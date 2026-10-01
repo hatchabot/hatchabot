@@ -1188,6 +1188,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (set && !loopbackUrl(set)) return set;
     return detectedUrl ?? set;
   };
+  /**
+   * The address for links that are SENT to people (an invitation, a reset
+   * link): the public one while public access is on and serving, because the
+   * person opening it may not be on the tailnet; the private one otherwise.
+   * Never from a request's Host. The owner's own pages (the app's QR code,
+   * Google's consent coming back) stay on the private address.
+   */
+  const linkUrlFor = (): string | undefined => {
+    const st = app.publicAccess?.status();
+    return st?.on && st.serving && st.url ? st.url : appUrlFor();
+  };
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
     setTimeout(() => { void refreshDetectedUrl(); }, 4_000).unref();
     setInterval(() => { void refreshDetectedUrl(); }, 10 * 60_000).unref();
@@ -1393,7 +1404,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // a stranger's Host would have put THEIR address, with the real code, in
     // the owner's own chat (use-case audit, 2026-09-27). With no known address
     // the link is only the path, to be opened where Hatchabot usually is.
-    const base = appUrlFor();
+    const base = linkUrlFor();
     const text = [
       `🔑 Hatchabot password reset for ${account.username}.`,
       base ? `Open this within 15 minutes to choose a new password:` : `Within 15 minutes, open Hatchabot at the address you always use and add this to it:`,
@@ -1468,6 +1479,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     rebuildConcurrency: rebuildGate.limit,
     /** The address /app-qr.svg encodes, so the app can name it beside the code. */
     appUrl: appUrlFor(),
+    /** The address invitation and reset links are made for: the public one while public access is on. */
+    linkUrl: linkUrlFor(),
     identity:
       deps.authMode === 'identity'
         ? {
@@ -9641,7 +9654,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       code,
       expiresAt,
       path,
-      url: appUrlFor() ? `${appUrlFor()}${path}` : undefined,
+      url: linkUrlFor() ? `${linkUrlFor()}${path}` : undefined,
     });
   });
 

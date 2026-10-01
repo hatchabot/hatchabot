@@ -143,11 +143,20 @@ describe('public route classification', () => {
     }
   });
 
-  it('only the first-factor enrolment routes let someone with no second factor past step-up', () => {
-    const lax = PUBLIC_RULES.filter((r) => r.firstFactorOk).map((r) => r.pattern.source);
-    expect(lax).toHaveLength(1);
-    expect(lax[0]).toContain('second-factor');
+  it('only routes that ask for the current password themselves let someone with no second factor past step-up', () => {
+    const lax = all().filter((line) => { const [m, u] = line.split(' '); return publicRuleFor(m!, u!)?.firstFactorOk; });
+    expect(lax).toEqual([
+      'POST /v1/local-accounts/:id/password',
+      'POST /v1/local-accounts/me/recovery-code',
+      'POST /v1/second-factor/backup-codes',
+      'POST /v1/second-factor/passkey',
+      'POST /v1/second-factor/passkey/options',
+      'POST /v1/second-factor/totp',
+      'POST /v1/second-factor/totp/confirm',
+    ]);
     expect(publicRuleFor('DELETE', '/v1/second-factor/:id')?.firstFactorOk).toBeUndefined();
+    expect(publicRuleFor('POST', '/v1/local-accounts/:id/reset-link')?.firstFactorOk).toBeUndefined();
+    expect(publicRuleFor('DELETE', '/v1/local-accounts/:id')?.firstFactorOk).toBeUndefined();
   });
 
   it('every rule names at least one real route (no rule left over from a route that is gone)', () => {

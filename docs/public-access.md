@@ -68,7 +68,7 @@ What is different for a public request, everywhere in the code:
 | Sign-in failure counts | per address and per account | separate `pub:` buckets, so the internet can lock an account out of the public address only |
 | A session | the session cookie | the session cookie **and** the public pass (below) |
 | A request replayed inside the process (a confirmed change of the management agent) | private | stays public: it is stamped with a secret that never leaves the process |
-| Reset links, invitation links | built from the configured private address, never from `Host` | the same (unchanged: `appUrlFor`) |
+| Reset links, invitation links | built from a configured address, never from `Host` | the same rule. While public access is on and serving they are made for the public address (the person opening one may not be on the tailnet); otherwise for the private one |
 
 ## The safeguards
 
@@ -172,7 +172,8 @@ has no rule.
 | signed-in | Removing a Google connection |
 | step-up | Adding or replacing a second factor |
 | step-up | Removing a second factor |
-| step-up | Managing accounts (add, remove, reset links, passwords, recovery codes) |
+| step-up | Managing accounts (add, remove, reset links) |
+| step-up | Changing a password, making a recovery code (your own needs your current password as well) |
 | step-up | Signing someone else out everywhere |
 | step-up | Public access: status, its address, and turning it off |
 | step-up | The security record |

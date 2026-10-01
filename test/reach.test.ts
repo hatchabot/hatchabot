@@ -68,6 +68,8 @@ describe('reach on', () => {
     expect(envNow().get('HATCHABOT_PUBLIC_ACCESS_URL')).toBe(`https://${SHIM_DNS}:8443`);
     // The listener is really open and serving.
     expect((await h.pub('/v1/config')).json.publicAddress).toBe(true);
+    // Links sent to people are made for the public address now; the app's own address stays private.
+    expect((await call('GET', '/v1/config')).json()).toMatchObject({ publicAddress: false, linkUrl: `https://${SHIM_DNS}:8443` });
     expect(h.store.listSecurityLog().find((e) => e.kind === 'public.on')).toMatchObject({ ownerId: owner.id });
     // The address as a QR code.
     const qr = await call('GET', '/v1/public-access/qr.svg');
@@ -200,6 +202,7 @@ describe('reach off', () => {
     expect(h.store.listSecurityLog().map((e) => e.kind)).toContain('public.off');
     const st = (await call('GET', '/v1/public-access')).json();
     expect(st).toMatchObject({ on: false, serving: false, listening: false, url: null });
+    expect((await call('GET', '/v1/config')).json().linkUrl).not.toBe(`https://${SHIM_DNS}:8443`); // links are private again
   });
 
   it('when Tailscale will not let go, Hatchabot still stops serving and says what to run', async () => {

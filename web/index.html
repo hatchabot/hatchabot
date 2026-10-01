@@ -3022,6 +3022,7 @@ async function reachTurnOn(btn) {
     }
     reachRender(data);
     toast('Public access is on');
+    void loadConfig(); // invitation links are made for the public address from now on
   } catch (e) { $('reachErr').textContent = e.message; }
   finally { btn.disabled = false; }
 }
@@ -3032,6 +3033,7 @@ async function reachTurnOff(btn) {
     const r = await api('/v1/public-access/off', { method: 'POST', body: {} });
     if (r.warning) $('reachErr').textContent = r.warning;
     toast('Public access is off');
+    void loadConfig(); // …and for the private one again
     const keep = $('reachErr').textContent;
     await loadReach();
     if (keep) $('reachErr').textContent = keep;
@@ -3436,7 +3438,7 @@ async function addAccount(btn) {
       for (const p of shareable.slice(0, 1)) { try { await api(`/v1/ai-profiles/${p.id}`, { method: 'PATCH', body: { shared: true } }); } catch {} }
     }
     $('acctNewUser').value = '';
-    const url = (appConfig?.appUrl || location.origin).replace(/\/$/, '') + r.claimPath;
+    const url = (appConfig?.linkUrl || appConfig?.appUrl || location.origin).replace(/\/$/, '') + r.claimPath;
     $('acctInviteOut').style.display = '';
     $('acctInviteOut').textContent = url;
     try { await navigator.clipboard.writeText(url); toast('Invitation copied — send it to them. It expires in 48 hours.', 7000); }
@@ -3447,7 +3449,7 @@ async function addAccount(btn) {
 }
 
 async function copyAccountInvite(path) {
-  const url = (appConfig?.appUrl || location.origin).replace(/\/$/, '') + path;
+  const url = (appConfig?.linkUrl || appConfig?.appUrl || location.origin).replace(/\/$/, '') + path;
   try { await navigator.clipboard.writeText(url); toast('Invitation copied — it expires 48 hours after it was made.', 7000); }
   catch { toast(url, 12000); }
 }
@@ -3460,7 +3462,7 @@ async function copyAccountInvite(path) {
 async function sendResetLink(id, username) {
   try {
     const r = await api(`/v1/local-accounts/${id}/reset-link`, { method: 'POST', body: {} });
-    const url = (appConfig?.appUrl || location.origin).replace(/\/$/, '') + r.claimPath;
+    const url = (appConfig?.linkUrl || appConfig?.appUrl || location.origin).replace(/\/$/, '') + r.claimPath;
     $('acctInviteOut').style.display = '';
     $('acctInviteOut').textContent = url;
     const copied = await copyText(url);

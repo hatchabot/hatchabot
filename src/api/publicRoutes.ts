@@ -76,9 +76,13 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   // ---- step-up: second-factor and account management ------------------------
   r('*', /^\/v1\/second-factor\/(totp|totp\/confirm|passkey\/options|passkey|backup-codes)$/, 'step-up', 'Adding or replacing a second factor', { firstFactorOk: true }),
   r(['DELETE'], /^\/v1\/second-factor\/:id$/, 'step-up', 'Removing a second factor'),
-  r(['POST'], /^\/v1\/local-accounts$/, 'step-up', 'Managing accounts (add, remove, reset links, passwords, recovery codes)'),
-  r(['DELETE', 'POST'], /^\/v1\/local-accounts\/:id(\/(password|reset-link))?$/, 'step-up', 'Managing accounts (add, remove, reset links, passwords, recovery codes)'),
-  r(['POST'], /^\/v1\/local-accounts\/me\/recovery-code$/, 'step-up', 'Managing accounts (add, remove, reset links, passwords, recovery codes)'),
+  r(['POST'], /^\/v1\/local-accounts$/, 'step-up', 'Managing accounts (add, remove, reset links)'),
+  // Your own password and recovery code: the routes ask for the current
+  // password themselves, so someone with no second factor is let through to
+  // that check (a member without one could otherwise never change a password
+  // here). The owner resetting SOMEONE ELSE's password always has a factor.
+  r(['POST'], /^\/v1\/local-accounts\/(:id\/password|me\/recovery-code)$/, 'step-up', 'Changing a password, making a recovery code (your own needs your current password as well)', { firstFactorOk: true }),
+  r(['DELETE', 'POST'], /^\/v1\/local-accounts\/:id(\/reset-link)?$/, 'step-up', 'Managing accounts (add, remove, reset links)'),
   r(['POST'], /^\/v1\/security\/sign-out\/:ownerId$/, 'step-up', 'Signing someone else out everywhere'),
   r('*', /^\/v1\/public-access(\/(off|invited-only|qr\.svg))?$/, 'step-up', 'Public access: status, its address, and turning it off'),
   r(READ, /^\/v1\/security\/log$/, 'step-up', 'The security record'),
