@@ -295,6 +295,20 @@ function zodMessage(err: z.ZodError): string {
   return `${where}${i.message}`;
 }
 
+/**
+ * A hosted Hatchabot (managed mode, HATCHABOT_MANAGED_BY) takes Claude only
+ * through an API key. A Claude plan source — a `claude setup-token` or this
+ * machine's Claude login — would have the provider storing and relaying a
+ * customer's Claude.ai credentials, which Anthropic's terms bar third parties
+ * from doing (code.claude.com/docs/en/legal-and-compliance, "Authentication
+ * and credential use"). HATCHABOT_MANAGED_ALLOW_CLAUDE_PLAN=1 turns it back on,
+ * for a provider Anthropic has agreed with in writing. Home installs: no change.
+ */
+export function claudePlanAllowed(env = process.env): boolean {
+  return !env.HATCHABOT_MANAGED_BY?.trim() || env.HATCHABOT_MANAGED_ALLOW_CLAUDE_PLAN?.trim() === '1';
+}
+const CLAUDE_PLAN_HOSTED = 'On a hosted Hatchabot, connect Claude with an API key from console.anthropic.com.';
+
 /** Shown when a non-machine-owner tries an action that touches the machine
  *  itself — runtime images, runner setup, host probes. Not for anything a
  *  member legitimately owns (their bots, their agents, their sources). */
@@ -1422,6 +1436,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     managed: process.env.HATCHABOT_MANAGED_BY?.trim()
       ? { by: process.env.HATCHABOT_MANAGED_BY.trim(), supportUrl: process.env.HATCHABOT_SUPPORT_URL?.trim() || undefined }
       : undefined,
+    // May a Claude plan (setup token / machine login) be added as a source?
+    // Not on a hosted Hatchabot unless the provider turned it back on.
+    claudePlan: claudePlanAllowed(),
     notice: process.env.HATCHABOT_NOTICE?.trim() || undefined,
     // Accounts mode with an empty roster: the login screen offers to create
     // account #1 instead of asking for credentials nobody has yet.
@@ -3103,6 +3120,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const parsed = CreateAIProfile.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
     const body = parsed.data;
+    // Hosted: no Claude plan sources of any kind (a setup token, or this
+    // machine's login), and a setup token pasted as an "API key" gets the
+    // same answer rather than "make it a subscription source".
+    if (!claudePlanAllowed() && (body.kind === 'subscription' || (body.kind === 'api_key' && /^sk-ant-oat/i.test(body.apiKey.trim())))) {
+      return reply.code(400).send({ error: CLAUDE_PLAN_HOSTED });
+    }
 
     const id = randomUUID();
     let secretRef: string | undefined;

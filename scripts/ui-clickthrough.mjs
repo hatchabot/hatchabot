@@ -1064,6 +1064,42 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/usage/periods'];
       }
     },
+    // A hosted Hatchabot takes Claude by API key only (2026-09-30): no Claude plan option in Settings or the setup guide.
+    hostedClaudeByApiKey: async () => {
+      const savedConfig = appConfig, savedProfiles = profiles, savedAccount = myAccount;
+      const kindSel = document.getElementById('aiKind');
+      const planOpt = kindSel.querySelector('option[value="subscription"]');
+      try {
+        ok('a home install offers the Claude plan', !!planOpt);
+        window.__override['/v1/config'] = { ...appConfig, managed: { by: 'Example Cloud' }, claudePlan: false };
+        await loadConfig();
+        await openAiDlg('ai');
+        ok('Settings → AI sources offers no Claude plan', ![...kindSel.options].some((o) => o.value === 'subscription' || /subscription|setup.token/i.test(o.textContent)));
+        eq('the form opens on API key', kindSel.value, 'api_key');
+        ok('no setup-token field', document.getElementById('aiTokenRow').style.display === 'none' && document.getElementById('aiKeyRow').style.display === '');
+        const note = document.getElementById('aiHostedNote');
+        ok('it says how: ' + note.textContent, !note.hidden && note.textContent.includes('connect Claude with an API key from') && note.textContent.includes('console.anthropic.com'));
+        aiDlg.close();
+        // The setup guide's first step, for an owner with no source yet.
+        profiles = []; myAccount = { ...myAccount, hostOwner: true };
+        setupOpen = true; renderSetup();
+        const setup = document.getElementById('setup');
+        ok('the guide asks for an API key, not a setup token', !!document.getElementById('setupApiKey') && !document.getElementById('setupToken')
+          && !setup.textContent.includes('claude setup-token') && !setup.textContent.includes('Use my Claude subscription'));
+        document.getElementById('setupApiKey').value = 'sk-ant-api-made-up';
+        byText('#setup button', 'Connect Claude').click();
+        const made = await until(() => calls('POST', /^\/v1\/ai-profiles$/).pop());
+        eq('it makes an API-key source', { kind: made.body.kind, vendor: made.body.vendor }, { kind: 'api_key', vendor: 'anthropic' });
+        ok('and sends no token', !('oauthToken' in made.body));
+      } finally {
+        delete window.__override['/v1/config'];
+        appConfig = savedConfig; profiles = savedProfiles; myAccount = savedAccount; setupOpen = false;
+        if (planOpt && !kindSel.querySelector('option[value="subscription"]')) kindSel.insertBefore(planOpt, kindSel.firstChild);
+        document.getElementById('aiHostedNote').hidden = true;
+        if (aiDlg.open) aiDlg.close();
+        renderSetup();
+      }
+    },
   });
   (async () => {
     for (const [name, run] of Object.entries(T)) {

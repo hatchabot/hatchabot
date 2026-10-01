@@ -140,6 +140,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('managed', 'HATCHABOT_MANAGED_BY', null, 'Who runs this install, shown in the app.'),
   s('managed', 'HATCHABOT_SUPPORT_URL', null, 'Their support link, shown with it.'),
   s('managed', 'HATCHABOT_NOTICE', null, 'A notice shown at the top of the app.'),
+  s('managed', 'HATCHABOT_MANAGED_ALLOW_CLAUDE_PLAN', null, '1 lets a hosted install (HATCHABOT_MANAGED_BY set) add Claude plan sources (setup token, machine login). Unset: hosted installs take Claude by API key only, as Anthropic\'s terms require of a provider without its written agreement.'),
   s('managed', 'HATCHABOT_SIGNIN_KEY_FILE', null, 'One-time sign-in links from the provider\'s account page: the Ed25519 PUBLIC key (PEM, absolute path, chmod 600) they are signed with; HATCHABOT_PUBLIC_URL must be set. Unset: no links (docs/signin-links.md).'),
 
   // Timeouts and sweeps

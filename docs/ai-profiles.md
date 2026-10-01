@@ -57,6 +57,23 @@ supported shapes:
   `CLAUDE_CODE_OAUTH_TOKEN` rather than mounted. This is how Claude Max runs on a
   runner (e.g. a laptop driven by a control plane on another box).
 
+### Hosted installs: API key only
+
+A Hatchabot run for someone else — managed mode, `HATCHABOT_MANAGED_BY` set,
+as on Hatchabot Cloud — offers neither shape. A Claude plan source there would
+have the provider storing and relaying its customer's Claude.ai credentials,
+which Anthropic's terms bar third parties from doing
+([code.claude.com/docs/en/legal-and-compliance](https://code.claude.com/docs/en/legal-and-compliance),
+"Authentication and credential use"). So the app does not show the option
+(Settings → AI sources, and the setup guide asks for an API key instead), and
+`POST /v1/ai-profiles` refuses a subscription source of either kind — and a
+setup token pasted as an API key — with *"On a hosted Hatchabot, connect
+Claude with an API key from console.anthropic.com."*
+`HATCHABOT_MANAGED_ALLOW_CLAUDE_PLAN=1` turns it back on, for a provider that
+has Anthropic's agreement in writing. A home install (no `HATCHABOT_MANAGED_BY`)
+is unchanged. Sources that already exist are not touched (a fresh hosted
+install has none).
+
 ### macOS hosts: the setup-token path
 
 On Linux the login is a file (`~/.claude/.credentials.json`) that gets mounted

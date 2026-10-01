@@ -1525,13 +1525,15 @@
     <div id="aiList"></div>
 
     <details class="sec-drawer">
-      <summary><b>➕ Add another AI source</b> <span class="sub">— a subscription, API key, or local model server</span></summary>
+      <summary><b>➕ Add another AI source</b> <span class="sub" id="aiAddSummary">— a subscription, API key, or local model server</span></summary>
       <div style="margin-top:8px"></div>
     <select id="aiKind" onchange="aiKindChanged()">
       <option value="subscription">Claude subscription (login on this machine)</option>
       <option value="api_key">API key</option>
       <option value="local">Local model server (Ollama) — no credential, model calls stay on this machine</option>
     </select>
+    <div class="sub" id="aiHostedNote" hidden>On a hosted Hatchabot, connect Claude with an API key from
+      <a href="https://console.anthropic.com/" target="_blank" rel="noopener">console.anthropic.com</a>.</div>
     <div id="aiLocalRow" style="display:none">
       <input type="text" id="aiBaseUrl" value="http://172.17.0.1:11434/v1"
              placeholder="Model server URL as the AGENT sees it">
@@ -2728,7 +2730,23 @@ async function loadConfig() {
   if (setup) $('loginDlg').querySelector('h3').textContent = 'Welcome to Hatchabot';
   if (claim) { $('loginDlg').querySelector('h3').textContent = 'Set your password'; void loadClaim(claim); }
   renderWhoami();
+  applyClaudePlanPolicy();
   if (identity) loadGoogleButton();
+}
+
+/**
+ * A hosted Hatchabot (managed mode) takes Claude by API key only: a Claude
+ * plan source would have the provider holding the customer's Claude.ai
+ * credentials, which Anthropic's terms bar. The server refuses one; the app
+ * does not offer it (Settings → AI sources, and the setup guide).
+ */
+function claudePlanOffered() { return appConfig?.claudePlan !== false; }
+function applyClaudePlanPolicy() {
+  if (claudePlanOffered()) return;
+  $('aiKind')?.querySelector('option[value="subscription"]')?.remove();
+  if ($('aiHostedNote')) $('aiHostedNote').hidden = false;
+  if ($('aiAddSummary')) $('aiAddSummary').textContent = '— an API key, or a local model server';
+  if ($('aiKind')) aiKindChanged();
 }
 
 // Google Identity Services renders the button and hands back a Google ID
@@ -3196,7 +3214,21 @@ function setupSteps() {
   const ops = (agents ?? []).find(a => a.ops && v2Mine(a) && a.state !== 'ARCHIVED');
   const aiDone = profiles.length > 0, botDone = poolAvail > 0 || mine.some(a => a.botUsername);
   const steps = [
-    { key: 'ai', done: aiDone, title: aiDone ? `AI connected: ${esc(profiles[0].name)}` : 'Connect the AI', body: `
+    { key: 'ai', done: aiDone, title: aiDone ? `AI connected: ${esc(profiles[0].name)}` : 'Connect the AI', body: !claudePlanOffered() ? `
+      <p class="sub" style="margin:4px 0 6px">Claude powers every agent. On a hosted Hatchabot, connect Claude with an API key from
+        <a href="https://console.anthropic.com/" target="_blank" rel="noopener">console.anthropic.com</a> (Settings → API keys); it is billed by Anthropic, per use.</p>
+      <label>Model</label>
+      <select id="setupModel" style="width:auto">
+        <option value="claude-opus-4-8">Claude Opus 4.8 (best)</option>
+        <option value="claude-sonnet-5">Claude Sonnet 5 (faster)</option>
+      </select>
+      <label>API key</label>
+      <input type="password" id="setupApiKey" placeholder="sk-ant-api…" autocomplete="off">
+      <div class="err" id="setupErr"></div>
+      <div class="actions" style="justify-content:space-between;align-items:center">
+        <span class="sub">Using another AI? <a href="#" onclick="event.preventDefault();openAiDlg('ai')">⚙ AI sources</a></span>
+        <button class="primary" onclick="createApiKeyProfileFromSetup()">Connect Claude</button>
+      </div>` : `
       <p class="sub" style="margin:4px 0 6px">A Claude subscription (Pro or Max) powers every agent. On the machine running Hatchabot, run
         <code>npm i -g @anthropic-ai/claude-code</code>, then <code>claude</code> once to log in, then <code>claude setup-token</code> and paste the token here.</p>
       <label>Model</label>
@@ -3446,6 +3478,19 @@ async function createSubscriptionProfile() {
       kind: 'subscription', vendor: 'anthropic',
       name: 'My Claude', model: $('setupModel').value,
       oauthToken: $('setupToken').value.trim(),
+    }});
+    await refresh(true);
+    toast('Claude connected');
+  } catch (e) { $('setupErr').textContent = e.message; }
+}
+
+/** The setup guide's first step on a hosted Hatchabot: Claude by API key. */
+async function createApiKeyProfileFromSetup() {
+  const key = $('setupApiKey').value.trim();
+  if (!key) { $('setupErr').textContent = 'Paste an API key from console.anthropic.com.'; return; }
+  try {
+    await api('/v1/ai-profiles', { method: 'POST', body: {
+      kind: 'api_key', vendor: 'anthropic', name: 'My Claude', model: $('setupModel').value, apiKey: key,
     }});
     await refresh(true);
     toast('Claude connected');
