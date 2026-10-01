@@ -22,18 +22,24 @@
 #      user's slice, and a socket-owner firewall rule on its ports;
 #   3. per tenant: the owner account and a CLI token, doctor, and with
 #      --ai-source an agent and the Hatchabot agent, each asked a question —
-#      the manager's answer proves its door works under rootless networking;
+#      the manager's answer proves its door works under rootless networking —
+#      and then the agent's OpenClaw console in a headless Chrome run in the
+#      tenant's own rootless Docker (scripts/shared-host-console.mjs): the
+#      owner's console renders, connects and answers; a second account given
+#      web chat by an invite gets OpenClaw's chat with only its own sessions,
+#      is refused the owner's conversation and owner-only RPCs and pages, and
+#      is cut off when web chat is turned off (--no-console skips it);
 #   4. isolation: a tenant's shell and a tenant's container try the other
 #      tenant's ports; the router user and root reach both;
 #   5. deletes the VM; --keep keeps it STOPPED (its qemu process exits and
 #      frees ~10 GB), --keep-running leaves it up for poking at by hand.
-#      Logs stay in ~/hatchabot-shared-host/<time>/.
+#      Logs (and the console screenshots) stay in ~/hatchabot-shared-host/<time>/.
 #
 # Needs LXD (see clean-install-test.sh). On a machine that also runs Docker the
 # VM has no internet until Docker's firewall lets LXD's bridge through; the
 # script checks and says how.
 set -uo pipefail
-CHANNEL=latest; KEEP=0; KEEP_RUNNING=0; AI_SOURCE=""; TENANTS=2; VM=""; SHARED=0
+CHANNEL=latest; KEEP=0; KEEP_RUNNING=0; AI_SOURCE=""; TENANTS=2; VM=""; SHARED=0; CONSOLE=1
 INSTALLER_URL="https://raw.githubusercontent.com/hatchabot/hatchabot/main/install.sh"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,9 +49,10 @@ while [ $# -gt 0 ]; do
     --ai-source) AI_SOURCE="$2"; shift 2 ;;
     --tenants) TENANTS="$2"; shift 2 ;;
     --shared-embedder) SHARED=1; shift ;;
+    --no-console) CONSOLE=0; shift ;;         # skip the browser checks of the console (they need --ai-source)
     --vm) VM="$2"; KEEP=1; shift 2 ;;         # reuse a VM this script kept — and keep it again (host prep is skipped if done)
     --installer-url) INSTALLER_URL="$2"; shift 2 ;;
-    -h|--help) sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option $1 (see --help)"; exit 2 ;;
   esac
 done
@@ -212,6 +219,9 @@ for i in $(seq 1 "$TENANTS"); do
     ACC=$(tenanti "$u" "hbt accounts create owner --host-owner --cli-token --json" 2>/dev/null | grep '^{' | tail -1)
     TOKEN[$u]=$(printf %s "$ACC" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).cliToken||'')}catch{console.log('')}})")
     [ -n "${TOKEN[$u]}" ] && ok "$u: owner account + CLI token without a browser" || { bad "$u: hbt accounts create — ${ACC:-no output}"; continue; }
+    # The owner's one-time link to choose a password: the console check signs in with it (a browser needs a session cookie).
+    CLAIM=$(printf %s "$ACC" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(new URL(JSON.parse(s).claimUrl).searchParams.get('claim')||'')}catch{console.log('')}})")
+    [ -n "$CLAIM" ] && tenant "$u" "umask 077; printf %s '$CLAIM' > ~/.hb-owner-claim; rm -f ~/.hb-owner-pw" >/dev/null 2>&1
     tenanti "$u" "hatchabot login --token ${TOKEN[$u]} --url $B" >/dev/null 2>&1
   fi
 
@@ -286,6 +296,23 @@ EOF
     # Agent containers carry no role label (the doorman, manager jail and service containers do).
     CAP=$(tenant "$u" "export DOCKER_HOST=unix://\$XDG_RUNTIME_DIR/docker.sock; docker inspect \$(docker ps --format '{{.Names}} {{.Label \"hatchabot.role\"}}' | awk '\$2==\"\" && \$1 ~ /^$u-/ {print \$1}' | sed -n 1p) --format '{{.HostConfig.Memory}}' 2>/dev/null" | tr -d '\r')
     [ -n "$CAP" ] && [ "$CAP" != 0 ] && ok "$u: the agent's memory cap is enforced ($((CAP / 1048576)) MiB)" || bad "$u: no memory cap on the agent container (cgroup delegation?)"
+
+    # The console in a real browser, through this tenant's own Hatchabot: the owner's, a web-chat
+    # guest's, and the guest cut off. Chrome runs in the tenant's rootless Docker; its DevTools port
+    # (9400+i, on loopback, only while the check runs) is driven over CDP by a Node script run as the tenant.
+    if [ "$CONSOLE" = 1 ]; then
+      if grep -q '^STATE ready' "$OUT/$u-agents.log"; then
+        L file push "$REPO/scripts/shared-host-console.mjs" "$VM/home/$u/console-check.mjs" --uid "${UIDOF[$u]}" --gid "${UIDOF[$u]}" --mode 0600 >/dev/null
+        tenanti "$u" "HB_URL=$B HB_CDP_PORT=$((9400 + i)) timeout 1500 node ~/console-check.mjs" >"$OUT/$u-console.log" 2>&1
+        while IFS= read -r line; do
+          case "$line" in "CHECK ok "*) ok "$u: ${line#CHECK ok }" ;; "CHECK fail "*) bad "$u: ${line#CHECK fail }" ;; esac
+        done < <(grep -a '^CHECK ' "$OUT/$u-console.log")
+        grep -q '^CONSOLE ' "$OUT/$u-console.log" || bad "$u: the console check did not finish — $(tail -2 "$OUT/$u-console.log" | tr '\n' ' ')"
+        for f in console-owner console-guest; do L file pull "$VM/home/$u/$f.png" "$OUT/$u-$f.png" >/dev/null 2>&1; done
+      else
+        bad "$u: console checks skipped — Helper is not running"
+      fi
+    fi
   fi
 done
 [ -n "$CRED" ] && rm -f "$CRED"
