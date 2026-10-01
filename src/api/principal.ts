@@ -1,5 +1,6 @@
 import type { FastifyRequest } from 'fastify';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { isPublic } from './trust.js';
 
 /**
  * Who is making this request. Phase 1 of docs/identity.md: every route reads
@@ -49,6 +50,9 @@ export function internalPrincipal(req: FastifyRequest): Principal | undefined {
   const given = h['x-hatchabot-internal'];
   const owner = h['x-hatchabot-internal-owner'];
   if (typeof given !== 'string' || typeof owner !== 'string' || !owner) return undefined;
+  // Funnel traffic arrives from 127.0.0.1 too (tailscaled proxies it): the
+  // loopback test below would not tell it from an in-process call.
+  if (isPublic(req)) return undefined;
   if (given.length !== INTERNAL_SECRET.length || !timingSafeEqual(Buffer.from(given), Buffer.from(INTERNAL_SECRET))) return undefined;
   if (req.ip !== '127.0.0.1' && req.ip !== '::1') return undefined;
   return { ownerId: owner, via: 'identity', subject: owner };
@@ -64,7 +68,7 @@ export function principalOf(req: FastifyRequest): Principal {
   // silently become an owner-spoof. Set HATCHABOT_ALLOW_OWNER_HEADER=1 in
   // tests and scripts that need it.
   const raw = (req.headers as Record<string, unknown>)['x-hatchabot-owner'];
-  if (process.env.HATCHABOT_ALLOW_OWNER_HEADER === '1' && typeof raw === 'string' && raw) {
+  if (process.env.HATCHABOT_ALLOW_OWNER_HEADER === '1' && typeof raw === 'string' && raw && !isPublic(req)) {
     return { ownerId: raw, via: 'header' };
   }
   return { ownerId: LOCAL_OWNER, via: 'password' };

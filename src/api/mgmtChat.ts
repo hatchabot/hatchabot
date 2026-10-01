@@ -1,3 +1,4 @@
+import { publicReplayHeaders } from './trust.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
@@ -108,6 +109,9 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
         if (typeof cookie === 'string') headers.cookie = cookie;
         const shim = req.headers['x-hatchabot-owner'];
         if (typeof shim === 'string') headers['x-hatchabot-owner'] = shim;
+        // A confirm pressed at the public address executes as a public
+        // request: the route's class and step-up apply to the change itself.
+        Object.assign(headers, publicReplayHeaders(req));
       },
     };
     confirmers.set(ownerId, confirmer);

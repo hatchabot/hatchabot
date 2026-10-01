@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { loopbackIsRemote } from './auth.js';
+import { isPublic } from './trust.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Store } from '../store/store.js';
 import type { LocalAccount } from '../domain/types.js';
@@ -118,13 +119,28 @@ function isLoopback(ip: string | undefined): boolean {
  * connects from loopback on behalf of every device on the tailnet, and it
  * says so with forwarding headers. Those requests are remote.
  */
-function onThisMachine(req: FastifyRequest): boolean {
+export function onThisMachine(req: FastifyRequest): boolean {
+  // Public traffic reaches us from 127.0.0.1 (tailscaled proxies Funnel). It
+  // is judged by the listener it arrived on, before any header is looked at:
+  // a stranger is never "on this machine" (trust.ts).
+  if (isPublic(req)) return false;
   // A rootless daemon's containers are loopback peers too: then nobody is
   // "on this machine" and the setup code is asked of everyone (30th audit).
   if (loopbackIsRemote()) return false;
   if (!isLoopback(req.ip)) return false;
   const h = req.headers;
   return !h['x-forwarded-for'] && !h['forwarded'] && !h['x-forwarded-host'] && !h['tailscale-user-login'];
+}
+
+/**
+ * The machine owner's FIRST claim (an owner made with `hatchabot accounts
+ * create --host-owner`, who has never chosen a password) is taking the
+ * machine. Never from the public address: there the link would be one leaked
+ * message away from handing a fresh box to a stranger.
+ */
+const OWNER_CLAIM_PRIVATE_ONLY = 'The owner of this machine sets their first password at its private address, not this public one.';
+function ownerFirstClaimFromPublic(req: FastifyRequest, account: LocalAccount): boolean {
+  return isPublic(req) && account.hostOwner && account.pwHash === '';
 }
 
 /** Session signature. The account's password hash rides in the material, so
@@ -185,6 +201,7 @@ export function signInLocalByLink(store: Store, secret: Buffer, req: FastifyRequ
   if (!account) return { kind: 'refused', why: 'no-account' };
   if (account.disabled) return { kind: 'refused', why: 'disabled' };
   if (account.pwHash === '') {
+    if (ownerFirstClaimFromPublic(req, account)) return { kind: 'refused', why: 'no-account' };
     const code = randomBytes(16).toString('base64url');
     store.setLocalAccountClaim(account.id, code, new Date(Date.now() + LINK_CLAIM_TTL_MS).toISOString());
     return { kind: 'claim', ownerId: account.id, code };
@@ -261,6 +278,9 @@ export function registerAccountRoutes(
         // Google owns account #1 here; local accounts arrive by invitation.
         return reply.code(403).send({ error: 'This installation signs in with Google — ask its owner for an invitation link.' });
       }
+      // A machine is never claimed from the internet, setup code or not. The
+      // public route table refuses this route already; this is the second lock.
+      if (isPublic(req)) return reply.code(403).send({ error: 'The first account is created on the machine itself or its private address.' });
       if (store.countLocalAccounts() > 0) {
         return reply.code(403).send({ error: 'This installation already has accounts — sign in instead.' });
       }
@@ -322,6 +342,7 @@ export function registerAccountRoutes(
       guard.noteFailure(req);
       return reply.code(404).send({ error: 'That invitation has been used already, or it has expired. Ask for a new one.' });
     }
+    if (ownerFirstClaimFromPublic(req, account)) return reply.code(403).send({ error: OWNER_CLAIM_PRIVATE_ONLY });
     const { hash, salt } = await hashPassword(password);
     // Checked again after the await, and claimed in the same synchronous step:
     // two people opening one link at once both got in (night review).
@@ -342,6 +363,7 @@ export function registerAccountRoutes(
   app.get<{ Querystring: { code?: string } }>('/v1/local-accounts/claim', async (req, reply) => {
     const account = req.query.code ? store.localAccountByClaim(req.query.code) : undefined;
     if (!account) return reply.code(404).send({ error: 'That link has been used already, or it has expired.' });
+    if (ownerFirstClaimFromPublic(req, account)) return reply.code(403).send({ error: OWNER_CLAIM_PRIVATE_ONLY });
     // An account that already has a password is being RESET, not invited: the
     // page should say so, or people wonder why they are "joining" again.
     return {

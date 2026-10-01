@@ -573,6 +573,59 @@ export class Store {
         used_at TEXT NOT NULL,
         keep_until INTEGER NOT NULL
       );
+      -- Second factors (docs/public-access.md): passkeys, an authenticator
+      -- app's secret, one-time backup codes. kind: passkey | totp | backup.
+      -- data: a passkey's public key (JSON), the TOTP secret (sealed with the
+      -- install's key), a backup code's keyed hash. A totp row with
+      -- confirmed_at NULL is an enrolment nobody finished: it counts for nothing.
+      CREATE TABLE IF NOT EXISTS second_factors (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        label TEXT,
+        credential_id TEXT,
+        rp_id TEXT,
+        data TEXT NOT NULL,
+        sign_count INTEGER NOT NULL DEFAULT 0,
+        last_step INTEGER,
+        created_at TEXT NOT NULL,
+        confirmed_at TEXT,
+        last_used_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS second_factors_owner ON second_factors (owner_id, kind);
+      CREATE UNIQUE INDEX IF NOT EXISTS second_factors_credential ON second_factors (credential_id) WHERE credential_id IS NOT NULL;
+      -- Browsers that have signed in through the public address, per person,
+      -- so a sign-in from one never seen before can be announced.
+      CREATE TABLE IF NOT EXISTS known_devices (
+        owner_id TEXT NOT NULL,
+        device_hash TEXT NOT NULL,
+        label TEXT,
+        source TEXT,
+        first_seen TEXT NOT NULL,
+        last_seen TEXT NOT NULL,
+        PRIMARY KEY (owner_id, device_hash)
+      );
+      -- The security record: every public sign-in, failure burst, and the
+      -- public-access switch going on or off. Append-only; pruned by age.
+      CREATE TABLE IF NOT EXISTS security_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        owner_id TEXT,
+        detail TEXT
+      );
+      CREATE INDEX IF NOT EXISTS security_log_at ON security_log (at);
+      -- Notices for a person's in-app inbox (a sign-in from a new device).
+      CREATE TABLE IF NOT EXISTS security_notices (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        at TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        about_owner TEXT,
+        text TEXT NOT NULL,
+        seen_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS security_notices_owner ON security_notices (owner_id, seen_at);
     `);
     // Windows that were open when this version arrived move to the per-seat
     // table once; the old table is then left empty (its ALTER below still runs).
@@ -1759,6 +1812,121 @@ export class Store {
     };
   }
 
+  // ---- second factors, known devices, the security record (docs/public-access.md) ----
+
+  /** The database itself, for the one reader shared with `hatchabot doctor` (safeguards.ts adminAccounts). */
+  rawDb(): Database.Database {
+    return this.db;
+  }
+
+  /**
+   * Identity mode at the public address: is this Google account someone this
+   * installation already knows or has invited? An account that has signed in
+   * here before (from the private address), a member of an agent, or the
+   * addressee of a share waiting in an inbox. Anyone else may hold a perfectly
+   * good Google account and is still a stranger.
+   */
+  identityIsInvited(sub: string, email: string | undefined): boolean {
+    const ownerId = `user-${sub}`;
+    if (this.db.prepare(`SELECT 1 FROM accounts WHERE owner_id = ?`).get(ownerId)) return true;
+    if (this.db.prepare(`SELECT 1 FROM memberships WHERE user_id = ? AND status = 'active' LIMIT 1`).get(ownerId)) return true;
+    if (this.db.prepare(`SELECT 1 FROM hosts WHERE owner_id = ? LIMIT 1`).get(ownerId)) return true;
+    if (email && this.db.prepare(`SELECT 1 FROM agent_shares WHERE lower(to_email) = lower(?) AND status = 'pending' LIMIT 1`).get(email)) return true;
+    return false;
+  }
+
+  insertSecondFactor(f: { id: string; ownerId: string; kind: SecondFactorKind; label?: string; credentialId?: string; rpId?: string; data: string; signCount?: number; confirmed?: boolean }): void {
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `INSERT INTO second_factors (id, owner_id, kind, label, credential_id, rp_id, data, sign_count, created_at, confirmed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(f.id, f.ownerId, f.kind, f.label ?? null, f.credentialId ?? null, f.rpId ?? null, f.data, f.signCount ?? 0, now, f.confirmed === false ? null : now);
+  }
+  /** A person's factors. Unfinished enrolments only when asked for. */
+  listSecondFactors(ownerId: string, opts: { kind?: SecondFactorKind; unconfirmed?: boolean } = {}): SecondFactorRow[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM second_factors WHERE owner_id = ?${opts.kind ? ' AND kind = ?' : ''}${opts.unconfirmed ? '' : ' AND confirmed_at IS NOT NULL'} ORDER BY created_at`,
+    ).all(...(opts.kind ? [ownerId, opts.kind] : [ownerId])) as any[];
+    return rows.map(rowToSecondFactor);
+  }
+  secondFactorByCredential(credentialId: string): SecondFactorRow | undefined {
+    const r = this.db.prepare(`SELECT * FROM second_factors WHERE credential_id = ? AND confirmed_at IS NOT NULL`).get(credentialId) as any;
+    return r ? rowToSecondFactor(r) : undefined;
+  }
+  confirmSecondFactor(id: string): void {
+    this.db.prepare(`UPDATE second_factors SET confirmed_at = ? WHERE id = ?`).run(new Date().toISOString(), id);
+  }
+  /** After a good passkey sign-in: its counter and when. */
+  touchPasskey(id: string, signCount: number): void {
+    this.db.prepare(`UPDATE second_factors SET sign_count = ?, last_used_at = ? WHERE id = ?`).run(signCount, new Date().toISOString(), id);
+  }
+  /**
+   * Record the TOTP step a code was accepted for, only if it is later than
+   * the last one: false means that code (or a later one) was already used.
+   */
+  advanceTotpStep(id: string, step: number): boolean {
+    const r = this.db.prepare(`UPDATE second_factors SET last_step = ?, last_used_at = ? WHERE id = ? AND (last_step IS NULL OR last_step < ?)`)
+      .run(step, new Date().toISOString(), id, step);
+    return r.changes === 1;
+  }
+  /** Spend a backup code: true only for the one request that deletes its row. */
+  spendBackupCode(ownerId: string, hash: string): boolean {
+    return this.db.prepare(`DELETE FROM second_factors WHERE owner_id = ? AND kind = 'backup' AND data = ?`).run(ownerId, hash).changes === 1;
+  }
+  deleteSecondFactor(ownerId: string, id: string): boolean {
+    return this.db.prepare(`DELETE FROM second_factors WHERE owner_id = ? AND id = ?`).run(ownerId, id).changes === 1;
+  }
+  deleteSecondFactors(ownerId: string, kind?: SecondFactorKind, opts: { unconfirmedOnly?: boolean } = {}): number {
+    return this.db.prepare(`DELETE FROM second_factors WHERE owner_id = ?${kind ? ' AND kind = ?' : ''}${opts.unconfirmedOnly ? ' AND confirmed_at IS NULL' : ''}`)
+      .run(...(kind ? [ownerId, kind] : [ownerId])).changes;
+  }
+
+  /** Has this person signed in from this browser before? Records it either way; true = it is new. */
+  noteDevice(ownerId: string, deviceHash: string, label: string, source: string): boolean {
+    const now = new Date().toISOString();
+    const seen = this.db.prepare(`UPDATE known_devices SET last_seen = ?, source = ? WHERE owner_id = ? AND device_hash = ?`).run(now, source, ownerId, deviceHash).changes === 1;
+    if (seen) return false;
+    this.db.prepare(`INSERT INTO known_devices (owner_id, device_hash, label, source, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(ownerId, deviceHash, label.slice(0, 200), source.slice(0, 80), now, now);
+    return true;
+  }
+  listDevices(ownerId: string): Array<{ label?: string; source?: string; firstSeen: string; lastSeen: string }> {
+    return (this.db.prepare(`SELECT label, source, first_seen, last_seen FROM known_devices WHERE owner_id = ? ORDER BY last_seen DESC LIMIT 50`).all(ownerId) as any[])
+      .map((r) => ({ label: r.label ?? undefined, source: r.source ?? undefined, firstSeen: r.first_seen, lastSeen: r.last_seen }));
+  }
+  /** "Sign out everywhere" forgets the browsers too: the next sign-in from each is announced again. */
+  forgetDevices(ownerId: string): void {
+    this.db.prepare(`DELETE FROM known_devices WHERE owner_id = ?`).run(ownerId);
+  }
+
+  recordSecurity(kind: string, ownerId: string | undefined, detail: Record<string, unknown> = {}): void {
+    this.db.prepare(`INSERT INTO security_log (at, kind, owner_id, detail) VALUES (?, ?, ?, ?)`)
+      .run(new Date().toISOString(), kind, ownerId ?? null, JSON.stringify(detail).slice(0, 2000));
+    // A year of record, and never more than 20,000 rows: a flood of failures must not fill the disk.
+    if (Math.random() < 0.02) {
+      this.db.prepare(`DELETE FROM security_log WHERE at < ?`).run(new Date(Date.now() - 365 * 86_400_000).toISOString());
+      this.db.prepare(`DELETE FROM security_log WHERE id <= (SELECT MAX(id) FROM security_log) - 20000`).run();
+    }
+  }
+  listSecurityLog(limit = 200, ownerId?: string): Array<{ id: number; at: string; kind: string; ownerId?: string; detail: Record<string, unknown> }> {
+    const rows = this.db.prepare(`SELECT * FROM security_log${ownerId ? ' WHERE owner_id = ?' : ''} ORDER BY id DESC LIMIT ?`)
+      .all(...(ownerId ? [ownerId, limit] : [limit])) as any[];
+    return rows.map((r) => ({ id: r.id, at: r.at, kind: r.kind, ownerId: r.owner_id ?? undefined, detail: safeJson(r.detail ?? '{}', {}) }));
+  }
+
+  addSecurityNotice(n: { id: string; ownerId: string; kind: string; aboutOwner?: string; text: string }): void {
+    this.db.prepare(`INSERT INTO security_notices (id, owner_id, at, kind, about_owner, text) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(n.id, n.ownerId, new Date().toISOString(), n.kind, n.aboutOwner ?? null, n.text.slice(0, 1000));
+    this.db.prepare(`DELETE FROM security_notices WHERE owner_id = ? AND id NOT IN (SELECT id FROM security_notices WHERE owner_id = ? ORDER BY at DESC LIMIT 50)`).run(n.ownerId, n.ownerId);
+  }
+  listSecurityNotices(ownerId: string, opts: { unseenOnly?: boolean } = {}): Array<{ id: string; at: string; kind: string; aboutOwner?: string; text: string; seenAt?: string }> {
+    return (this.db.prepare(`SELECT * FROM security_notices WHERE owner_id = ?${opts.unseenOnly ? ' AND seen_at IS NULL' : ''} ORDER BY at DESC LIMIT 50`).all(ownerId) as any[])
+      .map((r) => ({ id: r.id, at: r.at, kind: r.kind, aboutOwner: r.about_owner ?? undefined, text: r.text, seenAt: r.seen_at ?? undefined }));
+  }
+  markSecurityNoticeSeen(ownerId: string, id: string): boolean {
+    return this.db.prepare(`UPDATE security_notices SET seen_at = ? WHERE owner_id = ? AND id = ? AND seen_at IS NULL`).run(new Date().toISOString(), ownerId, id).changes === 1;
+  }
+
   /** The sign-in generation a session of this owner must carry; 0 until the first bump. */
   sessionEpoch(ownerId: string): number {
     const row = this.db.prepare(`SELECT epoch FROM session_epochs WHERE owner_id = ?`).get(ownerId) as { epoch: number } | undefined;
@@ -1849,6 +2017,11 @@ export class Store {
       // Their account-level Telegram link too: kept, it made a re-created
       // account unable to link the same Telegram ever again (night review).
       this.db.prepare(`DELETE FROM accounts WHERE owner_id = ?`).run(id);
+      // Their second factors and remembered browsers: a re-created account of
+      // the same name must not inherit them.
+      this.db.prepare(`DELETE FROM second_factors WHERE owner_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM known_devices WHERE owner_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM security_notices WHERE owner_id = ?`).run(id);
       this.db.prepare(`DELETE FROM local_accounts WHERE id = ?`).run(id);
     })();
   }
@@ -4365,6 +4538,19 @@ function rowToAgent(r: any): Agent {
     parentAgentId: r.parent_agent_id ?? undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+  };
+}
+
+export type SecondFactorKind = 'passkey' | 'totp' | 'backup';
+export interface SecondFactorRow {
+  id: string; ownerId: string; kind: SecondFactorKind; label?: string; credentialId?: string; rpId?: string;
+  data: string; signCount: number; lastStep?: number; createdAt: string; confirmedAt?: string; lastUsedAt?: string;
+}
+function rowToSecondFactor(r: any): SecondFactorRow {
+  return {
+    id: r.id, ownerId: r.owner_id, kind: r.kind, label: r.label ?? undefined, credentialId: r.credential_id ?? undefined,
+    rpId: r.rp_id ?? undefined, data: r.data, signCount: r.sign_count ?? 0, lastStep: r.last_step ?? undefined,
+    createdAt: r.created_at, confirmedAt: r.confirmed_at ?? undefined, lastUsedAt: r.last_used_at ?? undefined,
   };
 }
 

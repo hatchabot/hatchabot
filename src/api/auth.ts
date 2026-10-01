@@ -6,6 +6,10 @@ import { registerAccountRoutes, sessionAccount, signInLocalByLink } from './acco
 import { registerSigninLink, SIGNIN_LINK_PATH, type LinkSignIn, type SigninLinkDeps } from './signinLink.js';
 import { clearSessionCookies, readSessionCookie, sessionValue, setSessionCookie, upgradeSessionCookie } from './sessionCookie.js';
 import { registerOriginCheck } from './requestOrigin.js';
+import { isPublic, publicClientAddress } from './trust.js';
+import { registerPublicAccess } from './publicAccess.js';
+import { publicConfig } from './safeguards.js';
+import { registerSecondFactorRoutes } from './secondFactor.js';
 import type { Store } from '../store/store.js';
 import {
   identityConfigFromEnv,
@@ -47,7 +51,18 @@ const failures = new Map<string, { n: number; until: number }>();
 export function loopbackIsRemote(): boolean {
   return process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK === '1';
 }
-function throttleKeys(req: FastifyRequest, who?: string, scope?: 'link'): string[] {
+function throttleKeys(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): string[] {
+  // The public listener (trust.ts) counts apart from everything else, so a
+  // stranger on the internet can lock an account out of the PUBLIC address
+  // only: the owner still signs in at the private one. There the visitor's
+  // address is the one tailscaled reports, the account is a second bucket,
+  // and `pub:all` is a ceiling on every public failure together.
+  if (isPublic(req)) {
+    const keys = [`pub:ip:${publicClientAddress(req)}`];
+    if (who) keys.push(`pub:user:${who.trim().toLowerCase()}`);
+    keys.push('pub:all');
+    return scope ? keys.map((k) => `${scope}:${k}`) : keys;
+  }
   let ip = req.ip || 'unknown';
   const bare = ip.replace(/^::ffff:/, '');
   // Under a rootless daemon every agent container is a loopback peer of this
@@ -71,24 +86,50 @@ function throttleKeys(req: FastifyRequest, who?: string, scope?: 'link'): string
   // the owner out of signing in (2026-10-01).
   return scope ? keys.map((k) => `${scope}:${k}`) : keys;
 }
-export function throttled(req: FastifyRequest, who?: string, scope?: 'link'): boolean {
+/** How many misses a bucket takes before it refuses. */
+function limitFor(k: string): number {
+  if (k.endsWith('pub:all')) return publicConfig().failsCeiling;
+  // A shared bucket (the one password, the first-run code) is a ceiling on
+  // everyone together, not a lock: at the per-client limit, ten misses from
+  // anyone locked the owner out too (regression review, 2026-09-28).
+  return k.includes('user:*') ? failLimit() * 10 : failLimit();
+}
+/**
+ * Public lockouts back off: each time the same address or account is locked
+ * out again within a day the lock lasts twice as long (one window, two, four,
+ * up to a day). A patient guesser at ten tries per window gets ten, then ten
+ * more two windows later, then four: a few dozen a day, not a thousand.
+ */
+const strikes = new Map<string, { n: number; until: number }>();
+const STRIKE_MEMORY_MS = 24 * 60 * 60_000;
+function lockMsFor(k: string): number {
+  const now = Date.now();
+  const s = strikes.get(k);
+  const n = s && now < s.until ? s.n + 1 : 1;
+  strikes.set(k, { n, until: now + STRIKE_MEMORY_MS });
+  if (strikes.size > 10_000) for (const [key, v] of strikes) if (now > v.until) strikes.delete(key);
+  return Math.min(FAIL_WINDOW_MS * 2 ** (n - 1), STRIKE_MEMORY_MS);
+}
+export function throttled(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): boolean {
   for (const k of throttleKeys(req, who, scope)) {
     const f = failures.get(k);
     if (!f) continue;
     if (Date.now() > f.until) { failures.delete(k); continue; }
-    // A shared bucket (the one password, the first-run code) is a ceiling on
-    // everyone together, not a lock: at the per-client limit, ten misses from
-    // anyone locked the owner out too (regression review, 2026-09-28).
-    const limit = k.startsWith('user:*') ? failLimit() * 10 : failLimit();
-    if (f.n >= limit) return true;
+    if (f.n >= limitFor(k)) return true;
   }
   return false;
 }
-export function noteFailure(req: FastifyRequest, who?: string, scope?: 'link'): void {
+export function noteFailure(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): void {
   for (const k of throttleKeys(req, who, scope)) {
     const f = failures.get(k);
-    if (!f || Date.now() > f.until) failures.set(k, { n: 1, until: Date.now() + FAIL_WINDOW_MS });
-    else f.n += 1;
+    const now = Date.now();
+    const cur = !f || now > f.until ? { n: 1, until: now + FAIL_WINDOW_MS } : { n: f.n + 1, until: f.until };
+    failures.set(k, cur);
+    // A public bucket that just filled: lock it for its backed-off time, and put it on the record.
+    if (k.includes('pub:') && cur.n === limitFor(k)) {
+      if (!k.endsWith('pub:all')) cur.until = now + lockMsFor(k);
+      req.server.publicAccess?.failureBurst(req, k, cur.until);
+    }
   }
   // Bounded: expired entries go first, then client buckets with the fewest
   // misses; an account's bucket goes last. Dropping the oldest by insertion
@@ -107,11 +148,12 @@ export function noteFailure(req: FastifyRequest, who?: string, scope?: 'link'): 
 /** A recovered account starts clean: the lock-out someone ran up on it ends. */
 export function clearFailures(who: string): void {
   failures.delete(`user:${who.trim().toLowerCase()}`);
+  failures.delete(`pub:user:${who.trim().toLowerCase()}`);
 }
 /** Password mode has one password, so one bucket for it: forged forwarded-for addresses each got a fresh client bucket and unlimited guesses (night review). */
 const PASSWORD_BUCKET = '*shared-password*';
 /** Test hook. */
-export function _resetLoginThrottle(): void { failures.clear(); }
+export function _resetLoginThrottle(): void { failures.clear(); strikes.clear(); }
 // The session cookie's name, flags and reading rules: sessionCookie.ts. It is
 // `secure` (and `__Host-`) only when the request actually arrived over HTTPS:
 // the browser silently DISCARDS a secure cookie on an http:// origin, so a
@@ -254,6 +296,8 @@ function registerLogoutEverywhere(app: FastifyInstance, store: Store | undefined
     // (2026-09-30). A Google-signed-in CLI keeps its own refresh token on
     // that computer; the confirm tells them to run `hatchabot logout` there.
     const cliTokens = store.revokePersonalCliTokens(who);
+    // …and the browsers the public address remembers: the next sign-in from each is announced again.
+    store.forgetDevices(who);
     if (cliTokens) app.log.warn({ owner: who, revoked: cliTokens }, 'logout_everywhere.cli_tokens_revoked');
     clearSessionCookies(reply, req);
     return { ok: true, cliTokens };
@@ -282,14 +326,22 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
   registerOriginCheck(app);
 
   const mode: AuthMode = opts.mode ?? 'password';
+  // The public address's gate (publicAccess.ts), in two halves around the
+  // sign-in hook: what is refused whoever asks comes before it, what depends
+  // on who is asking (the second factor, the idle limit) after it.
+  const publicGate = registerPublicAccess(app, { store: opts.store, secret: opts.secret, mode, throttle: { throttled, noteFailure } });
+  if (opts.store && mode !== 'password') registerSecondFactorRoutes(app, { store: opts.store, secret: opts.secret, api: publicGate });
   if (mode === 'identity') {
     await registerIdentityAuth(app, opts);
+    publicGate.afterSignIn();
     return;
   }
   if (mode === 'accounts') {
     registerAccountsAuth(app, opts);
+    publicGate.afterSignIn();
     return;
   }
+  // Password mode: the public listener never serves (safeguard a), and the gate's first half refuses everything there.
 
   if (!opts.password) {
     app.log.warn(
@@ -584,6 +636,14 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
       const principal = principalFor(token);
       const denied = allowedEmailProblem(token.email);
       if (denied) return reply.code(403).send({ error: denied });
+      // "Only invited people": at the public address a Google account this
+      // installation has never met, and nobody invited, is a stranger. It
+      // cannot become an account by signing in there (safeguard c).
+      if (isPublic(req) && !(opts.store?.identityIsInvited(token.sub, token.email) ?? false)) {
+        noteFailure(req);
+        opts.store?.recordSecurity('public.signin_refused', undefined, { why: 'not invited', from: publicClientAddress(req) });
+        return reply.code(403).send({ error: 'Only people who were invited can sign in at this address. Ask whoever runs this Hatchabot for an invitation.' });
+      }
       const exp = Date.now() + sessionTtlMs();
       setSessionCookie(reply, req, mintSession(token.sub, exp, token.email), (exp - Date.now()) / 1000);
       opts.onAuthenticated?.(principal);
@@ -683,8 +743,10 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     // here refused the request before the owner's cookie was even looked at,
     // and the UI retried the icon thousands of times an hour (2026-09-24).
     // The cookie decides those requests; the proxy still strips our tokens.
+    // Not at the public address: there a browser session is the only way in
+    // (a bearer skips the second factor and the idle limit).
     const authz = req.headers.authorization;
-    if (typeof authz === 'string' && authz.startsWith('Bearer ') && !CONSOLE_PATH.test(path)) {
+    if (typeof authz === 'string' && authz.startsWith('Bearer ') && !CONSOLE_PATH.test(path) && !isPublic(req)) {
       try {
         const token = await verifier.verify(authz.slice(7));
         const denied = allowedEmailProblem(token.email);
@@ -731,6 +793,10 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
 /** What a rehost-scoped token may call: the other server's move, and nothing else. */
 const REHOST_PATHS = new Set(['/v1/agents/preflight', '/v1/agents/restore', '/v1/agents']);
 function cliBearer(req: FastifyRequest, opts: AuthOptions): string | undefined {
+  // Command-line and peer tokens are long-lived bearers with no second
+  // factor: they are for the private address. At the public one they are not
+  // looked at, whatever they are worth elsewhere.
+  if (isPublic(req)) return undefined;
   const authz = req.headers.authorization;
   if (typeof authz !== 'string') return undefined;
   if (!authz.startsWith('Bearer hatchabot_') && !authz.startsWith('Bearer agentclaw_')) return undefined;

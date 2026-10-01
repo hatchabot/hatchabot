@@ -1,3 +1,4 @@
+import { isPublic, publicClientAddress } from './trust.js';
 /**
  * What the per-request log may say about a URL. Fastify's default logged the
  * full URL, so OpenClaw's `mediaTicket=<JWT>` capability links (console media)
@@ -21,12 +22,17 @@ export function requestLogSerializer(req: {
   host?: string;
   ip?: string;
   socket?: { remotePort?: number };
+  headers?: Record<string, string | string[] | undefined>;
 }): Record<string, unknown> {
+  // A request through the public address arrives from 127.0.0.1 (tailscaled):
+  // the journal says it was public, and from where.
+  const pub = isPublic(req as never);
   return {
     method: req.method,
     url: redactUrlForLog(req.url),
     host: req.host ?? req.hostname,
     remoteAddress: req.ip,
     remotePort: req.socket?.remotePort,
+    ...(pub ? { public: true, client: publicClientAddress({ headers: req.headers ?? {} }) } : {}),
   };
 }

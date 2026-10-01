@@ -299,6 +299,17 @@ postureDaily.unref();
   }
 }
 await app.listen({ port: PORT, host: bindHost });
+// Public access (docs/public-access.md): off unless HATCHABOT_PUBLIC_ACCESS says
+// otherwise. When it is on, the public listener opens on loopback for
+// Tailscale Funnel, and serves only while every safeguard holds: with one
+// off it answers 503 to everyone and the log says which (publicAccess.ts).
+if (app.publicAccess?.config().on) {
+  const r = await app.publicAccess.syncListener();
+  const st = app.publicAccess.status();
+  if (!r.listening) app.log.error({ error: r.error }, 'public access is on but its listener did not open: nothing is served at the public address');
+  else if (!st.serving) app.log.error({ failing: st.failing.map((c) => `${c.letter}. ${c.title}`) }, 'public access is on but REFUSED: fix the safeguards listed (hatchabot doctor), or turn it off (hatchabot reach off)');
+  else app.log.warn({ url: st.url, port: st.port }, 'public access is ON: this Hatchabot\'s sign-in page is reachable from the internet');
+}
 // Keep .env listing every setting (what's set stays in force; everything else
 // commented with its default). This process already read it; the file is only
 // put in order, never changed in meaning (src/config/envFile.ts).

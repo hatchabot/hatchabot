@@ -88,7 +88,10 @@ export function foreignRequest(req: RequestLike, env: NodeJS.ProcessEnv = proces
   try { o = new URL(origin); } catch { return 'origin: unreadable'; }
   const theirs = o.host.toLowerCase();
   const mine = [first(req.headers.host), first(req.headers['x-forwarded-host'])].map((h) => normHost(h, o.protocol));
-  try { const pub = env.HATCHABOT_PUBLIC_URL?.trim(); if (pub) mine.push(new URL(pub).host.toLowerCase()); } catch { /* unparsable: not ours */ }
+  // …and its public address (docs/public-access.md), when it has one.
+  for (const name of ['HATCHABOT_PUBLIC_URL', 'HATCHABOT_PUBLIC_ACCESS_URL'] as const) {
+    try { const pub = env[name]?.trim(); if (pub) mine.push(new URL(pub).host.toLowerCase()); } catch { /* unparsable: not ours */ }
+  }
   return mine.includes(theirs) ? undefined : `origin: ${theirs}`;
 }
 
