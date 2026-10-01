@@ -1,4 +1,5 @@
 import { ensureOpsServer } from '../ops/opsServer.js';
+import { claudePlanAllowed, CLAUDE_PLAN_HOSTED } from '../config/claudePlan.js';
 import { clearOpsDrift } from '../ops/opsDrift.js';
 import { randomBytes } from 'node:crypto';
 import { createHash, randomUUID } from 'node:crypto';
@@ -474,6 +475,11 @@ export async function buildRuntimeSpec(
   // injected as CLAUDE_CODE_OAUTH_TOKEN — pure data, so it rides to any host, a
   // runner included. The machine-login flavour instead bind-mounts the CONTROL
   // PLANE'S ~/.claude, which a remote daemon can't see; that one stays local.
+  // A hosted Hatchabot takes Claude by API key only. The API refuses new plan
+  // sources there; this catches the ones that already exist (made before
+  // managed mode was set, or brought in by an import or restore), at the one
+  // place every build, rebuild, move and clone passes through.
+  if (subscription && !claudePlanAllowed()) throw new Error(`${CLAUDE_PLAN_HOSTED} Pick an API-key source under the agent's settings, then rebuild.`);
   if (subscription && host.kind !== 'local' && !profile.secretRef) {
     // Enforced at the API too; belt and suspenders here because this is the
     // last gate before a credential decision. See docs/ai-profiles.md.

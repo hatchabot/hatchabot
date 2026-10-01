@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { AIProfile } from '../domain/types.js';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
+import { claudePlanAllowed } from '../config/claudePlan.js';
 
 /**
  * The management chat's LLM rides one of the owner's AI sources, proxied
@@ -19,7 +20,8 @@ import type { SecretStore } from '../secrets/secretStore.js';
  * surface Max actually sanctions. Only local model servers are out.
  */
 export function usableForMgmt(p: AIProfile): boolean {
-  return p.vendor === 'anthropic';
+  // A hosted Hatchabot never relays a Claude plan's credential (config/claudePlan.ts).
+  return p.vendor === 'anthropic' && (p.kind !== 'subscription' || claudePlanAllowed());
 }
 
 /** The owner's flagged source; else the automatic pick: api-key (fastest)

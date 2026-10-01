@@ -4,6 +4,8 @@ All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
 ## [Unreleased]
 
+- Hosted Hatchabot: a Claude plan source that already exists (made before managed mode was set, or brought in by an import or restore) is refused at the agent's next build, and the management chat skips it, so no path relays a Claude plan's credential on a hosted machine.
+
 ### Added
 - **One-time sign-in links for hosted Hatchabots** (Hatchabot Cloud S5; docs/signin-links.md). A provider's account page can offer *Open my Hatchabot*: it signs a link that is good for at most ten minutes, and the Hatchabot accepts it once and signs the person in with the normal session, then sends them to `/` with no token left in the address bar. Links are signed with Ed25519: the Hatchabot holds only the public key (`HATCHABOT_SIGNIN_KEY_FILE`), so nothing on the machine can make a link. A link names the Hatchabot's address (`HATCHABOT_PUBLIC_URL`) and is refused anywhere else. Expired, tampered, reused and wrong-address links get a plain "expired or already used" page with where to get a new one; failures count against the sign-in throttle. Works in accounts, identity (Google) and password mode. The first link on a new Hatchabot, for an owner who has no password yet, opens "Choose a password" (with the recovery code after) and makes the claim link the provisioner printed stop working. Each use is logged (`account.signed_in_by_link`) and recorded for 30 days; the token and keys never are. Off unless the setting is set. `scripts/signin-link.mjs` makes the key pair and signs links (the reference for the portal).
 
