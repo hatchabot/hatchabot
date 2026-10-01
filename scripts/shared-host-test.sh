@@ -240,14 +240,14 @@ for i in $(seq 1 "$TENANTS"); do
     cat >"$OUT/$u-agents.sh" <<EOF
 #!/usr/bin/env bash
 B=$B; H="authorization: Bearer ${TOKEN[$u]}"
-node -e 'const fs=require("fs");const c=fs.readFileSync(process.env.HOME+"/.cred","utf8").trim();const sub="$KIND"==="subscription";process.stdout.write(JSON.stringify(Object.assign({kind:sub?"subscription":"api_key",vendor:"$VENDOR",name:"$AI_SOURCE",model:"$MODEL"},sub?{oauthToken:c}:{apiKey:c})))' >$HOME/body.json
-curl -s -H "\$H" -H 'content-type: application/json' --data @$HOME/body.json \$B/v1/ai-profiles >/dev/null; rm -f $HOME/body.json ~/.cred
+node -e 'const fs=require("fs");const c=fs.readFileSync(process.env.HOME+"/.cred","utf8").trim();const sub="$KIND"==="subscription";process.stdout.write(JSON.stringify(Object.assign({kind:sub?"subscription":"api_key",vendor:"$VENDOR",name:"$AI_SOURCE",model:"$MODEL"},sub?{oauthToken:c}:{apiKey:c})))' >\$HOME/body.json
+curl -s -H "\$H" -H 'content-type: application/json' --data @\$HOME/body.json \$B/v1/ai-profiles >/dev/null; rm -f \$HOME/body.json ~/.cred
 PID=\$(curl -s -H "\$H" \$B/v1/ai-profiles | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s)[0].id))")
 # A kept VM may already have Helper (a failed one from an earlier run is retried).
 HS=\$(hbt list --json 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s).find(x=>x.name==='Helper');console.log(a?a.state:'')})")
 case "\$HS" in
-  "") hbt create Helper --no-telegram --persona 'You answer in one word.' >$HOME/create.log 2>&1 || grep -q "retry requested" $HOME/create.log || { echo "FAIL create: \$(tail -1 $HOME/create.log)"; exit 0; } ;;
-  FAILED) hbt retry Helper >$HOME/create.log 2>&1 || true ;;
+  "") hbt create Helper --no-telegram --persona 'You answer in one word.' >\$HOME/create.log 2>&1 || grep -q "retry requested" \$HOME/create.log || { echo "FAIL create: \$(tail -1 \$HOME/create.log)"; exit 0; } ;;
+  FAILED) hbt retry Helper >\$HOME/create.log 2>&1 || true ;;
 esac
 # The Hatchabot agent: made once; a failed one from an earlier run is retried.
 OS=\$(curl -s -H "\$H" \$B/v1/ops-agent | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log((JSON.parse(s).agent||{}).state||'')}catch{console.log('')}})")
