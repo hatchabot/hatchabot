@@ -75,6 +75,20 @@ export function publicClientAddress(req: { headers: Record<string, string | stri
   return a && /^[0-9a-fA-F:.]{2,45}$/.test(a) ? a : 'unknown';
 }
 
+/**
+ * The bucket an address is counted in. An IPv6 visitor usually holds a whole
+ * /64 and can change the rest at will, so the first four groups are the
+ * bucket; an IPv4 address is its own.
+ */
+export function addressBucket(addr: string): string {
+  if (!addr.includes(':')) return addr;
+  const [head, tail] = addr.toLowerCase().split('::');
+  const h = head ? head.split(':') : [];
+  const t = tail !== undefined && tail !== '' ? tail.split(':') : [];
+  const groups = tail === undefined ? h : [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t];
+  return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, '')).join(':')}::/64`;
+}
+
 /** A coarse form of an address for a notice: enough to say "somewhere new", not a precise locator. */
 export function approximateSource(addr: string): string {
   if (addr.includes(':')) return addr.split(':').slice(0, 3).join(':') + '::/48';

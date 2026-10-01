@@ -84,7 +84,7 @@ the log says which.
 | a | A sign-in per person: `accounts` or `identity` mode. The shared-password mode is refused. | `evaluateSafeguards`; the gate refuses everything public in password mode | One guessable secret guarding everything |
 | b | A second factor for everyone with owner rights: a passkey or an authenticator app, with one-time backup codes. Members may add one; with `HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL=1` they must. | Enrolment is checked before the switch; at the public address the gate asks for it at sign-in and again before sensitive actions (`src/api/publicAccess.ts`, `secondFactor.ts`) | A stolen, guessed or phished password; a Google session on a borrowed laptop |
 | c | Only invited people. At the public address only existing accounts and pending invitations can sign in; nobody registers there; the machine cannot be claimed there. | The `HATCHABOT_PUBLIC_INVITED_ONLY` switch must be on; the route table refuses first-run routes; `/v1/session` refuses a Google account this install has never met; the owner's first claim is refused | Strangers becoming accounts; a fresh machine being taken from the internet |
-| d | Public traffic on its own listener, never trusted as local. | `trust.ts`; the listener binds `127.0.0.1` only; safeguard fails if Funnel points at the private port, if the ports clash, or if `HATCHABOT_ALLOW_OWNER_HEADER` is on | A forged or missing header upgrading a stranger to "this machine" |
+| d | Public traffic on its own listener, never trusted as local. | `trust.ts`; the listener binds `127.0.0.1` only; safeguard fails if Funnel points at the private port, if the ports clash, if `HATCHABOT_ALLOW_OWNER_HEADER` is on, or (while public access is on) if Funnel's configuration cannot be read | A forged or missing header upgrading a stranger to "this machine" |
 | e | Only what outsiders need is served there. Every route has a class; an unclassified route is refused. | `src/api/publicRoutes.ts`, enforced in one hook before the handler; `test/publicRoutes.test.ts` sweeps every registered route | Machine-level routes, and any route added later, being reachable by accident |
 | f | Limits and lockouts keyed for public traffic. | `auth.ts` (`throttleKeys`): per address, per account with a lockout that doubles each time (one window, two, four, up to a day), a ceiling on all public failures together; request ceilings per address and overall | Password and code guessing; one visitor locking the owner out of the private address |
 | g | A notice on a sign-in from a new device, to the person and to the owner. | The gate, on the first use of a public sign-in from a browser it has not seen: in the app (home screen) and on Telegram when linked, with the browser, the approximate source, and "sign out everywhere" | A break-in going unnoticed |
@@ -188,6 +188,7 @@ has no rule.
 | step-up | Machine settings (defaults, rebuild policy, memory search) |
 | step-up | Backups (run, restore, delete) and downloads of an agent |
 | step-up | An agent's environment variables |
+| step-up | An agent's Files tab (its home holds its config and tokens) |
 | step-up | Folders of this machine given to an agent, and bringing in workspaces |
 | step-up | Moving an agent to another machine |
 | step-up | Creating the management agent |
@@ -203,6 +204,11 @@ has no rule.
 | never | Linking another Hatchabot |
 | never | Resetting someone's second factor |
 
+Before sign-in (open and second-step routes) a body over 256 KB is refused
+by its declared length and never read, and a body with no declared length is
+refused on every route. `/v1/config` leaves out the private address and the
+provider's notice there.
+
 Reads of lists that show no credential are **signed-in**, so the app's home
 screen works without asking for the second factor every few minutes; every
 write under a machine-level group, and every read that reveals a credential,
@@ -210,7 +216,9 @@ is **step-up**. Rights are unchanged by any of this: a member is still refused
 the machine's routes by the routes themselves.
 
 The console's WebSocket is held to the same rules as a signed-in request (the
-pass, its idle limit, the second factor).
+pass, its idle limit, the second factor), and so is the session `/v1/join`
+reads for a web-chat invitation. Every open socket is closed when a safeguard
+goes off and when public access is turned off.
 
 ## Turning it on and off
 
@@ -283,13 +291,19 @@ Settings: the "Public access" group of `.env` (`src/config/envCatalog.ts`).
   anyone. This is the reason for safeguard i.
 - **Denial of service.** The ceilings bound what one address and all visitors
   together can ask for; they do not stop a flood from many addresses, and
-  Funnel's own limits are Tailscale's. Per-account lockouts mean someone who
-  knows a username can keep that account locked out **of the public address**
-  (never of the private one).
+  Funnel's own limits are Tailscale's. Locking people out of the **public**
+  address is cheap: someone who knows a username can keep that account
+  locked there, and about a hundred failed sign-ins per fifteen minutes from
+  a handful of addresses trip the ceiling that refuses every public sign-in
+  for the rest of the window. Neither touches the private address or
+  sessions already signed in. (The ceiling is what bounds password guessing
+  spread across accounts; `HATCHABOT_PUBLIC_FAILS_CEILING` sets it.)
 - **A stolen signed-in device.** A browser already signed in, within its idle
-  time, is that person. The step-up limits what it can do to the machine
-  (credentials, hosts, images, backups, accounts) without the second factor;
-  it does not protect their agents and chats. "Sign out on every device"
+  time, is that person. The step-up limits what it can do without the second
+  factor: credentials (also the agent's Files tab, whose home holds its
+  tokens), hosts, images, backups, accounts. It does not protect their
+  agents' settings, core files and chats, and an owner's OpenClaw console is
+  a shell in that agent's container. "Sign out on every device"
   ends it.
 - **Members without a second factor.** By default only accounts with owner
   rights must have one. A member's password alone opens their own agents.

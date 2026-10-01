@@ -124,7 +124,7 @@ describe('public route classification', () => {
       'POST /v1/workspaces/inspect', 'POST /v1/agents/:id/adopt-workspace', 'POST /v1/agents/:id/data-sources', 'POST /v1/agents/:id/move-host', 'POST /v1/agents/:id/rehost',
       'DELETE /v1/second-factor/:id', 'POST /v1/second-factor/totp', 'POST /v1/second-factor/passkey', 'POST /v1/second-factor/backup-codes',
       'POST /v1/public-access/off', 'GET /v1/public-access', 'GET /v1/security/log', 'POST /v1/security/sign-out/:ownerId',
-      'POST /v1/embedder/start', 'POST /v1/embedder/guests', 'POST /v1/pool', 'DELETE /v1/pool/:username', 'POST /v1/proposals/:id/:verb',
+      'POST /v1/embedder/start', 'POST /v1/embedder/guests', 'POST /v1/pool', 'DELETE /v1/pool/:username', 'POST /v1/proposals/:id/:verb', 'GET /v1/agents/:id/fs', 'GET /v1/agents/:id/fs/file', 'PUT /v1/agents/:id/fs/file',
     ]) {
       expect(routes.has(line), `${line} is registered`).toBe(true);
       expect(classOf(line), line).toBe('step-up');

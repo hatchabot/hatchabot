@@ -181,7 +181,7 @@ describe('the console\'s WebSocket at the public address', () => {
       app.server.on('upgrade', (req, socket) => {
         const principal = app.principalFromCookieHeader!(req.headers.cookie, true);
         if (!principal) { reasons.push('no session'); socket.destroy(); return; }
-        const why = app.publicAccess!.refuseUpgrade(req, principal.ownerId);
+        const why = app.publicAccess!.refuseSession(req, principal.ownerId);
         reasons.push(why);
         if (why) { socket.destroy(); return; }
         socket.end('HTTP/1.1 101 Switching Protocols\r\n\r\n');

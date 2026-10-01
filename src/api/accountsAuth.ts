@@ -503,7 +503,10 @@ export function registerAccountRoutes(
       disabled: a.disabled,
       createdAt: a.createdAt,
       pending: !!a.claimCode,
-      claimPath: a.claimCode ? `/?claim=${a.claimCode}` : undefined,
+      // A pending invitation's code is a way into that account: at the public
+      // address it is shown once, to whoever makes it (a step-up route), not
+      // listed for any session to read.
+      claimPath: a.claimCode && !isPublic(req) ? `/?claim=${a.claimCode}` : undefined,
       agents: store.listAgents(a.id).filter((x) => x.state !== 'DELETED').length,
     }));
   });

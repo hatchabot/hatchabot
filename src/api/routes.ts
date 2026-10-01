@@ -1448,7 +1448,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // is publishable by design (Google: "API keys for Firebase services do not
   // need to be treated as secrets") — it identifies the project, it doesn't
   // authorise anything on its own.
-  app.get('/v1/config', async (req) => ({
+  /**
+   * What /v1/config tells someone who has not signed in. At the public address
+   * that is anyone on the internet: the private address, the provider's notice
+   * and the limits are left out; what the sign-in screen needs stays.
+   */
+  const publicConfigView = <T extends Record<string, unknown>>(req: FastifyRequest, full: T): Partial<T> => {
+    if (!isPublic(req)) return full;
+    const { appUrl: _a, notice: _n, maxAgentsPerAccount: _m, rebuildConcurrency: _r, setupCodeRequired: _s, ...rest } = full as Record<string, unknown>;
+    return rest as Partial<T>;
+  };
+  app.get('/v1/config', async (req) => publicConfigView(req, {
     authMode: deps.authMode ?? 'password',
     // The page is being read through the public address (decided by the
     // listener it arrived on): it hides what is not available there.
@@ -5642,7 +5652,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // On the public listener the gate's rules apply to the socket too: the
     // public pass, its idle limit, the second factor (publicAccess.ts).
     if (isPublic(rawReq)) {
-      const refused = app.publicAccess ? app.publicAccess.refuseUpgrade(rawReq, principal.ownerId) : 'no public gate';
+      const refused = app.publicAccess ? app.publicAccess.refuseSession(rawReq, principal.ownerId) : 'no public gate';
       if (refused) {
         app.log.warn({ path: url.split('?')[0], why: refused }, 'console.public_upgrade_refused');
         return deny();
@@ -9594,7 +9604,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return `user-${token.sub}`;
     }
     const decorated = (app as unknown as { principalFromCookieHeader?: (h: string | undefined, https: boolean) => { ownerId: string } | undefined }).principalFromCookieHeader;
-    const fromCookie = decorated?.(req.headers.cookie, requestIsHttps(req))?.ownerId;
+    let fromCookie = decorated?.(req.headers.cookie, requestIsHttps(req))?.ownerId;
+    // This open route reads the session itself: at the public address it
+    // counts only with what the gate asks of every signed-in request (the
+    // public pass, and the second factor when the person has one).
+    if (fromCookie && isPublic(req) && (app.publicAccess ? app.publicAccess.refuseSession(req.raw, fromCookie) : 'no public gate')) fromCookie = undefined;
     // Tests say who they are with the opt-in header (principal.ts).
     const p = fromCookie ?? (principalOf(req).via === 'header' ? principalOf(req).ownerId : undefined);
     return p && p !== LOCAL_OWNER ? p : undefined;

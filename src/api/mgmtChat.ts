@@ -153,16 +153,34 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     };
   };
 
+  const confirming = new Map<string, Promise<void>>();
   /** Confirm or cancel a proposal as the signed-in owner. Hatchabot executes
    *  it with THIS request's auth, exactly as if they had done it in a panel. */
   const resolveProposal = async (req: FastifyRequest, reply: import('fastify').FastifyReply, id: string, verb: 'confirm' | 'cancel') => {
     const ownerId = ownerIdOf(req);
     const c = confirmerFor(ownerId); // created on demand: cards outlive a restart
-    c.setAuth(req);
-    // Read the card before it resolves: afterwards its author is what tells us
-    // whether the management agent is waiting to hear how it went.
-    const rec = store.getMgmtProposal<PendingConfirm>(id) as PendingConfirm | undefined;
-    const out = await c.broker.confirm(id, verb, { ...WEB_WHO, ownerId });
+    // One confirm at a time per owner: the confirmer holds ONE set of
+    // credentials, and a second confirm arriving mid-way would swap them under
+    // the first (a confirm pressed at the public address could then run with a
+    // private one's standing; review, 2026-10-01).
+    const before = confirming.get(ownerId) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((res) => { release = res; });
+    const chained = before.then(() => mine);
+    confirming.set(ownerId, chained);
+    await before;
+    let rec: PendingConfirm | undefined;
+    let out: Awaited<ReturnType<Confirmer['broker']['confirm']>>;
+    try {
+      c.setAuth(req);
+      // Read the card before it resolves: afterwards its author is what tells us
+      // whether the management agent is waiting to hear how it went.
+      rec = store.getMgmtProposal<PendingConfirm>(id) as PendingConfirm | undefined;
+      out = await c.broker.confirm(id, verb, { ...WEB_WHO, ownerId });
+    } finally {
+      release();
+      if (confirming.get(ownerId) === chained) confirming.delete(ownerId);
+    }
     if (!out.ok) {
       return reply.code(out.reason === 'missing' ? 404 : 409).send({
         error: out.reason === 'expired' ? 'That card expired — ask again.' : out.reason === 'missing' ? 'No such proposal.' : 'Already handled.',

@@ -139,5 +139,5 @@ export function clearSessionCookies(reply: FastifyReply, req: FastifyRequest): v
   req.server.publicAccess?.sessionCleared(req, reply);
 }
 
-/** Any of our session cookies, for stripping from what is forwarded to an agent's gateway. */
-export const SESSION_COOKIE_NAME = /^(__Host-)?(hatchabot|agentclaw)_session$/;
+/** Any of our session cookies (the public pass and the device cookie included), for stripping from what is forwarded to an agent's gateway. */
+export const SESSION_COOKIE_NAME = /^(__Host-)?(hatchabot|agentclaw)_(session|pub|device)$/;

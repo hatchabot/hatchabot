@@ -84,7 +84,8 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
   const proveManage = async (req: FastifyRequest, reply: FastifyReply, ownerId: string, current: unknown): Promise<boolean> => {
     const local = store.localAccount(ownerId);
     // At the public address someone who has a factor has just given it (the gate's step-up).
-    if (isPublic(req) && real(ownerId).length > 0) return true;
+    // (One the gate counts HERE: a passkey made for another address was never asked for.)
+    if (isPublic(req) && api.secondFactorNeed(ownerId) === 'yes') return true;
     if (!local) return true; // a Google account: Google is its password
     if (api.throttle.throttled(req, local.username)) { void reply.code(429).send({ error: 'Too many failed attempts — try again later.' }); return false; }
     if (typeof current !== 'string' || !current || local.pwHash === '' || !(await verifyPassword(current, local.pwHash, local.pwSalt))) {

@@ -132,11 +132,12 @@ export function registerReachRoutes(app: FastifyInstance, deps: ReachDeps): void
     }
     delete process.env.HATCHABOT_PUBLIC_ACCESS;
     delete process.env.HATCHABOT_PUBLIC_ACCESS_URL;
+    // The setting first: whatever happens to the listener, a restart must not bring public access back.
+    await unsetEnvVar(envPath(), 'HATCHABOT_PUBLIC_ACCESS').catch(() => undefined);
+    await unsetEnvVar(envPath(), 'HATCHABOT_PUBLIC_ACCESS_URL').catch(() => undefined);
     // Asked through the public address itself: let the answer leave before the listener closes under it.
     if (opts.afterAnswer) setTimeout(() => { void api.stopListener(); }, 750).unref();
     else await api.stopListener();
-    await unsetEnvVar(envPath(), 'HATCHABOT_PUBLIC_ACCESS').catch(() => undefined);
-    await unsetEnvVar(envPath(), 'HATCHABOT_PUBLIC_ACCESS_URL').catch(() => undefined);
     return { funnelError, command };
   };
 

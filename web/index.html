@@ -3388,7 +3388,8 @@ async function loadAccounts() {
       <b>${esc(a.username)}</b>${a.hostOwner ? ' <span class="chip">host owner</span>' : ''}
       ${a.pending ? '<span class="chip">invitation not accepted yet</span>' : `<span class="sub">${a.agents} agent${a.agents === 1 ? '' : 's'}</span>`}
       <span style="margin-left:auto;display:flex;gap:6px">
-        ${a.pending ? `<button onclick="copyAccountInvite('${jsq(a.claimPath ?? '')}')">Copy invitation</button>`
+        ${a.pending && !a.claimPath ? `<span class="sub" title="An invitation link is a way into that account, so it is not listed at the public address">invitation link: at the private address</span>`
+          : a.pending ? `<button onclick="copyAccountInvite('${jsq(a.claimPath ?? '')}')">Copy invitation</button>`
           : a.hostOwner ? '' : `<button onclick="sendResetLink('${jsq(a.id)}','${jsq(a.username)}')" title="They choose a new password themselves; you never see it">Send a reset link</button>`}
         ${a.hostOwner ? '' : `<button class="danger" onclick="removeAccount('${jsq(a.id)}','${jsq(a.username)}')">Remove</button>`}
       </span></div>`).join('');

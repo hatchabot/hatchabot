@@ -110,6 +110,8 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(READ, /^\/v1\/agents\/:id\/(backup|export|fs\/archive)$/, 'step-up', 'Backups (run, restore, delete) and downloads of an agent'),
   r(['POST'], /^\/v1\/agents\/(import|:id\/restore|:id\/snapshots\/:snapId\/restore)$/, 'step-up', 'Backups (run, restore, delete) and downloads of an agent'),
   r(['POST', 'DELETE'], /^\/v1\/agents\/:id\/env(\/:envId)?$/, 'step-up', 'An agent\'s environment variables'),
+  // The Files tab reads and writes the agent's whole home: its config and tokens are there.
+  r('*', /^\/v1\/agents\/:id\/fs(\/file)?$/, 'step-up', 'An agent\'s Files tab (its home holds its config and tokens)'),
   r(['POST', 'PATCH', 'DELETE'], /^\/v1\/agents\/:id\/data-sources(\/:dsId)?$/, 'step-up', 'Folders of this machine given to an agent, and bringing in workspaces'),
   r('*', /^\/v1\/(workspaces\/(inspect|scan-paths)|openclaw\/(agents|quiesce)|agents\/:id\/adopt-workspace)$/, 'step-up', 'Folders of this machine given to an agent, and bringing in workspaces'),
   r(['POST'], /^\/v1\/agents\/:id\/(move-host|rehost)$/, 'step-up', 'Moving an agent to another machine'),

@@ -90,8 +90,12 @@ export interface PublicAccessApi {
   /** Does this person have to give a second factor at the public address? `missing`: they must and have none. */
   secondFactorNeed(ownerId: string): 'no' | 'yes' | 'missing';
   hasOwnerRights(ownerId: string): boolean;
-  /** For a WebSocket upgrade on the public listener, which Fastify never sees: why it is refused (undefined: it is not). */
-  refuseUpgrade(rawReq: IncomingMessage, ownerId: string): string | undefined;
+  /**
+   * For code that reads the session itself rather than through the gate (a
+   * WebSocket upgrade, which Fastify never sees; the open /v1/join route):
+   * why this public request does not count as signed in (undefined: it does).
+   */
+  refuseSession(rawReq: IncomingMessage, ownerId: string): string | undefined;
   /** The site passkeys are made for: the host of the public (or private HTTPS) address. */
   rpId(): string | undefined;
   /** Every https origin this Hatchabot is opened at on that host. */
@@ -147,6 +151,8 @@ export function publicCsp(mode: string): string {
 }
 
 const CONSOLE_PATH = /^\/v1\/agents\/[^/]+\/ui(\/|$|\?)/;
+/** The largest body read from someone who has not finished signing in (a passkey answer is a few kilobytes). */
+const PRE_SIGNIN_BODY_MAX = 256 * 1024;
 const NOT_SERVING = 'Public access to this Hatchabot is paused. Open it at its private address.';
 const NOT_HERE = 'This is not available at the public address. Open Hatchabot at its private address for it.';
 
@@ -174,7 +180,10 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
   const origins = (): string[] => {
     const host = rpId();
     if (!host) return [];
-    const out = new Set<string>([`https://${host}`, `https://${host}:8443`, `https://${host}:10000`]);
+    // Only addresses this Hatchabot is configured to be opened at: the private
+    // https one, the public one, and the public one's port before it is on.
+    const fp = publicConfig().funnelPort;
+    const out = new Set<string>([`https://${host}${fp === 443 ? '' : `:${fp}`}`]);
     for (const u of [publicConfig().url, probes.appUrl(), process.env.HATCHABOT_PUBLIC_URL]) {
       try { if (u && new URL(u).hostname.toLowerCase() === host && new URL(u).protocol === 'https:') out.add(new URL(u).origin); } catch { /* not an address */ }
     }
@@ -206,6 +215,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       ports: { main: mainPort(), public: cfg.port, ops: Number(process.env.HATCHABOT_OPS_PORT ?? 8091), embed: Number(process.env.HATCHABOT_EMBED_PORT ?? 8093) },
       autoUpgrade,
       funnelOnPrivatePort,
+      publicOn: cfg.on,
       loginFailLimit: Number(process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW ?? 10),
       publicHost: hostOf(cfg.url) ?? rpId(),
     });
@@ -218,6 +228,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       announcedServing = serving;
       if (serving) app.log.warn({ url: cfg.url }, 'public.serving');
       else {
+        dropUpgraded(); // open console sockets do not outlive the safeguard
         // Fail closed, and say why: in the log and on the record.
         const why = cfg.unknownProvider ? [`unknown provider "${cfg.unknownProvider}"`] : failing.map((c) => `${c.letter}. ${c.title}: ${c.detail}`);
         app.log.error({ failing: why }, 'public.refusing: public access is on but a safeguard is off; the public listener answers 503 until it is fixed');
@@ -315,7 +326,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
 
   /** The first authenticated request of a public sign-in: the record, and the new-device notice. */
   const announced = new Map<string, number>();
-  const firstUse = (req: FastifyRequest, ownerId: string, pass: Pass): void => {
+  const firstUse = (req: { headers: Record<string, string | string[] | undefined> }, ownerId: string, pass: Pass): void => {
     const key = `${pass.sess}.${pass.minted}`;
     if (announced.has(key)) return;
     announced.set(key, Date.now());
@@ -373,6 +384,20 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       return reply.code(403).send({ error: NOT_HERE });
     }
     req.publicRule = rule;
+    // Bodies. A request with no declared length is refused; before sign-in
+    // (open and second-step routes) nothing over a few hundred kilobytes is
+    // read at all. The app accepts uploads of hundreds of megabytes on any
+    // route, and a stranger could otherwise make it hold that much per
+    // request (review, 2026-10-01). Signed-in routes are answered 401 by the
+    // sign-in hook before a byte of body is read.
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const te = req.headers['transfer-encoding'];
+      const len = Number(req.headers['content-length'] ?? 0);
+      if (te !== undefined || !Number.isFinite(len) || len < 0) return reply.code(411).header('connection', 'close').send({ error: 'Send a Content-Length.' });
+      if ((rule.cls === 'open' || rule.cls === 'second-step') && len > PRE_SIGNIN_BODY_MAX) {
+        return reply.code(413).header('connection', 'close').send({ error: 'That request is too large.' });
+      }
+    }
   });
 
   // ---- the gate: second half (after the sign-in hook) --------------------------
@@ -423,14 +448,14 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     });
   };
 
-  const refuseUpgrade = (rawReq: IncomingMessage, ownerId: string): string | undefined => {
+  const refuseSession = (rawReq: IncomingMessage, ownerId: string): string | undefined => {
     if (!isPublic(rawReq)) return undefined;
     if (!serving) return 'public access is not serving';
-    const rule = publicRuleFor('GET', '/v1/agents/:id/ui/*');
-    if (!rule || rule.cls !== 'signed-in') return 'route class';
     const headers = rawReq.headers as Record<string, string | string[] | undefined>;
     const pass = passOf({ headers }, sessionValue({ headers, socket: rawReq.socket }));
     if (!pass) return 'no public pass';
+    // A sign-in used only for a socket is still a sign-in: recorded and announced like any other.
+    if (!pass.used) firstUse({ headers }, ownerId, pass);
     const need = secondFactorNeed(ownerId);
     if (need === 'missing') return 'no second factor';
     if (need === 'yes' && pass.sfAt === 0) return 'second factor not given';
@@ -461,16 +486,30 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
 
   // ---- the listener ------------------------------------------------------------
 
+  /**
+   * Every socket the public listener has open, upgraded ones (a console's
+   * WebSocket) included: Node's closeAllConnections does not close those, and
+   * close() waits for them, so "off" would otherwise hang on one open chat
+   * and leave it working (review, 2026-10-01).
+   */
+  const sockets = new Set<import('node:net').Socket>();
+  const upgraded = new Set<import('node:net').Socket>();
+  function dropUpgraded(): void {
+    for (const s of upgraded) s.destroy();
+    upgraded.clear();
+  }
   const stopListener = async (): Promise<void> => {
     announcedServing = undefined;
     if (timer) { clearInterval(timer); timer = undefined; }
     const s = server;
     server = undefined;
     serving = false;
+    dropUpgraded();
     if (!s) return;
     await new Promise<void>((resolve) => {
       s.close(() => resolve());
-      s.closeAllConnections?.();
+      for (const sock of sockets) sock.destroy();
+      sockets.clear();
     });
   };
 
@@ -483,12 +522,23 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       timer.unref();
     }
     if (server?.listening) return { listening: true };
-    const s = createServer((req, res) => { app.routing(req, res); });
-    s.on('connection', (socket) => markPublicSocket(socket));
+    const s = createServer((req, res) => {
+      // An address the router cannot decode is answered by Fastify itself,
+      // before any hook: here it would skip the gate. Refuse it first.
+      try { decodeURI((req.url ?? '').split('?')[0] ?? ''); }
+      catch { res.writeHead(400, { 'content-type': 'application/json', 'x-content-type-options': 'nosniff', connection: 'close' }).end('{"error":"Bad request"}'); return; }
+      app.routing(req, res);
+    });
+    s.on('connection', (socket) => {
+      markPublicSocket(socket);
+      sockets.add(socket);
+      socket.once('close', () => { sockets.delete(socket); upgraded.delete(socket as never); });
+    });
     // The console's WebSocket: handed to the app's own upgrade handler, which
     // sees a public socket and asks refuseUpgrade. Anything else is dropped.
     s.on('upgrade', (req, socket, head) => {
       if (!serving || !CONSOLE_PATH.test(req.url ?? '') || app.server.listenerCount('upgrade') === 0) { socket.destroy(); return; }
+      upgraded.add(socket as never);
       app.server.emit('upgrade', req, socket, head);
     });
     s.headersTimeout = 20_000;
@@ -516,7 +566,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     config: publicConfig, status, evaluate,
     setProbes: (p) => { probes = { ...probes, ...p }; },
     syncListener, stopListener, sessionMinted, sessionCleared, failureBurst, secondFactorPassed, secondFactorNeed, hasOwnerRights,
-    refuseUpgrade, rpId, origins, afterSignIn, throttle: opts.throttle, secret,
+    refuseSession, rpId, origins, afterSignIn, throttle: opts.throttle, secret,
   };
   app.decorate('publicAccess', api);
   return api;

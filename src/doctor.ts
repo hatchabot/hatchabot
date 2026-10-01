@@ -180,6 +180,7 @@ export async function publicAccessFacts(env: Record<string, string>, dbPath: str
     ports: { main: mainPort, public: cfg.port, ops: Number(env.HATCHABOT_OPS_PORT ?? 8091), embed: Number(env.HATCHABOT_EMBED_PORT ?? 8093) },
     autoUpgrade: await (probe.autoUpgrade ?? autoUpgradeStatus)().catch(() => ({ ok: false, why: 'Automatic upgrades could not be checked.' })),
     funnelOnPrivatePort: funnel?.toPrivatePort,
+    publicOn: cfg.on,
     loginFailLimit: Number(env.HATCHABOT_LOGIN_FAILS_PER_WINDOW ?? 10),
     publicHost,
   });

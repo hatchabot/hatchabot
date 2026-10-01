@@ -296,7 +296,8 @@ export function parseFunnelStatus(raw: string | undefined): FunnelStatus {
 
 /** Does a Funnel target land on this local port? */
 export function targetsPort(entry: FunnelEntry, localPort: number): boolean {
-  return entry.targets.some((t) => new RegExp(`(^|[/@])(127\\.0\\.0\\.1|localhost|\\[::1\\]):${localPort}(/|$)`).test(t) || t === String(localPort));
+  // Whatever name this machine is called by (loopback, a LAN or tailnet address, its hostname): the port is what matters.
+  return entry.targets.some((t) => new RegExp(`:${localPort}(/|$)`).test(t) || t === String(localPort));
 }
 
 export async function funnelStatus(): Promise<FunnelStatus> {

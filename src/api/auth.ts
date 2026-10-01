@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import { LOCAL_OWNER, internalPrincipal, type Principal } from './principal.js';
@@ -6,7 +6,7 @@ import { registerAccountRoutes, sessionAccount, signInLocalByLink } from './acco
 import { registerSigninLink, SIGNIN_LINK_PATH, type LinkSignIn, type SigninLinkDeps } from './signinLink.js';
 import { clearSessionCookies, readSessionCookie, sessionValue, setSessionCookie, upgradeSessionCookie } from './sessionCookie.js';
 import { registerOriginCheck } from './requestOrigin.js';
-import { isPublic, publicClientAddress } from './trust.js';
+import { addressBucket, isPublic, publicClientAddress } from './trust.js';
 import { registerPublicAccess } from './publicAccess.js';
 import { publicConfig } from './safeguards.js';
 import { registerSecondFactorRoutes } from './secondFactor.js';
@@ -51,6 +51,16 @@ const failures = new Map<string, { n: number; until: number }>();
 export function loopbackIsRemote(): boolean {
   return process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK === '1';
 }
+/**
+ * The account a failure is counted against, as a key of bounded size: anyone
+ * can type any "username", and megabyte-long ones, each kept as a map key,
+ * were a way to fill the process's memory with no account at all (review,
+ * 2026-10-01).
+ */
+function accountKey(who: string): string {
+  const w = who.trim().toLowerCase();
+  return w.length <= 64 ? w : `#${createHash('sha256').update(w).digest('hex').slice(0, 32)}`;
+}
 function throttleKeys(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): string[] {
   // The public listener (trust.ts) counts apart from everything else, so a
   // stranger on the internet can lock an account out of the PUBLIC address
@@ -58,8 +68,8 @@ function throttleKeys(req: FastifyRequest, who?: string, scope?: 'link' | '2fa')
   // address is the one tailscaled reports, the account is a second bucket,
   // and `pub:all` is a ceiling on every public failure together.
   if (isPublic(req)) {
-    const keys = [`pub:ip:${publicClientAddress(req)}`];
-    if (who) keys.push(`pub:user:${who.trim().toLowerCase()}`);
+    const keys = [`pub:ip:${addressBucket(publicClientAddress(req))}`];
+    if (who) keys.push(`pub:user:${accountKey(who)}`);
     keys.push('pub:all');
     return scope ? keys.map((k) => `${scope}:${k}`) : keys;
   }
@@ -78,8 +88,8 @@ function throttleKeys(req: FastifyRequest, who?: string, scope?: 'link' | '2fa')
     const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim();
     if (first) ip = `fwd:${first}`;
   }
-  const keys = [`ip:${ip}`];
-  if (who) keys.push(`user:${who.trim().toLowerCase()}`);
+  const keys = [`ip:${ip.slice(0, 80)}`];
+  if (who) keys.push(`user:${accountKey(who)}`);
   // A scope is a separate count: sign-in links' misses never lock anyone out
   // of the password form. A junk link costs a page on another site nothing
   // to send (it needs no cookie), so sharing the bucket let ten of them lock
@@ -140,20 +150,22 @@ export function noteFailure(req: FastifyRequest, who?: string, scope?: 'link' | 
     for (const [k, f] of failures) if (now > f.until) failures.delete(k);
     if (failures.size > 8_000) {
       const order = [...failures.entries()].sort(([ka, a], [kb, b]) =>
-        (ka.startsWith('user:') ? 1 : 0) - (kb.startsWith('user:') ? 1 : 0) || a.n - b.n);
+        (ka.includes('user:') ? 1 : 0) - (kb.includes('user:') ? 1 : 0) || a.n - b.n);
       for (const [k] of order.slice(0, failures.size - 8_000)) failures.delete(k);
     }
   }
 }
 /** A recovered account starts clean: the lock-out someone ran up on it ends. */
 export function clearFailures(who: string): void {
-  failures.delete(`user:${who.trim().toLowerCase()}`);
-  failures.delete(`pub:user:${who.trim().toLowerCase()}`);
+  failures.delete(`user:${accountKey(who)}`);
+  failures.delete(`pub:user:${accountKey(who)}`);
 }
 /** Password mode has one password, so one bucket for it: forged forwarded-for addresses each got a fresh client bucket and unlimited guesses (night review). */
 const PASSWORD_BUCKET = '*shared-password*';
 /** Test hook. */
 export function _resetLoginThrottle(): void { failures.clear(); strikes.clear(); }
+/** Test hook: the bucket names in use (never their counts). */
+export function _loginThrottleKeys(): string[] { return [...failures.keys()]; }
 // The session cookie's name, flags and reading rules: sessionCookie.ts. It is
 // `secure` (and `__Host-`) only when the request actually arrived over HTTPS:
 // the browser silently DISCARDS a secure cookie on an http:// origin, so a

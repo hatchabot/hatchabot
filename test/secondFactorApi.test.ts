@@ -40,7 +40,7 @@ describe('second factors: enrolment', () => {
   });
 
   it('a passkey: made at the https address it will be used at, refused anywhere else', async () => {
-    h = await publicApp({ off: true });
+    h = await publicApp({ off: true, env: { HATCHABOT_PUBLIC_URL: `https://${PUBLIC_HOST}` } }); // the private https address (tailscale serve)
     const o = await h.addAccount('owner', { owner: true, totp: false });
     const call = await priv(h, 'owner', o.password);
     const at = { origin: `https://${PUBLIC_HOST}`, host: PUBLIC_HOST };
@@ -73,7 +73,7 @@ describe('second factors: enrolment', () => {
 
 describe('second factors: at the public address', () => {
   it('a passkey signs in; its challenge is single use; someone else\'s passkey does not', async () => {
-    h = await publicApp();
+    h = await publicApp({ env: { HATCHABOT_PUBLIC_URL: `https://${PUBLIC_HOST}` } });
     const o = await h.addAccount('owner', { owner: true, totp: false });
     const m = await h.addAccount('member');
     const call = await priv(h, 'owner', o.password);

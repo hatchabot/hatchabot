@@ -30,6 +30,7 @@ const NOTICES = 'test/publicNotices.test.ts';
 const REACH = 'test/reach.test.ts';
 const GUARDS = 'test/safeguards.test.ts';
 const ROUTES = 'test/publicRoutes.test.ts';
+const REVIEW = 'test/publicReview.test.ts';
 
 /** name, file, the guard's exact text, what replaces it, the tests that must then fail. */
 const MUTANTS = [
@@ -84,7 +85,24 @@ const MUTANTS = [
   ['switch: on without the safeguards', 'src/api/reachRoutes.ts', "      if (failing.length) {\n        return reply.code(409)", "      if (false) {\n        return reply.code(409)", [REACH]],
   ['switch: on without a confirmation', 'src/api/reachRoutes.ts', "if (req.body?.confirm !== true) {", "if (false) {", [REACH]],
   ['switch: a member may flip it', 'src/api/reachRoutes.ts', "return deps.ownsLocalHost(req) ? undefined : OWNER_ONLY;", "return undefined;", [REACH]],
-  ['switch: Funnel on the private port is not noticed', 'src/api/safeguards.ts', "const listenerOk = !clash && !f.ownerHeader && f.funnelOnPrivatePort !== true;", "const listenerOk = !clash && !f.ownerHeader;", [GUARDS, REACH]],
+  ['switch: Funnel on the private port is not noticed', 'src/api/safeguards.ts', "const listenerOk = !clash && !f.ownerHeader && f.funnelOnPrivatePort !== true && !unreadable;", "const listenerOk = !clash && !f.ownerHeader && !unreadable;", [GUARDS, REACH]],
+  ['switch: unreadable Funnel passes while on', 'src/api/safeguards.ts', "const unreadable = !!f.publicOn && f.funnelOnPrivatePort === undefined;", "const unreadable = false;", [REVIEW]],
+  ['switch: only loopback Funnel targets are seen', 'src/ops/tailnet.ts', "return entry.targets.some((t) => new RegExp(`:${localPort}(/|$)`).test(t) || t === String(localPort));", "return entry.targets.some((t) => new RegExp(`(127\\.0\\.0\\.1|localhost):${localPort}(/|$)`).test(t));", [REVIEW]],
+  ['review: large bodies are read before sign-in', 'src/api/publicAccess.ts', "if ((rule.cls === 'open' || rule.cls === 'second-step') && len > PRE_SIGNIN_BODY_MAX) {", "if (false) {", [REVIEW]],
+  ['review: bodies with no length are read', 'src/api/publicAccess.ts', "if (te !== undefined || !Number.isFinite(len) || len < 0) return reply.code(411)", "if (false) return reply.code(411)", [REVIEW]],
+  ['review: undecodable addresses reach the router', 'src/api/publicAccess.ts', "catch { res.writeHead(400,", "catch { app.routing(req, res); return; res.writeHead(400,", [REVIEW]],
+  ['review: sockets outlive a failed safeguard', 'src/api/publicAccess.ts', "        dropUpgraded(); // open console sockets do not outlive the safeguard\n", "", [REVIEW]],
+  ['review: off waits for open sockets', 'src/api/publicAccess.ts', "    dropUpgraded();\n    if (!s) return;\n    await new Promise<void>((resolve) => {\n      s.close(() => resolve());\n      for (const sock of sockets) sock.destroy();\n      sockets.clear();", "    if (!s) return;\n    await new Promise<void>((resolve) => {\n      s.close(() => resolve());\n      s.closeAllConnections?.();", [REVIEW]],
+  ['review: a socket-only sign-in is not recorded', 'src/api/publicAccess.ts', "if (!pass.used) firstUse({ headers }, ownerId, pass);", "", [REVIEW]],
+  ['review: usernames are throttle keys at any length', 'src/api/auth.ts', "return w.length <= 64 ? w : `#${createHash('sha256').update(w).digest('hex').slice(0, 32)}`;", "return w;", [REVIEW]],
+  ['review: IPv6 addresses are their own buckets', 'src/api/auth.ts', "const keys = [`pub:ip:${addressBucket(publicClientAddress(req))}`];", "const keys = [`pub:ip:${publicClientAddress(req)}`];", [REVIEW]],
+  ['review: the roster lists claim codes publicly', 'src/api/accountsAuth.ts', "claimPath: a.claimCode && !isPublic(req) ?", "claimPath: a.claimCode ?", [REVIEW]],
+  ['review: Files are signed-in', 'src/api/publicRoutes.ts', "r('*', /^\\/v1\\/agents\\/:id\\/fs(\\/file)?$/, 'step-up',", "r('*', /^\\/v1\\/agents\\/:id\\/fs(\\/file)?$/, 'signed-in',", [REVIEW]],
+  ['review: join accepts a session the gate has not passed', 'src/api/routes.ts', "if (fromCookie && isPublic(req) && (app.publicAccess ? app.publicAccess.refuseSession(req.raw, fromCookie) : 'no public gate')) fromCookie = undefined;", "", [REVIEW]],
+  ['review: config tells strangers the private address', 'src/api/routes.ts', "    if (!isPublic(req)) return full;\n    const { appUrl", "    if (true) return full;\n    const { appUrl", [REVIEW]],
+  ['review: the pass and device cookies go to the gateway', 'src/api/sessionCookie.ts', "_(session|pub|device)$/;", "_session$/;", [REVIEW]],
+  ['review: any factor counts as proof publicly', 'src/api/secondFactor.ts', "if (isPublic(req) && api.secondFactorNeed(ownerId) === 'yes') return true;", "if (isPublic(req) && real(ownerId).length > 0) return true;", [REVIEW]],
+  ['review: passkey origins include unserved ports', 'src/api/publicAccess.ts', "const out = new Set<string>([`https://${host}${fp === 443 ? '' : `:${fp}`}`]);", "const out = new Set<string>([`https://${host}`, `https://${host}:8443`, `https://${host}:10000`]);", [REVIEW]],
   ['switch: off leaves Funnel on', 'src/api/reachRoutes.ts', "      const r = await funnelOff(cfg.port, cfg.funnelPort);\n      if (!r.ok) { funnelError = r.error; command = r.command; }", "", [REACH]],
   ['switch: off leaves the listener open', 'src/api/reachRoutes.ts', "    else await api.stopListener();", "", [REACH]],
   ['switch: invited-only can be turned off while on', 'src/api/reachRoutes.ts', "if (!on && api.config().on) return reply.code(409)", "if (false) return reply.code(409)", [REACH]],
@@ -123,7 +141,7 @@ try {
     } else { console.log(`✓ ${name}`); killed++; }
   }
   // The copy must pass untouched, or "killed" means nothing.
-  const base = spawnSync('npx', ['vitest', 'run', GATE, TRUST, SF, NOTICES, REACH, GUARDS, ROUTES], { cwd: work, env, encoding: 'utf8', timeout: 600_000 });
+  const base = spawnSync('npx', ['vitest', 'run', GATE, TRUST, SF, NOTICES, REACH, GUARDS, ROUTES, REVIEW], { cwd: work, env, encoding: 'utf8', timeout: 600_000 });
   if (base.status !== 0) { console.log('✗ the unmutated copy does not pass its own tests: every result above is void'); survived++; }
   console.log(`${killed} killed, ${survived} survived, ${skipped} not counted`);
   process.exitCode = survived ? 1 : 0;
