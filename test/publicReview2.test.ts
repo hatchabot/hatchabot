@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { connect, type Socket } from 'node:net';
 import { Jar, PUBLIC_HOST, PUBLIC_URL, publicApp, type PublicApp } from './helpers/publicApp.js';
 import { SoftAuthenticator } from './helpers/softAuthenticator.js';
 import { totp } from '../src/api/totp.js';
 import { parseFunnelStatus, targetsPort } from '../src/ops/tailnet.js';
 import { evaluateSafeguards, failingSafeguards } from '../src/api/safeguards.js';
-import { verifyAssertion, WebAuthnError } from '../src/api/webauthn.js';
+import { verifyAssertion, verifyRegistration, WebAuthnError } from '../src/api/webauthn.js';
 
 /**
  * What a second, independent review of the public listener found
@@ -372,6 +375,13 @@ describe('smaller things', () => {
       expect(() => verifyAssertion({ ...good, clientDataJSON: Buffer.from(cd).toString('base64url') },
         { publicKey: { alg: -7, jwk: { kty: 'EC' } }, signCount: 0 }, { challenge: 'abc', origins: [PUBLIC_URL], rpId: PUBLIC_HOST }), cd).toThrow(WebAuthnError);
     }
+    // A challenge or origin wrapped in an array reads as the same text; with a genuine key and signature only the type check refuses it.
+    const reg = verifyRegistration(key.create({ challenge: 'c0', origin: PUBLIC_URL, rpId: PUBLIC_HOST }), { challenge: 'c0', origins: [PUBLIC_URL], rpId: PUBLIC_HOST });
+    const exp = { challenge: 'abc', origins: [PUBLIC_URL], rpId: PUBLIC_HOST };
+    expect(verifyAssertion(key.get({ challenge: 'abc', origin: PUBLIC_URL, rpId: PUBLIC_HOST }), { publicKey: reg.publicKey, signCount: reg.signCount }, exp).signCount).toBeGreaterThan(reg.signCount);
+    for (const odd of [{ challenge: ['abc'] }, { origin: [PUBLIC_URL] }]) {
+      expect(() => verifyAssertion(key.get({ challenge: 'abc', origin: PUBLIC_URL, rpId: PUBLIC_HOST, clientExtra: odd }), { publicKey: reg.publicKey, signCount: 0 }, exp), JSON.stringify(odd)).toThrow(/malformed/);
+    }
     // Through the route: counted as a failed attempt (401), not answered 500.
     h = await publicApp({ fullRoutes: true });
     const owner = await h.addAccount('owner', { owner: true });
@@ -413,12 +423,13 @@ describe('smaller things', () => {
     await h.app.publicAccess!.evaluate();
     h.store.insertAgent({ id: 'a1', ownerId: owner.id, name: 'Kitchen', slug: 'kitchen', state: 'STOPPED', aiProfileId: 'p1', hostId: 'host-local', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
     const jar = await h.signIn('owner', owner.password, { totpSecret: owner.totpSecret });
+    const folder = mkdtempSync(join(tmpdir(), 'hb-folder-'));
     const realNow = Date.now;
     try {
       // Eleven minutes on: signed in, but the second factor was not given in the last ten.
       Date.now = () => realNow() + 11 * 60_000;
       expect((await h.pub('/v1/agents/a1', { method: 'PATCH', body: { group: 'Home' }, jar })).status).toBe(200);
-      const r = await h.pub('/v1/agents/a1', { method: 'PATCH', body: { sharedPaths: ['/tmp'] }, jar });
+      const r = await h.pub('/v1/agents/a1', { method: 'PATCH', body: { sharedPaths: [folder] }, jar });
       expect(r.status).toBe(401);
       expect(r.json.secondFactor).toBe('step-up');
       expect(h.store.getAgent('a1')!.sharedPaths ?? []).toEqual([]);
@@ -430,10 +441,11 @@ describe('smaller things', () => {
     const realNow2 = Date.now;
     try {
       Date.now = () => realNow2() + 46_000;
-      const ok = await h.pub('/v1/agents/a1', { method: 'PATCH', body: { sharedPaths: ['/tmp'] }, jar: fresh });
+      const ok = await h.pub('/v1/agents/a1', { method: 'PATCH', body: { sharedPaths: [folder] }, jar: fresh });
       expect(ok.status, JSON.stringify(ok.json)).toBe(200);
     } finally { Date.now = realNow2; }
-    expect(h.store.getAgent('a1')!.sharedPaths).toEqual(['/tmp']);
+    expect(h.store.getAgent('a1')!.sharedPaths).toEqual([folder]);
+    rmSync(folder, { recursive: true, force: true });
   }, 30_000);
 
   it('the request ceiling counts an IPv6 visitor by their /64, not by an address they can change at will', async () => {

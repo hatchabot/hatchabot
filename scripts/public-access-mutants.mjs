@@ -56,7 +56,7 @@ const MUTANTS = [
   ['pass: not bound to its session', 'src/api/publicAccess.ts', "if (pass.sess.length !== want.length || !timingSafeEqual(Buffer.from(pass.sess), Buffer.from(want))) return undefined;", '', [GATE]],
   ['pass: the signature is not checked', 'src/api/publicAccess.ts', "if (sig.length !== want.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(want))) return undefined;", '', [GATE]],
   ['pass: never idles out', 'src/api/publicAccess.ts', "if (pass.seen > now + 60_000 || now - pass.seen > publicConfig().idleMs) return undefined;", '', [GATE]],
-  ['pass: a new sign-in inherits the second factor', 'src/api/publicAccess.ts', "if (req.principal && req.routeOptions?.url === '/v1/local-accounts/:id/password') {\n      sfAt = passOf(req, sessionValue(req))?.sfAt ?? 0;\n    }", "sfAt = Date.now();", [GATE]],
+  ['pass: a new sign-in inherits the second factor', 'src/api/publicAccess.ts', "if (req.principal && req.routeOptions?.url === '/v1/local-accounts/:id/password') {\n      const old = passOf(req, sessionValue(req));\n      sfAt = old?.sfAt ?? 0;\n      en = old?.en ?? 0;\n    }", "sfAt = Date.now();", [GATE]],
   ['2fa: not asked for at sign-in', 'src/api/publicAccess.ts', "if (need === 'yes' && pass.sfAt === 0) {\n        return reply", "if (false) {\n        return reply", [GATE]],
   ['2fa: step-up never expires', 'src/api/publicAccess.ts', "if (now - pass.sfAt > publicConfig().stepUpMs) {", "if (false) {", [GATE, SF]],
   ['2fa: step-up open to people without a factor', 'src/api/publicAccess.ts', "          if (rule.firstFactorOk) return;\n          return reply.code(403)", "          return;\n          return reply.code(403)", [GATE]],
