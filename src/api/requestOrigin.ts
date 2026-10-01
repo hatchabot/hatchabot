@@ -28,8 +28,46 @@ import type { RequestLike } from './sessionCookie.js';
  * site is a GET: Google's OAuth callback, a one-time sign-in link from the
  * provider's page. Telegram is polled, Slack is Socket Mode and Discord is
  * its gateway, so no chat service posts to us.
+ *
+ * Reads too (foreignRead, 2026-10-01). Not every GET here only reads: a
+ * Download (/v1/agents/:id/backup) stops the agent, the console proxy wakes a
+ * sleeping one and reaches its gateway as the owner, a junk sign-in link is
+ * a counted failure, and many reads run docker commands or call Telegram per
+ * agent. A neighbour's <img>, link or no-cors fetch could start any of them.
+ * So a browser GET or HEAD that says it came from another site is refused
+ * too, except:
+ *
+ *  - the pages people are SENT to by links, and only as a page visit
+ *    (Sec-Fetch-Mode navigate, Sec-Fetch-Dest document): the app (/, with a
+ *    reset link's ?claim=), an invitation (/join/<code>), a sign-in link from
+ *    the provider's page, Google's consent coming back, the legal pages.
+ *    Those validate their own codes, and an <img> of one is nobody visiting.
+ *  - static public files with no data and no side effect (the PWA shell,
+ *    /healthz).
+ *
+ * Only Sec-Fetch-Site counts for reads: a GET carries no Origin, and a browser
+ * without Fetch Metadata (pre-2023 Safari) is not protected here. Every other
+ * method (OPTIONS, and anything the console proxy's catch-all accepts) is
+ * judged like a write.
  */
-const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const READS = new Set(['GET', 'HEAD']);
+
+/** Where another site may send a browser: a person following a link. */
+const LANDINGS: readonly RegExp[] = [
+  /^\/$/,
+  /^\/join\/[A-Za-z0-9_-]{1,64}$/,
+  /^\/signin\/link$/,
+  /^\/v1\/connections\/google\/callback$/,
+  /^\/(privacy|terms)$/,
+];
+/** Static, public, no data, no side effect: fine to be fetched from anywhere. */
+const PUBLIC_FILES: readonly RegExp[] = [
+  /^\/healthz$/,
+  /^\/manifest\.webmanifest$/,
+  /^\/sw\.js$/,
+  /^\/icons\/[a-z0-9-]+\.png$/,
+  /^\/app-qr\.svg$/,
+];
 
 const first = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v)?.split(',')[0]?.trim();
 /** host[:port] as a URL would print it: lower case, no default port. */
@@ -38,7 +76,7 @@ function normHost(h: string | undefined, scheme: string): string | undefined {
   try { return new URL(`${scheme}//${h}`).host.toLowerCase(); } catch { return undefined; }
 }
 
-/** Why this browser request is from somewhere else (undefined: it is not). Check state-changing requests and upgrades only. */
+/** Why this browser request is from somewhere else (undefined: it is not). For every method but GET/HEAD, and for upgrades (reads: foreignRead). */
 export function foreignRequest(req: RequestLike, env: NodeJS.ProcessEnv = process.env): string | undefined {
   const site = first(req.headers['sec-fetch-site'])?.toLowerCase();
   if (site === 'same-origin' || site === 'none') return undefined;
@@ -54,13 +92,31 @@ export function foreignRequest(req: RequestLike, env: NodeJS.ProcessEnv = proces
   return mine.includes(theirs) ? undefined : `origin: ${theirs}`;
 }
 
-/** Every state-changing request through Fastify. (WebSocket upgrades never reach Fastify: the console proxy calls foreignRequest itself.) */
+/**
+ * Why this browser GET/HEAD from another site is refused (undefined: it is
+ * not refused). `path` is the path alone, without the query.
+ */
+export function foreignRead(method: string, path: string, headers: RequestLike['headers']): string | undefined {
+  if (!READS.has(method.toUpperCase())) return undefined;
+  const site = first(headers['sec-fetch-site'])?.toLowerCase();
+  if (site !== 'same-site' && site !== 'cross-site') return undefined;
+  if (PUBLIC_FILES.some((re) => re.test(path))) return undefined;
+  if (LANDINGS.some((re) => re.test(path))) {
+    const mode = first(headers['sec-fetch-mode'])?.toLowerCase();
+    const dest = first(headers['sec-fetch-dest'])?.toLowerCase();
+    if ((!mode || mode === 'navigate') && (!dest || dest === 'document')) return undefined;
+    return `sec-fetch-site: ${site}, ${mode ?? '-'}/${dest ?? '-'} (not a page visit)`;
+  }
+  return `sec-fetch-site: ${site}`;
+}
+
+/** Every request through Fastify. (WebSocket upgrades never reach Fastify: the console proxy calls foreignRequest itself.) */
 export function registerOriginCheck(app: FastifyInstance): void {
   app.addHook('onRequest', async (req, reply) => {
-    if (!UNSAFE.has(req.method)) return;
-    const why = foreignRequest(req);
+    const path = req.url.split('?')[0] ?? '';
+    const why = READS.has(req.method) ? foreignRead(req.method, path, req.headers) : foreignRequest(req);
     if (!why) return;
-    app.log.warn({ method: req.method, path: req.url.split('?')[0], why }, 'request.foreign_refused');
+    app.log.warn({ method: req.method, path, why }, 'request.foreign_refused');
     return reply.code(403).send({ error: 'This request came from another site, so it was refused. Open Hatchabot at its own address and try again.' });
   });
 }

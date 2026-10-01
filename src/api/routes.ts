@@ -27,7 +27,7 @@ import { enableServe, tailnetInfo, writeEnvVar, writePublicUrl } from '../ops/ta
 import { randomBytes } from 'node:crypto';
 import { hashPassword, newRecoveryCode, normalizeRecoveryCode, passwordProblem, usernameProblem } from './accountsAuth.js';
 import { noteFailure, throttled } from './auth.js';
-import { requestIsHttps, SESSION_COOKIE_NAME, type RequestLike } from './sessionCookie.js';
+import { cookieFromHeader, requestIsHttps, SESSION_COOKIE_NAME, type RequestLike } from './sessionCookie.js';
 import { foreignRequest } from './requestOrigin.js';
 import { isControlUiDocument, rebaseControlUi } from './controlUiRebase.js';
 import { defaultMemoryCap, effectiveMemoryCap, formatMemoryCap, memberMemoryMax, MEMORY_CAP_CEILING_BYTES, parseMemoryCap } from '../orchestrator/memoryCap.js';
@@ -307,8 +307,21 @@ const MACHINE_OWNER_ONLY =
   'Only the account that set up this machine can do that — it touches the machine itself ' +
   '(its runtime images, hosts and runners), not just your own agents.';
 
-/** Binds a Google consent round-trip to the browser that started it. */
+/**
+ * Binds a Google consent round-trip to the browser that started it. Over
+ * HTTPS it is `__Host-` (Secure, Path=/, no Domain): on a hosted Hatchabot a
+ * neighbouring tenant is the same site and can set a plain-named cookie for
+ * the parent domain — planting their own nonce in this browser, then walking
+ * this person through Google's consent with their own state, put this
+ * person's Google account in the planter's vault (2026-10-01). Over plain
+ * HTTP the prefix is impossible; the plain name stays, scoped to the callback.
+ */
 const OAUTH_NONCE_COOKIE = 'hb_oauth';
+const OAUTH_NONCE_HOST_COOKIE = '__Host-hb_oauth';
+const oauthNonceCookie = (https: boolean, nonce: string, maxAgeS: number): string =>
+  https
+    ? `${OAUTH_NONCE_HOST_COOKIE}=${nonce}; Path=/; Max-Age=${maxAgeS}; HttpOnly; SameSite=Lax; Secure`
+    : `${OAUTH_NONCE_COOKIE}=${nonce}; Path=/v1/connections/google/callback; Max-Age=${maxAgeS}; HttpOnly; SameSite=Lax`;
 /** The manager lives with its machine: its door, network and tools are this machine's (night review, 2026-09-27). */
 const OPS_STAYS_HERE = 'The Hatchabot agent stays on this machine: its locked-down network and its tools belong here. Set one up on the other machine instead.';
 /** The manager's jail reaches only internet AI services, so it cannot run on a local model. */
@@ -5540,7 +5553,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const guestRewrite = caller.role === 'guest' && (isDocument || guestConfig);
     for (const [k, v] of Object.entries(upstream.headers)) {
       // set-cookie: the gateway is the least-trusted component; it must not plant cookies on our origin.
-      if (v === undefined || /^(transfer-encoding|connection|content-length|set-cookie)$/i.test(k)) continue;
+      // CORS: OpenClaw has handlers that echo any Origin back as allowed; relayed,
+      // that would let a page on another site (a neighbouring tenant's) read the
+      // console's answers with this browser's cookie. Hatchabot allows no other origin.
+      if (v === undefined || /^(transfer-encoding|connection|content-length|set-cookie|access-control-[a-z-]+|timing-allow-origin)$/i.test(k)) continue;
       if (guestRewrite && /^(etag|last-modified)$/i.test(k)) continue;
       // OpenClaw forbids framing outright (X-Frame-Options: DENY and
       // frame-ancestors 'none'), which forced the console into a separate tab.
@@ -7922,9 +7938,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     const nonce = randomBytes(18).toString('base64url');
     const state = stateJar.issue(ownerIdOf(req), services, nonce);
-    const fwd = req.headers['x-forwarded-proto'];
-    const secure = ((Array.isArray(fwd) ? fwd[0] : fwd) ?? req.protocol) === 'https';
-    reply.header('set-cookie', `${OAUTH_NONCE_COOKIE}=${nonce}; Path=/v1/connections/google/callback; Max-Age=600; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`);
+    reply.header('set-cookie', oauthNonceCookie(requestIsHttps(req), nonce, 600));
     return { url: googleAuthUrl(client.clientId, oauthRedirectUri(req as any), state, services) };
   });
 
@@ -7947,9 +7961,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // This path is auth-exempt (the cross-site redirect can't carry the
       // strict-SameSite session cookie) — the single-use state token IS the
       // credential, and claim.ownerId names whose vault the result joins.
-      const nonce = String(req.headers.cookie ?? '').split(';').map((c) => c.trim()).find((c) => c.startsWith(`${OAUTH_NONCE_COOKIE}=`))?.slice(OAUTH_NONCE_COOKIE.length + 1);
+      // Over HTTPS only the __Host- cookie is believed: a plain one may have been planted.
+      const https = requestIsHttps(req);
+      const nonce = cookieFromHeader(req.headers.cookie, https ? OAUTH_NONCE_HOST_COOKIE : OAUTH_NONCE_COOKIE);
       const claim = req.query.state ? stateJar.consume(req.query.state, nonce ?? '') : null;
-      reply.header('set-cookie', `${OAUTH_NONCE_COOKIE}=; Path=/v1/connections/google/callback; Max-Age=0; HttpOnly; SameSite=Lax`);
+      reply.header('set-cookie', https ? [oauthNonceCookie(true, '', 0), oauthNonceCookie(false, '', 0)] : oauthNonceCookie(false, '', 0));
       if (!claim) {
         return page("That didn't match", 'This consent link expired, was already used, or was opened in a different browser from the one that pressed Connect — go back to Hatchabot there and press Connect again.', false);
       }

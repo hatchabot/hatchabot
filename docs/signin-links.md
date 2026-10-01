@@ -184,7 +184,7 @@ cookie with a form post, a `fetch` or a WebSocket, and it can set cookies on
 sign the owner out everywhere, open an agent's console socket, sign a
 visitor in as an account of the neighbour's choosing by planting its
 cookie, and sign the owner out by planting a junk one with a longer path.
-Two things close that, on every install and in every sign-in mode:
+These close that, on every install and in every sign-in mode:
 
 - **Requests from elsewhere change nothing** (`src/api/requestOrigin.ts`).
   Every `POST`, `PUT`, `PATCH` and `DELETE`, and every WebSocket upgrade to
@@ -198,6 +198,30 @@ Two things close that, on every install and in every sign-in mode:
   everything that legitimately arrives from another site is a `GET` (this
   link, Google's OAuth callback), and no chat service posts to Hatchabot
   (Telegram is polled, Slack is Socket Mode, Discord is its gateway).
+- **Reads from elsewhere are refused too**, because not every `GET` only
+  reads: a Download (`/v1/agents/:id/backup`) stops the agent, a `GET`
+  through the console proxy wakes a sleeping agent and reaches its gateway as
+  the owner, a junk sign-in link counts as a failed sign-in, and many reads
+  run commands in every agent or call Telegram per bot. A `GET` or `HEAD` the
+  browser marks `Sec-Fetch-Site: same-site` or `cross-site` is refused (403)
+  on every path except the pages people are sent to by links, and only as a
+  page visit (`Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`): `/`
+  (a reset link's `/?claim=…` too), `/join/<code>`, this link,
+  Google's callback, `/privacy` and `/terms`; and static public files
+  (`/healthz`, the PWA shell). Every other method is judged like a write.
+  Reads have no `Origin`, so a browser too old for Fetch Metadata is not
+  covered for them.
+- **Sign-in links have their own failure count.** A junk link needs no cookie
+  to send; when it counted against the password form's per-address limit,
+  ten of them locked the owner out of signing in. Now links and passwords
+  are counted apart.
+- **Google's consent is bound with a `__Host-hb_oauth` cookie over HTTPS.**
+  The plain-named one could be planted from the parent domain, so someone
+  with an account here and a page on the same site could walk another person
+  through Google's consent into their own vault.
+- **The console proxy relays no CORS headers.** OpenClaw has handlers that
+  echo any `Origin` back as allowed; relayed, a page elsewhere could have
+  read the console's answers. Hatchabot itself allows no other origin.
 - **The session cookie is `__Host-hatchabot_session` over HTTPS**
   (`src/api/sessionCookie.ts`). The browser accepts a `__Host-` cookie only
   from this exact host, `Secure`, `Path=/`, with no `Domain`, so a neighbour

@@ -47,7 +47,7 @@ const failures = new Map<string, { n: number; until: number }>();
 export function loopbackIsRemote(): boolean {
   return process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK === '1';
 }
-function throttleKeys(req: FastifyRequest, who?: string): string[] {
+function throttleKeys(req: FastifyRequest, who?: string, scope?: 'link'): string[] {
   let ip = req.ip || 'unknown';
   const bare = ip.replace(/^::ffff:/, '');
   // Under a rootless daemon every agent container is a loopback peer of this
@@ -65,10 +65,14 @@ function throttleKeys(req: FastifyRequest, who?: string): string[] {
   }
   const keys = [`ip:${ip}`];
   if (who) keys.push(`user:${who.trim().toLowerCase()}`);
-  return keys;
+  // A scope is a separate count: sign-in links' misses never lock anyone out
+  // of the password form. A junk link costs a page on another site nothing
+  // to send (it needs no cookie), so sharing the bucket let ten of them lock
+  // the owner out of signing in (2026-10-01).
+  return scope ? keys.map((k) => `${scope}:${k}`) : keys;
 }
-export function throttled(req: FastifyRequest, who?: string): boolean {
-  for (const k of throttleKeys(req, who)) {
+export function throttled(req: FastifyRequest, who?: string, scope?: 'link'): boolean {
+  for (const k of throttleKeys(req, who, scope)) {
     const f = failures.get(k);
     if (!f) continue;
     if (Date.now() > f.until) { failures.delete(k); continue; }
@@ -80,8 +84,8 @@ export function throttled(req: FastifyRequest, who?: string): boolean {
   }
   return false;
 }
-export function noteFailure(req: FastifyRequest, who?: string): void {
-  for (const k of throttleKeys(req, who)) {
+export function noteFailure(req: FastifyRequest, who?: string, scope?: 'link'): void {
+  for (const k of throttleKeys(req, who, scope)) {
     const f = failures.get(k);
     if (!f || Date.now() > f.until) failures.set(k, { n: 1, until: Date.now() + FAIL_WINDOW_MS });
     else f.n += 1;
@@ -267,7 +271,8 @@ const CONSOLE_PATH = /^\/v1\/agents\/[^/]+\/ui(\/|$)/;
 function linkRoute(app: FastifyInstance, opts: AuthOptions, signIn: SigninLinkDeps['signIn']): void {
   if (!process.env.HATCHABOT_SIGNIN_KEY_FILE?.trim()) return;
   if (!opts.store) { app.log.error('signin_link: no database to record spent links in; sign-in links are off'); return; }
-  registerSigninLink(app, { store: opts.store, guard: { throttled, noteFailure }, signIn });
+  // Its own count (throttleKeys): a link's misses are not the password form's.
+  registerSigninLink(app, { store: opts.store, guard: { throttled: (req) => throttled(req, undefined, 'link'), noteFailure: (req) => noteFailure(req, undefined, 'link') }, signIn });
 }
 
 export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Promise<void> {

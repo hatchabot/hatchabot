@@ -103,13 +103,15 @@ describe('requests a page on another site makes the browser send', () => {
     expect((await f.inject({ method: 'POST', url: '/v1/change-something', headers: { cookie } })).statusCode).toBe(200);
   });
 
-  it('signing in from a neighbour\'s page (login CSRF) is refused; reads and the sign-in link (a GET) are not affected', async () => {
+  it('signing in from a neighbour\'s page (login CSRF) is refused; the app\'s own reads are not affected', async () => {
     const { f } = await accountsApp();
     const r = await login(f, 'member', NEIGHBOUR);
     expect(r.statusCode).toBe(403);
     expect(r.cookies.filter((c) => c.value)).toEqual([]);
     expect((await login(f, 'owner', SAME_ORIGIN)).statusCode).toBe(200);
-    expect((await f.inject({ method: 'GET', url: '/v1/config', headers: NEIGHBOUR })).statusCode).not.toBe(403);
+    // Reads from a neighbour are refused too since 2026-10-01 (sameSiteReads.test.ts); the app's own page reads as always.
+    expect((await f.inject({ method: 'GET', url: '/v1/config', headers: NEIGHBOUR })).statusCode).toBe(403);
+    expect((await f.inject({ method: 'GET', url: '/v1/config', headers: SAME_ORIGIN })).statusCode).not.toBe(403);
   });
 });
 
