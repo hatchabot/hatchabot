@@ -127,6 +127,117 @@ export const GUEST_METHODS: ReadonlySet<string> = new Set([
   'mentions.list', 'mentions.dismiss', 'push.web.vapidPublicKey',
 ]);
 
+/** What a guest's connection is confined to: their agent (slug) and their own conversation on it. */
+export interface GuestScope {
+  /** The OpenClaw agent the guest's role lets them use. */
+  agentId?: string;
+  /** Their conversation (guestConsoleSessionKey): `agent:<agentId>:guest:<…>`. */
+  sessionKey?: string;
+}
+
+/** The part of the guest's session key after `agent:<agentId>:` — what the UI calls the main key. */
+function guestMainKey(scope: GuestScope): string | undefined {
+  const head = `agent:${scope.agentId}:`;
+  return scope.agentId && scope.sessionKey?.startsWith(head) && scope.sessionKey.length > head.length ? scope.sessionKey.slice(head.length) : undefined;
+}
+
+/**
+ * What a guest's Control UI is told about the agents (2026-09-30): only the
+ * one their role lets them use (the gateway's role already confines them to
+ * it), with their own conversation as its main one — the sidebar's Home opened
+ * the owner's ("Session … was not found") — and no `defaultPermissionMode`:
+ * the composer showed "Default (Full Access)" from it, an operator setting a
+ * guest cannot choose; without it the composer says "Default" ("follow the
+ * agent's configured execution permissions"), which is what a guest's turns do.
+ */
+export function guestAgentsList(payload: unknown, scope: GuestScope = {}): unknown {
+  if (!payload || typeof payload !== 'object' || !Array.isArray((payload as { agents?: unknown }).agents)) return payload;
+  const { agentId } = scope;
+  const p = { ...(payload as Record<string, unknown>) };
+  let agents = (p.agents as unknown[]).filter((a): a is Record<string, unknown> => !!a && typeof a === 'object' && !Array.isArray(a));
+  if (agentId && agents.some((a) => a.id === agentId)) agents = agents.filter((a) => a.id === agentId);
+  p.agents = agents.map(({ defaultPermissionMode: _mode, ...rest }) => rest);
+  if (agentId && agents.some((a) => a.id === agentId)) {
+    p.defaultId = agentId;
+    const mainKey = guestMainKey(scope);
+    if (mainKey && typeof p.mainKey === 'string') p.mainKey = mainKey;
+  }
+  return p;
+}
+
+/** The hello's session defaults, for a guest: their agent, their conversation (as guestAgentsList). */
+export function guestSessionDefaults(defaults: unknown, scope: GuestScope = {}): unknown {
+  if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults) || !scope.agentId) return defaults;
+  const d = { ...(defaults as Record<string, unknown>) };
+  d.defaultAgentId = scope.agentId;
+  const mainKey = guestMainKey(scope);
+  if (mainKey) {
+    if ('mainKey' in d) d.mainKey = mainKey;
+    if ('mainSessionKey' in d) d.mainSessionKey = scope.sessionKey;
+  }
+  return d;
+}
+
+/**
+ * The Control UI's boot settings (`control-ui-config.json`), for a guest: no
+ * community invite card (it invites whoever runs the gateway to OpenClaw's
+ * Discord). `terminalEnabled` is left as it is: the app reloads itself when it
+ * differs from the page's own attribute (an endless reload loop, seen
+ * 2026-09-30), and a guest's terminal is hidden anyway — it needs
+ * operator.admin and `terminal.open`, which the hello does not advertise.
+ */
+export function guestControlUiConfig(body: string): string | undefined {
+  let j: unknown;
+  try { j = JSON.parse(body); } catch { return undefined; }
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return undefined;
+  return JSON.stringify({ ...(j as Record<string, unknown>), communityInvite: false });
+}
+
+/** Where a guest's page loads the script below from (under the console prefix; served by Hatchabot, never proxied). */
+export const GUEST_VIEW_SCRIPT_PATH = '/__hatchabot/guest-view.js';
+
+/** The sidebar pages a guest can use: their conversations. Pinned conversations (`session:`) stay too. */
+export const GUEST_SIDEBAR_ROUTES: readonly string[] = ['route:sessions'];
+
+/**
+ * A guest's sidebar (2026-09-30). The Control UI decides which pages the
+ * sidebar shows from one per-browser setting — `sidebarEntries` in
+ * `openclaw.control.settings.v1:<gateway url>` — with a fixed default
+ * (Agents, Dashboards, Systems, Automations, Plugins); neither the hello's
+ * methods nor its scopes hide them (verified on 2026.9.6). So a guest's page
+ * starts with that setting pruned to what a guest can open, before the app
+ * reads it: data the UI already honours, not a change to the UI. Run as a
+ * classic script ahead of the app's modules; storage that is blocked leaves
+ * the default view, nothing worse.
+ */
+export const GUEST_VIEW_SCRIPT = `// Hatchabot: a web-chat guest's view of this console.
+(function () {
+  try {
+    var m = /^(.*\\/v1\\/agents\\/[^/]+\\/ui)(?:\\/|$)/.exec(location.pathname);
+    if (!m) return;
+    var gw = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + m[1];
+    var key = 'openclaw.control.settings.v1:' + gw;
+    var keep = ${JSON.stringify(GUEST_SIDEBAR_ROUTES)};
+    var s = null;
+    try { s = JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) { s = null; }
+    if (!s || typeof s !== 'object' || Array.isArray(s)) s = { gatewayUrl: gw };
+    var had = Array.isArray(s.sidebarEntries) ? s.sidebarEntries : null;
+    var kept = (had || []).filter(function (e) { return typeof e === 'string' && (e.indexOf('session:') === 0 || keep.indexOf(e) >= 0); });
+    if (had && kept.length === had.length) return;
+    s.sidebarEntries = kept;
+    if (!s.gatewayUrl) s.gatewayUrl = gw;
+    localStorage.setItem(key, JSON.stringify(s));
+  } catch (e) { /* blocked storage: the default view */ }
+})();
+`;
+
+/** A guest's copy of the app's document: the script above runs first (same origin, so the page's CSP allows it). */
+export function withGuestView(html: string, prefix: string): string {
+  const tag = `<script src="${prefix.replace(/\/+$/, '')}${GUEST_VIEW_SCRIPT_PATH}"></script>`;
+  if (/<script\b/i.test(html)) return html.replace(/<script\b/i, `${tag}\n    <script`);
+  return /<\/head>/i.test(html) ? html.replace(/<\/head>/i, `${tag}\n</head>`) : `${tag}${html}`;
+}
+
 export interface GuestVerdict { allow: boolean; id?: string; method?: string; reason?: string }
 
 /** Judge one client→gateway message from a guest. */
@@ -177,12 +288,17 @@ function scrubHealth(h: unknown): unknown {
   return out;
 }
 
+/** Replies the proxy rewrites for a guest, by the method asked: their request ids are remembered on the way out. */
+export const GUEST_REWRITTEN_REPLIES: ReadonlySet<string> = new Set(['health', 'agents.list']);
+
 /**
  * A gateway→guest message, with other people taken out: the hello's presence
- * and health snapshot, presence and health events, and a health reply.
+ * and health snapshot, presence and health events, and a health reply — and
+ * an agents.list reply told the guest's truth (guestAgentsList). `pending`
+ * maps a guest's request ids to the method asked (GUEST_REWRITTEN_REPLIES).
  * Returns undefined when nothing needed changing (the bytes pass as they came).
  */
-export function scrubForGuest(msg: unknown, identity: string, healthIds: Set<string>): unknown | undefined {
+export function scrubForGuest(msg: unknown, identity: string, pending: Map<string, string>, scope: GuestScope = {}): unknown | undefined {
   if (!msg || typeof msg !== 'object') return undefined;
   const f = msg as { type?: string; event?: string; id?: string; ok?: boolean; payload?: any };
   if (f.type === 'res' && f.ok && f.payload && typeof f.payload === 'object') {
@@ -192,6 +308,7 @@ export function scrubForGuest(msg: unknown, identity: string, healthIds: Set<str
         const snap = { ...payload.snapshot };
         if ('presence' in snap) snap.presence = scrubPresence(snap.presence, identity);
         if ('health' in snap) snap.health = scrubHealth(snap.health);
+        if ('sessionDefaults' in snap) snap.sessionDefaults = guestSessionDefaults(snap.sessionDefaults, scope);
         payload.snapshot = snap;
       }
       // Only the methods a guest may use are advertised: the chat hides what
@@ -202,12 +319,16 @@ export function scrubForGuest(msg: unknown, identity: string, healthIds: Set<str
       }
       return { ...f, payload };
     }
-    if (f.id !== undefined && healthIds.has(String(f.id))) {
-      healthIds.delete(String(f.id));
-      return { ...f, payload: scrubHealth(f.payload) };
+    const asked = f.id !== undefined ? pending.get(String(f.id)) : undefined;
+    if (asked) {
+      pending.delete(String(f.id));
+      if (asked === 'health') return { ...f, payload: scrubHealth(f.payload) };
+      if (asked === 'agents.list') return { ...f, payload: guestAgentsList(f.payload, scope) };
     }
     return undefined;
   }
+  // A refused reply: nothing to rewrite, nothing left to remember.
+  if (f.type === 'res' && f.id !== undefined) pending.delete(String(f.id));
   if (f.type === 'event') {
     if (f.event === 'presence') {
       const p = f.payload;
@@ -320,6 +441,8 @@ class MessageAssembler {
 
 export interface GuestSpliceOptions {
   identity: string;
+  /** Their agent and conversation: what agents.list and the hello's session defaults are told (guestAgentsList). */
+  scope?: GuestScope;
   /** Largest message either way (chat attachments ride inside chat.send). */
   maxMessage?: number;
   /** Told of each refused method, for the activity trail. */
@@ -338,7 +461,7 @@ export function spliceGuest(client: Duplex, upstream: Duplex, opts: GuestSpliceO
   const fromGateway = new FrameReader(max);
   const clientMsgs = new MessageAssembler(max);
   const gatewayMsgs = new MessageAssembler(max);
-  const healthIds = new Set<string>();
+  const pending = new Map<string, string>();
   let closed = false;
   const end = (code: number, reason: string) => {
     if (closed) return;
@@ -366,7 +489,7 @@ export function spliceGuest(client: Duplex, upstream: Duplex, opts: GuestSpliceO
           client.write(encodeFrame(0x1, Buffer.from(guestRefusal(v.id, v.method), 'utf8'), false));
           continue;
         }
-        if (v.method === 'health' && v.id !== undefined) healthIds.add(v.id);
+        if (v.method && GUEST_REWRITTEN_REPLIES.has(v.method) && v.id !== undefined && pending.size < 1000) pending.set(v.id, v.method);
         for (const fr of msg.frames) upstream.write(fr.raw);
       }
     } catch (e) {
@@ -385,7 +508,7 @@ export function spliceGuest(client: Duplex, upstream: Duplex, opts: GuestSpliceO
         const msg = item.message!;
         if (msg.opcode === 0x1) {
           let scrubbed: unknown;
-          try { scrubbed = scrubForGuest(JSON.parse(msg.data.toString('utf8')), opts.identity, healthIds); } catch { scrubbed = undefined; }
+          try { scrubbed = scrubForGuest(JSON.parse(msg.data.toString('utf8')), opts.identity, pending, opts.scope); } catch { scrubbed = undefined; }
           if (scrubbed !== undefined) { client.write(encodeFrame(0x1, Buffer.from(JSON.stringify(scrubbed), 'utf8'), false)); continue; }
         }
         for (const fr of msg.frames) client.write(fr.raw);

@@ -177,7 +177,10 @@ import {
 import type { Agent, AIProfile, Channel } from '../domain/types.js';
 import { LOCAL_OWNER, ownerIdOf, principalOf } from './principal.js';
 import { registerWebChatRoutes, webChatBusy } from './webChat.js';
-import { forwardedClientAddress, guestHttpAllowed, spliceGuest, stripClientIdentity, withConsoleIdentity } from './consoleProxy.js';
+import {
+  forwardedClientAddress, GUEST_VIEW_SCRIPT, GUEST_VIEW_SCRIPT_PATH, guestControlUiConfig, guestHttpAllowed, spliceGuest,
+  stripClientIdentity, withConsoleIdentity, withGuestView,
+} from './consoleProxy.js';
 import { ConsoleAccess } from '../orchestrator/consoleAccess.js';
 import { consoleIdentity, type ConsoleRole } from '../openclaw/consoleIdentity.js';
 import type { IdentityVerifier } from './identity.js';
@@ -2264,10 +2267,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   }
   // A started or woken agent may carry sessions pinned to a runtime its config
   // no longer names (runtimePins.ts): once its gateway answers, clear them.
+  // Set once the console's access keeper exists (further down); used only after a start or a wake.
+  let consoleAccessLater: ConsoleAccess | undefined;
   const clearPinsWhenUp = (a: Agent): void => {
     if (!a.runtimeRef) return;
     forgetDmPolicy(a.id); // started or woken: the door is asserted afresh at the next rest
     void clearStaleRuntimePinsWhenUp(providerFor(a.hostId), a.runtimeRef, a.slug, (e, d) => trace(a.id)(e, d)).catch(() => {});
+    // Web chat given or taken while it was down: its gateway's list of people
+    // follows now, before anyone opens the console (2026-09-30).
+    void consoleAccessLater?.syncWhenUp(a.id).catch(() => {});
     // Google accounts attached or detached while it was stopped or asleep take
     // effect now, not at its next rebuild: a detached account used to stay
     // usable after Start (night review, 2026-09-28). Only for owners who have any.
@@ -5278,6 +5286,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * own Control UI through this proxy, each named to the gateway.
    */
   const consoleAccess = new ConsoleAccess({ store, providerFor, gatewayAddr, trace: (id) => trace(id) });
+  consoleAccessLater = consoleAccess;
   (app as unknown as { consoleAccess?: ConsoleAccess }).consoleAccess = consoleAccess;
   /** Who may open this agent's console, and as what: its owner, or a web-chat guest. Never the management agent's guest. */
   const consoleCaller = (userId: string, id: string): { agent: Agent; role: ConsoleRole } | undefined => {
@@ -5441,6 +5450,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { role, console: 'identity', session: consoleAccess.guestSessionKey(agent, me) };
   });
 
+  // A guest's page loads this ahead of the app (consoleProxy.ts GUEST_VIEW_SCRIPT):
+  // Hatchabot's own file, never the gateway's. Static, so anyone who may open the console may load it.
+  app.get<{ Params: { id: string } }>(`/v1/agents/:id/ui${GUEST_VIEW_SCRIPT_PATH}`, async (req, reply) => {
+    if (!consoleCaller(ownerIdOf(req), req.params.id)) return reply.code(404).send({ error: 'Not found' });
+    return reply.header('content-type', 'text/javascript; charset=utf-8').header('cache-control', 'no-cache').send(GUEST_VIEW_SCRIPT);
+  });
+
   app.all<{ Params: { id: string; '*': string } }>('/v1/agents/:id/ui/*', NO_COMPRESS, async (req, reply) => {
     const me = ownerIdOf(req);
     const caller = consoleCaller(me, req.params.id);
@@ -5463,11 +5479,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // below — so it is asked for uncompressed. Assets pass through as they
     // come, gzip/brotli included.
     const isDocument = isControlUiDocument(path);
+    // A guest's copy of the UI's boot settings is rewritten too (guestControlUiConfig).
+    const guestConfig = caller.role === 'guest' && req.method === 'GET' && path === '/control-ui-config.json';
     const forwarded: Record<string, string | string[] | undefined> = {
       ...consoleHeaders(req.headers, target.agent, caller.role, me, identity, req.socket.remoteAddress),
       host: `127.0.0.1:${target.addr.port}`, connection: 'close',
     };
-    if (isDocument) delete forwarded['accept-encoding'];
+    if (isDocument || guestConfig) delete forwarded['accept-encoding'];
+    // What a guest gets is not the gateway's own bytes: no validators that would let a cache mix them up.
+    if (caller.role === 'guest' && (isDocument || guestConfig)) { delete forwarded['if-none-match']; delete forwarded['if-modified-since']; }
     // The body as it will be sent, and a content-length that matches it: a
     // parsed JSON body re-serialised can be shorter than the client's declared
     // length, and the gateway then waits for bytes that never come (30th audit).
@@ -5503,9 +5523,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       },
     ).catch(() => undefined as never);
     if (!upstream) return reply.code(502).send({ error: "The agent's gateway did not answer." });
+    const guestRewrite = caller.role === 'guest' && (isDocument || guestConfig);
     for (const [k, v] of Object.entries(upstream.headers)) {
       // set-cookie: the gateway is the least-trusted component; it must not plant cookies on our origin.
       if (v === undefined || /^(transfer-encoding|connection|content-length|set-cookie)$/i.test(k)) continue;
+      if (guestRewrite && /^(etag|last-modified)$/i.test(k)) continue;
       // OpenClaw forbids framing outright (X-Frame-Options: DENY and
       // frame-ancestors 'none'), which forced the console into a separate tab.
       // Served through us it is same-origin, so permit framing by THIS app and
@@ -5525,7 +5547,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     let body = upstream.body;
     const ctype = String(upstream.headers['content-type'] ?? '');
     if (isDocument && /text\/html/i.test(ctype) && !upstream.headers['content-encoding']) {
-      body = Buffer.from(rebaseControlUi(body.toString('utf8'), `/v1/agents/${req.params.id}/ui`), 'utf8');
+      const prefix = `/v1/agents/${req.params.id}/ui`;
+      const page = rebaseControlUi(body.toString('utf8'), prefix);
+      // A guest's sidebar starts with only what a guest can open (consoleProxy.ts GUEST_VIEW_SCRIPT).
+      body = Buffer.from(caller.role === 'guest' ? withGuestView(page, prefix) : page, 'utf8');
+    }
+    if (guestConfig && upstream.status === 200 && !upstream.headers['content-encoding']) {
+      const cfg = guestControlUiConfig(body.toString('utf8'));
+      if (cfg !== undefined) body = Buffer.from(cfg, 'utf8');
     }
     return reply.code(upstream.status).send(body);
   });
@@ -5596,6 +5625,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         upSocket.on('close', forget);
         spliceGuest(socket, upSocket, {
           identity: consoleIdentity(caller.agent.gatewayToken!, 'guest', principal.ownerId),
+          scope: { agentId: caller.agent.slug, sessionKey: consoleAccess.guestSessionKey(caller.agent, principal.ownerId) },
           // Once per method per connection: the app polls some of them.
           onRefused: (method) => {
             const name = String(method ?? '').slice(0, 60);
@@ -9521,6 +9551,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     try {
       const joined = redeemInvite(store, body.code!, body.name ?? '', accountId);
       trace(joined.agentId)('member.web_chat_joined', { userId: joined.membershipUserId });
+      // Their name goes on the gateway's list NOW, not at their first open:
+      // the new list reloads the gateway's auth and every open console (the
+      // owner's too) reconnects — better while they are not connected yet.
+      // Their console/access call waits for this run (2026-09-30).
+      const joinedAgent = store.getAgent(joined.agentId);
+      if (joinedAgent?.state === 'RUNNING') void consoleAccess.ensureReady(joinedAgent, 'grant').catch(() => {});
       return reply.code(201).send({ agentName: store.getAgent(joined.agentId)!.name, agentId: joined.agentId, webChat: true });
     } catch (err) {
       if (err instanceof InviteInvalidError) return reply.code(400).send({ error: err.userMessage });
@@ -9614,7 +9650,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Off: their open console closes now; on or off, the gateway's list of
       // people follows (a guest's name is only admitted while they may chat).
       if (!on) consoleAccess.dropGuests(agent.id, m.userId);
-      if (agent.state === 'RUNNING') void consoleAccess.ensureReady(agent).catch(() => {});
+      if (agent.state === 'RUNNING') void consoleAccess.ensureReady(agent, on ? 'grant' : 'removal').catch(() => {});
       return { userId: m.userId, webChat: on };
     },
   );
@@ -9633,7 +9669,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // Their open console (the full chat) ends with the membership, and
         // their name leaves the gateway's list.
         consoleAccess.dropGuests(agent.id, req.params.userId);
-        if (agent.state === 'RUNNING') void consoleAccess.ensureReady(agent).catch(() => {});
+        if (agent.state === 'RUNNING') void consoleAccess.ensureReady(agent, 'removal').catch(() => {});
         return { revoked: true };
       } catch (err) {
         if (err instanceof RevokeError) return reply.code(400).send({ error: err.userMessage });
@@ -10383,8 +10419,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     await providerFor(agent.hostId).start(agent.runtimeRef);
     store.setHibernated(agent.id, null);
-    clearPinsWhenUp(agent);
-    return publicAgent(store.setAgentState(agent.id, 'RUNNING'));
+    // After the store says RUNNING, as a wake does: what runs once it is up reads that.
+    const started = store.setAgentState(agent.id, 'RUNNING');
+    clearPinsWhenUp(started);
+    return publicAgent(started);
   });
 
   // ---- Hibernation (src/orchestrator/hibernate.ts) ------------------------

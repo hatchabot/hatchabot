@@ -35,15 +35,37 @@ interface FakeGateway {
   received: Array<{ identity?: string; method: string; params: any }>;
   /** Scopes the hello grants, by the name Hatchabot sent. */
   scopes: (identity: string | undefined) => string[];
+  /** When set, the names admitted (trusted-proxy allowUsers): anyone else's connect is refused, as OpenClaw does. */
+  allow?: Set<string>;
+  /** Every connect the gateway refused, by name. */
+  refusedConnects: string[];
+  /** A reload of its auth: every open connection drops (OpenClaw: 4001 "gateway policy changed"). */
+  dropAll: () => void;
+  /** Connections dropped by reloads, by name. */
+  dropped: string[];
 }
+
+/** The app's document and its boot settings, as 2026.9 serves them (just the parts the proxy touches). */
+const FAKE_DOCUMENT = '<!doctype html><html data-openclaw-control-ui-base-path=""><head><meta charset="UTF-8" /><script>theme()</script><script type="module" src="/assets/app.js"></script></head><body></body></html>';
+const FAKE_UI_CONFIG = JSON.stringify({ basePath: '', communityInvite: true, terminalEnabled: true, cliAgentsEnabled: true });
 
 /** An OpenClaw gateway stand-in: HTTP answers "ok"; a WebSocket gets a challenge, a hello, and an echo per request. */
 async function fakeGateway(): Promise<FakeGateway> {
-  const g: FakeGateway = { port: 0, http: [], upgrades: [], received: [], scopes: () => [] };
-  const server: Server = createServer((req, res) => { g.http.push(req.headers); res.setHeader('content-type', 'text/plain'); res.end('ok'); });
+  const g: FakeGateway = { port: 0, http: [], upgrades: [], received: [], scopes: () => [], refusedConnects: [], dropAll: () => {}, dropped: [] };
+  const server: Server = createServer((req, res) => {
+    g.http.push(req.headers);
+    const path = (req.url ?? '').split('?')[0];
+    if (path === '/chat') { res.setHeader('content-type', 'text/html; charset=utf-8'); res.setHeader('etag', '"doc"'); res.end(FAKE_DOCUMENT); return; }
+    if (path === '/control-ui-config.json') { res.setHeader('content-type', 'application/json'); res.end(FAKE_UI_CONFIG); return; }
+    res.setHeader('content-type', 'text/plain'); res.end('ok');
+  });
   const sockets = new Set<import('node:net').Socket>();
+  const names = new Map<unknown, string>();
+  g.dropAll = () => { for (const s of sockets) { if (!s.destroyed) { g.dropped.push(names.get(s) ?? ''); s.destroy(); } } };
   server.on('upgrade', (req, socket) => {
     sockets.add(socket as never);
+    names.set(socket, String(req.headers['x-hatchabot-user'] ?? ''));
+    socket.on('close', () => sockets.delete(socket as never));
     g.upgrades.push({ url: req.url ?? '', headers: req.headers });
     const identity = req.headers['x-hatchabot-user'] as string | undefined;
     const accept = createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
@@ -57,7 +79,11 @@ async function fakeGateway(): Promise<FakeGateway> {
         if (f.opcode !== 0x1) continue;
         const m = JSON.parse(f.payload.toString());
         g.received.push({ identity, method: m.method, params: m.params });
-        if (m.method === 'connect') {
+        if (m.method === 'connect' && g.allow && !g.allow.has(identity ?? '')) {
+          g.refusedConnects.push(identity ?? '');
+          send({ type: 'res', id: m.id, ok: false, error: { code: 'INVALID_REQUEST', message: 'unauthorized', details: { code: 'AUTH_UNAUTHORIZED' } } });
+          socket.end();
+        } else if (m.method === 'connect') {
           send({ type: 'res', id: m.id, ok: true, payload: { type: 'hello-ok', auth: { scopes: g.scopes(identity) }, snapshot: {
             presence: [{ mode: 'gateway', reason: 'self' }, { mode: 'webchat', user: { email: ['owner-somebody', 'hatchabot.invalid'].join('@') } }],
           } } });
@@ -74,7 +100,17 @@ async function fakeGateway(): Promise<FakeGateway> {
   return g;
 }
 
-async function world(opts: { mode?: 'trusted-proxy' | 'token'; allowUsers?: 'in-step' | 'missing-guest'; ownerAdmin?: boolean } = {}) {
+async function world(opts: {
+  mode?: 'trusted-proxy' | 'token'; allowUsers?: 'in-step' | 'missing-guest'; ownerAdmin?: boolean;
+  /** Accounts sign-in (web chat invites need it). */
+  authMode?: 'accounts';
+  /**
+   * The gateway as it really behaves: its list of names is what the last
+   * `config set` wrote, it refuses anyone else, and a new list takes effect a
+   * moment after the write (the reload) — every open console dropping then.
+   */
+  liveList?: { reloadMs: number };
+} = {}) {
   const gw = await fakeGateway();
   const db = new Database(':memory:');
   const store = new Store(db);
@@ -91,11 +127,31 @@ async function world(opts: { mode?: 'trusted-proxy' | 'token'; allowUsers?: 'in-
   store.insertMembership({ id: 'm2', agentId: 'a1', userId: OTHER, role: 'user' as never, status: 'active', joinedAt: now, webChat: false, displayName: 'Bob' });
   const agent = store.getAgent('a1')!;
   const want = consoleAllowUsers(store, agent, token);
-  provider.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({
+  const setListed = (allowUsers: string[]) => provider.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({
     mode: opts.mode ?? 'trusted-proxy', roles: (opts.mode ?? 'trusted-proxy') === 'trusted-proxy',
-    allowUsers: opts.allowUsers === 'missing-guest' ? want.slice(0, 1) : want,
-    trustedProxies: ['172.18.0.1'], route: '172.18.0.1',
+    allowUsers, trustedProxies: ['172.18.0.1'], route: '172.18.0.1',
   }) });
+  const initial = opts.allowUsers === 'missing-guest' ? want.slice(0, 1) : want;
+  setListed(initial);
+  /** Each list written, with when it was written and when it took effect. */
+  const writes: Array<{ names: string[]; at: number; effective?: number }> = [];
+  if (opts.liveList) {
+    gw.allow = new Set(initial);
+    const origExec = provider.exec.bind(provider);
+    (provider as any).exec = async (ref: string, argv: string[], o?: any) => {
+      const r = await origExec(ref, argv, o);
+      if (argv[0] === 'config' && argv[1] === 'set') {
+        const names = (JSON.parse(argv[3]!) as Array<{ path: string; value: unknown }>).find((b) => b.path === 'gateway.auth.trustedProxy.allowUsers')?.value as string[] | undefined;
+        if (names) {
+          setListed(names);
+          const w: { names: string[]; at: number; effective?: number } = { names, at: Date.now() };
+          writes.push(w);
+          setTimeout(() => { gw.allow = new Set(names); w.effective = Date.now(); gw.dropAll(); }, opts.liveList!.reloadMs);
+        }
+      }
+      return r;
+    };
+  }
   const ownerId = consoleIdentity(token, 'owner', OWNER);
   let ownerHasRole = opts.ownerAdmin !== false;
   gw.scopes = (id) => (id === ownerId && ownerHasRole ? ['operator.admin'] : id?.startsWith('guest-') ? ['operator.read', 'operator.write'] : []);
@@ -110,12 +166,12 @@ async function world(opts: { mode?: 'trusted-proxy' | 'token'; allowUsers?: 'in-
     const u = /hbu=([\w-]+)/.exec(h ?? '')?.[1];
     return u ? { ownerId: u, via: 'identity' as const } : undefined;
   });
-  await registerRoutes(app, { store, secrets: { get: async () => '', put: async () => {}, delete: async () => {} } as never, providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never });
+  await registerRoutes(app, { store, secrets: { get: async () => '', put: async () => {}, delete: async () => {} } as never, providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never, ...(opts.authMode ? { authMode: opts.authMode } : {}) });
   await app.listen({ port: 0, host: '127.0.0.1' });
   toClose.push({ close: () => { const raw = app.server as Server; raw.closeAllConnections?.(); raw.close(); } });
   const port = (app.server.address() as { port: number }).port;
   const access = (app as unknown as { consoleAccess: ConsoleAccess }).consoleAccess;
-  return { app, port, gw, store, provider, token, ownerId, guestId: consoleIdentity(token, 'guest', GUEST), access, grantOwnerRole: () => { ownerHasRole = true; } };
+  return { app, port, gw, store, provider, token, ownerId, guestId: consoleIdentity(token, 'guest', GUEST), access, writes, grantOwnerRole: () => { ownerHasRole = true; } };
 }
 
 /** A browser-side socket to the proxy, as `user`; resolves once the hello came back. */
@@ -304,6 +360,134 @@ describe('keeping the gateway in step', () => {
     expect(res.json()).toEqual({ role: 'owner', console: 'identity' });
     const roles = w.provider.execLog.filter((a) => a.slice(0, 3).join(' ') === 'gateway call users.setRole').map((a) => JSON.parse(a[4]!));
     expect(roles).toEqual([{ profileId: 'p-old-owner', role: null }, { profileId: 'p-owner', role: OWNER_ROLE }]);
+  });
+});
+
+describe('the list of names changes when access changes, not at a first open (2026-09-30)', () => {
+  const NEW = 'user-new-guest';
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const until = async (pred: () => boolean, ms = 5000) => { const end = Date.now() + ms; while (!pred() && Date.now() < end) await sleep(20); return pred(); };
+  const owner = { 'x-hatchabot-owner': OWNER };
+
+  it("a web chat invite lists the guest when they join; their first open is let in at once and drops nobody's console", async () => {
+    const w = await world({ authMode: 'accounts', liveList: { reloadMs: 250 } });
+    const o = openConsole(w.port, OWNER);
+    expect((await o.ready)?.ok).toBe(true);
+    const inv = await w.app.inject({ method: 'POST', url: '/v1/agents/a1/invites', headers: owner, payload: { webChat: true } });
+    expect(inv.statusCode).toBe(201);
+    const join = await w.app.inject({ method: 'POST', url: '/v1/join', headers: { 'x-hatchabot-owner': NEW }, payload: { code: inv.json().code, name: 'Cara' } });
+    expect(join.statusCode).toBe(201);
+    const newId = consoleIdentity(w.token, 'guest', NEW);
+    // Written at the join, before anyone asked for the console…
+    expect(await until(() => w.writes.length === 1)).toBe(true);
+    expect(w.writes[0]!.names).toContain(newId);
+    // …and the console/access their page asks first waits until the gateway took it.
+    const acc = await w.app.inject({ method: 'GET', url: '/v1/agents/a1/console/access', headers: { 'x-hatchabot-owner': NEW } });
+    expect(acc.json()).toMatchObject({ role: 'guest', console: 'identity' });
+    expect(w.writes[0]!.effective).toBeDefined();
+    // The reload happened then: the owner's console dropped at the grant, while the guest was not connected.
+    expect(w.gw.dropped).toContain(w.ownerId);
+    const o2 = openConsole(w.port, OWNER);
+    expect((await o2.ready)?.ok).toBe(true);
+    const dropped = w.gw.dropped.length;
+    // Their first open: in on the first try, nothing written, nobody dropped.
+    const g = openConsole(w.port, NEW);
+    const hello = await g.ready;
+    expect(hello?.ok).toBe(true);
+    await sleep(400);
+    expect(w.writes).toHaveLength(1);
+    expect(w.gw.dropped.length).toBe(dropped);
+    expect(o2.isClosed()).toBe(false);
+    expect(g.isClosed()).toBe(false);
+  });
+
+  it('an open that finds the list out of step (the grant missed it) fixes it — and lets them in only once it took effect', async () => {
+    const w = await world({ allowUsers: 'missing-guest', liveList: { reloadMs: 250 } });
+    const g = openConsole(w.port, GUEST);
+    const hello = await g.ready;
+    expect(hello?.ok).toBe(true); // never the "unauthorized" of the old first open
+    expect(w.writes.map((x) => x.names)).toEqual([[w.ownerId, w.guestId]]);
+    const browserConnect = w.gw.received.filter((r) => r.identity === w.guestId && r.method === 'connect' && r.params?.client?.id === 'openclaw-control-ui');
+    expect(browserConnect).toHaveLength(1);
+    expect(w.gw.refusedConnects.filter((n) => n === w.guestId).length).toBeGreaterThan(0); // only the proxy's own probes met the old list
+  });
+
+  it('a grant made while an older run is in flight gets its own run (not the older list)', async () => {
+    const w = await world({ liveList: { reloadMs: 50 } });
+    const agent = w.store.getAgent('a1')!;
+    const first = w.access.ensureReady(agent);
+    const on = await w.app.inject({ method: 'PUT', url: `/v1/agents/a1/members/${OTHER}/web-chat`, headers: owner, payload: { on: true } });
+    expect(on.statusCode).toBe(200);
+    expect((await first).mode).toBe('identity');
+    const otherId = consoleIdentity(w.token, 'guest', OTHER);
+    expect(await until(() => w.writes.some((x) => x.names.includes(otherId) && x.effective !== undefined))).toBe(true);
+  });
+
+  it('a removal takes the name off at once (the switch, and removing them)', async () => {
+    const w = await world({ liveList: { reloadMs: 50 } });
+    const off = await w.app.inject({ method: 'PUT', url: `/v1/agents/a1/members/${GUEST}/web-chat`, headers: owner, payload: { on: false } });
+    expect(off.statusCode).toBe(200);
+    expect(await until(() => w.writes.length === 1)).toBe(true);
+    expect(w.writes[0]!.names).toEqual([w.ownerId]);
+    const on = await w.app.inject({ method: 'PUT', url: `/v1/agents/a1/members/${GUEST}/web-chat`, headers: owner, payload: { on: true } });
+    expect(on.statusCode).toBe(200);
+    expect(await until(() => w.writes.length === 2)).toBe(true);
+    const del = await w.app.inject({ method: 'DELETE', url: `/v1/agents/a1/members/${GUEST}`, headers: owner });
+    expect(del.statusCode).toBe(200);
+    expect(await until(() => w.writes.length === 3)).toBe(true);
+    expect(w.writes[2]!.names).toEqual([w.ownerId]);
+  });
+
+  it('a grant while it was stopped is listed when it starts, before anyone opens the console', async () => {
+    const w = await world({ liveList: { reloadMs: 50 } });
+    const agent = w.store.getAgent('a1')!;
+    await w.provider.stop(agent.runtimeRef!);
+    w.store.setAgentState('a1', 'STOPPED');
+    const on = await w.app.inject({ method: 'PUT', url: `/v1/agents/a1/members/${OTHER}/web-chat`, headers: owner, payload: { on: true } });
+    expect(on.statusCode).toBe(200);
+    await sleep(100);
+    expect(w.writes).toHaveLength(0); // nothing to reach while it is down
+    const start = await w.app.inject({ method: 'POST', url: '/v1/agents/a1/start', headers: owner });
+    expect(start.statusCode).toBe(200);
+    const otherId = consoleIdentity(w.token, 'guest', OTHER);
+    expect(await until(() => w.writes.some((x) => x.names.includes(otherId)))).toBe(true);
+    // In step already: a start reads the state and does nothing more.
+    const writes = w.writes.length;
+    expect(await w.access.syncWhenUp('a1', { sleep: async () => {} })).toBeUndefined();
+    expect(w.writes.length).toBe(writes);
+  });
+});
+
+describe("a guest's page over HTTP (2026-09-30)", () => {
+  it("a guest's document loads the view script first; the owner's does not; the script is Hatchabot's own", async () => {
+    const { port, gw } = await world();
+    const g = await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/chat`, { headers: { 'x-hatchabot-owner': GUEST, 'if-none-match': '"doc"' } });
+    const page = await g.text();
+    expect(g.status).toBe(200);
+    expect(g.headers.get('etag')).toBeNull(); // not the gateway's bytes: no validator to mix them up by
+    expect(gw.http.at(-1)!['if-none-match']).toBeUndefined();
+    const tag = '<script src="/v1/agents/a1/ui/__hatchabot/guest-view.js"></script>';
+    expect(page.indexOf(tag)).toBeGreaterThan(-1);
+    expect(page.indexOf(tag)).toBeLessThan(page.indexOf('<script>theme()'));
+    expect(page).toContain('src="/v1/agents/a1/ui/assets/app.js"'); // rebased as before
+    const o = await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/chat`, { headers: { 'x-hatchabot-owner': OWNER } });
+    expect(await o.text()).not.toContain('guest-view.js');
+    const before = gw.http.length;
+    const s = await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/__hatchabot/guest-view.js`, { headers: { 'x-hatchabot-owner': GUEST } });
+    expect(s.status).toBe(200);
+    expect(s.headers.get('content-type')).toMatch(/javascript/);
+    expect(await s.text()).toContain('openclaw.control.settings.v1:');
+    expect(gw.http.length).toBe(before); // never the gateway's
+    const stranger = await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/__hatchabot/guest-view.js`, { headers: { 'x-hatchabot-owner': 'user-stranger' } });
+    expect(stranger.status).toBe(404);
+  });
+
+  it("a guest's boot settings have no community invite; the owner's are the gateway's own", async () => {
+    const { port } = await world();
+    const g = await (await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/control-ui-config.json`, { headers: { 'x-hatchabot-owner': GUEST } })).json();
+    expect(g).toMatchObject({ communityInvite: false, terminalEnabled: true });
+    const o = await (await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/control-ui-config.json`, { headers: { 'x-hatchabot-owner': OWNER } })).json() as { communityInvite?: boolean };
+    expect(o.communityInvite).toBe(true);
   });
 });
 

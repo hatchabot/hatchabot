@@ -103,21 +103,21 @@ describe('other people are taken out of what the gateway tells a guest', () => {
   const health = { ok: true, agents: [{ agentId: 'taco', sessions: { count: 3, recent: [{ key: 'agent:taco:main' }] } }] };
 
   it('the hello: presence down to the gateway and themselves, no recent sessions', () => {
-    const out = scrubForGuest({ type: 'res', id: 'c', ok: true, payload: { type: 'hello-ok', snapshot: { presence: [gw, me, them], health } } }, GUEST, new Set()) as any;
+    const out = scrubForGuest({ type: 'res', id: 'c', ok: true, payload: { type: 'hello-ok', snapshot: { presence: [gw, me, them], health } } }, GUEST, new Map()) as any;
     expect(out.payload.snapshot.presence).toEqual([gw, me]);
     expect(out.payload.snapshot.health.agents[0].sessions.recent).toEqual([]);
     expect(JSON.stringify(out)).not.toContain('agent:taco:main');
   });
   it('presence and health events, and the reply to their own health call', () => {
-    expect((scrubForGuest({ type: 'event', event: 'presence', payload: { presence: [them, me] } }, GUEST, new Set()) as any).payload.presence).toEqual([me]);
-    expect(JSON.stringify(scrubForGuest({ type: 'event', event: 'health', payload: health }, GUEST, new Set()))).not.toContain('agent:taco:main');
-    const ids = new Set(['h9']);
+    expect((scrubForGuest({ type: 'event', event: 'presence', payload: { presence: [them, me] } }, GUEST, new Map()) as any).payload.presence).toEqual([me]);
+    expect(JSON.stringify(scrubForGuest({ type: 'event', event: 'health', payload: health }, GUEST, new Map()))).not.toContain('agent:taco:main');
+    const ids = new Map([['h9', 'health']]);
     expect(JSON.stringify(scrubForGuest({ type: 'res', id: 'h9', ok: true, payload: health }, GUEST, ids))).not.toContain('agent:taco:main');
     expect(ids.has('h9')).toBe(false);
   });
   it('anything else passes untouched', () => {
-    expect(scrubForGuest({ type: 'event', event: 'chat', payload: { text: 'hi' } }, GUEST, new Set())).toBeUndefined();
-    expect(scrubForGuest({ type: 'res', id: 'x', ok: true, payload: { sessions: [] } }, GUEST, new Set())).toBeUndefined();
+    expect(scrubForGuest({ type: 'event', event: 'chat', payload: { text: 'hi' } }, GUEST, new Map())).toBeUndefined();
+    expect(scrubForGuest({ type: 'res', id: 'x', ok: true, payload: { sessions: [] } }, GUEST, new Map())).toBeUndefined();
   });
 });
 
@@ -223,8 +223,101 @@ describe('the guest hello advertises only what a guest may use (2026-09-30)', ()
     const { scrubForGuest, GUEST_METHODS } = await import('../src/api/consoleProxy.js');
     const allowed = [...GUEST_METHODS][0]!;
     const hello = { type: 'res', id: 'c', ok: true, payload: { type: 'hello-ok', features: { methods: [allowed, 'sessions.github.options', 'cron.list', 'config.get'], events: ['chat'] } } };
-    const out = scrubForGuest(hello, GUEST, new Set()) as any;
+    const out = scrubForGuest(hello, GUEST, new Map()) as any;
     expect(out.payload.features.methods).toEqual([allowed]);
     expect(out.payload.features.events).toEqual(['chat']);
+  });
+});
+
+describe("what a guest's Control UI is told (2026-09-30)", () => {
+  const scope = { agentId: 'taco', sessionKey: 'agent:taco:guest:0123456789abcdef' };
+  const list = {
+    defaultId: 'main', mainKey: 'main', scope: 'per-sender',
+    agents: [
+      { id: 'main', defaultPermissionMode: 'full', workspace: '/w/main' },
+      { id: 'taco', name: 'taco', defaultPermissionMode: 'full', workspace: '/w/taco' },
+    ],
+  };
+
+  it('agents.list: only their agent, their conversation as its main one, no permission mode to call "Full Access"', async () => {
+    const { guestAgentsList } = await import('../src/api/consoleProxy.js');
+    const out = guestAgentsList(list, scope) as any;
+    expect(out.agents).toEqual([{ id: 'taco', name: 'taco', workspace: '/w/taco' }]);
+    expect(out.defaultId).toBe('taco');
+    expect(out.mainKey).toBe('guest:0123456789abcdef');
+    expect(JSON.stringify(out)).not.toContain('defaultPermissionMode');
+    expect(list.agents[0]!.defaultPermissionMode).toBe('full'); // the original is not touched
+    // Not knowing their agent: the list stays whole, the mode still goes.
+    const unscoped = guestAgentsList(list) as any;
+    expect(unscoped.agents.map((a: any) => a.id)).toEqual(['main', 'taco']);
+    expect(unscoped.defaultId).toBe('main');
+    expect(JSON.stringify(unscoped)).not.toContain('defaultPermissionMode');
+    expect(guestAgentsList('nope', scope)).toBe('nope');
+  });
+
+  it("the hello's session defaults: their agent and their conversation", async () => {
+    const { guestSessionDefaults } = await import('../src/api/consoleProxy.js');
+    const d = { defaultAgentId: 'main', mainKey: 'main', mainSessionKey: 'agent:main:main', scope: 'per-sender' };
+    expect(guestSessionDefaults(d, scope)).toEqual({ defaultAgentId: 'taco', mainKey: 'guest:0123456789abcdef', mainSessionKey: scope.sessionKey, scope: 'per-sender' });
+    expect(guestSessionDefaults(d, {})).toBe(d);
+  });
+
+  it('the spliced socket rewrites the reply to their own agents.list (and only that reply), and the hello', async () => {
+    const browser = fakeSocket(), gateway = fakeSocket();
+    spliceGuest(browser.s, gateway.s, { identity: GUEST, scope });
+    gateway.feed(encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'res', id: 'c', ok: true, payload: { type: 'hello-ok', snapshot: { sessionDefaults: { defaultAgentId: 'main', mainKey: 'main', mainSessionKey: 'agent:main:main' } } } })), false));
+    browser.feed(encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'req', id: 'a1', method: 'agents.list', params: {} })), true));
+    await tick();
+    gateway.feed(encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'res', id: 'a1', ok: true, payload: list })), false));
+    // The same id again, unasked: passes as it came.
+    gateway.feed(encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'res', id: 'a1', ok: true, payload: list })), false));
+    await tick();
+    const [hello, mine, unasked] = texts(browser.sent);
+    expect(hello.payload.snapshot.sessionDefaults).toMatchObject({ defaultAgentId: 'taco', mainSessionKey: scope.sessionKey });
+    expect(mine.payload.agents.map((a: any) => a.id)).toEqual(['taco']);
+    expect(JSON.stringify(mine)).not.toContain('defaultPermissionMode');
+    expect(unasked.payload.agents).toHaveLength(2);
+  });
+
+  it('control-ui-config.json: no community invite; the terminal flag is left alone (the app reloads itself when it differs from the page)', async () => {
+    const { guestControlUiConfig } = await import('../src/api/consoleProxy.js');
+    const out = JSON.parse(guestControlUiConfig(JSON.stringify({ basePath: '', communityInvite: true, terminalEnabled: true, cliAgentsEnabled: true }))!);
+    expect(out).toEqual({ basePath: '', communityInvite: false, terminalEnabled: true, cliAgentsEnabled: true });
+    expect(guestControlUiConfig('not json')).toBeUndefined();
+    expect(guestControlUiConfig('[1]')).toBeUndefined();
+  });
+
+  it("the guest's document loads the view script before any of the app's own scripts", async () => {
+    const { withGuestView, GUEST_VIEW_SCRIPT_PATH } = await import('../src/api/consoleProxy.js');
+    const html = '<html><head><meta charset="UTF-8" /><script>theme()</script><script type="module" src="/p/ui/assets/app.js"></script></head><body></body></html>';
+    const out = withGuestView(html, '/p/ui/');
+    const tag = `<script src="/p/ui${GUEST_VIEW_SCRIPT_PATH}"></script>`;
+    expect(out.indexOf(tag)).toBeGreaterThan(-1);
+    expect(out.indexOf(tag)).toBeLessThan(out.indexOf('<script>theme()'));
+    expect(withGuestView('<html><head></head></html>', '/p/ui')).toContain(`${tag}\n</head>`);
+  });
+
+  it('the view script prunes the sidebar to what a guest can open — and keeps their pinned conversations', async () => {
+    const { GUEST_VIEW_SCRIPT, GUEST_SIDEBAR_ROUTES } = await import('../src/api/consoleProxy.js');
+    const vm = await import('node:vm');
+    const run = (stored: Record<string, string>, pathname = '/v1/agents/a1/ui/chat') => {
+      const store = new Map(Object.entries(stored));
+      const localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); } };
+      vm.runInNewContext(GUEST_VIEW_SCRIPT, { localStorage, location: { pathname, protocol: 'http:', host: 'box:8080' }, JSON });
+      return store;
+    };
+    const key = 'openclaw.control.settings.v1:ws://box:8080/v1/agents/a1/ui';
+    // First visit: the default pins never appear.
+    const fresh = run({});
+    expect(JSON.parse(fresh.get(key)!)).toEqual({ gatewayUrl: 'ws://box:8080/v1/agents/a1/ui', sidebarEntries: [] });
+    // A browser that already had the default: owner pages go, their own things stay, the rest of the settings too.
+    const had = run({ [key]: JSON.stringify({ gatewayUrl: 'ws://box:8080/v1/agents/a1/ui', theme: 'claw', sidebarEntries: ['route:agents-home', 'route:dashboards', 'route:cron', 'plugin:x/y', 'route:sessions', 'session:agent:taco:guest:1'] }) });
+    expect(JSON.parse(had.get(key)!)).toEqual({ gatewayUrl: 'ws://box:8080/v1/agents/a1/ui', theme: 'claw', sidebarEntries: [...GUEST_SIDEBAR_ROUTES, 'session:agent:taco:guest:1'] });
+    // Nothing to prune: not rewritten. Not a console page: nothing done. Broken storage: no throw.
+    const clean = JSON.stringify({ sidebarEntries: ['route:sessions'] });
+    expect(run({ [key]: clean }).get(key)).toBe(clean);
+    expect(run({}, '/elsewhere').size).toBe(0);
+    const blocked = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };
+    expect(() => vm.runInNewContext(GUEST_VIEW_SCRIPT, { localStorage: blocked, location: { pathname: '/v1/agents/a1/ui/', protocol: 'https:', host: 'h' }, JSON })).not.toThrow();
   });
 });

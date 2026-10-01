@@ -14,6 +14,11 @@
 //  3. turning the guest's web chat off closes their open console and the
 //     console refuses them afterwards.
 //
+// Also (2026-09-30): the guest's name reaches the gateway when they are let
+// in, so their first open is in on the first try and the owner's open console
+// is not dropped by it; and the guest's sidebar shows no owner pages and the
+// composer does not claim "Full Access".
+//
 // The browser reaches this tenant's Hatchabot the way its containers do, at
 // 10.0.2.2:<port>, but opens it as http://localhost:<port> — a forwarder in the
 // browser's own network namespace — because the Control UI needs a secure
@@ -140,7 +145,7 @@ async function openPage(cdp, who, session) {
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank', browserContextId });
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   const s = (m, p, t) => cdp.send(m, p, sessionId, t);
-  const page = { who, s, targetId, sockets: [], errors: [] };
+  const page = { who, s, targetId, sockets: [], errors: [], closed: 0, refusals: 0 };
   cdp.listeners.push((m) => {
     if (m.sessionId !== sessionId) return;
     const p = m.params ?? {};
@@ -148,7 +153,8 @@ async function openPage(cdp, who, session) {
     if (m.method === 'Runtime.consoleAPICalled' && p.type === 'error') page.errors.push(short((p.args ?? []).map((a) => a.value ?? a.description).join(' '), 200));
     if (m.method === 'Network.webSocketCreated') page.sockets.push({ url: p.url, id: p.requestId });
     if (m.method === 'Network.webSocketHandshakeResponseReceived') log(`[${who}] websocket handshake ${p.response?.status} ${p.response?.statusText ?? ''}`);
-    if (m.method === 'Network.webSocketClosed') log(`[${who}] websocket closed`);
+    if (m.method === 'Network.webSocketClosed') { page.closed++; log(`[${who}] websocket closed`); }
+    if (m.method === 'Network.webSocketFrameReceived' && /AUTH_UNAUTHORIZED/.test(p.response?.payloadData ?? '')) { page.refusals++; log(`[${who}] the gateway refused the connection (AUTH_UNAUTHORIZED)`); }
     if (m.method === 'Network.responseReceived' && p.type === 'Document') { page.docStatus = p.response?.status; log(`[${who}] document ${p.response?.status} ${short(p.response?.url, 140)}`); }
   });
   await s('Page.enable'); await s('Runtime.enable'); await s('Network.enable');
@@ -231,6 +237,15 @@ async function chatTurn(page, sessionKey, word) {
   return { ok: false, why: 'no answer within 4 minutes' };
 }
 const sessionKeys = (res) => (res?.r?.sessions ?? []).map((x) => x?.key).filter(Boolean);
+/** What the page shows a person: the sidebar's page links and the composer's permission label (light and shadow DOM). */
+const VIEW = `(() => {
+  const all = []; const walk = (root) => { for (const el of root.querySelectorAll('*')) { all.push(el); if (el.shadowRoot) walk(el.shadowRoot); } }; walk(document);
+  const txt = (el) => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+  return {
+    links: all.filter((el) => el.matches('a[href]')).map(txt).filter(Boolean),
+    permission: all.filter((el) => el.matches('.chat-controls__permission-trigger')).map(txt),
+  };
+})()`;
 
 // ---- the run ---------------------------------------------------------------
 async function main() {
@@ -310,6 +325,10 @@ async function main() {
     }
     if (!check(joined, `guest: given web chat on ${AGENT} (${how})`)) return;
     const gacc = await api(`/v1/agents/${agent.id}/console/access`, { cookie: guest });
+    // Letting them in may have dropped the owner's console once (a new list of names reloads the
+    // gateway's auth); that is over before they open theirs, which must drop nobody.
+    await waitConnected(op); await sleep(1500);
+    const ownerSockets = op.sockets.length, ownerClosed = op.closed;
     log(`guest console/access: ${gacc.status} ${short(gacc.json)}`);
     const guestKey = gacc.json?.session;
     if (!check(gacc.json?.role === 'guest' && gacc.json?.console === 'identity' && /^agent:[^:]+:guest:/.test(guestKey ?? ''), `guest: offered OpenClaw's own chat (console/access: ${gacc.json?.console}${gacc.json?.reason ? ` — ${gacc.json.reason}` : ''})`)) return;
@@ -317,7 +336,14 @@ async function main() {
     const gp = await openPage(cdp, 'guest', guest);
     await gp.s('Page.navigate', { url: `${BROWSER_BASE}/v1/agents/${agent.id}/ui/chat?session=${encodeURIComponent(guestKey)}` });
     const gs = await waitConnected(gp);
+    await sleep(10_000); // a reload, if their open caused one, lands within this
     await screenshot(gp, 'console-guest');
+    check(gp.refusals === 0 && gp.closed === 0 && gp.sockets.length === 1, `guest: in on the first try, never dropped (${gp.sockets.length} socket${gp.sockets.length === 1 ? '' : 's'}, ${gp.refusals} refused, ${gp.closed} closed)`);
+    check(op.closed === ownerClosed && op.sockets.length === ownerSockets, `owner: their open console is not dropped when the guest first opens (${op.closed - ownerClosed} closed, ${op.sockets.length - ownerSockets} reopened)`);
+    const gview = await evaluate(gp, VIEW);
+    const ownerPages = ['Agents', 'Dashboards', 'Systems', 'Automations', 'Plugins'].filter((x) => gview.links.includes(x));
+    check(ownerPages.length === 0, `guest: the sidebar shows no owner pages${ownerPages.length ? ` — shows ${ownerPages.join(', ')}` : ''}`);
+    check(gview.permission.length > 0 && !gview.permission.some((x) => /full access/i.test(x)), `guest: the composer does not claim Full Access (${short(gview.permission, 80)})`);
     check(gp.docStatus === 200 && gs?.app && gs?.drawn > 0, `guest: OpenClaw's chat loads through the proxy and renders (document ${gp.docStatus}, ${gs?.drawn ?? 0} chars drawn)`);
     check(gs?.phase === 'connected', `guest: the chat connects through the guest filter (hello ok)${gs?.phase === 'connected' ? '' : ` — phase ${gs?.phase}, ${short(gs?.error, 160)} ${gs?.code ?? ''}`}`);
     if (gs?.phase !== 'connected') { log(`guest page errors: ${short(gp.errors, 800)}`); return; }

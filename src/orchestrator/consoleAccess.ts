@@ -153,6 +153,8 @@ export interface ConsoleAccessDeps {
   /** Where Hatchabot reaches the agent's gateway (its loopback port, or a runner's tunnel). */
   gatewayAddr: (agent: Agent) => Promise<Gateway | undefined>;
   trace?: (agentId: string) => (event: string, detail: Record<string, unknown>) => void;
+  /** How long to wait for a new list of names to take effect at the gateway (default 20 s). */
+  reloadWaitMs?: number;
 }
 
 export type ConsoleReady =
@@ -160,6 +162,15 @@ export type ConsoleReady =
   | { mode: 'identity' }
   /** identity: the gateway IS an identity one (so the owner is still sent as a named person), it just is not in step. */
   | { mode: 'unavailable'; reason: string; identity?: boolean };
+
+/**
+ * Why the gateway is being brought in step, for the activity trail. The list
+ * of names is changed when access changes (a grant, a removal, a start) —
+ * never, in the normal course, when someone opens the console: changing it
+ * reloads the gateway's auth, and every open console (the owner's too)
+ * reconnects (2026-09-30).
+ */
+export type ConsoleSyncReason = 'open' | 'grant' | 'removal' | 'start';
 
 /**
  * Per process: what each agent's gateway runs, and whether it has been
@@ -170,7 +181,8 @@ export class ConsoleAccess {
   readonly #deps: ConsoleAccessDeps;
   readonly #state = new Map<string, { key: string; at: number; state: ConsoleState | undefined }>();
   readonly #ready = new Map<string, { key: string; at: number }>();
-  readonly #inflight = new Map<string, Promise<ConsoleReady>>();
+  /** One run per agent at a time, keyed by the list of people it was started for. */
+  readonly #inflight = new Map<string, { key: string; p: Promise<ConsoleReady> }>();
   readonly #named = new Map<string, number>();
   /** Open guest consoles, so a removal ends them at once. */
   readonly #sockets = new Map<string, Set<{ userId: string; destroy: () => void }>>();
@@ -202,19 +214,68 @@ export class ConsoleAccess {
   }
 
   /**
-   * Bring the agent's gateway in step before a console connection: its names
-   * (the owner and every current guest), its trusted proxy, and the owner
-   * role on the owner's profile. A token gateway needs nothing.
+   * Bring the agent's gateway in step: its names (the owner and every current
+   * guest), its trusted proxy, and the owner role on the owner's profile. A
+   * token gateway needs nothing.
+   *
+   * Called where access CHANGES — a web chat grant (invite or switch), a
+   * removal, a start — so the reload a new list of names costs happens while
+   * no guest is connected yet; at a console open it then only verifies. An
+   * open that finds the list out of step anyway (the agent was stopped when
+   * access changed, or that sync failed) still fixes it, and waits for the
+   * reload to land before letting anyone in.
+   *
+   * A call for the list a run in flight was started for shares that run; a
+   * call for a newer list waits for it and runs again, so a grant made while
+   * an older run is in flight is never answered by the older list.
    */
-  async ensureReady(agent: Agent): Promise<ConsoleReady> {
+  async ensureReady(agent: Agent, why: ConsoleSyncReason = 'open'): Promise<ConsoleReady> {
+    const key = this.#namesKey(agent);
     const running = this.#inflight.get(agent.id);
-    if (running) return running;
-    const p = this.#ensure(agent).finally(() => this.#inflight.delete(agent.id));
-    this.#inflight.set(agent.id, p);
+    if (running && running.key === key) return running.p;
+    const before = running ? running.p.catch(() => undefined) : Promise.resolve(undefined);
+    const p: Promise<ConsoleReady> = before
+      .then(() => this.#ensure(agent, why))
+      .finally(() => { if (this.#inflight.get(agent.id)?.p === p) this.#inflight.delete(agent.id); });
+    this.#inflight.set(agent.id, { key, p });
     return p;
   }
 
-  async #ensure(agent: Agent): Promise<ConsoleReady> {
+  /** What a run is for: the agent's container and the names its gateway must admit now. */
+  #namesKey(agent: Agent): string {
+    const want = agent.gatewayToken ? consoleAllowUsers(this.#deps.store, agent, agent.gatewayToken) : [];
+    return `${agent.hostId}|${agent.runtimeRef}|${createHash('sha256').update(want.join(',')).digest('hex')}`;
+  }
+
+  /**
+   * After a start or a wake, once its gateway answers: bring the names in
+   * step if access changed while it was down (a grant to a stopped or
+   * sleeping agent could not reach its gateway). Only the state read when
+   * nothing changed — no connection, no CLI — so a fleet start stays cheap.
+   */
+  async syncWhenUp(agentId: string, opts: { attempts?: number; sleep?: (ms: number) => Promise<void> } = {}): Promise<ConsoleReady | undefined> {
+    const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    for (let i = 0; i < (opts.attempts ?? 24); i++) {
+      const a = this.#deps.store.getAgent(agentId);
+      if (!a || a.state === 'DELETED' || !a.runtimeRef || !a.gatewayToken || a.ops) return undefined;
+      if (a.state === 'RUNNING') {
+        const st = await this.#deps.providerFor(a.hostId).status(a.runtimeRef).catch(() => undefined);
+        if (st?.phase === 'stopped' || st?.phase === 'error') return undefined;
+        if (st?.phase === 'running' && st.healthy) {
+          this.invalidate(a.id);
+          const state = await this.state(a);
+          if (!state || state.mode !== 'identity') return undefined;
+          const batch = consoleSyncBatch(state, consoleAllowUsers(this.#deps.store, a, a.gatewayToken));
+          if (!batch?.some((b) => b.path === 'gateway.auth.trustedProxy.allowUsers')) return undefined;
+          return this.ensureReady(a, 'start');
+        }
+      }
+      await sleep(5000); // a fleet start is many of these at once: not one docker inspect a second each
+    }
+    return undefined;
+  }
+
+  async #ensure(agent: Agent, why: ConsoleSyncReason): Promise<ConsoleReady> {
     if (!agent.gatewayToken) return { mode: 'unavailable', reason: 'no console' };
     const want = consoleAllowUsers(this.#deps.store, agent, agent.gatewayToken);
     const readyKey = `${agent.hostId}|${agent.runtimeRef}|${agent.updatedAt}|${createHash('sha256').update(want.join(',')).digest('hex')}`;
@@ -227,15 +288,27 @@ export class ConsoleAccess {
     const provider = this.#deps.providerFor(agent.hostId);
     const trace = this.#deps.trace?.(agent.id);
     const batch = consoleSyncBatch(state, want);
+    // Names the gateway does not admit yet: the reload must have landed before they connect.
+    const added = want.filter((u) => !state.allowUsers.includes(u));
     if (batch) {
       const res = await provider.exec(agent.runtimeRef!, ['config', 'set', '--batch-json', JSON.stringify(batch), '--replace'], { timeoutMs: 60_000 });
-      trace?.('console.names_synced', { ok: res.code === 0, names: want.length, paths: batch.map((b) => b.path) });
+      trace?.('console.names_synced', { ok: res.code === 0, names: want.length, paths: batch.map((b) => b.path), why });
       this.#state.delete(agent.id);
       if (res.code !== 0) return { mode: 'unavailable', reason: 'its gateway would not take the list of people', identity: true };
     }
     const gw = await this.#deps.gatewayAddr(agent);
     if (!gw) return { mode: 'unavailable', reason: 'its gateway is not reachable', identity: true };
     const owner = consoleIdentity(agent.gatewayToken, 'owner', agent.ownerId);
+    if (batch && added.length) {
+      // The edit reloads the gateway's auth a moment later. Until then a new
+      // name is still refused — the "unauthorized" a new guest's first open
+      // met. Wait until the gateway admits one of them (a connection with no
+      // device and no scopes: it reads nothing and changes nothing).
+      if (!(await this.#admitted(gw, added.find((u) => u !== owner) ?? added[0]!))) {
+        trace?.('console.unavailable', { reason: 'the new list of people did not take effect in time' });
+        return { mode: 'unavailable', reason: 'its gateway did not take the new list of people in time — try again in a moment', identity: true };
+      }
+    }
     // A reload after the edit above closes and reopens the gateway's doors:
     // give it a moment rather than failing the owner's first open.
     let scopes: string[] | undefined;
@@ -262,6 +335,16 @@ export class ConsoleAccess {
     }
     this.#ready.set(agent.id, { key: readyKey, at: Date.now() });
     return { mode: 'identity' };
+  }
+
+  /** Does the gateway admit this name yet? Asked every 300 ms until it does, for up to `reloadWaitMs`. */
+  async #admitted(gw: Gateway, identity: string): Promise<boolean> {
+    const until = Date.now() + (this.#deps.reloadWaitMs ?? 20_000);
+    for (;;) {
+      try { await gatewayCallAs(gw, identity, [], 5000); return true; } catch { /* not yet */ }
+      if (Date.now() >= until) return false;
+      await new Promise((r) => setTimeout(r, 300));
+    }
   }
 
   async #assignOwnerRole(provider: RuntimeProvider, runtimeRef: string, owner: string): Promise<boolean> {
