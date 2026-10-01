@@ -4,6 +4,8 @@ import fastifyCookie from '@fastify/cookie';
 import { LOCAL_OWNER, internalPrincipal, type Principal } from './principal.js';
 import { registerAccountRoutes, sessionAccount, signInLocalByLink } from './accountsAuth.js';
 import { registerSigninLink, SIGNIN_LINK_PATH, type LinkSignIn, type SigninLinkDeps } from './signinLink.js';
+import { clearSessionCookies, readSessionCookie, sessionValue, setSessionCookie, upgradeSessionCookie } from './sessionCookie.js';
+import { registerOriginCheck } from './requestOrigin.js';
 import type { Store } from '../store/store.js';
 import {
   identityConfigFromEnv,
@@ -11,8 +13,6 @@ import {
   IdentityVerifier,
   principalFor,
 } from './identity.js';
-
-const COOKIE = 'hatchabot_session';
 
 /**
  * Optional allowlist for identity mode: HATCHABOT_ALLOWED_EMAILS="a@example.com, b@example.org".
@@ -108,19 +108,10 @@ export function clearFailures(who: string): void {
 const PASSWORD_BUCKET = '*shared-password*';
 /** Test hook. */
 export function _resetLoginThrottle(): void { failures.clear(); }
-const LEGACY_COOKIE = 'agentclaw_session'; // set by pre-rename servers; cleared on logout, never read
-/**
- * Mark the session cookie `secure` only when the request actually arrived over
- * HTTPS (directly or via a terminating proxy). Setting it unconditionally
- * breaks every plain-HTTP install: the browser silently DISCARDS a secure
- * cookie on an http:// origin, so login appears to succeed and then loops.
- * On HTTPS the flag still does its job.
- */
-function requestIsHttps(req: FastifyRequest): boolean {
-  const forwarded = req.headers['x-forwarded-proto'];
-  const proto = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-  return (proto ?? req.protocol) === 'https';
-}
+// The session cookie's name, flags and reading rules: sessionCookie.ts. It is
+// `secure` (and `__Host-`) only when the request actually arrived over HTTPS:
+// the browser silently DISCARDS a secure cookie on an http:// origin, so a
+// plain-HTTP install would log in and then loop.
 const TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 /**
  * Identity-mode browser sessions: ours once Google's token is verified. They
@@ -226,20 +217,16 @@ declare module 'fastify' {
     /** Resolve a principal from a raw Cookie header — for a WebSocket upgrade,
      *  which Fastify never sees and so has no `request.principal`. Returns
      *  undefined when the caller is not authenticated. Same session logic as
-     *  the onRequest hooks; deliberately the ONLY seam, so the two can't drift. */
-    principalFromCookieHeader?: (cookieHeader: string | undefined) => Principal | undefined;
+     *  the onRequest hooks; deliberately the ONLY seam, so the two can't drift.
+     *  `https`: whether that request came over HTTPS (sessionCookie.ts
+     *  requestIsHttps), which decides which cookie names count. */
+    principalFromCookieHeader?: (cookieHeader: string | undefined, https: boolean) => Principal | undefined;
   }
 }
 
-/** Pull one cookie's value out of a raw `Cookie:` header. */
-function cookieValue(header: string | undefined, name: string): string | undefined {
-  if (!header) return undefined;
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    if (part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
-  }
-  return undefined;
+/** The session value in a raw `Cookie:` header (a WebSocket upgrade's), by sessionCookie.ts's rules. */
+function cookieValue(header: string | undefined, https: boolean): string | undefined {
+  return readSessionCookie(header, https)?.value;
 }
 
 /**
@@ -264,8 +251,7 @@ function registerLogoutEverywhere(app: FastifyInstance, store: Store | undefined
     // that computer; the confirm tells them to run `hatchabot logout` there.
     const cliTokens = store.revokePersonalCliTokens(who);
     if (cliTokens) app.log.warn({ owner: who, revoked: cliTokens }, 'logout_everywhere.cli_tokens_revoked');
-    reply.clearCookie(COOKIE, { path: '/' });
-    reply.clearCookie(LEGACY_COOKIE, { path: '/' });
+    clearSessionCookies(reply, req);
     return { ok: true, cliTokens };
   });
 }
@@ -286,6 +272,9 @@ function linkRoute(app: FastifyInstance, opts: AuthOptions, signIn: SigninLinkDe
 
 export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Promise<void> {
   await app.register(fastifyCookie);
+  // Before any sign-in hook: a request a page on another site (a neighbouring
+  // tenant included) made the browser send changes nothing (requestOrigin.ts).
+  registerOriginCheck(app);
 
   const mode: AuthMode = opts.mode ?? 'password';
   if (mode === 'identity') {
@@ -348,26 +337,19 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
       return reply.code(401).send({ error: 'Wrong password' });
     }
     const exp = Date.now() + TTL_MS;
-    reply.setCookie(COOKIE, `${exp}.${sign(exp)}`, {
-      httpOnly: true,
-      sameSite: 'strict',
-      // Behind HTTPS (Tailscale serve, a terminating proxy) the 30-day cookie
-      // must not ride a forced plaintext request; plain-HTTP LAN installs
-      // still work because the flag is only set when the request came in
-      // encrypted. Same rule as identity mode below.
-      secure: requestIsHttps(req),
-      path: '/',
-      maxAge: Math.floor(TTL_MS / 1000),
-    });
+    // Behind HTTPS (Tailscale serve, a terminating proxy) the 30-day cookie
+    // must not ride a forced plaintext request; plain-HTTP LAN installs
+    // still work because the flag is only set when the request came in
+    // encrypted. Same rule in every mode (sessionCookie.ts).
+    setSessionCookie(reply, req, `${exp}.${sign(exp)}`, TTL_MS / 1000);
     return { ok: true };
   });
 
   // Symmetric with identity mode: lock the app on a shared screen, or switch
   // who this tab is. Exempt from auth below — logging out with an already
   // dead session must succeed, not 401.
-  app.post('/v1/logout', async (_req, reply) => {
-    reply.clearCookie(COOKIE, { path: '/' });
-    reply.clearCookie(LEGACY_COOKIE, { path: '/' });
+  app.post('/v1/logout', async (req, reply) => {
+    clearSessionCookies(reply, req);
     return { ok: true };
   });
   registerLogoutEverywhere(app, opts.store, !!opts.password);
@@ -378,16 +360,14 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     if (!('owner' in who)) return { kind: 'refused', why: 'no-account' };
     if (opts.password) {
       const exp = Date.now() + TTL_MS;
-      reply.setCookie(COOKIE, `${exp}.${sign(exp)}`, {
-        httpOnly: true, sameSite: 'strict', secure: requestIsHttps(req), path: '/', maxAge: Math.floor(TTL_MS / 1000),
-      });
+      setSessionCookie(reply, req, `${exp}.${sign(exp)}`, TTL_MS / 1000);
     }
     return { kind: 'session', ownerId: LOCAL_OWNER };
   });
 
-  app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
+  app.decorate('principalFromCookieHeader', (header: string | undefined, https: boolean): Principal | undefined => {
     if (!opts.password) return { ownerId: LOCAL_OWNER, via: 'password' };
-    return validSession(cookieValue(header, COOKIE))
+    return validSession(cookieValue(header, https))
       ? { ownerId: LOCAL_OWNER, via: 'password' }
       : undefined;
   });
@@ -425,10 +405,11 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
       req.principal = { ownerId: cliOwner, via: 'identity', subject: cliOwner };
       return;
     }
-    if (validSession(req.cookies[COOKIE])) {
+    if (validSession(sessionValue(req))) {
       // A valid password session IS the installation's single owner. In
       // identity mode this becomes the verified token subject.
       req.principal = { ownerId: LOCAL_OWNER, via: 'password' };
+      upgradeSessionCookie(req, reply, TTL_MS / 1000);
       return;
     }
     return reply.code(401).send({ error: 'auth required' });
@@ -447,9 +428,8 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
 
   registerAccountRoutes(app, { store, secret: opts.secret, onAuthenticated: opts.onAuthenticated, cliTokenOwner: opts.cliTokenOwner }, { throttled, noteFailure, clearFailures });
 
-  app.post('/v1/logout', async (_req, reply) => {
-    reply.clearCookie(COOKIE, { path: '/' });
-    reply.clearCookie(LEGACY_COOKIE, { path: '/' });
+  app.post('/v1/logout', async (req, reply) => {
+    clearSessionCookies(reply, req);
     return { ok: true };
   });
   registerLogoutEverywhere(app, store);
@@ -461,8 +441,8 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
     return r;
   });
 
-  app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
-    const id = sessionAccount(store, opts.secret, cookieValue(header, COOKIE));
+  app.decorate('principalFromCookieHeader', (header: string | undefined, https: boolean): Principal | undefined => {
+    const id = sessionAccount(store, opts.secret, cookieValue(header, https));
     return id ? { ownerId: id, via: 'password', subject: id } : undefined;
   });
 
@@ -503,9 +483,10 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
       req.principal = { ownerId: cliOwner, via: 'identity', subject: cliOwner };
       return;
     }
-    const id = sessionAccount(store, opts.secret, req.cookies[COOKIE]);
+    const id = sessionAccount(store, opts.secret, sessionValue(req));
     if (id) {
       req.principal = { ownerId: id, via: 'password', subject: id };
+      upgradeSessionCookie(req, reply, TTL_MS / 1000);
       opts.onAuthenticated?.(req.principal);
       return;
     }
@@ -599,13 +580,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
       const denied = allowedEmailProblem(token.email);
       if (denied) return reply.code(403).send({ error: denied });
       const exp = Date.now() + sessionTtlMs();
-      reply.setCookie(COOKIE, mintSession(token.sub, exp, token.email), {
-        httpOnly: true,
-        sameSite: 'strict',
-        secure: requestIsHttps(req),
-        path: '/',
-        maxAge: Math.floor((exp - Date.now()) / 1000),
-      });
+      setSessionCookie(reply, req, mintSession(token.sub, exp, token.email), (exp - Date.now()) / 1000);
       opts.onAuthenticated?.(principal);
       return { ok: true, ownerId: principal.ownerId, email: principal.email };
     } catch (err) {
@@ -615,9 +590,8 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     }
   });
 
-  app.post('/v1/logout', async (_req, reply) => {
-    reply.clearCookie(COOKIE, { path: '/' });
-    reply.clearCookie(LEGACY_COOKIE, { path: '/' });
+  app.post('/v1/logout', async (req, reply) => {
+    clearSessionCookies(reply, req);
     return { ok: true };
   });
   registerLogoutEverywhere(app, opts.store);
@@ -634,9 +608,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
       const email = store.emailForOwner(ownerId);
       if (process.env.HATCHABOT_ALLOWED_EMAILS?.trim() && allowedEmailProblem(email)) return { kind: 'refused', why: 'not-allowed' };
       const exp = Date.now() + sessionTtlMs();
-      reply.setCookie(COOKIE, mintSession(ownerId.slice('user-'.length), exp, email), {
-        httpOnly: true, sameSite: 'strict', secure: requestIsHttps(req), path: '/', maxAge: Math.floor((exp - Date.now()) / 1000),
-      });
+      setSessionCookie(reply, req, mintSession(ownerId.slice('user-'.length), exp, email), (exp - Date.now()) / 1000);
       opts.onAuthenticated?.({ ownerId, via: 'identity', subject: ownerId.slice('user-'.length), email });
       return { kind: 'session', ownerId };
     }
@@ -647,13 +619,13 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     return signInLocalByLink(store, opts.secret, req, reply, account);
   });
 
-  app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
-    const session = readSession(cookieValue(header, COOKIE));
+  app.decorate('principalFromCookieHeader', (header: string | undefined, https: boolean): Principal | undefined => {
+    const session = readSession(cookieValue(header, https));
     if (session) return { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub, email: session.email };
     // A local account's session, as the request hook accepts it: without this
     // their console's WebSocket was always refused (night review).
     if (localAccounts && opts.store) {
-      const id = sessionAccount(opts.store, opts.secret, cookieValue(header, COOKIE));
+      const id = sessionAccount(opts.store, opts.secret, cookieValue(header, https));
       const owner = id ? opts.store.localAccount(id) : undefined;
       if (id && owner && !owner.disabled) return { ownerId: id, via: 'password', subject: id };
     }
@@ -722,20 +694,22 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     }
 
     // Browser session cookie minted from an already-verified token.
-    const session = readSession(req.cookies[COOKIE]);
+    const session = readSession(sessionValue(req));
     if (session) {
       req.principal = { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub, email: session.email };
+      upgradeSessionCookie(req, reply, sessionTtlMs() / 1000);
       return;
     }
     // …or a local account's session, when those run alongside Google. The two
     // cookie shapes are signed with different material, so one never validates
     // as the other.
     if (localAccounts && opts.store) {
-      const id = sessionAccount(opts.store, opts.secret, req.cookies[COOKIE]);
+      const id = sessionAccount(opts.store, opts.secret, sessionValue(req));
       if (id) {
         const owner = opts.store.localAccount(id);
         if (owner && !owner.disabled) {
           req.principal = { ownerId: id, via: 'password', subject: id };
+          upgradeSessionCookie(req, reply, TTL_MS / 1000);
           return;
         }
       }

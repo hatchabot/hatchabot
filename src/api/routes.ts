@@ -25,6 +25,8 @@ import { enableServe, tailnetInfo, writeEnvVar, writePublicUrl } from '../ops/ta
 import { randomBytes } from 'node:crypto';
 import { hashPassword, newRecoveryCode, normalizeRecoveryCode, passwordProblem, usernameProblem } from './accountsAuth.js';
 import { noteFailure, throttled } from './auth.js';
+import { requestIsHttps, SESSION_COOKIE_NAME, type RequestLike } from './sessionCookie.js';
+import { foreignRequest } from './requestOrigin.js';
 import { isControlUiDocument, rebaseControlUi } from './controlUiRebase.js';
 import { defaultMemoryCap, effectiveMemoryCap, formatMemoryCap, memberMemoryMax, MEMORY_CAP_CEILING_BYTES, parseMemoryCap } from '../orchestrator/memoryCap.js';
 import { APP_VERSION } from '../domain/appVersion.js';
@@ -5353,7 +5355,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const stripSessionCookie = (headers: Record<string, string | string[] | undefined>) => {
     const h = { ...headers };
     if (typeof h.cookie === 'string') {
-      const kept = h.cookie.split(';').map((s) => s.trim()).filter((c) => c && !/^(hatchabot|agentclaw)_session=/.test(c));
+      const kept = h.cookie.split(';').map((s) => s.trim()).filter((c) => c && !SESSION_COOKIE_NAME.test(c.split('=')[0]!.trim()));
       if (kept.length) h.cookie = kept.join('; ');
       else delete h.cookie;
     }
@@ -5599,9 +5601,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const m = /^\/v1\/agents\/([^/]+)\/ui\/?([^?]*)/.exec(url);
     if (!m) return; // not ours — leave it alone
     const deny = () => socket.destroy();
+    // A page on another site — a neighbouring tenant's is the SAME site, so
+    // SameSite does not stop it — must not open a console with this
+    // browser's cookie (requestOrigin.ts).
+    const foreign = foreignRequest(rawReq as RequestLike);
+    if (foreign) {
+      app.log.warn({ path: url.split('?')[0], why: foreign }, 'console.foreign_upgrade_refused');
+      return deny();
+    }
     const resolve = app.principalFromCookieHeader;
     if (!resolve) return deny();
-    const principal = resolve(rawReq.headers.cookie);
+    const principal = resolve(rawReq.headers.cookie, requestIsHttps(rawReq as RequestLike));
     if (!principal) return deny();
 
     // Same rule as the page itself, against the real caller: the owner, or a
@@ -9547,8 +9557,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const token = await deps.verifier.verify(idToken); // throws on a bad token
       return `user-${token.sub}`;
     }
-    const decorated = (app as unknown as { principalFromCookieHeader?: (h: string | undefined) => { ownerId: string } | undefined }).principalFromCookieHeader;
-    const fromCookie = decorated?.(req.headers.cookie)?.ownerId;
+    const decorated = (app as unknown as { principalFromCookieHeader?: (h: string | undefined, https: boolean) => { ownerId: string } | undefined }).principalFromCookieHeader;
+    const fromCookie = decorated?.(req.headers.cookie, requestIsHttps(req))?.ownerId;
     // Tests say who they are with the opt-in header (principal.ts).
     const p = fromCookie ?? (principalOf(req).via === 'header' ? principalOf(req).ownerId : undefined);
     return p && p !== LOCAL_OWNER ? p : undefined;

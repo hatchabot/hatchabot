@@ -106,8 +106,16 @@ signs in once) before the account is looked up.
 | password | the one shared-password session | refused: there are no named accounts |
 
 On success the browser gets the normal session cookie for that account (the
-same one a password or Google sign-in gives, ended the same ways) and a
-`303` to `/`, so no token stays in the address bar. Every answer carries
+same one a password or Google sign-in gives, ended the same ways;
+`__Host-hatchabot_session` over HTTPS, see below) and a `303` to `/`, so no
+token stays in the address bar. The cookie is `SameSite=Strict`. When the
+provider's page is on another site (a home install, or once
+`my.hatchabot.com` is on the Public Suffix List) the browser stores it but
+does not send it with that first `GET /`; the page is the app's shell, which
+needs no session, and every request the app then makes is same-origin and
+carries it (checked in Chrome 124 and 151, 2026-10-01). When the provider's
+page is the same site (portal on `hatchabot.com`, tenant on
+`<name>.my.hatchabot.com`) the cookie rides the first `GET /` too. Every answer carries
 `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. Only `GET`
 spends a link: `HEAD` is not answered, so a link checker's or chat app's
 preview request does not use it up (a preview that does a full `GET` will,
@@ -163,6 +171,45 @@ refusals as `signin_link.refused` with the reason (`signature`, `audience`,
 ever logged: the request log drops query strings, and the code logs only
 the reason. Spent nonces are kept in the `signin_links` table with the
 `sub` and the time for 30 days.
+
+## Neighbours on the same site
+
+Every tenant is `<name>.my.hatchabot.com`, and until that suffix is on the
+Public Suffix List (which wants thousands of users first) every tenant, and
+the portal, are the **same site**. `SameSite=Strict` then protects nothing
+between them: a neighbour's page can make the browser send this tenant's
+cookie with a form post, a `fetch` or a WebSocket, and it can set cookies on
+`.my.hatchabot.com` or `.hatchabot.com` that the browser sends here. Before
+2026-10-01 a neighbour's page could, in a real browser, mint a CLI token,
+sign the owner out everywhere, open an agent's console socket, sign a
+visitor in as an account of the neighbour's choosing by planting its
+cookie, and sign the owner out by planting a junk one with a longer path.
+Two things close that, on every install and in every sign-in mode:
+
+- **Requests from elsewhere change nothing** (`src/api/requestOrigin.ts`).
+  Every `POST`, `PUT`, `PATCH` and `DELETE`, and every WebSocket upgrade to
+  the console, is refused (403; the socket is dropped) when the browser says
+  `Sec-Fetch-Site: same-site` or `cross-site`. A browser too old to send
+  that header is held to its `Origin`, which must be this machine: the host
+  it addressed (`Host`, or a proxy's `X-Forwarded-Host`) or
+  `HATCHABOT_PUBLIC_URL`'s; `Origin: null` is refused. A request with
+  neither header is not from a browser (the CLI, a runner, another
+  Hatchabot, an agent) and passes on its own credentials. Nothing is exempt:
+  everything that legitimately arrives from another site is a `GET` (this
+  link, Google's OAuth callback), and no chat service posts to Hatchabot
+  (Telegram is polled, Slack is Socket Mode, Discord is its gateway).
+- **The session cookie is `__Host-hatchabot_session` over HTTPS**
+  (`src/api/sessionCookie.ts`). The browser accepts a `__Host-` cookie only
+  from this exact host, `Secure`, `Path=/`, with no `Domain`, so a neighbour
+  cannot plant one; when a request carries it, it is the only session cookie
+  read. Over plain HTTP (a home LAN) the prefix is impossible and the name
+  stays `hatchabot_session`. On a hosted install (`HATCHABOT_MANAGED_BY`) a
+  plain-named cookie over HTTPS is ignored, because it is exactly what a
+  neighbour can plant. On a home install over HTTPS (Tailscale, a TLS
+  proxy) a session from before the change keeps working and is moved to the
+  new name on its next request, so nobody is signed out by the upgrade.
+  HTTPS means `X-Forwarded-Proto: https`, a TLS connection, or a request for
+  the https `HATCHABOT_PUBLIC_URL`'s own host.
 
 ## Not covered
 

@@ -6,6 +6,7 @@ import type { Store } from '../store/store.js';
 import type { LocalAccount } from '../domain/types.js';
 import type { Principal } from './principal.js';
 import type { LinkSignIn } from './signinLink.js';
+import { setSessionCookie as setSessionCookieAs } from './sessionCookie.js';
 
 /**
  * Accounts mode (HATCHABOT_AUTH=accounts): the middle rung between one shared
@@ -84,7 +85,6 @@ export interface AccountsAuthDeps {
   cliTokenOwner?: (token: string) => string | undefined;
 }
 
-const COOKIE = 'hatchabot_session';
 const TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** How long an unclaimed invitation stays good. */
 const CLAIM_TTL_MS = 48 * 60 * 60 * 1000;
@@ -163,16 +163,9 @@ export function sessionAccount(store: Store, secret: Buffer, token: string | und
   return timingSafeEqual(Buffer.from(sig, 'utf8'), Buffer.from(expected, 'utf8')) ? accountId : undefined;
 }
 
+/** The session cookie (sessionCookie.ts: `__Host-` over HTTPS). */
 function setSessionCookie(reply: FastifyReply, req: FastifyRequest, value: string): void {
-  const forwarded = req.headers['x-forwarded-proto'];
-  const proto = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-  reply.setCookie(COOKIE, value, {
-    httpOnly: true,
-    sameSite: 'strict',
-    secure: (proto ?? req.protocol) === 'https',
-    path: '/',
-    maxAge: Math.floor(TTL_MS / 1000),
-  });
+  setSessionCookieAs(reply, req, value, TTL_MS / 1000);
 }
 
 /** How long the password chooser a sign-in link opens stays good. */
