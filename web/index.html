@@ -926,6 +926,7 @@
   </header>
   <div id="setup"></div>
   <div id="limitBanner" hidden></div>
+  <div id="secNotice" hidden style="background:color-mix(in srgb, var(--accent) 17%, transparent);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;margin:8px 0"></div>
   <div id="noticeBanner" hidden style="background:color-mix(in srgb, var(--accent) 17%, transparent);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;margin:8px 0"></div>
 <div id="offlineBanner" hidden style="background:var(--bad);color:#fff;border-radius:10px;padding:10px 14px;margin:8px 0;font-weight:600">⚠ Can't reach Hatchabot — what you see may be an old cached copy. If you're away from home, check that <b>Tailscale</b> is connected on this device, then pull to refresh.</div>
   <div class="card" id="activityCard" hidden>
@@ -1110,6 +1111,36 @@
     </div>
   </div>
   <div class="err" id="loginErr"></div>
+</dialog>
+
+<dialog id="sfDlg" closedby="none" style="max-width:460px">
+  <h3 style="margin:0 0 6px" id="sfDlgTitle">One more step</h3>
+  <div class="sub" id="sfDlgLede">This Hatchabot is being opened from the internet, so it asks for your second factor.</div>
+  <form onsubmit="event.preventDefault();sfSubmitCode()" style="margin-top:12px">
+    <div id="sfPasskeyRow" hidden style="margin-bottom:10px"><button type="button" class="primary" id="sfPasskeyBtn" onclick="sfUsePasskey()">Use your passkey</button></div>
+    <label for="sfCode" id="sfCodeLabel">Code from your authenticator app, or a backup code</label>
+    <input type="text" id="sfCode" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" style="letter-spacing:.08em">
+    <div class="err" id="sfErr"></div>
+    <div class="actions" style="justify-content:space-between">
+      <button type="button" onclick="sfCancel()">Cancel</button>
+      <button class="primary" id="sfCodeBtn">Continue</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="backupDlg" closedby="none" style="max-width:520px">
+  <h3 style="margin:0 0 6px">Your backup codes</h3>
+  <div class="sub">If you lose your phone or passkey, one of these gets you in at the public address instead. Each works once. Keep them somewhere safe, away from this computer.</div>
+  <pre id="backupCodes" style="font:600 16px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace;text-align:center;margin:14px 0;padding:12px;border:1px dashed var(--line);border-radius:10px;user-select:all;columns:2"></pre>
+  <div class="sub">They are shown <b>only now</b>. Making new codes (⚙ Settings → You) replaces these.</div>
+  <div class="actions" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+    <span style="display:flex;gap:8px">
+      <button type="button" onclick="copyText($('backupCodes').textContent).then(ok => toast(ok ? 'Copied' : 'Select them and copy'))">Copy</button>
+      <button type="button" onclick="downloadBackupCodes()">Download</button>
+    </span>
+    <label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="backupSaved" onchange="$('backupDone').disabled = !this.checked"> I've saved them</label>
+    <button class="primary" id="backupDone" disabled onclick="closeBackupCodes()">Done</button>
+  </div>
 </dialog>
 
 <dialog id="recoveryDlg" closedby="none" style="max-width:520px">
@@ -1879,6 +1910,49 @@
         <button onclick="newRecoveryCode(this)">Make a new code</button>
       </div>
       <div class="sub" style="margin:6px 0 18px">A new code replaces the old one.</div>
+    </div>
+    <div id="sfBox" hidden>
+      <h4 style="margin:0 0 4px">Second factor</h4>
+      <div class="sub" id="sfStatus" style="margin-bottom:6px">Loading…</div>
+      <div id="sfList"></div>
+      <div id="sfPwRow" hidden style="margin:8px 0"><label for="sfCurPw">Current password (needed to change your second factor)</label><input type="password" id="sfCurPw" style="width:220px" autocomplete="current-password"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0">
+        <button id="sfAddPasskeyBtn" onclick="sfAddPasskey(this)">Add a passkey</button>
+        <button id="sfAddTotpBtn" onclick="sfStartTotp(this)">Add an authenticator app</button>
+        <button id="sfBackupBtn" onclick="sfNewBackupCodes(this)" hidden>New backup codes</button>
+      </div>
+      <div id="sfTotpBox" hidden style="border:1px solid var(--line);border-radius:10px;padding:12px;margin:8px 0">
+        <div class="sub">Scan this with an authenticator app (Google Authenticator, 1Password, Aegis…), then type the six digits it shows.</div>
+        <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:8px">
+          <div id="sfTotpQr" style="width:150px;height:150px;background:#fff;border-radius:8px;padding:6px;flex:none"></div>
+          <div>
+            <div class="sub">Or type this key in: <code id="sfTotpSecret" style="user-select:all;word-break:break-all"></code></div>
+            <form onsubmit="event.preventDefault();sfConfirmTotp()" style="display:flex;gap:8px;align-items:flex-end;margin-top:8px">
+              <div><label for="sfTotpCode">Six-digit code</label><input type="text" id="sfTotpCode" inputmode="numeric" autocomplete="one-time-code" style="width:120px;letter-spacing:.1em"></div>
+              <button class="primary" id="sfTotpConfirmBtn">Confirm</button>
+            </form>
+          </div>
+        </div>
+      </div>
+      <div class="err" id="sfBoxErr"></div>
+      <div class="sub" style="margin:6px 0 18px" id="sfNote"></div>
+    </div>
+    <div id="reachBox" hidden>
+      <h4 style="margin:0 0 4px">Reach it from anywhere</h4>
+      <div class="sub" id="reachStatus" style="margin-bottom:8px">Loading…</div>
+      <div id="reachAddress" hidden style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin:8px 0"></div>
+      <div id="reachChecks"></div>
+      <label class="sub" style="display:flex;align-items:center;gap:6px;margin:10px 0" title="At the public address only existing accounts and pending invitations may sign in; nobody can register there, and the machine cannot be claimed there.">
+        <input type="checkbox" id="reachInvited" onchange="reachSetInvitedOnly(this)"> Only invited people (needed before public access can be turned on)</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0">
+        <button class="primary" id="reachOnBtn" onclick="reachTurnOn(this)">Turn on public access…</button>
+        <button id="reachOffBtn" onclick="reachTurnOff(this)" hidden>Turn off public access</button>
+        <button onclick="loadReach(true)" title="Check again">⟳</button>
+        <button id="reachLogBtn" onclick="reachToggleLog()">Record</button>
+      </div>
+      <div class="err" id="reachErr"></div>
+      <div id="reachLog" hidden style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin:8px 0"></div>
+      <div class="sub" style="margin:6px 0 18px">Off, this Hatchabot is reachable only on your network and your tailnet. On, its sign-in page is reachable from the internet at the address above, through Tailscale Funnel; the list above is what protects it. <a href="https://github.com/hatchabot/hatchabot/blob/main/docs/public-access.md" target="_blank" rel="noopener">How it works</a></div>
     </div>
     <h4 style="margin:0 0 4px">Your Telegram</h4>
     <div id="tgLinkStatus" class="sub" style="margin:4px 0 12px">Loading…</div>
@@ -2661,14 +2735,29 @@ const UI_V2 = (() => {
 })();
 
 const api = async (path, opts = {}) => {
+  const { _afterSecondFactor, ...fetchOpts } = opts;
   const res = await fetch(path, {
-    ...opts,
+    ...fetchOpts,
     // Only claim a JSON body when there is one: Fastify 400s a body-less
     // request (e.g. DELETE) that still carries the content-type header.
     headers: opts.body ? { 'content-type': 'application/json' } : undefined,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
+  // At the public address: signed in, and the second factor is wanted (at
+  // sign-in, or again before a sensitive action). Ask for it, then make the
+  // same request once more. The second-factor calls themselves never loop.
+  if (res.status === 401 && (data.secondFactor === 'required' || data.secondFactor === 'step-up')
+      && !_afterSecondFactor && !path.startsWith('/v1/second-factor/verify') && !path.startsWith('/v1/second-factor/challenge')) {
+    await askSecondFactor(data.secondFactor);
+    return api(path, { ...opts, _afterSecondFactor: true });
+  }
+  // Everyone is asked for a second factor here and this person has none yet:
+  // take them to where one is added (once; the calls behind it just fail).
+  if (res.status === 403 && data.secondFactor === 'enrol' && !window.__sfEnrolShown && typeof aiDlg !== 'undefined') {
+    window.__sfEnrolShown = true;
+    setTimeout(() => { toast(data.error, 8000); if (!aiDlg.open) void openAiDlg('access'); }, 0);
+  }
   // Only the sign-in hook's own 401 means the session is gone. A route that
   // answers 401 with its own reason — a wrong current password, a recovery
   // code that doesn't match — is an answer, not a reason to sign out: showing
@@ -2693,6 +2782,307 @@ const api = async (path, opts = {}) => {
   }
   return data;
 };
+
+// ---- second factor (docs/public-access.md) ----------------------------------
+// Passkeys speak ArrayBuffers; the server speaks base64url.
+const b64uToBuf = (s) => Uint8Array.from(atob(String(s).replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)).buffer;
+const bufToB64u = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+/** One prompt at a time: every request that needs the second factor waits on the same one. */
+let sfPending = null;
+function askSecondFactor(kind) {
+  if (sfPending) return sfPending.promise;
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  sfPending = { promise, resolve, reject, kind };
+  promise.then(() => { sfPending = null; }, () => { sfPending = null; });
+  $('sfDlgTitle').textContent = kind === 'step-up' ? 'Confirm it is you' : 'One more step';
+  $('sfDlgLede').textContent = kind === 'step-up'
+    ? 'This changes something sensitive, and you are at the public address: give your second factor again.'
+    : 'This Hatchabot is being opened from the internet, so it asks for your second factor.';
+  $('sfErr').textContent = ''; $('sfCode').value = '';
+  $('sfPasskeyRow').hidden = true;
+  if (loginDlg.open) loginDlg.close();
+  if (!sfDlg.open) sfDlg.showModal();
+  $('sfCode').focus();
+  // Which factors this person has decides what is offered.
+  api('/v1/second-factor', { _afterSecondFactor: true }).then((st) => {
+    const kinds = st.methods || [];
+    $('sfPasskeyRow').hidden = !(kinds.includes('passkey') && st.passkeyHere && window.PublicKeyCredential);
+    const codes = [kinds.includes('totp') && 'Code from your authenticator app', kinds.includes('backup') && 'a backup code'].filter(Boolean);
+    $('sfCodeLabel').textContent = codes.length ? codes.join(', or ') : 'Backup code';
+  }).catch(() => {});
+  return promise;
+}
+function sfDone() { if (sfDlg.open) sfDlg.close(); sfPending?.resolve(); }
+async function sfCancel() {
+  const kind = sfPending?.kind;
+  if (sfDlg.open) sfDlg.close();
+  sfPending?.reject(new Error('The second factor was not given.'));
+  // At sign-in there is nothing to use without it: back to the sign-in screen, signed out.
+  if (kind === 'required') {
+    try { await fetch('/v1/logout', { method: 'POST' }); } catch { /* the screen is shown either way */ }
+    showLogin();
+  }
+}
+async function sfSubmitCode() {
+  const code = $('sfCode').value.trim();
+  if (!code) return;
+  $('sfCodeBtn').disabled = true; $('sfErr').textContent = '';
+  try { await api('/v1/second-factor/verify', { method: 'POST', body: { code } }); sfDone(); }
+  catch (e) { $('sfErr').textContent = e.message; $('sfCode').select(); }
+  finally { $('sfCodeBtn').disabled = false; }
+}
+async function sfUsePasskey() {
+  $('sfPasskeyBtn').disabled = true; $('sfErr').textContent = '';
+  try {
+    const o = await api('/v1/second-factor/challenge', { method: 'POST', body: {} });
+    const cred = await navigator.credentials.get({ publicKey: {
+      challenge: b64uToBuf(o.challenge), rpId: o.rpId, timeout: o.timeout, userVerification: o.userVerification,
+      allowCredentials: o.allowCredentials.map((c) => ({ type: 'public-key', id: b64uToBuf(c.id) })),
+    } });
+    await api('/v1/second-factor/verify', { method: 'POST', body: { passkey: {
+      id: bufToB64u(cred.rawId), clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+      authenticatorData: bufToB64u(cred.response.authenticatorData), signature: bufToB64u(cred.response.signature),
+    } } });
+    sfDone();
+  } catch (e) { $('sfErr').textContent = e.name === 'NotAllowedError' ? 'The passkey was not used. Try again, or type a code.' : e.message; }
+  finally { $('sfPasskeyBtn').disabled = false; }
+}
+
+/** Shows the codes once; resolves when the person has pressed Done. (Not the dialog's close event: it can arrive much later.) */
+let backupResolve = null;
+function showBackupCodes(codes) {
+  $('backupCodes').textContent = codes.join('\n');
+  $('backupSaved').checked = false; $('backupDone').disabled = true;
+  backupDlg.showModal();
+  return new Promise((res) => { backupResolve = res; });
+}
+function closeBackupCodes() {
+  // Gone from the page at once: one-time codes must not sit in the DOM for the next person at the keyboard.
+  $('backupCodes').textContent = '';
+  if (backupDlg.open) backupDlg.close();
+  const done = backupResolve; backupResolve = null;
+  done?.();
+}
+function downloadBackupCodes() {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([`Hatchabot backup codes\n${location.origin}\n\n${$('backupCodes').textContent}\n\nEach works once.\n`], { type: 'text/plain' }));
+  a.download = 'hatchabot-backup-codes.txt';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+/** Settings → You → Second factor. */
+let sfState = null;
+async function loadSecondFactor() {
+  const box = $('sfBox');
+  if (!box) return;
+  if ((appConfig.authMode ?? 'password') === 'password') { box.hidden = true; return; }
+  let st;
+  try { st = await api('/v1/second-factor'); } catch { box.hidden = true; return; }
+  sfState = st;
+  box.hidden = false;
+  $('sfPwRow').hidden = !st.localAccount || (st.publicAddress && st.factors.length > 0);
+  $('sfBackupBtn').hidden = st.factors.length === 0;
+  $('sfStatus').innerHTML = st.factors.length
+    ? `Asked for when you sign in at the public address, and again there before sensitive changes. ${st.backupCodes} backup code${st.backupCodes === 1 ? '' : 's'} left.`
+    : st.ownerRights
+      ? '<b style="color:var(--warn)">You have none.</b> You own this machine, so you need one before it can be made reachable from the internet.'
+      : 'You have none. With one, signing in at the public address asks for it as well as your password.';
+  $('sfList').innerHTML = st.factors.map((f) => `<div class="pair" style="gap:8px;align-items:center">
+      <span><b>${esc(f.kind === 'passkey' ? (f.label || 'Passkey') : 'Authenticator app')}</b>
+        <span class="sub">· added ${esc(new Date(f.createdAt).toLocaleDateString())}${f.lastUsedAt ? ` · last used ${esc(new Date(f.lastUsedAt).toLocaleDateString())}` : ''}${f.kind === 'passkey' && !f.worksAtPublicAddress ? ` · made for ${esc(f.madeFor || 'another address')}` : ''}</span></span>
+      <button class="sfRemove" data-id="${esc(f.id)}" onclick="sfRemove(this)">Remove</button></div>`).join('');
+  $('sfNote').textContent = st.passkeyAddress
+    ? `A passkey belongs to the address it is made at: add it while you have Hatchabot open at ${st.passkeyAddress}. An authenticator app works at any address.`
+    : 'A passkey needs this Hatchabot\'s https address (the setup guide\'s "Turn on HTTPS" step). An authenticator app works without one.';
+  $('sfAddPasskeyBtn').disabled = !st.passkeyHere || !window.PublicKeyCredential;
+  $('sfAddPasskeyBtn').title = st.passkeyHere ? '' : (st.passkeyAddress ? `Open Hatchabot at ${st.passkeyAddress} to add a passkey` : 'Needs an https address');
+}
+const sfProof = () => ($('sfPwRow').hidden ? {} : { current: $('sfCurPw').value });
+function sfFail(e) { $('sfBoxErr').textContent = e.message === 'The second factor was not given.' ? '' : e.message; if (/password/i.test(e.message)) $('sfCurPw').focus(); }
+async function sfAfterChange(r) {
+  $('sfCurPw').value = ''; $('sfBoxErr').textContent = '';
+  if (r && r.backupCodes) {
+    await showBackupCodes(r.backupCodes);
+  }
+  await loadSecondFactor();
+  if (!$('reachBox').hidden) void loadReach();
+}
+async function sfStartTotp(btn) {
+  btn.disabled = true; $('sfBoxErr').textContent = '';
+  try {
+    const r = await api('/v1/second-factor/totp', { method: 'POST', body: sfProof() });
+    $('sfTotpBox').hidden = false;
+    $('sfTotpBox').dataset.id = r.id;
+    // The server's own SVG (the qrcode library's output): an image, never markup from a person.
+    $('sfTotpQr').innerHTML = `<img alt="QR code for your authenticator app" width="138" height="138" src="data:image/svg+xml;base64,${btoa(r.qr)}">`;
+    $('sfTotpSecret').textContent = r.secret.match(/.{1,4}/g).join(' ');
+    $('sfTotpCode').value = ''; $('sfTotpCode').focus();
+  } catch (e) { sfFail(e); }
+  finally { btn.disabled = false; }
+}
+async function sfConfirmTotp() {
+  $('sfTotpConfirmBtn').disabled = true;
+  try {
+    const r = await api('/v1/second-factor/totp/confirm', { method: 'POST', body: { id: $('sfTotpBox').dataset.id, code: $('sfTotpCode').value.trim() } });
+    $('sfTotpBox').hidden = true; $('sfTotpQr').innerHTML = ''; $('sfTotpSecret').textContent = '';
+    toast('Authenticator app added');
+    await sfAfterChange(r);
+  } catch (e) { sfFail(e); }
+  finally { $('sfTotpConfirmBtn').disabled = false; }
+}
+async function sfAddPasskey(btn) {
+  btn.disabled = true; $('sfBoxErr').textContent = '';
+  try {
+    const o = await api('/v1/second-factor/passkey/options', { method: 'POST', body: sfProof() });
+    const cred = await navigator.credentials.create({ publicKey: {
+      challenge: b64uToBuf(o.challenge), rp: o.rp,
+      user: { id: b64uToBuf(o.user.id), name: o.user.name, displayName: o.user.displayName },
+      pubKeyCredParams: o.pubKeyCredParams, timeout: o.timeout, attestation: o.attestation,
+      authenticatorSelection: o.authenticatorSelection,
+      excludeCredentials: o.excludeCredentials.map((c) => ({ type: 'public-key', id: b64uToBuf(c.id) })),
+    } });
+    const label = (navigator.userAgentData?.platform || navigator.platform || 'Passkey').slice(0, 40);
+    const r = await api('/v1/second-factor/passkey', { method: 'POST', body: {
+      label, clientDataJSON: bufToB64u(cred.response.clientDataJSON), attestationObject: bufToB64u(cred.response.attestationObject),
+    } });
+    toast('Passkey added');
+    await sfAfterChange(r);
+  } catch (e) { sfFail(e.name === 'NotAllowedError' ? new Error('The passkey was not made (cancelled, or it timed out).') : e.name === 'InvalidStateError' ? new Error('This device already has a passkey for this Hatchabot.') : e); }
+  finally { btn.disabled = !sfState?.passkeyHere; }
+}
+async function sfNewBackupCodes(btn) {
+  if (!confirm('Make new backup codes? The old ones stop working.')) return;
+  btn.disabled = true;
+  try { await sfAfterChange(await api('/v1/second-factor/backup-codes', { method: 'POST', body: sfProof() })); }
+  catch (e) { sfFail(e); }
+  finally { btn.disabled = false; }
+}
+async function sfRemove(btn) {
+  if (!confirm('Remove this second factor?')) return;
+  btn.disabled = true;
+  try { await api('/v1/second-factor/' + encodeURIComponent(btn.dataset.id), { method: 'DELETE', body: sfProof() }); toast('Removed'); await sfAfterChange(); }
+  catch (e) { sfFail(e); btn.disabled = false; }
+}
+
+/** Settings → You → Reach it from anywhere (the machine's owner, at the private address). */
+async function loadReach(preflight) {
+  const box = $('reachBox');
+  if (!box) return;
+  if (appConfig.managed || appConfig.publicAddress || (appConfig.authMode ?? 'password') === 'password') { box.hidden = true; return; }
+  let r;
+  try { r = await api('/v1/public-access' + (preflight ? '?preflight=1' : '')); } catch { box.hidden = true; return; }
+  box.hidden = false;
+  reachRender(r);
+}
+function reachRender(r) {
+  $('reachErr').textContent = '';
+  $('reachStatus').innerHTML = r.on
+    ? (r.serving ? `<b>On.</b> This Hatchabot's sign-in page is reachable from the internet.`
+        : `<b style="color:var(--bad)">On, but refused.</b> A safeguard below is off, so the public address answers nothing until it is fixed.`)
+    : '<b>Off.</b> Reachable only on your network and your tailnet.';
+  const addr = $('reachAddress');
+  addr.hidden = !(r.on && r.url);
+  addr.innerHTML = r.on && r.url ? `<img src="/v1/public-access/qr.svg?${Date.now()}" alt="QR code for the public address" width="104" height="104" style="background:#fff;border-radius:8px;padding:4px">
+      <div><div class="sub">The public address</div><code style="word-break:break-all;user-select:all">${esc(r.url)}</code>
+      <div style="margin-top:6px"><button onclick="copyText('${esc(r.url)}').then(ok => toast(ok ? 'Copied' : 'Select it and copy'))">Copy</button></div></div>` : '';
+  const missing = (r.tailscale?.missing || []).map((m) => `<div class="pair reachCheck" data-ok="0" style="gap:8px"><span>✗ <b>Tailscale:</b> ${esc(m.what)} <span class="sub">${esc(m.fix)}${/^https:\/\//.test(m.link || '') ? ` <a href="${esc(m.link)}" target="_blank" rel="noopener">Open</a>` : ''}</span></span></div>`).join('');
+  $('reachChecks').innerHTML = (r.safeguards || []).map((c) => `<div class="pair reachCheck" data-id="${esc(c.id)}" data-ok="${c.ok ? 1 : 0}" style="gap:8px">
+      <span>${c.ok ? '✓' : '✗'} <b>${esc(c.title)}</b>${c.ok ? '' : `<br><span class="sub">${esc(c.detail)}${c.fix ? ` <i>${esc(c.fix)}</i>` : ''}</span>`}</span></div>`).join('') + missing;
+  $('reachInvited').checked = !!r.invitedOnly;
+  $('reachInvited').disabled = !!r.on;
+  $('reachOnBtn').hidden = !!(r.on && r.serving);
+  $('reachOnBtn').disabled = (r.failing || []).length > 0;
+  $('reachOnBtn').title = (r.failing || []).length ? 'Every safeguard above has to be in place first' : '';
+  $('reachOffBtn').hidden = !r.on;
+  $('reachOnBtn').dataset.confirm = r.confirmText || 'This makes your sign-in page reachable from the internet.';
+}
+async function reachSetInvitedOnly(cb) {
+  try { reachRender(await api('/v1/public-access/invited-only', { method: 'POST', body: { on: cb.checked } })); }
+  catch (e) { cb.checked = !cb.checked; $('reachErr').textContent = e.message; }
+}
+async function reachTurnOn(btn) {
+  if (!confirm(`${btn.dataset.confirm}\n\nAnyone on the internet will be able to open it and try to sign in. Your accounts, the second factor and the limits listed here are what keeps them out.\n\nTurn on public access?`)) return;
+  btn.disabled = true; $('reachErr').textContent = '';
+  try {
+    const res = await fetch('/v1/public-access/on', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: true }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      // Say exactly what is missing, with Tailscale's own link when it gave one.
+      const parts = [data.error || 'Could not turn it on.'];
+      for (const m of data.missing || []) parts.push(`${m.what} ${m.fix}`);
+      $('reachErr').innerHTML = parts.map(esc).join('<br>') + (/^https:\/\//.test(data.link || '') ? `<br><a href="${esc(data.link)}" target="_blank" rel="noopener">Open Tailscale to allow Funnel</a>` : '');
+      // Check again (something may have changed), and keep the reason on screen: the re-render clears it.
+      const why = $('reachErr').innerHTML;
+      await loadReach(true).catch(() => {});
+      $('reachErr').innerHTML = why;
+      return;
+    }
+    reachRender(data);
+    toast('Public access is on');
+  } catch (e) { $('reachErr').textContent = e.message; }
+  finally { btn.disabled = false; }
+}
+async function reachTurnOff(btn) {
+  if (!confirm('Turn off public access? The public address stops working at once; people outside your network will need Tailscale again.')) return;
+  btn.disabled = true;
+  try {
+    const r = await api('/v1/public-access/off', { method: 'POST', body: {} });
+    if (r.warning) $('reachErr').textContent = r.warning;
+    toast('Public access is off');
+    const keep = $('reachErr').textContent;
+    await loadReach();
+    if (keep) $('reachErr').textContent = keep;
+  } catch (e) { $('reachErr').textContent = e.message; }
+  finally { btn.disabled = false; }
+}
+const REACH_KINDS = {
+  'public.signin': 'Signed in', 'public.second_factor': 'Second factor given', 'public.failure_burst': 'Too many failed sign-ins',
+  'public.signin_refused': 'Sign-in refused', 'public.on': 'Public access turned on', 'public.off': 'Public access turned off',
+  'public.paused': 'Public access paused (a safeguard is off)', 'signed_out_everywhere': 'Signed out everywhere', 'second_factor.reset': 'Second factor reset',
+};
+async function reachToggleLog() {
+  const el = $('reachLog');
+  if (!el.hidden) { el.hidden = true; return; }
+  el.hidden = false; el.textContent = 'Loading…';
+  try {
+    const { entries } = await api('/v1/security/log');
+    el.innerHTML = entries.length ? entries.map((e) => {
+      const d = e.detail || {};
+      const bits = [d.device, d.from && `from ${d.from}`, d.newDevice && 'new device', d.method, d.bucket, d.why].filter(Boolean).join(' · ');
+      return `<div class="pair" style="gap:8px;align-items:center"><span><span class="sub">${esc(new Date(e.at).toLocaleString())}</span> ${esc(REACH_KINDS[e.kind] || e.kind)}${e.who ? ` — <b>${esc(e.who)}</b>` : ''}${bits ? ` <span class="sub">${esc(bits)}</span>` : ''}</span>
+        ${e.kind === 'public.signin' && e.ownerId ? `<button data-owner="${esc(e.ownerId)}" data-who="${esc(e.who || '')}" onclick="reachSignOut(this)">Sign out everywhere</button>` : ''}</div>`;
+    }).join('') : '<span class="sub">Nothing yet.</span>';
+  } catch (e) { el.textContent = e.message; }
+}
+async function reachSignOut(btn) {
+  if (!confirm(`Sign ${btn.dataset.who || 'this person'} out on every device? Their browsers and command-line sign-ins all end; they sign in again with their password.`)) return;
+  btn.disabled = true;
+  try { await api('/v1/security/sign-out/' + encodeURIComponent(btn.dataset.owner), { method: 'POST', body: {} }); toast('Signed out everywhere'); }
+  catch (e) { toast(e.message); btn.disabled = false; }
+}
+
+/** A sign-in from a new device, told in the app: to the person, and to the machine's owner. */
+async function loadSecurityNotices() {
+  const el = $('secNotice');
+  if (!el || (appConfig.authMode ?? 'password') === 'password') return;
+  let r;
+  try { r = await api('/v1/security/notices', { _afterSecondFactor: true }); } catch { return; }
+  const n = (r.notices || [])[0];
+  el.hidden = !n;
+  if (!n) return;
+  const aboutMe = !n.aboutOwner || !r.canSignOutOthers || !/sign .* out everywhere/.test(n.text);
+  el.innerHTML = `<div>🔐 ${esc(n.text)}</div><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+    ${aboutMe ? '<button onclick="signOutEverywhere()">Sign out on every device</button>'
+      : `<button data-owner="${esc(n.aboutOwner)}" data-who="" onclick="reachSignOut(this)">Sign them out everywhere</button>`}
+    <button data-id="${esc(n.id)}" onclick="dismissSecurityNotice(this)">It was expected</button></div>`;
+}
+async function dismissSecurityNotice(btn) {
+  try { await api(`/v1/security/notices/${encodeURIComponent(btn.dataset.id)}/seen`, { method: 'POST', body: {} }); } catch { /* shown again next time */ }
+  await loadSecurityNotices();
+}
 
 // ---- auth ------------------------------------------------------------------
 
@@ -3570,7 +3960,7 @@ function showTabPane(name) {
     $(pane).hidden = !on;
     $('tab' + key[0].toUpperCase() + key.slice(1))?.setAttribute('aria-selected', String(on)); // v2-only panes have no classic tab
   }
-  if (name === 'access') void loadAccounts();
+  if (name === 'access') { void loadAccounts(); void loadSecondFactor(); void loadReach(true); }
   if (name === 'classes') loadClasses();
   if (name === 'conn') loadConnections();
   if (name === 'hosts') { loadHosts(); loadEmbedder(); }
@@ -10776,8 +11166,9 @@ async function refresh(withMeta) {
     if (!UI_V2) loadActivity();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
-    if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); loadFleetKeys(); }
-    if (withMeta && tailnet === null) void loadTailnet();
+    if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); loadFleetKeys(); void loadSecurityNotices(); }
+    // Tailscale set-up is the private address's business (the public one refuses it).
+    if (withMeta && tailnet === null && !appConfig.publicAddress) void loadTailnet();
     // Pairing checks hit docker exec — do them on a slower cadence.
     if (pairTick++ % 3 === 0) {
       // Only agents in a chat app can be knocked on: one with none answers 404.
@@ -12297,7 +12688,7 @@ function v2SetTheme(t) {
 const V2_BACK_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>';
 function v2ConvertPanels() {
   // recoveryDlg: a secret shown once stays until it is saved — no Back arrow.
-  const skip = new Set(['loginDlg', 'consoleDlg', 'v2AgentDlg', 'recoveryDlg']);
+  const skip = new Set(['loginDlg', 'consoleDlg', 'v2AgentDlg', 'recoveryDlg', 'sfDlg', 'backupDlg']);
   for (const d of document.querySelectorAll('dialog')) {
     if (skip.has(d.id) || d.classList.contains('v2panel')) continue;
     d.classList.add('v2panel');
