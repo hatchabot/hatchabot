@@ -98,6 +98,7 @@ import { pickIcons, validIcon, validIconColor, type IconCompleter } from '../orc
 import { ENV_NAME_RE, reservedEnvProblem } from '../orchestrator/envPolicy.js';
 import { registerMgmtChat } from './mgmtChat.js';
 import { registerReachRoutes } from './reachRoutes.js';
+import { ConsoleSockets, type ConsoleSocket } from './consoleSockets.js';
 import { isPublic, publicReplayHeaders } from './trust.js';
 import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
 import { scanWorkspacePaths } from '../orchestrator/dataPaths.js';
@@ -4663,6 +4664,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const sharedPathList = parsed.data.sharedPaths?.map((p) => p.trim()).filter(Boolean);
       if (sharedPathList) {
         const paths = sharedPathList;
+        // Giving an agent a folder of this machine is machine-level: at the
+        // public address it needs the second factor again, like the Folders
+        // routes (publicRoutes.ts), although the rest of this route does not.
+        // Taking folders away needs nothing more.
+        const had = new Set(agent.sharedPaths ?? []);
+        if (paths.some((p) => !had.has(p))) {
+          const again = app.publicAccess ? app.publicAccess.stepUpRefusal(req) : isPublic(req) ? { code: 403, body: { error: 'Not at the public address.' } } : undefined;
+          if (again) return reply.code(again.code).send(again.body);
+        }
         // Mounting host folders is the machine owner's privilege only — the
         // blocklist below is owner-blind, so on a shared box a second account
         // could otherwise read another user's files through their own agent.
@@ -5632,6 +5642,48 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   //
   // A guest's socket is not spliced blind: every message is read
   // (consoleProxy.ts spliceGuest) and a removal closes it (consoleAccess).
+  /**
+   * Every console socket that is open, re-judged by the rules that let it in
+   * (consoleSockets.ts): the session, at the public address the pass, its idle
+   * limit and the second factor, and the caller's standing on that agent.
+   */
+  const consoleSockets = new ConsoleSockets();
+  const consoleSocketProblem = (s: ConsoleSocket): string | undefined => {
+    const who = app.principalFromCookieHeader?.(s.cookie, s.https);
+    if (!who || who.ownerId !== s.ownerId) return 'signed out';
+    if (s.public) {
+      const why = app.publicAccess ? app.publicAccess.refuseOpenSocket(s.cookie, s.ownerId, s.lastActive) : 'no public gate';
+      if (why) return why;
+    }
+    const now = consoleCaller(s.ownerId, s.agentId);
+    if (!now || now.role !== s.role) return 'no longer allowed on this agent';
+    return undefined;
+  };
+  const revalidateConsoleSockets = (): number => consoleSockets.size() === 0 ? 0
+    : consoleSockets.sweep(consoleSocketProblem, (s, why) => {
+      app.log.warn({ agent: s.agentId, ownerId: s.ownerId, public: s.public, why }, 'console.socket_closed');
+      try { trace(s.agentId)('console.socket_closed', { userId: s.ownerId, why }); } catch { /* the trace is best effort */ }
+    });
+  app.decorate('consoleSockets', {
+    revalidate: revalidateConsoleSockets,
+    closeFor: (ownerId: string, opts: { publicOnly?: boolean } = {}) =>
+      consoleSockets.sweep((s) => (s.ownerId === ownerId && (!opts.publicOnly || s.public) ? 'second factor changed' : undefined),
+        (s, why) => app.log.warn({ agent: s.agentId, ownerId: s.ownerId, public: s.public, why }, 'console.socket_closed')),
+    size: () => consoleSockets.size(),
+  });
+  // After any request that changed something (a sign-out, a password, an
+  // account, a member's access, a factor): what it ended, it ends for open
+  // sockets too. Reads change nothing and are not worth a sweep.
+  app.addHook('onResponse', async (req, reply) => {
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS' || reply.statusCode >= 400) return;
+    revalidateConsoleSockets();
+  });
+  // …and for what no request announces: the public idle limit, a session that
+  // ran out, a change made by another process (the command line).
+  const consoleSweep = setInterval(() => { try { revalidateConsoleSockets(); } catch { /* next time */ } }, 30_000);
+  consoleSweep.unref?.();
+  app.addHook('onClose', async () => { clearInterval(consoleSweep); });
+
   app.server.on('upgrade', async (rawReq, socket, head) => {
     const url = rawReq.url ?? '';
     const m = /^\/v1\/agents\/([^/]+)\/ui\/?([^?]*)/.exec(url);
@@ -5694,6 +5746,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         ].join('\r\n'),
       );
       if (upHead?.length) upSocket.unshift(upHead);
+      // Remembered while it is open, so it can be closed when what let it in ends.
+      const entry: ConsoleSocket = {
+        ownerId: principal.ownerId, agentId: caller.agent.id, role: caller.role,
+        cookie: rawReq.headers.cookie, https: requestIsHttps(rawReq as RequestLike), public: isPublic(rawReq),
+        lastActive: Date.now(), close: () => { socket.destroy(); upSocket.destroy(); },
+      };
+      const forgetSocket = consoleSockets.add(entry);
+      socket.on('close', forgetSocket);
+      upSocket.on('close', forgetSocket);
+      socket.on('data', () => { entry.lastActive = Date.now(); });
       if (guest) {
         // Whatever the browser sent after its upgrade request goes through the filter too.
         if (head?.length) socket.unshift(head);

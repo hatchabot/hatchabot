@@ -154,6 +154,11 @@ interface ClientData { type: string; challenge: string; origin: string; crossOri
 function checkClientData(json: Buffer, want: { type: string; challenge: string; origins: string[] }): void {
   let c: ClientData;
   try { c = JSON.parse(json.toString('utf8')) as ClientData; } catch { return fail('client data is not JSON'); }
+  // `null`, a number or an array parse as JSON too; reading a field of null
+  // threw a TypeError, which the routes answered with a 500 that was not
+  // counted as a failed attempt (second review, 2026-10-01).
+  if (c === null || typeof c !== 'object' || Array.isArray(c)) return fail('client data is not an object');
+  if (typeof c.type !== 'string' || typeof c.challenge !== 'string' || typeof c.origin !== 'string') return fail('client data is malformed');
   if (c.type !== want.type) fail(`client data type is ${String(c.type)}`);
   const a = Buffer.from(String(c.challenge ?? '')), b = Buffer.from(want.challenge);
   if (a.length !== b.length || !timingSafeEqual(a, b)) fail('challenge does not match');

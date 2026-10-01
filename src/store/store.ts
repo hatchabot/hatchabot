@@ -626,6 +626,12 @@ export class Store {
         seen_at TEXT
       );
       CREATE INDEX IF NOT EXISTS security_notices_owner ON security_notices (owner_id, seen_at);
+      -- Public passes that were signed out (publicAccess.ts): a copy of the
+      -- cookie must not outlive "Sign out". id = session hash + when minted.
+      CREATE TABLE IF NOT EXISTS public_pass_revocations (
+        id TEXT PRIMARY KEY,
+        until INTEGER NOT NULL
+      );
     `);
     // Windows that were open when this version arrived move to the per-seat
     // table once; the old table is then left empty (its ALTER below still runs).
@@ -1879,6 +1885,15 @@ export class Store {
   deleteSecondFactors(ownerId: string, kind?: SecondFactorKind, opts: { unconfirmedOnly?: boolean } = {}): number {
     return this.db.prepare(`DELETE FROM second_factors WHERE owner_id = ?${kind ? ' AND kind = ?' : ''}${opts.unconfirmedOnly ? ' AND confirmed_at IS NULL' : ''}`)
       .run(...(kind ? [ownerId, kind] : [ownerId])).changes;
+  }
+
+  /** A public sign-in was signed out: remember its pass until no session cookie could still carry it. */
+  revokePublicPass(id: string, untilMs: number): void {
+    this.db.prepare(`INSERT INTO public_pass_revocations (id, until) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET until = excluded.until`).run(id.slice(0, 200), untilMs);
+    if (Math.random() < 0.05) this.db.prepare(`DELETE FROM public_pass_revocations WHERE until < ?`).run(Date.now());
+  }
+  revokedPublicPasses(nowMs: number): string[] {
+    return (this.db.prepare(`SELECT id FROM public_pass_revocations WHERE until >= ?`).all(nowMs) as Array<{ id: string }>).map((r) => r.id);
   }
 
   /** Has this person signed in from this browser before? Records it either way; true = it is new. */

@@ -2,9 +2,10 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Store } from '../store/store.js';
-import { approximateSource, isPublic, markPublicSocket, publicClientAddress } from './trust.js';
+import { addressBucket, approximateSource, isPublic, markPublicSocket, publicClientAddress } from './trust.js';
 import { publicRuleFor, type PublicRule } from './publicRoutes.js';
-import { cookieFromHeader, sessionValue } from './sessionCookie.js';
+import { cookieFromHeader, readSessionCookie, sessionValue } from './sessionCookie.js';
+import type { ConsoleSocketsApi } from './consoleSockets.js';
 import { adminAccounts, evaluateSafeguards, failingSafeguards, hostOf, publicConfig, usableFactors, type PublicConfig, type SafeguardCheck } from './safeguards.js';
 
 /**
@@ -43,7 +44,12 @@ export interface PublicAccessOptions {
   store?: Store;
   secret: Buffer;
   mode: 'password' | 'accounts' | 'identity';
-  throttle: { throttled(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): boolean; noteFailure(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): void };
+  throttle: {
+    throttled(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): boolean;
+    noteFailure(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): void;
+    /** A place in the count while a guess is being checked (auth.ts reserve); undefined: refused. */
+    reserve?(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): (() => void) | undefined;
+  };
 }
 
 /** What the gate cannot know by itself; the routes and the process supply them. */
@@ -69,7 +75,8 @@ export interface PublicStatus {
   checkedAt?: string;
 }
 
-interface Pass { sess: string; minted: number; seen: number; sfAt: number; used: boolean }
+/** `en`: until when this sign-in may add the person's FIRST second factor (0: it may not; see FIRST_FACTOR_PROOF). */
+interface Pass { sess: string; minted: number; seen: number; sfAt: number; used: boolean; en: number }
 
 export interface PublicAccessApi {
   config(): PublicConfig;
@@ -96,6 +103,21 @@ export interface PublicAccessApi {
    * why this public request does not count as signed in (undefined: it does).
    */
   refuseSession(rawReq: IncomingMessage, ownerId: string): string | undefined;
+  /**
+   * For a console socket that is already open (consoleSockets.ts re-judges
+   * them): why it must close now (undefined: it may stay). `cookie` is the
+   * Cookie header it was opened with; `lastActive` is when the browser last
+   * sent anything on it, which is what "idle" means for a socket.
+   */
+  refuseOpenSocket(cookie: string | undefined, ownerId: string, lastActive: number): string | undefined;
+  /**
+   * For a route whose class is signed-in but where ONE thing its body can ask
+   * for is machine-level (an agent's settings can name folders of this
+   * machine): at the public address, why this request must give the second
+   * factor again first, as a step-up route would be answered (undefined: go
+   * on; always undefined at the private address).
+   */
+  stepUpRefusal(req: FastifyRequest): { code: number; body: Record<string, unknown> } | undefined;
   /** The site passkeys are made for: the host of the public (or private HTTPS) address. */
   rpId(): string | undefined;
   /** Every https origin this Hatchabot is opened at on that host. */
@@ -108,6 +130,8 @@ export interface PublicAccessApi {
 declare module 'fastify' {
   interface FastifyInstance {
     publicAccess?: PublicAccessApi;
+    /** The open console sockets (routes.ts registers it with the console proxy). */
+    consoleSockets?: ConsoleSocketsApi;
   }
   interface FastifyRequest {
     /** Set by the gate for public requests: the rule that classified this route. */
@@ -153,6 +177,36 @@ export function publicCsp(mode: string): string {
 const CONSOLE_PATH = /^\/v1\/agents\/[^/]+\/ui(\/|$|\?)/;
 /** The largest body read from someone who has not finished signing in (a passkey answer is a few kilobytes). */
 const PRE_SIGNIN_BODY_MAX = 256 * 1024;
+/**
+ * …and how long that body may take to arrive. The listener allows a request
+ * ten minutes (a signed-in upload); a stranger sending a sign-in form one
+ * byte at a time held a connection for all of it (second review, 2026-10-01).
+ */
+const PRE_SIGNIN_READ_MS = 15_000;
+/**
+ * Connections the public listener holds at once; more are refused at accept.
+ * tailscaled opens one per request in flight, so this is "requests at once
+ * from the whole internet": far above a household's use, far below what would
+ * cost this process (and so the private address) its memory or its file
+ * descriptors.
+ */
+const PUBLIC_MAX_CONNECTIONS = 512;
+/** How long a signed-out pass is remembered: longer than any session cookie lasts (30 days, or HATCHABOT_SESSION_DAYS). */
+const revokedPassMs = (): number => (Math.max(30, Number(process.env.HATCHABOT_SESSION_DAYS) || 0) + 1) * 86_400_000;
+/**
+ * Adding your FIRST second factor at the public address. The password is all
+ * a person without a factor has shown, and it is exactly what a thief would
+ * have: if it were enough, whoever held a member's password would enrol their
+ * own phone, and "everyone has a second factor" would mean nothing for an
+ * account that had not got round to it (second review, 2026-10-01). So the
+ * sign-in must also have come, within this time, from something sent to the
+ * person out of band: an invitation or reset link, the Telegram recovery
+ * link, a recovery code, or (Google sign-in) a Google sign-in just made. At
+ * the private address nothing changes.
+ */
+const FIRST_FACTOR_PROOF = /^\/v1\/(local-accounts\/(claim|recover-with-code)|session)$/;
+const FIRST_FACTOR_WINDOW_MS = 30 * 60_000;
+const FIRST_FACTOR_NEEDS_LINK = 'Your password alone cannot add your first second factor at this address. Add it at the private address, or ask whoever runs this Hatchabot for a reset link and add it right after using the link.';
 const NOT_SERVING = 'Public access to this Hatchabot is paused. Open it at its private address.';
 const NOT_HERE = 'This is not available at the public address. Open Hatchabot at its private address for it.';
 
@@ -201,11 +255,13 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
   };
 
   const evaluate = async (): Promise<SafeguardCheck[]> => {
-    const cfg = publicConfig();
     const [autoUpgrade, funnelOnPrivatePort] = await Promise.all([
       probes.autoUpgrade().catch((err: unknown) => ({ ok: false, why: `Automatic upgrades could not be checked (${String((err as Error)?.message ?? err).slice(0, 80)}).` })),
       probes.funnelOnPrivatePort(mainPort()).catch(() => undefined),
     ]);
+    // Read AFTER the probes answered: a judgement that began while public
+    // access was on must not say "serving" once it has been turned off.
+    const cfg = publicConfig();
     const next = evaluateSafeguards({
       authMode: opts.mode,
       managed: !!process.env.HATCHABOT_MANAGED_BY?.trim(),
@@ -246,7 +302,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
   // ---- the pass ------------------------------------------------------------
 
   const encodePass = (p: Pass): string => {
-    const body = `1.${p.sess}.${p.minted}.${p.seen}.${p.sfAt}.${p.used ? 1 : 0}`;
+    const body = `1.${p.sess}.${p.minted}.${p.seen}.${p.sfAt}.${p.used ? 1 : 0}.${p.en}`;
     return `${body}.${sign(body)}`;
   };
   const decodePass = (raw: string | undefined): Pass | undefined => {
@@ -255,22 +311,40 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     if (i < 0) return undefined;
     const body = raw.slice(0, i), sig = raw.slice(i + 1), want = sign(body);
     if (sig.length !== want.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(want))) return undefined;
-    const [v, sess, minted, seen, sfAt, used] = body.split('.');
+    const [v, sess, minted, seen, sfAt, used, en] = body.split('.');
     if (v !== '1' || !sess) return undefined;
-    const n = [minted, seen, sfAt].map(Number);
+    const n = [minted, seen, sfAt, en].map(Number);
     if (n.some((x) => !Number.isFinite(x) || x < 0)) return undefined;
-    return { sess, minted: n[0]!, seen: n[1]!, sfAt: n[2]!, used: used === '1' };
+    return { sess, minted: n[0]!, seen: n[1]!, sfAt: n[2]!, used: used === '1', en: n[3]! };
   };
   const cookieHeaderOf = (req: { headers: Record<string, string | string[] | undefined> }): string | undefined => {
     const h = req.headers.cookie;
     return Array.isArray(h) ? h.join('; ') : h;
   };
-  /** The valid pass this request carries for the session it carries, or why there is none. */
-  const passOf = (req: { headers: Record<string, string | string[] | undefined> }, session: string | undefined): Pass | undefined => {
+  /**
+   * Passes that were signed out. The pass is a signed cookie, so a copy of it
+   * (taken from a shared computer before "Sign out" was pressed) would
+   * otherwise keep working, step-up included, for as long as it was kept
+   * refreshed. Signing out at the public address ends that sign-in for every
+   * copy: its name (session hash + when it was made, the same for every
+   * refreshed copy) is remembered here and in the database.
+   */
+  const revoked = new Set<string>();
+  const passName = (p: Pass): string => `${p.sess}.${p.minted}`;
+  try { for (const id of store?.revokedPublicPasses(Date.now()) ?? []) revoked.add(id); } catch { /* a database from before the table: none yet */ }
+  /** The pass this request carries, genuine, for the session it carries and not signed out. Says nothing about idleness. */
+  const boundPass = (req: { headers: Record<string, string | string[] | undefined> }, session: string | undefined): Pass | undefined => {
     const pass = decodePass(cookieFromHeader(cookieHeaderOf(req), PASS_COOKIE));
     if (!pass || !session) return undefined;
     const want = sha(session);
     if (pass.sess.length !== want.length || !timingSafeEqual(Buffer.from(pass.sess), Buffer.from(want))) return undefined;
+    if (revoked.has(passName(pass))) return undefined;
+    return pass;
+  };
+  /** The valid pass this request carries for the session it carries, or why there is none. */
+  const passOf = (req: { headers: Record<string, string | string[] | undefined> }, session: string | undefined): Pass | undefined => {
+    const pass = boundPass(req, session);
+    if (!pass) return undefined;
     const now = Date.now();
     if (pass.seen > now + 60_000 || now - pass.seen > publicConfig().idleMs) return undefined;
     return pass;
@@ -286,16 +360,28 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     // already given on the old one carries over. Nowhere else: a sign-in as
     // someone else must never inherit it.
     let sfAt = 0;
+    // A sign-in made with something sent out of band may add the person's first factor for a while.
+    let en = FIRST_FACTOR_PROOF.test(req.routeOptions?.url ?? '') ? now + FIRST_FACTOR_WINDOW_MS : 0;
     if (req.principal && req.routeOptions?.url === '/v1/local-accounts/:id/password') {
-      sfAt = passOf(req, sessionValue(req))?.sfAt ?? 0;
+      const old = passOf(req, sessionValue(req));
+      sfAt = old?.sfAt ?? 0;
+      en = old?.en ?? 0;
     }
-    setPass(reply, { sess: sha(value), minted: now, seen: now, sfAt, used: sfAt > 0 });
+    setPass(reply, { sess: sha(value), minted: now, seen: now, sfAt, used: sfAt > 0, en });
     if (!cookieFromHeader(cookieHeaderOf(req), DEVICE_COOKIE)) {
       reply.setCookie(DEVICE_COOKIE, randomBytes(16).toString('base64url'), { ...cookieOpts, maxAge: 400 * 86_400 });
     }
   };
   const sessionCleared = (req: FastifyRequest, reply: FastifyReply): void => {
-    if (isPublic(req)) reply.clearCookie(PASS_COOKIE, cookieOpts);
+    if (!isPublic(req)) return;
+    // Signed out here: this sign-in is over for every copy of its cookies, not only this browser's.
+    const pass = boundPass(req, sessionValue(req));
+    if (pass) {
+      revoked.add(passName(pass));
+      try { store?.revokePublicPass(passName(pass), Date.now() + revokedPassMs()); } catch (err) { app.log.error({ err: String(err) }, 'public.pass_revoke_failed'); }
+      app.consoleSockets?.revalidate();
+    }
+    reply.clearCookie(PASS_COOKIE, cookieOpts);
   };
 
   const secondFactorPassed = (req: FastifyRequest, reply: FastifyReply): void => {
@@ -357,7 +443,10 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
   let minute = 0;
   let total = 0;
   const perAddress = new Map<string, number>();
-  const overCeiling = (addr: string): boolean => {
+  const overCeiling = (visitor: string): boolean => {
+    // An IPv6 visitor is its /64, as for the sign-in limits: counted by the
+    // single address, one visitor had 2^64 counts of their own (second review).
+    const addr = addressBucket(visitor);
     const cfg = publicConfig();
     const m = Math.floor(Date.now() / 60_000);
     if (m !== minute) { minute = m; total = 0; perAddress.clear(); }
@@ -397,6 +486,14 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       if ((rule.cls === 'open' || rule.cls === 'second-step') && len > PRE_SIGNIN_BODY_MAX) {
         return reply.code(413).header('connection', 'close').send({ error: 'That request is too large.' });
       }
+      // …and a small body arrives promptly or the connection is closed.
+      if ((rule.cls === 'open' || rule.cls === 'second-step') && len > 0) {
+        const raw = req.raw;
+        const slow = setTimeout(() => { if (!raw.complete) raw.destroy(); }, PRE_SIGNIN_READ_MS);
+        slow.unref();
+        const done = (): void => clearTimeout(slow);
+        raw.once('end', done); raw.once('close', done); reply.raw.once('close', done); reply.raw.once('finish', done);
+      }
     }
   });
 
@@ -430,7 +527,10 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
         if (hasOwnerRights(principal.ownerId)) {
           return reply.code(403).send({ error: 'Your account has owner rights and no second factor. Add one at the private address (Settings → You → Second factor); until then it cannot be used here.', secondFactor: 'missing' });
         }
-        if (rule.cls === 'step-up' && rule.firstFactorOk) return;
+        if (rule.cls === 'step-up' && rule.firstFactorOk) {
+          if (rule.enrols && !(pass.en > now)) return reply.code(403).send({ error: FIRST_FACTOR_NEEDS_LINK, secondFactor: 'enrol-link' });
+          return;
+        }
         return reply.code(403).send({ error: 'This Hatchabot asks everyone for a second factor at the public address. Add one under Settings → You → Second factor.', secondFactor: 'enrol' });
       }
       if (need === 'yes' && pass.sfAt === 0) {
@@ -438,6 +538,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       }
       if (rule.cls === 'step-up') {
         if (need === 'no') {
+          if (rule.firstFactorOk && rule.enrols && !(pass.en > now)) return reply.code(403).send({ error: FIRST_FACTOR_NEEDS_LINK, secondFactor: 'enrol-link' });
           if (rule.firstFactorOk) return;
           return reply.code(403).send({ error: 'This needs a second factor at the public address. Add one under Settings → You → Second factor, or use the private address.', secondFactor: 'missing' });
         }
@@ -456,6 +557,31 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     if (!pass) return 'no public pass';
     // A sign-in used only for a socket is still a sign-in: recorded and announced like any other.
     if (!pass.used) firstUse({ headers }, ownerId, pass);
+    const need = secondFactorNeed(ownerId);
+    if (need === 'missing') return 'no second factor';
+    if (need === 'yes' && pass.sfAt === 0) return 'second factor not given';
+    return undefined;
+  };
+
+  const stepUpRefusal = (req: FastifyRequest): { code: number; body: Record<string, unknown> } | undefined => {
+    if (!isPublic(req)) return undefined;
+    const principal = req.principal;
+    const pass = principal && principal.via !== 'header' ? passOf(req, sessionValue(req)) : undefined;
+    if (!principal || !pass) return { code: 401, body: { error: 'auth required', publicSignIn: true } };
+    if (secondFactorNeed(principal.ownerId) !== 'yes') {
+      return { code: 403, body: { error: 'This needs a second factor at the public address. Add one under Settings → You → Second factor, or use the private address.', secondFactor: 'missing' } };
+    }
+    if (pass.sfAt === 0 || Date.now() - pass.sfAt > publicConfig().stepUpMs) return { code: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
+    return undefined;
+  };
+
+  const refuseOpenSocket = (cookie: string | undefined, ownerId: string, lastActive: number): string | undefined => {
+    if (!serving) return 'public access is not serving';
+    const headers = { cookie };
+    // The public listener is HTTPS by definition (sessionCookie.ts requestIsHttps).
+    const pass = boundPass({ headers }, readSessionCookie(cookie, true)?.value);
+    if (!pass) return 'signed out';
+    if (Date.now() - lastActive > publicConfig().idleMs) return 'idle';
     const need = secondFactorNeed(ownerId);
     if (need === 'missing') return 'no second factor';
     if (need === 'yes' && pass.sfAt === 0) return 'second factor not given';
@@ -538,12 +664,15 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     // sees a public socket and asks refuseUpgrade. Anything else is dropped.
     s.on('upgrade', (req, socket, head) => {
       if (!serving || !CONSOLE_PATH.test(req.url ?? '') || app.server.listenerCount('upgrade') === 0) { socket.destroy(); return; }
+      // Sockets count against the request ceilings like anything else.
+      if (overCeiling(publicClientAddress(req as never))) { socket.destroy(); return; }
       upgraded.add(socket as never);
       app.server.emit('upgrade', req, socket, head);
     });
     s.headersTimeout = 20_000;
     s.requestTimeout = 10 * 60_000;
     s.maxHeadersCount = 100;
+    s.maxConnections = PUBLIC_MAX_CONNECTIONS;
     try {
       await new Promise<void>((resolve, reject) => {
         s.once('error', reject);
@@ -566,7 +695,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     config: publicConfig, status, evaluate,
     setProbes: (p) => { probes = { ...probes, ...p }; },
     syncListener, stopListener, sessionMinted, sessionCleared, failureBurst, secondFactorPassed, secondFactorNeed, hasOwnerRights,
-    refuseSession, rpId, origins, afterSignIn, throttle: opts.throttle, secret,
+    refuseSession, refuseOpenSocket, stepUpRefusal, rpId, origins, afterSignIn, throttle: opts.throttle, secret,
   };
   app.decorate('publicAccess', api);
   return api;

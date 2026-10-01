@@ -31,6 +31,7 @@ const REACH = 'test/reach.test.ts';
 const GUARDS = 'test/safeguards.test.ts';
 const ROUTES = 'test/publicRoutes.test.ts';
 const REVIEW = 'test/publicReview.test.ts';
+const REVIEW2 = 'test/publicReview2.test.ts';
 
 /** name, file, the guard's exact text, what replaces it, the tests that must then fail. */
 const MUTANTS = [
@@ -103,6 +104,34 @@ const MUTANTS = [
   ['review: the pass and device cookies go to the gateway', 'src/api/sessionCookie.ts', "_(session|pub|device)$/;", "_session$/;", [REVIEW]],
   ['review: any factor counts as proof publicly', 'src/api/secondFactor.ts', "if (isPublic(req) && api.secondFactorNeed(ownerId) === 'yes') return true;", "if (isPublic(req) && real(ownerId).length > 0) return true;", [REVIEW]],
   ['review: passkey origins include unserved ports', 'src/api/publicAccess.ts', "const out = new Set<string>([`https://${host}${fp === 443 ? '' : `:${fp}`}`]);", "const out = new Set<string>([`https://${host}`, `https://${host}:8443`, `https://${host}:10000`]);", [REVIEW]],
+  // The second review (test/publicReview2.test.ts).
+  ['review 2: a burst of guesses outruns the sign-in limit', 'src/api/auth.ts', "    if (counted >= limitFor(k)) return undefined;\n", '', [REVIEW2]],
+  ['review 2: a guess in flight is not counted', 'src/api/auth.ts', "const counted = (f && now <= f.until ? f.n : 0) + (pending.get(k) ?? 0);", "const counted = (f && now <= f.until ? f.n : 0);", [REVIEW2]],
+  ['review 2: foreground Funnel sessions are not read', 'src/ops/tailnet.ts', "  for (const fg of Object.values(cfg.Foreground ?? {})) if (fg && typeof fg === 'object') read(fg);\n", '', [REVIEW2]],
+  ['review 2: a signed-out pass still works', 'src/api/publicAccess.ts', "    if (revoked.has(passName(pass))) return undefined;\n", '', [REVIEW2]],
+  ['review 2: signing out revokes nothing', 'src/api/publicAccess.ts', "      revoked.add(passName(pass));\n", '', [REVIEW2]],
+  ['review 2: a signed-out pass is not kept across a restart', 'src/api/publicAccess.ts', "try { store?.revokePublicPass(passName(pass), Date.now() + revokedPassMs()); }", "try { /* not kept */ }", [REVIEW2]],
+  ['review 2: open sockets are not re-judged after a change', 'src/api/routes.ts', "    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS' || reply.statusCode >= 400) return;\n    revalidateConsoleSockets();", "    return;", [REVIEW2]],
+  ['review 2: an open socket\'s session is not checked again', 'src/api/routes.ts', "    if (!who || who.ownerId !== s.ownerId) return 'signed out';\n", '', [REVIEW2]],
+  ['review 2: an open public socket is not held to the public rules', 'src/api/routes.ts', "      if (why) return why;\n    }\n    const now = consoleCaller", "    }\n    const now = consoleCaller", [REVIEW2]],
+  ['review 2: an open public socket never idles out', 'src/api/publicAccess.ts', "    if (Date.now() - lastActive > publicConfig().idleMs) return 'idle';\n", '', [REVIEW2]],
+  ['review 2: an open socket outlives the caller\'s standing on the agent', 'src/api/routes.ts', "    if (!now || now.role !== s.role) return 'no longer allowed on this agent';\n", '', [REVIEW2]],
+  ['review 2: a socket that cannot be re-judged is kept', 'src/api/consoleSockets.ts', "catch { why = 'could not be checked'; }", "catch { why = undefined; }", [REVIEW2]],
+  ['review 2: a factor reset leaves public consoles open', 'src/api/secondFactor.ts', "    app.consoleSockets?.closeFor(target, { publicOnly: true });\n", '', [REVIEW2]],
+  ['review 2: removing a factor leaves public consoles open', 'src/api/secondFactor.ts', "    app.consoleSockets?.closeFor(ownerId, { publicOnly: true });\n", '', [REVIEW2]],
+  ['review 2: a factor change is not on the record', 'src/api/secondFactor.ts', "try { store.recordSecurity(kind, ownerId, {", "try { void ({", [REVIEW2]],
+  ['review 2: a slow sign-in form is held for minutes', 'src/api/publicAccess.ts', "const slow = setTimeout(() => { if (!raw.complete) raw.destroy(); }, PRE_SIGNIN_READ_MS);", "const slow = setTimeout(() => {}, PRE_SIGNIN_READ_MS);", [REVIEW2]],
+  ['review 2: no limit on public connections', 'src/api/publicAccess.ts', "    s.maxConnections = PUBLIC_MAX_CONNECTIONS;\n", '', [REVIEW2]],
+  ['review 2: sockets are outside the request ceiling', 'src/api/publicAccess.ts', "      if (overCeiling(publicClientAddress(req as never))) { socket.destroy(); return; }\n", '', [REVIEW2]],
+  ['review 2: client data that is not an object crashes', 'src/api/webauthn.ts', "  if (c === null || typeof c !== 'object' || Array.isArray(c)) return fail('client data is not an object');\n", '', [REVIEW2]],
+  ['review 2: client data fields of any type', 'src/api/webauthn.ts', "  if (typeof c.type !== 'string' || typeof c.challenge !== 'string' || typeof c.origin !== 'string') return fail('client data is malformed');\n", '', [REVIEW2]],
+  ['review 2: host folders need no step-up publicly', 'src/api/routes.ts', "          if (again) return reply.code(again.code).send(again.body);\n", '', [REVIEW2]],
+  ['review 2: a stale judgement says serving after off', 'src/api/publicAccess.ts', "  const evaluate = async (): Promise<SafeguardCheck[]> => {\n    const [autoUpgrade, funnelOnPrivatePort] = await Promise.all([\n      probes.autoUpgrade().catch((err: unknown) => ({ ok: false, why: `Automatic upgrades could not be checked (${String((err as Error)?.message ?? err).slice(0, 80)}).` })),\n      probes.funnelOnPrivatePort(mainPort()).catch(() => undefined),\n    ]);\n    // Read AFTER the probes answered: a judgement that began while public\n    // access was on must not say \"serving\" once it has been turned off.\n    const cfg = publicConfig();", "  const evaluate = async (): Promise<SafeguardCheck[]> => {\n    const cfg = publicConfig();\n    const [autoUpgrade, funnelOnPrivatePort] = await Promise.all([\n      probes.autoUpgrade().catch((err: unknown) => ({ ok: false, why: `Automatic upgrades could not be checked (${String((err as Error)?.message ?? err).slice(0, 80)}).` })),\n      probes.funnelOnPrivatePort(mainPort()).catch(() => undefined),\n    ]);\n    // Read AFTER the probes answered: a judgement that began while public\n    // access was on must not say \"serving\" once it has been turned off.", [REVIEW2]],
+  ['review 2: a password alone adds the first factor publicly', 'src/api/publicAccess.ts', "          if (rule.firstFactorOk && rule.enrols && !(pass.en > now)) return reply.code(403).send({ error: FIRST_FACTOR_NEEDS_LINK, secondFactor: 'enrol-link' });\n", '', [SF, REVIEW]],
+  ['review 2: a password alone adds the first factor publicly (everyone must have one)', 'src/api/publicAccess.ts', "          if (rule.enrols && !(pass.en > now)) return reply.code(403).send({ error: FIRST_FACTOR_NEEDS_LINK, secondFactor: 'enrol-link' });\n", '', [TRUST]],
+  ['review 2: any sign-in may add the first factor publicly', 'src/api/publicAccess.ts', "let en = FIRST_FACTOR_PROOF.test(req.routeOptions?.url ?? '') ? now + FIRST_FACTOR_WINDOW_MS : 0;", "let en = now + FIRST_FACTOR_WINDOW_MS;", [SF, TRUST]],
+  ['review 2: the first-factor window never closes', 'src/api/publicAccess.ts', "? now + FIRST_FACTOR_WINDOW_MS : 0;", "? now + 400 * 86_400_000 : 0;", [SF]],
+  ['review 2: the request ceiling counts single IPv6 addresses', 'src/api/publicAccess.ts', "const addr = addressBucket(visitor);", "const addr = visitor;", [REVIEW2]],
   ['switch: off leaves Funnel on', 'src/api/reachRoutes.ts', "      const r = await funnelOff(cfg.port, cfg.funnelPort);\n      if (!r.ok) { funnelError = r.error; command = r.command; }", "", [REACH]],
   ['switch: off leaves the listener open', 'src/api/reachRoutes.ts', "    else await api.stopListener();", "", [REACH]],
   ['switch: invited-only can be turned off while on', 'src/api/reachRoutes.ts', "if (!on && api.config().on) return reply.code(409)", "if (false) return reply.code(409)", [REACH]],
@@ -141,7 +170,7 @@ try {
     } else { console.log(`✓ ${name}`); killed++; }
   }
   // The copy must pass untouched, or "killed" means nothing.
-  const base = spawnSync('npx', ['vitest', 'run', GATE, TRUST, SF, NOTICES, REACH, GUARDS, ROUTES, REVIEW], { cwd: work, env, encoding: 'utf8', timeout: 600_000 });
+  const base = spawnSync('npx', ['vitest', 'run', GATE, TRUST, SF, NOTICES, REACH, GUARDS, ROUTES, REVIEW, REVIEW2], { cwd: work, env, encoding: 'utf8', timeout: 600_000 });
   if (base.status !== 0) { console.log('✗ the unmutated copy does not pass its own tests: every result above is void'); survived++; }
   console.log(`${killed} killed, ${survived} survived, ${skipped} not counted`);
   process.exitCode = survived ? 1 : 0;

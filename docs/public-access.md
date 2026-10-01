@@ -82,15 +82,15 @@ the log says which.
 | | Safeguard | What enforces it | What it stops |
 |---|---|---|---|
 | a | A sign-in per person: `accounts` or `identity` mode. The shared-password mode is refused. | `evaluateSafeguards`; the gate refuses everything public in password mode | One guessable secret guarding everything |
-| b | A second factor for everyone with owner rights: a passkey or an authenticator app, with one-time backup codes. Members may add one; with `HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL=1` they must. | Enrolment is checked before the switch; at the public address the gate asks for it at sign-in and again before sensitive actions (`src/api/publicAccess.ts`, `secondFactor.ts`) | A stolen, guessed or phished password; a Google session on a borrowed laptop |
+| b | A second factor for everyone with owner rights: a passkey or an authenticator app, with one-time backup codes. Members may add one; with `HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL=1` they must (recommended: see "Members without a second factor"). | Enrolment is checked before the switch; at the public address the gate asks for it at sign-in and again before sensitive actions (`src/api/publicAccess.ts`, `secondFactor.ts`) | A stolen, guessed or phished password; a Google session on a borrowed laptop |
 | c | Only invited people. At the public address only existing accounts and pending invitations can sign in; nobody registers there; the machine cannot be claimed there. | The `HATCHABOT_PUBLIC_INVITED_ONLY` switch must be on; the route table refuses first-run routes; `/v1/session` refuses a Google account this install has never met; the owner's first claim is refused | Strangers becoming accounts; a fresh machine being taken from the internet |
 | d | Public traffic on its own listener, never trusted as local. | `trust.ts`; the listener binds `127.0.0.1` only; safeguard fails if Funnel points at the private port, if the ports clash, if `HATCHABOT_ALLOW_OWNER_HEADER` is on, or (while public access is on) if Funnel's configuration cannot be read | A forged or missing header upgrading a stranger to "this machine" |
 | e | Only what outsiders need is served there. Every route has a class; an unclassified route is refused. | `src/api/publicRoutes.ts`, enforced in one hook before the handler; `test/publicRoutes.test.ts` sweeps every registered route | Machine-level routes, and any route added later, being reachable by accident |
-| f | Limits and lockouts keyed for public traffic. | `auth.ts` (`throttleKeys`): per address, per account with a lockout that doubles each time (one window, two, four, up to a day), a ceiling on all public failures together; request ceilings per address and overall | Password and code guessing; one visitor locking the owner out of the private address |
+| f | Limits and lockouts keyed for public traffic. | `auth.ts` (`throttleKeys`): per address, per account with a lockout that doubles each time (one window, two, four, up to a day), a ceiling on all public failures together; a guess still being checked counts as a miss until it is answered (`reserve`), so a burst cannot outrun the limit; request ceilings per address and overall | Password and code guessing; one visitor locking the owner out of the private address |
 | g | A notice on a sign-in from a new device, to the person and to the owner. | The gate, on the first use of a public sign-in from a browser it has not seen: in the app (home screen) and on Telegram when linked, with the browser, the approximate source, and "sign out everywhere" | A break-in going unnoticed |
 | h | Stricter sessions there. | `__Host-` cookies always; the public pass ends after `HATCHABOT_PUBLIC_IDLE_MINUTES` without use (12 hours; the session cookie alone lasts 30 days); step-up for sensitive actions; HSTS, a content security policy, `frame-ancestors`, `nosniff`, `Referrer-Policy: no-referrer` | A session left open; framing; a cookie handed out without `Secure` |
 | i | Automatic upgrades on the `stable` channel. | `src/ops/autoUpgrade.ts`: the `hatchabot-follow-channel` timer is enabled, running, follows `stable`, and the machine is not pinned to a version | A public machine that never takes a security fix |
-| j | A record of every public sign-in, failure burst, and the switch going on or off. | `security_log` in the database; Settings → You → Reach it from anywhere → Record | Not knowing what happened afterwards |
+| j | A record of every public sign-in, failure burst, second factor added, removed or reset, and the switch going on or off. | `security_log` in the database; Settings → You → Reach it from anywhere → Record | Not knowing what happened afterwards |
 
 ### The second factor
 
@@ -117,7 +117,17 @@ the log says which.
   otherwise be all it takes to reach the machine's settings from the internet.
 - **Changing your factors** needs proof beyond the session: your current
   password at the private address; at the public address, the second factor
-  given in the last few minutes (or your password, when adding your first).
+  given in the last few minutes.
+- **Adding your first factor at the public address** needs more than your
+  password, because the password is exactly what a thief would have: whoever
+  held it would enrol their own phone, and the account would be theirs. The
+  sign-in must also have come, in the last half hour, from something sent to
+  you out of band: an invitation or reset link from the owner, the Telegram
+  recovery link, your recovery code, or (with Google sign-in) a Google
+  sign-in just made. Then your password is asked for as well. Otherwise add
+  it at the private address. So with `HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL=1`
+  a member who has no factor yet and cannot reach the private address asks
+  the owner for a reset link, and adds one right after using it.
 - **A lost phone.** Backup codes get you in. Without them: sign in at the
   private address, where no second factor is asked; the owner can also clear
   anyone's factors (`hatchabot second-factor reset <user>`). Clearing the
@@ -138,7 +148,16 @@ public address answers "sign in". So:
   (cookies are shared between ports of one host, so the cookie itself would);
 - a public session ends after the idle time, long before the session cookie;
 - the second factor given by one person is never inherited by a sign-in as
-  another.
+  another;
+- **"Sign out" at the public address ends that sign-in for every copy of its
+  cookies**, not only in the browser where it was pressed. The pass is a
+  signed cookie, so a copy taken from a shared computer would otherwise keep
+  working (step-up included) for as long as it was kept refreshed. A signed-out
+  pass is remembered in the database (`public_pass_revocations`) until no
+  session cookie could still carry it, so a restart does not bring it back.
+  The session cookie itself is unchanged at the private address, where plain
+  "Sign out" has always only forgotten this browser's copy; "Sign out on
+  every device" ends it everywhere.
 
 ## Route classes at the public address
 
@@ -205,8 +224,12 @@ has no rule.
 | never | Resetting someone's second factor |
 
 Before sign-in (open and second-step routes) a body over 256 KB is refused
-by its declared length and never read, and a body with no declared length is
-refused on every route. `/v1/config` leaves out the private address and the
+by its declared length and never read, a body with no declared length is
+refused on every route, and a body that has not arrived within 15 seconds
+closes the connection (the listener otherwise allows a request ten minutes,
+for a signed-in upload). The public listener holds at most 512 connections
+at once; more are refused at the door, so a flood there cannot take the
+process's memory or file descriptors, and with them the private address. `/v1/config` leaves out the private address and the
 provider's notice there.
 
 Reads of lists that show no credential are **signed-in**, so the app's home
@@ -215,10 +238,30 @@ write under a machine-level group, and every read that reveals a credential,
 is **step-up**. Rights are unchanged by any of this: a member is still refused
 the machine's routes by the routes themselves.
 
+One signed-in route has a machine-level part: an agent's settings
+(`PATCH /v1/agents/:id`) can name folders of this machine for it to read. That
+part alone asks for the second factor again at the public address, like the
+Folders routes; taking folders away, and the rest of the settings, do not.
+
 The console's WebSocket is held to the same rules as a signed-in request (the
-pass, its idle limit, the second factor), and so is the session `/v1/join`
-reads for a web-chat invitation. Every open socket is closed when a safeguard
-goes off and when public access is turned off.
+pass, its idle limit, the second factor), counts against the request
+ceilings, and so is the session `/v1/join` reads for a web-chat invitation.
+Every open socket is closed when a safeguard goes off and when public access
+is turned off.
+
+**An open console does not outlive what let it in** (`src/api/consoleSockets.ts`).
+A WebSocket is checked when it opens and is then two sockets spliced together,
+so every open one is remembered with the cookies it was opened with and judged
+again by the same rules: after every request that changed something, and
+every thirty seconds. It is closed when its session is over ("Sign out on
+every device", the owner signing that person out, a password change or
+reset, the account disabled or removed, the session's own end); at the public
+address also when its sign-in was signed out, when nothing has been sent on
+it for the idle time, when the person's second factor is reset or one is
+removed, and when they no longer have the standing on that agent that opened
+it (the agent changed hands, a guest's web chat was switched off). This holds
+at the private address too, for the session and the standing. A socket that
+cannot be judged (the database does not answer) is closed.
 
 ## Turning it on and off
 
@@ -291,7 +334,9 @@ Settings: the "Public access" group of `.env` (`src/config/envCatalog.ts`).
   anyone. This is the reason for safeguard i.
 - **Denial of service.** The ceilings bound what one address and all visitors
   together can ask for; they do not stop a flood from many addresses, and
-  Funnel's own limits are Tailscale's. Locking people out of the **public**
+  Funnel's own limits are Tailscale's. The public listener's connection limit
+  and the 15-second limit on a sign-in form keep such a flood from reaching
+  the private address; they do not keep the public one usable under it. Locking people out of the **public**
   address is cheap: someone who knows a username can keep that account
   locked there, and about a hundred failed sign-ins per fifteen minutes from
   a handful of addresses trip the ceiling that refuses every public sign-in
@@ -306,8 +351,13 @@ Settings: the "Public access" group of `.env` (`src/config/envCatalog.ts`).
   a shell in that agent's container. "Sign out on every device"
   ends it.
 - **Members without a second factor.** By default only accounts with owner
-  rights must have one. A member's password alone opens their own agents.
-  `HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL=1` asks everyone.
+  rights must have one. A member's password alone opens their own agents,
+  and an agent's console is a shell in its container on this machine: with
+  the default, one reused or phished member password is code running on your
+  machine, from the internet. `HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL=1` asks
+  everyone, and the second review recommends it for any install with members
+  who have agents of their own (it is not the default yet: a product
+  decision).
 - **Invitation codes.** `/join/<code>` pages and account invitations work by
   code alone, by design, and are now reachable from the internet. The codes
   are random and expire; they are still bearer links: whoever holds one can
@@ -354,3 +404,10 @@ against Tailscale itself:
 8. Automatic-upgrade detection against a real installed channel timer.
 9. Behaviour across a restart with public access on (the listener reopening,
    Funnel's entry persisting), and across a Tailscale restart.
+10. That a Funnel started by hand without `--bg` (`tailscale funnel 8080`)
+    appears in `tailscale funnel status --json` under `Foreground`, as
+    Tailscale's source (`ipn.ServeConfig`) says: safeguard d and the doctor
+    read it there since the second review.
+11. That tailscaled opens one connection to the public listener per request in
+    flight (the 512-connection limit assumes it), and that a console's
+    WebSocket through Funnel stays up while idle (Funnel's own timeouts).

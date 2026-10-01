@@ -223,11 +223,22 @@ const DUMMY_SALT = 'no-account';
 export function registerAccountRoutes(
   app: FastifyInstance,
   deps: AccountsAuthDeps,
-  guard: { throttled: (req: FastifyRequest, who?: string) => boolean; noteFailure: (req: FastifyRequest, who?: string) => void; clearFailures?: (who: string) => void },
+  guard: {
+    throttled: (req: FastifyRequest, who?: string) => boolean; noteFailure: (req: FastifyRequest, who?: string) => void; clearFailures?: (who: string) => void;
+    /** auth.ts reserve: a place in the count while a guess is being checked (undefined: refused). */
+    reserve?: (req: FastifyRequest, who?: string) => (() => void) | undefined;
+  },
   opts: { bootstrap?: boolean } = {},
 ): void {
   const { store, secret } = deps;
   const allowBootstrap = opts.bootstrap !== false;
+  /**
+   * Before a secret is checked off the event loop (scrypt): take a place in
+   * the count, so a burst of guesses cannot all slip past the limit while the
+   * first ones are still being verified. undefined: over the limit.
+   */
+  const guessSlot = (req: FastifyRequest, who?: string): (() => void) | undefined =>
+    guard.reserve ? guard.reserve(req, who) : guard.throttled(req, who) ? undefined : () => {};
   /** A new recovery code for an account: stored as a hash, returned once. */
   const issueRecoveryCode = async (id: string): Promise<string> => {
     const code = newRecoveryCode();
@@ -397,7 +408,8 @@ export function registerAccountRoutes(
   app.post<{ Body: { username?: string; password?: string } }>('/v1/login', async (req, reply) => {
     const username = (req.body?.username ?? '').trim();
     // Counted per client AND per account: hopping addresses does not reset it.
-    if (guard.throttled(req, username || undefined)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+    const release = guessSlot(req, username || undefined);
+    if (!release) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     const password = req.body?.password ?? '';
     const account = username ? store.localAccountByUsername(username) : undefined;
     // One message for every failure: a different answer for "no such user"
@@ -405,13 +417,15 @@ export function registerAccountRoutes(
     // …and one scrypt whatever the account: skipping it for a missing,
     // disabled or pending one made the answer ~20 ms faster (night review).
     const usable = !!account && !account.disabled && account.pwHash !== '';
-    const verified = await verifyPassword(password, usable ? account!.pwHash : DUMMY_HASH, usable ? account!.pwSalt : DUMMY_SALT);
+    const verified = await verifyPassword(password, usable ? account!.pwHash : DUMMY_HASH, usable ? account!.pwSalt : DUMMY_SALT).catch((err: unknown) => { release(); throw err; });
     const ok = usable && verified;
     if (!account || !ok) {
       guard.noteFailure(req, username || undefined);
+      release(); // after the miss is counted: the place is never free while the miss is uncounted
       await new Promise((r) => setTimeout(r, 400));
       return reply.code(401).send({ error: 'Wrong username or password' });
     }
+    release();
     setSessionCookie(reply, req, mintSession(secret, account.id, account.pwHash, Date.now() + TTL_MS, store.sessionEpoch(account.id)));
     deps.onAuthenticated?.({ ownerId: account.id, via: 'password', email: account.username.includes('@') ? account.username : undefined });
     return { ok: true, id: account.id, username: account.username, hostOwner: account.hostOwner };
@@ -435,9 +449,12 @@ export function registerAccountRoutes(
   app.post<{ Body: { current?: string } }>('/v1/local-accounts/me/recovery-code', async (req, reply) => {
     const me = store.localAccount(req.principal?.ownerId ?? '');
     if (!me) return reply.code(401).send({ error: 'Sign in first.' });
-    if (guard.throttled(req, me.username)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
-    if (!(await verifyPassword(req.body?.current ?? '', me.pwHash, me.pwSalt))) {
-      guard.noteFailure(req, me.username);
+    const release = guessSlot(req, me.username);
+    if (!release) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+    const right = await verifyPassword(req.body?.current ?? '', me.pwHash, me.pwSalt).catch((err: unknown) => { release(); throw err; });
+    if (!right) guard.noteFailure(req, me.username);
+    release();
+    if (!right) {
       return reply.code(401).send({ error: 'Current password is wrong.' });
     }
     const recoveryCode = await issueRecoveryCode(me.id);
@@ -457,24 +474,27 @@ export function registerAccountRoutes(
     // bad passwords and so lock its owner out of recovery too (night review).
     // A code is 20 characters of randomness, so guessing it is not the risk
     // the account bucket exists for.
-    if (guard.throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+    const release = guessSlot(req);
+    if (!release) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     const started = Date.now();
     const code = normalizeRecoveryCode(String(req.body?.code ?? ''));
     const password = String(req.body?.password ?? '');
     const problem = passwordProblem(password);
-    if (problem) return reply.code(400).send({ error: problem });
+    if (problem) { release(); return reply.code(400).send({ error: problem }); }
     const account = username && username.length <= 64 ? store.localAccountByUsername(username) : undefined;
     // Always pay for one scrypt, so a missing account or code answers as slowly
     // as a wrong code does.
     const hash = account?.recoveryHash ?? '00'.repeat(32);
     const salt = account?.recoverySalt ?? 'no-account';
-    const match = (await verifyPassword(code, hash, salt)) && !!account?.recoveryHash && !account.disabled && code.length === 20;
+    const match = (await verifyPassword(code, hash, salt).catch((err: unknown) => { release(); throw err; })) && !!account?.recoveryHash && !account.disabled && code.length === 20;
     if (!account || !match) {
       guard.noteFailure(req);
+      release();
       const left = 900 - (Date.now() - started);
       if (left > 0) await new Promise((r) => setTimeout(r, left));
       return reply.code(401).send({ error: 'That username and recovery code do not match.' });
     }
+    release();
     const pw = await hashPassword(password);
     store.transact(() => {
       store.setLocalAccountPassword(account.id, pw.hash, pw.salt);
@@ -560,11 +580,14 @@ export function registerAccountRoutes(
       const password = req.body?.password ?? '';
       const problem = passwordProblem(password);
       if (problem) return reply.code(400).send({ error: problem });
-      if (self && guard.throttled(req, target.username)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
-      if (self && !(await verifyPassword(req.body?.current ?? '', target.pwHash, target.pwSalt))) {
-        // Counted against the account too: it was checked there but never
-        // counted, so a hijacked session could guess without limit (night review).
-        guard.noteFailure(req, target.username);
+      const release = self ? guessSlot(req, target.username) : () => {};
+      if (!release) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+      const right = !self || await verifyPassword(req.body?.current ?? '', target.pwHash, target.pwSalt).catch((err: unknown) => { release(); throw err; });
+      // Counted against the account too: it was checked there but never
+      // counted, so a hijacked session could guess without limit (night review).
+      if (!right) guard.noteFailure(req, target.username);
+      release();
+      if (!right) {
         return reply.code(401).send({ error: 'Current password is wrong.' });
       }
       const { hash, salt } = await hashPassword(password);

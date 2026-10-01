@@ -276,21 +276,35 @@ export interface FunnelStatus { readable: boolean; entries: FunnelEntry[] }
 /** `tailscale funnel status --json`: every host:port the internet can reach, and where each lands on this machine. */
 export function parseFunnelStatus(raw: string | undefined): FunnelStatus {
   if (raw === undefined) return { readable: false, entries: [] };
-  let cfg: {
+  interface ServeConfig {
     AllowFunnel?: Record<string, boolean>;
     Web?: Record<string, { Handlers?: Record<string, { Proxy?: string; Path?: string; Text?: string }> }>;
     TCP?: Record<string, { TCPForward?: string }>;
-  };
-  try { cfg = JSON.parse(raw.trim() || '{}') ?? {}; } catch { return { readable: false, entries: [] }; }
-  const entries: FunnelEntry[] = [];
-  for (const [hostPort, allowed] of Object.entries(cfg.AllowFunnel ?? {})) {
-    if (!allowed) continue;
-    const port = Number(hostPort.split(':').pop());
-    const targets = Object.values(cfg.Web?.[hostPort]?.Handlers ?? {}).map((h) => h.Proxy ?? (h.Path ? `path:${h.Path}` : 'text')).filter(Boolean);
-    const fwd = cfg.TCP?.[String(port)]?.TCPForward;
-    if (fwd) targets.push(`tcp://${fwd}`);
-    entries.push({ hostPort, port, targets });
+    /**
+     * Sessions started WITHOUT --bg (`tailscale funnel 8080`, the form its own
+     * help shows first): each is a whole configuration of its own, kept under
+     * its session id for as long as that command runs. Reading only the top
+     * level missed exactly the hand-made Funnel safeguard d exists to notice
+     * (second review, 2026-10-01).
+     */
+    Foreground?: Record<string, ServeConfig | null>;
   }
+  let cfg: ServeConfig;
+  try { cfg = JSON.parse(raw.trim() || '{}') ?? {}; } catch { return { readable: false, entries: [] }; }
+  if (typeof cfg !== 'object' || Array.isArray(cfg)) return { readable: false, entries: [] };
+  const entries: FunnelEntry[] = [];
+  const read = (c: ServeConfig): void => {
+    for (const [hostPort, allowed] of Object.entries(c.AllowFunnel ?? {})) {
+      if (!allowed) continue;
+      const port = Number(hostPort.split(':').pop());
+      const targets = Object.values(c.Web?.[hostPort]?.Handlers ?? {}).map((h) => h.Proxy ?? (h.Path ? `path:${h.Path}` : 'text')).filter(Boolean);
+      const fwd = c.TCP?.[String(port)]?.TCPForward;
+      if (fwd) targets.push(`tcp://${fwd}`);
+      entries.push({ hostPort, port, targets });
+    }
+  };
+  read(cfg);
+  for (const fg of Object.values(cfg.Foreground ?? {})) if (fg && typeof fg === 'object') read(fg);
   return { readable: true, entries };
 }
 

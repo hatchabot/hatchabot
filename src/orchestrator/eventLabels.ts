@@ -88,6 +88,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'webchat.needs_rebuild': 'web chat refused a guest: rebuild it to turn on guest rights',
   'console.guest_opened': 'a web chat guest opened its chat (the OpenClaw console, their own conversations)',
   'console.guest_refused': 'a web chat guest was refused part of the console (owner only)',
+  'console.socket_closed': 'an open console was closed: what let it in had ended (signed out, idle, second factor changed, access taken away)',
   'console.names_synced': 'the people who may use its console were brought up to date on its gateway',
   'console.owner_role': "its owner was given the owner role on its console",
   'console.unavailable': 'its console could not be opened with names (see the reason)',

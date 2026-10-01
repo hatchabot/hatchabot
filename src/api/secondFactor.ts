@@ -76,6 +76,10 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     if (!id || req.principal?.via === 'header') { void reply.code(401).send({ error: 'auth required' }); return undefined; }
     return id;
   };
+  /** A factor added or removed goes on the security record, with where it was done: the owner can see a factor they did not add. */
+  const recordChange = (req: FastifyRequest, kind: 'second_factor.added' | 'second_factor.removed', ownerId: string, what: string): void => {
+    try { store.recordSecurity(kind, ownerId, { method: what, ...(isPublic(req) ? { from: publicClientAddress(req), at: 'the public address' } : { at: 'the private address' }) }); } catch { /* the record must not break the change */ }
+  };
   const nameOf = (ownerId: string): string => store.localAccount(ownerId)?.username ?? store.emailForOwner(ownerId) ?? 'you';
   const real = (ownerId: string): SecondFactorRow[] => store.listSecondFactors(ownerId).filter((f) => f.kind !== 'backup');
   const backupLeft = (ownerId: string): number => store.listSecondFactors(ownerId, { kind: 'backup' }).length;
@@ -87,9 +91,14 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     // (One the gate counts HERE: a passkey made for another address was never asked for.)
     if (isPublic(req) && api.secondFactorNeed(ownerId) === 'yes') return true;
     if (!local) return true; // a Google account: Google is its password
-    if (api.throttle.throttled(req, local.username)) { void reply.code(429).send({ error: 'Too many failed attempts — try again later.' }); return false; }
-    if (typeof current !== 'string' || !current || local.pwHash === '' || !(await verifyPassword(current, local.pwHash, local.pwSalt))) {
-      api.throttle.noteFailure(req, local.username);
+    // A place in the count while the password is checked: a burst cannot outrun the limit (auth.ts reserve).
+    const release = api.throttle.reserve ? api.throttle.reserve(req, local.username) : api.throttle.throttled(req, local.username) ? undefined : () => {};
+    if (!release) { void reply.code(429).send({ error: 'Too many failed attempts — try again later.' }); return false; }
+    const right = typeof current === 'string' && !!current && local.pwHash !== ''
+      && await verifyPassword(current, local.pwHash, local.pwSalt).catch((err: unknown) => { release(); throw err; });
+    if (!right) api.throttle.noteFailure(req, local.username);
+    release();
+    if (!right) {
       void reply.code(401).send({ error: 'Current password is wrong.', needsPassword: true });
       return false;
     }
@@ -239,6 +248,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     store.confirmSecondFactor(row.id);
     store.advanceTotpStep(row.id, step);
     app.log.warn({ ownerId }, 'second_factor.totp_added');
+    recordChange(req, 'second_factor.added', ownerId, 'totp');
     api.secondFactorPassed(req, reply);
     void api.evaluate().catch(() => {});
     return { ok: true, ...(first || backupLeft(ownerId) === 0 ? { backupCodes: newBackupCodes(ownerId) } : {}) };
@@ -283,6 +293,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
       const label = String(req.body?.label ?? '').trim().slice(0, 60) || 'Passkey';
       store.insertSecondFactor({ id: `sf-${randomUUID()}`, ownerId, kind: 'passkey', label, credentialId: cred.credentialId, rpId, data: JSON.stringify(cred.publicKey), signCount: cred.signCount });
       app.log.warn({ ownerId, rpId, backedUp: cred.backedUp }, 'second_factor.passkey_added');
+      recordChange(req, 'second_factor.added', ownerId, 'passkey');
       api.secondFactorPassed(req, reply);
       void api.evaluate().catch(() => {});
       return { ok: true, label, ...(first || backupLeft(ownerId) === 0 ? { backupCodes: newBackupCodes(ownerId) } : {}) };
@@ -316,6 +327,9 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     store.deleteSecondFactor(ownerId, row.id);
     if (real(ownerId).length === 0) store.deleteSecondFactors(ownerId, 'backup');
     app.log.warn({ ownerId, kind: row.kind }, 'second_factor.removed');
+    recordChange(req, 'second_factor.removed', ownerId, row.kind);
+    // What was proved with the old set of factors is void: consoles opened at the public address close.
+    app.consoleSockets?.closeFor(ownerId, { publicOnly: true });
     void api.evaluate().catch(() => {});
     return { ok: true };
   });
@@ -338,6 +352,8 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     const removed = store.deleteSecondFactors(target);
     try { store.recordSecurity('second_factor.reset', target, { by: ownerId, removed }); } catch { /* best effort */ }
     app.log.warn({ by: ownerId, target, removed }, 'second_factor.reset');
+    // A reset is for a lost phone or a suspicion: either way, that person's open public consoles end now.
+    app.consoleSockets?.closeFor(target, { publicOnly: true });
     await api.evaluate().catch(() => {});
     return { ok: true, removed, publicAccess: api.status().serving ? 'serving' : api.config().on ? 'paused' : 'off' };
   });

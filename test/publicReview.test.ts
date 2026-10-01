@@ -240,7 +240,7 @@ describe('smaller things', () => {
     expect(h.app.publicAccess!.origins().sort()).toEqual([`https://${PUBLIC_HOST}`, `https://${PUBLIC_HOST}:8443`]);
   });
 
-  it('a member whose only passkey is for another address is asked for the password to add a factor here', async () => {
+  it('a member whose only passkey is for another address adds a factor here as a first one: a link, and the password', async () => {
     h = await publicApp();
     await h.addAccount('owner', { owner: true });
     const m = await h.addAccount('member');
@@ -248,7 +248,12 @@ describe('smaller things', () => {
     await h.app.publicAccess!.evaluate();
     const jar = await h.signIn('member', m.password); // not asked for a factor: the passkey does not work here
     expect((await h.pub('/v1/agents', { jar })).status).toBe(200);
-    expect((await h.pub('/v1/second-factor/totp', { jar, body: {} })).status).toBe(401); // a session alone is not enough
-    expect((await h.pub('/v1/second-factor/totp', { jar, body: { current: m.password } })).status).toBe(200);
+    // A passkey made elsewhere was never asked for here, so it proves nothing: this is a first factor (second review).
+    expect((await h.pub('/v1/second-factor/totp', { jar, body: { current: m.password } })).json.secondFactor).toBe('enrol-link');
+    h.store.setLocalAccountClaim(m.id, 'a-reset-link', new Date(Date.now() + 60_000).toISOString());
+    const linked = new Jar();
+    expect((await h.pub('/v1/local-accounts/claim', { jar: linked, body: { code: 'a-reset-link', password: m.password } })).status).toBe(200);
+    expect((await h.pub('/v1/second-factor/totp', { jar: linked, body: {} })).status).toBe(401); // a session alone is not enough
+    expect((await h.pub('/v1/second-factor/totp', { jar: linked, body: { current: m.password } })).status).toBe(200);
   });
 });

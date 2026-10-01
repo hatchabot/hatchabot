@@ -129,6 +129,37 @@ export function throttled(req: FastifyRequest, who?: string, scope?: 'link' | '2
   }
   return false;
 }
+/**
+ * A place in the count for one guess that is still being checked. A password
+ * is verified with scrypt, off the event loop: between `throttled` saying
+ * "not yet" and `noteFailure` counting the miss, every other request that
+ * arrived was let through too, so one burst of a few hundred requests got a
+ * few hundred guesses at an account whose limit is ten (second review,
+ * 2026-10-01). A guess in flight now counts as a miss until it is released:
+ * undefined means refused (answer 429); otherwise call the function returned
+ * when the check is over, whatever its result.
+ */
+const pending = new Map<string, number>();
+export function reserve(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): (() => void) | undefined {
+  const keys = throttleKeys(req, who, scope);
+  const now = Date.now();
+  for (const k of keys) {
+    const f = failures.get(k);
+    if (f && now > f.until) failures.delete(k);
+    const counted = (f && now <= f.until ? f.n : 0) + (pending.get(k) ?? 0);
+    if (counted >= limitFor(k)) return undefined;
+  }
+  for (const k of keys) pending.set(k, (pending.get(k) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    for (const k of keys) {
+      const n = (pending.get(k) ?? 1) - 1;
+      if (n > 0) pending.set(k, n); else pending.delete(k);
+    }
+  };
+}
 export function noteFailure(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): void {
   for (const k of throttleKeys(req, who, scope)) {
     const f = failures.get(k);
@@ -163,7 +194,7 @@ export function clearFailures(who: string): void {
 /** Password mode has one password, so one bucket for it: forged forwarded-for addresses each got a fresh client bucket and unlimited guesses (night review). */
 const PASSWORD_BUCKET = '*shared-password*';
 /** Test hook. */
-export function _resetLoginThrottle(): void { failures.clear(); strikes.clear(); }
+export function _resetLoginThrottle(): void { failures.clear(); strikes.clear(); pending.clear(); }
 /** Test hook: the bucket names in use (never their counts). */
 export function _loginThrottleKeys(): string[] { return [...failures.keys()]; }
 // The session cookie's name, flags and reading rules: sessionCookie.ts. It is
@@ -341,7 +372,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
   // The public address's gate (publicAccess.ts), in two halves around the
   // sign-in hook: what is refused whoever asks comes before it, what depends
   // on who is asking (the second factor, the idle limit) after it.
-  const publicGate = registerPublicAccess(app, { store: opts.store, secret: opts.secret, mode, throttle: { throttled, noteFailure } });
+  const publicGate = registerPublicAccess(app, { store: opts.store, secret: opts.secret, mode, throttle: { throttled, noteFailure, reserve } });
   if (opts.store && mode !== 'password') registerSecondFactorRoutes(app, { store: opts.store, secret: opts.secret, api: publicGate });
   if (mode === 'identity') {
     await registerIdentityAuth(app, opts);
@@ -495,7 +526,7 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
   const store = opts.store;
   if (!store) throw new Error('accounts mode needs a store (registerAuth opts.store)');
 
-  registerAccountRoutes(app, { store, secret: opts.secret, onAuthenticated: opts.onAuthenticated, cliTokenOwner: opts.cliTokenOwner }, { throttled, noteFailure, clearFailures });
+  registerAccountRoutes(app, { store, secret: opts.secret, onAuthenticated: opts.onAuthenticated, cliTokenOwner: opts.cliTokenOwner }, { throttled, noteFailure, clearFailures, reserve });
 
   app.post('/v1/logout', async (req, reply) => {
     clearSessionCookies(reply, req);
@@ -587,7 +618,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     registerAccountRoutes(
       app,
       { store: opts.store, secret: opts.secret, onAuthenticated: opts.onAuthenticated, cliTokenOwner: opts.cliTokenOwner },
-      { throttled, noteFailure, clearFailures },
+      { throttled, noteFailure, clearFailures, reserve },
       { bootstrap: false }, // the host owner is the Google account; nobody bootstraps
     );
   }

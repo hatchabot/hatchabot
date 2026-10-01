@@ -147,7 +147,7 @@ describe('second factors: at the public address', () => {
     expect((await h.pub('/v1/agents', { jar })).json.secondFactor).toBe('required');
   });
 
-  it('removing or replacing a factor there needs the second factor again; adding the first needs the password', async () => {
+  it('removing or replacing a factor there needs the second factor again; adding the first needs a link as well as the password', async () => {
     h = await publicApp({ env: { HATCHABOT_PUBLIC_STEPUP_MINUTES: '1' } });
     const o = await h.addAccount('owner', { owner: true });
     const m = await h.addAccount('member');
@@ -162,9 +162,23 @@ describe('second factors: at the public address', () => {
       const id = h.store.listSecondFactors(o.id, { kind: 'totp' })[0]!.id;
       expect((await h.pub(`/v1/second-factor/${id}`, { jar, method: 'DELETE' })).json.secondFactor).toBe('step-up');
     } finally { Date.now = realNow; }
-    // A member with no factor may add their first one there, with their password.
-    const mj = await h.signIn('member', m.password);
+    // A member with no factor, signed in with the password alone, cannot add one there:
+    // whoever had the password would enrol their own phone.
+    const pw = await h.signIn('member', m.password);
+    const refused = await h.pub('/v1/second-factor/totp', { jar: pw, body: { current: m.password } });
+    expect(refused.status).toBe(403);
+    expect(refused.json.secondFactor).toBe('enrol-link');
+    expect((await h.pub('/v1/second-factor/passkey/options', { jar: pw, body: { current: m.password } })).status).toBe(403);
+    // Signed in by a link the owner sent (an invitation, a reset link): they may, for half an hour, with their password.
+    h.store.setLocalAccountClaim(m.id, 'a-link-from-the-owner', new Date(Date.now() + 60_000).toISOString());
+    const mj = new Jar();
+    expect((await h.pub('/v1/local-accounts/claim', { jar: mj, body: { code: 'a-link-from-the-owner', password: m.password } })).status).toBe(200);
     expect((await h.pub('/v1/second-factor/totp', { jar: mj, body: {} })).status).toBe(401);
+    const realNow2 = Date.now;
+    try {
+      Date.now = () => realNow2() + 31 * 60_000;
+      expect((await h.pub('/v1/second-factor/totp', { headers: { cookie: mj.header() }, body: { current: m.password } })).json.secondFactor).toBe('enrol-link');
+    } finally { Date.now = realNow2; }
     const start = await h.pub('/v1/second-factor/totp', { jar: mj, body: { current: m.password } });
     expect(start.status).toBe(200);
     const done = await h.pub('/v1/second-factor/totp/confirm', { jar: mj, body: { id: start.json.id, code: totp(base32Decode(start.json.secret)) } });

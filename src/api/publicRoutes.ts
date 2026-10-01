@@ -36,6 +36,13 @@ export interface PublicRule {
    * enrolling the first factor, which nothing could otherwise step up to.
    */
   firstFactorOk?: boolean;
+  /**
+   * With firstFactorOk: this route ADDS a factor. A password alone is not
+   * enough for that at the public address (whoever has the password would
+   * enrol their own phone); the sign-in must also have just come from a link
+   * or a code sent out of band (publicAccess.ts, the pass's `en`).
+   */
+  enrols?: boolean;
 }
 
 const READ = ['GET', 'HEAD'] as const;
@@ -74,7 +81,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(['POST'], /^\/v1\/second-factor\/(challenge|verify)$/, 'second-step', 'The second-factor screen'),
 
   // ---- step-up: second-factor and account management ------------------------
-  r('*', /^\/v1\/second-factor\/(totp|totp\/confirm|passkey\/options|passkey|backup-codes)$/, 'step-up', 'Adding or replacing a second factor', { firstFactorOk: true }),
+  r('*', /^\/v1\/second-factor\/(totp|totp\/confirm|passkey\/options|passkey|backup-codes)$/, 'step-up', 'Adding or replacing a second factor', { firstFactorOk: true, enrols: true }),
   r(['DELETE'], /^\/v1\/second-factor\/:id$/, 'step-up', 'Removing a second factor'),
   r(['POST'], /^\/v1\/local-accounts$/, 'step-up', 'Managing accounts (add, remove, reset links)'),
   // Your own password and recovery code: the routes ask for the current

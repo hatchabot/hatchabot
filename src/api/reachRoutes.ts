@@ -141,6 +141,10 @@ export function registerReachRoutes(app: FastifyInstance, deps: ReachDeps): void
     return { funnelError, command };
   };
 
+  /** A failed "on" took itself back, but Tailscale kept its Funnel entry: say so, with the command (nothing is served there: the listener is closed). */
+  const funnelLeft = (left: { funnelError?: string; command?: string }): { warning?: string; command?: string } =>
+    left.funnelError ? { warning: `Tailscale's Funnel entry could not be removed (${left.funnelError}). Hatchabot is not serving it. Run: ${left.command}`, command: left.command } : {};
+
   let switching = false;
   app.post<{ Body: { confirm?: boolean } }>('/v1/public-access/on', async (req, reply) => {
     const no = ownerOnly(req);
@@ -180,14 +184,14 @@ export function registerReachRoutes(app: FastifyInstance, deps: ReachDeps): void
       const w1 = await writeEnvVar(envPath(), 'HATCHABOT_PUBLIC_ACCESS', 'funnel', () => true, 'Written by Hatchabot: public access (docs/public-access.md).');
       const w2 = w1.ok ? await writeEnvVar(envPath(), 'HATCHABOT_PUBLIC_ACCESS_URL', fun.url, () => true) : w1;
       if (!w2.ok) {
-        await undo(cfg, true);
-        return reply.code(409).send({ error: `Could not save the setting (${w2.error ?? '.env'}), so public access was turned back off.` });
+        const left = await undo(cfg, true);
+        return reply.code(409).send({ error: `Could not save the setting (${w2.error ?? '.env'}), so public access was turned back off.`, ...funnelLeft(left) });
       }
       // 5. Judged again with the public address known (a passkey counts only if it was made for this host).
       const after = (await api.evaluate()).filter((c) => !c.ok);
       if (after.length || !api.status().serving) {
-        await undo(cfg, true);
-        return reply.code(409).send({ error: `Turned back off: ${after.map((c) => `${c.title} (${c.detail})`).join('; ') || 'the public listener is not serving'}.`, failing: after });
+        const left = await undo(cfg, true);
+        return reply.code(409).send({ error: `Turned back off: ${after.map((c) => `${c.title} (${c.detail})`).join('; ') || 'the public listener is not serving'}.`, failing: after, ...funnelLeft(left) });
       }
       store.recordSecurity('public.on', req.principal?.ownerId, { url: fun.url, provider: 'funnel' });
       deps.trace('public.on', { url: fun.url });

@@ -3044,6 +3044,7 @@ const REACH_KINDS = {
   'public.signin': 'Signed in', 'public.second_factor': 'Second factor given', 'public.failure_burst': 'Too many failed sign-ins',
   'public.signin_refused': 'Sign-in refused', 'public.on': 'Public access turned on', 'public.off': 'Public access turned off',
   'public.paused': 'Public access paused (a safeguard is off)', 'signed_out_everywhere': 'Signed out everywhere', 'second_factor.reset': 'Second factor reset',
+  'second_factor.added': 'Second factor added', 'second_factor.removed': 'Second factor removed',
 };
 async function reachToggleLog() {
   const el = $('reachLog');
@@ -3053,7 +3054,7 @@ async function reachToggleLog() {
     const { entries } = await api('/v1/security/log');
     el.innerHTML = entries.length ? entries.map((e) => {
       const d = e.detail || {};
-      const bits = [d.device, d.from && `from ${d.from}`, d.newDevice && 'new device', d.method, d.bucket, d.why].filter(Boolean).join(' · ');
+      const bits = [d.device, d.from && `from ${d.from}`, d.newDevice && 'new device', d.method, d.at && `at ${d.at}`, d.bucket, d.why].filter(Boolean).join(' · ');
       return `<div class="pair" style="gap:8px;align-items:center"><span><span class="sub">${esc(new Date(e.at).toLocaleString())}</span> ${esc(REACH_KINDS[e.kind] || e.kind)}${e.who ? ` — <b>${esc(e.who)}</b>` : ''}${bits ? ` <span class="sub">${esc(bits)}</span>` : ''}</span>
         ${e.kind === 'public.signin' && e.ownerId ? `<button data-owner="${esc(e.ownerId)}" data-who="${esc(e.who || '')}" onclick="reachSignOut(this)">Sign out everywhere</button>` : ''}</div>`;
     }).join('') : '<span class="sub">Nothing yet.</span>';

@@ -279,7 +279,7 @@ describe('who a public request acts as', () => {
     expect(seen).toEqual([{ url: '/v1/backups/run', pub: true }, { url: '/v1/backups/run', pub: false }]);
   });
 
-  it('with "a second factor for everyone", a member without one can only add one there', async () => {
+  it('with "a second factor for everyone", a member without one can only add one there, and not with the password alone', async () => {
     const { h } = await ready({ env: { HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL: '1' } });
     const m = await h.addAccount('member');
     const jar = await h.signIn('member', m.password);
@@ -289,9 +289,19 @@ describe('who a public request acts as', () => {
     expect((await h.pub('/v1/second-factor', { jar })).status).toBe(200);
     expect((await h.pub('/v1/cli-tokens', { jar, body: {} })).status).toBe(403);
     const { base32Decode, totp } = await import('../src/api/totp.js');
-    const start = await h.pub('/v1/second-factor/totp', { jar, body: { current: m.password } });
+    // The password is what a thief would have: it does not enrol a phone here.
+    const stolen = await h.pub('/v1/second-factor/totp', { jar, body: { current: m.password } });
+    expect(stolen.status).toBe(403);
+    expect(stolen.json.secondFactor).toBe('enrol-link');
+    expect(h.store.listSecondFactors(m.id, { unconfirmed: true })).toEqual([]);
+    // A reset link from the owner (sent to the person out of band), used at the public address: now they may.
+    h.store.setLocalAccountClaim(m.id, 'reset-code-from-the-owner', new Date(Date.now() + 60_000).toISOString());
+    const linked = new Jar();
+    expect((await h.pub('/v1/local-accounts/claim', { jar: linked, body: { code: 'reset-code-from-the-owner', password: 'a-new-password-they-chose' } })).status).toBe(200);
+    expect((await h.pub('/v1/agents', { jar: linked })).json.secondFactor).toBe('enrol');
+    const start = await h.pub('/v1/second-factor/totp', { jar: linked, body: { current: 'a-new-password-they-chose' } });
     expect(start.status).toBe(200);
-    expect((await h.pub('/v1/second-factor/totp/confirm', { jar, body: { id: start.json.id, code: totp(base32Decode(start.json.secret)) } })).status).toBe(200);
-    expect((await h.pub('/v1/agents', { jar })).status).toBe(200);
+    expect((await h.pub('/v1/second-factor/totp/confirm', { jar: linked, body: { id: start.json.id, code: totp(base32Decode(start.json.secret)) } })).status).toBe(200);
+    expect((await h.pub('/v1/agents', { jar: linked })).status).toBe(200);
   });
 });
