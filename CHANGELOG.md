@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.113.1] — 2026-10-01
+
+### Fixed
+- **Cost estimates used an out-of-date price for Sonnet 5.** It is $2 in / $10 out per million tokens (the rise to $3/$15 planned for September did not happen), so its estimates were 50% high. Opus 5.5 ($4/$20), Sonnet 5.5 ($2/$10) and Fable 5.1 ($10/$50) now have prices instead of "no price known", and a cache read on Opus 5.5 and Fable 5.1 is priced at their lower rate. Prices checked against Anthropic's pricing page on 2026-10-01.
+
 ## [2.113.0] — 2026-10-01
 
 ### Added

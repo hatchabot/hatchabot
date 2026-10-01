@@ -181,9 +181,9 @@ describe('GET /v1/usage (fleet rollup)', () => {
     expect(body.agents[0].cost.high).toBeCloseTo(0.045, 4);
     expect(body.agents[0].cost.partial).toBe(false);
     // Fleet cost sums both api agents: 0.045 (Den) + Kitchen's 1500 opus input
-    // (0.0075) + 250 sonnet input @ $3 (0.00075).
+    // (0.0075) + 250 sonnet input @ $2 (0.0005).
     expect(body.cost.agents).toBe(2);
-    expect(body.cost.low).toBeCloseTo(0.05325, 4);
+    expect(body.cost.low).toBeCloseTo(0.053, 4);
   });
 
   it('drops an unreachable container to skipped rather than failing the whole list', async () => {
