@@ -2,9 +2,9 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [Unreleased]
+## [2.114.0] — 2026-10-02
 
-Built on the `reach-anywhere` branch. Not released, and not yet run against a real tailnet (docs/public-access.md, "Not verified yet").
+Public access ships OFF. It has passed two adversarial reviews and the mutant check, but has not yet been run against a real tailnet (docs/public-access.md, "Not verified yet"): a supervised trial with the owner present comes before anyone turns it on.
 
 ### Added
 - **"Reach it from anywhere": public access, off by default** (docs/public-access.md). The machine's owner can make this Hatchabot's sign-in page reachable from the internet through Tailscale Funnel, so invited people need no Tailscale app: ⚙ Settings → You → Reach it from anywhere, or `hatchabot reach on|off|status`. It asks first ("This makes your sign-in page reachable from the internet"), shows the address with a QR code, and Off undoes all of it (Funnel's entry, the listener, the setting, the address). `tailscale serve` for the private address is left alone.
