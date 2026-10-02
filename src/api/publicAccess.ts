@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Store } from '../store/store.js';
 import { addressBucket, approximateSource, isPublic, markPublicSocket, publicClientAddress } from './trust.js';
-import { publicRuleFor, type PublicRule } from './publicRoutes.js';
+import { guestMay, publicRuleFor, type PublicRule } from './publicRoutes.js';
 import { cookieFromHeader, readSessionCookie, sessionValue } from './sessionCookie.js';
 import type { ConsoleSocketsApi } from './consoleSockets.js';
 import { adminAccounts, evaluateSafeguards, failingSafeguards, hostOf, publicConfig, usableFactors, type PublicConfig, type SafeguardCheck } from './safeguards.js';
@@ -29,9 +29,14 @@ import { adminAccounts, evaluateSafeguards, failingSafeguards, hostOf, publicCon
  *      idle too long: sign in again. So a session from the private address
  *      does not carry over, and a public session ends after an idle time far
  *      shorter than the cookie's 30 days.
- *   5. The second factor: required of everyone who has one, and of every
- *      account with owner rights (who must have one). Until given, only the
- *      second-factor screen works.
+ *   5. The second factor: required of everyone who signs in with a password
+ *      and of every account with owner rights; a Google account without
+ *      owner rights is exempt (Google is its factor) unless it has added
+ *      one. Until given, only the second-factor screen works. Someone who
+ *      must have one and has none is refused (and may add it there only
+ *      after a link sent out of band). The one exception is the owner's
+ *      deliberate switch for chat-only guests, who then get the chat and
+ *      nothing else.
  *   6. Step-up: machine-level and dangerous routes need the second factor
  *      given again within the last few minutes.
  */
@@ -75,6 +80,8 @@ export interface PublicStatus {
   checkedAt?: string;
 }
 
+export type SecondFactorNeed = 'no' | 'yes' | 'missing' | 'guest';
+
 /** `en`: until when this sign-in may add the person's FIRST second factor (0: it may not; see FIRST_FACTOR_PROOF). */
 interface Pass { sess: string; minted: number; seen: number; sfAt: number; used: boolean; en: number }
 
@@ -94,15 +101,25 @@ export interface PublicAccessApi {
   failureBurst(req: FastifyRequest, key: string, until: number): void;
   /** The second factor was just given by the signed-in person: note it on their public pass. */
   secondFactorPassed(req: FastifyRequest, reply: FastifyReply): void;
-  /** Does this person have to give a second factor at the public address? `missing`: they must and have none. */
-  secondFactorNeed(ownerId: string): 'no' | 'yes' | 'missing';
+  /**
+   * Does this person have to give a second factor at the public address?
+   * `yes`: they have one and are asked for it. `missing`: they must and have
+   * none. `guest`: a chat-only guest the owner chose to let in without one
+   * (the chat and nothing else). `no`: a Google account without owner rights.
+   */
+  secondFactorNeed(ownerId: string): SecondFactorNeed;
+  /** At the public address: has this request's sign-in given the second factor? (Always true at the private address.) */
+  secondFactorGiven(req: FastifyRequest): boolean;
   hasOwnerRights(ownerId: string): boolean;
   /**
    * For code that reads the session itself rather than through the gate (a
    * WebSocket upgrade, which Fastify never sees; the open /v1/join route):
    * why this public request does not count as signed in (undefined: it does).
+   * `acceptingWebChat`: the request is accepting a web-chat invitation, which
+   * is how someone BECOMES a chat-only guest; with the owner's guest switch
+   * on, an account that owns nothing may do that one thing without a factor.
    */
-  refuseSession(rawReq: IncomingMessage, ownerId: string): string | undefined;
+  refuseSession(rawReq: IncomingMessage, ownerId: string, opts?: { acceptingWebChat?: boolean }): string | undefined;
   /**
    * For a console socket that is already open (consoleSockets.ts re-judges
    * them): why it must close now (undefined: it may stay). `cookie` is the
@@ -207,6 +224,14 @@ const revokedPassMs = (): number => (Math.max(30, Number(process.env.HATCHABOT_S
 const FIRST_FACTOR_PROOF = /^\/v1\/(local-accounts\/(claim|recover-with-code)|session)$/;
 const FIRST_FACTOR_WINDOW_MS = 30 * 60_000;
 const FIRST_FACTOR_NEEDS_LINK = 'Your password alone cannot add your first second factor at this address. Add it at the private address, or ask whoever runs this Hatchabot for a reset link and add it right after using the link.';
+/** Someone who must have a second factor here and has none, by how they arrived. */
+const MUST_ENROL_NOW = 'This Hatchabot asks for a second factor at the public address. Add one now under Settings → You → Second factor: you have half an hour from the link you used.';
+const MUST_ENROL_NEEDS_LINK = 'This Hatchabot asks for a second factor at the public address, and your account has none yet. Ask whoever runs this Hatchabot for a reset link and add one right after using it, or add one at the private address (Settings → You → Second factor).';
+const GUEST_CHAT_ONLY = 'Without a second factor you can chat here and nothing else. Add one at the private address, or ask whoever runs this Hatchabot for a reset link and add one right after using it.';
+/** New-device notices: one per recipient and account in this long, and at most this many a day per recipient and overall. */
+const NOTICE_EVERY_MS = 10 * 60_000;
+const NOTICE_DAILY_PER_PERSON = 20;
+const NOTICE_DAILY_ALL = 100;
 const NOT_SERVING = 'Public access to this Hatchabot is paused. Open it at its private address.';
 const NOT_HERE = 'This is not available at the public address. Open Hatchabot at its private address for it.';
 
@@ -225,6 +250,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
   let serving = false;
   /** What the log last said about serving; undefined until the first judgement with public access on. */
   let announcedServing: boolean | undefined;
+  let warnedForAll = false;
   let server: Server | undefined;
   let timer: NodeJS.Timeout | undefined;
 
@@ -246,12 +272,17 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
 
   const admins = () => (store ? adminAccounts(store.rawDb(), opts.mode) : []);
   const hasOwnerRights = (ownerId: string): boolean => admins().some((a) => a.id === ownerId);
-  const secondFactorNeed = (ownerId: string): 'no' | 'yes' | 'missing' => {
+  const secondFactorNeed = (ownerId: string): SecondFactorNeed => {
     if (!store) return 'missing';
     const host = rpId();
     const mine = store.listSecondFactors(ownerId).filter((f) => f.kind === 'totp' || (f.kind === 'passkey' && (!host || (f.rpId ?? '').toLowerCase() === host)));
     if (mine.length) return 'yes';
-    return hasOwnerRights(ownerId) || publicConfig().secondFactorForAll ? 'missing' : 'no';
+    if (hasOwnerRights(ownerId)) return 'missing';
+    // Signed in with Google and no owner rights: Google is their factor.
+    if (!store.localAccount(ownerId)) return 'no';
+    // Everyone with a password needs one. The owner may exempt chat-only guests, and nobody else.
+    if (publicConfig().guestsWithoutSecondFactor && store.isChatOnlyGuest(ownerId)) return 'guest';
+    return 'missing';
   };
 
   const evaluate = async (): Promise<SafeguardCheck[]> => {
@@ -274,11 +305,17 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       publicOn: cfg.on,
       loginFailLimit: Number(process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW ?? 10),
       publicHost: hostOf(cfg.url) ?? rpId(),
+      guestsExempt: cfg.guestsWithoutSecondFactor,
     });
     const failing = failingSafeguards(next);
     checks = next;
     checkedAt = new Date().toISOString();
     serving = cfg.on && !cfg.unknownProvider && !!store && opts.mode !== 'password' && failing.length === 0;
+    // Said once: someone who set the old opt-in to "off" expects it to do something. It does not.
+    if (cfg.on && cfg.forAllIgnored !== undefined && !warnedForAll) {
+      warnedForAll = true;
+      app.log.warn({ value: cfg.forAllIgnored }, 'HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL is ignored: a second factor is required of every password account at the public address');
+    }
     if (!cfg.on) announcedServing = undefined;
     else if (announcedServing !== serving) {
       announcedServing = serving;
@@ -384,6 +421,12 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     reply.clearCookie(PASS_COOKIE, cookieOpts);
   };
 
+  const secondFactorGiven = (req: FastifyRequest): boolean => {
+    if (!isPublic(req)) return true;
+    const pass = passOf(req, sessionValue(req));
+    return !!pass && pass.sfAt > 0;
+  };
+
   const secondFactorPassed = (req: FastifyRequest, reply: FastifyReply): void => {
     if (!isPublic(req)) return;
     const pass = passOf(req, sessionValue(req));
@@ -410,6 +453,33 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
   const nameOf = (ownerId: string): string =>
     store?.localAccount(ownerId)?.username ?? store?.emailForOwner(ownerId) ?? ownerId;
 
+  /**
+   * New-device notices are limited. A sign-in needs only the password to be
+   * "a sign-in from a new device" (the second factor comes after), so whoever
+   * holds one valid password could otherwise send the person and the owner a
+   * Telegram message per request. Per recipient and account: one notice in
+   * NOTICE_EVERY_MS, the next one saying how many were left out. Per
+   * recipient, and for everyone together: a ceiling a day. The record
+   * (`public.signin`) is never limited: every sign-in is there.
+   */
+  const noticePairs = new Map<string, { last: number; suppressed: number }>();
+  const noticeDay = { day: 0, all: 0, per: new Map<string, number>() };
+  const noticeAllowed = (to: string, about: string): { send: boolean; suppressed: number } => {
+    const now = Date.now();
+    const day = Math.floor(now / 86_400_000);
+    if (day !== noticeDay.day) { noticeDay.day = day; noticeDay.all = 0; noticeDay.per.clear(); }
+    const key = `${to}\n${about}`;
+    const pair = noticePairs.get(key) ?? { last: 0, suppressed: 0 };
+    noticePairs.set(key, pair);
+    const soon = pair.last > 0 && now - pair.last < NOTICE_EVERY_MS && now >= pair.last;
+    const mine = noticeDay.per.get(to) ?? 0;
+    if (soon || mine >= NOTICE_DAILY_PER_PERSON || noticeDay.all >= NOTICE_DAILY_ALL) { pair.suppressed += 1; return { send: false, suppressed: pair.suppressed }; }
+    const suppressed = pair.suppressed;
+    pair.last = now; pair.suppressed = 0;
+    noticeDay.per.set(to, mine + 1); noticeDay.all += 1;
+    return { send: true, suppressed };
+  };
+
   /** The first authenticated request of a public sign-in: the record, and the new-device notice. */
   const announced = new Map<string, number>();
   const firstUse = (req: { headers: Record<string, string | string[] | undefined> }, ownerId: string, pass: Pass): void => {
@@ -430,7 +500,10 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     const base = probes.appUrl();
     const mine = `New sign-in to Hatchabot as ${who}: ${label}, from about ${source}, ${at}, through the public address. If this was not you: change your password and choose "Sign out on every device"${base ? ` at ${base}` : ''}.`;
     const theirs = `New sign-in to Hatchabot as ${who}: ${label}, from about ${source}, ${at}, through the public address. If they do not recognise it: Settings → Reach it from anywhere → sign ${who} out everywhere${base ? ` (${base})` : ''}.`;
-    const tell = (to: string, text: string): void => {
+    const tell = (to: string, said: string): void => {
+      const limit = noticeAllowed(to, ownerId);
+      if (!limit.send) { app.log.warn({ to, about: ownerId, suppressed: limit.suppressed }, 'public.notice_suppressed'); return; }
+      const text = limit.suppressed ? `${said} (${limit.suppressed} more new-device sign-in${limit.suppressed === 1 ? '' : 's'} as ${who} since the last notice ${limit.suppressed === 1 ? 'was' : 'were'} not announced; the record lists every one.)` : said;
       try { store.addSecurityNotice({ id: `sn-${randomBytes(9).toString('base64url')}`, ownerId: to, kind: 'new-device', aboutOwner: ownerId, text }); } catch { /* best effort */ }
       void probes.telegram(to, `🔐 ${text}`).catch(() => false);
     };
@@ -520,18 +593,24 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
 
       const need = secondFactorNeed(principal.ownerId);
       if (rule.cls === 'second-step') return;
-      if (need === 'missing') {
-        // Someone with owner rights enrols at the private address. Anyone else
-        // (when a second factor is asked of everyone) may add their first one
-        // here, with their password, and nothing else until they have.
-        if (hasOwnerRights(principal.ownerId)) {
+      if (need === 'missing' || need === 'guest') {
+        // Someone with owner rights enrols at the private address, always.
+        if (need === 'missing' && hasOwnerRights(principal.ownerId)) {
           return reply.code(403).send({ error: 'Your account has owner rights and no second factor. Add one at the private address (Settings → You → Second factor); until then it cannot be used here.', secondFactor: 'missing' });
         }
+        // A chat-only guest the owner chose to let in with a password alone: the chat, and nothing else.
+        if (need === 'guest' && guestMay(req.method, req.routeOptions?.url)) return;
+        // Adding the first factor (and changing one's own password): let
+        // through to the route, which asks for the current password; adding
+        // one also needs a sign-in that came by a link or code sent out of band.
         if (rule.cls === 'step-up' && rule.firstFactorOk) {
           if (rule.enrols && !(pass.en > now)) return reply.code(403).send({ error: FIRST_FACTOR_NEEDS_LINK, secondFactor: 'enrol-link' });
           return;
         }
-        return reply.code(403).send({ error: 'This Hatchabot asks everyone for a second factor at the public address. Add one under Settings → You → Second factor.', secondFactor: 'enrol' });
+        if (need === 'guest') return reply.code(403).send({ error: GUEST_CHAT_ONLY, secondFactor: 'guest' });
+        // Sent to enrolment only when they arrived by a fresh invitation, reset link or recovery; otherwise told where to get one.
+        if (pass.en > now) return reply.code(403).send({ error: MUST_ENROL_NOW, secondFactor: 'enrol' });
+        return reply.code(403).send({ error: MUST_ENROL_NEEDS_LINK, secondFactor: 'enrol-link' });
       }
       if (need === 'yes' && pass.sfAt === 0) {
         return reply.code(401).send({ error: 'second factor required', secondFactor: 'required' });
@@ -549,7 +628,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     });
   };
 
-  const refuseSession = (rawReq: IncomingMessage, ownerId: string): string | undefined => {
+  const refuseSession = (rawReq: IncomingMessage, ownerId: string, o: { acceptingWebChat?: boolean } = {}): string | undefined => {
     if (!isPublic(rawReq)) return undefined;
     if (!serving) return 'public access is not serving';
     const headers = rawReq.headers as Record<string, string | string[] | undefined>;
@@ -558,7 +637,11 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     // A sign-in used only for a socket is still a sign-in: recorded and announced like any other.
     if (!pass.used) firstUse({ headers }, ownerId, pass);
     const need = secondFactorNeed(ownerId);
-    if (need === 'missing') return 'no second factor';
+    if (need === 'missing') {
+      // Accepting a web-chat invitation makes a chat-only guest of someone who owns nothing: allowed when guests are.
+      const becomesGuest = !!o.acceptingWebChat && publicConfig().guestsWithoutSecondFactor && !!store?.localAccount(ownerId) && !hasOwnerRights(ownerId) && !!store?.ownsNothing(ownerId);
+      if (!becomesGuest) return 'no second factor';
+    }
     if (need === 'yes' && pass.sfAt === 0) return 'second factor not given';
     return undefined;
   };
@@ -568,7 +651,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     const principal = req.principal;
     const pass = principal && principal.via !== 'header' ? passOf(req, sessionValue(req)) : undefined;
     if (!principal || !pass) return { code: 401, body: { error: 'auth required', publicSignIn: true } };
-    if (secondFactorNeed(principal.ownerId) !== 'yes') {
+    if (secondFactorNeed(principal.ownerId) !== 'yes') { // (a guest let in without one included)
       return { code: 403, body: { error: 'This needs a second factor at the public address. Add one under Settings → You → Second factor, or use the private address.', secondFactor: 'missing' } };
     }
     if (pass.sfAt === 0 || Date.now() - pass.sfAt > publicConfig().stepUpMs) return { code: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
@@ -694,7 +777,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
   const api: PublicAccessApi = {
     config: publicConfig, status, evaluate,
     setProbes: (p) => { probes = { ...probes, ...p }; },
-    syncListener, stopListener, sessionMinted, sessionCleared, failureBurst, secondFactorPassed, secondFactorNeed, hasOwnerRights,
+    syncListener, stopListener, sessionMinted, sessionCleared, failureBurst, secondFactorPassed, secondFactorNeed, secondFactorGiven, hasOwnerRights,
     refuseSession, refuseOpenSocket, stepUpRefusal, rpId, origins, afterSignIn, throttle: opts.throttle, secret,
   };
   app.decorate('publicAccess', api);

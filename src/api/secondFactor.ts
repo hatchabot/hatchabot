@@ -14,9 +14,11 @@ import { b64u, verifyAssertion, verifyRegistration, WebAuthnError, type StoredPu
  * (docs/public-access.md, safeguard b).
  *
  * Who must have one: every account with owner rights, before public access
- * can be turned on. Who may: anyone. Where it is asked for: at the public
- * address, at sign-in and again for sensitive actions (publicAccess.ts). At
- * the private address sign-in is unchanged.
+ * can be turned on; and, to use the public address at all, everyone who
+ * signs in with a password (a Google account without owner rights is exempt;
+ * chat-only guests only by the owner's switch). Where it is asked for: at
+ * the public address, at sign-in and again for sensitive actions
+ * (publicAccess.ts). At the private address sign-in is unchanged.
  *
  * In identity mode Google is the first factor, and the owner still needs one
  * of these: a Google session open on a borrowed laptop, or a phished Google
@@ -80,6 +82,13 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
   const recordChange = (req: FastifyRequest, kind: 'second_factor.added' | 'second_factor.removed', ownerId: string, what: string): void => {
     try { store.recordSecurity(kind, ownerId, { method: what, ...(isPublic(req) ? { from: publicClientAddress(req), at: 'the public address' } : { at: 'the private address' }) }); } catch { /* the record must not break the change */ }
   };
+  /**
+   * A passkey of someone with owner rights must VERIFY its user (a PIN, a
+   * fingerprint, a face), not merely be touched: asked of the browser and
+   * checked in the answer's flags. A bare security key left in a laptop would
+   * otherwise be a second factor for whoever sits down at it. Members: preferred.
+   */
+  const uvFor = (ownerId: string): 'required' | 'preferred' => (api.hasOwnerRights(ownerId) ? 'required' : 'preferred');
   const nameOf = (ownerId: string): string => store.localAccount(ownerId)?.username ?? store.emailForOwner(ownerId) ?? 'you';
   const real = (ownerId: string): SecondFactorRow[] => store.listSecondFactors(ownerId).filter((f) => f.kind !== 'backup');
   const backupLeft = (ownerId: string): number => store.listSecondFactors(ownerId, { kind: 'backup' }).length;
@@ -129,13 +138,18 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     if (!ownerId) return reply;
     const rpId = api.rpId();
     const factors = real(ownerId);
+    // At the public address, until the second factor has been given, this is
+    // read by whoever holds the password: they learn which KINDS to offer on
+    // the prompt, not the factors' ids, names or when each was last used.
+    const shown = api.secondFactorGiven(req);
     return {
-      factors: factors.map((f) => ({
+      factors: !shown ? [] : factors.map((f) => ({
         id: f.id, kind: f.kind, label: f.label, createdAt: f.createdAt, lastUsedAt: f.lastUsedAt,
         // A passkey belongs to the address it was made at.
         ...(f.kind === 'passkey' ? { madeFor: f.rpId, worksAtPublicAddress: !!rpId && f.rpId === rpId } : {}),
       })),
-      backupCodes: backupLeft(ownerId),
+      backupCodes: shown ? backupLeft(ownerId) : null,
+      ...(shown ? {} : { hidden: true }),
       need: api.secondFactorNeed(ownerId),
       ownerRights: api.hasOwnerRights(ownerId),
       methods: [...new Set(factors.map((f) => f.kind)), ...(backupLeft(ownerId) && factors.length ? ['backup'] : [])],
@@ -154,7 +168,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     const keys = real(ownerId).filter((f) => f.kind === 'passkey' && f.rpId === rpId);
     if (!rpId || !keys.length) return reply.code(409).send({ error: 'You have no passkey for this address. Use your authenticator app or a backup code.' });
     return {
-      challenge: issue(`get:${ownerId}`), rpId, timeout: 120_000, userVerification: 'preferred',
+      challenge: issue(`get:${ownerId}`), rpId, timeout: 120_000, userVerification: uvFor(ownerId),
       allowCredentials: keys.map((k) => ({ type: 'public-key', id: k.credentialId })),
     };
   });
@@ -181,7 +195,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
           const r = verifyAssertion(
             { clientDataJSON: String(body.passkey.clientDataJSON ?? ''), authenticatorData: String(body.passkey.authenticatorData ?? ''), signature: String(body.passkey.signature ?? '') },
             { publicKey: key, signCount: row.signCount },
-            { challenge, origins: api.origins(), rpId },
+            { challenge, origins: api.origins(), rpId, requireUserVerification: uvFor(ownerId) === 'required' },
           );
           store.touchPasskey(row.id, r.signCount);
           method = 'passkey';
@@ -271,7 +285,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
       user: { id: createHash('sha256').update(`passkey-user:${ownerId}`).digest().subarray(0, 16).toString('base64url'), name, displayName: name },
       pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -8 }, { type: 'public-key', alg: -257 }],
       excludeCredentials: real(ownerId).filter((f) => f.kind === 'passkey').map((k) => ({ type: 'public-key', id: k.credentialId })),
-      authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
+      authenticatorSelection: { residentKey: 'preferred', userVerification: uvFor(ownerId) },
       attestation: 'none',
       timeout: 120_000,
     };
@@ -286,7 +300,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     try {
       const cred = verifyRegistration(
         { clientDataJSON: String(req.body?.clientDataJSON ?? ''), attestationObject: String(req.body?.attestationObject ?? '') },
-        { challenge, origins: api.origins(), rpId },
+        { challenge, origins: api.origins(), rpId, requireUserVerification: uvFor(ownerId) === 'required' },
       );
       if (store.secondFactorByCredential(cred.credentialId)) return reply.code(409).send({ error: 'That passkey is already added.' });
       const first = real(ownerId).length === 0;
@@ -340,7 +354,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
    * public one). If that person has owner rights and public access is on, it
    * pauses until they enrol again: the safeguard is judged right away.
    */
-  app.post<{ Params: { id: string } }>('/v1/second-factor/reset/:id', async (req, reply) => {
+  app.post<{ Params: { id: string }; Body: { current?: string } }>('/v1/second-factor/reset/:id', async (req, reply) => {
     const ownerId = me(req, reply);
     if (!ownerId) return reply;
     if (isPublic(req)) return reply.code(403).send({ error: 'Not at the public address.' });
@@ -349,6 +363,11 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     }
     const target = req.params.id === 'me' ? ownerId : (store.localAccount(req.params.id)?.id ?? store.localAccountByUsername(req.params.id)?.id ?? (req.params.id.startsWith('user-') ? req.params.id : undefined));
     if (!target) return reply.code(404).send({ error: 'Not found' });
+    // Clearing your OWN factors is changing them: the session alone is not
+    // enough (a browser left signed in would strip the owner's second factor,
+    // and with public access on only pause it). Your current password, as for
+    // every other change of your factors.
+    if (target === ownerId && !(await proveManage(req, reply, ownerId, req.body?.current))) return reply;
     const removed = store.deleteSecondFactors(target);
     try { store.recordSecurity('second_factor.reset', target, { by: ownerId, removed }); } catch { /* best effort */ }
     app.log.warn({ by: ownerId, target, removed }, 'second_factor.reset');

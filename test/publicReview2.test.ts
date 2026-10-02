@@ -140,11 +140,11 @@ describe('signing out at the public address ends that sign-in for every copy of 
   it('a sign-out with someone else\'s pass, a forged one or none revokes nothing', async () => {
     h = await publicApp({ fullRoutes: true });
     await h.addAccount('owner', { owner: true });
-    const bob = await h.addAccount('bob', { totp: false });
-    const eve = await h.addAccount('eve', { totp: false });
+    const bob = await h.addAccount('bob', { totp: true });
+    const eve = await h.addAccount('eve', { totp: true });
     await h.app.publicAccess!.evaluate();
-    const jb = await h.signIn('bob', bob.password);
-    const je = await h.signIn('eve', eve.password);
+    const jb = await h.signIn('bob', bob.password, { totpSecret: bob.totpSecret });
+    const je = await h.signIn('eve', eve.password, { totpSecret: eve.totpSecret });
     // Eve's session with Bob's pass; a pass with a bad signature; no cookies at all.
     await h.pub('/v1/logout', { body: {}, headers: { cookie: `__Host-hatchabot_session=${je.cookies.get('__Host-hatchabot_session')}; __Host-hatchabot_pub=${jb.cookies.get('__Host-hatchabot_pub')}` } });
     await h.pub('/v1/logout', { body: {}, headers: { cookie: `__Host-hatchabot_session=${jb.cookies.get('__Host-hatchabot_session')}; __Host-hatchabot_pub=${jb.cookies.get('__Host-hatchabot_pub')}x` } });
@@ -193,7 +193,7 @@ async function consoleWorld(env: Record<string, string> = {}) {
   const gw = await fakeGateway();
   h = await publicApp({ fullRoutes: true, env });
   const owner = await h.addAccount('owner', { owner: true });
-  const bob = await h.addAccount('bob', { totp: false });
+  const bob = await h.addAccount('bob', { totp: true });
   const dana = await h.addAccount('dana', { totp: true });
   await h.app.publicAccess!.evaluate();
   h.store.insertAIProfile({ id: 'p1', ownerId: owner.id, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' } as never);
@@ -212,7 +212,7 @@ async function consoleWorld(env: Record<string, string> = {}) {
 describe('an open console socket ends when what let it in ends', () => {
   it('"Sign out on every device" closes the person\'s open consoles, public and private, and nobody else\'s', async () => {
     const { h, owner, bob, privPort, privLogin } = await consoleWorld();
-    const jb = await h.signIn('bob', bob.password);
+    const jb = await h.signIn('bob', bob.password, { totpSecret: bob.totpSecret });
     const pubSock = await openConsole(h.port, 'b1', jb.header());
     const privSock = await openConsole(privPort, 'b1', await privLogin('bob', bob.password));
     const ownerSock = await openConsole(privPort, 'a1', await privLogin('owner', owner.password));
@@ -232,13 +232,13 @@ describe('an open console socket ends when what let it in ends', () => {
     const { h, owner, bob, dana, privPort, privLogin } = await consoleWorld();
     const ownerCookie = await privLogin('owner', owner.password);
     // The owner signs Bob out.
-    const jb = await h.signIn('bob', bob.password);
+    const jb = await h.signIn('bob', bob.password, { totpSecret: bob.totpSecret });
     const s1 = await openConsole(h.port, 'b1', jb.header());
     expect(await alive(s1)).toBe(true);
     expect((await h.app.inject({ method: 'POST', url: `/v1/security/sign-out/${bob.id}`, headers: { cookie: ownerCookie }, payload: {} })).statusCode).toBe(200);
     expect(await closedSoon(s1)).toBe(true);
     // Bob changes his password at the private address: his sessions end, his open console too.
-    const jb2 = await h.signIn('bob', bob.password);
+    const jb2 = await signInAgain(h, 'bob', bob.password, bob.totpSecret!);
     const s2 = await openConsole(h.port, 'b1', jb2.header());
     expect(await alive(s2)).toBe(true);
     const bobCookie = await privLogin('bob', bob.password);
@@ -285,9 +285,47 @@ describe('an open console socket ends when what let it in ends', () => {
     expect(kinds.some((k) => k.startsWith('second_factor.reset'))).toBe(true);
   }, 40_000);
 
+  it('for a Google account too (which may go on without a factor): a reset, or removing the factor, closes the console it was opened with', async () => {
+    const gw = await fakeGateway();
+    const verifier = { verify: async (t: string) => ({ sub: t, email: `${t}@example.com`, emailVerified: true, expMs: Date.now() + 3_600_000 }) };
+    h = await publicApp({ fullRoutes: true, mode: 'identity', verifier });
+    const { _sealForTest } = await import('../src/api/secondFactor.js');
+    const secrets = { owner: Buffer.alloc(20, 3), gina: Buffer.alloc(20, 5) };
+    h.store.insertHost({ id: 'host-local', ownerId: 'user-owner', kind: 'local', provider: 'mock', name: 'm', settings: {}, createdAt: 'now' });
+    for (const who of ['owner', 'gina'] as const) {
+      h.store.recordAccount(`user-${who}`, `${who}@example.com`);
+      h.store.insertSecondFactor({ id: `f-${who}`, ownerId: `user-${who}`, kind: 'totp', data: _sealForTest(h.secret, secrets[who]) });
+    }
+    await h.app.publicAccess!.evaluate();
+    expect(h.app.publicAccess!.status().failing).toEqual([]);
+    h.store.insertAgent({ id: 'g1', ownerId: 'user-gina', name: 'g1', slug: 'g1', state: 'RUNNING', aiProfileId: 'p1', hostId: 'host-local', runtimeRef: 'mock://g1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
+    h.store.rawDb().prepare('UPDATE agents SET gateway_port = ?, gateway_token = ? WHERE id = ?').run(gw, 'gw-token', 'g1');
+    await h.app.listen({ port: 0, host: '127.0.0.1' });
+    const priv = async (who: string) => String((await h!.app.inject({ method: 'POST', url: '/v1/session', payload: { idToken: who } })).headers['set-cookie']).split(';')[0]!;
+    const signIn = async (step: number): Promise<Jar> => {
+      const jar = new Jar();
+      expect((await h!.pub('/v1/session', { body: { idToken: 'gina' }, jar })).status).toBe(200);
+      const v = await h!.pub('/v1/second-factor/verify', { jar, body: { code: totp(secrets.gina, Date.now() + step * 30_000) } });
+      expect(v.status, JSON.stringify(v.json)).toBe(200);
+      return jar;
+    };
+    // Gina removes her factor herself, at the private address: she may go on without one, but not on what she proved with it.
+    const s1 = await openConsole(h.port, 'g1', (await signIn(0)).header());
+    expect(await alive(s1)).toBe(true);
+    expect((await h.app.inject({ method: 'DELETE', url: '/v1/second-factor/f-gina', headers: { cookie: await priv('gina') }, payload: {} })).statusCode).toBe(200);
+    expect(await closedSoon(s1)).toBe(true);
+    // She adds one again; the owner resets it.
+    h.store.insertSecondFactor({ id: 'f-gina-2', ownerId: 'user-gina', kind: 'totp', data: _sealForTest(h.secret, secrets.gina) });
+    const s2 = await openConsole(h.port, 'g1', (await signIn(1)).header());
+    expect(await alive(s2)).toBe(true);
+    const reset = await h.app.inject({ method: 'POST', url: '/v1/second-factor/reset/user-gina', headers: { cookie: await priv('owner') }, payload: {} });
+    expect(reset.statusCode, reset.body).toBe(200);
+    expect(await closedSoon(s2)).toBe(true);
+  }, 40_000);
+
   it('the public idle limit: a console nobody has typed in for that long is closed; one in use stays', async () => {
     const { h, bob } = await consoleWorld({ HATCHABOT_PUBLIC_IDLE_MINUTES: '5' });
-    const jb = await h.signIn('bob', bob.password);
+    const jb = await h.signIn('bob', bob.password, { totpSecret: bob.totpSecret });
     const idle = await openConsole(h.port, 'b1', jb.header());
     const used = await openConsole(h.port, 'b1', jb.header());
     expect(await alive(idle)).toBe(true);
@@ -303,10 +341,10 @@ describe('an open console socket ends when what let it in ends', () => {
 
   it('an account disabled or removed, and a guest whose web chat is switched off', async () => {
     const { h, owner, bob, privLogin } = await consoleWorld();
-    const carol = await h.addAccount('carol', { totp: false });
+    const carol = await h.addAccount('carol', { totp: true });
     const ownerCookie = await privLogin('owner', owner.password);
     // Bob is disabled (as `hatchabot accounts disable` does, in another process): the timer's sweep finds it.
-    const jb = await h.signIn('bob', bob.password);
+    const jb = await h.signIn('bob', bob.password, { totpSecret: bob.totpSecret });
     const s1 = await openConsole(h.port, 'b1', jb.header());
     expect(await alive(s1)).toBe(true);
     h.store.rawDb().prepare('UPDATE local_accounts SET disabled = 1 WHERE id = ?').run(bob.id);
@@ -317,7 +355,7 @@ describe('an open console socket ends when what let it in ends', () => {
     h.store.insertAgent({ id: 'c1', ownerId: carol.id, name: 'c1', slug: 'c1', state: 'RUNNING', aiProfileId: 'p1', hostId: 'host-local', runtimeRef: 'mock://c1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
     const gw = h.store.rawDb().prepare('SELECT gateway_port AS p FROM agents WHERE id = ?').get('a1') as { p: number };
     h.store.rawDb().prepare('UPDATE agents SET gateway_port = ?, gateway_token = ? WHERE id = ?').run(gw.p, 'gw-token', 'c1');
-    const jc = await h.signIn('carol', carol.password);
+    const jc = await h.signIn('carol', carol.password, { totpSecret: carol.totpSecret });
     const s2 = await openConsole(h.port, 'c1', jc.header());
     expect(await alive(s2)).toBe(true);
     h.store.rawDb().prepare(`UPDATE agents SET state = 'DELETED' WHERE id = 'c1'`).run();
@@ -328,7 +366,7 @@ describe('an open console socket ends when what let it in ends', () => {
 
   it('a socket that could not be re-judged is closed, not kept', async () => {
     const { h, bob } = await consoleWorld();
-    const jb = await h.signIn('bob', bob.password);
+    const jb = await h.signIn('bob', bob.password, { totpSecret: bob.totpSecret });
     const s1 = await openConsole(h.port, 'b1', jb.header());
     expect(await alive(s1)).toBe(true);
     const real = h.app.principalFromCookieHeader!;
@@ -400,7 +438,7 @@ describe('smaller things', () => {
 
   it('a console socket counts against the request ceiling like any request', async () => {
     const { h, bob } = await consoleWorld({ HATCHABOT_PUBLIC_REQS_PER_MIN_PER_ADDRESS: '8' });
-    const jb = await h.signIn('bob', bob.password, { from: '192.0.2.200' });
+    const jb = await h.signIn('bob', bob.password, { from: '192.0.2.200', totpSecret: bob.totpSecret });
     const opened: Open[] = [];
     for (let i = 0; i < 12; i++) opened.push(await openConsole(h.port, 'b1', jb.header()));
     // (openConsole sends X-Forwarded-For 203.0.113.7: its own address's count.)
@@ -409,7 +447,7 @@ describe('smaller things', () => {
 
   it('an agent that no longer belongs to the caller closes its console (the same standing check that opened it)', async () => {
     const { h, owner, bob } = await consoleWorld();
-    const jb = await h.signIn('bob', bob.password);
+    const jb = await h.signIn('bob', bob.password, { totpSecret: bob.totpSecret });
     const s1 = await openConsole(h.port, 'b1', jb.header());
     expect(await alive(s1)).toBe(true);
     h.store.rawDb().prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run(owner.id, 'b1');

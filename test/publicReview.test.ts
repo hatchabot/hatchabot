@@ -132,7 +132,7 @@ describe('what a signed-in public session cannot read without the second factor 
     h = await publicApp({ fullRoutes: true });
     const owner = await h.addAccount('owner', { owner: true });
     const bob = await h.addAccount('bob', { totp: true });
-    const carol = await h.addAccount('carol');
+    const carol = await h.addAccount('carol', { totp: true });
     await h.app.publicAccess!.evaluate();
     h.store.insertAgent({ id: 'a1', ownerId: owner.id, name: 'Kitchen', slug: 'kitchen', state: 'STOPPED', aiProfileId: 'p1', hostId: 'host-local', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
     const invite = () => createInvite(h!.store, 'a1', owner.id, undefined, { webChat: true }).code;
@@ -147,7 +147,7 @@ describe('what a signed-in public session cannot read without the second factor 
     expect(j2.status).toBe(401);
     expect(h.store.rawDb().prepare(`SELECT COUNT(*) AS n FROM memberships WHERE agent_id = 'a1'`).get()).toEqual({ n: 0 });
     // Signed in properly at the public address: accepted.
-    const full = await h.signIn('carol', carol.password);
+    const full = await h.signIn('carol', carol.password, { totpSecret: carol.totpSecret });
     const j3 = await h.pub('/v1/join', { body: { code: invite(), name: 'C' }, jar: full });
     expect(j3.status, JSON.stringify(j3.json)).toBe(201);
   });
@@ -209,6 +209,10 @@ describe('open sockets do not outlive public access', () => {
     const owner = await h.addAccount('owner', { owner: true });
     const m = await h.addAccount('member');
     await h.app.publicAccess!.evaluate();
+    // Who can use a sign-in for a socket and nothing else: a chat-only guest the owner lets in without a second factor.
+    process.env.HATCHABOT_PUBLIC_GUESTS_WITHOUT_SECOND_FACTOR = '1';
+    h.store.insertAgent({ id: 'a1', ownerId: owner.id, name: 'Kitchen', slug: 'kitchen', state: 'RUNNING', aiProfileId: 'p1', hostId: 'host-local', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
+    h.store.insertMembership({ id: 'm1', agentId: 'a1', userId: m.id, role: 'member', status: 'active', webChat: true } as never);
     const jar = new Jar();
     await h.pub('/v1/login', { body: { username: 'member', password: m.password }, jar });
     const answer = await raw(h.port, `GET /v1/agents/a1/ui/ HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nCookie: ${jar.header()}\r\n\r\n`);
@@ -246,8 +250,8 @@ describe('smaller things', () => {
     const m = await h.addAccount('member');
     h.store.insertSecondFactor({ id: 'pk-elsewhere', ownerId: m.id, kind: 'passkey', credentialId: 'cred-x', rpId: 'localhost', data: '{}' });
     await h.app.publicAccess!.evaluate();
-    const jar = await h.signIn('member', m.password); // not asked for a factor: the passkey does not work here
-    expect((await h.pub('/v1/agents', { jar })).status).toBe(200);
+    const jar = await h.signIn('member', m.password); // not asked for the passkey: it does not work here, so they have none that counts
+    expect((await h.pub('/v1/agents', { jar })).json.secondFactor).toBe('enrol-link');
     // A passkey made elsewhere was never asked for here, so it proves nothing: this is a first factor (second review).
     expect((await h.pub('/v1/second-factor/totp', { jar, body: { current: m.password } })).json.secondFactor).toBe('enrol-link');
     h.store.setLocalAccountClaim(m.id, 'a-reset-link', new Date(Date.now() + 60_000).toISOString());

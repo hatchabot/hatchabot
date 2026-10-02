@@ -78,7 +78,9 @@ describe('public traffic is never "on this machine"', () => {
     expect((await h.pub('/v1/local-accounts/claim?code=member-claim-code')).json.username).toBe('invited');
     const jar = new Jar();
     expect((await h.pub('/v1/local-accounts/claim', { body: { code: 'member-claim-code', password: 'a-long-password' }, jar })).status).toBe(200);
-    expect((await h.pub('/v1/agents', { jar })).json.me).toBe(mid);
+    // In, and (having arrived by an invitation) sent to add a second factor before anything else.
+    expect(h.store.localAccount(mid)!.pwHash).not.toBe('');
+    expect((await h.pub('/v1/agents', { jar })).json.secondFactor).toBe('enrol');
   });
 
   it('a request for another host name is refused', async () => {
@@ -245,10 +247,10 @@ describe('each lock on its own (a marked socket, no listener)', () => {
 describe('who a public request acts as', () => {
   it('a bearer token beside a valid public session is ignored: the session decides', async () => {
     const { h } = await ready();
-    const a = await h.addAccount('alice');
+    const a = await h.addAccount('alice', { totp: true });
     const c = await h.addAccount('carol');
     const { token } = h.store.createCliToken(c.id, 'CLI', 90);
-    const jar = await h.signIn('alice', a.password);
+    const jar = await h.signIn('alice', a.password, { totpSecret: a.totpSecret });
     const r = await h.pub('/v1/agents', { jar, headers: { authorization: `Bearer ${token}` } });
     expect(r.json.me).toBe(a.id); // not carol, whose token it is
   });
@@ -279,13 +281,13 @@ describe('who a public request acts as', () => {
     expect(seen).toEqual([{ url: '/v1/backups/run', pub: true }, { url: '/v1/backups/run', pub: false }]);
   });
 
-  it('with "a second factor for everyone", a member without one can only add one there, and not with the password alone', async () => {
+  it('a member without a second factor can only add one there, and not with the password alone (the default; the old opt-in changes nothing)', async () => {
     const { h } = await ready({ env: { HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL: '1' } });
     const m = await h.addAccount('member');
     const jar = await h.signIn('member', m.password);
     const r = await h.pub('/v1/agents', { jar });
     expect(r.status).toBe(403);
-    expect(r.json.secondFactor).toBe('enrol');
+    expect(r.json.secondFactor).toBe('enrol-link'); // told where to get a link, not sent to a page that would refuse them
     expect((await h.pub('/v1/second-factor', { jar })).status).toBe(200);
     expect((await h.pub('/v1/cli-tokens', { jar, body: {} })).status).toBe(403);
     const { base32Decode, totp } = await import('../src/api/totp.js');

@@ -303,6 +303,13 @@ await app.listen({ port: PORT, host: bindHost });
 // otherwise. When it is on, the public listener opens on loopback for
 // Tailscale Funnel, and serves only while every safeguard holds: with one
 // off it answers 503 to everyone and the log says which (publicAccess.ts).
+// First, whatever a switch that died left behind is taken back: an "on" that
+// never finished (so it is off again, not half on), or a Funnel entry
+// pointing at the public port while public access is off (reachRoutes.ts).
+{
+  const rec = await app.publicAccessRecover?.('startup').catch((err: unknown) => { app.log.error({ err: String(err) }, 'public.recover_failed'); return undefined; });
+  if (rec?.funnelError) app.log.error({ funnelError: rec.funnelError, command: rec.command }, 'Tailscale kept a Funnel entry for the public port, which is closed: run the command shown');
+}
 if (app.publicAccess?.config().on) {
   const r = await app.publicAccess.syncListener();
   const st = app.publicAccess.status();

@@ -192,6 +192,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/public-access/on': 'app: fleet-wide/irreversible — makes the sign-in page reachable from the internet; the owner confirms it in person',
   'POST /v1/public-access/off': 'app: fleet-wide/irreversible — the owner turns public access off in person',
   'POST /v1/public-access/invited-only': 'app: fleet-wide/irreversible — a safeguard public access stands on',
+  'POST /v1/public-access/guests': 'app: fleet-wide/irreversible — the owner\'s own choice to let chat-only guests in without a second factor; a person makes it, signed in themselves',
   'POST /v1/second-factor/challenge': 'app: browser — a passkey challenge for the person signing in',
   'POST /v1/second-factor/verify': 'app: secret — the second factor itself',
   'POST /v1/second-factor/totp': 'app: secret — returns an authenticator secret',

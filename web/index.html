@@ -926,6 +926,7 @@
   </header>
   <div id="setup"></div>
   <div id="limitBanner" hidden></div>
+  <div id="sfBlock" hidden style="background:color-mix(in srgb, var(--accent) 17%, transparent);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;margin:8px 0"></div>
   <div id="secNotice" hidden style="background:color-mix(in srgb, var(--accent) 17%, transparent);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;margin:8px 0"></div>
   <div id="noticeBanner" hidden style="background:color-mix(in srgb, var(--accent) 17%, transparent);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;margin:8px 0"></div>
 <div id="offlineBanner" hidden style="background:var(--bad);color:#fff;border-radius:10px;padding:10px 14px;margin:8px 0;font-weight:600">⚠ Can't reach Hatchabot — what you see may be an old cached copy. If you're away from home, check that <b>Tailscale</b> is connected on this device, then pull to refresh.</div>
@@ -1944,6 +1945,10 @@
       <div id="reachChecks"></div>
       <label class="sub" style="display:flex;align-items:center;gap:6px;margin:10px 0" title="At the public address only existing accounts and pending invitations may sign in; nobody can register there, and the machine cannot be claimed there.">
         <input type="checkbox" id="reachInvited" onchange="reachSetInvitedOnly(this)"> Only invited people (needed before public access can be turned on)</label>
+      <label class="sub" style="display:flex;align-items:center;gap:6px;margin:10px 0 2px" title="A chat-only guest: someone who can chat with another person's agent from the web app and has no agents, AI sources or hosts of their own, and no owner rights.">
+        <input type="checkbox" id="reachGuests" onchange="reachSetGuests(this)"> Let chat-only guests in without a second factor</label>
+      <div class="sub" id="reachGuestsWarn" style="margin:0 0 6px 24px">Off (recommended): everyone who signs in with a password needs a second factor at the public address. On: people who can only chat with someone else's agent get in with their password alone, for the chat and nothing else. <b>A guest's password that is guessed, reused or phished then opens their chats to anyone on the internet.</b></div>
+      <div class="sub" id="reachNoFactor" hidden style="margin:6px 0"></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0">
         <button class="primary" id="reachOnBtn" onclick="reachTurnOn(this)">Turn on public access…</button>
         <button id="reachOffBtn" onclick="reachTurnOff(this)" hidden>Turn off public access</button>
@@ -2758,6 +2763,9 @@ const api = async (path, opts = {}) => {
     window.__sfEnrolShown = true;
     setTimeout(() => { toast(data.error, 8000); if (!aiDlg.open) void openAiDlg('access'); }, 0);
   }
+  // …and they did not arrive by a link, so they cannot add one here: say
+  // plainly what to do instead (the settings page would only refuse them).
+  if (res.status === 403 && data.secondFactor === 'enrol-link' && !path.startsWith('/v1/second-factor/')) sfShowBlock(data.error);
   // Only the sign-in hook's own 401 means the session is gone. A route that
   // answers 401 with its own reason — a wrong current password, a recovery
   // code that doesn't match — is an answer, not a reason to sign out: showing
@@ -2787,6 +2795,14 @@ const api = async (path, opts = {}) => {
 // Passkeys speak ArrayBuffers; the server speaks base64url.
 const b64uToBuf = (s) => Uint8Array.from(atob(String(s).replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)).buffer;
 const bufToB64u = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+/** Signed in at the public address with no second factor and no way to add one here: what to do, once, where it cannot be missed. */
+function sfShowBlock(text) {
+  const el = $('sfBlock');
+  if (!el || !el.hidden) return;
+  el.hidden = false;
+  el.innerHTML = `<div>🔐 ${esc(text)}</div><div style="margin-top:8px"><button onclick="signOut()">Sign out</button></div>`;
+}
 
 /** One prompt at a time: every request that needs the second factor waits on the same one. */
 let sfPending = null;
@@ -2885,11 +2901,17 @@ async function loadSecondFactor() {
   box.hidden = false;
   $('sfPwRow').hidden = !st.localAccount || (st.publicAddress && st.factors.length > 0);
   $('sfBackupBtn').hidden = st.factors.length === 0;
-  $('sfStatus').innerHTML = st.factors.length
+  $('sfStatus').innerHTML = st.hidden
+    ? 'Give your second factor to see and change what you have.'
+    : st.factors.length
     ? `Asked for when you sign in at the public address, and again there before sensitive changes. ${st.backupCodes} backup code${st.backupCodes === 1 ? '' : 's'} left.`
     : st.ownerRights
       ? '<b style="color:var(--warn)">You have none.</b> You own this machine, so you need one before it can be made reachable from the internet.'
-      : 'You have none. With one, signing in at the public address asks for it as well as your password.';
+      : st.need === 'no'
+        ? 'You have none. You sign in with Google, which is your second step at the public address; if you add one here, it is asked for there as well.'
+        : st.need === 'guest'
+          ? 'You have none. At the public address you can chat without one; everything else there needs one.'
+          : `<b style="color:var(--warn)">You have none, and the public address asks everyone for one.</b> ${st.publicAddress ? 'Add one now if you just used an invitation or reset link; otherwise add it at the private address, or ask whoever runs this Hatchabot for a reset link.' : 'Add one here, so you can sign in from the internet too.'}`;
   $('sfList').innerHTML = st.factors.map((f) => `<div class="pair" style="gap:8px;align-items:center">
       <span><b>${esc(f.kind === 'passkey' ? (f.label || 'Passkey') : 'Authenticator app')}</b>
         <span class="sub">· added ${esc(new Date(f.createdAt).toLocaleDateString())}${f.lastUsedAt ? ` · last used ${esc(new Date(f.lastUsedAt).toLocaleDateString())}` : ''}${f.kind === 'passkey' && !f.worksAtPublicAddress ? ` · made for ${esc(f.madeFor || 'another address')}` : ''}</span></span>
@@ -2987,12 +3009,22 @@ function reachRender(r) {
   addr.hidden = !(r.on && r.url);
   addr.innerHTML = r.on && r.url ? `<img src="/v1/public-access/qr.svg?${Date.now()}" alt="QR code for the public address" width="104" height="104" style="background:#fff;border-radius:8px;padding:4px">
       <div><div class="sub">The public address</div><code style="word-break:break-all;user-select:all">${esc(r.url)}</code>
-      <div style="margin-top:6px"><button onclick="copyText('${esc(r.url)}').then(ok => toast(ok ? 'Copied' : 'Select it and copy'))">Copy</button></div></div>` : '';
+      <div style="margin-top:6px"><button data-copy="${esc(r.url)}" onclick="copyText(this.dataset.copy).then(ok => toast(ok ? 'Copied' : 'Select it and copy'))">Copy</button></div></div>` : '';
   const missing = (r.tailscale?.missing || []).map((m) => `<div class="pair reachCheck" data-ok="0" style="gap:8px"><span>✗ <b>Tailscale:</b> ${esc(m.what)} <span class="sub">${esc(m.fix)}${/^https:\/\//.test(m.link || '') ? ` <a href="${esc(m.link)}" target="_blank" rel="noopener">Open</a>` : ''}</span></span></div>`).join('');
   $('reachChecks').innerHTML = (r.safeguards || []).map((c) => `<div class="pair reachCheck" data-id="${esc(c.id)}" data-ok="${c.ok ? 1 : 0}" style="gap:8px">
       <span>${c.ok ? '✓' : '✗'} <b>${esc(c.title)}</b>${c.ok ? '' : `<br><span class="sub">${esc(c.detail)}${c.fix ? ` <i>${esc(c.fix)}</i>` : ''}</span>`}</span></div>`).join('') + missing;
   $('reachInvited').checked = !!r.invitedOnly;
   $('reachInvited').disabled = !!r.on;
+  $('reachGuests').checked = !!r.guestsWithoutSecondFactor;
+  $('reachGuests').dataset.confirm = r.guestsConfirmText || '';
+  // Who has no second factor yet: stopped at the public address until they add one (or, a chat-only guest, let in by the switch above).
+  const none = (r.withoutSecondFactor || []).filter((p) => !(r.guestsWithoutSecondFactor && p.chatOnlyGuest));
+  const guests = (r.withoutSecondFactor || []).filter((p) => r.guestsWithoutSecondFactor && p.chatOnlyGuest);
+  $('reachNoFactor').hidden = !(none.length || guests.length);
+  $('reachNoFactor').innerHTML = [
+    none.length ? `<b>No second factor yet:</b> ${none.map((p) => esc(p.name)).join(', ')}. They are stopped at the public address until they add one: send each a reset link (Accounts, above), which lets them add it right after using it, or have them add it at the private address.` : '',
+    guests.length ? `<b>Let in with a password alone (chat only):</b> ${guests.map((p) => esc(p.name)).join(', ')}.` : '',
+  ].filter(Boolean).join('<br>');
   $('reachOnBtn').hidden = !!(r.on && r.serving);
   $('reachOnBtn').disabled = (r.failing || []).length > 0;
   $('reachOnBtn').title = (r.failing || []).length ? 'Every safeguard above has to be in place first' : '';
@@ -3001,6 +3033,11 @@ function reachRender(r) {
 }
 async function reachSetInvitedOnly(cb) {
   try { reachRender(await api('/v1/public-access/invited-only', { method: 'POST', body: { on: cb.checked } })); }
+  catch (e) { cb.checked = !cb.checked; $('reachErr').textContent = e.message; }
+}
+async function reachSetGuests(cb) {
+  if (cb.checked && !confirm(`${cb.dataset.confirm || 'This lets chat-only guests use the public address with their password alone.'}\n\nEveryone else who signs in with a password still needs a second factor there.\n\nLet chat-only guests in without one?`)) { cb.checked = false; return; }
+  try { reachRender(await api('/v1/public-access/guests', { method: 'POST', body: { on: cb.checked, confirm: true } })); toast(cb.checked ? 'Chat-only guests no longer need a second factor' : 'Everyone with a password needs a second factor'); }
   catch (e) { cb.checked = !cb.checked; $('reachErr').textContent = e.message; }
 }
 async function reachTurnOn(btn) {
@@ -3260,6 +3297,7 @@ async function idSignUp() {
 }
 
 function showLogin() {
+  if ($('sfBlock')) $('sfBlock').hidden = true; // the next sign-in is judged afresh
   if (!loginDlg.open) {
     $('loginErr').textContent = '';
     loadConfig().then(() => {
@@ -3284,7 +3322,8 @@ async function forgotPassword() {
     from one of your agents' bots, valid for 15 minutes. Your current password keeps working until you use it.
     <br><br>No message? Use your <a href="#" onclick="event.preventDefault();showRecoverForm()">recovery code</a>,
     or ask whoever runs this machine to send you a reset link from ⚙ Settings → You.
-    If that is <b>you</b> and you have no code, run <code>hatchabot accounts reset-password ${esc(username)}</code> on the machine itself.`;
+    If that is <b>you</b> and you have no code, run <code>hatchabot accounts reset-password ${esc(username)}</code> on the machine itself.${appConfig.publicAddress ? `
+    <br><br>This is the public address: here a reset can be asked for once an hour, and <b>an account that owns this machine is recovered at the private address only</b> (on your network or your tailnet), by link or by recovery code.` : ''}`;
 }
 
 /** An invitation link: show who it is for, then let them choose a password. */

@@ -1173,7 +1173,9 @@ const SCENARIOS = String.raw`(() => {
         { id: 'invited-only', letter: 'c', title: 'Only invited people', ok: invited, detail: invited ? 'ok' : 'The "Only invited people" switch is off.', fix: invited ? undefined : 'Turn it on.' },
         { id: 'auto-upgrade', letter: 'i', title: 'Automatic upgrades on the stable channel', ok: true, detail: 'ok' },
       ];
-      const off = (invited) => ({ on: false, serving: false, url: null, invitedOnly: invited, safeguards: guards(invited), failing: invited ? [] : ['invited-only'], confirmText: 'This makes your sign-in page reachable from the internet.' });
+      const off = (invited, guests = false) => ({ on: false, serving: false, url: null, invitedOnly: invited, safeguards: guards(invited), failing: invited ? [] : ['invited-only'], confirmText: 'This makes your sign-in page reachable from the internet.',
+        guestsWithoutSecondFactor: guests, guestsConfirmText: 'This lets chat-only guests use the public address with their password alone.',
+        withoutSecondFactor: [{ name: 'sam', chatOnlyGuest: false }, { name: 'gran', chatOnlyGuest: true }] });
       const on = { on: true, serving: true, url: 'https://box.example.com:8443', invitedOnly: true, safeguards: guards(true), failing: [], turnedOn: true };
       const savedConfig = appConfig;
       window.__override['/v1/public-access'] = off(false);
@@ -1194,6 +1196,28 @@ const SCENARIOS = String.raw`(() => {
         const inv = await until(() => calls('POST', /\/v1\/public-access\/invited-only$/)[0]);
         eq('the switch', inv.body, { on: true });
         await until(() => !document.getElementById('reachOnBtn').disabled);
+        // Who has no second factor yet is named, with what to do about it.
+        const none = document.getElementById('reachNoFactor');
+        ok('people without a second factor are named: ' + none.textContent, !none.hidden && none.textContent.includes('sam, gran') && none.textContent.includes('reset link'));
+        // The guest switch: off, with a plain warning; turning it on asks first; a "no" changes nothing.
+        const guests = document.getElementById('reachGuests');
+        ok('guests are not exempt unless the owner says so', !guests.checked);
+        ok('the warning is plain: ' + document.getElementById('reachGuestsWarn').textContent, document.getElementById('reachGuestsWarn').textContent.includes('password alone') && document.getElementById('reachGuestsWarn').textContent.includes('anyone on the internet'));
+        window.__confirmAnswer = false; window.__confirms.length = 0;
+        guests.click(); await sleep(150);
+        ok('it asks first: ' + window.__confirms[0], (window.__confirms[0] || '').includes('password alone') && window.__confirms[0].includes('Everyone else'));
+        ok('declined: unticked, nothing sent', !guests.checked && calls('POST', /\/v1\/public-access\/guests$/).length === 0);
+        window.__confirmAnswer = true;
+        window.__answer = { 'POST /v1/public-access/guests': [{ body: off(true, true) }, { body: off(true, false) }] };
+        guests.click();
+        const g = await until(() => calls('POST', /\/v1\/public-access\/guests$/)[0]);
+        eq('the guest switch, confirmed', g.body, { on: true, confirm: true });
+        await until(() => none.textContent.includes('Let in with a password alone'));
+        ok('it says who is let in, and who is still stopped: ' + none.textContent, /No second factor yet:\s*sam\./.test(none.textContent) && /chat only\):\s*gran\./.test(none.textContent));
+        guests.click(); // off again: no question for tightening
+        await until(() => calls('POST', /\/v1\/public-access\/guests$/).length === 2);
+        eq('off again', calls('POST', /\/v1\/public-access\/guests$/)[1].body.on, false);
+        await until(() => !none.textContent.includes('Let in with a password alone'));
         // Turning it on asks first, in plain words; a "no" does nothing.
         window.__confirmAnswer = false; window.__confirms.length = 0;
         document.getElementById('reachOnBtn').click(); await sleep(150);
@@ -1215,6 +1239,8 @@ const SCENARIOS = String.raw`(() => {
         eq('the request confirms', calls('POST', /\/v1\/public-access\/on$/).pop().body, { confirm: true });
         ok('the address is shown: ' + document.getElementById('reachAddress').textContent, !document.getElementById('reachAddress').hidden && document.getElementById('reachAddress').textContent.includes('https://box.example.com:8443'));
         ok('with its QR code', !!document.querySelector('#reachAddress img[src^="/v1/public-access/qr.svg"]'));
+        const copy = document.querySelector('#reachAddress button');
+        ok('Copy reads the address from a data attribute, not from a script string', copy.dataset.copy === 'https://box.example.com:8443' && !copy.getAttribute('onclick').includes('box.example.com'));
         ok('On is replaced by Off', document.getElementById('reachOnBtn').hidden && !document.getElementById('reachOffBtn').hidden);
         ok('the invited-only switch is locked while on', document.getElementById('reachInvited').disabled);
         // The record, with a sign-out for whoever signed in.
@@ -1243,6 +1269,29 @@ const SCENARIOS = String.raw`(() => {
         for (const k of ['/v1/public-access', '/v1/second-factor', '/v1/security/log']) delete window.__override[k];
         window.__answer = {}; window.__confirmAnswer = true;
         if (aiDlg.open) aiDlg.close();
+      }
+    },
+    secondFactorMissing: async () => {
+      // At the public address with a password and no second factor, and no link behind the sign-in: told plainly, once.
+      const block = document.getElementById('sfBlock');
+      const text = 'This Hatchabot asks for a second factor at the public address, and your account has none yet. Ask whoever runs this Hatchabot for a reset link and add one right after using it, or add one at the private address (Settings → You → Second factor).';
+      try {
+        window.__answer = {
+          'POST /v1/second-factor/totp': [{ status: 403, body: { error: 'Your password alone cannot add your first second factor at this address.', secondFactor: 'enrol-link' } }],
+          'GET /v1/hosts': [{ status: 403, body: { error: text, secondFactor: 'enrol-link' } }, { status: 403, body: { error: 'again', secondFactor: 'enrol-link' } }],
+        };
+        ok('nothing shown before', block.hidden);
+        await api('/v1/second-factor/totp', { method: 'POST', body: {} }).catch(() => {});
+        ok('the enrolment form\'s own refusal stays in the form', block.hidden);
+        const failed = await api('/v1/hosts').then(() => '', (e) => e.message);
+        eq('the call fails with the reason', failed, text);
+        ok('and the page says what to do: ' + block.textContent, !block.hidden && block.textContent.includes('reset link') && block.textContent.includes('private address'));
+        ok('with a way out', !!byText('#sfBlock button', 'Sign out'));
+        await api('/v1/hosts').catch(() => {});
+        ok('said once, not replaced by every later refusal', block.textContent.includes('reset link') && !block.textContent.includes('again'));
+      } finally {
+        window.__answer = {};
+        block.hidden = true; block.innerHTML = '';
       }
     },
     secondFactorPrompt: async () => {

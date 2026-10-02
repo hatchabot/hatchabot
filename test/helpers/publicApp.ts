@@ -30,7 +30,7 @@ export async function freePort(): Promise<number> {
 
 const ENV_KEYS = ['HATCHABOT_PUBLIC_ACCESS', 'HATCHABOT_PUBLIC_PORT', 'HATCHABOT_PUBLIC_INVITED_ONLY', 'HATCHABOT_PUBLIC_ACCESS_URL', 'HATCHABOT_PUBLIC_URL',
   'HATCHABOT_PUBLIC_IDLE_MINUTES', 'HATCHABOT_PUBLIC_STEPUP_MINUTES', 'HATCHABOT_PUBLIC_REQS_PER_MIN', 'HATCHABOT_PUBLIC_REQS_PER_MIN_PER_ADDRESS',
-  'HATCHABOT_PUBLIC_FAILS_CEILING', 'HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL', 'HATCHABOT_LOGIN_FAILS_PER_WINDOW', 'HATCHABOT_ALLOW_OWNER_HEADER', 'HATCHABOT_LOCAL_ACCOUNTS', 'HATCHABOT_ALLOWED_EMAILS',
+  'HATCHABOT_PUBLIC_FAILS_CEILING', 'HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL', 'HATCHABOT_PUBLIC_GUESTS_WITHOUT_SECOND_FACTOR', 'HATCHABOT_LOGIN_FAILS_PER_WINDOW', 'HATCHABOT_ALLOW_OWNER_HEADER', 'HATCHABOT_LOCAL_ACCOUNTS', 'HATCHABOT_ALLOWED_EMAILS',
   'HATCHABOT_MANAGED_BY', 'HATCHABOT_FUNNEL_PORT', 'HATCHABOT_PUBLIC_FUNNEL_PORT', 'HATCHABOT_ENV_FILE', 'HATCHABOT_TAILSCALE_BIN', 'PORT'];
 
 export class Jar {
@@ -56,6 +56,8 @@ export interface PublicAppOptions {
   /** Leave public access off (the listener is not opened). */
   off?: boolean;
   verifier?: unknown;
+  /** With fullRoutes: dependencies of the routes to replace (a secret store that answers, a stand-in for fetch). */
+  routeDeps?: Record<string, unknown>;
   /** Add routes before the app is ready. */
   extra?: (app: FastifyInstance, store: Store) => void;
 }
@@ -101,7 +103,8 @@ export async function publicApp(opts: PublicAppOptions = {}): Promise<PublicApp>
       providers: new Map([['mock', new MockProvider()]]),
       channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never,
       authMode: mode,
-    });
+      ...(opts.routeDeps ?? {}),
+    } as never);
   } else {
     app.get('/', async (_req, reply) => reply.type('text/html').send('<html>app</html>'));
     app.get('/v1/config', async () => ({ authMode: mode }));

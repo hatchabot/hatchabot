@@ -143,6 +143,20 @@ function ownerFirstClaimFromPublic(req: FastifyRequest, account: LocalAccount): 
   return isPublic(req) && account.hostOwner && account.pwHash === '';
 }
 
+/**
+ * Nor is an owner's password RESET from the public address: a reset link (the
+ * Telegram one, or one another owner sent) and the recovery code replace the
+ * first factor of the account that holds the machine. From the internet that
+ * would rest on one leaked message or one written-down code; at the private
+ * address the person is already on the network or the tailnet. Members'
+ * recovery works at both.
+ */
+export const OWNER_RECOVERY_PRIVATE_ONLY = 'An account with owner rights is recovered at the private address only. Open Hatchabot at its private address (on your network or your tailnet) and use the link or the recovery code there.';
+function ownerRecoveryFromPublic(req: FastifyRequest, account: LocalAccount): boolean {
+  // (An owner who has never had a password is the first claim, above.)
+  return isPublic(req) && account.pwHash !== '' && (account.hostOwner || (req.server.publicAccess?.hasOwnerRights(account.id) ?? false));
+}
+
 /** Session signature. The account's password hash rides in the material, so
  *  changing (or resetting) a password invalidates that account's sessions
  *  everywhere without touching anyone else's. */
@@ -354,6 +368,7 @@ export function registerAccountRoutes(
       return reply.code(404).send({ error: 'That invitation has been used already, or it has expired. Ask for a new one.' });
     }
     if (ownerFirstClaimFromPublic(req, account)) return reply.code(403).send({ error: OWNER_CLAIM_PRIVATE_ONLY });
+    if (ownerRecoveryFromPublic(req, account)) return reply.code(403).send({ error: OWNER_RECOVERY_PRIVATE_ONLY, privateOnly: true });
     const { hash, salt } = await hashPassword(password);
     // Checked again after the await, and claimed in the same synchronous step:
     // two people opening one link at once both got in (night review).
@@ -375,6 +390,8 @@ export function registerAccountRoutes(
     const account = req.query.code ? store.localAccountByClaim(req.query.code) : undefined;
     if (!account) return reply.code(404).send({ error: 'That link has been used already, or it has expired.' });
     if (ownerFirstClaimFromPublic(req, account)) return reply.code(403).send({ error: OWNER_CLAIM_PRIVATE_ONLY });
+    // The code is the credential, so this tells only its holder; the link is kept for the private address.
+    if (ownerRecoveryFromPublic(req, account)) return reply.code(403).send({ error: OWNER_RECOVERY_PRIVATE_ONLY, privateOnly: true });
     // An account that already has a password is being RESET, not invited: the
     // page should say so, or people wonder why they are "joining" again.
     return {
@@ -495,6 +512,8 @@ export function registerAccountRoutes(
       return reply.code(401).send({ error: 'That username and recovery code do not match.' });
     }
     release();
+    // Said only to someone who gave the right code (so it tells a stranger nothing), and the code is not spent.
+    if (ownerRecoveryFromPublic(req, account)) return reply.code(403).send({ error: OWNER_RECOVERY_PRIVATE_ONLY, privateOnly: true });
     const pw = await hashPassword(password);
     store.transact(() => {
       store.setLocalAccountPassword(account.id, pw.hash, pw.salt);

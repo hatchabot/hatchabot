@@ -91,8 +91,13 @@ Commands:
                                (docs/public-access.md). --invited-only also
                                turns that switch on first.
   reach off                    Take the public address down again, completely.
+  reach guests on|off          Let chat-only web-chat guests use the public
+                               address without a second factor (off unless you
+                               turn it on; it asks first). Everyone else who
+                               signs in with a password always needs one there.
   second-factor reset <user>   Machine owner: clear someone's passkeys,
                                authenticator app and backup codes (a lost phone).
+                               Your own: asks for your password.
   list [--all]                 Agents with state, model, and last activity.
                                --all (host owner): every user's agents, with
                                the owner id — find another login's leftovers.
@@ -1202,6 +1207,14 @@ async function main() {
           : 'Public access: off (private only).');
         for (const c of r.safeguards ?? []) console.log(`  ${c.ok ? '✓' : '✗'} ${c.letter}. ${c.title}${c.builtIn ? ' (built in)' : ''}${c.ok ? '' : ` — ${c.detail}`}${!c.ok && c.fix ? `\n      → ${c.fix}` : ''}`);
         for (const m of r.tailscale?.missing ?? []) console.log(`  ✗ Tailscale: ${m.what} ${m.fix}${m.link ? `\n      → ${m.link}` : ''}`);
+        if (r.recovered?.rolledBack) console.log('  ! Turning public access on had begun and never finished: it has been turned back off.');
+        if (r.recovered?.leftoverRemoved) console.log('  ! Tailscale Funnel pointed at the public port while public access was off: that entry has been removed.');
+        if (r.recovered?.funnelError) console.log(`  ! Tailscale kept a Funnel entry for the public port (${r.recovered.funnelError}). Run: ${r.recovered.command}`);
+        console.log(r.guestsWithoutSecondFactor
+          ? '  Second factor: required of everyone with a password, EXCEPT chat-only guests (your choice: hatchabot reach guests off).'
+          : '  Second factor: required of everyone who signs in with a password.');
+        const none = (r.withoutSecondFactor ?? []).filter((p: any) => !(r.guestsWithoutSecondFactor && p.chatOnlyGuest));
+        if (none.length) console.log(`  No second factor yet, so stopped at the public address: ${none.map((p: any) => p.name).join(', ')}.\n      → Send each a reset link (Settings → You → Accounts); they add one right after using it, or at the private address.`);
         if (r.on && r.serving && r.url) {
           const QR = (await import('qrcode')).default;
           console.log(`\n${await QR.toString(r.url, { type: 'terminal', small: true })}`);
@@ -1234,13 +1247,26 @@ async function main() {
         }
         return;
       }
-      fail('usage: hatchabot reach [status|on|off]');
+      if (sub === 'guests') {
+        const want = rest[1];
+        if (want !== 'on' && want !== 'off') fail('usage: hatchabot reach guests on|off');
+        if (want === 'on') await confirmOr('This lets chat-only guests use the public address with their password alone. Anyone who learns, guesses or phishes a guest\'s password can then read and send in that guest\'s chats from the internet. Turn it on?');
+        const r: any = await (await jsonPost('/v1/public-access/guests', { on: want === 'on', confirm: true })).json();
+        console.log(r.guestsWithoutSecondFactor ? 'Chat-only guests may now use the public address without a second factor.' : 'Everyone who signs in with a password needs a second factor at the public address.');
+        return;
+      }
+      fail('usage: hatchabot reach [status|on|off|guests on|off]');
       return;
     }
     case 'second-factor': {
       if (rest[0] !== 'reset' || !rest[1]) fail('usage: hatchabot second-factor reset <username>');
       await confirmOr(`Clear every second factor of "${rest[1]}"? If they have owner rights and public access is on, it pauses until they add one again.`);
-      const r: any = await (await jsonPost(`/v1/second-factor/reset/${encodeURIComponent(rest[1]!)}`, {})).json();
+      const reset = (body: object) => jsonPost(`/v1/second-factor/reset/${encodeURIComponent(rest[1]!)}`, body);
+      // Your own factors: the server asks for your password as well as the session.
+      const r: any = await (await reset({}).catch(async (err: unknown) => {
+        if (!(err as { data?: { needsPassword?: boolean } }).data?.needsPassword) throw err;
+        return reset({ current: await askSecret('Your password (clearing your own second factor needs it): ') });
+      })).json();
       console.log(`${r.removed} second factor${r.removed === 1 ? '' : 's'} and backup codes removed for "${rest[1]}". Public access: ${r.publicAccess}.`);
       return;
     }

@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freePort, Jar, publicApp, type PublicApp } from './helpers/publicApp.js';
@@ -14,6 +14,8 @@ import { enableServe, funnelOff, funnelOn, funnelPreflight, parseFunnelStatus, t
  * binary the module runs when it is set, and without it every changing
  * command refuses under a test runner.
  */
+// Every test here starts the whole app and runs a stand-in command several times: five seconds is not enough on a busy machine.
+vi.setConfig({ testTimeout: 30_000 });
 let h: PublicApp | undefined;
 let shim: Shim;
 let dir: string;
@@ -154,14 +156,27 @@ describe('reach on', () => {
     expect(changing()).toEqual([]);
   });
 
-  it('when the setting cannot be saved, everything is taken back', async () => {
+  it('with no .env to save the setting in, nothing is changed at all', async () => {
     const { h, call } = await start({ HATCHABOT_ENV_FILE: join(dir, 'missing', '.env') });
     const r = await call('POST', '/v1/public-access/on', { confirm: true });
     expect(r.statusCode).toBe(409);
-    expect(r.json().error).toContain('turned back off');
+    expect(r.json().error).toContain('nothing was changed');
+    expect(h.app.publicAccess!.status()).toMatchObject({ on: false, listening: false });
+    expect(changing()).toEqual([]);
+  });
+
+  it('when the setting cannot be saved, everything is taken back', async () => {
+    const { h, call } = await start();
+    chmodSync(envFile, 0o000); // there, and not writable or readable: the note is written, the setting is not
+    try {
+      const r = await call('POST', '/v1/public-access/on', { confirm: true });
+      expect(r.statusCode).toBe(409);
+      expect(r.json().error).toContain('turned back off');
+    } finally { chmodSync(envFile, 0o600); }
     expect(shim.config().AllowFunnel ?? {}).toEqual({});
     expect(h.app.publicAccess!.status()).toMatchObject({ on: false, listening: false });
     expect(changing().map((c) => c.join(' '))).toEqual([`funnel --bg --https=8443 http://127.0.0.1:${h.port}`, 'funnel --https=8443 off']);
+    expect(existsSync(`${envFile}.public-access-pending`)).toBe(false);
   });
 
   it('cannot be turned on from the public address itself', async () => {

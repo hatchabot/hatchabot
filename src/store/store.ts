@@ -2780,6 +2780,36 @@ export class Store {
     return !!m && m.status === 'active' && m.webChat;
   }
 
+  /**
+   * A CHAT-ONLY GUEST (docs/public-access.md): someone whose whole standing
+   * here is "may chat with somebody else's agent from the web app".
+   * All of:
+   *   1. an active member, with web chat on, of at least one agent that is
+   *      not deleted, is not the management agent and belongs to someone else;
+   *   2. owns no agent (in any state but DELETED), so has no console of
+   *      their own: an owner's console is a shell in the agent's container;
+   *   3. owns no AI source and no host or runner.
+   * Owner rights over the machine are judged by the caller (adminAccounts):
+   * someone with them is never a guest. Read fresh on every request: the
+   * moment any line stops being true, so does this.
+   */
+  /** Lines 2 and 3 of the chat-only guest: no agent, AI source, host or runner of their own. */
+  ownsNothing(userId: string): boolean {
+    const one = (sql: string, ...args: unknown[]): boolean => !!this.db.prepare(sql).get(...args);
+    if (one(`SELECT 1 FROM agents WHERE owner_id = ? AND state != 'DELETED' LIMIT 1`, userId)) return false;
+    if (one(`SELECT 1 FROM ai_profiles WHERE owner_id = ? LIMIT 1`, userId)) return false;
+    if (one(`SELECT 1 FROM hosts WHERE owner_id = ? LIMIT 1`, userId)) return false;
+    return true;
+  }
+  isChatOnlyGuest(userId: string): boolean {
+    const one = (sql: string, ...args: unknown[]): boolean => !!this.db.prepare(sql).get(...args);
+    if (!this.ownsNothing(userId)) return false;
+    return one(
+      `SELECT 1 FROM memberships m JOIN agents a ON a.id = m.agent_id
+        WHERE m.user_id = ? AND m.status = 'active' AND m.web_chat = 1
+          AND a.state != 'DELETED' AND a.owner_id != ? AND COALESCE(a.ops, 0) = 0 LIMIT 1`, userId, userId);
+  }
+
   /** Turn web chat on or off for an active member. False when there is no such member. */
   setMembershipWebChat(agentId: string, userId: string, on: boolean): boolean {
     const res = this.db

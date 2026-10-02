@@ -138,7 +138,8 @@ describe('second factors: at the public address', () => {
 
   it('a password reset does not get around the second factor', async () => {
     h = await publicApp();
-    const o = await h.addAccount('owner', { owner: true });
+    await h.addAccount('owner', { owner: true });
+    const o = await h.addAccount('member', { totp: true });
     await h.app.publicAccess!.evaluate();
     // A reset link (as Telegram recovery would send), used at the public address.
     h.store.setLocalAccountClaim(o.id, 'reset-code-123', new Date(Date.now() + 600_000).toISOString());
@@ -200,7 +201,16 @@ describe('second factors: at the public address', () => {
     // The reset (a lost phone) is the private address's, and public access stops serving in the same breath.
     const jar = await h.signIn('owner', o.password, { totpSecret: o.totpSecret });
     expect((await h.pub('/v1/second-factor/reset/me', { jar, body: {} })).status).toBe(403);
-    const reset = await call('POST', '/v1/second-factor/reset/owner', {});
+    // Clearing your own factors is changing them: the session alone is not enough, by name or as "me".
+    for (const who of ['owner', 'me', o.id]) {
+      const bare = await call('POST', `/v1/second-factor/reset/${who}`, {});
+      expect(bare.statusCode, who).toBe(401);
+      expect(bare.json().needsPassword, who).toBe(true);
+      expect((await call('POST', `/v1/second-factor/reset/${who}`, { current: 'not-the-password' })).statusCode, who).toBe(401);
+    }
+    expect(h.store.listSecondFactors(o.id)).not.toHaveLength(0);
+    expect(h.app.publicAccess!.status().serving).toBe(true);
+    const reset = await call('POST', '/v1/second-factor/reset/owner', { current: o.password });
     expect(reset.json()).toMatchObject({ ok: true, publicAccess: 'paused' });
     expect((await h.pub('/')).status).toBe(503);
     // A member cannot reset anyone.

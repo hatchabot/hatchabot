@@ -26,8 +26,20 @@ export interface PublicConfig {
   /** https://<machine>.<tailnet>.ts.net[:port], written when Funnel was turned on. */
   url?: string;
   invitedOnly: boolean;
-  /** Everyone, not only people with owner rights, must have a second factor to use the public address. */
-  secondFactorForAll: boolean;
+  /**
+   * HATCHABOT_PUBLIC_GUESTS_WITHOUT_SECOND_FACTOR=1: the owner's deliberate
+   * choice to let chat-only web-chat guests (store.isChatOnlyGuest) use the
+   * public address with their password alone. Everyone else with a password
+   * needs a second factor there, always.
+   */
+  guestsWithoutSecondFactor: boolean;
+  /**
+   * HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL was the opt-in before a second
+   * factor became the rule. =1 changes nothing now. Any other value used to
+   * mean "members need none": it is NOT a way to weaken the rule, it is
+   * ignored, and this says so (the doctor warns).
+   */
+  forAllIgnored?: string;
   idleMs: number;
   stepUpMs: number;
   requestsPerMinute: number;
@@ -50,7 +62,8 @@ export function publicConfig(env: NodeJS.ProcessEnv = process.env): PublicConfig
     funnelPort: [443, 8443, 10000].includes(Number(env.HATCHABOT_PUBLIC_FUNNEL_PORT)) ? Number(env.HATCHABOT_PUBLIC_FUNNEL_PORT) : 8443,
     url: env.HATCHABOT_PUBLIC_ACCESS_URL?.trim().replace(/\/$/, '') || undefined,
     invitedOnly: env.HATCHABOT_PUBLIC_INVITED_ONLY === '1',
-    secondFactorForAll: env.HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL === '1',
+    guestsWithoutSecondFactor: env.HATCHABOT_PUBLIC_GUESTS_WITHOUT_SECOND_FACTOR === '1',
+    forAllIgnored: ((v) => (v !== undefined && v.trim() !== '' && v.trim() !== '1' ? v.trim() : undefined))(env.HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL),
     idleMs: num(env.HATCHABOT_PUBLIC_IDLE_MINUTES, 720, 5, 60 * 24 * 30) * 60_000,
     stepUpMs: num(env.HATCHABOT_PUBLIC_STEPUP_MINUTES, 10, 1, 120) * 60_000,
     requestsPerMinute: num(env.HATCHABOT_PUBLIC_REQS_PER_MIN, 3000, 10, 1_000_000),
@@ -92,6 +105,8 @@ export interface SafeguardFacts {
   loginFailLimit: number;
   /** The public host, when known: a passkey counts only if it was made for it. */
   publicHost?: string;
+  /** Chat-only guests are let in without a second factor (the owner's switch). For the report only. */
+  guestsExempt?: boolean;
 }
 
 export interface SafeguardCheck {
@@ -128,7 +143,7 @@ export function evaluateSafeguards(f: SafeguardFacts): SafeguardCheck[] {
     ok: claimed && without.length === 0,
     detail: !claimed ? 'Nobody owns this machine yet (first run). A machine cannot be claimed from the internet.'
       : without.length ? `No passkey or authenticator app yet: ${without.map((a) => a.name).join(', ')}.${f.publicHost && without.some((a) => a.passkeyRpIds.length) ? ` (A passkey made at another address does not work at ${f.publicHost}.)` : ''}`
-      : `${f.admins.map((a) => `${a.name}: ${[a.passkeyRpIds.length && `${a.passkeyRpIds.length} passkey${a.passkeyRpIds.length === 1 ? '' : 's'}`, a.totp && 'authenticator app'].filter(Boolean).join(' + ')}`).join('; ')}.`,
+      : `${f.admins.map((a) => `${a.name}: ${[a.passkeyRpIds.length && `${a.passkeyRpIds.length} passkey${a.passkeyRpIds.length === 1 ? '' : 's'}`, a.totp && 'authenticator app'].filter(Boolean).join(' + ')}`).join('; ')}. Everyone else who signs in with a password is asked for one at the public address too${f.guestsExempt ? ', EXCEPT chat-only guests (your choice: their password alone lets them chat)' : ''}.`,
     ...(claimed && !without.length ? {} : { fix: claimed ? 'Each of them: Settings → You → Second factor (from the private address).' : 'Create the first account on the machine itself, then add a second factor.' }),
   });
   out.push({

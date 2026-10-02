@@ -43,10 +43,14 @@ describe('new-device notices and the security record', () => {
     expect(sent).toEqual([]);
     expect(h.store.listSecurityLog().filter((e) => e.kind === 'public.signin').map((e) => e.detail.newDevice)).toEqual([false, true]);
 
-    // Another browser: announced again.
+    // Another browser, a quarter of an hour later: announced again (sooner, it would be held back: publicNoticeLimits.test.ts).
     const other = new Jar();
-    await h.pub('/v1/login', { body: { username: 'member', password: m.password }, jar: other });
-    await h.pub('/v1/agents', { jar: other });
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + 15 * 60_000;
+      await h.pub('/v1/login', { body: { username: 'member', password: m.password }, jar: other });
+      await h.pub('/v1/agents', { jar: other });
+    } finally { Date.now = realNow; }
     expect(sent.map((s) => s.to).sort()).toEqual([m.id, o.id].sort());
   });
 
@@ -65,9 +69,9 @@ describe('new-device notices and the security record', () => {
   it('"sign out everywhere" ends the public session and forgets the browsers', async () => {
     h = await publicApp({ fullRoutes: true });
     const o = await h.addAccount('owner', { owner: true });
-    const m = await h.addAccount('member');
+    const m = await h.addAccount('member', { totp: true });
     await h.app.publicAccess!.evaluate();
-    const jar = await h.signIn('member', m.password);
+    const jar = await h.signIn('member', m.password, { totpSecret: m.totpSecret });
     expect((await h.pub('/v1/agents', { jar })).status).toBe(200);
     expect(h.store.listDevices(m.id)).toHaveLength(1);
     // The owner, from the notice, signs the member out everywhere (at the private address).

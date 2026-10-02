@@ -86,14 +86,21 @@ describe('the public listener: who gets what', () => {
     expect((await h.pub('/v1/agents', { jar })).json.me).toBe(o.id);
   });
 
-  it('a member without a second factor signs in with a password; one who enrolled is asked for it', async () => {
+  it('a member without a second factor is stopped there: the password alone opens nothing, and says where to get one; one who enrolled is asked for it', async () => {
     h = await publicApp();
     await h.addAccount('owner', { owner: true });
     const m = await h.addAccount('member');
     const m2 = await h.addAccount('careful', { totp: true });
     await h.app.publicAccess!.evaluate();
     const jar = await h.signIn('member', m.password);
-    expect((await h.pub('/v1/agents', { jar })).status).toBe(200);
+    const stopped = await h.pub('/v1/agents', { jar });
+    expect(stopped.status).toBe(403);
+    expect(stopped.json.secondFactor).toBe('enrol-link');
+    expect(stopped.json.error).toContain('reset link');
+    expect(stopped.json.error).toContain('private address');
+    // The same account at the private address is untouched.
+    const login = await h.app.inject({ method: 'POST', url: '/v1/login', payload: { username: 'member', password: m.password } });
+    expect((await h.app.inject({ url: '/v1/agents', headers: { cookie: String(login.headers['set-cookie']).split(';')[0]! } })).statusCode).toBe(200);
     const jar2 = await h.signIn('careful', m2.password);
     expect((await h.pub('/v1/agents', { jar: jar2 })).json.secondFactor).toBe('required');
   });
@@ -120,7 +127,7 @@ describe('the public listener: who gets what', () => {
     const mj = await h.signIn('member', m.password);
     const refused = await h.pub('/v1/cli-tokens', { jar: mj, body: {} });
     expect(refused.status).toBe(403);
-    expect(refused.json.secondFactor).toBe('missing');
+    expect(refused.json.secondFactor).toBe('enrol-link');
   });
 
   it('a session from the private address does not carry over: the public address wants its own sign-in', async () => {
@@ -139,10 +146,10 @@ describe('the public listener: who gets what', () => {
 
   it('a public session left idle ends, long before the session cookie does', async () => {
     h = await publicApp({ env: { HATCHABOT_PUBLIC_IDLE_MINUTES: '5' } });
-    const m = await h.addAccount('member');
+    const m = await h.addAccount('member', { totp: true });
     await h.addAccount('owner', { owner: true });
     await h.app.publicAccess!.evaluate();
-    const jar = await h.signIn('member', m.password);
+    const jar = await h.signIn('member', m.password, { totpSecret: m.totpSecret });
     expect((await h.pub('/v1/agents', { jar })).status).toBe(200);
     const realNow = Date.now;
     try {
