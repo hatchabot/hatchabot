@@ -172,13 +172,15 @@ describe('GET /v1/usage/periods', () => {
     const f = Fastify();
     await registerRoutes(f, { store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} } as never, providers: new Map([['mock', new MockProvider()]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never });
     const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER; process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
+    // The route reads the real clock; the fixture's samples are a week before NOW (this failed on its own on 2026-10-02).
+    const realNow = Date.now; Date.now = () => NOW;
     try {
       const r = await f.inject({ method: 'GET', url: '/v1/usage/periods?period=week', headers: { 'x-hatchabot-owner': OWNER } });
       expect(r.statusCode).toBe(200);
       expect(r.json().period).toBe('week');
       expect(r.json().agents.map((a: any) => a.name)).toEqual(['Den', 'Kitchen']);
       expect((await f.inject({ method: 'GET', url: '/v1/usage/periods?period=month', headers: { 'x-hatchabot-owner': OWNER } })).statusCode).toBe(400);
-    } finally { if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev; }
+    } finally { Date.now = realNow; if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev; }
   });
 });
 
