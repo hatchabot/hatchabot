@@ -8,7 +8,10 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { defaultBackupsDir, defaultDbPath } from './envCompat.js';
 import { readSetStatus } from './orchestrator/backups.js';
-import { tailnetInfo } from './ops/tailnet.js';
+import { funnelOff, funnelStatus, tailnetInfo, targetsPort } from './ops/tailnet.js';
+import { envFilePath, publicIntentIsStale, readPublicIntent } from './ops/publicIntent.js';
+import { adminAccounts, evaluateSafeguards, hostOf, publicConfig, type SafeguardCheck } from './api/safeguards.js';
+import { autoUpgradeStatus } from './ops/autoUpgrade.js';
 
 export interface DoctorFacts {
   nodeVersion: string;
@@ -29,6 +32,25 @@ export interface DoctorFacts {
     sharedNetwork?: number };
   /** Which release this checkout sits on, and whether a newer tag is present. */
   checkout?: { tag?: string; latestTag?: string; dirty?: string[] };
+  /** Public access (docs/public-access.md): the switch, and every safeguard it stands on. */
+  publicAccess?: {
+    on: boolean;
+    /** HATCHABOT_PUBLIC_ACCESS names something that is not a provider. */
+    unknownProvider?: string;
+    url?: string;
+    port: number;
+    safeguards: SafeguardCheck[];
+    /** Tailscale Funnel as it is configured now. undefined: could not be read. */
+    funnel?: { toPublicPort: boolean; toPrivatePort: boolean };
+    /** Chat-only guests are let in without a second factor (HATCHABOT_PUBLIC_GUESTS_WITHOUT_SECOND_FACTOR=1). */
+    guestsExempt?: boolean;
+    /** HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL is set to something other than 1: ignored, not a way to weaken. */
+    forAllIgnored?: string;
+    /** A switch to "on" that began and has not finished (publicIntent.ts). `stale`: it died; a restart takes it back. */
+    pending?: { at?: string; stale: boolean };
+    /** Off, and Funnel pointed at the public port: what happened when the doctor took the entry out. */
+    leftover?: { removed: boolean; error?: string; command?: string };
+  };
 }
 
 export interface DoctorLine { level: 'ok' | 'warn' | 'fail'; text: string; fix?: string }
@@ -105,7 +127,109 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
       : t.serving && t.reachable ? { level: 'ok', text: `Tailscale up, serving ${t.url}` }
       : { level: 'ok', text: `Tailscale up${t.dns ? ` (${t.dns})` : ''}${t.serving ? ' — serving, but the address did not answer yet' : ' — HTTPS not turned on (setup guide → Turn on HTTPS)'}` });
   }
+  if (f.publicAccess) out.push(...publicAccessLines(f.publicAccess));
   return out;
+}
+
+/**
+ * Public access. Off: one line (and a failure only if Funnel is publishing
+ * something anyway). On: a line per safeguard, and every one that is off is
+ * a FAILURE: the public address answers 503 until it is fixed.
+ */
+export function publicAccessLines(p: NonNullable<DoctorFacts['publicAccess']>): DoctorLine[] {
+  const out: DoctorLine[] = [];
+  const off = p.safeguards.filter((c) => !c.ok);
+  if (p.funnel?.toPrivatePort) {
+    out.push({ level: 'fail', text: 'Tailscale Funnel publishes the PRIVATE port to the internet: visitors there are treated as this machine, with none of the public safeguards', fix: 'tailscale funnel reset   (then, if you want a public address: hatchabot reach on)' });
+  }
+  const settings: DoctorLine[] = [];
+  if (p.forAllIgnored !== undefined) {
+    settings.push({ level: 'warn', text: `HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL=${p.forAllIgnored} is ignored: at the public address a second factor is required of everyone who signs in with a password, and this setting cannot switch that off`, fix: 'Remove the line from .env. To let chat-only guests in without one (and nobody else): Settings → You → Reach it from anywhere' });
+  }
+  if (p.guestsExempt) {
+    settings.push({ level: 'warn', text: 'Chat-only guests use the public address without a second factor (HATCHABOT_PUBLIC_GUESTS_WITHOUT_SECOND_FACTOR=1): a guest\'s password alone opens their chats from the internet', fix: 'Your choice; to undo it: Settings → You → Reach it from anywhere' });
+  }
+  if (p.pending) {
+    settings.push(p.pending.stale
+      ? { level: 'fail', text: `Turning public access on began${p.pending.at ? ` at ${p.pending.at}` : ''} and never finished (the process stopped part-way)`, fix: 'Restart Hatchabot: at start it takes the unfinished switch back (Funnel\'s entry, the setting, the address). Then: hatchabot reach on' }
+      : { level: 'warn', text: 'Public access is being turned on right now (or the switch stopped moments ago): run the doctor again in a few minutes' });
+  }
+  if (!p.on) {
+    out.push({ level: 'ok', text: `Public access: off (private only)${off.length ? ` — not ready to turn on: ${off.map((c) => c.title).join('; ')}` : ' — every safeguard is in place'}` });
+    if (p.leftover?.removed) out.push({ level: 'warn', text: `Tailscale Funnel pointed at the public listener's port ${p.port} while public access is off (a switch that did not finish): the entry has been removed` });
+    else if (p.funnel?.toPublicPort) out.push({ level: 'warn', text: `Tailscale Funnel still points at the public listener's port ${p.port}, which is closed${p.leftover?.error ? ` (removing it failed: ${p.leftover.error})` : ''}`, fix: p.leftover?.command ?? 'hatchabot reach off' });
+    out.push(...settings);
+    return out;
+  }
+  if (p.unknownProvider) {
+    out.push({ level: 'fail', text: `HATCHABOT_PUBLIC_ACCESS=${p.unknownProvider} is not a known provider: nothing is served publicly`, fix: 'Set it to funnel, or remove it (hatchabot reach off)' });
+  }
+  out.push(off.length
+    ? { level: 'fail', text: `Public access is ON${p.url ? ` at ${p.url}` : ''}, but ${off.length} safeguard${off.length === 1 ? ' is' : 's are'} off: the public address answers 503`, fix: 'Fix each line below, or: hatchabot reach off' }
+    : { level: 'ok', text: `Public access is ON${p.url ? ` at ${p.url}` : ''}: the sign-in page is reachable from the internet` });
+  for (const c of p.safeguards) {
+    out.push({ level: c.ok ? 'ok' : 'fail', text: `  ${c.letter}. ${c.title}${c.builtIn ? ' (built in)' : ''}: ${c.detail}`, ...(c.ok || !c.fix ? {} : { fix: c.fix }) });
+  }
+  if (p.funnel && !p.funnel.toPublicPort) {
+    out.push({ level: 'warn', text: `Public access is on, but Tailscale Funnel is not pointed at the public listener (port ${p.port}): nobody can reach it`, fix: 'hatchabot reach on' });
+  }
+  out.push(...settings);
+  return out;
+}
+
+/** The public-access facts, from .env, the database (read-only) and the machine. */
+export async function publicAccessFacts(env: Record<string, string>, dbPath: string, mainPort: number, probe: {
+  autoUpgrade?: typeof autoUpgradeStatus; funnel?: typeof funnelStatus; funnelOff?: typeof funnelOff;
+  /** The .env the service reads (the note of an unfinished switch sits beside it). */
+  envPath?: string;
+} = {}): Promise<NonNullable<DoctorFacts['publicAccess']>> {
+  const merged = { ...env, ...Object.fromEntries(Object.entries(process.env).filter(([k, v]) => k.startsWith('HATCHABOT_PUBLIC_') && v !== undefined)) } as NodeJS.ProcessEnv;
+  const cfg = publicConfig(merged);
+  const authMode = (env.HATCHABOT_AUTH ?? 'password').toLowerCase();
+  let admins: ReturnType<typeof adminAccounts> = [];
+  if (existsSync(dbPath)) {
+    try {
+      const { default: Database } = await import('better-sqlite3');
+      const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+      try { admins = adminAccounts(db, authMode); } finally { db.close(); }
+    } catch { /* unreadable: nobody is known to have a second factor, which fails the safeguard */ }
+  }
+  const fs = await (probe.funnel ?? funnelStatus)().catch(() => ({ readable: false, entries: [] }));
+  let funnel = fs.readable ? { toPublicPort: fs.entries.some((e) => targetsPort(e, cfg.port)), toPrivatePort: fs.entries.some((e) => targetsPort(e, mainPort)) } : undefined;
+  // A switch to "on" that has not finished. While it is fresh it may be in
+  // progress in the running app: nothing is touched. Stale, or absent: a
+  // Funnel entry on the public port with public access off is a leftover,
+  // and is taken out here (the port is closed; the entry must not wait for
+  // whatever opens that port next).
+  const intent = readPublicIntent(probe.envPath ?? envFilePath());
+  const pending = intent ? { at: typeof intent.at === 'string' ? intent.at : undefined, stale: publicIntentIsStale(intent) } : undefined;
+  let leftover: { removed: boolean; error?: string; command?: string } | undefined;
+  if (!cfg.on && funnel?.toPublicPort && (!pending || pending.stale)) {
+    const r = await (probe.funnelOff ?? funnelOff)(cfg.port, cfg.funnelPort).catch((err: unknown) => ({ ok: false, error: String((err as Error)?.message ?? err), command: undefined }));
+    leftover = r.ok ? { removed: true } : { removed: false, error: r.error, command: r.command };
+    if (r.ok) funnel = { ...funnel, toPublicPort: false };
+  }
+  const publicHost = hostOf(cfg.url) ?? hostOf(env.HATCHABOT_PUBLIC_URL);
+  const safeguards = evaluateSafeguards({
+    authMode,
+    managed: !!env.HATCHABOT_MANAGED_BY?.trim(),
+    admins,
+    invitedOnly: cfg.invitedOnly,
+    ownerHeader: env.HATCHABOT_ALLOW_OWNER_HEADER === '1',
+    ports: { main: mainPort, public: cfg.port, ops: Number(env.HATCHABOT_OPS_PORT ?? 8091), embed: Number(env.HATCHABOT_EMBED_PORT ?? 8093) },
+    autoUpgrade: await (probe.autoUpgrade ?? autoUpgradeStatus)().catch(() => ({ ok: false, why: 'Automatic upgrades could not be checked.' })),
+    funnelOnPrivatePort: funnel?.toPrivatePort,
+    publicOn: cfg.on,
+    loginFailLimit: Number(env.HATCHABOT_LOGIN_FAILS_PER_WINDOW ?? 10),
+    publicHost,
+    guestsExempt: cfg.guestsWithoutSecondFactor,
+  });
+  return {
+    on: cfg.on, unknownProvider: cfg.unknownProvider, url: cfg.url, port: cfg.port, safeguards, funnel,
+    ...(cfg.guestsWithoutSecondFactor ? { guestsExempt: true } : {}),
+    ...(cfg.forAllIgnored !== undefined ? { forAllIgnored: cfg.forAllIgnored } : {}),
+    ...(pending ? { pending } : {}), ...(leftover ? { leftover } : {}),
+  };
 }
 
 /** Git facts about this checkout. Offline: it reads the tags already fetched,
@@ -201,6 +325,7 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
     service, controlPlane, diskFreeGb, backups, tailscale,
     containers: { running: rows.filter((l) => l.endsWith('|running')).length, total: rows.length, sharedNetwork },
     checkout: checkoutFacts(),
+    publicAccess: await publicAccessFacts(env, dbPath, port).catch(() => undefined),
   };
 }
 

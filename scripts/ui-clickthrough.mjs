@@ -65,7 +65,7 @@ const SCENARIOS = String.raw`(() => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // 8 s: a condition that holds returns at once; a slow run of headless Chrome
   // (it happens) used to fail checks that were only late.
-  const until = async (f, ms = 8000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = f(); if (v) return v; await sleep(50); } throw new Error('timed out waiting'); };
+  const until = async (f, ms = 8000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = f(); if (v) return v; await sleep(50); } throw new Error('timed out waiting for ' + String(f).replace(/\s+/g, ' ').slice(0, 160)); };
   const calls = (method, re) => window.__calls.filter((c) => c.method === method && re.test(c.path));
   const eq = (what, got, want) => { if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(what + ': got ' + JSON.stringify(got) + ', want ' + JSON.stringify(want)); };
   const ok = (what, cond) => { if (!cond) throw new Error(what); };
@@ -1098,6 +1098,267 @@ const SCENARIOS = String.raw`(() => {
         document.getElementById('aiHostedNote').hidden = true;
         if (aiDlg.open) aiDlg.close();
         renderSetup();
+      }
+    },
+    // ---- public access (docs/public-access.md) --------------------------------
+    secondFactorEnrol: async () => {
+      const none = { factors: [], backupCodes: 0, need: 'missing', ownerRights: true, methods: [], publicAddress: false, localAccount: true, passkeyAddress: 'https://box.example.com', passkeyHere: false };
+      window.__override['/v1/second-factor'] = none;
+      window.__override['/v1/public-access'] = { on: false, serving: false, safeguards: [], failing: [], invitedOnly: false };
+      try {
+        await openAiDlg('access');
+        const box = await until(() => { const b = document.getElementById('sfBox'); return !b.hidden && b; });
+        ok('it says the owner has none: ' + document.getElementById('sfStatus').textContent, document.getElementById('sfStatus').textContent.includes('You have none') && document.getElementById('sfStatus').textContent.includes('reachable from the internet'));
+        ok('the current password is asked for (a local account)', !document.getElementById('sfPwRow').hidden);
+        ok('a passkey is not offered away from its address, and says where', document.getElementById('sfAddPasskeyBtn').disabled && document.getElementById('sfAddPasskeyBtn').title.includes('https://box.example.com'));
+        ok('no backup-code button before a factor exists', document.getElementById('sfBackupBtn').hidden);
+        // A wrong password is shown, not swallowed.
+        window.__answer = { 'POST /v1/second-factor/totp': [{ status: 401, body: { error: 'Current password is wrong.', needsPassword: true } }] };
+        document.getElementById('sfCurPw').value = 'wrong';
+        document.getElementById('sfAddTotpBtn').click();
+        await until(() => document.getElementById('sfBoxErr').textContent.includes('Current password is wrong'));
+        ok('no QR for a wrong password', document.getElementById('sfTotpBox').hidden);
+        // The right one: the QR, the key, then a code. (The key is made up here: RFC 6238's test seed, in base32.)
+        const madeUpKey = 'GEZDGNBVGY3TQOJQ'.repeat(2);
+        window.__answer = {
+          'POST /v1/second-factor/totp': [{ body: { id: 'sf-1', secret: madeUpKey, uri: 'otpauth://totp/x', qr: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0h10v10H0z"/></svg>' } }],
+          'POST /v1/second-factor/totp/confirm': [{ status: 401, body: { error: 'That code is not right.' } }, { body: { ok: true, backupCodes: ['AAAA-BBBB-CCCC', 'DDDD-EEEE-FFFF'] } }],
+        };
+        document.getElementById('sfCurPw').value = 'the-right-password';
+        document.getElementById('sfAddTotpBtn').click();
+        const start = await until(() => calls('POST', /\/v1\/second-factor\/totp$/)[1]);
+        eq('the password is the proof', start.body, { current: 'the-right-password' });
+        await until(() => !document.getElementById('sfTotpBox').hidden);
+        ok('the QR is an image', !!document.querySelector('#sfTotpQr img[src^="data:image/svg+xml;base64,"]'));
+        eq('the key, in groups of four', document.getElementById('sfTotpSecret').textContent, 'GEZD GNBV GY3T QOJQ GEZD GNBV GY3T QOJQ');
+        document.getElementById('sfTotpCode').value = '000000';
+        document.getElementById('sfTotpConfirmBtn').click();
+        await until(() => document.getElementById('sfBoxErr').textContent.includes('not right'));
+        ok('a wrong code leaves the QR up', !document.getElementById('sfTotpBox').hidden);
+        window.__override['/v1/second-factor'] = { ...none, need: 'yes', methods: ['totp', 'backup'], backupCodes: 2, factors: [{ id: 'sf-1', kind: 'totp', createdAt: new Date().toISOString() }] };
+        document.getElementById('sfTotpCode').value = '123456';
+        document.getElementById('sfTotpConfirmBtn').click();
+        await until(() => backupDlg.open);
+        eq('the confirm', calls('POST', /\/totp\/confirm$/).pop().body, { id: 'sf-1', code: '123456' });
+        ok('both backup codes are shown', document.getElementById('backupCodes').textContent.includes('AAAA-BBBB-CCCC') && document.getElementById('backupCodes').textContent.includes('DDDD-EEEE-FFFF'));
+        ok('Done waits for "I have saved them"', document.getElementById('backupDone').disabled);
+        document.getElementById('backupSaved').click();
+        document.getElementById('backupDone').click();
+        await until(() => !backupDlg.open && document.getElementById('sfList').textContent.includes('Authenticator app'));
+        ok('the codes are gone from the page', document.getElementById('backupCodes').textContent === '');
+        ok('the password box is cleared', document.getElementById('sfCurPw').value === '');
+        ok('the secret is gone from the page', document.getElementById('sfTotpSecret').textContent === '' && document.getElementById('sfTotpBox').hidden);
+        ok('backup codes can now be remade', !document.getElementById('sfBackupBtn').hidden);
+        ok('it says how many are left', document.getElementById('sfStatus').textContent.includes('2 backup codes left'));
+        // Removing asks first, and sends the proof.
+        window.__confirmAnswer = false;
+        document.querySelector('#sfList .sfRemove').click(); await sleep(150);
+        eq('declined: nothing removed', calls('DELETE', /\/v1\/second-factor\//).length, 0);
+        window.__confirmAnswer = true;
+        document.getElementById('sfCurPw').value = 'the-right-password';
+        document.querySelector('#sfList .sfRemove').click();
+        const del = await until(() => calls('DELETE', /\/v1\/second-factor\/sf-1$/)[0]);
+        eq('the removal carries the password', del.body, { current: 'the-right-password' });
+      } finally {
+        delete window.__override['/v1/second-factor']; delete window.__override['/v1/public-access'];
+        window.__answer = {}; window.__confirmAnswer = true;
+        if (backupDlg.open) closeBackupCodes();
+        if (aiDlg.open) aiDlg.close();
+      }
+    },
+    reachSwitch: async () => {
+      const guards = (invited) => [
+        { id: 'auth-mode', letter: 'a', title: 'A sign-in per person', ok: true, detail: 'ok' },
+        { id: 'second-factor', letter: 'b', title: 'A second factor for everyone with owner rights', ok: true, detail: 'ok' },
+        { id: 'invited-only', letter: 'c', title: 'Only invited people', ok: invited, detail: invited ? 'ok' : 'The "Only invited people" switch is off.', fix: invited ? undefined : 'Turn it on.' },
+        { id: 'auto-upgrade', letter: 'i', title: 'Automatic upgrades on the stable channel', ok: true, detail: 'ok' },
+      ];
+      const off = (invited, guests = false) => ({ on: false, serving: false, url: null, invitedOnly: invited, safeguards: guards(invited), failing: invited ? [] : ['invited-only'], confirmText: 'This makes your sign-in page reachable from the internet.',
+        guestsWithoutSecondFactor: guests, guestsConfirmText: 'This lets chat-only guests use the public address with their password alone.',
+        withoutSecondFactor: [{ name: 'sam', chatOnlyGuest: false }, { name: 'gran', chatOnlyGuest: true }] });
+      const on = { on: true, serving: true, url: 'https://box.example.com:8443', invitedOnly: true, safeguards: guards(true), failing: [], turnedOn: true };
+      const savedConfig = appConfig;
+      window.__override['/v1/public-access'] = off(false);
+      window.__override['/v1/second-factor'] = { factors: [], backupCodes: 0, need: 'no', methods: [], localAccount: false, passkeyAddress: null, passkeyHere: false };
+      const before = window.__calls.length;
+      try {
+        await openAiDlg('access');
+        await until(() => !document.getElementById('reachBox').hidden && document.querySelectorAll('.reachCheck').length === 4);
+        ok('it starts off, and says so', document.getElementById('reachStatus').textContent.startsWith('Off.'));
+        const row = document.querySelector('.reachCheck[data-id="invited-only"]');
+        ok('the missing safeguard is marked, with why: ' + row.textContent, row.dataset.ok === '0' && row.textContent.includes('✗') && row.textContent.includes('switch is off'));
+        eq('the others are ticked', [...document.querySelectorAll('.reachCheck[data-ok="1"]')].length, 3);
+        ok('it cannot be turned on while a safeguard is off', document.getElementById('reachOnBtn').disabled);
+        ok('no address and no Off button while off', document.getElementById('reachAddress').hidden && document.getElementById('reachOffBtn').hidden);
+        // The "Only invited people" switch.
+        window.__answer = { 'POST /v1/public-access/invited-only': [{ body: off(true) }] };
+        document.getElementById('reachInvited').click();
+        const inv = await until(() => calls('POST', /\/v1\/public-access\/invited-only$/)[0]);
+        eq('the switch', inv.body, { on: true });
+        await until(() => !document.getElementById('reachOnBtn').disabled);
+        // Who has no second factor yet is named, with what to do about it.
+        const none = document.getElementById('reachNoFactor');
+        ok('people without a second factor are named: ' + none.textContent, !none.hidden && none.textContent.includes('sam, gran') && none.textContent.includes('reset link'));
+        // The guest switch: off, with a plain warning; turning it on asks first; a "no" changes nothing.
+        const guests = document.getElementById('reachGuests');
+        ok('guests are not exempt unless the owner says so', !guests.checked);
+        ok('the warning is plain: ' + document.getElementById('reachGuestsWarn').textContent, document.getElementById('reachGuestsWarn').textContent.includes('password alone') && document.getElementById('reachGuestsWarn').textContent.includes('anyone on the internet'));
+        window.__confirmAnswer = false; window.__confirms.length = 0;
+        guests.click(); await sleep(150);
+        ok('it asks first: ' + window.__confirms[0], (window.__confirms[0] || '').includes('password alone') && window.__confirms[0].includes('Everyone else'));
+        ok('declined: unticked, nothing sent', !guests.checked && calls('POST', /\/v1\/public-access\/guests$/).length === 0);
+        window.__confirmAnswer = true;
+        window.__answer = { 'POST /v1/public-access/guests': [{ body: off(true, true) }, { body: off(true, false) }] };
+        guests.click();
+        const g = await until(() => calls('POST', /\/v1\/public-access\/guests$/)[0]);
+        eq('the guest switch, confirmed', g.body, { on: true, confirm: true });
+        await until(() => none.textContent.includes('Let in with a password alone'));
+        ok('it says who is let in, and who is still stopped: ' + none.textContent, /No second factor yet:\s*sam\./.test(none.textContent) && /chat only\):\s*gran\./.test(none.textContent));
+        guests.click(); // off again: no question for tightening
+        await until(() => calls('POST', /\/v1\/public-access\/guests$/).length === 2);
+        eq('off again', calls('POST', /\/v1\/public-access\/guests$/)[1].body.on, false);
+        await until(() => !none.textContent.includes('Let in with a password alone'));
+        // Turning it on asks first, in plain words; a "no" does nothing.
+        window.__confirmAnswer = false; window.__confirms.length = 0;
+        document.getElementById('reachOnBtn').click(); await sleep(150);
+        ok('the question says what it does: ' + window.__confirms[0], (window.__confirms[0] || '').includes('This makes your sign-in page reachable from the internet.') && window.__confirms[0].includes('Anyone on the internet'));
+        eq('declined: nothing asked of the server', calls('POST', /\/v1\/public-access\/on$/).length, 0);
+        // The server refuses and says why: shown, with Tailscale's link.
+        window.__confirmAnswer = true;
+        window.__answer = { 'POST /v1/public-access/on': [
+          { status: 409, body: { error: 'Tailscale Funnel is not ready: This machine is not allowed to use Funnel yet.', missing: [{ what: 'This machine is not allowed to use Funnel yet.', fix: 'Add the funnel node attribute.' }], link: 'https://login.tailscale.com/f/funnel?node=abc' } },
+          { body: on } ] };
+        document.getElementById('reachOnBtn').click();
+        await until(() => document.getElementById('reachErr').textContent.includes('not allowed to use Funnel'));
+        ok('Tailscale\'s link is offered', !!document.querySelector('#reachErr a[href="https://login.tailscale.com/f/funnel?node=abc"]'));
+        ok('still off', document.getElementById('reachStatus').textContent.startsWith('Off.'));
+        // And then it works.
+        window.__override['/v1/public-access'] = on;
+        document.getElementById('reachOnBtn').click();
+        await until(() => document.getElementById('reachStatus').textContent.startsWith('On.'));
+        eq('the request confirms', calls('POST', /\/v1\/public-access\/on$/).pop().body, { confirm: true });
+        ok('the address is shown: ' + document.getElementById('reachAddress').textContent, !document.getElementById('reachAddress').hidden && document.getElementById('reachAddress').textContent.includes('https://box.example.com:8443'));
+        ok('with its QR code', !!document.querySelector('#reachAddress img[src^="/v1/public-access/qr.svg"]'));
+        const copy = document.querySelector('#reachAddress button');
+        ok('Copy reads the address from a data attribute, not from a script string', copy.dataset.copy === 'https://box.example.com:8443' && !copy.getAttribute('onclick').includes('box.example.com'));
+        ok('On is replaced by Off', document.getElementById('reachOnBtn').hidden && !document.getElementById('reachOffBtn').hidden);
+        ok('the invited-only switch is locked while on', document.getElementById('reachInvited').disabled);
+        // The record, with a sign-out for whoever signed in.
+        window.__override['/v1/security/log'] = { entries: [
+          { id: 2, at: new Date().toISOString(), kind: 'public.signin', ownerId: 'acct-9', who: 'sam', detail: { from: '203.0.113.7', device: 'Chrome on Android', newDevice: true } },
+          { id: 1, at: new Date().toISOString(), kind: 'public.on', who: 'chris', detail: { url: 'https://box.example.com:8443' } } ] };
+        document.getElementById('reachLogBtn').click();
+        const out = await until(() => byText('#reachLog button', 'Sign out everywhere'));
+        ok('the record reads in plain words: ' + document.getElementById('reachLog').textContent, document.getElementById('reachLog').textContent.includes('Signed in') && document.getElementById('reachLog').textContent.includes('Chrome on Android') && document.getElementById('reachLog').textContent.includes('Public access turned on'));
+        out.click();
+        await until(() => calls('POST', /\/v1\/security\/sign-out\/acct-9$/)[0]);
+        // Off asks too, then undoes it.
+        window.__override['/v1/public-access'] = off(true);
+        window.__confirms.length = 0;
+        document.getElementById('reachOffBtn').click();
+        await until(() => calls('POST', /\/v1\/public-access\/off$/)[0]);
+        ok('off asked first', (window.__confirms[0] || '').includes('Turn off public access?'));
+        await until(() => document.getElementById('reachStatus').textContent.startsWith('Off.') && document.getElementById('reachAddress').hidden);
+        // At the public address itself the switch is not offered at all.
+        appConfig = { ...appConfig, publicAddress: true };
+        await loadReach();
+        ok('hidden at the public address', document.getElementById('reachBox').hidden);
+        void before;
+      } finally {
+        appConfig = savedConfig;
+        for (const k of ['/v1/public-access', '/v1/second-factor', '/v1/security/log']) delete window.__override[k];
+        window.__answer = {}; window.__confirmAnswer = true;
+        if (aiDlg.open) aiDlg.close();
+      }
+    },
+    secondFactorMissing: async () => {
+      // At the public address with a password and no second factor, and no link behind the sign-in: told plainly, once.
+      const block = document.getElementById('sfBlock');
+      const text = 'This Hatchabot asks for a second factor at the public address, and your account has none yet. Ask whoever runs this Hatchabot for a reset link and add one right after using it, or add one at the private address (Settings → You → Second factor).';
+      try {
+        window.__answer = {
+          'POST /v1/second-factor/totp': [{ status: 403, body: { error: 'Your password alone cannot add your first second factor at this address.', secondFactor: 'enrol-link' } }],
+          'GET /v1/hosts': [{ status: 403, body: { error: text, secondFactor: 'enrol-link' } }, { status: 403, body: { error: 'again', secondFactor: 'enrol-link' } }],
+        };
+        ok('nothing shown before', block.hidden);
+        await api('/v1/second-factor/totp', { method: 'POST', body: {} }).catch(() => {});
+        ok('the enrolment form\'s own refusal stays in the form', block.hidden);
+        const failed = await api('/v1/hosts').then(() => '', (e) => e.message);
+        eq('the call fails with the reason', failed, text);
+        ok('and the page says what to do: ' + block.textContent, !block.hidden && block.textContent.includes('reset link') && block.textContent.includes('private address'));
+        ok('with a way out', !!byText('#sfBlock button', 'Sign out'));
+        await api('/v1/hosts').catch(() => {});
+        ok('said once, not replaced by every later refusal', block.textContent.includes('reset link') && !block.textContent.includes('again'));
+      } finally {
+        window.__answer = {};
+        block.hidden = true; block.innerHTML = '';
+      }
+    },
+    secondFactorPrompt: async () => {
+      window.__override['/v1/second-factor'] = { factors: [{ id: 'sf-1', kind: 'totp' }], backupCodes: 3, need: 'yes', methods: ['totp', 'backup'], passkeyHere: false };
+      try {
+        // A sensitive call at the public address is answered "second factor again": the page asks, then repeats the call.
+        window.__answer = {
+          'POST /v1/cli-tokens': [{ status: 401, body: { error: 'second factor required', secondFactor: 'step-up' } }, { status: 201, body: { id: 't1', token: 'made-up-token' } }],
+          'POST /v1/second-factor/verify': [{ status: 401, body: { error: 'That code is not right.' } }, { body: { ok: true, method: 'totp' } }],
+        };
+        const before = calls('POST', /\/v1\/cli-tokens$/).length;
+        const pending = api('/v1/cli-tokens', { method: 'POST', body: { label: 'x' } });
+        await until(() => sfDlg.open);
+        ok('it says why it is asking', document.getElementById('sfDlgTitle').textContent === 'Confirm it is you' && document.getElementById('sfDlgLede').textContent.includes('sensitive'));
+        ok('no sign-in screen behind it', !loginDlg.open);
+        await until(() => document.getElementById('sfCodeLabel').textContent.includes('authenticator app'));
+        ok('no passkey button when there is no passkey here', document.getElementById('sfPasskeyRow').hidden);
+        document.getElementById('sfCode').value = '111111';
+        document.getElementById('sfCodeBtn').click();
+        await until(() => document.getElementById('sfErr').textContent.includes('not right'));
+        ok('a wrong code keeps the prompt', sfDlg.open);
+        document.getElementById('sfCode').value = '654321';
+        document.getElementById('sfCodeBtn').click();
+        const out = await pending;
+        eq('the original call went through after it', out, { id: 't1', token: 'made-up-token' });
+        eq('it was made exactly twice', calls('POST', /\/v1\/cli-tokens$/).length - before, 2);
+        eq('the code was sent', calls('POST', /\/second-factor\/verify$/).pop().body, { code: '654321' });
+        ok('the prompt closed', !sfDlg.open);
+        // Cancel: the call fails with a plain reason, and nothing loops.
+        window.__answer = { 'POST /v1/cli-tokens': [{ status: 401, body: { error: 'second factor required', secondFactor: 'step-up' } }] };
+        const second = api('/v1/cli-tokens', { method: 'POST', body: { label: 'y' } }).then(() => 'went through', (e) => e.message);
+        await until(() => sfDlg.open);
+        byText('#sfDlg button', 'Cancel').click();
+        eq('cancelled', await second, 'The second factor was not given.');
+        ok('closed, and no sign-in screen for a step-up', !sfDlg.open && !loginDlg.open);
+        // An owner with no second factor is told where to add one (a 403, not a prompt).
+        window.__answer = { 'POST /v1/cli-tokens': [{ status: 403, body: { error: 'Your account has owner rights and no second factor. Add one at the private address.', secondFactor: 'missing' } }] };
+        const third = await api('/v1/cli-tokens', { method: 'POST', body: {} }).then(() => 'went through', (e) => e.message);
+        ok('told, not prompted: ' + third, third.includes('no second factor') && !sfDlg.open);
+      } finally {
+        delete window.__override['/v1/second-factor'];
+        window.__answer = {};
+        if (sfDlg.open) sfDlg.close();
+      }
+    },
+    newDeviceNotice: async () => {
+      const text = 'New sign-in to Hatchabot as sam: Chrome on Android, from about 203.0.113.x, 2026-10-01 12:00 UTC, through the public address. If they do not recognise it: Settings → Reach it from anywhere → sign sam out everywhere.';
+      window.__override['/v1/security/notices'] = { notices: [{ id: 'sn-1', at: new Date().toISOString(), kind: 'new-device', aboutOwner: 'acct-9', text }], canSignOutOthers: true };
+      try {
+        await loadSecurityNotices();
+        const el = document.getElementById('secNotice');
+        ok('the notice is on the home screen: ' + el.textContent, !el.hidden && el.textContent.includes('New sign-in to Hatchabot as sam') && el.textContent.includes('Chrome on Android'));
+        const out = byText('#secNotice button', 'Sign them out everywhere');
+        ok('the owner can sign them out from it', !!out);
+        out.click();
+        await until(() => calls('POST', /\/v1\/security\/sign-out\/acct-9$/).length >= 1);
+        window.__override['/v1/security/notices'] = { notices: [], canSignOutOthers: true };
+        byText('#secNotice button', 'It was expected').click();
+        await until(() => calls('POST', /\/v1\/security\/notices\/sn-1\/seen$/)[0]);
+        await until(() => el.hidden);
+        // About yourself: the action is your own "sign out on every device".
+        window.__override['/v1/security/notices'] = { notices: [{ id: 'sn-2', at: new Date().toISOString(), kind: 'new-device', aboutOwner: 'me', text: 'New sign-in to Hatchabot as chris: Safari on iOS. If this was not you: change your password and choose "Sign out on every device".' }], canSignOutOthers: false };
+        await loadSecurityNotices();
+        ok('your own notice offers your own sign-out', !!byText('#secNotice button', 'Sign out on every device') && !byText('#secNotice button', 'Sign them out'));
+      } finally {
+        delete window.__override['/v1/security/notices'];
+        document.getElementById('secNotice').hidden = true;
       }
     },
   });

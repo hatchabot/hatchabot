@@ -1,4 +1,5 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import { isPublic } from './trust.js';
 
 /**
  * The browser session cookie, in every sign-in mode (auth.ts, accountsAuth.ts).
@@ -49,6 +50,10 @@ const first = (v: string | string[] | undefined): string | undefined => (Array.i
  * cookie over http), never anyone else's.
  */
 export function requestIsHttps(req: RequestLike, env: NodeJS.ProcessEnv = process.env): boolean {
+  // The public listener is only ever reached through Funnel, which is HTTPS
+  // and nothing else: decided by the connection, not by a header a stranger
+  // could leave out to be handed a cookie without Secure and __Host-.
+  if (isPublic(req)) return true;
   const proto = first(req.headers['x-forwarded-proto']);
   if (proto) return proto.toLowerCase() === 'https';
   if (req.protocol === 'https' || (req.socket as { encrypted?: boolean } | null | undefined)?.encrypted) return true;
@@ -105,6 +110,9 @@ export function setSessionCookie(reply: FastifyReply, req: FastifyRequest, value
   reply.setCookie(https ? HOST_SESSION_COOKIE : SESSION_COOKIE, value, { ...baseOpts, secure: https, maxAge: Math.max(0, Math.floor(maxAgeS)) });
   // A plain one left from before would only confuse whoever looks at the jar.
   if (https && cookieFromHeader(req.headers.cookie, SESSION_COOKIE) !== undefined) reply.clearCookie(SESSION_COOKIE, { path: '/' });
+  // A sign-in at the public address also gets the public pass (publicAccess.ts):
+  // every place a session is handed out comes through here, so none can forget it.
+  req.server.publicAccess?.sessionMinted(req, reply, value);
 }
 
 /**
@@ -128,7 +136,8 @@ export function clearSessionCookies(reply: FastifyReply, req: FastifyRequest): v
   reply.clearCookie(LEGACY_RENAME_COOKIE, { path: '/' });
   // A __Host- cookie can only be overwritten by one with the same attributes (Secure, Path=/).
   if (requestIsHttps(req)) reply.clearCookie(HOST_SESSION_COOKIE, { path: '/', secure: true, httpOnly: true, sameSite: 'strict' });
+  req.server.publicAccess?.sessionCleared(req, reply);
 }
 
-/** Any of our session cookies, for stripping from what is forwarded to an agent's gateway. */
-export const SESSION_COOKIE_NAME = /^(__Host-)?(hatchabot|agentclaw)_session$/;
+/** Any of our session cookies (the public pass and the device cookie included), for stripping from what is forwarded to an agent's gateway. */
+export const SESSION_COOKIE_NAME = /^(__Host-)?(hatchabot|agentclaw)_(session|pub|device)$/;

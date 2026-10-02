@@ -18,12 +18,13 @@ export interface EnvSetting {
 }
 
 export type EnvGroup =
-  | 'basics' | 'signin' | 'data' | 'limits' | 'agents' | 'usage' | 'memory'
+  | 'basics' | 'signin' | 'public' | 'data' | 'limits' | 'agents' | 'usage' | 'memory'
   | 'runtime' | 'manager' | 'managed' | 'timings' | 'never';
 
 export const ENV_GROUPS: Array<{ id: EnvGroup; title: string; intro?: string }> = [
   { id: 'basics', title: 'Basics' },
   { id: 'signin', title: 'Sign-in', intro: 'Modes: accounts (a login per person, kept here), password (one shared password), identity (Google sign-in; docs/identity.md).' },
+  { id: 'public', title: 'Public access ("Reach it from anywhere")', intro: 'Off unless HATCHABOT_PUBLIC_ACCESS is set. Turn it on from Settings or `hatchabot reach on`, which checks every safeguard first (docs/public-access.md).' },
   { id: 'data', title: 'Data and backups' },
   { id: 'limits', title: 'Limits', intro: '0 or unset = no limit. Archived agents never count.' },
   { id: 'agents', title: 'Agents' },
@@ -58,6 +59,20 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('signin', 'HATCHABOT_GOOGLE_CLIENT_ID', null, 'Identity mode: the OAuth client id.'),
   s('signin', 'HATCHABOT_LOGIN_FAILS_PER_WINDOW', '10', 'Failed sign-ins allowed per client per window before it is refused for a while.'),
   s('signin', 'HATCHABOT_LOGIN_WINDOW_MS', '900000', 'That window.'),
+
+  // Public access
+  s('public', 'HATCHABOT_PUBLIC_ACCESS', null, 'funnel makes the sign-in page reachable from the internet through Tailscale Funnel. Unset or off: private only. On with any safeguard off, the public address answers 503 and `hatchabot doctor` fails.'),
+  s('public', 'HATCHABOT_PUBLIC_ACCESS_URL', null, 'The public address, written when public access is turned on (https://<machine>.<tailnet>.ts.net:8443).'),
+  s('public', 'HATCHABOT_PUBLIC_INVITED_ONLY', null, '1: at the public address only existing accounts and pending invitations may sign in. Public access needs it on.'),
+  s('public', 'HATCHABOT_PUBLIC_GUESTS_WITHOUT_SECOND_FACTOR', null, '1: chat-only web-chat guests (no agents, AI sources or hosts of their own, no owner rights) may use the public address with their password alone, for the chat and nothing else. Unset: everyone who signs in with a password needs a second factor there. Weakens the public address: turn it on from Settings, which asks first.'),
+  s('public', 'HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL', null, 'No longer needed: a second factor is required of every password account at the public address. 1 changes nothing; any other value is ignored (it does not switch the rule off) and `hatchabot doctor` says so.'),
+  s('public', 'HATCHABOT_PUBLIC_PORT', '8092', 'The public listener\'s port on this machine (127.0.0.1 only). Funnel is pointed at this port and no other; everything arriving on it is treated as a stranger.'),
+  s('public', 'HATCHABOT_PUBLIC_FUNNEL_PORT', '8443', 'The port of the public address: 443, 8443 or 10000 (Funnel\'s choices). 8443 leaves 443 to the private tailnet address.'),
+  s('public', 'HATCHABOT_PUBLIC_IDLE_MINUTES', '720', 'A sign-in at the public address ends after this long without use.'),
+  s('public', 'HATCHABOT_PUBLIC_STEPUP_MINUTES', '10', 'Machine-level and dangerous actions at the public address need the second factor given within this many minutes.'),
+  s('public', 'HATCHABOT_PUBLIC_REQS_PER_MIN', '3000', 'Requests a minute the public address answers, all visitors together.'),
+  s('public', 'HATCHABOT_PUBLIC_REQS_PER_MIN_PER_ADDRESS', '600', 'Requests a minute from one address.'),
+  s('public', 'HATCHABOT_PUBLIC_FAILS_CEILING', '100', 'Failed sign-ins per window at the public address, all visitors together, before every public sign-in is refused for the rest of the window.'),
 
   // Data and backups
   s('data', 'HATCHABOT_DB', null, 'The registry and secret store (SQLite). Unset: data/hatchabot.sqlite in this folder. Production keeps it outside the checkout.'),
@@ -186,7 +201,7 @@ export const ENV_INTERNAL: string[] = [
   'HATCHABOT_INSTALL_CMD', 'HATCHABOT_RESTART_CMD', 'HATCHABOT_PROD_DIR', 'HATCHABOT_SERVICE', 'HATCHABOT_HEALTH_URL',
   'HATCHABOT_REPO', 'HATCHABOT_IMAGE_REPO', 'HATCHABOT_PROMOTE_TRAILERS', 'HATCHABOT_DRILL_DB', 'HATCHABOT_ENV_FILE',
   // test knobs
-  'HATCHABOT_SMOKE_AI_KEY', 'HATCHABOT_SMOKE_BOT_TOKEN', 'HATCHABOT_SMOKE_GATEWAY_BASE', 'HATCHABOT_SMOKE_PORT',
+  'HATCHABOT_TAILSCALE_BIN', 'HATCHABOT_SMOKE_AI_KEY', 'HATCHABOT_SMOKE_BOT_TOKEN', 'HATCHABOT_SMOKE_GATEWAY_BASE', 'HATCHABOT_SMOKE_PORT',
   // marker text in the page, and placeholders in the service unit templates (__HATCHABOT_PATH__)
   'HATCHABOT_VERSION', 'HATCHABOT_PATH',
 ];

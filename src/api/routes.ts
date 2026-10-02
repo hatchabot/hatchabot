@@ -97,6 +97,9 @@ import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_S
 import { pickIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
 import { ENV_NAME_RE, reservedEnvProblem } from '../orchestrator/envPolicy.js';
 import { registerMgmtChat } from './mgmtChat.js';
+import { registerReachRoutes } from './reachRoutes.js';
+import { ConsoleSockets, type ConsoleSocket } from './consoleSockets.js';
+import { addressBucket, isPublic, publicClientAddress, publicReplayHeaders } from './trust.js';
 import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
 import { scanWorkspacePaths } from '../orchestrator/dataPaths.js';
 import {
@@ -1186,6 +1189,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (set && !loopbackUrl(set)) return set;
     return detectedUrl ?? set;
   };
+  /**
+   * The address for links that are SENT to people (an invitation, a reset
+   * link): the public one while public access is on and serving, because the
+   * person opening it may not be on the tailnet; the private one otherwise.
+   * Never from a request's Host. The owner's own pages (the app's QR code,
+   * Google's consent coming back) stay on the private address.
+   */
+  const linkUrlFor = (): string | undefined => {
+    const st = app.publicAccess?.status();
+    return st?.on && st.serving && st.url ? st.url : appUrlFor();
+  };
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
     setTimeout(() => { void refreshDetectedUrl(); }, 4_000).unref();
     setInterval(() => { void refreshDetectedUrl(); }, 10 * 60_000).unref();
@@ -1319,10 +1333,54 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * has an account. The link is one use and short-lived, the old password
    * keeps working until it is used, and a username can ask at most once every
    * few minutes.
+   *
+   * At the PUBLIC address the asker is anyone on the internet who knows (or
+   * guesses) a username, so there it is held much tighter: a username can ask
+   * once an hour and three times a day, an address five times an hour, all
+   * visitors together thirty; a link that is still good is never replaced
+   * (a stranger asking again must not kill the link the person just got);
+   * and an account with owner rights is not reset from there at all (it is
+   * told so on Telegram, with no link). The public counts are apart from the
+   * private ones, so none of this can keep anyone from recovering at the
+   * private address. The answer stays identical in every case.
    */
   const recoverySentAt = new Map<string, number>();
   const RECOVERY_EVERY_MS = 5 * 60_000;
   const RECOVERY_TTL_MS = 15 * 60_000;
+  const PUBLIC_RECOVERY_EVERY_MS = 60 * 60_000;
+  const PUBLIC_RECOVERY_PER_DAY = 3;
+  const PUBLIC_RECOVERY_PER_ADDRESS = 5;
+  const PUBLIC_RECOVERY_ALL = 30;
+  const publicRecovery = { perName: new Map<string, number[]>(), perAddress: new Map<string, number[]>(), all: [] as number[] };
+  /** One more ask in this window, unless that would pass `max`: false = over (and not counted). */
+  const underCeiling = (asks: number[], windowMs: number, max: number, now: number): boolean => {
+    while (asks.length && now - asks[0]! >= windowMs) asks.shift();
+    if (asks.length >= max) return false;
+    asks.push(now);
+    return true;
+  };
+  const publicRecoveryAllowed = (req: FastifyRequest, key: string): boolean => {
+    const now = Date.now();
+    const pr = publicRecovery;
+    for (const m of [pr.perName, pr.perAddress]) {
+      if (m.size > 2000) for (const [k, v] of m) if (!v.length || now - v[v.length - 1]! >= 86_400_000) m.delete(k);
+      if (m.size > 4000) m.clear(); // a flood of made-up names: start over rather than grow (the ceilings below still hold)
+    }
+    const addr = addressBucket(publicClientAddress(req));
+    const byAddr = pr.perAddress.get(addr) ?? [];
+    pr.perAddress.set(addr, byAddr);
+    // The address first, then everyone together, then the name: an address over its count costs the name nothing.
+    if (!underCeiling(byAddr, 3_600_000, PUBLIC_RECOVERY_PER_ADDRESS, now)) return false;
+    if (!underCeiling(pr.all, 3_600_000, PUBLIC_RECOVERY_ALL, now)) return false;
+    const byName = pr.perName.get(key) ?? [];
+    pr.perName.set(key, byName);
+    while (byName.length && now - byName[0]! >= 86_400_000) byName.shift();
+    if (byName.length && now - byName[byName.length - 1]! < PUBLIC_RECOVERY_EVERY_MS) return false;
+    if (byName.length >= PUBLIC_RECOVERY_PER_DAY) return false;
+    byName.push(now);
+    return true;
+  };
+  (app as unknown as { _resetRecoveryLimits?: () => void })._resetRecoveryLimits = () => { recoverySentAt.clear(); publicRecovery.perName.clear(); publicRecovery.perAddress.clear(); publicRecovery.all.length = 0; };
   app.post<{ Body: { username?: string } }>('/v1/local-accounts/recover', async (req, reply) => {
     const mode = deps.authMode ?? 'password';
     if (mode === 'password') return reply.code(404).send({ error: 'Not found' });
@@ -1338,18 +1396,27 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const username = String(req.body?.username ?? '').trim();
     if (!username || username.length > 64) return settle();
     const key = username.toLowerCase();
-    // Anyone can post any username here, so the map must not grow without
-    // bound: forget entries past their window once it gets large.
-    if (recoverySentAt.size > 1000) {
-      const cutoff = Date.now() - RECOVERY_EVERY_MS;
-      for (const [k, t] of recoverySentAt) if (t < cutoff) recoverySentAt.delete(k);
+    const fromPublic = isPublic(req);
+    if (fromPublic) {
+      if (!publicRecoveryAllowed(req, key)) return settle();
+    } else {
+      // Anyone can post any username here, so the map must not grow without
+      // bound: forget entries past their window once it gets large.
+      if (recoverySentAt.size > 1000) {
+        const cutoff = Date.now() - RECOVERY_EVERY_MS;
+        for (const [k, t] of recoverySentAt) if (t < cutoff) recoverySentAt.delete(k);
+      }
+      const last = recoverySentAt.get(key) ?? 0;
+      if (Date.now() - last < RECOVERY_EVERY_MS) return settle();
+      recoverySentAt.set(key, Date.now());
     }
-    const last = recoverySentAt.get(key) ?? 0;
-    if (Date.now() - last < RECOVERY_EVERY_MS) return settle();
-    recoverySentAt.set(key, Date.now());
 
     const account = store.localAccountByUsername(username);
     if (!account || account.disabled || account.pwHash === '') return settle();
+    // Asked from the internet: a link that is still good stays as it is.
+    if (fromPublic && account.claimCode && account.claimExpires && Date.parse(account.claimExpires) > Date.now()) return settle();
+    // Owner rights are recovered at the private address only (accountsAuth.ts): no link is made from here.
+    const ownerFromPublic = fromPublic && (account.hostOwner || (app.publicAccess?.hasOwnerRights(account.id) ?? false));
     const tgId = store.knownChannelUserId(account.id);
     const dcId = store.identityOfUserAnywhere(account.id, 'discord');
     if (!tgId && !dcId) return settle();
@@ -1385,19 +1452,26 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     if (!token && !discordRef) return settle();
 
-    const code = randomBytes(16).toString('base64url');
-    store.setLocalAccountClaim(account.id, code, new Date(Date.now() + RECOVERY_TTL_MS).toISOString());
+    const ownerRights = account.hostOwner || (app.publicAccess?.hasOwnerRights(account.id) ?? false);
+    const code = ownerFromPublic ? undefined : randomBytes(16).toString('base64url');
+    if (code) store.setLocalAccountClaim(account.id, code, new Date(Date.now() + RECOVERY_TTL_MS).toISOString());
     // Never from the request's Host header: this route is unauthenticated, and
     // a stranger's Host would have put THEIR address, with the real code, in
     // the owner's own chat (use-case audit, 2026-09-27). With no known address
     // the link is only the path, to be opened where Hatchabot usually is.
-    const base = appUrlFor();
-    const text = [
+    // An owner's link works at the private address only, so it is made for that one.
+    const base = ownerRights ? appUrlFor() : linkUrlFor();
+    const text = (code ? [
       `🔑 Hatchabot password reset for ${account.username}.`,
       base ? `Open this within 15 minutes to choose a new password:` : `Within 15 minutes, open Hatchabot at the address you always use and add this to it:`,
       base ? `${base}/?claim=${code}` : `/?claim=${code}`,
+      ...(ownerRights ? [`This account has owner rights: the link works at the private address only, not the public one.`] : []),
       `If you did not ask for this, ignore it — nothing changes unless the link is used.`,
-    ].join('\n\n');
+    ] : [
+      `🔑 Someone asked at this Hatchabot's public address to reset the password of ${account.username}.`,
+      `An account with owner rights is recovered at the private address only, so no link was made. If it was you: open Hatchabot at its private address${base ? ` (${base})` : ''} and choose "Forgot password?" there.`,
+      `If it was not you, nothing has changed.`,
+    ]).join('\n\n');
     if (token) {
       const send = deps.oauthFetch ?? fetch;
       await send(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -1412,7 +1486,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const secret = await secrets.get(discordRef).catch(() => undefined);
       if (conn?.dm && secret) await conn.dm(secret, dcId, text).catch(() => false);
     }
-    app.log.warn({ account: account.id, via }, 'account.recovery_link_sent');
+    app.log.warn({ account: account.id, via, ...(fromPublic ? { from: 'the public address' } : {}), ...(code ? {} : { link: false }) }, 'account.recovery_link_sent');
     return settle();
   });
 
@@ -1426,14 +1500,30 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return reply.header('cache-control', 'no-cache').type('image/svg+xml').send(svg);
   });
 
+  // "Reach it from anywhere": the public-access switch, the security record and notices (reachRoutes.ts).
+  registerReachRoutes(app, { store, secrets, ownsLocalHost, appUrlFor, trace: (e, d) => trace()(e, d), fetchImpl: deps.oauthFetch });
+
   app.get('/healthz', async () => ({ ok: true }));
 
   // What the login screen needs before anyone is authenticated. The API key
   // is publishable by design (Google: "API keys for Firebase services do not
   // need to be treated as secrets") — it identifies the project, it doesn't
   // authorise anything on its own.
-  app.get('/v1/config', async () => ({
+  /**
+   * What /v1/config tells someone who has not signed in. At the public address
+   * that is anyone on the internet: the private address, the provider's notice
+   * and the limits are left out; what the sign-in screen needs stays.
+   */
+  const publicConfigView = <T extends Record<string, unknown>>(req: FastifyRequest, full: T): Partial<T> => {
+    if (!isPublic(req)) return full;
+    const { appUrl: _a, notice: _n, maxAgentsPerAccount: _m, rebuildConcurrency: _r, setupCodeRequired: _s, ...rest } = full as Record<string, unknown>;
+    return rest as Partial<T>;
+  };
+  app.get('/v1/config', async (req) => publicConfigView(req, {
     authMode: deps.authMode ?? 'password',
+    // The page is being read through the public address (decided by the
+    // listener it arrived on): it hides what is not available there.
+    publicAddress: isPublic(req),
     // Managed mode (a hosted Hatchabot): who runs it, where to get help, and a
     // notice to show everyone. The app hides the machine chores that are not
     // the customer's (HTTPS, backups, OpenClaw upgrades) when `managed` is set.
@@ -1460,6 +1550,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     rebuildConcurrency: rebuildGate.limit,
     /** The address /app-qr.svg encodes, so the app can name it beside the code. */
     appUrl: appUrlFor(),
+    /** The address invitation and reset links are made for: the public one while public access is on. */
+    linkUrl: linkUrlFor(),
     identity:
       deps.authMode === 'identity'
         ? {
@@ -4632,6 +4724,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const sharedPathList = parsed.data.sharedPaths?.map((p) => p.trim()).filter(Boolean);
       if (sharedPathList) {
         const paths = sharedPathList;
+        // Giving an agent a folder of this machine is machine-level: at the
+        // public address it needs the second factor again, like the Folders
+        // routes (publicRoutes.ts), although the rest of this route does not.
+        // Taking folders away needs nothing more.
+        const had = new Set(agent.sharedPaths ?? []);
+        if (paths.some((p) => !had.has(p))) {
+          const again = app.publicAccess ? app.publicAccess.stepUpRefusal(req) : isPublic(req) ? { code: 403, body: { error: 'Not at the public address.' } } : undefined;
+          if (again) return reply.code(again.code).send(again.body);
+        }
         // Mounting host folders is the machine owner's privilege only — the
         // blocklist below is owner-blind, so on a shared box a second account
         // could otherwise read another user's files through their own agent.
@@ -5601,6 +5702,48 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   //
   // A guest's socket is not spliced blind: every message is read
   // (consoleProxy.ts spliceGuest) and a removal closes it (consoleAccess).
+  /**
+   * Every console socket that is open, re-judged by the rules that let it in
+   * (consoleSockets.ts): the session, at the public address the pass, its idle
+   * limit and the second factor, and the caller's standing on that agent.
+   */
+  const consoleSockets = new ConsoleSockets();
+  const consoleSocketProblem = (s: ConsoleSocket): string | undefined => {
+    const who = app.principalFromCookieHeader?.(s.cookie, s.https);
+    if (!who || who.ownerId !== s.ownerId) return 'signed out';
+    if (s.public) {
+      const why = app.publicAccess ? app.publicAccess.refuseOpenSocket(s.cookie, s.ownerId, s.lastActive) : 'no public gate';
+      if (why) return why;
+    }
+    const now = consoleCaller(s.ownerId, s.agentId);
+    if (!now || now.role !== s.role) return 'no longer allowed on this agent';
+    return undefined;
+  };
+  const revalidateConsoleSockets = (): number => consoleSockets.size() === 0 ? 0
+    : consoleSockets.sweep(consoleSocketProblem, (s, why) => {
+      app.log.warn({ agent: s.agentId, ownerId: s.ownerId, public: s.public, why }, 'console.socket_closed');
+      try { trace(s.agentId)('console.socket_closed', { userId: s.ownerId, why }); } catch { /* the trace is best effort */ }
+    });
+  app.decorate('consoleSockets', {
+    revalidate: revalidateConsoleSockets,
+    closeFor: (ownerId: string, opts: { publicOnly?: boolean } = {}) =>
+      consoleSockets.sweep((s) => (s.ownerId === ownerId && (!opts.publicOnly || s.public) ? 'second factor changed' : undefined),
+        (s, why) => app.log.warn({ agent: s.agentId, ownerId: s.ownerId, public: s.public, why }, 'console.socket_closed')),
+    size: () => consoleSockets.size(),
+  });
+  // After any request that changed something (a sign-out, a password, an
+  // account, a member's access, a factor): what it ended, it ends for open
+  // sockets too. Reads change nothing and are not worth a sweep.
+  app.addHook('onResponse', async (req, reply) => {
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS' || reply.statusCode >= 400) return;
+    revalidateConsoleSockets();
+  });
+  // …and for what no request announces: the public idle limit, a session that
+  // ran out, a change made by another process (the command line).
+  const consoleSweep = setInterval(() => { try { revalidateConsoleSockets(); } catch { /* next time */ } }, 30_000);
+  consoleSweep.unref?.();
+  app.addHook('onClose', async () => { clearInterval(consoleSweep); });
+
   app.server.on('upgrade', async (rawReq, socket, head) => {
     const url = rawReq.url ?? '';
     const m = /^\/v1\/agents\/([^/]+)\/ui\/?([^?]*)/.exec(url);
@@ -5618,6 +5761,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!resolve) return deny();
     const principal = resolve(rawReq.headers.cookie, requestIsHttps(rawReq as RequestLike));
     if (!principal) return deny();
+    // On the public listener the gate's rules apply to the socket too: the
+    // public pass, its idle limit, the second factor (publicAccess.ts).
+    if (isPublic(rawReq)) {
+      const refused = app.publicAccess ? app.publicAccess.refuseSession(rawReq, principal.ownerId) : 'no public gate';
+      if (refused) {
+        app.log.warn({ path: url.split('?')[0], why: refused }, 'console.public_upgrade_refused');
+        return deny();
+      }
+    }
 
     // Same rule as the page itself, against the real caller: the owner, or a
     // guest the owner gave web chat.
@@ -5654,6 +5806,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         ].join('\r\n'),
       );
       if (upHead?.length) upSocket.unshift(upHead);
+      // Remembered while it is open, so it can be closed when what let it in ends.
+      const entry: ConsoleSocket = {
+        ownerId: principal.ownerId, agentId: caller.agent.id, role: caller.role,
+        cookie: rawReq.headers.cookie, https: requestIsHttps(rawReq as RequestLike), public: isPublic(rawReq),
+        lastActive: Date.now(), close: () => { socket.destroy(); upSocket.destroy(); },
+      };
+      const forgetSocket = consoleSockets.add(entry);
+      socket.on('close', forgetSocket);
+      upSocket.on('close', forgetSocket);
+      socket.on('data', () => { entry.lastActive = Date.now(); });
       if (guest) {
         // Whatever the browser sent after its upgrade request goes through the filter too.
         if (head?.length) socket.unshift(head);
@@ -9428,6 +9590,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             ...(typeof req.headers.authorization === 'string' ? { authorization: req.headers.authorization } : {}),
             ...(typeof req.headers.cookie === 'string' ? { cookie: req.headers.cookie } : {}),
             ...(typeof req.headers['x-hatchabot-owner'] === 'string' ? { 'x-hatchabot-owner': req.headers['x-hatchabot-owner'] as string } : {}),
+            ...publicReplayHeaders(req), // a public caller's replay stays public (trust.ts)
             'content-type': 'application/json',
           },
           payload: '{}',
@@ -9557,13 +9720,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * (/v1/join is auth-exempt, so the hook has not read it). Never the
    * password-mode owner: that is the owner, not an invitee.
    */
-  const joiningAccount = async (req: FastifyRequest, idToken?: string): Promise<string | undefined> => {
+  const joiningAccount = async (req: FastifyRequest, idToken?: string, opts: { acceptingWebChat?: boolean } = {}): Promise<string | undefined> => {
     if (idToken && deps.verifier) {
       const token = await deps.verifier.verify(idToken); // throws on a bad token
       return `user-${token.sub}`;
     }
     const decorated = (app as unknown as { principalFromCookieHeader?: (h: string | undefined, https: boolean) => { ownerId: string } | undefined }).principalFromCookieHeader;
-    const fromCookie = decorated?.(req.headers.cookie, requestIsHttps(req))?.ownerId;
+    let fromCookie = decorated?.(req.headers.cookie, requestIsHttps(req))?.ownerId;
+    // This open route reads the session itself: at the public address it
+    // counts only with what the gate asks of every signed-in request (the
+    // public pass, and the second factor when the person has one).
+    if (fromCookie && isPublic(req) && (app.publicAccess ? app.publicAccess.refuseSession(req.raw, fromCookie, opts) : 'no public gate')) fromCookie = undefined;
     // Tests say who they are with the opt-in header (principal.ts).
     const p = fromCookie ?? (principalOf(req).via === 'header' ? principalOf(req).ownerId : undefined);
     return p && p !== LOCAL_OWNER ? p : undefined;
@@ -9578,7 +9745,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(400).send({ error: 'This Hatchabot has no accounts to sign in with, so it cannot offer chat on the web.' });
     }
     let accountId: string | undefined;
-    try { accountId = await joiningAccount(req, body.idToken); }
+    try { accountId = await joiningAccount(req, body.idToken, { acceptingWebChat: true }); }
     catch { return reply.code(401).send({ error: "That sign-in didn't verify — try again." }); }
     if (!accountId) return reply.code(401).send({ error: 'Sign in to this Hatchabot first.', signIn: true });
     const inv = checkInvite(store, body.code!);
@@ -9623,7 +9790,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       code,
       expiresAt,
       path,
-      url: appUrlFor() ? `${appUrlFor()}${path}` : undefined,
+      url: linkUrlFor() ? `${linkUrlFor()}${path}` : undefined,
     });
   });
 
@@ -9717,9 +9884,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   );
 
   // Unauthenticated (code-gated): what the join page needs to render.
-  app.get<{ Params: { code: string } }>('/v1/invites/:code', async (req) => {
+  // A miss counts like a bad sign-in link (its own count, never the password
+  // form's): the route answered any number of guesses at a code.
+  app.get<{ Params: { code: string } }>('/v1/invites/:code', async (req, reply) => {
+    const guard = app.publicAccess?.throttle;
+    if (guard?.throttled(req, undefined, 'link')) return reply.code(429).send({ valid: false, reason: 'Too many attempts — try again later.' });
     const check = checkInvite(store, req.params.code);
-    if (!check.valid) return { valid: false, reason: check.reason };
+    if (!check.valid) {
+      // A used or expired link is somebody coming back to an old one; a code nobody made is a guess.
+      if (check.reason === 'unknown') guard?.noteFailure(req, undefined, 'link');
+      return { valid: false, reason: check.reason };
+    }
     const agent = store.getAgent(check.agentId)!;
     // Which apps the invitee can use to reach it (names only, no links yet).
     const channels = store.listChannelsForAgent(agent.id).map((c) => ({

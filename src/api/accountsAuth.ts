@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { loopbackIsRemote } from './auth.js';
+import { isPublic } from './trust.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Store } from '../store/store.js';
 import type { LocalAccount } from '../domain/types.js';
@@ -118,13 +119,42 @@ function isLoopback(ip: string | undefined): boolean {
  * connects from loopback on behalf of every device on the tailnet, and it
  * says so with forwarding headers. Those requests are remote.
  */
-function onThisMachine(req: FastifyRequest): boolean {
+export function onThisMachine(req: FastifyRequest): boolean {
+  // Public traffic reaches us from 127.0.0.1 (tailscaled proxies Funnel). It
+  // is judged by the listener it arrived on, before any header is looked at:
+  // a stranger is never "on this machine" (trust.ts).
+  if (isPublic(req)) return false;
   // A rootless daemon's containers are loopback peers too: then nobody is
   // "on this machine" and the setup code is asked of everyone (30th audit).
   if (loopbackIsRemote()) return false;
   if (!isLoopback(req.ip)) return false;
   const h = req.headers;
   return !h['x-forwarded-for'] && !h['forwarded'] && !h['x-forwarded-host'] && !h['tailscale-user-login'];
+}
+
+/**
+ * The machine owner's FIRST claim (an owner made with `hatchabot accounts
+ * create --host-owner`, who has never chosen a password) is taking the
+ * machine. Never from the public address: there the link would be one leaked
+ * message away from handing a fresh box to a stranger.
+ */
+const OWNER_CLAIM_PRIVATE_ONLY = 'The owner of this machine sets their first password at its private address, not this public one.';
+function ownerFirstClaimFromPublic(req: FastifyRequest, account: LocalAccount): boolean {
+  return isPublic(req) && account.hostOwner && account.pwHash === '';
+}
+
+/**
+ * Nor is an owner's password RESET from the public address: a reset link (the
+ * Telegram one, or one another owner sent) and the recovery code replace the
+ * first factor of the account that holds the machine. From the internet that
+ * would rest on one leaked message or one written-down code; at the private
+ * address the person is already on the network or the tailnet. Members'
+ * recovery works at both.
+ */
+export const OWNER_RECOVERY_PRIVATE_ONLY = 'An account with owner rights is recovered at the private address only. Open Hatchabot at its private address (on your network or your tailnet) and use the link or the recovery code there.';
+function ownerRecoveryFromPublic(req: FastifyRequest, account: LocalAccount): boolean {
+  // (An owner who has never had a password is the first claim, above.)
+  return isPublic(req) && account.pwHash !== '' && (account.hostOwner || (req.server.publicAccess?.hasOwnerRights(account.id) ?? false));
 }
 
 /** Session signature. The account's password hash rides in the material, so
@@ -185,6 +215,7 @@ export function signInLocalByLink(store: Store, secret: Buffer, req: FastifyRequ
   if (!account) return { kind: 'refused', why: 'no-account' };
   if (account.disabled) return { kind: 'refused', why: 'disabled' };
   if (account.pwHash === '') {
+    if (ownerFirstClaimFromPublic(req, account)) return { kind: 'refused', why: 'no-account' };
     const code = randomBytes(16).toString('base64url');
     store.setLocalAccountClaim(account.id, code, new Date(Date.now() + LINK_CLAIM_TTL_MS).toISOString());
     return { kind: 'claim', ownerId: account.id, code };
@@ -206,11 +237,22 @@ const DUMMY_SALT = 'no-account';
 export function registerAccountRoutes(
   app: FastifyInstance,
   deps: AccountsAuthDeps,
-  guard: { throttled: (req: FastifyRequest, who?: string) => boolean; noteFailure: (req: FastifyRequest, who?: string) => void; clearFailures?: (who: string) => void },
+  guard: {
+    throttled: (req: FastifyRequest, who?: string) => boolean; noteFailure: (req: FastifyRequest, who?: string) => void; clearFailures?: (who: string) => void;
+    /** auth.ts reserve: a place in the count while a guess is being checked (undefined: refused). */
+    reserve?: (req: FastifyRequest, who?: string) => (() => void) | undefined;
+  },
   opts: { bootstrap?: boolean } = {},
 ): void {
   const { store, secret } = deps;
   const allowBootstrap = opts.bootstrap !== false;
+  /**
+   * Before a secret is checked off the event loop (scrypt): take a place in
+   * the count, so a burst of guesses cannot all slip past the limit while the
+   * first ones are still being verified. undefined: over the limit.
+   */
+  const guessSlot = (req: FastifyRequest, who?: string): (() => void) | undefined =>
+    guard.reserve ? guard.reserve(req, who) : guard.throttled(req, who) ? undefined : () => {};
   /** A new recovery code for an account: stored as a hash, returned once. */
   const issueRecoveryCode = async (id: string): Promise<string> => {
     const code = newRecoveryCode();
@@ -261,6 +303,9 @@ export function registerAccountRoutes(
         // Google owns account #1 here; local accounts arrive by invitation.
         return reply.code(403).send({ error: 'This installation signs in with Google — ask its owner for an invitation link.' });
       }
+      // A machine is never claimed from the internet, setup code or not. The
+      // public route table refuses this route already; this is the second lock.
+      if (isPublic(req)) return reply.code(403).send({ error: 'The first account is created on the machine itself or its private address.' });
       if (store.countLocalAccounts() > 0) {
         return reply.code(403).send({ error: 'This installation already has accounts — sign in instead.' });
       }
@@ -322,6 +367,8 @@ export function registerAccountRoutes(
       guard.noteFailure(req);
       return reply.code(404).send({ error: 'That invitation has been used already, or it has expired. Ask for a new one.' });
     }
+    if (ownerFirstClaimFromPublic(req, account)) return reply.code(403).send({ error: OWNER_CLAIM_PRIVATE_ONLY });
+    if (ownerRecoveryFromPublic(req, account)) return reply.code(403).send({ error: OWNER_RECOVERY_PRIVATE_ONLY, privateOnly: true });
     const { hash, salt } = await hashPassword(password);
     // Checked again after the await, and claimed in the same synchronous step:
     // two people opening one link at once both got in (night review).
@@ -342,6 +389,9 @@ export function registerAccountRoutes(
   app.get<{ Querystring: { code?: string } }>('/v1/local-accounts/claim', async (req, reply) => {
     const account = req.query.code ? store.localAccountByClaim(req.query.code) : undefined;
     if (!account) return reply.code(404).send({ error: 'That link has been used already, or it has expired.' });
+    if (ownerFirstClaimFromPublic(req, account)) return reply.code(403).send({ error: OWNER_CLAIM_PRIVATE_ONLY });
+    // The code is the credential, so this tells only its holder; the link is kept for the private address.
+    if (ownerRecoveryFromPublic(req, account)) return reply.code(403).send({ error: OWNER_RECOVERY_PRIVATE_ONLY, privateOnly: true });
     // An account that already has a password is being RESET, not invited: the
     // page should say so, or people wonder why they are "joining" again.
     return {
@@ -375,7 +425,8 @@ export function registerAccountRoutes(
   app.post<{ Body: { username?: string; password?: string } }>('/v1/login', async (req, reply) => {
     const username = (req.body?.username ?? '').trim();
     // Counted per client AND per account: hopping addresses does not reset it.
-    if (guard.throttled(req, username || undefined)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+    const release = guessSlot(req, username || undefined);
+    if (!release) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     const password = req.body?.password ?? '';
     const account = username ? store.localAccountByUsername(username) : undefined;
     // One message for every failure: a different answer for "no such user"
@@ -383,13 +434,15 @@ export function registerAccountRoutes(
     // …and one scrypt whatever the account: skipping it for a missing,
     // disabled or pending one made the answer ~20 ms faster (night review).
     const usable = !!account && !account.disabled && account.pwHash !== '';
-    const verified = await verifyPassword(password, usable ? account!.pwHash : DUMMY_HASH, usable ? account!.pwSalt : DUMMY_SALT);
+    const verified = await verifyPassword(password, usable ? account!.pwHash : DUMMY_HASH, usable ? account!.pwSalt : DUMMY_SALT).catch((err: unknown) => { release(); throw err; });
     const ok = usable && verified;
     if (!account || !ok) {
       guard.noteFailure(req, username || undefined);
+      release(); // after the miss is counted: the place is never free while the miss is uncounted
       await new Promise((r) => setTimeout(r, 400));
       return reply.code(401).send({ error: 'Wrong username or password' });
     }
+    release();
     setSessionCookie(reply, req, mintSession(secret, account.id, account.pwHash, Date.now() + TTL_MS, store.sessionEpoch(account.id)));
     deps.onAuthenticated?.({ ownerId: account.id, via: 'password', email: account.username.includes('@') ? account.username : undefined });
     return { ok: true, id: account.id, username: account.username, hostOwner: account.hostOwner };
@@ -413,9 +466,12 @@ export function registerAccountRoutes(
   app.post<{ Body: { current?: string } }>('/v1/local-accounts/me/recovery-code', async (req, reply) => {
     const me = store.localAccount(req.principal?.ownerId ?? '');
     if (!me) return reply.code(401).send({ error: 'Sign in first.' });
-    if (guard.throttled(req, me.username)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
-    if (!(await verifyPassword(req.body?.current ?? '', me.pwHash, me.pwSalt))) {
-      guard.noteFailure(req, me.username);
+    const release = guessSlot(req, me.username);
+    if (!release) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+    const right = await verifyPassword(req.body?.current ?? '', me.pwHash, me.pwSalt).catch((err: unknown) => { release(); throw err; });
+    if (!right) guard.noteFailure(req, me.username);
+    release();
+    if (!right) {
       return reply.code(401).send({ error: 'Current password is wrong.' });
     }
     const recoveryCode = await issueRecoveryCode(me.id);
@@ -435,24 +491,29 @@ export function registerAccountRoutes(
     // bad passwords and so lock its owner out of recovery too (night review).
     // A code is 20 characters of randomness, so guessing it is not the risk
     // the account bucket exists for.
-    if (guard.throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+    const release = guessSlot(req);
+    if (!release) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     const started = Date.now();
     const code = normalizeRecoveryCode(String(req.body?.code ?? ''));
     const password = String(req.body?.password ?? '');
     const problem = passwordProblem(password);
-    if (problem) return reply.code(400).send({ error: problem });
+    if (problem) { release(); return reply.code(400).send({ error: problem }); }
     const account = username && username.length <= 64 ? store.localAccountByUsername(username) : undefined;
     // Always pay for one scrypt, so a missing account or code answers as slowly
     // as a wrong code does.
     const hash = account?.recoveryHash ?? '00'.repeat(32);
     const salt = account?.recoverySalt ?? 'no-account';
-    const match = (await verifyPassword(code, hash, salt)) && !!account?.recoveryHash && !account.disabled && code.length === 20;
+    const match = (await verifyPassword(code, hash, salt).catch((err: unknown) => { release(); throw err; })) && !!account?.recoveryHash && !account.disabled && code.length === 20;
     if (!account || !match) {
       guard.noteFailure(req);
+      release();
       const left = 900 - (Date.now() - started);
       if (left > 0) await new Promise((r) => setTimeout(r, left));
       return reply.code(401).send({ error: 'That username and recovery code do not match.' });
     }
+    release();
+    // Said only to someone who gave the right code (so it tells a stranger nothing), and the code is not spent.
+    if (ownerRecoveryFromPublic(req, account)) return reply.code(403).send({ error: OWNER_RECOVERY_PRIVATE_ONLY, privateOnly: true });
     const pw = await hashPassword(password);
     store.transact(() => {
       store.setLocalAccountPassword(account.id, pw.hash, pw.salt);
@@ -481,7 +542,10 @@ export function registerAccountRoutes(
       disabled: a.disabled,
       createdAt: a.createdAt,
       pending: !!a.claimCode,
-      claimPath: a.claimCode ? `/?claim=${a.claimCode}` : undefined,
+      // A pending invitation's code is a way into that account: at the public
+      // address it is shown once, to whoever makes it (a step-up route), not
+      // listed for any session to read.
+      claimPath: a.claimCode && !isPublic(req) ? `/?claim=${a.claimCode}` : undefined,
       agents: store.listAgents(a.id).filter((x) => x.state !== 'DELETED').length,
     }));
   });
@@ -535,11 +599,14 @@ export function registerAccountRoutes(
       const password = req.body?.password ?? '';
       const problem = passwordProblem(password);
       if (problem) return reply.code(400).send({ error: problem });
-      if (self && guard.throttled(req, target.username)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
-      if (self && !(await verifyPassword(req.body?.current ?? '', target.pwHash, target.pwSalt))) {
-        // Counted against the account too: it was checked there but never
-        // counted, so a hijacked session could guess without limit (night review).
-        guard.noteFailure(req, target.username);
+      const release = self ? guessSlot(req, target.username) : () => {};
+      if (!release) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+      const right = !self || await verifyPassword(req.body?.current ?? '', target.pwHash, target.pwSalt).catch((err: unknown) => { release(); throw err; });
+      // Counted against the account too: it was checked there but never
+      // counted, so a hijacked session could guess without limit (night review).
+      if (!right) guard.noteFailure(req, target.username);
+      release();
+      if (!right) {
         return reply.code(401).send({ error: 'Current password is wrong.' });
       }
       const { hash, salt } = await hashPassword(password);
