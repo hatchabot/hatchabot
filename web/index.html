@@ -11663,7 +11663,7 @@ function v2ShowTip(el) {
   const st = v2Status(a);
   const tip = $('v2Tip');
   tip.innerHTML = `<b>${esc(a.name)} · ${esc(st.label)}</b>${a.persona ? esc(a.persona.slice(0, 140)) : ''}${!v2Mine(a) ? '<br>Shared with you.' : ''}`
-    + `<br>${a.botUsername ? `On Telegram as @${esc(a.botUsername)}` : 'No Telegram — chat here in Hatchabot'}`
+    + (a.botUsername ? `<br>On Telegram as @${esc(a.botUsername)}` : '') // an agent without Telegram says nothing about it (Chris, 2026-10-03)
     + (st.why.length ? `<ul>${st.why.slice(0, 4).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : '')
     + (() => { const prev = v2PreviewOf(a), at = v2Recent?.get(a.id)?.at; return prev ? `<span class="v2tipprev">${at ? esc(ago(at)) + ' · ' : ''}${esc(prev)}</span>` : ''; })();
   tip.hidden = false;

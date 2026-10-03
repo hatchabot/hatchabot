@@ -1518,6 +1518,8 @@ const SCENARIOS = String.raw`(() => {
         for (const v of ['group', 'attention', 'model', 'activity']) {
           v2SetView(v); await sleep(50);
           eq(v + ': the last line is in the tooltip', prevOf('Meal Planner'), 'Robin: can we do tacos on Friday?');
+          { const t = tile('Meal Planner'); v2ShowTip(t); const tip = document.getElementById('v2Tip').textContent; document.getElementById('v2Tip').hidden = true;
+            ok(v + ': no "No Telegram" line in a tooltip', !tip.includes('No Telegram')); }
           ok(v + ': nothing under the tiles', !document.querySelector('#v2groups .v2prev'));
           ok(v + ': no Hide previews button', !byText('#v2groups button', 'Hide previews'));
           eq(v + ': Unread is a section only in Activity', [...document.querySelectorAll('#v2groups .v2ghead h3')].some((h) => h.textContent === 'Unread'), v === 'activity');

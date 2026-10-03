@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.117.3] — 2026-10-03
+
+### Changed
+- **A tile's tooltip no longer says "No Telegram — chat here in Hatchabot".** An agent without Telegram now shows nothing about it; one with Telegram still shows its bot name.
+
 ## [2.117.2] — 2026-10-03
 
 ### Changed
