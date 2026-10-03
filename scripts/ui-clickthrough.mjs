@@ -1465,10 +1465,9 @@ const SCENARIOS = String.raw`(() => {
       { id: 'a13', name: 'Car Upkeep', at: mins(60 * 26), unread: false, said: 'Oil change is due' },
     ] };
     await refresh(false);
+    await v2LoadRecent(true); // the poll reads it at most every 30 s
   };
   const recentCleanup = async () => {
-    try { localStorage.setItem('hb-v2-hide-previews', '0'); } catch {}
-    v2HidePreviews = false;
     delete window.__override['/v1/agents']; delete window.__override['/v1/recent']; window.__answer = {};
     v2SetView('group');
     await refresh(false);
@@ -1513,20 +1512,20 @@ const SCENARIOS = String.raw`(() => {
         await recentCleanup();
       }
     },
-    otherViewsUnchanged: async () => {
+    previewsInEveryView: async () => {
       try {
         await recentFixture();
-        v2SetView('activity');
-        await until(() => prevOf('Homework Helper'));
-        for (const v of ['group', 'attention', 'model']) {
+        for (const v of ['group', 'attention', 'model', 'activity']) {
           v2SetView(v); await sleep(50);
-          ok(v + ': no preview in the tooltip', tipOf('Homework Helper') === null);
+          eq(v + ': the last line is in the tooltip', prevOf('Meal Planner'), 'Robin: can we do tacos on Friday?');
+          ok(v + ': nothing under the tiles', !document.querySelector('#v2groups .v2prev'));
           ok(v + ': no Hide previews button', !byText('#v2groups button', 'Hide previews'));
-          ok(v + ': no Unread section', ![...document.querySelectorAll('#v2groups .v2ghead h3')].some((h) => h.textContent === 'Unread'));
+          eq(v + ': Unread is a section only in Activity', [...document.querySelectorAll('#v2groups .v2ghead h3')].some((h) => h.textContent === 'Unread'), v === 'activity');
         }
+        // Read with the list poll, but at most every 30 s.
         const before = calls('GET', /^\/v1\/recent$/).length;
         v2SetView('group'); await refresh(false); await refresh(false);
-        eq('not asked for outside the Activity view', calls('GET', /^\/v1\/recent$/).length, before);
+        eq('not re-read on every poll', calls('GET', /^\/v1\/recent$/).length, before);
       } finally { await recentCleanup(); }
     },
     activityRecentFails: async () => {
@@ -1536,6 +1535,7 @@ const SCENARIOS = String.raw`(() => {
         window.__answer = { 'GET /v1/recent': Array.from({ length: 6 }, () => ({ status: 500, body: { error: 'Something failed.' } })) };
         v2Recent = new Map();
         v2SetView('activity');
+        await v2LoadRecent(true);
         await until(() => v2Recent === null);
         ok('no preview in the tooltip', tipOf('Homework Helper') === null);
         eq('every tile still there', document.querySelectorAll('#v2groups .v2agent').length, 14);

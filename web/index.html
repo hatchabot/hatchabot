@@ -11260,7 +11260,7 @@ async function refresh(withMeta) {
     }).catch(() => {});
     agents = await api('/v1/agents');
     agentsLoaded = true;
-    if (UI_V2 && v2View === 'activity') void v2LoadRecent(); // the Activity view's last lines, with the list
+    if (UI_V2) void v2LoadRecent(); // each agent's last line, for its tooltip (at most every 30 s)
     $('offlineBanner').hidden = true; // reached the server: any earlier warning is stale
     // The classic Activity card; v2 hides it (Status → Activity loads its own).
     if (!UI_V2) loadActivity();
@@ -11480,7 +11480,6 @@ function v2SetView(v) {
   v2View = V2_VIEWS.some(([k]) => k === v) ? v : 'group';
   try { localStorage.setItem('hb-v2-view', v2View); } catch {}
   renderV2();
-  if (v2View === 'activity') void v2LoadRecent();
 }
 /** The section an agent belongs to under the current view: [key, label]. */
 function v2ViewKey(a, view = v2View) {
@@ -11533,24 +11532,25 @@ function v2Fold(key) {
 const v2IsCollapsed = (key) => (key in v2Collapsed ? v2Collapsed[key] : key === 'archived');
 
 // ---- Activity view: the Unread section and each agent's last line ----------
-// GET /v1/recent (orchestrator/recent.ts): read only while the Activity view
-// is shown, on entering it and with the list poll. It never wakes an agent;
-// if it fails, the view is drawn exactly as without it.
-let v2Recent = null, v2RecentBusy = false;
-async function v2LoadRecent() {
-  if (v2View !== 'activity' || v2RecentBusy) return;
+// GET /v1/recent (orchestrator/recent.ts): each agent's last line, for its
+// tooltip in every view (Chris, 2026-10-03). Read with the list poll, at most
+// every 30 s; it never wakes an agent. If it fails, tooltips have no line.
+let v2Recent = null, v2RecentBusy = false, v2RecentAt = 0;
+const V2_RECENT_EVERY_MS = 30_000;
+async function v2LoadRecent(force = false) {
+  if (v2RecentBusy || (!force && Date.now() - v2RecentAt < V2_RECENT_EVERY_MS)) return;
   v2RecentBusy = true;
   try {
     const r = await api('/v1/recent?all=1');
     v2Recent = new Map((Array.isArray(r?.items) ? r.items : []).map(i => [i.id, i]));
   } catch { v2Recent = null; }
-  finally { v2RecentBusy = false; }
-  if (v2View === 'activity') renderV2();
+  finally { v2RecentBusy = false; v2RecentAt = Date.now(); }
+  renderV2(); // the tiles' spoken labels carry the line
 }
-/** The agent's last line, shown in its tooltip in the Activity view (Chris, 2026-10-03: not under the tile):
+/** The agent's last line, shown in its tooltip (not under the tile, Chris 2026-10-03):
  *  what needs you (as Needs you words it), else who said what last. */
 function v2PreviewOf(a) {
-  if (v2View !== 'activity' || !v2Recent) return '';
+  if (!v2Recent) return '';
   const need = v2Mine(a) && !attentionCleared(a) ? agentAttention(a)[0] : null;
   if (need) return `needs you: ${need.why}`;
   const said = v2Recent.get(a.id)?.said;

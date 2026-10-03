@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.117.2] — 2026-10-03
+
+### Changed
+- **An agent's last line is in its hover tooltip in every view**, not only in Activity: Groups, Needs you, Model and the rest show it too, with how long ago. It is read with the list, at most every 30 seconds, and still never wakes an agent. The Unread section stays in the Activity view.
+
 ## [2.117.1] — 2026-10-03
 
 ### Changed

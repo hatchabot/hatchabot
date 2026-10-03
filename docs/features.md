@@ -1483,8 +1483,9 @@ repeated in the time bins below. Hovering a tile shows its last line in the
 tooltip, with how long ago: who spoke last and how it began ("You: thanks",
 "Robin: can we do tacos?", the agent's own words with no name), **⏰ Daily
 brief ran** when the last thing was a scheduled task, or **needs you: …** in
-Needs you's own words. Nothing is added under the tiles. Other views are
-unchanged, and a click on a tile does what it always does.
+Needs you's own words. The same line is in the tooltip in every view (read
+with the list, at most every 30 seconds). Nothing is added under the tiles,
+and a click on a tile does what it always does.
 
 - *Who sees which line*: what that person could already read in the agent's
   console. The owner's console reads every conversation, so the owner sees
