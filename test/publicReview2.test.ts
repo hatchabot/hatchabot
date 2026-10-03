@@ -440,10 +440,15 @@ describe('smaller things', () => {
     const { h, bob } = await consoleWorld({ HATCHABOT_PUBLIC_REQS_PER_MIN_PER_ADDRESS: '8' });
     const jb = await h.signIn('bob', bob.password, { from: '192.0.2.200', totpSecret: bob.totpSecret });
     const opened: Open[] = [];
+    // The ceiling counts per calendar minute: twelve opens that straddle a
+    // minute's end are counted in two buckets and all get through. Start early
+    // in a fresh minute (a flake seen 2026-10-03 under load).
+    const left = 60_000 - (Date.now() % 60_000);
+    if (left < 20_000) await new Promise((r) => setTimeout(r, left + 50));
     for (let i = 0; i < 12; i++) opened.push(await openConsole(h.port, 'b1', jb.header()));
     // (openConsole sends X-Forwarded-For 203.0.113.7: its own address's count.)
     expect(opened.filter((o) => o.state.got.includes('101')).length).toBe(8);
-  }, 30_000);
+  }, 45_000);
 
   it('an agent that no longer belongs to the caller closes its console (the same standing check that opened it)', async () => {
     const { h, owner, bob } = await consoleWorld();
