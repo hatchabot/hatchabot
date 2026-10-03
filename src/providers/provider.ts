@@ -387,6 +387,15 @@ export interface RuntimeProvider {
    * compresses swap. Always pass both: a call without the allowance takes it away.
    */
   updateMemory?(runtimeRef: string, cap: string, swap: string | undefined): Promise<void>;
+  /**
+   * What each container's limits really are now: docker's record AND the
+   * cgroup's own memory.max / memory.swap.max (running containers). They can
+   * disagree: with docker's systemd cgroup driver a zero swap limit is not in
+   * systemd's record of the scope, so any `systemctl daemon-reload` puts
+   * memory.swap.max back to "max" while docker still says no swap (Spark,
+   * 2026-10-02). Keyed by runtimeRef; a container that is not there is absent.
+   */
+  memoryLimitsLive?(runtimeRefs: string[]): Promise<Map<string, LiveMemoryLimits>>;
   /** Whether this provider's host compresses swap (zswap or zram), read through the host's own probe; cached briefly. */
   compressedSwap?(opts?: { fresh?: boolean }): Promise<import('../orchestrator/swap.js').CompressedSwap>;
 
@@ -413,6 +422,16 @@ export interface RuntimeProvider {
    * files (SOUL/MEMORY/AGENTS and everything else it has accumulated).
    */
   importWorkspace(runtimeRef: string, slug: string, data: Buffer): Promise<void>;
+}
+
+export interface LiveMemoryLimits {
+  running: boolean;
+  /** docker's HostConfig.Memory and .MemorySwap, bytes (MemorySwap -1 = unlimited, 0 = unset). */
+  dockerMemory: number;
+  dockerMemorySwap: number;
+  /** The cgroup's own limits (null = "max"), when they could be read: this machine
+   *  directly, a runner through `docker exec` (its own cgroup namespace). */
+  cgroup?: { memoryMax: number | null; swapMax: number | null };
 }
 
 export interface ContainerStats {

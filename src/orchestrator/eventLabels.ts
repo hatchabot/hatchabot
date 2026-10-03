@@ -40,6 +40,8 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'embed.engineless_refused': 'its image has no memory engine and the shared service is unavailable',
   'embed.mode': 'memory search engine switched',
   'memory.peaks_cleared': 'memory peak and cap-hit readings cleared',
+  'runtime.swap_reasserted': (d) => `memory and swap limits applied again: ${Array.isArray(d.reasons) ? (d.reasons as string[]).join(', ') : 'they had drifted'}${d.cause ? ` (${String(d.cause)})` : ''}`,
+  'runtime.swap_reassert_failed': (d) => `memory and swap limits drifted and could not be applied again: ${Array.isArray(d.reasons) ? (d.reasons as string[]).join(', ') : ''}`,
   'memory.swap_set': (d) => `swap allowance ${d.swap === 'default' ? 'back to the default' : d.swap === 'class' ? 'set by its class' : 'set'}: ${String(d.effective ?? '')}${d.withheld ? ` — not given: this host has no compressed swap (${String(d.withheld)})` : d.live ? ' — applied to the container' : ''}`,
   'memory.swap_host': (d) => d.compressed ? `its host compresses swap now (${String(d.kind)}): its swap allowance is given` : `its host has no compressed swap now (${String(d.kind)}): it runs without swap`,
   'memory.cap_set': (d) => `memory cap ${d.cap === 'default' ? 'back to the default' : d.cap === 'class' ? 'set by its class' : 'set'}: ${String(d.effective ?? '')}${d.live ? ' — applied to the running container' : ''}`,

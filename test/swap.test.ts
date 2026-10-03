@@ -1,15 +1,16 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   agentMemoryLimits, defaultSwapAllowance, describeCompressedSwap, dockerMemorySwap, effectiveSwapAllowance,
-  formatSwapAllowance, parseSwapAllowance, parseSwapProbe, type CompressedSwap,
+  formatSwapAllowance, limitsDrift, parseCgroupLimit, parseSwapAllowance, parseSwapProbe, procCgroupPath, wantedLimits,
+  type CompressedSwap, type LimitsCheckSummary,
 } from '../src/orchestrator/swap.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { hibernateAgent, resetHibernateState, wakeAgent, type HibernateDeps } from '../src/orchestrator/hibernate.js';
-import { swapLine } from '../src/doctor.js';
+import { limitsCheckLine, swapLine } from '../src/doctor.js';
 import { parseCgroupMemory } from '../src/providers/provider.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
@@ -420,25 +421,141 @@ describe('every path that makes or starts a container carries the allowance', ()
     expect(w.provider.memoryUpdates).toEqual([{ runtimeRef: refOf(w, id), cap: '3g' }]);
   });
 
-  it('the watch: a host that gains or loses compressed swap updates the agents with an allowance, once per change', async () => {
+  it('the check: a host that gains or loses compressed swap brings the allowance with it; docker\'s record with swap it should not have is corrected', async () => {
     const w = await makeWorld();
     const id = await seedRunningAgent(w);
     const plain = await seedRunningAgent(w, { id: 'a2', name: 'Plain', slug: 'plain', accountId: 'plainbot' });
     await patch(w, id, { swapAllowance: '2g' });
-    const watch = (w.f as unknown as { swapWatch: (boot?: boolean) => Promise<{ applied: number }> }).swapWatch;
+    const check = (w.f as unknown as { limitsCheck: (o?: { agentIds?: string[] }) => Promise<LimitsCheckSummary> }).limitsCheck;
     w.provider.memoryUpdates.length = 0;
-    expect((await watch(true)).applied).toBe(1); // boot: withheld, applied as no-swap
-    expect(w.provider.memoryUpdates).toEqual([{ runtimeRef: refOf(w, id), cap: '3g' }]);
-    expect((await watch()).applied).toBe(0); // nothing changed
+    expect(await check()).toMatchObject({ checked: 2, reasserted: 0 }); // withheld already, nothing to do
     w.provider.swapState = ZSWAP_ON; // the owner ran the script
-    expect((await watch()).applied).toBe(1);
-    expect(w.provider.memoryUpdates.at(-1)).toEqual({ runtimeRef: refOf(w, id), cap: '3g', swap: '2g' });
+    expect((await check()).reasserted).toBe(1);
+    expect(w.provider.memoryUpdates).toEqual([{ runtimeRef: refOf(w, id), cap: '3g', swap: '2g' }]);
     expect(w.store.listEvents([id]).some((e) => e.event === 'memory.swap_host')).toBe(true);
-    // Boot also takes swap away from a container that carries it and should not.
-    w.provider.infoOverride.set(refOf(w, plain), { memoryLimitBytes: 3 * GiB, memorySwapLimitBytes: 6 * GiB });
+    expect((await check()).reasserted).toBe(0); // in place now
+    // docker's record says 2x swap (an old container): taken away.
+    w.provider.dockerLimits.set(refOf(w, plain), { memory: 3 * GiB, memorySwap: 6 * GiB });
     w.provider.memoryUpdates.length = 0;
-    await watch(true);
-    expect(w.provider.memoryUpdates).toContainEqual({ runtimeRef: refOf(w, plain), cap: '3g' });
+    expect(await check()).toMatchObject({ reasserted: 1, cgroupDrifted: 0 });
+    expect(w.provider.memoryUpdates).toEqual([{ runtimeRef: refOf(w, plain), cap: '3g' }]);
+  });
+});
+
+describe('a systemd reload resets memory.swap.max under docker (the Spark, 2026-10-02)', () => {
+  it('the decision: the cgroup says "max" while docker says no swap → apply again; the cgroup matches → nothing', () => {
+    const want = wantedLimits({ memory: '3g' }, false);
+    expect(want).toEqual({ memoryMax: 3 * GiB, swapMax: 0 });
+    const docker = { running: true, dockerMemory: 3 * GiB, dockerMemorySwap: 3 * GiB };
+    const drifted = limitsDrift(want, { ...docker, cgroup: { memoryMax: 3 * GiB, swapMax: null } });
+    expect(drifted).toMatchObject({ reassert: true, reasons: ['cgroup memory.swap.max'], have: { dockerSwap: 0, cgroupSwapMax: null } });
+    expect(limitsDrift(want, { ...docker, cgroup: { memoryMax: 3 * GiB, swapMax: 0 } }).reassert).toBe(false);
+    // A stopped container has no cgroup: docker's record alone.
+    expect(limitsDrift(want, { ...docker, running: false, cgroup: { memoryMax: 3 * GiB, swapMax: null } }).reassert).toBe(false);
+    // A stale allowance left in the cgroup after it was taken away (systemd keeps the last non-zero one).
+    expect(limitsDrift(want, { ...docker, cgroup: { memoryMax: 3 * GiB, swapMax: 2 * GiB } }).reasons).toEqual(['cgroup memory.swap.max']);
+    // An allowance given: the cgroup must hold it too.
+    const withSwap = wantedLimits({ memory: '3g', swap: '2g' }, true);
+    expect(limitsDrift(withSwap, { running: true, dockerMemory: 3 * GiB, dockerMemorySwap: 5 * GiB, cgroup: { memoryMax: 3 * GiB, swapMax: 2 * GiB } }).reassert).toBe(false);
+    expect(limitsDrift(withSwap, { running: true, dockerMemory: 3 * GiB, dockerMemorySwap: 5 * GiB, cgroup: { memoryMax: 3 * GiB, swapMax: null } }).reassert).toBe(true);
+    // Withheld (no compressed swap): zero, whatever the setting.
+    expect(wantedLimits({ memory: '3g', swap: '2g' }, false).swapMax).toBe(0);
+    // docker's MemorySwap: -1 is unlimited, 0 is unset (as much swap as memory); a cap moved in the cgroup.
+    expect(limitsDrift(want, { running: false, dockerMemory: 3 * GiB, dockerMemorySwap: -1 }).reasons).toEqual(['docker swap']);
+    expect(limitsDrift(want, { running: false, dockerMemory: 3 * GiB, dockerMemorySwap: 0 }).reasons).toEqual(['docker swap']);
+    expect(limitsDrift(want, { ...docker, cgroup: { memoryMax: null, swapMax: 0 } }).reasons).toEqual(['cgroup memory.max']);
+    // Page rounding is not drift.
+    expect(limitsDrift(want, { ...docker, dockerMemory: 3 * GiB - 4096, cgroup: { memoryMax: 3 * GiB - 4096, swapMax: 0 } }).reassert).toBe(false);
+  });
+
+  it('parses cgroup limit files and /proc/<pid>/cgroup', () => {
+    expect(parseCgroupLimit('max\n')).toBeNull();
+    expect(parseCgroupLimit('3221225472\n')).toBe(3 * GiB);
+    expect(parseCgroupLimit('0')).toBe(0);
+    expect(parseCgroupLimit(undefined)).toBeUndefined();
+    expect(parseCgroupLimit('garbage')).toBeUndefined();
+    expect(procCgroupPath('0::/system.slice/docker-abc.scope\n')).toBe('/system.slice/docker-abc.scope');
+    expect(procCgroupPath('0::/\n')).toBeUndefined(); // a private cgroup namespace: not a path to use
+    expect(procCgroupPath('12:memory:/docker/abc\n')).toBeUndefined(); // cgroup v1
+  });
+
+  it('the provider reads the cgroup by the container\'s process (this machine) and by docker exec (a runner)', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'hb-cg-'));
+    const ID = 'f'.repeat(64);
+    // A fake /proc and /sys: the systemd driver's scope, reset to "max" by a reload.
+    mkdirSync(join(d, 'proc/4242'), { recursive: true });
+    writeFileSync(join(d, 'proc/4242/cgroup'), `0::/system.slice/docker-${ID}.scope\n`);
+    const cg = join(d, `sys/fs/cgroup/system.slice/docker-${ID}.scope`);
+    mkdirSync(cg, { recursive: true });
+    writeFileSync(join(cg, 'memory.max'), `${3 * GiB}\n`); writeFileSync(join(cg, 'memory.swap.max'), 'max\n');
+    // cgroupfs driver for a second container, found without a pid.
+    const ID2 = 'e'.repeat(64);
+    mkdirSync(join(d, `sys/fs/cgroup/docker/${ID2}`), { recursive: true });
+    writeFileSync(join(d, `sys/fs/cgroup/docker/${ID2}/memory.max`), `${2 * GiB}\n`); writeFileSync(join(d, `sys/fs/cgroup/docker/${ID2}/memory.swap.max`), '0\n');
+    const st = join(d, 'docker');
+    writeFileSync(st, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(join(d, 'argv'))}
+args="$*"; case "$args" in -H*) set -- "\${@:3}" ;; esac
+case "$1" in
+  inspect) echo "/hatchabot-kitchen-helper-df918a55|${ID}|true|4242|${3 * GiB}|${3 * GiB}"; echo "/hatchabot-other-11111111|${ID2}|true|0|${2 * GiB}|${2 * GiB}"; echo "/hatchabot-sleepy-22222222|${'d'.repeat(64)}|false|0|${GiB}|${GiB}"; exit 1 ;;
+  exec) printf '${3 * GiB}\\nmax\\n' ;;
+  info) echo "Ubuntu|[name=seccomp]" ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    const refs: [string, string, string, string] = ['docker://hatchabot-kitchen-helper-df918a55', 'docker://hatchabot-other-11111111', 'docker://hatchabot-sleepy-22222222', 'docker://hatchabot-gone-33333333'];
+    const local = new LocalDockerProvider({ docker: st, image: 'test-image:latest', hostRoot: d });
+    const live = await local.memoryLimitsLive(refs);
+    expect(live.get(refs[0])).toEqual({ running: true, dockerMemory: 3 * GiB, dockerMemorySwap: 3 * GiB, cgroup: { memoryMax: 3 * GiB, swapMax: null } });
+    expect(live.get(refs[1])?.cgroup).toEqual({ memoryMax: 2 * GiB, swapMax: 0 });
+    expect(live.get(refs[2])).toEqual({ running: false, dockerMemory: GiB, dockerMemorySwap: GiB }); // stopped: no cgroup to read
+    expect(live.has(refs[3])).toBe(false);
+    expect(readFileSync(join(d, 'argv'), 'utf8')).not.toContain('exec'); // this machine: files, no process in the agent
+    const remote = new LocalDockerProvider({ docker: st, image: 'test-image:latest', host: 'ssh://runner@10.0.0.9' });
+    const r = await remote.memoryLimitsLive(refs.slice(0, 1));
+    expect(r.get(refs[0])?.cgroup).toEqual({ memoryMax: 3 * GiB, swapMax: null });
+    expect(readFileSync(join(d, 'argv'), 'utf8')).toContain('-H ssh://runner@10.0.0.9 exec hatchabot-kitchen-helper-df918a55 cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max');
+  });
+
+  it('the app finds it, applies the limits again, says so once, counts it for the doctor; after a start it checks that agent', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w);
+    const ok2 = await seedRunningAgent(w, { id: 'a2', name: 'Fine', slug: 'fine', accountId: 'finebot' });
+    const check = (w.f as unknown as { limitsCheck: (o?: { agentIds?: string[] }) => Promise<LimitsCheckSummary> }).limitsCheck;
+    const ref = refOf(w, id);
+    w.provider.cgroupLimits.set(refOf(w, ok2), { memoryMax: 3 * GiB, swapMax: 0 });
+    w.provider.cgroupLimits.set(ref, { memoryMax: 3 * GiB, swapMax: null }); // a daemon-reload happened
+    w.provider.memoryUpdates.length = 0;
+    expect(await check()).toEqual({ at: expect.any(String), checked: 2, cgroupDrifted: 1, reasserted: 1, failed: 0, notCovered: 0 });
+    expect(w.provider.memoryUpdates).toEqual([{ runtimeRef: ref, cap: '3g' }]);
+    expect(w.provider.cgroupLimits.get(ref)).toEqual({ memoryMax: 3 * GiB, swapMax: 0 });
+    const ev = w.store.listEvents([id]).filter((e) => e.event === 'runtime.swap_reasserted');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.detail).toMatchObject({ reasons: ['cgroup memory.swap.max'], before: { cgroupSwapMax: null, dockerSwap: 0 }, after: { cgroupSwapMax: 0 }, cause: expect.stringMatching(/systemd reload/) });
+    expect((w.f as unknown as { lastLimitsCheck: () => LimitsCheckSummary }).lastLimitsCheck()).toMatchObject({ cgroupDrifted: 1 });
+    expect(await check()).toMatchObject({ cgroupDrifted: 0, reasserted: 0 }); // fixed: quiet
+    // One that cannot be fixed is counted every time, but on its trail once.
+    w.provider.cgroupLimits.set(ref, { memoryMax: 3 * GiB, swapMax: null });
+    w.provider.cgroupStuck.add(ref);
+    expect(await check()).toMatchObject({ reasserted: 1, failed: 1 });
+    expect(await check()).toMatchObject({ reasserted: 1, failed: 1 });
+    expect(w.store.listEvents([id]).filter((e) => e.event === 'runtime.swap_reassert_failed')).toHaveLength(1);
+    w.provider.cgroupStuck.delete(ref);
+    // Start: that agent alone is checked once it is up.
+    await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/stop`, headers: as() });
+    w.provider.liveReads.length = 0;
+    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/start`, headers: as() })).statusCode).toBe(200);
+    for (let i = 0; i < 50 && !w.provider.liveReads.length; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(w.provider.liveReads[0]).toEqual([ref]);
+  });
+
+  it('the doctor says what the last check found', () => {
+    const base = { at: '2026-10-02T23:40:00.000Z', checked: 44, cgroupDrifted: 0, reasserted: 0, failed: 0, notCovered: 0 };
+    expect(limitsCheckLine(base)).toEqual({ level: 'ok', text: 'Limits check 2026-10-02 23:40: 44 agents checked, none drifted' });
+    const l = limitsCheckLine({ ...base, cgroupDrifted: 16, reasserted: 16 });
+    expect(l.level).toBe('warn');
+    expect(l.text).toBe('Limits check 2026-10-02 23:40: 16 agents\' swap limits had drifted (systemd reload) and were restored');
+    expect(limitsCheckLine({ ...base, reasserted: 2, failed: 1, notCovered: 3 })).toMatchObject({ level: 'warn', text: expect.stringMatching(/1 agent's memory or swap limits had drifted and could NOT be restored; 3 running agents on a runner/) });
   });
 });
 

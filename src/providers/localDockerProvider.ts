@@ -9,6 +9,7 @@ import { join, dirname } from 'node:path';
 import { promisify } from 'node:util';
 import type {
   ExecResult,
+  LiveMemoryLimits,
   RuntimeInfo,
   RuntimeProvider,
   RuntimeSpec,
@@ -16,7 +17,7 @@ import type {
 } from './provider.js';
 import { ProviderError, parseByteSize, parseCgroupMemory, parseChannelsLabel, parseEmbedEngineLabel, parsePluginInstallLabel, parsePluginsLabel, type ContainerStats, type EmbedEngine } from './provider.js';
 import { CONTAINER_GEN } from '../orchestrator/rebuildPolicy.js';
-import { dockerMemorySwap, parseSwapProbe, SWAP_PROBE_SCRIPT, type CompressedSwap } from '../orchestrator/swap.js';
+import { dockerMemorySwap, parseCgroupLimit, parseSwapProbe, procCgroupPath, SWAP_PROBE_SCRIPT, type CompressedSwap } from '../orchestrator/swap.js';
 
 /** How much an imported archive may expand to on the volume (default 8 GiB). */
 const IMPORT_MAX_BYTES = Math.floor((Number(process.env.HATCHABOT_IMPORT_MAX_GB) || 8) * 2 ** 30);
@@ -45,6 +46,8 @@ export interface LocalDockerOptions {
   host?: string;
   /** Reads the host's swap state (the output of SWAP_PROBE_SCRIPT); tests stub it. */
   swapProbe?: () => Promise<string | undefined>;
+  /** Where /proc and /sys are read from for cgroup limits ('' = this machine); tests point it at a fake tree. */
+  hostRoot?: string;
 }
 
 /**
@@ -103,10 +106,12 @@ export class LocalDockerProvider implements RuntimeProvider {
   readonly #conn: string[];
   readonly #fetch: typeof fetch;
   readonly #swapProbe?: () => Promise<string | undefined>;
+  readonly #hostRoot: string;
 
   constructor(opts: LocalDockerOptions = {}) {
     this.#fetch = opts.fetchImpl ?? fetch;
     this.#swapProbe = opts.swapProbe;
+    this.#hostRoot = opts.hostRoot ?? '';
     this.image = opts.image ?? 'hatchabot-runtime:latest';
     this.prefix = opts.prefix ?? DEFAULT_PREFIX;
     this.docker = opts.docker ?? 'docker';
@@ -945,6 +950,58 @@ export class LocalDockerProvider implements RuntimeProvider {
   async #memoryArgs(memory: string, swap: string | undefined): Promise<string[]> {
     const compressed = swap ? (await this.compressedSwap()).compressed : false;
     return ['--memory', memory, '--memory-swap', dockerMemorySwap(memory, swap, compressed)];
+  }
+
+  async memoryLimitsLive(runtimeRefs: string[]): Promise<Map<string, LiveMemoryLimits>> {
+    const out = new Map<string, LiveMemoryLimits>();
+    if (!runtimeRefs.length) return out;
+    const names = runtimeRefs.map((r) => this.#names(r).container);
+    // One inspect for all of them; a missing container makes it exit non-zero, the others still print.
+    const res = await this.#docker(['inspect', '-f', '{{.Name}}|{{.Id}}|{{.State.Running}}|{{.State.Pid}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}', ...names], 60_000);
+    const local = !this.remote && process.platform === 'linux' && !(await this.desktop());
+    for (const line of res.stdout.split('\n')) {
+      const [nm, id, running, pid, mem, msw] = line.trim().split('|');
+      const idx = names.indexOf((nm ?? '').replace(/^\//, ''));
+      if (idx < 0 || !id) continue;
+      const live: LiveMemoryLimits = { running: running === 'true', dockerMemory: Number(mem) || 0, dockerMemorySwap: Number(msw) || 0 };
+      if (live.running) {
+        const cg = local ? this.#cgroupLimitsLocal(id, Number(pid) || 0) : await this.#cgroupLimitsExec(names[idx]!);
+        if (cg) live.cgroup = cg;
+      }
+      out.set(runtimeRefs[idx]!, live);
+    }
+    return out;
+  }
+
+  /**
+   * The container's own cgroup, found by its init process (/proc/<pid>/cgroup
+   * names the path whatever the driver: system.slice/docker-<id>.scope with
+   * systemd, docker/<id> with cgroupfs, under the user's manager rootless),
+   * else by the usual places.
+   */
+  #cgroupLimitsLocal(id: string, pid: number): { memoryMax: number | null; swapMax: number | null } | undefined {
+    const R = this.#hostRoot;
+    const dirs: string[] = [];
+    if (pid > 0) { try { const p = procCgroupPath(readFileSync(`${R}/proc/${pid}/cgroup`, 'utf8')); if (p) dirs.push(`${R}/sys/fs/cgroup${p}`); } catch { /* gone */ } }
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
+    dirs.push(`${R}/sys/fs/cgroup/system.slice/docker-${id}.scope`, `${R}/sys/fs/cgroup/docker/${id}`,
+      `${R}/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/user.slice/docker-${id}.scope`);
+    for (const d of dirs) {
+      let mem: string | undefined, swap: string | undefined;
+      try { mem = readFileSync(`${d}/memory.max`, 'utf8'); swap = readFileSync(`${d}/memory.swap.max`, 'utf8'); } catch { continue; }
+      const m = parseCgroupLimit(mem), w = parseCgroupLimit(swap);
+      if (m !== undefined && w !== undefined) return { memoryMax: m, swapMax: w };
+    }
+    return undefined;
+  }
+
+  /** A runner's (or Docker Desktop's) container reads its own cgroup: with a private cgroup namespace /sys/fs/cgroup is it. */
+  async #cgroupLimitsExec(container: string): Promise<{ memoryMax: number | null; swapMax: number | null } | undefined> {
+    const res = await this.#docker(['exec', container, 'cat', '/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.swap.max'], 15_000);
+    if (res.code !== 0) return undefined;
+    const [a, b] = res.stdout.split('\n');
+    const m = parseCgroupLimit(a), w = parseCgroupLimit(b);
+    return m !== undefined && w !== undefined ? { memoryMax: m, swapMax: w } : undefined;
   }
 
   #swapState?: { at: number; p: Promise<CompressedSwap> };

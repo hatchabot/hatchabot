@@ -5,14 +5,14 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { defaultBackupsDir, defaultDbPath } from './envCompat.js';
 import { readSetStatus } from './orchestrator/backups.js';
 import { funnelOff, funnelStatus, tailnetInfo, targetsPort } from './ops/tailnet.js';
 import { envFilePath, publicIntentIsStale, readPublicIntent } from './ops/publicIntent.js';
 import { adminAccounts, evaluateSafeguards, hostOf, publicConfig, type SafeguardCheck } from './api/safeguards.js';
 import { autoUpgradeStatus } from './ops/autoUpgrade.js';
-import { COMPRESSED_SWAP_FIX, describeCompressedSwap, effectiveSwapAllowance, formatSwapAllowance, parseSwapAllowance, parseSwapProbe, SWAP_PROBE_SCRIPT, type CompressedSwap } from './orchestrator/swap.js';
+import { COMPRESSED_SWAP_FIX, type LimitsCheckSummary, describeCompressedSwap, effectiveSwapAllowance, formatSwapAllowance, parseSwapAllowance, parseSwapProbe, SWAP_PROBE_SCRIPT, type CompressedSwap } from './orchestrator/swap.js';
 
 export interface DoctorFacts {
   nodeVersion: string;
@@ -42,6 +42,8 @@ export interface DoctorFacts {
     agentsWithAllowance?: number;
     /** Agent containers that run with swap now (docker's MemorySwap above the cap). */
     containersWithSwap?: number;
+    /** The app's last limits check (limits-check.json beside the database). */
+    lastCheck?: LimitsCheckSummary;
   };
   /** Public access (docs/public-access.md): the switch, and every safeguard it stands on. */
   publicAccess?: {
@@ -139,6 +141,7 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
       : { level: 'ok', text: `Tailscale up${t.dns ? ` (${t.dns})` : ''}${t.serving ? ' — serving, but the address did not answer yet' : ' — HTTPS not turned on (setup guide → Turn on HTTPS)'}` });
   }
   if (f.swap) out.push(swapLine(f.swap));
+  if (f.swap?.lastCheck) out.push(limitsCheckLine(f.swap.lastCheck));
   if (f.publicAccess) out.push(...publicAccessLines(f.publicAccess));
   return out;
 }
@@ -152,6 +155,21 @@ export function swapLine(sw: NonNullable<DoctorFacts['swap']>): DoctorLine {
   if (wanted) return { level: 'warn', text: `Agents are set to use compressed swap${who}, but this machine has none, so they run without swap: ${sw.state.why ?? sw.state.kind}`, fix: COMPRESSED_SWAP_FIX };
   if (sw.state.kind === 'unknown') return { level: 'ok', text: 'Compressed swap: could not be read (agents run without swap)' };
   return { level: 'ok', text: `Compressed swap: none — agents run without swap (optional: ${COMPRESSED_SWAP_FIX}, then Settings → Hosts → Defaults → Compressed swap per agent)` };
+}
+
+/**
+ * The app's last limits check. A systemd reload resets a container's
+ * memory.swap.max to "max" behind docker's back (docker's systemd driver
+ * leaves a zero swap limit out of systemd's record); the app finds and
+ * restores those every ten minutes, and says here how many it found.
+ */
+export function limitsCheckLine(c: LimitsCheckSummary): DoctorLine {
+  const when = c.at.slice(0, 16).replace('T', ' ');
+  const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
+  const uncovered = c.notCovered ? `; ${n(c.notCovered, 'running agent', 'running agents')} on a runner whose cgroup could not be read (docker's record only)` : '';
+  if (c.failed) return { level: 'warn', text: `Limits check ${when}: ${n(c.failed, 'agent\'s', 'agents\'')} memory or swap limits had drifted and could NOT be restored${uncovered}`, fix: 'hatchabot events <agent> (runtime.swap_reassert_failed); a rebuild makes the container anew' };
+  if (c.cgroupDrifted) return { level: 'warn', text: `Limits check ${when}: ${n(c.cgroupDrifted, 'agent\'s', 'agents\'')} swap limits had drifted (systemd reload) and were restored${c.reasserted > c.cgroupDrifted ? `, ${c.reasserted - c.cgroupDrifted} more brought up to date` : ''}${uncovered}`, fix: 'Nothing to do: the app checks every ten minutes. A reload (snap refresh, package upgrade) causes it; docker\'s systemd driver leaves a zero swap limit out of systemd\'s record' };
+  return { level: 'ok', text: `Limits check ${when}: ${n(c.checked, 'agent', 'agents')} checked${c.reasserted ? `, ${c.reasserted} brought up to date` : ', none drifted'}${uncovered}` };
 }
 
 /** The machine's swap and who is set to use it; best-effort, never throws. */
@@ -187,7 +205,9 @@ export async function swapFacts(env: Record<string, string>, dbPath: string, pre
       if (ins !== undefined) containersWithSwap = ins.split('\n').filter((l) => { const [m, w, r] = l.split('|'); return r === 'true' && !!Number(m) && (Number(w) < 0 || Number(w) > Number(m)); }).length;
     } else containersWithSwap = 0;
   }
-  return { state, fleet, agentsWithAllowance, containersWithSwap };
+  let lastCheck: LimitsCheckSummary | undefined;
+  try { lastCheck = JSON.parse(readFileSync(join(dirname(dbPath), 'limits-check.json'), 'utf8')) as LimitsCheckSummary; } catch { /* the app has not run one yet */ }
+  return { state, fleet, agentsWithAllowance, containersWithSwap, ...(lastCheck && typeof lastCheck.at === 'string' ? { lastCheck } : {}) };
 }
 
 /**

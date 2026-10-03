@@ -52,6 +52,12 @@ export class MockProvider implements RuntimeProvider {
 
   async provision(spec: RuntimeSpec): Promise<{ runtimeRef: string }> {
     this.lastSpec = spec;
+    if (spec.memory) {
+      const b = (v: string | undefined) => { const m = /^(\d+(?:\.\d+)?)([mg])$/.exec(v ?? ''); return m ? Math.round(Number(m[1]) * (m[2] === 'g' ? 1024 ** 3 : 1024 ** 2)) : 0; };
+      const mem = b(spec.memory), sw = spec.memorySwap && this.swapState.compressed ? Math.min(b(spec.memorySwap), mem) : 0;
+      this.dockerLimits.set(`mock://${spec.agentId}`, { memory: mem, memorySwap: mem + sw });
+      this.cgroupLimits.delete(`mock://${spec.agentId}`);
+    }
     if (this.opts.failOn === 'provision') {
       throw new ProviderError(
         'mock provision failure',
@@ -205,6 +211,31 @@ export class MockProvider implements RuntimeProvider {
     this.#require(runtimeRef);
     const given = swap && this.swapState.compressed ? swap : undefined;
     this.memoryUpdates.push(given ? { runtimeRef, cap, swap: given } : { runtimeRef, cap });
+    // What docker update does: its record and the cgroup both take the new values.
+    const b = (v: string) => { const m = /^(\d+(?:\.\d+)?)([mg])$/.exec(v); return m ? Math.round(Number(m[1]) * (m[2] === 'g' ? 1024 ** 3 : 1024 ** 2)) : 0; };
+    const mem = b(cap), sw = given ? Math.min(b(given), mem) : 0;
+    this.dockerLimits.set(runtimeRef, { memory: mem, memorySwap: mem + sw });
+    if (!this.cgroupStuck.has(runtimeRef)) this.cgroupLimits.set(runtimeRef, { memoryMax: mem, swapMax: sw });
+  }
+  /** docker's record per runtime (set by provision and updateMemory; tests may set it). */
+  dockerLimits = new Map<string, { memory: number; memorySwap: number }>();
+  /** The cgroup's own values per runtime; tests set them to model a systemd reload (swapMax null = "max"). */
+  cgroupLimits = new Map<string, { memoryMax: number | null; swapMax: number | null }>();
+  /** Runtimes whose cgroup a docker update does not fix (to model a reassert that fails). */
+  cgroupStuck = new Set<string>();
+  /** Every memoryLimitsLive call's refs, in order (tests). */
+  liveReads: string[][] = [];
+  async memoryLimitsLive(runtimeRefs: string[]) {
+    this.liveReads.push([...runtimeRefs]);
+    const out = new Map<string, import('./provider.js').LiveMemoryLimits>();
+    for (const ref of runtimeRefs) {
+      const rt = this.runtimes.get(ref);
+      if (!rt || rt.purged) continue;
+      const d = this.dockerLimits.get(ref) ?? { memory: 3 * 1024 ** 3, memorySwap: 3 * 1024 ** 3 };
+      const c = this.cgroupLimits.get(ref);
+      out.set(ref, { running: rt.phase === 'running', dockerMemory: d.memory, dockerMemorySwap: d.memorySwap, ...(c ? { cgroup: c } : {}) });
+    }
+    return out;
   }
   /** What the host's swap looks like (tests set it); no swap by default. */
   swapState: CompressedSwap = { kind: 'none', compressed: false, why: 'This machine has no swap: agents get none until zswap (with a swap file) or zram is on.', swapDevices: [] };

@@ -31,6 +31,9 @@ import { cookieFromHeader, requestIsHttps, SESSION_COOKIE_NAME, type RequestLike
 import { foreignRequest } from './requestOrigin.js';
 import { isControlUiDocument, rebaseControlUi } from './controlUiRebase.js';
 import { defaultMemoryCap, effectiveMemoryCap, formatMemoryCap, memberMemoryMax, MEMORY_CAP_CEILING_BYTES, parseMemoryCap } from '../orchestrator/memoryCap.js';
+import { limitsDrift, wantedLimits, type LimitsCheckSummary } from '../orchestrator/swap.js';
+import { writeFile as writeFileAsync } from 'node:fs/promises';
+import type { LiveMemoryLimits } from '../providers/provider.js';
 import { agentMemoryLimits, COMPRESSED_SWAP_FIX, defaultSwapAllowance, describeCompressedSwap, effectiveSwapAllowance, formatSwapAllowance, parseSwapAllowance, type CompressedSwap } from '../orchestrator/swap.js';
 import { APP_VERSION } from '../domain/appVersion.js';
 import { slackConnector, slackManifest } from '../channels/slack.js';
@@ -2464,6 +2467,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const clearPinsWhenUp = (a: Agent): void => {
     if (!a.runtimeRef) return;
     forgetDmPolicy(a.id); // started or woken: the door is asserted afresh at the next rest
+    // Its memory and swap limits as the kernel holds them, now that it has a fresh cgroup (limitsCheck).
+    void limitsCheck({ agentIds: [a.id] }).catch(() => {});
     void clearStaleRuntimePinsWhenUp(providerFor(a.hostId), a.runtimeRef, a.slug, (e, d) => trace(a.id)(e, d)).catch(() => {});
     // Web chat given or taken while it was down: its gateway's list of people
     // follows now, before anyone opens the console (2026-09-30).
@@ -2557,65 +2562,105 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
   };
   /**
-   * Compressed swap follows the host (swap.ts). Every agent with an allowance
-   * is given it only while its host compresses swap, so when that changes —
-   * the owner ran scripts/enable-compressed-swap.sh, or --undo, or a runner
-   * rebooted without it — their containers are updated in place. `boot` also
-   * takes swap away from containers that have it and should not (a setting
-   * changed in .env by hand while the app was down). Said once per change on
-   * the log and on each agent's trail, never every sweep.
+   * The limits check: every agent's memory cap and swap allowance as docker
+   * AND the kernel hold them, against what the agent should have, applied
+   * again with `docker update` where they differ. Three ways they drift:
+   *  - a host gains or loses compressed swap (scripts/enable-compressed-swap.sh,
+   *    --undo, a runner rebooted without it): the allowance follows it;
+   *  - a setting changed in .env while the app was down;
+   *  - **a systemd reload.** With docker's systemd cgroup driver a zero swap
+   *    limit is not in systemd's record of the container's scope
+   *    (MemorySwapMax=infinity), so any `systemctl daemon-reload` (a snap
+   *    refresh does one) puts memory.swap.max back to "max" while docker still
+   *    says no swap: on the Spark 16 of 44 running agents had ~2.7 GiB in the
+   *    plain disk swap file that way (2026-10-02). The service user cannot set
+   *    the scope's property itself (system scopes need root), so this check is
+   *    the fix: it reads the cgroup, not docker's record.
+   * At start, every ten minutes, and for one agent right after it starts or
+   * wakes. Each restoration is on the agent's trail (runtime.swap_reasserted,
+   * before and after) once per distinct drift, never every sweep; the last
+   * check's counts go to limits-check.json beside the database for the doctor.
    */
   const swapSeen = new Map<string, string>();
-  const swapWatch = async (boot = false): Promise<{ applied: number }> => {
-    let applied = 0;
-    const agents = store.listAllActiveAgents().filter((a) => a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED') && !isBusy(a.id) && !a.migratedTo && !!store.getHost(a.hostId));
+  const driftSeen = new Map<string, string>();
+  let lastLimitsCheck: LimitsCheckSummary | undefined;
+  const limitsCheckFile = join(dirname(resolve(process.env.HATCHABOT_DB ?? defaultDbPath())), 'limits-check.json');
+  const limitsCheck = async (opts: { agentIds?: string[] } = {}): Promise<LimitsCheckSummary> => {
+    const sum: LimitsCheckSummary = { at: new Date().toISOString(), checked: 0, cgroupDrifted: 0, reasserted: 0, failed: 0, notCovered: 0 };
+    const agents = store.listAllActiveAgents().filter((a) => a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')
+      && !isBusy(a.id) && !a.migratedTo && !!store.getHost(a.hostId) && (!opts.agentIds || opts.agentIds.includes(a.id)));
     const byHost = new Map<string, Agent[]>();
     for (const a of agents) byHost.set(a.hostId, [...(byHost.get(a.hostId) ?? []), a]);
     for (const [hostId, list] of byHost) {
       const prov = providerFor(hostId);
-      if (!prov.updateMemory) continue;
+      if (!prov.updateMemory || !prov.memoryLimitsLive) continue;
+      // The host's compressed swap, only where some agent here has an allowance.
+      let compressed = false;
       const withSwap = list.filter((a) => !!agentMemoryLimits(store, a).swap);
-      let targets = withSwap;
       if (withSwap.length) {
-        const sw = await prov.compressedSwap?.({ fresh: true }).catch(() => undefined);
-        const state = sw ? `${sw.kind}` : 'unknown';
-        const changed = swapSeen.get(hostId) !== state;
-        swapSeen.set(hostId, state);
-        if (changed && !sw?.compressed) {
+        const sw = await prov.compressedSwap?.({ fresh: !opts.agentIds }).catch(() => undefined);
+        compressed = !!sw?.compressed;
+        const state = sw ? sw.kind : 'unknown';
+        if (swapSeen.has(hostId) && swapSeen.get(hostId) !== state) for (const a of withSwap) trace(a.id)('memory.swap_host', { compressed, kind: state });
+        if (swapSeen.get(hostId) !== state && !compressed) {
           app.log.warn({ host: hostId, agents: withSwap.length, state, why: sw?.why, fix: COMPRESSED_SWAP_FIX }, 'swap.withheld: agents have a swap allowance, but this host does not compress swap; they run without swap');
         }
-        if (changed && !boot) for (const a of withSwap) trace(a.id)('memory.swap_host', { compressed: !!sw?.compressed, kind: state });
-        if (!changed && !boot) targets = [];
+        swapSeen.set(hostId, state);
       }
-      if (boot) {
-        // Containers that carry swap they should not have any more.
-        for (const a of list.filter((x) => !withSwap.includes(x))) {
-          const info = await prov.info(a.runtimeRef!).catch(() => undefined);
-          if (info?.memorySwapLimitBytes !== undefined && info.memoryLimitBytes && (info.memorySwapLimitBytes < 0 || info.memorySwapLimitBytes > info.memoryLimitBytes)) targets = [...targets, a];
-        }
-      }
-      for (const a of targets) {
+      let live: Map<string, LiveMemoryLimits>;
+      try { live = await prov.memoryLimitsLive(list.map((a) => a.runtimeRef!)); } catch { continue; } // unreachable: next sweep
+      for (const a of list) {
+        const l = live.get(a.runtimeRef!);
+        if (!l) continue;
+        sum.checked++;
+        if (l.running && !l.cgroup) sum.notCovered++;
         const now = store.getAgent(a.id);
         if (!now?.runtimeRef || isBusy(a.id)) continue;
         const lim = agentMemoryLimits(store, now);
-        try { await prov.updateMemory(now.runtimeRef, lim.memory, lim.swap); applied++; } catch { break; } // an unreachable host: next sweep
+        const d = limitsDrift(wantedLimits(lim, compressed), l);
+        if (!d.reassert) { driftSeen.delete(a.id); continue; }
+        // The kernel's own limit moved while docker's record did not: a systemd reload.
+        const cgroupOnly = d.reasons.every((r) => r.startsWith('cgroup'));
+        if (cgroupOnly) sum.cgroupDrifted++;
+        let after: ReturnType<typeof limitsDrift> | undefined;
+        try {
+          await prov.updateMemory(now.runtimeRef, lim.memory, lim.swap);
+          const re = (await prov.memoryLimitsLive([now.runtimeRef]).catch(() => undefined))?.get(now.runtimeRef);
+          after = re ? limitsDrift(wantedLimits(lim, compressed), re) : undefined;
+        } catch { /* counted as failed below */ }
+        const ok = !!after && !after.reassert;
+        sum.reasserted++;
+        if (!ok) sum.failed++;
+        const sig = `${d.reasons.join(',')}|${JSON.stringify(d.have)}|${ok}`;
+        if (driftSeen.get(a.id) !== sig) {
+          driftSeen.set(a.id, sig);
+          trace(a.id)(ok ? 'runtime.swap_reasserted' : 'runtime.swap_reassert_failed', {
+            reasons: d.reasons, before: d.have, after: after?.have, want: wantedLimits(lim, compressed), ...(cgroupOnly ? { cause: 'cgroup changed under docker (a systemd reload)' } : {}),
+          });
+        }
       }
     }
-    return { applied };
+    if (!opts.agentIds) {
+      lastLimitsCheck = sum;
+      if (sum.reasserted) app.log.warn(sum, 'limits check: agents\' memory or swap limits had drifted and were applied again');
+      if (!process.env.VITEST) await writeFileAsync(limitsCheckFile, JSON.stringify(sum, null, 2) + '\n').catch(() => {});
+    }
+    return sum;
   };
   /** The machine-defaults note beside "Compressed swap per agent". */
   const swapNote = (sw: CompressedSwap): string => sw.compressed
     ? `This machine compresses swap: ${describeCompressedSwap(sw)}.`
     : `${sw.why ?? 'No compressed swap here.'} To turn it on: ${COMPRESSED_SWAP_FIX}.`;
-  (app as unknown as { swapWatch?: typeof swapWatch }).swapWatch = swapWatch;
+  (app as unknown as { limitsCheck?: typeof limitsCheck; lastLimitsCheck?: () => LimitsCheckSummary | undefined }).limitsCheck = limitsCheck;
+  (app as unknown as { lastLimitsCheck?: () => LimitsCheckSummary | undefined }).lastLimitsCheck = () => lastLimitsCheck;
   (app as unknown as { retargetCronSweep?: typeof retargetCronSweep }).retargetCronSweep = retargetCronSweep;
   (app as unknown as { hibernateDeps?: HibernateDeps; ensureAwake?: typeof ensureAwake }).hibernateDeps = hibernateDeps;
   (app as unknown as { ensureAwake?: typeof ensureAwake }).ensureAwake = ensureAwake;
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
     setTimeout(() => { void retargetCronSweep(); }, 3 * 60_000).unref();
     setInterval(() => { void retargetCronSweep(); }, 24 * 3_600_000).unref();
-    setTimeout(() => { void swapWatch(true).catch((err) => app.log.warn({ err: String(err) }, 'swap watch failed')); }, Number(process.env.HATCHABOT_SWAP_BOOT_MS) || 45_000).unref();
-    setInterval(() => { void swapWatch().catch((err) => app.log.warn({ err: String(err) }, 'swap watch failed')); }, Number(process.env.HATCHABOT_SWAP_PROBE_MS) || 10 * 60_000).unref();
+    setTimeout(() => { void limitsCheck().catch((err) => app.log.warn({ err: String(err) }, 'limits check failed')); }, Number(process.env.HATCHABOT_SWAP_BOOT_MS) || 45_000).unref();
+    setInterval(() => { void limitsCheck().catch((err) => app.log.warn({ err: String(err) }, 'limits check failed')); }, Number(process.env.HATCHABOT_SWAP_PROBE_MS) || 10 * 60_000).unref();
     setInterval(() => { void hibernateSweep(hibernateDeps).catch((err) => app.log.warn({ err: String(err) }, 'hibernate sweep failed')); },
       Number(process.env.HATCHABOT_HIBERNATE_SWEEP_MS) || 5 * 60_000).unref();
     setInterval(() => { void wakeSweep(hibernateDeps).catch((err) => app.log.warn({ err: String(err) }, 'wake sweep failed')); },

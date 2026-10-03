@@ -851,6 +851,32 @@ withheld and why, the log says so once, and `hatchabot doctor` names the fix.
 When a host gains or loses compressed swap, Hatchabot notices within ten
 minutes and updates the containers that have an allowance.
 
+**The limits check.** Docker's record of a container's limits and the
+kernel's can disagree. With docker's systemd cgroup driver (Ubuntu's
+default), a zero swap limit is not written into systemd's record of the
+container's scope (`systemctl show docker-<id>.scope -p MemorySwapMax` says
+`infinity`), so any `systemctl daemon-reload` — a snap refresh does one —
+puts the cgroup's `memory.swap.max` back to `max` while `docker inspect`
+still says no swap: the agent then swaps into whatever swap the machine has,
+plain disk swap included. On the Spark on 2026-10-02, 16 of 44 running
+agents had drifted that way, with 2.7 GB of agent memory in the
+uncompressed swap file. (A positive allowance is in systemd's record and
+survives a reload; but taking one away leaves the old figure there.) Making
+systemd keep a zero (`systemctl set-property --runtime docker-<id>.scope
+MemorySwapMax=0`) needs root for a system scope, and the service runs as a
+user, so the app checks instead: at start, every ten minutes, and for an
+agent right after it starts or wakes, it reads each agent's real
+`memory.max` and `memory.swap.max` (from the container's own cgroup, found
+through its process: `system.slice/docker-<id>.scope` with systemd,
+`docker/<id>` with cgroupfs, under the user's manager rootless; on a runner
+through `docker exec` reading the container's own cgroup) and applies the
+intended limits again with `docker update` where either docker or the
+kernel differs. Each restoration is on the agent's setup log
+(`runtime.swap_reasserted`, before and after) once per distinct drift;
+`hatchabot doctor` reports the last check ("N agents' swap limits had drifted
+(systemd reload) and were restored"). Lowering `memory.swap.max` does not pull
+pages already in swap back in; they come back as they are used.
+
 Turning it on, Linux, as root: `sudo scripts/enable-compressed-swap.sh`. It
 says what it will do and asks first; it turns on zswap with zstd (lz4 if zstd
 is missing) and the zsmalloc pool at up to 20% of memory, in front of the

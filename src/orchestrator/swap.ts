@@ -201,3 +201,69 @@ export function describeCompressedSwap(s: CompressedSwap): string {
   }
   return s.kind === 'unknown' ? 'unknown' : 'none';
 }
+
+// ---- drift: what docker and the kernel say against what the agent should have ----
+
+/** A cgroup v2 limit file: "max" → null, a number → bytes, anything else → undefined. */
+export function parseCgroupLimit(text: string | undefined): number | null | undefined {
+  const v = (text ?? '').trim();
+  if (v === 'max') return null;
+  return /^\d+$/.test(v) ? Number(v) : undefined;
+}
+
+/** /proc/<pid>/cgroup on cgroup v2 ("0::/system.slice/docker-<id>.scope") → the path under /sys/fs/cgroup. */
+export function procCgroupPath(text: string | undefined): string | undefined {
+  const m = /^0::(\/\S*)$/m.exec(text ?? '');
+  return m && m[1] !== '/' ? m[1] : undefined;
+}
+
+/** The two numbers the kernel should hold for an agent: its cap, and its swap (0 unless given). */
+export function wantedLimits(limits: { memory: string; swap?: string }, compressed: boolean): { memoryMax: number; swapMax: number } {
+  const bytes = (v: string | undefined) => { const m = /^(\d+(?:\.\d+)?)([mg])$/.exec(v ?? ''); return m ? Math.round(Number(m[1]) * (m[2] === 'g' ? 1024 ** 3 : 1024 ** 2)) : 0; };
+  const memoryMax = bytes(limits.memory);
+  return { memoryMax, swapMax: compressed && limits.swap ? Math.min(bytes(limits.swap), memoryMax) : 0 };
+}
+
+/** Limits are page-aligned by the kernel: equal within one 64 KiB page. */
+const same = (a: number | null, b: number) => a !== null && Math.abs(a - b) < 65536;
+
+/**
+ * Should the agent's limits be applied again? Yes when docker's record or the
+ * cgroup itself (running containers) differs from what the agent should have:
+ * a host that gained or lost compressed swap, a setting changed while the app
+ * was down, or a systemd reload that reset memory.swap.max to "max".
+ */
+export function limitsDrift(
+  want: { memoryMax: number; swapMax: number },
+  live: { running: boolean; dockerMemory: number; dockerMemorySwap: number; cgroup?: { memoryMax: number | null; swapMax: number | null } },
+): { reassert: boolean; reasons: string[]; have: { dockerMemory: number; dockerSwap: number | null; cgroupMemoryMax?: number | null; cgroupSwapMax?: number | null } } {
+  const reasons: string[] = [];
+  // docker's MemorySwap: -1 unlimited; 0 unset (docker then allows as much swap as memory).
+  const dockerSwap = live.dockerMemorySwap < 0 ? null : live.dockerMemorySwap === 0 ? live.dockerMemory : live.dockerMemorySwap - live.dockerMemory;
+  if (!same(live.dockerMemory, want.memoryMax)) reasons.push('docker memory');
+  if (dockerSwap === null || !same(dockerSwap, want.swapMax)) reasons.push('docker swap');
+  const c = live.running ? live.cgroup : undefined;
+  if (c) {
+    if (!same(c.memoryMax, want.memoryMax)) reasons.push('cgroup memory.max');
+    if (!same(c.swapMax, want.swapMax)) reasons.push('cgroup memory.swap.max');
+  }
+  return {
+    reassert: reasons.length > 0,
+    reasons,
+    have: { dockerMemory: live.dockerMemory, dockerSwap, ...(c ? { cgroupMemoryMax: c.memoryMax, cgroupSwapMax: c.swapMax } : {}) },
+  };
+}
+
+/** The last limits check, as the app writes it and the doctor reads it. */
+export interface LimitsCheckSummary {
+  at: string;
+  /** Agents whose limits were compared. */
+  checked: number;
+  /** Of those, the ones whose cgroup itself had drifted from docker's record (a systemd reload), and were restored. */
+  cgroupDrifted: number;
+  /** Every agent whose limits were applied again (any reason), and those still wrong afterwards. */
+  reasserted: number;
+  failed: number;
+  /** Running agents whose cgroup could not be read (docker's record only). */
+  notCovered: number;
+}
