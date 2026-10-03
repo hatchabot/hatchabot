@@ -568,6 +568,14 @@ export class Store {
         bytes INTEGER NOT NULL,
         measured_at TEXT NOT NULL
       );
+      -- Each agent's last line per recent conversation, for the home screen's
+      -- Recent list (orchestrator/recent.ts): kept so an agent that is asleep
+      -- or stopped still shows it without being woken. Cleaned, cut text.
+      CREATE TABLE IF NOT EXISTS agent_recent (
+        agent_id TEXT PRIMARY KEY,
+        json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       -- Hourly limits that must survive a restart (web chat per person,
       -- consults per agent): one row per counted event, pruned after an hour.
       -- They lived in memory and every deploy reset them (2026-09-30).
@@ -1531,6 +1539,7 @@ export class Store {
       this.db.prepare(`DELETE FROM agent_seen WHERE agent_id = ?`).run(id);
       this.db.prepare(`DELETE FROM member_identities WHERE agent_id = ?`).run(id);
       this.db.prepare(`DELETE FROM agent_disk WHERE agent_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM agent_recent WHERE agent_id = ?`).run(id);
     }
     return this.getAgent(id)!;
   }
@@ -3554,6 +3563,19 @@ export class Store {
       `INSERT INTO agent_seen (owner_id, agent_id, seen_at) VALUES (?, ?, ?)
        ON CONFLICT(owner_id, agent_id) DO UPDATE SET seen_at = excluded.seen_at`,
     ).run(ownerId, agentId, at);
+  }
+
+  /** The Recent list's capture for one agent (orchestrator/recent.ts RecentRecord), or undefined. */
+  getAgentRecent(agentId: string): unknown {
+    const r = this.db.prepare(`SELECT json FROM agent_recent WHERE agent_id = ?`).get(agentId) as { json: string } | undefined;
+    if (!r) return undefined;
+    try { return JSON.parse(r.json); } catch { return undefined; }
+  }
+  setAgentRecent(agentId: string, value: unknown): void {
+    this.db.prepare(
+      `INSERT INTO agent_recent (agent_id, json, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
+    ).run(agentId, JSON.stringify(value), new Date().toISOString());
   }
 
   // ---- the management agent and its key -----------------------------------

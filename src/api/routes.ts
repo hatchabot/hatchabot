@@ -74,6 +74,9 @@ import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
 import { runUsageAlerts } from '../orchestrator/usageAlerts.js';
 import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orchestrator/unread.js';
+import { guestConsoleSessionKey } from '../openclaw/consoleIdentity.js';
+import { webChatStoreKey } from '../orchestrator/webChat.js';
+import { RecentTracker, RECENT_CAP, orderRecent, previewFor, previewLine, type RecentPeople, type RecentViewer } from '../orchestrator/recent.js';
 import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
@@ -4291,19 +4294,37 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     return undefined;
   };
+  /**
+   * The Recent list's capture (orchestrator/recent.ts), fed by the reads
+   * below: a conversation that moved gets its last line read in the
+   * background; a quiet agent costs nothing more. Only running agents are
+   * ever read; an asleep one keeps its stored line.
+   */
+  const recentTracker = new RecentTracker({
+    get: (id) => store.getAgentRecent(id),
+    set: (id, record) => store.setAgentRecent(id, record),
+    exec: async (id, script) => {
+      const a = store.getAgent(id);
+      if (!a?.runtimeRef || a.state !== 'RUNNING') return { code: 1, stdout: '' };
+      return providerFor(a.hostId).execShell(a.runtimeRef, script);
+    },
+  });
   const sessionsFor = async (a: Agent): Promise<Record<string, SessionEntry> | undefined> => {
     if (!a.runtimeRef || a.state !== 'RUNNING') return undefined;
     const hit = sessionsCache.get(a.id);
     if (hit) {
       if (Date.now() - hit.fetchedAt >= 60_000 && !hit.refreshing) {
         hit.refreshing = true;
-        void readSessions(a).then((value) => sessionsCache.set(a.id, { fetchedAt: Date.now(), value }))
-          .catch(() => { hit.refreshing = false; });
+        void readSessions(a).then((value) => {
+          sessionsCache.set(a.id, { fetchedAt: Date.now(), value });
+          void recentTracker.note(a, value);
+        }).catch(() => { hit.refreshing = false; });
       }
       return hit.value;
     }
     const value = await readSessions(a); // first look: wait for it
     sessionsCache.set(a.id, { fetchedAt: Date.now(), value });
+    void recentTracker.note(a, value);
     return value;
   };
   /** "Last active" = the newest session update in that file. */
@@ -4358,6 +4379,80 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!agent) return reply.code(404).send({ error: 'No such agent.' });
     store.setAgentSeen(ownerIdOf(req), agent.id, Date.now());
     return { ok: true };
+  });
+
+  // ---- Recent: each agent's last line, as this person could read it ---------
+  // (orchestrator/recent.ts). Previews mirror the console: its owner reads
+  // every conversation; a web-chat guest only their own; anyone else none.
+
+  /** Who is looking at this agent, as its console would treat them. */
+  const recentViewerOf = (a: Agent, me: string, role: string): RecentViewer => {
+    if (role === 'owner') return { kind: 'owner', userId: me };
+    if (!a.ops && a.gatewayToken && store.webChatAllowed(a.id, me)) {
+      return { kind: 'guest', userId: me, keys: [guestConsoleSessionKey(a.gatewayToken, a.slug, me), webChatStoreKey(a.slug, me)] };
+    }
+    return { kind: 'none', userId: me };
+  };
+  /** The people a line can be from: the agent's active members by their channel ids, and the guests by their own conversations. */
+  const recentPeopleOf = (a: Agent): RecentPeople => {
+    const byChannelId: RecentPeople['byChannelId'] = new Map();
+    const byKey: RecentPeople['byKey'] = new Map();
+    const ownerTg = store.accountTelegram(a.ownerId);
+    if (ownerTg) byChannelId.set(ownerTg, { userId: a.ownerId });
+    for (const m of store.listMemberships(a.id)) {
+      if (m.status !== 'active') continue;
+      const who = { userId: m.userId, name: m.displayName };
+      for (const id of Object.values(store.memberIdentities(a.id, m.userId))) if (id && !byChannelId.has(id)) byChannelId.set(id, who);
+      if (m.userId !== a.ownerId) {
+        if (a.gatewayToken) byKey.set(guestConsoleSessionKey(a.gatewayToken, a.slug, m.userId), who);
+        byKey.set(webChatStoreKey(a.slug, m.userId), who);
+      }
+    }
+    return { byChannelId, byKey };
+  };
+  /** The Needs-you states the line carries (the app's wording), unless the owner cleared them. */
+  const recentNeedsYou = (a: Agent): string | undefined => {
+    const cleared = new Set((a.attentionAck ?? '').split('\n'));
+    if (a.state === 'FAILED' && !cleared.has('failed')) return 'it failed';
+    if (a.pendingAction && !cleared.has('pending')) return a.pendingAction.type === 'bot_token' ? 'waiting for a Telegram bot token' : 'a step is waiting on you';
+    return undefined;
+  };
+  /**
+   * The home screen's Recent list: the agents this person can open that were
+   * active in the last week, each with its last line as they could read it.
+   * Unread first, then newest, at most eight; ?all=1 is the whole week,
+   * newest first. Rides on the list's cached session reads: an agent that
+   * is asleep or stopped is never read or woken — its stored line is used.
+   */
+  app.get<{ Querystring: { all?: string } }>('/v1/recent', async (req) => {
+    const me = ownerIdOf(req);
+    const rows = (await Promise.all(store.listVisibleAgents(me)
+      .filter((a) => a.state !== 'ARCHIVED' && a.state !== 'DELETING' && a.state !== 'DELETED')
+      .map(async (a) => {
+        const role = store.accessRole(a.id, me);
+        if (!role) return undefined;
+        const live = Date.parse((await lastActiveFor(a).catch(() => undefined)) ?? '') || 0;
+        const record = recentTracker.record(a.id);
+        const preview = previewFor(record, recentViewerOf(a, me, role), recentPeopleOf(a));
+        const needsYou = role === 'owner' ? recentNeedsYou(a) : undefined;
+        return {
+          id: a.id,
+          name: a.name,
+          icon: a.icon,
+          at: Math.max(live, record?.lastActiveAt ?? 0),
+          unread: await unreadFor(a, me).catch(() => false),
+          asleep: !!a.hibernatedAt || a.state !== 'RUNNING' || undefined,
+          line: previewLine(preview, needsYou),
+          by: needsYou ? 'needs-you' : preview?.by,
+        };
+      }))).filter((r): r is NonNullable<typeof r> => !!r);
+    const all = req.query.all === '1';
+    const ordered = orderRecent(rows, { all });
+    return {
+      cap: RECENT_CAP,
+      total: all ? ordered.length : orderRecent(rows, { all: true }).length,
+      items: ordered.map((r) => ({ ...r, at: new Date(r.at).toISOString() })),
+    };
   });
 
   // ---- rebuild policy: which agents need a rebuild, and which the machine
