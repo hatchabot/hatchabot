@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.117.1] — 2026-10-03
+
+### Changed
+- **Activity view: an agent's last line is in its hover tooltip, not under the tile.** The dim line under each tile and the **Hide previews** button are gone, so the tiles look as they do in every other view; hovering a tile (or focusing it) shows its last line with how long ago. Screen readers still hear it with the tile's name.
+
 ## [2.117.0] — 2026-10-03
 
 ### Added

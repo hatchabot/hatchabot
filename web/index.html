@@ -635,10 +635,8 @@
   .v2name { font-size:12.5px; line-height:1.25; text-align:center; max-width:94px; overflow-wrap:anywhere;
             display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden }
   .v2agent.v2child .v2name::before { content:"↳ "; color:var(--dim) }
-  /* Activity view: the agent's last line under its name — one dim line, cut to the tile. */
-  .v2prev { display:block; width:100%; margin-top:-5px; font-size:11.5px; line-height:1.3; color:var(--dim); text-align:center;
-            white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
-  .v2binsort.v2prevtog { margin-left:0 }
+  /* Activity view: the agent's last line, in the hover tooltip. */
+  .v2tipprev { display:block; margin-top:6px; color:var(--dim); font-style:italic }
   .v2ic::after { content:""; position:absolute; inset:-5px; border-radius:22px; border:2px solid transparent; pointer-events:none }
   .v2st-working .v2ic::after { border-color:var(--warn); border-style:dashed; animation:v2spin 6s linear infinite }
   .v2st-blocked .v2ic::after { border-color:var(--bad) }
@@ -11539,7 +11537,6 @@ const v2IsCollapsed = (key) => (key in v2Collapsed ? v2Collapsed[key] : key === 
 // is shown, on entering it and with the list poll. It never wakes an agent;
 // if it fails, the view is drawn exactly as without it.
 let v2Recent = null, v2RecentBusy = false;
-let v2HidePreviews = (() => { try { return localStorage.getItem('hb-v2-hide-previews') === '1'; } catch { return false; } })();
 async function v2LoadRecent() {
   if (v2View !== 'activity' || v2RecentBusy) return;
   v2RecentBusy = true;
@@ -11550,14 +11547,10 @@ async function v2LoadRecent() {
   finally { v2RecentBusy = false; }
   if (v2View === 'activity') renderV2();
 }
-function v2TogglePreviews() {
-  v2HidePreviews = !v2HidePreviews;
-  try { localStorage.setItem('hb-v2-hide-previews', v2HidePreviews ? '1' : '0'); } catch {}
-  renderV2();
-}
-/** The one dim line under a tile in the Activity view: what needs you (as Needs you words it), else who said what last. */
+/** The agent's last line, shown in its tooltip in the Activity view (Chris, 2026-10-03: not under the tile):
+ *  what needs you (as Needs you words it), else who said what last. */
 function v2PreviewOf(a) {
-  if (v2View !== 'activity' || v2HidePreviews || !v2Recent) return '';
+  if (v2View !== 'activity' || !v2Recent) return '';
   const need = v2Mine(a) && !attentionCleared(a) ? agentAttention(a)[0] : null;
   if (need) return `needs you: ${need.why}`;
   const said = v2Recent.get(a.id)?.said;
@@ -11622,8 +11615,7 @@ function renderV2() {
     return `<button class="${on ? 'on' : ''}" onclick="v2SetSort('${k}')" title="${title}">${l}${on ? (v2Sort.dir > 0 ? ' ▲' : ' ▼') : ''}</button>`;
   }).join('')}</span>`;
   const viewBar = live.length > 1 ? `<div class="v2viewbar" role="tablist" aria-label="Group agents by">${V2_VIEWS.map(([k, l]) =>
-    `<button role="tab" aria-selected="${k === v2View}" class="${k === v2View ? 'on' : ''}" onclick="v2SetView('${k}')">${esc(l)}</button>`).join('')}${sortBar}${v2View === 'activity'
-      ? `<span class="v2binsort v2prevtog"><button id="v2PrevToggle" class="${v2HidePreviews ? 'on' : ''}" aria-pressed="${v2HidePreviews}" onclick="v2TogglePreviews()" title="Show only the names, without each agent's last line">Hide previews</button></span>` : ''}</div>` : '';
+    `<button role="tab" aria-selected="${k === v2View}" class="${k === v2View ? 'on' : ''}" onclick="v2SetView('${k}')">${esc(l)}</button>`).join('')}${sortBar}</div>` : '';
   v2SectionsNow = sections;
   const html = viewBar + sections.map(s => `
     <section class="v2group${v2IsCollapsed(s.key) ? ' collapsed' : ''}">
@@ -11640,7 +11632,7 @@ function renderV2() {
           const st = v2Status(a);
           const prev = v2PreviewOf(a);
           return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) || a.ops ? ' data-v2fixed="1"' : ''}
-            aria-label="${esc(a.name)} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}${prev ? `. ${esc(prev)}` : ''}">${v2IconHTML(a, st)}<span class="v2name">${esc(a.name)}</span>${prev ? `<span class="v2prev" aria-hidden="true">${esc(prev)}</span>` : ''}</button>`;
+            aria-label="${esc(a.name)} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}${prev ? `. ${esc(prev)}` : ''}">${v2IconHTML(a, st)}<span class="v2name">${esc(a.name)}</span></button>`;
         }).join('') || (s.key === 'archived' ? '<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept.</span>' : '')}
       </div>
     </section>`).join('');
@@ -11673,7 +11665,7 @@ function v2ShowTip(el) {
   tip.innerHTML = `<b>${esc(a.name)} · ${esc(st.label)}</b>${a.persona ? esc(a.persona.slice(0, 140)) : ''}${!v2Mine(a) ? '<br>Shared with you.' : ''}`
     + `<br>${a.botUsername ? `On Telegram as @${esc(a.botUsername)}` : 'No Telegram — chat here in Hatchabot'}`
     + (st.why.length ? `<ul>${st.why.slice(0, 4).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : '')
-    + (v2PreviewOf(a) ? `<br><i>${esc(v2PreviewOf(a))}</i>` : '');
+    + (() => { const prev = v2PreviewOf(a), at = v2Recent?.get(a.id)?.at; return prev ? `<span class="v2tipprev">${at ? esc(ago(at)) + ' · ' : ''}${esc(prev)}</span>` : ''; })();
   tip.hidden = false;
   const r = el.querySelector('.v2ic').getBoundingClientRect();
   const w = tip.offsetWidth;

@@ -1473,7 +1473,9 @@ const SCENARIOS = String.raw`(() => {
     v2SetView('group');
     await refresh(false);
   };
-  const prevOf = (name) => tile(name)?.querySelector('.v2prev')?.textContent ?? null;
+  // The last line lives in the tile's hover tooltip (2026-10-03), not under the tile.
+  const tipOf = (name) => { const t = tile(name); if (!t) return null; v2ShowTip(t); const p = document.querySelector('#v2Tip .v2tipprev'); const txt = p ? p.textContent : null; document.getElementById('v2Tip').hidden = true; return txt; };
+  const prevOf = (name) => { const t = tipOf(name); return t === null ? null : t.replace(/^[^·]*·\s*/, ''); };
   Object.assign(T, {
     activityUnreadFirst: async () => {
       try {
@@ -1499,9 +1501,8 @@ const SCENARIOS = String.raw`(() => {
         eq('a task that ran', prevOf('Budget Tracker'), '⏰ Daily brief ran');
         eq('no line, no row', prevOf('Stock Watcher'), null);
         eq('Needs you as the page words it', prevOf('Car Upkeep'), 'needs you: waiting for a Telegram bot token');
-        const p = tile('Homework Helper').querySelector('.v2prev'), cs = getComputedStyle(p);
-        ok('one line, cut with an ellipsis', cs.whiteSpace === 'nowrap' && cs.textOverflow === 'ellipsis' && p.scrollWidth > p.clientWidth);
-        ok('it stays inside the tile', p.getBoundingClientRect().width <= tile('Homework Helper').getBoundingClientRect().width + 0.5);
+        ok('nothing under the tiles any more', !document.querySelector('#v2groups .v2prev'));
+        ok('the tooltip says how long ago: ' + tipOf('Homework Helper'), / ago · You: thanks|just now · You: thanks/.test(tipOf('Homework Helper')));
         ok('the tile reads the line out', tile('Homework Helper').getAttribute('aria-label').includes('You: thanks'));
         tile('Homework Helper').click();
         await until(() => v2AgentDlg.open || document.getElementById('consoleDlg').open);
@@ -1512,23 +1513,6 @@ const SCENARIOS = String.raw`(() => {
         await recentCleanup();
       }
     },
-    activityHidePreviews: async () => {
-      try {
-        await recentFixture();
-        v2SetView('activity');
-        await until(() => prevOf('Homework Helper'));
-        const btn = document.getElementById('v2PrevToggle');
-        ok('a Hide previews toggle beside the sort', !!btn && btn.closest('.v2viewbar') && btn.getAttribute('aria-pressed') === 'false');
-        btn.click();
-        await until(() => !document.querySelector('#v2groups .v2prev'));
-        eq('remembered for this browser', localStorage.getItem('hb-v2-hide-previews'), '1');
-        eq('pressed', document.getElementById('v2PrevToggle').getAttribute('aria-pressed'), 'true');
-        ok('names and dots stay', tile('Homework Helper').querySelector('.v2unread') && tile('Homework Helper').querySelector('.v2name'));
-        document.getElementById('v2PrevToggle').click();
-        await until(() => prevOf('Homework Helper'));
-        eq('shown again, remembered', localStorage.getItem('hb-v2-hide-previews'), '0');
-      } finally { await recentCleanup(); }
-    },
     otherViewsUnchanged: async () => {
       try {
         await recentFixture();
@@ -1536,8 +1520,8 @@ const SCENARIOS = String.raw`(() => {
         await until(() => prevOf('Homework Helper'));
         for (const v of ['group', 'attention', 'model']) {
           v2SetView(v); await sleep(50);
-          ok(v + ': no preview lines', !document.querySelector('#v2groups .v2prev'));
-          ok(v + ': no Hide previews toggle', !document.getElementById('v2PrevToggle'));
+          ok(v + ': no preview in the tooltip', tipOf('Homework Helper') === null);
+          ok(v + ': no Hide previews button', !byText('#v2groups button', 'Hide previews'));
           ok(v + ': no Unread section', ![...document.querySelectorAll('#v2groups .v2ghead h3')].some((h) => h.textContent === 'Unread'));
         }
         const before = calls('GET', /^\/v1\/recent$/).length;
@@ -1553,7 +1537,7 @@ const SCENARIOS = String.raw`(() => {
         v2Recent = new Map();
         v2SetView('activity');
         await until(() => v2Recent === null);
-        ok('no preview lines', !document.querySelector('#v2groups .v2prev'));
+        ok('no preview in the tooltip', tipOf('Homework Helper') === null);
         eq('every tile still there', document.querySelectorAll('#v2groups .v2agent').length, 14);
         ok('Unread still first (it comes from the list)', document.querySelector('#v2groups .v2ghead h3').textContent === 'Unread');
       } finally { await recentCleanup(); }
