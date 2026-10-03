@@ -150,6 +150,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('manager', 'HATCHABOT_OPS_MAX_TUNNELS', '24', 'Web connections the Hatchabot agent may hold open at once.'),
   s('manager', 'HATCHABOT_OPS_TUNNEL_IDLE_MS', '600000', 'Close such a connection after this long idle.'),
   s('manager', 'HATCHABOT_OPS_DRIFT_MS', '600000', 'How often its setup is checked for drift.'),
+  s('manager', 'HATCHABOT_MODEL_REVIEW', 'weekly', 'The Hatchabot agent\'s weekly model review (Mondays 09:00): it proposes a better-fitting model per agent, for you to confirm. off removes the task at its next rebuild.'),
   s('manager', 'HATCHABOT_MGMT_ANTHROPIC_KEY', null, 'An Anthropic key or setup token for the management chat when no AI source is chosen for it.'),
 
   // Managed installs

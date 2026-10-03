@@ -316,6 +316,19 @@ export class Store {
       CREATE TABLE IF NOT EXISTS agent_token_rates (
         agent_id TEXT PRIMARY KEY, usd_per_token REAL NOT NULL, partial INTEGER NOT NULL, at TEXT NOT NULL
       );
+      -- Each agent's last 30 days by model (calls, token split, context size,
+      -- tool use, how turns ended), as the usage sampler last read it from its
+      -- transcripts: the model scorecard reads this, never the container, so a
+      -- review wakes nothing and execs nothing (modelScorecard.ts).
+      CREATE TABLE IF NOT EXISTS agent_model_profiles (
+        agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, at TEXT NOT NULL
+      );
+      -- Scheduled tasks Hatchabot itself put on an agent (the weekly model
+      -- review), so it makes each once and can take it away again.
+      CREATE TABLE IF NOT EXISTS managed_crons (
+        agent_id TEXT NOT NULL, name TEXT NOT NULL, job_id TEXT, at TEXT NOT NULL,
+        PRIMARY KEY (agent_id, name)
+      );
 
       -- Daily security-posture risk snapshots per owner: the set of active risk
       -- keys, so a run can be diffed against the previous one to flag what newly
@@ -3132,6 +3145,30 @@ export class Store {
     this.db.prepare(`INSERT INTO agent_token_rates (agent_id, usd_per_token, partial, at) VALUES (?, ?, ?, ?)
       ON CONFLICT(agent_id) DO UPDATE SET usd_per_token = excluded.usd_per_token, partial = excluded.partial, at = excluded.at`)
       .run(agentId, usdPerToken, partial ? 1 : 0, at);
+  }
+  setModelProfile(agentId: string, profile: unknown, at: string): void {
+    this.db.prepare(`INSERT INTO agent_model_profiles (agent_id, profile, at) VALUES (?, ?, ?)
+      ON CONFLICT(agent_id) DO UPDATE SET profile = excluded.profile, at = excluded.at`).run(agentId, JSON.stringify(profile), at);
+  }
+  /** The last stored 30-day profile per agent, with when it was read. */
+  modelProfiles(agentIds: string[]): Map<string, { profile: unknown; at: string }> {
+    const out = new Map<string, { profile: unknown; at: string }>();
+    if (!agentIds.length) return out;
+    const rows = this.db.prepare(`SELECT agent_id, profile, at FROM agent_model_profiles WHERE agent_id IN (SELECT value FROM json_each(?))`)
+      .all(JSON.stringify(agentIds)) as Array<{ agent_id: string; profile: string; at: string }>;
+    for (const r of rows) { try { out.set(r.agent_id, { profile: JSON.parse(r.profile), at: r.at }); } catch { /* a bad row reads as none */ } }
+    return out;
+  }
+  managedCron(agentId: string, name: string): { jobId?: string; at: string } | undefined {
+    const r = this.db.prepare(`SELECT job_id, at FROM managed_crons WHERE agent_id = ? AND name = ?`).get(agentId, name) as { job_id: string | null; at: string } | undefined;
+    return r ? { jobId: r.job_id ?? undefined, at: r.at } : undefined;
+  }
+  setManagedCron(agentId: string, name: string, jobId: string | undefined, at: string): void {
+    this.db.prepare(`INSERT INTO managed_crons (agent_id, name, job_id, at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(agent_id, name) DO UPDATE SET job_id = excluded.job_id, at = excluded.at`).run(agentId, name, jobId ?? null, at);
+  }
+  deleteManagedCron(agentId: string, name: string): void {
+    this.db.prepare(`DELETE FROM managed_crons WHERE agent_id = ? AND name = ?`).run(agentId, name);
   }
   agentTokenRate(agentId: string): { usdPerToken: number; partial: boolean } | undefined {
     const r = this.db.prepare(`SELECT usd_per_token, partial FROM agent_token_rates WHERE agent_id = ?`).get(agentId) as { usd_per_token: number; partial: number } | undefined;

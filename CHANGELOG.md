@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [Unreleased]
+
+### Added
+- **Right-size: the management agent is now a model steward** (docs/features.md → Right-size). Keeping each agent on the least capable model that does its job well, in both directions, is one of its primary purposes; a managed AGENTS.md section, "Model stewardship", holds the procedure (prefer no change on thin evidence, never downgrade heavy tool use or recent errors without saying so, propose a stronger model when an agent struggles, one `set_model` card per agent with the evidence and saving in its why, never wake a sleeping agent). It reaches existing management agents at their next build, replaced rather than duplicated.
+- **`get_model_scorecard`** (`GET /v1/model-scorecard`): one compact row per agent of the caller's: purpose, state, source, model and whether pinned, 30 days of calls and tokens, cache share, context size per call (median, p90), tool use, error counts (malformed tool calls, failed turns, tool failures, rate limits, retries), scheduled tasks, a monthly estimate at API prices, share of a Claude plan, and cheaper models on the same source with the saving. Built from what Hatchabot stores; no container is asked anything and no sleeping agent is woken.
+- **`get_model_options`** (`GET /v1/model-options`): per source, its models with prices (Anthropic's pricing page, read 2026-10-03) and a one-line capability note.
+- **A weekly model review** on the management agent ("Weekly model review", Mondays 09:00), made once at its build, delivered the way it already reaches you; `HATCHABOT_MODEL_REVIEW=off` removes it.
+
+### Changed
+- The usage sampler's transcript read also keeps a 30-day profile per agent (per model: token split, context size per call, turns, tool calls, how turns ended, plus the owner's scheduled-task count and the agent's Purpose excerpt), stored in `agent_model_profiles`. Same read, no extra exec.
+
 ## [2.115.1] — 2026-10-03
 
 ### Fixed
