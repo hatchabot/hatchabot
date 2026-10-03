@@ -138,7 +138,7 @@ describe('GET /v1/recent', () => {
     const w = await world();
     await w.settle(OWNER);
     w.store.setAgentPendingAction('r-lunch', { type: 'bot_token' } as never);
-    expect((await w.recent(OWNER)).items.find((i) => i.id === 'r-lunch')).toMatchObject({ line: 'needs you: waiting for a Telegram bot token', by: 'needs-you' });
+    expect((await w.recent(OWNER)).items.find((i) => i.id === 'r-lunch')).toMatchObject({ line: 'needs you: waiting for a Telegram bot token', by: 'needs-you', said: 'Booked Thursday at Pasta Place' });
     expect((await w.recent(GUEST)).items[0]!.line).toBe('You: is there a vegetarian option?');
   });
 

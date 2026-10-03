@@ -4444,6 +4444,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           asleep: !!a.hibernatedAt || a.state !== 'RUNNING' || undefined,
           line: previewLine(preview, needsYou),
           by: needsYou ? 'needs-you' : preview?.by,
+          /** The last line alone, without a Needs-you state (the app words those itself). */
+          said: previewLine(preview),
         };
       }))).filter((r): r is NonNullable<typeof r> => !!r);
     const all = req.query.all === '1';

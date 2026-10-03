@@ -1476,6 +1476,32 @@ sort. The top bar carries the accent colour, fading into the page, and holds
 only the brand and your account; New agent, Inbox, Status, Setup guide and
 Settings sit in the Hatchabot panel beside the manager.
 
+**The Activity view: Unread first, and each agent's last line.** In
+View by → **Activity**, agents with replies you have not read (the blue dot)
+sit in an **Unread** section at the top, newest reply first, and are not
+repeated in the time bins below. Under each tile is one dim line, cut to the
+tile's width (the whole line is in the tile's tooltip): who spoke last and how
+it began ("You: thanks", "Robin: can we do tacos?", the agent's own words with
+no name), **⏰ Daily brief ran** when the last thing was a scheduled task, or
+**needs you: …** in Needs you's own words. **Hide previews** on the view bar
+shows the names alone, remembered per browser. Other views are unchanged, and
+a click on a tile does what it always does.
+
+- *Who sees which line*: what that person could already read in the agent's
+  console. The owner's console reads every conversation, so the owner sees
+  the newest of them (a member's Telegram line carries the member's name, a
+  web-chat guest's line the guest's). A web-chat guest sees only their own
+  conversation. A member who cannot chat with the agent here sees no line.
+  A line nobody can place is not shown.
+- *Cost*: none on a quiet agent. The line rides on the session read the
+  home screen's poll already does once a minute; only a conversation that
+  moved gets one more read of its last few messages, inside the agent's
+  container. The cleaned line (at most 120 characters) is kept, so an agent
+  that is asleep or stopped shows its last line without being woken or read.
+  The app asks for the lines (`GET /v1/recent?all=1`) only while the
+  Activity view is shown; if that fails, the view is drawn without them.
+  Message text is never written to the logs.
+
 **Resources** (Status → Resources; `hatchabot top [--sort cpu|mem|name]`): live
 CPU and memory per agent, per machine, as Docker measures it — one call per
 machine, refreshed every few seconds while the view is open; click Agent, CPU

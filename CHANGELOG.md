@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [Unreleased]
+
+### Added
+- **View by → Activity: an Unread section first, and each agent's last line under its tile** (docs/features.md → The Activity view). Agents with unread replies come first, newest reply first, and are not repeated below. Each tile carries one dim line, cut to the tile: who spoke last and how it began ("You: …", a member's or guest's name, nothing for the agent), "⏰ <task> ran" for a scheduled task, or "needs you: …" in Needs you's own words. **Hide previews** on the view bar, remembered per browser. Other views and tile clicks are unchanged.
+- **The lines are captured on the poll that already runs, and scoped to the viewer.** The list poll's once-a-minute session read now notes which conversations moved; only those get one more exec in the agent's container, reading their last few transcript events (2026.9 SQLite or 2026.7 `.jsonl`). The cleaned line (inbound metadata, markdown and control characters stripped, at most 120 characters) is stored per agent (`agent_recent`), so an asleep or stopped agent keeps its line and is never read or woken for it. New `GET /v1/recent` (signed-in; `?all=1` for the whole week): the agents you can open that were active in the last 7 days, unread first. Previews mirror the console: the owner reads every conversation, a web-chat guest only their own, anyone else none. Text is never logged. Not listed in the management chat's coverage table, which lists only routes that change something.
+
 ## [2.116.0] — 2026-10-03
 
 ### Added
