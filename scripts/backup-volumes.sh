@@ -58,9 +58,10 @@ write_status() {
     "$1" "$started" "$(date -u +%FT%TZ)" "$count" "$failed" "$(json_list "$failed_list")" "$(json_list "$orphan_list")" \
     > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
 }
-write_status running
+# The record starts only once the run can really begin (below): a run that
+# refuses before it starts (no database, no docker) must not replace the
+# verdict of an earlier run of the same day with "incomplete, 0 volumes".
 finish() { local rc=$?; if [ "$rc" -eq 0 ]; then write_status complete; else write_status incomplete; fi; exit "$rc"; }
-trap finish EXIT
 
 # The control plane's own database first: it holds the encrypted bot tokens,
 # the agent registry, memberships and snapshots. Volumes survive without it,
@@ -72,6 +73,10 @@ if [ ! -f "$DB_PATH" ]; then
   echo "✗ No database at $DB_PATH — a backup without the registry is not a backup." >&2
   exit 1
 fi
+# Past the refusal: from here on this run writes into the set, so it owns
+# the day's record (a later failure is recorded as incomplete, rightly).
+write_status running
+trap finish EXIT
 node -e '
   const Database = require("better-sqlite3");
   const db = new Database(process.argv[1], { readonly: true });

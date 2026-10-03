@@ -225,9 +225,18 @@ export function startBackup(now: number): BackupRunState {
     if (lines.length > 40) lines.splice(0, lines.length - 40);
   };
 
+  // Under a test runner the real script would back up THIS machine into the
+  // real ~/hatchabot-backups: run from a checkout it found no database,
+  // refused, and its "incomplete, 0 volumes" record replaced the night's real
+  // one (2026-10-01 to 10-03, every test run). Tests name a script of their own.
+  const script = process.env.HATCHABOT_BACKUP_SCRIPT ?? ((process.env.VITEST || process.env.NODE_ENV === 'test') ? '' : SCRIPT);
+  if (!script) {
+    runState = { status: 'error', startedAt: runState.startedAt, summary: 'Backups are not run under a test runner (set HATCHABOT_BACKUP_SCRIPT to a test script).' };
+    return runState;
+  }
   let child;
   try {
-    child = spawn('bash', [SCRIPT], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn('bash', [script], { stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (err) {
     runState = { status: 'error', startedAt: runState.startedAt, summary: String((err as Error)?.message ?? err) };
     return runState;

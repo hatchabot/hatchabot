@@ -118,10 +118,21 @@ esac
   const fillVolume = (vol: string, files: string[]) => {
     for (const f of files) { mkdirSync(dirname(join(root, 'vols', vol, f)), { recursive: true }); writeFileSync(join(root, 'vols', vol, f), 'x'); }
   };
-  return { run, setDir, fillVolume };
+  return { run, setDir, fillVolume, repo };
 }
 
 describe('scripts/backup-volumes.sh records how the run ended', () => {
+  it('a run that refuses before it starts leaves the day\'s earlier record alone (2026-10-03)', () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    expect(w.run().status).toBe(0);
+    expect(readSetStatus(w.setDir())).toMatchObject({ complete: true });
+    rmSync(join(w.repo, 'data', 'hatchabot.sqlite'));
+    const again = w.run();
+    expect(again.status).toBe(1);
+    expect(again.stderr).toMatch(/No database/);
+    expect(readSetStatus(w.setDir())).toMatchObject({ complete: true });
+  });
+
   it('a clean run says complete; a volume no agent uses is left out and named', () => {
     const w = scriptWorld(['hatchabot-kitchen-1-vol', 'agentclaw-old-sophie'], ['docker://hatchabot-kitchen-1']);
     const r = w.run();
@@ -183,5 +194,19 @@ describe('scripts/backup-volumes.sh leaves out what an agent rebuilds (review, 2
     // The directories themselves are gone too, not only their files.
     for (const d of ['./.npm/', './.openclaw/tmp/', './.openclaw/cache/control-ui-assets/', './.cache/pip/']) expect(names.has(d), d).toBe(false);
     expect(names.has('./.openclaw/cache/')).toBe(true);
+  });
+});
+
+describe('the app never runs the real backup script under a test runner (2026-10-03)', () => {
+  it('"Back up now" in a test refuses unless the test names its own script', async () => {
+    const { startBackup, backupRunState } = await import('../src/orchestrator/backups.js');
+    const saved = process.env.HATCHABOT_BACKUP_SCRIPT;
+    delete process.env.HATCHABOT_BACKUP_SCRIPT;
+    try {
+      const r = startBackup(Date.now());
+      expect(r.status).toBe('error');
+      expect(r.summary).toMatch(/not run under a test runner/);
+      expect(backupRunState().status).toBe('error');
+    } finally { if (saved !== undefined) process.env.HATCHABOT_BACKUP_SCRIPT = saved; }
   });
 });

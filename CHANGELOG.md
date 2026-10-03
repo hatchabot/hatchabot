@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.115.2] — 2026-10-03
+
+### Fixed
+- **Test runs were overwriting the real nightly backup record.** A test of "Back up now" ran the real backup script against this machine's backup folder. Run from a checkout it found no database, refused, and wrote "incomplete, 0 volumes" over that day's real record, so a good night's backup (68 and 70 volumes on 1 and 2 October) showed as failed. Two fixes: under a test runner the app never runs the real script (a test must name its own), and a run that refuses before it starts (no database) no longer replaces the day's earlier record. The backups themselves were never affected.
+
 ## [2.115.1] — 2026-10-03
 
 ### Fixed
