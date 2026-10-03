@@ -2,7 +2,7 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [Unreleased]
+## [2.115.0] — 2026-10-03
 
 ### Added
 - **Compressed swap for agents, off by default** (docs/features.md → Compressed swap). An agent can be given a swap allowance on top of its memory cap: `HATCHABOT_AGENT_SWAP` for the machine (Settings → Hosts → Defaults → Compressed swap per agent), a class's own (Settings → Classes), or an agent's own (its sheet → Advanced → Runtime → Compressed swap; `hatchabot swap <agent> 2g|off|default`). Docker is given the total (`--memory 3g --memory-swap 5g` for a 3g cap and a 2g allowance). Never more than the agent's cap. Applied live with `docker update` (no rebuild) and at every create, rebuild, move, Start and wake; a cap change keeps the allowance.
