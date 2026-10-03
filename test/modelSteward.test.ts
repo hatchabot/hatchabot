@@ -14,6 +14,7 @@ import { buildScorecard, coverageDays, type StoredProfile } from '../src/orchest
 import { MODEL_CATALOG, modelKey, modelOption, modelOptionsFor, priceMix } from '../src/orchestrator/modelOptions.js';
 import { MODEL_PRICES, CACHE_READ_SHARE } from '../src/orchestrator/pricing.js';
 import { MODEL_REVIEW_NAME, modelReviewSetting, syncModelReviewCron } from '../src/orchestrator/modelReview.js';
+import { rebuildAgent } from '../src/orchestrator/provision.js';
 import { OPS_AGENTS_MD, OPS_MANAGED_HEADINGS, OPS_MODEL_REVIEW_MESSAGE, OPS_SOUL, opsSection } from '../src/ops/opsAgent.js';
 import { replaceSection } from '../src/openclaw/workspace.js';
 import { MANIFEST, toolDef } from '../src/mgmt/tools.js';
@@ -410,6 +411,16 @@ describe('the weekly model review task', () => {
     provider.info = async () => ({ openclawVersion: '2026.9.6' } as any);
     return { store, provider, runtimeRef, jobs, agent: store.getAgent('ops1')! };
   }
+
+  it('a rebuild of an existing management agent sets it up too (it is never provisioned again, 2026-10-03)', async () => {
+    const { store, provider, jobs } = await opsWorld();
+    const secrets = { async get() { return 'not-a-real-key'; }, async put() {}, async delete() {} };
+    const events: string[] = [];
+    const after = await rebuildAgent({ store, secrets, provider, channel: { kind: 'telegram', pool: { owns: () => false } }, log: () => (e: string) => events.push(e), sleep: async () => {} } as never, 'ops1');
+    expect(after.state).toBe('RUNNING');
+    expect(jobs.map((j) => j.name)).toContain(MODEL_REVIEW_NAME);
+    expect(store.managedCron('ops1', MODEL_REVIEW_NAME)).toBeTruthy();
+  });
 
   it('is made once, delivered to its console conversation when it has no chat app, and listed like any task', async () => {
     const { store, provider, runtimeRef, jobs, agent } = await opsWorld();

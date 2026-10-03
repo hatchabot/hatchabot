@@ -1060,6 +1060,12 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     log('runtime.settling', { agentId });
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
     await reindexMemoryIfSwitched(deps, agentId, runtimeRef, log);
+    // The weekly model review rides on rebuilds too: a management agent made
+    // before it existed is never provisioned again, only rebuilt (2026-10-03).
+    if (agent.ops) {
+      await syncModelReviewCron({ store, provider, log }, agent, runtimeRef)
+        .catch((err) => log('schedule.model_review_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
+    }
     log('runtime.rebuilt', { agentId, runtimeRef });
     store.dropCarriedMemorySeed(agentId); // on the volume now (see provision)
     const live = store.setAgentState(agentId, 'RUNNING');

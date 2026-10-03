@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.116.1] — 2026-10-03
+
+### Fixed
+- **The weekly model review now reaches an existing management agent.** It was set up only when the management agent was first created, and an existing one is only ever rebuilt, so it never got the task. A rebuild now sets it up (once, and not if `HATCHABOT_MODEL_REVIEW=off`).
+
 ## [2.116.0] — 2026-10-03
 
 ### Added
