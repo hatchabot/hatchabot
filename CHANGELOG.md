@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.115.1] — 2026-10-03
+
+### Fixed
+- **A source's default model can be changed for new agents only.** The "switch agents" step that follows a new default model would not save until at least one existing agent was ticked. Leaving every box empty now saves the new default for agents created from here on, and every existing agent keeps the model it runs today. The button says which it will do ("Save for new agents only" or "Save, and switch N"), and so does the note when it's done.
+
 ## [2.115.0] — 2026-10-03
 
 ### Added

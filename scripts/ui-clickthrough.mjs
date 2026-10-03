@@ -1417,6 +1417,33 @@ const SCENARIOS = String.raw`(() => {
         await refresh(false);
       }
     },
+    // A new default model for future agents only (Chris, 2026-10-03): no agent ticked is a real choice.
+    defaultModelNewOnly: async () => {
+      const onProfile = [
+        { id: 'a1', name: 'Homework Helper', aiProfileId: 'p1', model: null, modelOverride: null, state: 'RUNNING' },
+        { id: 'a2', name: 'Tax Helper', aiProfileId: 'p1', model: 'claude-opus-5', modelOverride: 'claude-opus-5', state: 'RUNNING' },
+      ];
+      try {
+        openApplyModel('p1', 'claude-haiku-4-5', [], onProfile, 'Claude token');
+        await until(() => applyModelDlg.open);
+        ok('the dialog says new agents start on it: ' + applyModelDlg.textContent, applyModelDlg.textContent.includes('New agents on') && applyModelDlg.textContent.includes('leave every box empty'));
+        toggleApplyAll(false);
+        const btn = document.getElementById('applyModelBtn');
+        ok('with none ticked the button still works', !btn.disabled);
+        eq('and says what it does', btn.textContent, 'Save for new agents only');
+        btn.click();
+        const c = await until(() => calls('POST', /\/v1\/ai-profiles\/p1\/apply-default-model$/).pop());
+        eq('no agent is switched', c.body.apply, []);
+        eq('the new default', c.body.model, 'claude-haiku-4-5');
+        await until(() => document.getElementById('toast').textContent.includes('for new agents'));
+        ok('the toast says existing agents keep theirs', document.getElementById('toast').textContent.includes('Existing agents keep their models'));
+        // One ticked: the button names it.
+        openApplyModel('p1', 'claude-haiku-4-5', [], onProfile, 'Claude token');
+        await until(() => applyModelDlg.open);
+        eq('one ticked by default (the follower, not the pinned one)', document.getElementById('applyModelBtn').textContent, 'Save, and switch 1');
+        applyModelDlg.close();
+      } finally { if (applyModelDlg.open) applyModelDlg.close(); }
+    },
   });
   (async () => {
     for (const [name, run] of Object.entries(T)) {

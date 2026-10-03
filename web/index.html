@@ -2420,13 +2420,12 @@
 </dialog>
 
 <dialog id="applyModelDlg" style="width:min(600px,96vw)">
-  <h3 style="margin:0 0 4px">Switch agents to <span id="applyModelName"></span></h3>
+  <h3 style="margin:0 0 4px">New default: <span id="applyModelName"></span></h3>
   <div class="sub" style="margin-bottom:10px">
-    Only your agents on <b id="applyModelSource"></b> are listed — agents on your
-    other AI sources aren't affected. Ticked agents switch to this model (memory
-    kept); un-ticked agents stay on the model they run today. Agents that have
-    their own chosen model start un-ticked, so they're never switched unless you
-    tick them.
+    New agents on <b id="applyModelSource"></b> start on this model. Tick any
+    existing agents that should switch to it too (memory kept); un-ticked agents
+    stay on the model they run today. To change the default for new agents only,
+    leave every box empty. Agents on your other AI sources aren't affected.
   </div>
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
     <label class="sub" style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:0">
@@ -5587,8 +5586,10 @@ function refreshApplyCount() {
   const n = cbs.filter(cb => cb.checked).length;
   $('applyModelCount').textContent = `${n} of ${cbs.length} selected`;
   $('applyModelAll').checked = n > 0 && n === cbs.length;
-  $('applyModelBtn').disabled = n === 0;
-  $('applyModelBtn').textContent = n ? `Apply to ${n}` : 'Apply';
+  // None ticked is a real choice: the default changes for new agents only,
+  // and every existing agent keeps the model it runs today.
+  $('applyModelBtn').disabled = false;
+  $('applyModelBtn').textContent = n ? `Save, and switch ${n}` : 'Save for new agents only';
 }
 async function applyModelToSelected() {
   if (!applyModelState) { toast('Reopen this dialog and try again.'); return; }
@@ -5608,7 +5609,9 @@ async function applyModelToSelected() {
     const later = (r.applied || 0) - (r.live || 0) - (r.staged || 0);
     if (later > 0) bits.push(`${later} apply on next rebuild`);
     if (r.held) bits.push(`${r.held} kept on their own model`);
-    toast(`Default is now ${model}${bits.length ? ' — ' + bits.join(', ') : ''}.`, 7000);
+    toast(apply.length
+      ? `Default is now ${model}${bits.length ? ' — ' + bits.join(', ') : ''}.`
+      : `Default is now ${model} for new agents. Existing agents keep their models.`, 7000);
     applyModelDlg.close();
     await refresh(true); renderAiList();
   } catch (e) { $('applyModelErr').textContent = e.message; }
