@@ -6,6 +6,7 @@ import type {
   RuntimeStatus,
 } from './provider.js';
 import { ProviderError } from './provider.js';
+import type { CompressedSwap } from '../orchestrator/swap.js';
 import { Readable } from 'node:stream';
 
 interface MockRuntime {
@@ -198,11 +199,17 @@ export class MockProvider implements RuntimeProvider {
 
   /** Per-runtime overrides of what info() reports (containerGen, onAgentNetwork…). */
   /** Live cap changes, as docker update would see them. */
-  memoryUpdates: Array<{ runtimeRef: string; cap: string }> = [];
-  async updateMemory(runtimeRef: string, cap: string): Promise<void> {
+  /** `swap` is the allowance docker would actually get: withheld (absent) when the host has no compressed swap. */
+  memoryUpdates: Array<{ runtimeRef: string; cap: string; swap?: string }> = [];
+  async updateMemory(runtimeRef: string, cap: string, swap: string | undefined): Promise<void> {
     this.#require(runtimeRef);
-    this.memoryUpdates.push({ runtimeRef, cap });
+    const given = swap && this.swapState.compressed ? swap : undefined;
+    this.memoryUpdates.push(given ? { runtimeRef, cap, swap: given } : { runtimeRef, cap });
   }
+  /** What the host's swap looks like (tests set it); no swap by default. */
+  swapState: CompressedSwap = { kind: 'none', compressed: false, why: 'This machine has no swap: agents get none until zswap (with a swap file) or zram is on.', swapDevices: [] };
+  swapProbes = 0;
+  async compressedSwap(): Promise<CompressedSwap> { this.swapProbes++; return this.swapState; }
 
   infoOverride = new Map<string, Partial<RuntimeInfo>>();
   async info(runtimeRef?: string): Promise<RuntimeInfo> {

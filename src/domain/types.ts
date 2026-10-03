@@ -53,6 +53,8 @@ export interface AgentClass {
   image?: string;
   /** Memory cap members' containers get ("4g") unless they carry their own; unset = fleet default. */
   memoryCap?: string;
+  /** Swap members may use on top of their cap ("2g", or "off") unless they carry their own; unset = fleet setting (swap.ts). */
+  swapAllowance?: string;
   createdAt: string;
 }
 
@@ -179,6 +181,9 @@ export interface Agent {
   image?: string;
   /** Memory cap on its container ("4g"); unset = its class's, else the fleet default. Applied live and kept across rebuilds. */
   memoryCap?: string;
+  /** Swap on top of the cap ("2g", or "off"); unset = its class's, else HATCHABOT_AGENT_SWAP.
+   *  Given only where the host compresses swap (swap.ts). Applied live and kept across rebuilds. */
+  swapAllowance?: string;
   /** Cap hits the container had recorded when the cap was last set — hits before that are old news. */
   memoryCapBaseline?: number;
   /** The high-water mark kept since the owner last cleared the peaks (Status → Resources), and when. */

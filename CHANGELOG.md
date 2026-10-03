@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [Unreleased]
+
+### Added
+- **Compressed swap for agents, off by default** (docs/features.md → Compressed swap). An agent can be given a swap allowance on top of its memory cap: `HATCHABOT_AGENT_SWAP` for the machine (Settings → Hosts → Defaults → Compressed swap per agent), a class's own (Settings → Classes), or an agent's own (its sheet → Advanced → Runtime → Compressed swap; `hatchabot swap <agent> 2g|off|default`). Docker is given the total (`--memory 3g --memory-swap 5g` for a 3g cap and a 2g allowance). Never more than the agent's cap. Applied live with `docker update` (no rebuild) and at every create, rebuild, move, Start and wake; a cap change keeps the allowance.
+- **Only where the machine compresses swap**: zswap on in front of a swap device, or an active zram swap device, read on this machine directly and on a runner through a one-shot container. With plain disk swap, none, or a host that cannot be read, agents get no swap: the agent's sheet says it is withheld and why, the log says so once per change, `hatchabot doctor` gives the fix. When a host gains or loses compressed swap, containers with an allowance are updated within ten minutes; at start, containers that carry swap they should not are corrected.
+- **`scripts/enable-compressed-swap.sh`** for the machine's owner (Linux, root): says what it will do and asks first; zswap with zstd (lz4 if missing) and zsmalloc, at most 20% of memory, in front of the existing swap file (or a new `/swapfile` if there is none), now and at every boot through `hatchabot-compressed-swap.service` (no reboot, no boot-loader edit); `vm.swappiness` only on a yes; `--zram` for zram instead (says when `linux-modules-extra` is needed); `--status`; `--undo`. Tested in an Ubuntu 24.04 VM: on, an agent-sized container pushed into swap (zswap 3.1:1 by the pool, nothing written to disk; zram 3.5:1), persistence of both across a reboot, and undo.
+- **Swap in use is shown** beside memory: the agent's sheet, Status → Resources (an "in swap" column and the host's compressed-swap state), `hatchabot memory` / `hatchabot swap`, a runner's Check; read from cgroup `memory.swap.current` (rootless tenants' containers too). `hatchabot doctor` reports compressed swap (zswap compressor, pool and ratio, or zram), how many agents have an allowance and how many containers run with swap.
+
 ## [2.114.0] — 2026-10-02
 
 Public access ships OFF. It has passed two adversarial reviews and the mutant check, but has not yet been run against a real tailnet (docs/public-access.md, "Not verified yet"): a supervised trial with the owner present comes before anyone turns it on.

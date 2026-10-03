@@ -40,6 +40,8 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'embed.engineless_refused': 'its image has no memory engine and the shared service is unavailable',
   'embed.mode': 'memory search engine switched',
   'memory.peaks_cleared': 'memory peak and cap-hit readings cleared',
+  'memory.swap_set': (d) => `swap allowance ${d.swap === 'default' ? 'back to the default' : d.swap === 'class' ? 'set by its class' : 'set'}: ${String(d.effective ?? '')}${d.withheld ? ` — not given: this host has no compressed swap (${String(d.withheld)})` : d.live ? ' — applied to the container' : ''}`,
+  'memory.swap_host': (d) => d.compressed ? `its host compresses swap now (${String(d.kind)}): its swap allowance is given` : `its host has no compressed swap now (${String(d.kind)}): it runs without swap`,
   'memory.cap_set': (d) => `memory cap ${d.cap === 'default' ? 'back to the default' : d.cap === 'class' ? 'set by its class' : 'set'}: ${String(d.effective ?? '')}${d.live ? ' — applied to the running container' : ''}`,
   'snapshot.captured': 'memory files snapshotted',
   'snapshot.unchanged': 'memory files unchanged since the last snapshot, so no new one',

@@ -10,6 +10,7 @@
  */
 import { hibernateAfterMs } from './hibernate.js';
 import { formatMemoryCap, MEMORY_CAP_CEILING_BYTES, MEMORY_CAP_MIN_BYTES, parseMemoryCap } from './memoryCap.js';
+import { formatSwapAllowance, parseSwapAllowance } from './swap.js';
 
 export type ChannelKindForFiles = 'telegram' | 'discord' | 'slack';
 /** What each app accepts at most (Telegram's Bot API; a Discord server at its highest boost; Slack held well below its 1 GB). */
@@ -26,7 +27,7 @@ export function filesMb(kind: ChannelKindForFiles, agentOverride?: number, env: 
   return Math.min(Math.max(1, want), FILES_MB_MAX[kind]);
 }
 
-export type DefaultKey = 'sleepAfter' | 'agentMemory' | 'engineMemory' | 'filesTelegram' | 'filesDiscord' | 'filesSlack';
+export type DefaultKey = 'sleepAfter' | 'agentMemory' | 'agentSwap' | 'engineMemory' | 'filesTelegram' | 'filesDiscord' | 'filesSlack';
 export interface DefaultSpec {
   key: DefaultKey;
   env: string;
@@ -87,6 +88,21 @@ export const MACHINE_DEFAULTS: DefaultSpec[] = [
     fallback: '3g',
     check: memory(MEMORY_CAP_MIN_BYTES, MEMORY_CAP_CEILING_BYTES, 'Memory per agent'),
     applies: 'now, on every agent that uses the default, runners included (no rebuild; a runner that cannot be reached gets it at its next rebuild)',
+  },
+  {
+    key: 'agentSwap',
+    env: 'HATCHABOT_AGENT_SWAP',
+    label: 'Compressed swap per agent',
+    help: 'Swap an agent may use on top of its memory cap, like 2g, or off. Only where this machine compresses swap (zswap or zram: scripts/enable-compressed-swap.sh); with plain disk swap or none, agents get no swap. An idle agent then shrinks about 3:1 and answers again in milliseconds; a busy one slows down instead of being killed. Never more than an agent\'s cap. An agent or class can say otherwise.',
+    fallback: 'off',
+    check(input) {
+      const v = String(input).trim();
+      if (v === '') return { ok: true, value: '' };
+      const b = parseSwapAllowance(v);
+      if (b === undefined) return { ok: false, error: 'Compressed swap per agent: a size like 2g or 512m (at least 256m), or off.' };
+      return { ok: true, value: b ? formatSwapAllowance(b) : '' };
+    },
+    applies: 'now, on every agent that follows the machine\'s setting, runners included (no rebuild)',
   },
   {
     key: 'engineMemory',

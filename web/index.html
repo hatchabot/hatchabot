@@ -1514,6 +1514,12 @@
         <button id="memoryBumpBtn" onclick="bumpMemoryCap()" title="One step up, right away">Give it 1 GB more</button>
       </div>
       <div class="sub" id="memoryCapStatus" style="margin:-4px 0 4px"></div>
+      <label style="margin-top:6px">Compressed swap <span style="color:var(--dim)">— extra room on top of the cap, kept compressed in memory; applied right away</span></label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="editSwapAllowance" style="flex:1;min-width:0;font-size:13px"></select>
+        <button id="swapSaveBtn" onclick="saveSwapAllowance()">Save</button>
+      </div>
+      <div class="sub" id="swapStatus" style="margin:-4px 0 4px"></div>
     </div>
     <div id="imagePinRow">
       <label style="margin-top:0">Image <span style="color:var(--dim)">— which one this agent runs (host owner only)</span></label>
@@ -4459,7 +4465,7 @@ async function loadMachineDefaults() {
     <div class="sub" style="margin:2px 0 8px">What every agent here gets unless it says otherwise. Saved to this machine's <code>.env</code>, so they survive a restart; each applies as it says, without a rebuild.</div>`
     + r.defaults.map(d => `<div class="pair" style="align-items:flex-start;padding:6px 0;border-top:1px solid var(--line);flex-wrap:wrap;gap:6px">
       <label for="md-${d.key}" class="grow" style="margin:0;min-width:220px"><b>${esc(d.label)}</b>
-        <div class="sub">${esc(d.help)}</div><div class="sub">Applies ${esc(d.applies)}.${d.set ? '' : ` Default: ${esc(d.fallback)}.`}</div></label>
+        <div class="sub">${esc(d.help)}</div><div class="sub">Applies ${esc(d.applies)}.${d.set ? '' : ` Default: ${esc(d.fallback)}.`}</div>${d.note ? `<div class="sub" id="md-note-${d.key}">${esc(d.note)}</div>` : ''}</label>
       <span style="display:flex;gap:6px;align-items:center"><input id="md-${d.key}" value="${esc(d.value)}" style="width:7em" autocomplete="off" spellcheck="false"
         onkeydown="if(event.key==='Enter')saveMachineDefault('${d.key}', this)"><button class="hbtn" onclick="saveMachineDefault('${d.key}', $('md-${d.key}'))">Save</button></span></div>`).join('');
 }
@@ -4531,7 +4537,8 @@ async function pingHost(id) {
       el.innerHTML = `✓ reachable · Docker ${esc(r.serverVersion || '')}` +
         (r.hasImage === false
           ? ` · <span style="color:var(--warn)">runtime image missing</span> <button class="hbtn" onclick="installImage('${jsq(id)}')">Install image</button>`
-          : '');
+          : '') +
+        (r.swap ? ` · swap: ${r.swap.compressed ? esc(r.swap.summary || r.swap.kind) : `<span class="sub">${esc(r.swap.kind === 'unknown' ? 'could not be read (agents there get none)' : 'not compressed (agents there get none)')}</span>`}` : '');
     }
   } catch (e) { if (el) { el.style.color = 'var(--warn)'; el.textContent = e.message; } }
 }
@@ -5045,6 +5052,12 @@ function classMemoryOptions(selected) {
   return `<option value=""${selected ? '' : ' selected'}>— memory: fleet default (${capLabel(myAccount.memoryCapDefault || '3g')}) —</option>` +
     choices.map(c => `<option value="${c}"${c === selected ? ' selected' : ''}>memory ${capLabel(c)}</option>`).join('');
 }
+function classSwapOptions(selected, cap) {
+  const capB = capBytes(cap || myAccount.memoryCapDefault || '3g');
+  const choices = [...new Set([...SWAP_CHOICES.filter(c => capBytes(c) <= capB), ...(selected && selected !== 'off' ? [selected] : [])])].sort((x, y) => capBytes(x) - capBytes(y));
+  return `<option value=""${selected ? '' : ' selected'}>— swap: machine's setting —</option><option value="off"${selected === 'off' ? ' selected' : ''}>swap off</option>` +
+    choices.map(c => `<option value="${c}"${c === selected ? ' selected' : ''}>swap ${capLabel(c)}</option>`).join('');
+}
 function classModelOptions(selected) {
   // Union of models across the owner's sources; the server validates a chosen
   // model against the agent's actual source when a class is applied.
@@ -5085,6 +5098,7 @@ function renderClassList() {
       <select onchange="updateClass('${c.id}','aiProfileId',this.value)">${classSourceOptions(c.aiProfileId || '')}</select>
       ${myAccount.hostOwner ? `<select onchange="updateClass('${c.id}','image',this.value)" title="Runtime image (applied on rebuild)">${classImageOptions(c.image || '')}</select>` : ''}
       <select onchange="updateClass('${c.id}','memoryCap',this.value)" title="Memory cap for its agents' containers (applied right away to members without a cap of their own)">${classMemoryOptions(c.memoryCap || '')}</select>
+      <select onchange="updateClass('${c.id}','swapAllowance',this.value)" title="Compressed swap on top of the cap for its agents (applied right away to members without a setting of their own; only where the machine compresses swap)">${classSwapOptions(c.swapAllowance || '', c.memoryCap)}</select>
       <button class="danger" onclick="deleteClass('${c.id}','${jsq(c.name)}')">Delete</button>
     </div>`;
   }).join('');
@@ -8467,7 +8481,7 @@ function fleetResDraw(r) {
   const { key, dir } = fleetResSort;
   // Every column sorts (Chris, 2026-09-24); a row without a reading sorts as zero.
   const val = (c) => key === 'cpu' ? c.cpuPct : key === 'cap' ? (c.memLimitBytes ? c.memBytes / c.memLimitBytes : 0)
-    : key === 'peak' ? (c.memPeakBytes ?? 0) : key === 'hits' ? ((c.memCapHits ?? 0) + 1e6 * (c.memOomKills ?? 0)) : c.memBytes;
+    : key === 'peak' ? (c.memPeakBytes ?? 0) : key === 'hits' ? ((c.memCapHits ?? 0) + 1e6 * (c.memOomKills ?? 0)) : key === 'swap' ? (c.swapBytes ?? 0) : c.memBytes;
   const cmp = (a, b) => key === 'name' ? dir * plain(a).localeCompare(plain(b), undefined, { sensitivity: 'base' })
     : dir * (val(a) - val(b)) || plain(a).localeCompare(plain(b));
   const th = (k, label, right) => `<th${right ? ' style="text-align:right"' : ''}><button class="res-sort${key === k ? ' on' : ''}" onclick="fleetResSortBy('${k}')" aria-sort="${key === k ? (dir > 0 ? 'ascending' : 'descending') : 'none'}">${label}${key === k ? (dir > 0 ? ' ▲' : ' ▼') : ''}</button></th>`;
@@ -8476,13 +8490,15 @@ function fleetResDraw(r) {
     const rows = [...h.containers].sort(cmp);
     return `<div style="padding:10px 0;border-top:1px solid var(--line)">
       <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b>${esc(h.kind === 'local' ? 'This machine' : h.name)}</b>
-        <span class="sub">${h.error ? esc(h.error) : `${h.totals.cpuPct}% CPU · ${mb(h.totals.memBytes)} in ${h.containers.length} container${h.containers.length === 1 ? '' : 's'}`}</span></div>
-      ${rows.length ? `<table class="rt-tbl" style="width:100%;margin-top:6px"><thead><tr>${th('name', 'Agent')}${th('cpu', 'CPU', true)}${th('mem', 'Memory', true)}${th('cap', 'of cap', true)}${th('peak', 'peak', true)}${th('hits', 'hit cap', true)}</tr></thead><tbody>
+        <span class="sub">${h.error ? esc(h.error) : `${h.totals.cpuPct}% CPU · ${mb(h.totals.memBytes)} in ${h.containers.length} container${h.containers.length === 1 ? '' : 's'}${h.totals.swapBytes ? ` · ${mb(h.totals.swapBytes)} in swap` : ''}`}</span>
+        ${h.swap ? `<span class="sub" title="${esc(h.swap.summary || '')}">· ${h.swap.compressed ? `compressed swap: ${esc(h.swap.summary || h.swap.kind)}` : 'no compressed swap (agents get none)'}</span>` : ''}</div>
+      ${rows.length ? `<table class="rt-tbl" style="width:100%;margin-top:6px"><thead><tr>${th('name', 'Agent')}${th('cpu', 'CPU', true)}${th('mem', 'Memory', true)}${th('cap', 'of cap', true)}${th('peak', 'peak', true)}${th('swap', 'in swap', true)}${th('hits', 'hit cap', true)}</tr></thead><tbody>
         ${rows.map(c => `<tr><td>${who(c)}${c.shared ? ' <span class="sub">(shared with you)</span>' : c.mine === false ? ' <span class="sub">(another account’s)</span>' : ''}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums">${c.cpuPct.toFixed(1)}%</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums">${mb(c.memBytes)}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memLimitBytes ? Math.round(100 * c.memBytes / c.memLimitBytes) + '% of ' + mb(c.memLimitBytes) : '—'}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub"${c.clearedAt ? ` title="Since you cleared it ${esc(ago(c.clearedAt))} ago"` : ''}>${c.memPeakBytes ? mb(c.memPeakBytes) : '—'}${c.agentId && c.mine !== false ? ` <button class="hbtn" style="padding:0 4px;font-size:11px" onclick="fleetResClear('${jsq(c.agentId)}')" title="Forget this agent's peak and cap hits; they count from now">×</button>` : ''}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.swapBytes ? mb(c.swapBytes) : c.swapBytes === 0 ? '0' : '—'}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums${c.memCapHits || c.memOomKills ? ';color:var(--warn);font-weight:600"' : '" class="sub"'}>${c.memCapHits === undefined ? '—' : `${c.memCapHits}${c.memOomKills ? ` · killed ${c.memOomKills}×` : ''}`}</td></tr>`).join('')}
       </tbody></table>${h.totals?.machineMemBytes && h.totals.memPeakBytes > 0.8 * h.totals.machineMemBytes ? `<div class="sub" style="margin-top:6px;color:var(--warn)">⚠ If every container hit its peak at once they would want ${mb(h.totals.memPeakBytes)} of this machine's ${mb(h.totals.machineMemBytes)}. Caps are ceilings, not reservations — but this is close: lower some caps or move agents.</div>` : ''}${rows.some(c => c.memCapHits) ? `<div class="sub" style="margin-top:6px">⚠ ${rows.filter(c => c.memCapHits).length === 1 ? 'One container has' : `${rows.filter(c => c.memCapHits).length} containers have`} run into the memory cap. An OpenClaw 2026.9 gateway idles near 1 GB, and an agent's own jobs sit on top of that: give that agent more (its sheet → Runtime → Memory cap, applied right away) or ask it to run smaller jobs.</div>` : ''}` : ''}</div>`;
   }).join('') || '<div class="sub">Nothing running.</div>';
@@ -10313,6 +10329,7 @@ function fillMemoryCapRow(a) {
   $('editMemoryCap').value = a.memoryCap || '';
   $('memoryBumpBtn').hidden = !(a.state === 'RUNNING' || a.state === 'STOPPED') || (capBytes(a.memoryCapEffective) + 1073741824 > max);
   $('memoryCapStatus').textContent = memoryCapText(a);
+  fillSwapRow(a);
 }
 function memoryCapText(a) {
   const mb = (b) => b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`;
@@ -10330,6 +10347,40 @@ async function saveMemoryCap() {
     toast(v ? `Memory cap ${capLabel(v)}${r.state === 'RUNNING' ? ' — applied to the running container' : ''}.` : 'Memory cap back to the default.');
     await refresh(false);
     const a = agents.find(x => x.id === editAgentId); if (a) fillMemoryCapRow(a);
+  } catch (e) { toast(e.message); }
+}
+// ---- compressed swap: an allowance on top of the cap, only where the machine compresses swap ----
+const SWAP_CHOICES = ['512m', '1g', '2g', '3g', '4g', '6g', '8g', '12g', '16g'];
+function fillSwapRow(a) {
+  const capB = capBytes(a.memoryCapEffective || myAccount.memoryCapDefault || '3g');
+  const cls = a.classId ? (agentClasses || []).find(c => c.id === a.classId) : null;
+  const fleet = a.swapAllowanceDefault || 'off';
+  const label = (v) => v === 'off' ? 'off' : capLabel(v);
+  const inherited = cls?.swapAllowance ? `its class's: ${label(cls.swapAllowance)}` : `the machine's setting: ${label(fleet)}`;
+  const own = a.swapAllowance || '';
+  const choices = [...new Set([...SWAP_CHOICES.filter(c => capBytes(c) <= capB), ...(own && own !== 'off' ? [own] : [])])].sort((x, y) => capBytes(x) - capBytes(y));
+  $('editSwapAllowance').innerHTML = `<option value="">No setting of its own — ${esc(inherited)}</option><option value="off">Off for this agent</option>`
+    + choices.map(c => `<option value="${c}">${capLabel(c)} on top of its cap</option>`).join('');
+  $('editSwapAllowance').value = own;
+  $('swapStatus').textContent = swapText(a);
+  $('swapStatus').style.color = a.swapWithheld ? 'var(--warn)' : '';
+}
+function swapText(a) {
+  const mb = (b) => b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`;
+  const want = a.swapAllowanceEffective || 'off';
+  if (want === 'off') return a.swapInEffect && a.swapInEffect !== 'off' ? `No swap allowance; its container still has ${a.swapInEffect === 'unlimited' ? 'unlimited swap' : capLabel(a.swapInEffect)} until it is next started or rebuilt.` : 'No swap: at its cap, the kernel reclaims or kills.';
+  if (a.swapWithheld) return `⚠ ${capLabel(want)} allowed, but not given: ${a.swapWithheld} The machine's owner turns it on with: ${a.swapFix || 'scripts/enable-compressed-swap.sh'}`;
+  const bits = [`Up to ${capLabel(want)} of compressed swap on top of its ${a.memoryCapEffective ? capLabel(a.memoryCapEffective) : 'cap'}`];
+  if (a.swapBytes !== undefined) bits.push(a.swapBytes ? `${mb(a.swapBytes)} in swap now` : 'nothing in swap now');
+  return bits.join(' · ') + '. Cold memory is compressed (about 3:1); it answers again in milliseconds, a busy turn a second or two slower.';
+}
+async function saveSwapAllowance() {
+  const v = $('editSwapAllowance').value;
+  try {
+    const r = await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { swapAllowance: v || null } });
+    toast(v === 'off' ? 'Swap off for this agent.' : v ? `Swap allowance ${capLabel(v)}${r.state === 'RUNNING' ? ' — applied to the running container' : ''}.` : 'Swap back to the default.');
+    await refresh(false);
+    const a = agents.find(x => x.id === editAgentId); if (a) { fillMemoryCapRow(a); }
   } catch (e) { toast(e.message); }
 }
 async function bumpMemoryCap() {

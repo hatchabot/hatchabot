@@ -12,6 +12,7 @@ import { funnelOff, funnelStatus, tailnetInfo, targetsPort } from './ops/tailnet
 import { envFilePath, publicIntentIsStale, readPublicIntent } from './ops/publicIntent.js';
 import { adminAccounts, evaluateSafeguards, hostOf, publicConfig, type SafeguardCheck } from './api/safeguards.js';
 import { autoUpgradeStatus } from './ops/autoUpgrade.js';
+import { COMPRESSED_SWAP_FIX, describeCompressedSwap, effectiveSwapAllowance, formatSwapAllowance, parseSwapAllowance, parseSwapProbe, SWAP_PROBE_SCRIPT, type CompressedSwap } from './orchestrator/swap.js';
 
 export interface DoctorFacts {
   nodeVersion: string;
@@ -32,6 +33,16 @@ export interface DoctorFacts {
     sharedNetwork?: number };
   /** Which release this checkout sits on, and whether a newer tag is present. */
   checkout?: { tag?: string; latestTag?: string; dirty?: string[] };
+  /** Compressed swap (orchestrator/swap.ts): what the machine has, and who is set to use it. */
+  swap?: {
+    state: CompressedSwap;
+    /** HATCHABOT_AGENT_SWAP as set ("off" when unset). */
+    fleet: string;
+    /** Live agents whose settings give them an allowance (own, class or fleet). */
+    agentsWithAllowance?: number;
+    /** Agent containers that run with swap now (docker's MemorySwap above the cap). */
+    containersWithSwap?: number;
+  };
   /** Public access (docs/public-access.md): the switch, and every safeguard it stands on. */
   publicAccess?: {
     on: boolean;
@@ -127,8 +138,56 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
       : t.serving && t.reachable ? { level: 'ok', text: `Tailscale up, serving ${t.url}` }
       : { level: 'ok', text: `Tailscale up${t.dns ? ` (${t.dns})` : ''}${t.serving ? ' — serving, but the address did not answer yet' : ' — HTTPS not turned on (setup guide → Turn on HTTPS)'}` });
   }
+  if (f.swap) out.push(swapLine(f.swap));
   if (f.publicAccess) out.push(...publicAccessLines(f.publicAccess));
   return out;
+}
+
+/** One line on compressed swap: the machine's state, and a warning when agents are set to swap and cannot. */
+export function swapLine(sw: NonNullable<DoctorFacts['swap']>): DoctorLine {
+  const n = sw.agentsWithAllowance;
+  const who = n === undefined ? '' : ` · ${n} agent${n === 1 ? ' has' : 's have'} a swap allowance${sw.containersWithSwap !== undefined ? ` (${sw.containersWithSwap} container${sw.containersWithSwap === 1 ? '' : 's'} running with swap)` : ''}${sw.fleet !== 'off' ? `; machine setting ${sw.fleet}` : ''}`;
+  if (sw.state.compressed) return { level: 'ok', text: `Compressed swap: ${describeCompressedSwap(sw.state)}${who}` };
+  const wanted = (n ?? 0) > 0 || sw.fleet !== 'off';
+  if (wanted) return { level: 'warn', text: `Agents are set to use compressed swap${who}, but this machine has none, so they run without swap: ${sw.state.why ?? sw.state.kind}`, fix: COMPRESSED_SWAP_FIX };
+  if (sw.state.kind === 'unknown') return { level: 'ok', text: 'Compressed swap: could not be read (agents run without swap)' };
+  return { level: 'ok', text: `Compressed swap: none — agents run without swap (optional: ${COMPRESSED_SWAP_FIX}, then Settings → Hosts → Defaults → Compressed swap per agent)` };
+}
+
+/** The machine's swap and who is set to use it; best-effort, never throws. */
+export async function swapFacts(env: Record<string, string>, dbPath: string, prefix: string, dockerOk: boolean): Promise<DoctorFacts['swap']> {
+  let out: string | undefined;
+  if (process.platform === 'linux') out = sh('sh', ['-c', SWAP_PROBE_SCRIPT]);
+  else if (dockerOk) out = sh('docker', ['run', '--rm', '--network', 'none', 'alpine', 'sh', '-c', SWAP_PROBE_SCRIPT], 60_000);
+  const state = parseSwapProbe(out);
+  const merged = { ...env, ...(process.env.HATCHABOT_AGENT_SWAP !== undefined ? { HATCHABOT_AGENT_SWAP: process.env.HATCHABOT_AGENT_SWAP } : {}) } as NodeJS.ProcessEnv;
+  const fb = parseSwapAllowance(merged.HATCHABOT_AGENT_SWAP ?? '');
+  const fleet = fb ? formatSwapAllowance(fb) : 'off';
+  let agentsWithAllowance: number | undefined;
+  if (existsSync(dbPath)) {
+    try {
+      const { default: Database } = await import('better-sqlite3');
+      const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+      try {
+        const classes = new Map((db.prepare('SELECT id, memory_cap, swap_allowance FROM agent_classes').all() as Array<{ id: string; memory_cap: string | null; swap_allowance: string | null }>).map((c) => [c.id, c]));
+        const rows = db.prepare(`SELECT memory_cap, swap_allowance, class_id FROM agents WHERE state NOT IN ('DELETED', 'ARCHIVED')`).all() as Array<{ memory_cap: string | null; swap_allowance: string | null; class_id: string | null }>;
+        agentsWithAllowance = rows.filter((r) => {
+          const c = r.class_id ? classes.get(r.class_id) : undefined;
+          return effectiveSwapAllowance({ memoryCap: r.memory_cap ?? undefined, swapAllowance: r.swap_allowance ?? undefined }, c ? { memoryCap: c.memory_cap ?? undefined, swapAllowance: c.swap_allowance ?? undefined } : undefined, merged) > 0;
+        }).length;
+      } finally { db.close(); }
+    } catch { /* an older database (no swap columns yet) or unreadable: not counted */ }
+  }
+  let containersWithSwap: number | undefined;
+  if (dockerOk) {
+    const names = (sh('docker', ['ps', '-a', '--format', '{{.Names}}']) ?? '').split('\n').filter((n) => (n.startsWith(`${prefix}-`) || n.startsWith('agentclaw-')) && !/-(vx|io|fs)-[0-9a-f]{12}$/.test(n) && !/-(embedder|embed-door)$|-doorman-/.test(n));
+    if (names.length) {
+      const ins = sh('docker', ['inspect', '--format', '{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}|{{.State.Running}}', ...names]);
+      // Running ones: a stopped container is given its limits again when it starts.
+      if (ins !== undefined) containersWithSwap = ins.split('\n').filter((l) => { const [m, w, r] = l.split('|'); return r === 'true' && !!Number(m) && (Number(w) < 0 || Number(w) > Number(m)); }).length;
+    } else containersWithSwap = 0;
+  }
+  return { state, fleet, agentsWithAllowance, containersWithSwap };
 }
 
 /**
@@ -325,6 +384,7 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
     service, controlPlane, diskFreeGb, backups, tailscale,
     containers: { running: rows.filter((l) => l.endsWith('|running')).length, total: rows.length, sharedNetwork },
     checkout: checkoutFacts(),
+    swap: await swapFacts(env, dbPath, prefix, dockerDaemon.ok).catch(() => undefined),
     publicAccess: await publicAccessFacts(env, dbPath, port).catch(() => undefined),
   };
 }

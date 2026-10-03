@@ -16,6 +16,7 @@ import type {
 } from './provider.js';
 import { ProviderError, parseByteSize, parseCgroupMemory, parseChannelsLabel, parseEmbedEngineLabel, parsePluginInstallLabel, parsePluginsLabel, type ContainerStats, type EmbedEngine } from './provider.js';
 import { CONTAINER_GEN } from '../orchestrator/rebuildPolicy.js';
+import { dockerMemorySwap, parseSwapProbe, SWAP_PROBE_SCRIPT, type CompressedSwap } from '../orchestrator/swap.js';
 
 /** How much an imported archive may expand to on the volume (default 8 GiB). */
 const IMPORT_MAX_BYTES = Math.floor((Number(process.env.HATCHABOT_IMPORT_MAX_GB) || 8) * 2 ** 30);
@@ -42,6 +43,8 @@ export interface LocalDockerOptions {
    * what turns the local provider into a fleet runner.
    */
   host?: string;
+  /** Reads the host's swap state (the output of SWAP_PROBE_SCRIPT); tests stub it. */
+  swapProbe?: () => Promise<string | undefined>;
 }
 
 /**
@@ -99,9 +102,11 @@ export class LocalDockerProvider implements RuntimeProvider {
   /** Connection args prepended to every docker invocation (`-H <host>` or none). */
   readonly #conn: string[];
   readonly #fetch: typeof fetch;
+  readonly #swapProbe?: () => Promise<string | undefined>;
 
   constructor(opts: LocalDockerOptions = {}) {
     this.#fetch = opts.fetchImpl ?? fetch;
+    this.#swapProbe = opts.swapProbe;
     this.image = opts.image ?? 'hatchabot-runtime:latest';
     this.prefix = opts.prefix ?? DEFAULT_PREFIX;
     this.docker = opts.docker ?? 'docker';
@@ -245,11 +250,12 @@ export class LocalDockerProvider implements RuntimeProvider {
       // search door published on loopback resolves to this). Docker Desktop
       // defines it; Linux does not, and under rootless it must be 10.0.2.2.
       '--add-host', `${HOST_ALIAS}:${await this.hostAliasTarget()}`,
-      // A ceiling, not a reservation. Swap is capped at the same figure, so
-      // the cap means what it says on a host that has swap. Per agent or
-      // class from the store (memoryCap.ts); else the fleet default.
-      '--memory', spec.memory ?? process.env.HATCHABOT_AGENT_MEMORY ?? '3g',
-      '--memory-swap', spec.memory ?? process.env.HATCHABOT_AGENT_MEMORY ?? '3g',
+      // A ceiling, not a reservation. Per agent or class from the store
+      // (memoryCap.ts); else the fleet default. --memory-swap is the TOTAL:
+      // equal to the cap means no swap at all; the cap plus the agent's swap
+      // allowance only where this host compresses swap (swap.ts) — never
+      // plain disk swap, which is slow and puts the agent's memory on disk.
+      ...(await this.#memoryArgs(spec.memory ?? process.env.HATCHABOT_AGENT_MEMORY ?? '3g', spec.memorySwap)),
       '--pids-limit', process.env.HATCHABOT_AGENT_PIDS ?? '512',
       // `hostname` inside the container answers "<agent>.<host>" — the moving
       // agent's compass (see provision.ts, which derives it per host).
@@ -713,13 +719,14 @@ export class LocalDockerProvider implements RuntimeProvider {
     const res = await this.#docker([
       'inspect',
       '-f',
-      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "hatchabot.gen" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.Created}}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}|{{ index .Config.Labels "org.hatchabot.plugin-install" }}|{{.RestartCount}}|{{.State.StartedAt}}|{{.State.ExitCode}}|{{.HostConfig.Memory}}|{{.Id}}`,
+      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "hatchabot.gen" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.Created}}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}|{{ index .Config.Labels "org.hatchabot.plugin-install" }}|{{.RestartCount}}|{{.State.StartedAt}}|{{.State.ExitCode}}|{{.HostConfig.Memory}}|{{.Id}}|{{.HostConfig.MemorySwap}}`,
       container,
     ]);
     if (res.code !== 0) return {};
-    const [imageId, openclawVersion, channels, gen, nets, created, engine, plugins, install, restarts, started, exitCode, memLimit, fullId] = res.stdout.trim().split('|');
+    const [imageId, openclawVersion, channels, gen, nets, created, engine, plugins, install, restarts, started, exitCode, memLimit, fullId, swapLimit] = res.stdout.trim().split('|');
     return {
       memoryLimitBytes: /^\d+$/.test(memLimit ?? '') ? Number(memLimit) : undefined,
+      memorySwapLimitBytes: /^-?\d+$/.test(swapLimit ?? '') ? Number(swapLimit) : undefined,
       ...this.#cgroupMemory((fullId ?? '').slice(0, 12)),
       restartCount: /^\d+$/.test(restarts ?? '') ? Number(restarts) : undefined,
       startedAt: started && !Number.isNaN(Date.parse(started)) ? new Date(started).toISOString() : undefined,
@@ -905,25 +912,64 @@ export class LocalDockerProvider implements RuntimeProvider {
    * when the files are not there (cgroup v1, a remote daemon, macOS).
    */
   #cgroupDirs?: { at: number; names: string[] };
-  #cgroupMemory(shortId: string): Pick<ContainerStats, 'memPeakBytes' | 'memCapHits' | 'memOomKills'> {
-    if (!shortId || process.platform !== 'linux') return {};
+  #cgroupMemory(shortId: string): Pick<ContainerStats, 'memPeakBytes' | 'memCapHits' | 'memOomKills' | 'swapBytes'> {
+    if (!shortId || process.platform !== 'linux' || this.remote) return {};
     try {
-      const base = '/sys/fs/cgroup/system.slice';
-      if (!this.#cgroupDirs || Date.now() - this.#cgroupDirs.at > 30_000) this.#cgroupDirs = { at: Date.now(), names: readdirSync(base) };
-      const dir = this.#cgroupDirs.names.find((n) => n.startsWith(`docker-${shortId}`) && n.endsWith('.scope'));
+      // Root docker puts containers under system.slice; rootless (a tenant on a
+      // shared host) under the user's own systemd manager.
+      const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+      const bases = ['/sys/fs/cgroup/system.slice', ...(uid ? [`/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/user.slice`] : [])];
+      if (!this.#cgroupDirs || Date.now() - this.#cgroupDirs.at > 30_000) {
+        const names: string[] = [];
+        for (const b of bases) { try { names.push(...readdirSync(b).map((n) => `${b}/${n}`)); } catch { /* not this layout */ } }
+        this.#cgroupDirs = { at: Date.now(), names };
+      }
+      const dir = this.#cgroupDirs.names.find((n) => { const leaf = n.slice(n.lastIndexOf('/') + 1); return leaf.startsWith(`docker-${shortId}`) && leaf.endsWith('.scope'); });
       if (!dir) return {};
-      const read = (f: string) => { try { return readFileSync(`${base}/${dir}/${f}`, 'utf8'); } catch { return undefined; } };
-      return parseCgroupMemory(read('memory.events'), read('memory.peak'));
+      const read = (f: string) => { try { return readFileSync(`${dir}/${f}`, 'utf8'); } catch { return undefined; } };
+      return parseCgroupMemory(read('memory.events'), read('memory.peak'), read('memory.swap.current'));
     } catch {
       return {};
     }
   }
 
-  async updateMemory(runtimeRef: string, cap: string): Promise<void> {
+  async updateMemory(runtimeRef: string, cap: string, swap: string | undefined): Promise<void> {
     const { container } = this.#names(runtimeRef);
     if (!/^\d+(\.\d+)?[mg]$/.test(cap)) throw new ProviderError(`bad memory cap ${cap}`, 'That memory cap is not valid.');
-    const res = await this.#docker(['update', '--memory', cap, '--memory-swap', cap, container]);
+    if (swap !== undefined && !/^\d+(\.\d+)?[mg]$/.test(swap)) throw new ProviderError(`bad swap allowance ${swap}`, 'That swap allowance is not valid.');
+    const res = await this.#docker(['update', ...(await this.#memoryArgs(cap, swap)), container]);
     if (res.code !== 0) throw new ProviderError(`docker update failed: ${res.stderr.slice(-300)}`, "Couldn't change the container's memory cap.");
+  }
+
+  /** --memory and --memory-swap for a cap and an allowance on this host (see provision). */
+  async #memoryArgs(memory: string, swap: string | undefined): Promise<string[]> {
+    const compressed = swap ? (await this.compressedSwap()).compressed : false;
+    return ['--memory', memory, '--memory-swap', dockerMemorySwap(memory, swap, compressed)];
+  }
+
+  #swapState?: { at: number; p: Promise<CompressedSwap> };
+  /**
+   * Does this host compress swap (zswap in front of a swap device, or zram)?
+   * This machine is read directly; a runner or Docker Desktop's VM through a
+   * one-shot container (sysfs and /proc/swaps there are the host's). A read
+   * that fails is "unknown", and unknown means no swap. Cached for a minute.
+   */
+  compressedSwap(opts: { fresh?: boolean } = {}): Promise<CompressedSwap> {
+    if (!opts.fresh && this.#swapState && Date.now() - this.#swapState.at < 60_000) return this.#swapState.p;
+    const p = this.#readSwap().then(parseSwapProbe, () => parseSwapProbe(undefined));
+    this.#swapState = { at: Date.now(), p };
+    return p;
+  }
+  async #readSwap(): Promise<string | undefined> {
+    if (this.#swapProbe) return this.#swapProbe();
+    if (!this.remote && process.platform === 'linux' && !(await this.desktop())) {
+      const { stdout } = await execFileP('sh', ['-c', SWAP_PROBE_SCRIPT], { timeout: 5000, killSignal: 'SIGKILL' });
+      return stdout;
+    }
+    const one = this.#oneShot();
+    const res = await this.#docker(['run', '--rm', ...one.flags, '--network', 'none', 'alpine', 'sh', '-c', SWAP_PROBE_SCRIPT], 60_000);
+    if (res.timedOut) await this.#reapOneShot(one.name);
+    return res.code === 0 ? res.stdout : undefined;
   }
 
   async logs(runtimeRef: string, lines: number): Promise<string> {

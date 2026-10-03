@@ -25,6 +25,7 @@ import { syncConnections } from './googleConnections.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
 import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, removeInstallSections, operatorSection, peerToolsSection, removeSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING } from '../openclaw/workspace.js';
 import { effectiveMemoryCap, memoryBudgetSection } from './memoryCap.js';
+import { agentMemoryLimits } from './swap.js';
 
 /**
  * The `call-agent` tool installed on agents granted peers: consults a peer by
@@ -703,6 +704,7 @@ export async function buildRuntimeSpec(
     if (problem) throw new ProviderError(`shared folder refused at build: ${problem}`, `A shared folder is no longer safe to mount: ${problem} Remove it from the agent's Data, then rebuild.`);
   }
   const seedFiles = store.getAgentSeed(agentId);
+  const limits = agentMemoryLimits(store, agent);
   return {
     agentId,
     slug: agent.slug,
@@ -710,8 +712,10 @@ export async function buildRuntimeSpec(
     // Pinned image, when the agent has one — a candidate under test, or a
     // derived image with extra system packages. Absent = provider default.
     image: agent.image,
-    // Its own cap, else its class's, else the fleet default (memoryCap.ts).
-    memory: memoryCapFor(store, agent),
+    // Its own cap, else its class's, else the fleet default (memoryCap.ts),
+    // and the swap it may use on top where the host compresses swap (swap.ts).
+    memory: limits.memory,
+    memorySwap: limits.swap,
     previousRef: agent.runtimeRef,
     ports: [{ host: gateway.port, container: 18789 }],
     workspace: {

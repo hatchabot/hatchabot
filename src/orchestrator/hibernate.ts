@@ -18,6 +18,7 @@ import type { RuntimeProvider } from '../providers/provider.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
 import { whileBusy } from './busy.js';
+import { agentMemoryLimits } from './swap.js';
 
 export interface HibernateDeps {
   store: Store;
@@ -147,7 +148,13 @@ export async function wakeAgent(deps: HibernateDeps, a: Agent, why: string): Pro
   const p = (async () => {
     const provider = deps.providerFor(a.hostId);
     try {
-      if (a.runtimeRef) await provider.start(a.runtimeRef);
+      if (a.runtimeRef) {
+        // Its cap and swap allowance as they are now (swap.ts): the host may
+        // have gained or lost compressed swap, or a setting changed, while it slept.
+        const lim = agentMemoryLimits(deps.store, deps.store.getAgent(a.id) ?? a);
+        await provider.updateMemory?.(a.runtimeRef, lim.memory, lim.swap).catch(() => {});
+        await provider.start(a.runtimeRef);
+      }
     } catch (err) {
       const n = (wakeFailures.get(a.id) ?? 0) + 1;
       wakeFailures.set(a.id, n);

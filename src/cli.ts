@@ -249,6 +249,11 @@ Commands:
   memory <agent> [<cap>|default]
                                Its container's memory cap ("4g"): show, set (applied
                                live, kept across rebuilds), or back to the default
+  swap <agent> [<size>|off|default]
+                               Its compressed swap allowance on top of the cap
+                               ("2g"): show (with how much is in swap now), set
+                               (applied live), off, or back to the default. Given
+                               only where the machine compresses swap
   console <agent> [--check]    The agent's OpenClaw console address; --check
                                loads it the way a browser would and says
                                whether the app bundle is reachable
@@ -2401,7 +2406,29 @@ async function main() {
       console.log(`${cur.name}: ${cur.memoryCap ? `own cap ${cur.memoryCap}` : 'no cap of its own (class or fleet default)'} · container runs with ${cur.memoryCapEffective ?? '?'}`
         + (cur.memoryPeakBytes ? ` · peak ${mb(cur.memoryPeakBytes)}` : '')
         + (cur.memoryCapHits ? ` · hit its cap ${cur.memoryCapHits}×` : '')
-        + (cur.memoryKills ? ` · ${cur.memoryKills} process${cur.memoryKills === 1 ? '' : 'es'} killed for memory` : ''));
+        + (cur.memoryKills ? ` · ${cur.memoryKills} process${cur.memoryKills === 1 ? '' : 'es'} killed for memory` : '')
+        + (cur.swapAllowanceEffective && cur.swapAllowanceEffective !== 'off' ? ` · swap ${cur.swapWithheld ? `${cur.swapAllowanceEffective} allowed, withheld (no compressed swap here)` : `up to ${cur.swapAllowanceEffective}`}` : '')
+        + (cur.swapBytes ? ` · ${mb(cur.swapBytes)} in swap` : ''));
+      return;
+    }
+    case 'swap': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot swap <agent> [<size>|off|default]'));
+      const mb = (b: number) => b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`;
+      if (rest[1]) {
+        const v = rest[1] === 'default' ? null : rest[1];
+        const res = await api(ctx, `/v1/agents/${a.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ swapAllowance: v }) });
+        const r: any = await res.json();
+        const cur: any = ((await agents(ctx)).find((x: any) => x.id === a.id) as any) ?? {};
+        console.log(`${a.name}: swap ${v === null ? 'back to the default' : v === 'off' ? 'off' : `allowance set to ${v}`} → ${cur.swapAllowanceEffective && cur.swapAllowanceEffective !== 'off' ? `up to ${cur.swapAllowanceEffective} on top of its ${cur.memoryCapEffective ?? 'cap'}` : 'no swap'}${r.state === 'RUNNING' ? ' (applied live)' : ''}`);
+        if (cur.swapWithheld) console.log(`  ⚠ withheld: ${cur.swapWithheld}\n  Fix (the machine's owner): ${cur.swapFix}`);
+        return;
+      }
+      const cur: any = ((await agents(ctx)).find((x: any) => x.id === a.id) as any) ?? a;
+      if (flags.has('json')) { console.log(JSON.stringify({ swapAllowance: cur.swapAllowance ?? null, effective: cur.swapAllowanceEffective, inEffect: cur.swapInEffect, swapBytes: cur.swapBytes, withheld: cur.swapWithheld })); return; }
+      console.log(`${cur.name}: ${cur.swapAllowance ? `own setting ${cur.swapAllowance}` : 'no setting of its own (class or machine)'} · allowance ${cur.swapAllowanceEffective ?? 'off'}`
+        + (cur.swapInEffect ? ` · container runs with ${cur.swapInEffect === 'off' ? 'no swap' : `${cur.swapInEffect} of swap`}` : '')
+        + (cur.swapBytes !== undefined ? ` · ${mb(cur.swapBytes)} in swap now` : ''));
+      if (cur.swapWithheld) console.log(`  ⚠ withheld: ${cur.swapWithheld}\n  Fix (the machine's owner): ${cur.swapFix}`);
       return;
     }
     case 'console': {

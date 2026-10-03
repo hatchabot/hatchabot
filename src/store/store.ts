@@ -722,6 +722,9 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN woken_at TEXT`,
       `ALTER TABLE agents ADD COLUMN hibernate_mark INTEGER`,
       `ALTER TABLE agent_classes ADD COLUMN memory_cap TEXT`,
+      // Compressed swap (swap.ts): an agent's or a class's allowance on top of its memory cap; "off" or a size, NULL = inherit.
+      `ALTER TABLE agents ADD COLUMN swap_allowance TEXT`,
+      `ALTER TABLE agent_classes ADD COLUMN swap_allowance TEXT`,
       // "Clear from Needs you": the fingerprint of what was flagged when the owner cleared it.
       `ALTER TABLE agents ADD COLUMN attention_ack TEXT`,
       // Installation-wide default AI source for NEW agents (single-select):
@@ -1191,7 +1194,7 @@ export class Store {
   #rowToClass = (r: any): AgentClass => ({
     id: r.id, ownerId: r.owner_id, name: r.name,
     model: r.model ?? undefined, aiProfileId: r.ai_profile_id ?? undefined,
-    image: r.image ?? undefined, memoryCap: r.memory_cap ?? undefined, createdAt: r.created_at,
+    image: r.image ?? undefined, memoryCap: r.memory_cap ?? undefined, swapAllowance: r.swap_allowance ?? undefined, createdAt: r.created_at,
   });
   listAllAgentClasses(): AgentClass[] {
     return (this.db.prepare(`SELECT * FROM agent_classes ORDER BY name`).all() as any[]).map(this.#rowToClass);
@@ -1203,14 +1206,14 @@ export class Store {
     const r = this.db.prepare(`SELECT * FROM agent_classes WHERE id = ?`).get(id) as any;
     return r ? this.#rowToClass(r) : undefined;
   }
-  upsertAgentClass(c: { id: string; ownerId: string; name: string; model?: string; aiProfileId?: string; image?: string; memoryCap?: string }): void {
+  upsertAgentClass(c: { id: string; ownerId: string; name: string; model?: string; aiProfileId?: string; image?: string; memoryCap?: string; swapAllowance?: string }): void {
     this.db
       .prepare(
-        `INSERT INTO agent_classes (id, owner_id, name, model, ai_profile_id, image, memory_cap, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, model = excluded.model, ai_profile_id = excluded.ai_profile_id, image = excluded.image, memory_cap = excluded.memory_cap`,
+        `INSERT INTO agent_classes (id, owner_id, name, model, ai_profile_id, image, memory_cap, swap_allowance, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, model = excluded.model, ai_profile_id = excluded.ai_profile_id, image = excluded.image, memory_cap = excluded.memory_cap, swap_allowance = excluded.swap_allowance`,
       )
-      .run(c.id, c.ownerId, c.name, c.model ?? null, c.aiProfileId ?? null, c.image ?? null, c.memoryCap ?? null, new Date().toISOString());
+      .run(c.id, c.ownerId, c.name, c.model ?? null, c.aiProfileId ?? null, c.image ?? null, c.memoryCap ?? null, c.swapAllowance ?? null, new Date().toISOString());
   }
   deleteAgentClass(id: string): void {
     this.transact(() => {
@@ -3663,6 +3666,12 @@ export class Store {
       .prepare(`UPDATE agents SET memory_cap = ?, memory_cap_baseline = ?, updated_at = ? WHERE id = ?`)
       .run(cap, baseline ?? null, new Date().toISOString(), id);
   }
+  /** The agent's own swap allowance ("2g" or "off"; null = back to its class's / the fleet setting). */
+  setAgentSwapAllowance(id: string, swap: string | null): void {
+    this.db
+      .prepare(`UPDATE agents SET swap_allowance = ?, updated_at = ? WHERE id = ?`)
+      .run(swap, new Date().toISOString(), id);
+  }
   setAgentImage(id: string, image: string | null): void {
     this.db
       .prepare(`UPDATE agents SET image = ?, updated_at = ? WHERE id = ?`)
@@ -4570,6 +4579,7 @@ function rowToAgent(r: any): Agent {
     cronTriggers: !!r.cron_triggers,
     memoryCap: r.memory_cap ?? undefined,
     memoryCapBaseline: r.memory_cap_baseline ?? undefined,
+    swapAllowance: r.swap_allowance ?? undefined,
     memoryPeakSince: r.memory_peak_since ?? undefined,
     memoryPeakClearedAt: r.memory_peak_cleared_at ?? undefined,
     hibernatedAt: r.hibernated_at ?? undefined,

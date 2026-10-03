@@ -31,6 +31,7 @@ import { cookieFromHeader, requestIsHttps, SESSION_COOKIE_NAME, type RequestLike
 import { foreignRequest } from './requestOrigin.js';
 import { isControlUiDocument, rebaseControlUi } from './controlUiRebase.js';
 import { defaultMemoryCap, effectiveMemoryCap, formatMemoryCap, memberMemoryMax, MEMORY_CAP_CEILING_BYTES, parseMemoryCap } from '../orchestrator/memoryCap.js';
+import { agentMemoryLimits, COMPRESSED_SWAP_FIX, defaultSwapAllowance, describeCompressedSwap, effectiveSwapAllowance, formatSwapAllowance, parseSwapAllowance, type CompressedSwap } from '../orchestrator/swap.js';
 import { APP_VERSION } from '../domain/appVersion.js';
 import { slackConnector, slackManifest } from '../channels/slack.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
@@ -643,6 +644,27 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * stripping it belongs here rather than in each route's spread — four
    * mutation routes previously leaked it by returning the raw row.
    */
+  /**
+   * An agent's swap as the app shows it: the allowance it should have
+   * (`swapAllowanceEffective`, "off" or a size), what its container runs with
+   * (`swapInEffect`), how much of it is in swap now (`swapBytes`), and — when
+   * an allowance is set but the host does not compress swap — why it is
+   * withheld and the fix.
+   */
+  const swapViewOf = async (a: Agent, running?: import('../providers/provider.js').RuntimeInfo): Promise<Record<string, unknown>> => {
+    const lim = agentMemoryLimits(store, a);
+    const out: Record<string, unknown> = { swapAllowanceEffective: lim.swap ?? 'off', swapAllowanceDefault: defaultSwapAllowance() };
+    if (running?.swapBytes !== undefined) out.swapBytes = running.swapBytes;
+    if (running?.memorySwapLimitBytes !== undefined && running.memoryLimitBytes) {
+      const extra = running.memorySwapLimitBytes - running.memoryLimitBytes;
+      out.swapInEffect = running.memorySwapLimitBytes < 0 ? 'unlimited' : extra > 0 ? formatMemoryCap(extra) : 'off';
+    }
+    if (lim.swap) {
+      const host = await providerFor(a.hostId).compressedSwap?.().catch(() => undefined);
+      if (host && !host.compressed) Object.assign(out, { swapWithheld: host.why, swapFix: COMPRESSED_SWAP_FIX });
+    }
+    return out;
+  };
   const publicAgent = (agent: Agent, extra: Record<string, unknown> = {}) => {
     const desired = store.getAIProfile(agent.aiProfileId);
     // What this agent WILL run: its own override if any, else the profile
@@ -1704,7 +1726,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) {
       try { baseline = (await provider.info(agent.runtimeRef)).memCapHits; } catch { /* no reading: no baseline */ }
       if (provider.updateMemory) {
-        try { await provider.updateMemory(agent.runtimeRef, effective); }
+        // The swap allowance rides along (a lower cap can shrink it): a call without it would take it away.
+        const limits = agentMemoryLimits(store, { ...agent, memoryCap: own ?? undefined });
+        try { await provider.updateMemory(agent.runtimeRef, effective, limits.swap); }
         catch (err) { return { status: 502, error: err instanceof ProviderError ? err.userMessage : "Couldn't change the container's memory cap." }; }
       }
     }
@@ -1813,6 +1837,35 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (bytes > parseMemoryCap(memberMemoryMax())! && !ownsLocalHost(req)) return { status: 403, error: `Up to ${memberMemoryMax()} per agent here; the machine's owner can go higher (HATCHABOT_AGENT_MEMORY_MAX).` };
     return undefined;
   };
+  /**
+   * Why this swap allowance may not be set (swap.ts), or undefined: a size or
+   * "off", and never more than the memory cap it sits on top of. Members are
+   * bound by the same per-agent maximum as for the cap.
+   */
+  const swapAllowanceProblem = (req: FastifyRequest, input: string, cap: string): { status: number; error: string } | undefined => {
+    const bytes = parseSwapAllowance(input);
+    if (bytes === undefined) return { status: 400, error: 'A swap allowance looks like "2g" or "512m" (at least 256m), or "off".' };
+    const capBytes = parseMemoryCap(cap) ?? parseMemoryCap(defaultMemoryCap())!;
+    if (bytes > capBytes) return { status: 400, error: `At most the memory cap it sits on top of (${formatMemoryCap(capBytes)}). Raise the cap first, or give it less swap.` };
+    if (bytes > parseMemoryCap(memberMemoryMax())! && !ownsLocalHost(req)) return { status: 403, error: `Up to ${memberMemoryMax()} per agent here; the machine's owner can go higher (HATCHABOT_AGENT_MEMORY_MAX).` };
+    return undefined;
+  };
+  /** Set (or clear) an agent's own swap allowance and apply it to its container right away, with its cap. */
+  const setSwapAllowance = async (agent: Agent, input: string | null): Promise<{ error?: string; status?: number }> => {
+    const own = input === null ? null : formatSwapAllowance(parseSwapAllowance(input)!);
+    const next = { ...store.getAgent(agent.id)!, swapAllowance: own ?? undefined };
+    const provider = providerFor(agent.hostId);
+    if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED') && provider.updateMemory) {
+      const lim = agentMemoryLimits(store, next);
+      try { await provider.updateMemory(agent.runtimeRef, lim.memory, lim.swap); }
+      catch (err) { return { status: 502, error: err instanceof ProviderError ? err.userMessage : "Couldn't change the container's swap allowance." }; }
+    }
+    store.setAgentSwapAllowance(agent.id, own);
+    const lim = agentMemoryLimits(store, next);
+    const host = lim.swap ? await provider.compressedSwap?.().catch(() => undefined) : undefined;
+    trace(agent.id)('memory.swap_set', { swap: own ?? 'default', effective: lim.swap ?? 'off', live: !!agent.runtimeRef, ...(lim.swap && host && !host.compressed ? { withheld: host.kind } : {}) });
+    return {};
+  };
   app.get('/v1/agent-classes', async (req) => ({ classes: store.listAgentClasses(ownerIdOf(req)) }));
 
   app.post<{ Body: { name?: string; model?: string; aiProfileId?: string; image?: string } }>('/v1/agent-classes', async (req, reply) => {
@@ -1831,8 +1884,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const capIn = (b as { memoryCap?: string }).memoryCap?.trim() || undefined;
     const capCheck = capIn ? classCapProblem(req, capIn) : undefined;
     if (capCheck) return reply.code(capCheck.status).send({ error: capCheck.error });
+    const swapIn = (b as { swapAllowance?: string }).swapAllowance?.trim() || undefined;
+    const swapCheck = swapIn ? swapAllowanceProblem(req, swapIn, capIn ?? defaultMemoryCap()) : undefined;
+    if (swapCheck) return reply.code(swapCheck.status).send({ error: swapCheck.error });
     const id = randomUUID();
-    store.upsertAgentClass({ id, ownerId: ownerIdOf(req), name, model: b.model?.trim() || undefined, aiProfileId: b.aiProfileId || undefined, image, memoryCap: capIn ? formatMemoryCap(parseMemoryCap(capIn)!) : undefined });
+    store.upsertAgentClass({ id, ownerId: ownerIdOf(req), name, model: b.model?.trim() || undefined, aiProfileId: b.aiProfileId || undefined, image, memoryCap: capIn ? formatMemoryCap(parseMemoryCap(capIn)!) : undefined, swapAllowance: swapIn ? formatSwapAllowance(parseSwapAllowance(swapIn)!) : undefined });
     return { class: store.getAgentClass(id) };
   });
 
@@ -1841,7 +1897,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const cls = store.getAgentClass(req.params.id);
       if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
-      const b = (req.body ?? {}) as { name?: string; model?: string; aiProfileId?: string; image?: string | null; memoryCap?: string | null };
+      const b = (req.body ?? {}) as { name?: string; model?: string; aiProfileId?: string; image?: string | null; memoryCap?: string | null; swapAllowance?: string | null };
       const name = b.name !== undefined ? (b.name.trim().slice(0, 48) || cls.name) : cls.name;
       let memoryCap = cls.memoryCap;
       if (b.memoryCap !== undefined) {
@@ -1849,6 +1905,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const capCheck = capIn ? classCapProblem(req, capIn) : undefined;
         if (capCheck) return reply.code(capCheck.status).send({ error: capCheck.error });
         memoryCap = capIn ? formatMemoryCap(parseMemoryCap(capIn)!) : undefined;
+      }
+      let swapAllowance = cls.swapAllowance;
+      if (b.swapAllowance !== undefined) {
+        const swapIn = b.swapAllowance?.trim() || undefined;
+        const swapCheck = swapIn ? swapAllowanceProblem(req, swapIn, memoryCap ?? defaultMemoryCap()) : undefined;
+        if (swapCheck) return reply.code(swapCheck.status).send({ error: swapCheck.error });
+        swapAllowance = swapIn ? formatSwapAllowance(parseSwapAllowance(swapIn)!) : undefined;
       }
       const image = b.image !== undefined ? (b.image?.trim() || undefined) : cls.image;
       if (image && !IMAGE_TAG_RE.test(image)) return reply.code(400).send({ error: 'That image tag is not valid.' });
@@ -1866,17 +1929,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (!usable && b.aiProfileId !== undefined) return reply.code(400).send({ error: 'Unknown AI source.' });
         if (!usable) aiProfileId = undefined;
       }
-      store.upsertAgentClass({ id: cls.id, ownerId: cls.ownerId, name, model, aiProfileId, image, memoryCap });
+      store.upsertAgentClass({ id: cls.id, ownerId: cls.ownerId, name, model, aiProfileId, image, memoryCap, swapAllowance });
       // Propagate the (possibly changed) model/source/image to every agent in the class.
       let applied = 0, needRebuild = 0; const skipped: string[] = [];
       for (const a of store.listAgentsInClass(cls.id)) {
         if (a.state === 'ARCHIVED') continue; // nothing to apply to; it keeps its tag
         // A class cap reaches members without a cap of their own, live.
-        if (memoryCap !== cls.memoryCap && !a.memoryCap && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
+        // Its swap allowance too (swap.ts), which a class cap can also shrink.
+        const capMoved = memoryCap !== cls.memoryCap && !a.memoryCap;
+        const swapMoved = swapAllowance !== cls.swapAllowance && !a.swapAllowance;
+        if ((capMoved || swapMoved || (memoryCap !== cls.memoryCap && !!effectiveSwapAllowance(a, { memoryCap, swapAllowance }))) && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
           const prov = providerFor(a.hostId);
-          const eff = effectiveMemoryCap(a, { memoryCap });
-          try { await prov.updateMemory?.(a.runtimeRef, eff); trace(a.id)('memory.cap_set', { cap: 'class', effective: eff, live: true }); }
-          catch (err) { skipped.push(`${a.name}: ${err instanceof ProviderError ? err.userMessage : 'memory cap not applied'}`); }
+          const lim = agentMemoryLimits({ getAgentClass: () => ({ ...cls, memoryCap, swapAllowance }) }, a);
+          try {
+            await prov.updateMemory?.(a.runtimeRef, lim.memory, lim.swap);
+            if (capMoved) trace(a.id)('memory.cap_set', { cap: 'class', effective: lim.memory, live: true });
+            if (swapMoved) trace(a.id)('memory.swap_set', { swap: 'class', effective: lim.swap ?? 'off', live: true });
+          } catch (err) { skipped.push(`${a.name}: ${err instanceof ProviderError ? err.userMessage : 'memory cap not applied'}`); }
         }
         // Image cleared: members the class had pinned go back to the fleet default (needs a rebuild).
         // The class image cleared: its pin goes, and the rest of the edit
@@ -1909,9 +1978,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // (night review, 2026-09-28).
     const applyCap = async (): Promise<void> => {
       const now = store.getAgent(agent.id);
-      if (!now?.runtimeRef || now.memoryCap || (now.state !== 'RUNNING' && now.state !== 'STOPPED')) return;
-      const eff = effectiveMemoryCap(now, now.classId ? store.getAgentClass(now.classId) : undefined);
-      await providerFor(now.hostId).updateMemory?.(now.runtimeRef, eff).catch(() => {});
+      if (!now?.runtimeRef || (now.memoryCap && now.swapAllowance) || (now.state !== 'RUNNING' && now.state !== 'STOPPED')) return;
+      // The cap and the swap allowance (swap.ts) together: either may be the class's.
+      const lim = agentMemoryLimits(store, now);
+      await providerFor(now.hostId).updateMemory?.(now.runtimeRef, lim.memory, lim.swap).catch(() => {});
     };
     if (classId === null) { store.setAgentClass(agent.id, null); await applyCap(); return { classId: null, rebuild: false }; }
     const cls = store.getAgentClass(classId);
@@ -2030,12 +2100,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const host = store.getHost(req.params.id);
     if (!host) return reply.code(404).send({ error: 'Not found' });
     const dockerHost = typeof host.settings?.dockerHost === 'string' ? host.settings.dockerHost : '';
-    if (!dockerHost) return { reachable: true, serverVersion: 'local' }; // the local daemon
+    // Compressed swap on that host (swap.ts), read through its own daemon.
+    const swapOf = async () => {
+      const sw = await (async () => providerFor(host.id).compressedSwap?.({ fresh: true }))().catch(() => undefined);
+      return sw ? { swap: { kind: sw.kind, compressed: sw.compressed, summary: sw.compressed ? describeCompressedSwap(sw) : sw.why } } : {};
+    };
+    if (!dockerHost) return { reachable: true, serverVersion: 'local', ...(await swapOf()) }; // the local daemon
     // Adapt pingRunner's {ok, version, error} to the shape the UI reads
     // ({reachable, serverVersion, error}) — the same mapping the add path does.
     // Without this a *successful* probe renders as "unreachable — no response".
     const ping = await pingRunner(dockerHost);
-    return { reachable: ping.ok, serverVersion: ping.version, hasImage: ping.hasImage, error: ping.error };
+    return { reachable: ping.ok, serverVersion: ping.version, hasImage: ping.hasImage, error: ping.error, ...(ping.ok ? await swapOf() : {}) };
   });
 
   // The control plane's dedicated runner key (created on first ask) plus the
@@ -2312,8 +2387,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // peaks, all reached at once, would fit the machine.
           memPeakBytes: containers.reduce((s, c) => s + (c.memPeakBytes ?? c.memBytes), 0),
           memCapBytes: containers.reduce((s, c) => s + c.memLimitBytes, 0),
+          swapBytes: containers.reduce((s, c) => s + (c.swapBytes ?? 0), 0),
           ...(h.kind === 'local' ? { machineMemBytes: totalmem() } : {}),
-        } };
+        },
+        // Whether this host compresses swap, for the machine's owner (swap.ts).
+        ...(owner ? await (async () => { const sw = await provider.compressedSwap?.(); return sw ? { swap: { kind: sw.kind, compressed: sw.compressed, summary: sw.compressed ? describeCompressedSwap(sw) : sw.why } } : {}; })().catch(() => ({})) : {}),
+        };
       } catch (err) {
         return { id: h.id, name: h.name, kind: h.kind, containers: [], error: err instanceof ProviderError ? err.userMessage : 'unreachable' };
       }
@@ -2477,12 +2556,66 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       } catch { /* next time */ }
     }
   };
+  /**
+   * Compressed swap follows the host (swap.ts). Every agent with an allowance
+   * is given it only while its host compresses swap, so when that changes —
+   * the owner ran scripts/enable-compressed-swap.sh, or --undo, or a runner
+   * rebooted without it — their containers are updated in place. `boot` also
+   * takes swap away from containers that have it and should not (a setting
+   * changed in .env by hand while the app was down). Said once per change on
+   * the log and on each agent's trail, never every sweep.
+   */
+  const swapSeen = new Map<string, string>();
+  const swapWatch = async (boot = false): Promise<{ applied: number }> => {
+    let applied = 0;
+    const agents = store.listAllActiveAgents().filter((a) => a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED') && !isBusy(a.id) && !a.migratedTo && !!store.getHost(a.hostId));
+    const byHost = new Map<string, Agent[]>();
+    for (const a of agents) byHost.set(a.hostId, [...(byHost.get(a.hostId) ?? []), a]);
+    for (const [hostId, list] of byHost) {
+      const prov = providerFor(hostId);
+      if (!prov.updateMemory) continue;
+      const withSwap = list.filter((a) => !!agentMemoryLimits(store, a).swap);
+      let targets = withSwap;
+      if (withSwap.length) {
+        const sw = await prov.compressedSwap?.({ fresh: true }).catch(() => undefined);
+        const state = sw ? `${sw.kind}` : 'unknown';
+        const changed = swapSeen.get(hostId) !== state;
+        swapSeen.set(hostId, state);
+        if (changed && !sw?.compressed) {
+          app.log.warn({ host: hostId, agents: withSwap.length, state, why: sw?.why, fix: COMPRESSED_SWAP_FIX }, 'swap.withheld: agents have a swap allowance, but this host does not compress swap; they run without swap');
+        }
+        if (changed && !boot) for (const a of withSwap) trace(a.id)('memory.swap_host', { compressed: !!sw?.compressed, kind: state });
+        if (!changed && !boot) targets = [];
+      }
+      if (boot) {
+        // Containers that carry swap they should not have any more.
+        for (const a of list.filter((x) => !withSwap.includes(x))) {
+          const info = await prov.info(a.runtimeRef!).catch(() => undefined);
+          if (info?.memorySwapLimitBytes !== undefined && info.memoryLimitBytes && (info.memorySwapLimitBytes < 0 || info.memorySwapLimitBytes > info.memoryLimitBytes)) targets = [...targets, a];
+        }
+      }
+      for (const a of targets) {
+        const now = store.getAgent(a.id);
+        if (!now?.runtimeRef || isBusy(a.id)) continue;
+        const lim = agentMemoryLimits(store, now);
+        try { await prov.updateMemory(now.runtimeRef, lim.memory, lim.swap); applied++; } catch { break; } // an unreachable host: next sweep
+      }
+    }
+    return { applied };
+  };
+  /** The machine-defaults note beside "Compressed swap per agent". */
+  const swapNote = (sw: CompressedSwap): string => sw.compressed
+    ? `This machine compresses swap: ${describeCompressedSwap(sw)}.`
+    : `${sw.why ?? 'No compressed swap here.'} To turn it on: ${COMPRESSED_SWAP_FIX}.`;
+  (app as unknown as { swapWatch?: typeof swapWatch }).swapWatch = swapWatch;
   (app as unknown as { retargetCronSweep?: typeof retargetCronSweep }).retargetCronSweep = retargetCronSweep;
   (app as unknown as { hibernateDeps?: HibernateDeps; ensureAwake?: typeof ensureAwake }).hibernateDeps = hibernateDeps;
   (app as unknown as { ensureAwake?: typeof ensureAwake }).ensureAwake = ensureAwake;
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
     setTimeout(() => { void retargetCronSweep(); }, 3 * 60_000).unref();
     setInterval(() => { void retargetCronSweep(); }, 24 * 3_600_000).unref();
+    setTimeout(() => { void swapWatch(true).catch((err) => app.log.warn({ err: String(err) }, 'swap watch failed')); }, Number(process.env.HATCHABOT_SWAP_BOOT_MS) || 45_000).unref();
+    setInterval(() => { void swapWatch().catch((err) => app.log.warn({ err: String(err) }, 'swap watch failed')); }, Number(process.env.HATCHABOT_SWAP_PROBE_MS) || 10 * 60_000).unref();
     setInterval(() => { void hibernateSweep(hibernateDeps).catch((err) => app.log.warn({ err: String(err) }, 'hibernate sweep failed')); },
       Number(process.env.HATCHABOT_HIBERNATE_SWEEP_MS) || 5 * 60_000).unref();
     setInterval(() => { void wakeSweep(hibernateDeps).catch((err) => app.log.warn({ err: String(err) }, 'wake sweep failed')); },
@@ -4254,7 +4387,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // ---- Defaults for this machine (machineDefaults.ts): written to .env, applied at once ----
   app.get('/v1/machine-defaults', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
-    return { defaults: readMachineDefaults() };
+    // Compressed swap: whether this machine has it, beside the setting.
+    const localId = store.localHostId();
+    const sw = localId ? await (async () => providerFor(localId).compressedSwap?.())().catch(() => undefined) : undefined;
+    return { defaults: readMachineDefaults().map((d) => d.key === 'agentSwap' && sw ? { ...d, note: swapNote(sw) } : d) };
   });
   app.put<{ Body: { key?: string; value?: unknown } }>('/v1/machine-defaults', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
@@ -4284,12 +4420,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (parseMemoryCap(a.memoryCap) || parseMemoryCap(cls?.memoryCap)) continue; // its own or its class's cap stands
         if (unreachable.has(a.hostId)) continue;
         const prov = providerFor(a.hostId);
-        try { await prov.updateMemory?.(a.runtimeRef!, effectiveMemoryCap(a, cls)); applied++; } catch {
+        const lim = agentMemoryLimits(store, a);
+        try { await prov.updateMemory?.(a.runtimeRef!, lim.memory, lim.swap); applied++; } catch {
           // The next rebuild applies it.
           if (a.hostId !== local) { unreachable.add(a.hostId); continue; }
         }
         // And tell the agent its new budget (AGENTS.md), as a per-agent change does.
         if (a.state === 'RUNNING') void syncDataSourceDocs({ store, secrets, provider: prov, channel: deps.channel, log: trace(a.id) }, a.id, a.runtimeRef!, trace(a.id)).catch(() => {});
+      }
+    } else if (spec.key === 'agentSwap') {
+      for (const a of fleet) {
+        const cls = a.classId ? store.getAgentClass(a.classId) : undefined;
+        if (parseSwapAllowance(a.swapAllowance) !== undefined || parseSwapAllowance(cls?.swapAllowance) !== undefined) continue; // its own or its class's stands
+        if (unreachable.has(a.hostId)) continue;
+        const lim = agentMemoryLimits(store, a);
+        try { await providerFor(a.hostId).updateMemory?.(a.runtimeRef!, lim.memory, lim.swap); applied++; } catch {
+          if (a.hostId !== local) unreachable.add(a.hostId);
+        }
       }
     } else if (spec.key === 'engineMemory') {
       if (embedder.enabled && !embedder.external) { await embedder.restart().catch(() => undefined); applied = 1; }
@@ -4449,6 +4596,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           memoryPeakBytes: peakSinceClear(a, rebuild?.running.memPeakBytes, undefined),
           memoryCapHits: rebuild?.running.memCapHits === undefined ? undefined : Math.max(0, rebuild.running.memCapHits - (a.memoryCapBaseline ?? 0)),
           memoryKills: rebuild?.running.memOomKills,
+          // Its swap (swap.ts): the allowance it should have, what the container
+          // runs with, how much sits in swap now, and why none is given here.
+          ...(await swapViewOf(a, rebuild?.running)),
           ...(role === 'owner' && (disks.get(a.id)?.bytes ?? 0) > diskWarn
             ? { diskOver: { bytes: disks.get(a.id)!.bytes, warnBytes: diskWarn, measuredAt: disks.get(a.id)!.measuredAt } }
             : {}),
@@ -4625,6 +4775,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           embedMode: z.enum(['baked', 'shared']).optional(),
           /** Memory cap on its container ("4g"); `null` = back to its class's / the fleet default. Applied live. */
           memoryCap: z.string().max(16).nullable().optional(),
+          /** Swap on top of the cap ("2g" or "off"); `null` = back to its class's / the fleet setting. Applied live; given only where the host compresses swap. */
+          swapAllowance: z.string().max(16).nullable().optional(),
           /** Home-screen icon: one emoji, and a #rrggbb tint. Cosmetic and
            *  immediate. `null` clears (the app then shows a picked default). */
           icon: z.string().refine(validIcon, { message: 'icon must be a single emoji' }).nullable().optional(),
@@ -4659,6 +4811,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         parsed.data.cronTriggers === undefined &&
         parsed.data.embedMode === undefined &&
         parsed.data.memoryCap === undefined &&
+        parsed.data.swapAllowance === undefined &&
         parsed.data.attentionAck === undefined &&
         parsed.data.hibernate === undefined &&
         parsed.data.filesMaxMb === undefined &&
@@ -4678,6 +4831,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       if (parsed.data.memoryCap !== undefined && parsed.data.memoryCap !== null) {
         const problem = memoryCapProblem(req, parsed.data.memoryCap);
+        if (problem) return reply.code(problem.status).send({ error: problem.error });
+      }
+      if (parsed.data.swapAllowance !== undefined && parsed.data.swapAllowance !== null) {
+        // Against the cap it will sit on: this request's, else the one it has.
+        const cls = agent.classId ? store.getAgentClass(agent.classId) : undefined;
+        const cap = parsed.data.memoryCap !== undefined ? effectiveMemoryCap({ memoryCap: parsed.data.memoryCap ?? undefined }, cls) : effectiveMemoryCap(agent, cls);
+        const problem = swapAllowanceProblem(req, parsed.data.swapAllowance, cap);
         if (problem) return reply.code(problem.status).send({ error: problem.error });
       }
 
@@ -4843,6 +5003,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (flippingMemory && isBusy(agent.id)) return reply.code(409).send({ error: 'The agent is busy — try again in a moment.' });
       if (parsed.data.memoryCap !== undefined) {
         const r = await setMemoryCap(req, agent, parsed.data.memoryCap);
+        if (r.error) return reply.code(r.status ?? 400).send({ error: r.error });
+      }
+      if (parsed.data.swapAllowance !== undefined) {
+        const r = await setSwapAllowance(store.getAgent(agent.id) ?? agent, parsed.data.swapAllowance);
         if (r.error) return reply.code(r.status ?? 400).send({ error: r.error });
       }
       if (flippingMemory) {
@@ -10630,6 +10794,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return reply.code(202).send({ ...publicAgent(store.getAgent(agent.id)!), rebuilding: true });
       }
     }
+    // Its cap and swap allowance as they are now, as a wake does (swap.ts).
+    const lim = agentMemoryLimits(store, agent);
+    await providerFor(agent.hostId).updateMemory?.(agent.runtimeRef, lim.memory, lim.swap).catch(() => {});
     await providerFor(agent.hostId).start(agent.runtimeRef);
     store.setHibernated(agent.id, null);
     // After the store says RUNNING, as a wake does: what runs once it is up reads that.

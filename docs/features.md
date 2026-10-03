@@ -826,6 +826,71 @@ it sizes its jobs to fit (fewer workers, chunked data) instead of running
 them into the kernel. OpenClaw already tells the model when a command was
 killed by SIGKILL and suggests narrowing it.
 
+## Compressed swap: room on top of the cap, kept compressed in memory
+
+Off by default. An agent can be given a **swap allowance**: swap it may use
+*on top of* its memory cap. Docker's `--memory-swap` is the total, so an agent
+with a 3 GB cap and a 2 GB allowance runs with `--memory 3g --memory-swap 5g`;
+with no allowance `--memory-swap` equals `--memory` and the agent cannot swap
+at all (as before). The allowance comes from the agent (its sheet → Advanced →
+Runtime → **Compressed swap**, or `hatchabot swap <agent> 2g|off|default`),
+else its **class** (Settings → Classes), else the machine
+(`HATCHABOT_AGENT_SWAP`, Settings → Hosts → Defaults → **Compressed swap per
+agent**). An agent or class can say `off` against a machine that is on. It is
+never more than the agent's cap (a lower cap shrinks it), and members are
+bound by the same per-agent maximum as for the cap. A change applies to the
+container right away (`docker update`, no rebuild, the cap and the allowance
+always together) and at every create, rebuild, move, Start and wake.
+
+**Only where the machine compresses swap.** Hatchabot gives the allowance
+only on a host with zswap on in front of a swap device, or an active zram
+swap device. With plain disk swap, or none, or a host it cannot read (a
+runner is read through a one-shot container on its own daemon; unknown means
+no), agents get no swap: the setting is kept, the agent's sheet says it is
+withheld and why, the log says so once, and `hatchabot doctor` names the fix.
+When a host gains or loses compressed swap, Hatchabot notices within ten
+minutes and updates the containers that have an allowance.
+
+Turning it on, Linux, as root: `sudo scripts/enable-compressed-swap.sh`. It
+says what it will do and asks first; it turns on zswap with zstd (lz4 if zstd
+is missing) and the zsmalloc pool at up to 20% of memory, in front of the
+existing swap file (or makes a `/swapfile` if there is none), now and at every
+boot through a small unit (`hatchabot-compressed-swap.service`) — no reboot,
+no boot-loader edit. It sets `vm.swappiness` only if you say yes. `--zram`
+uses zram instead (on Ubuntu cloud images it needs
+`linux-modules-extra-$(uname -r)`; the script says so); `--status` shows the
+state and the compression ratio; `--undo` puts it all back.
+
+**What it does for an idle agent** (measured 2026-10-01 on four idle OpenClaw
+gateways, and 2026-10-02 on an Ubuntu 24.04 VM with the script):
+
+| | Ratio | First answer after being pushed out | Whole working set back |
+|---|---|---|---|
+| zram, zstd | 3.5–3.6:1 | 9–14 ms on a gateway (7 ms on the stand-in) | 1.3 s for 0.9 GB |
+| zswap, zstd, zsmalloc | 3.1–3.6:1 (pool / per container) | 11–15 ms on a gateway (130–170 ms on the VM's Python stand-in) | 1.4–1.6 s for 1 GB |
+| zram or zswap, lz4 | 2.0–2.8:1 | 6–22 ms | |
+| plain disk swap (never used) | — | 150–500 ms | |
+
+An idle gateway holds about 0.72 GB; pushed out with zstd it holds about
+0.26 GB. A whole turn on a swapped-out gateway took 1–2 s longer.
+
+The trade-offs:
+- **CPU on the way out and back.** Compressing an idle gateway with zstd
+  costs about 5 s of one core, once; reading it back is fast (~0.6–0.7 GB/s).
+- **Slower rather than sudden.** An agent over its cap with an allowance
+  slows down (its cold memory is compressed) instead of having processes
+  killed; it still has a hard ceiling (cap + allowance), and the cap hits and
+  the swap in use show on its sheet and in Status → Resources.
+- **Per agent, capped.** Only agents given an allowance swap; nobody can
+  give one more swap than its cap.
+- **Never plain disk swap.** Uncompressed disk swap is slow to come back and
+  writes the agent's memory — keys included — to disk. With zswap, compressed
+  pages normally stay in memory; only when the pool is full do the oldest go
+  on to the swap file (the script turns zswap's early-writeback shrinker off).
+  zram never writes to disk. With zswap the compressed pool counts against the
+  container's own memory; with zram it is the host's memory, not the
+  container's.
+
 ## Bulk actions on what you can see
 
 Every section on the home screen — a group, or a bin of whatever **View by**

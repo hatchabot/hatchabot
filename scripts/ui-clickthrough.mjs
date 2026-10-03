@@ -1361,6 +1361,62 @@ const SCENARIOS = String.raw`(() => {
         document.getElementById('secNotice').hidden = true;
       }
     },
+    swapAllowance: async () => {
+      // Compressed swap beside the memory cap (agent sheet → Advanced → Runtime), and in Hosts → Defaults.
+      const list = await (await fetch('/v1/agents')).json();
+      const set = (over) => { window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, memoryCapEffective: '3g', swapAllowanceDefault: 'off', ...over } : a); };
+      const status = () => document.getElementById('swapStatus').textContent;
+      try {
+        set({ swapAllowanceEffective: 'off', swapInEffect: 'off' });
+        await refresh(false);
+        openV2Agent('a1', 'advanced');
+        const sel = await until(() => document.getElementById('editSwapAllowance'));
+        const vals = [...sel.options].map((o) => o.value);
+        ok('it offers inherit, off and sizes up to the 3 GB cap only: ' + vals, vals[0] === '' && vals.includes('off') && vals.includes('2g') && vals.includes('3g') && !vals.includes('4g'));
+        ok('the inherited choice names the machine setting: ' + sel.options[0].textContent, sel.options[0].textContent.includes("the machine's setting: off"));
+        ok('says it has no swap: ' + status(), status().includes('No swap'));
+        sel.value = '2g';
+        document.getElementById('swapSaveBtn').click();
+        const p = await until(() => calls('PATCH', /\/v1\/agents\/a1$/).find((c) => c.body && 'swapAllowance' in c.body));
+        eq('the swap allowance', p.body, { swapAllowance: '2g' });
+        v2Close();
+        // In effect, with some of it in swap now.
+        set({ swapAllowance: '2g', swapAllowanceEffective: '2g', swapInEffect: '2g', swapBytes: 600 * 1048576 });
+        await refresh(false);
+        openV2Agent('a1', 'advanced');
+        await until(() => document.getElementById('editSwapAllowance').value === '2g');
+        ok('in effect, and how much is in swap: ' + status(), status().includes('Up to 2 GB of compressed swap') && status().includes('600 MB in swap now'));
+        v2Close();
+        // Allowed, but this machine has no compressed swap: withheld, with the fix.
+        set({ swapAllowance: '2g', swapAllowanceEffective: '2g', swapInEffect: 'off', swapWithheld: 'This machine swaps to disk only.', swapFix: 'sudo scripts/enable-compressed-swap.sh' });
+        await refresh(false);
+        openV2Agent('a1', 'advanced');
+        await until(() => status().includes('⚠'));
+        ok('withheld, says why and the fix: ' + status(), status().includes('not given') && status().includes('disk only') && status().includes('enable-compressed-swap.sh'));
+        document.getElementById('editSwapAllowance').value = 'off';
+        document.getElementById('swapSaveBtn').click();
+        await until(() => calls('PATCH', /\/v1\/agents\/a1$/).find((c) => c.body && c.body.swapAllowance === 'off'));
+        v2Close();
+        // The machine's setting, with the note on whether this machine compresses swap.
+        window.__override['/v1/machine-defaults'] = { defaults: [
+          { key: 'agentSwap', label: 'Compressed swap per agent', help: 'h', applies: 'now', fallback: 'off', value: 'off', set: false, note: 'This machine compresses swap: zswap (zstd, zsmalloc, pool ≤ 20%) in front of /swap.img · nothing stored yet.' } ] };
+        window.__answer = { 'PUT /v1/machine-defaults': [{ status: 200, body: { default: { key: 'agentSwap', value: '2g' }, applied: 3 } }] };
+        await openAiDlg('hosts');
+        const input = await until(() => document.getElementById('md-agentSwap'));
+        ok('the note shows: ' + (document.getElementById('md-note-agentSwap')?.textContent || ''), (document.getElementById('md-note-agentSwap')?.textContent || '').includes('zswap (zstd'));
+        input.value = '2g';
+        input.parentElement.querySelector('button').click();
+        const put = await until(() => calls('PUT', /\/v1\/machine-defaults$/).find((c) => c.body && c.body.key === 'agentSwap'));
+        eq('the machine setting', put.body, { key: 'agentSwap', value: '2g' });
+        await until(() => document.getElementById('toast').textContent.includes('applied to 3 agents'));
+        aiDlg.close();
+      } finally {
+        try { v2Close(); } catch {}
+        window.__answer = {};
+        delete window.__override['/v1/agents']; delete window.__override['/v1/machine-defaults'];
+        await refresh(false);
+      }
+    },
   });
   (async () => {
     for (const [name, run] of Object.entries(T)) {

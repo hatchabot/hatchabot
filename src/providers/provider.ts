@@ -30,6 +30,12 @@ export interface RuntimeSpec {
   /** Memory cap for the container ("4g"); absent = the provider's default. */
   memory?: string;
   /**
+   * Swap the container may use ON TOP of `memory` ("2g"); absent = none. A
+   * provider gives it only where its host compresses swap (zswap or zram,
+   * see orchestrator/swap.ts) and otherwise runs the container without swap.
+   */
+  memorySwap?: string;
+  /**
    * Set when this spec re-provisions an existing runtime (rebuild, retry).
    * The provider MUST keep using the same underlying storage so the agent's
    * memory survives; the returned ref stays equal to this one.
@@ -374,8 +380,15 @@ export interface RuntimeProvider {
   logs(runtimeRef: string, lines: number): Promise<string>;
   /** Live CPU and memory of every Hatchabot container on this daemon (docker stats). */
   stats?(): Promise<ContainerStats[]>;
-  /** Change a container's memory cap in place — running or stopped, no restart (docker update). */
-  updateMemory?(runtimeRef: string, cap: string): Promise<void>;
+  /**
+   * Change a container's memory cap and swap allowance in place — running or
+   * stopped, no restart (docker update). `swap` is the allowance on top of the
+   * cap (undefined = none); like provision(), it is given only where the host
+   * compresses swap. Always pass both: a call without the allowance takes it away.
+   */
+  updateMemory?(runtimeRef: string, cap: string, swap: string | undefined): Promise<void>;
+  /** Whether this provider's host compresses swap (zswap or zram), read through the host's own probe; cached briefly. */
+  compressedSwap?(opts?: { fresh?: boolean }): Promise<import('../orchestrator/swap.js').CompressedSwap>;
 
   /** Only the model-call lines ("[model-fetch] response …") logged since `sinceIso`, each prefixed with its timestamp. */
   modelCallLog(runtimeRef: string, sinceIso: string): Promise<string>;
@@ -416,11 +429,15 @@ export interface ContainerStats {
   memCapHits?: number;
   /** Times the kernel killed a process in it for memory (memory.events `oom_kill`), when readable. */
   memOomKills?: number;
+  /** How much of it sits in swap now (cgroup memory.swap.current; with zswap, before compression), when readable. */
+  swapBytes?: number;
 }
 
-/** cgroup v2 memory.events + memory.peak text → the three ContainerStats memory fields. */
-export function parseCgroupMemory(events: string | undefined, peak: string | undefined): Pick<ContainerStats, 'memPeakBytes' | 'memCapHits' | 'memOomKills'> {
-  const out: Pick<ContainerStats, 'memPeakBytes' | 'memCapHits' | 'memOomKills'> = {};
+/** cgroup v2 memory.events + memory.peak (+ memory.swap.current) text → the ContainerStats memory fields. */
+export function parseCgroupMemory(events: string | undefined, peak: string | undefined, swapCurrent?: string): Pick<ContainerStats, 'memPeakBytes' | 'memCapHits' | 'memOomKills' | 'swapBytes'> {
+  const out: Pick<ContainerStats, 'memPeakBytes' | 'memCapHits' | 'memOomKills' | 'swapBytes'> = {};
+  const sw = Number((swapCurrent ?? '').trim());
+  if (swapCurrent !== undefined && swapCurrent.trim() !== '' && Number.isFinite(sw) && sw >= 0) out.swapBytes = sw;
   const n = (k: string) => { const m = new RegExp(`^${k} (\\d+)$`, 'm').exec(events ?? ''); return m ? Number(m[1]) : undefined; };
   const max = n('max'), oom = n('oom_kill');
   if (max !== undefined) out.memCapHits = max;
@@ -474,10 +491,13 @@ export interface RuntimeInfo {
   lastExitCode?: number;
   /** A container's: its memory cap in bytes (docker's HostConfig.Memory; 0 = none). */
   memoryLimitBytes?: number;
-  /** A container's: cgroup memory.peak, memory.events max / oom_kill, when readable (see stats()). */
+  /** A container's: memory + swap it may use (docker's HostConfig.MemorySwap; equal to the cap = no swap, -1 = unlimited). */
+  memorySwapLimitBytes?: number;
+  /** A container's: cgroup memory.peak, memory.events max / oom_kill, memory.swap.current, when readable (see stats()). */
   memPeakBytes?: number;
   memCapHits?: number;
   memOomKills?: number;
+  swapBytes?: number;
 }
 
 export type EmbedEngine = 'baked' | 'none';
