@@ -142,6 +142,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r('*', /^\/v1\/agents\/:id\/ui(\/.*)?$/, 'signed-in', 'An agent\'s OpenClaw console (the owner, or a web-chat guest in their own conversation)'),
   r('*', /^\/v1\/agents\/:id\/chat$/, 'signed-in', 'Web chat'),
   r('*', /^\/v1\/agents(\/.*)?$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),
+  r(READ, /^\/v1\/recent$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),
   r('*', /^\/v1\/(agent-classes|agent-todos|agent-peers|groups|inbox|proposals|pending|events|resources|usage|operator-profile)(\/.*)?$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),
   r(READ, /^\/v1\/(ai-profiles|ai-profiles\/usage|ai-profiles\/:id\/available-models)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['POST'], /^\/v1\/ai-profiles\/usage\/sample$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),

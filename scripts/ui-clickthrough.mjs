@@ -1445,6 +1445,120 @@ const SCENARIOS = String.raw`(() => {
       } finally { if (applyModelDlg.open) applyModelDlg.close(); }
     },
   });
+  // ---- View by → Activity: the Unread section and each agent's last line (2026-10-03) ----
+  const recentFixture = async () => {
+    const mins = (m) => new Date(Date.now() - m * 60000).toISOString();
+    const list = await (await fetch('/v1/agents')).json();
+    const patch = {
+      a1: { unread: true, lastActiveAt: mins(2) },      // Homework Helper
+      a4: { unread: true, lastActiveAt: mins(30) },     // Meal Planner
+      a8: { lastActiveAt: mins(5) },                    // Budget Tracker
+      a9: { lastActiveAt: mins(180) },                  // Stock Watcher
+      a13: { lastActiveAt: mins(60 * 26), pendingAction: { type: 'bot_token' } }, // Car Upkeep
+    };
+    window.__override['/v1/agents'] = list.map((a) => patch[a.id] ? { ...a, ...patch[a.id] } : a);
+    window.__override['/v1/recent'] = { cap: 8, total: 4, items: [
+      { id: 'a1', name: 'Homework Helper', at: mins(2), unread: true, said: 'You: thanks, that explains the fractions homework nicely' },
+      { id: 'a4', name: 'Meal Planner', at: mins(30), unread: true, said: 'Robin: can we do tacos on Friday?' },
+      { id: 'a8', name: 'Budget Tracker', at: mins(5), unread: false, said: '⏰ Daily brief ran' },
+      { id: 'a9', name: 'Stock Watcher', at: mins(180), unread: false, said: '' },
+      { id: 'a13', name: 'Car Upkeep', at: mins(60 * 26), unread: false, said: 'Oil change is due' },
+    ] };
+    await refresh(false);
+  };
+  const recentCleanup = async () => {
+    try { localStorage.setItem('hb-v2-hide-previews', '0'); } catch {}
+    v2HidePreviews = false;
+    delete window.__override['/v1/agents']; delete window.__override['/v1/recent']; window.__answer = {};
+    v2SetView('group');
+    await refresh(false);
+  };
+  const prevOf = (name) => tile(name)?.querySelector('.v2prev')?.textContent ?? null;
+  Object.assign(T, {
+    activityUnreadFirst: async () => {
+      try {
+        await recentFixture();
+        v2SetView('activity');
+        await until(() => v2Recent && v2Recent.size === 5);
+        ok('asked for the whole week', calls('GET', /^\/v1\/recent$/).some((c) => c.url.includes('all=1')));
+        const heads = [...document.querySelectorAll('#v2groups .v2ghead h3')].map((h) => h.textContent);
+        eq('Unread is the first section', heads[0], 'Unread');
+        const unread = document.querySelector('#v2groups .v2group');
+        eq('newest reply first', [...unread.querySelectorAll('.v2agent .v2name')].map((n) => n.textContent), ['Homework Helper', 'Meal Planner']);
+        for (const name of ['Homework Helper', 'Meal Planner']) eq(name + ' shown once', [...document.querySelectorAll('#v2groups .v2agent')].filter((t) => t.textContent.includes(name)).length, 1);
+        ok('the time bins follow', heads.slice(1).some((h) => /Active in the last hour/.test(h)));
+      } finally { await recentCleanup(); }
+    },
+    activityPreviews: async () => {
+      try {
+        await recentFixture();
+        v2SetView('activity');
+        await until(() => v2Recent && prevOf('Homework Helper'));
+        eq('the viewer\'s own line', prevOf('Homework Helper'), 'You: thanks, that explains the fractions homework nicely');
+        eq('a member\'s line', prevOf('Meal Planner'), 'Robin: can we do tacos on Friday?');
+        eq('a task that ran', prevOf('Budget Tracker'), '⏰ Daily brief ran');
+        eq('no line, no row', prevOf('Stock Watcher'), null);
+        eq('Needs you as the page words it', prevOf('Car Upkeep'), 'needs you: waiting for a Telegram bot token');
+        const p = tile('Homework Helper').querySelector('.v2prev'), cs = getComputedStyle(p);
+        ok('one line, cut with an ellipsis', cs.whiteSpace === 'nowrap' && cs.textOverflow === 'ellipsis' && p.scrollWidth > p.clientWidth);
+        ok('it stays inside the tile', p.getBoundingClientRect().width <= tile('Homework Helper').getBoundingClientRect().width + 0.5);
+        ok('the tile reads the line out', tile('Homework Helper').getAttribute('aria-label').includes('You: thanks'));
+        tile('Homework Helper').click();
+        await until(() => v2AgentDlg.open || document.getElementById('consoleDlg').open);
+        ok('a click opens it as it always did', true);
+      } finally {
+        if (document.getElementById('consoleDlg').open) closeConsole();
+        try { v2Close(); } catch {}
+        await recentCleanup();
+      }
+    },
+    activityHidePreviews: async () => {
+      try {
+        await recentFixture();
+        v2SetView('activity');
+        await until(() => prevOf('Homework Helper'));
+        const btn = document.getElementById('v2PrevToggle');
+        ok('a Hide previews toggle beside the sort', !!btn && btn.closest('.v2viewbar') && btn.getAttribute('aria-pressed') === 'false');
+        btn.click();
+        await until(() => !document.querySelector('#v2groups .v2prev'));
+        eq('remembered for this browser', localStorage.getItem('hb-v2-hide-previews'), '1');
+        eq('pressed', document.getElementById('v2PrevToggle').getAttribute('aria-pressed'), 'true');
+        ok('names and dots stay', tile('Homework Helper').querySelector('.v2unread') && tile('Homework Helper').querySelector('.v2name'));
+        document.getElementById('v2PrevToggle').click();
+        await until(() => prevOf('Homework Helper'));
+        eq('shown again, remembered', localStorage.getItem('hb-v2-hide-previews'), '0');
+      } finally { await recentCleanup(); }
+    },
+    otherViewsUnchanged: async () => {
+      try {
+        await recentFixture();
+        v2SetView('activity');
+        await until(() => prevOf('Homework Helper'));
+        for (const v of ['group', 'attention', 'model']) {
+          v2SetView(v); await sleep(50);
+          ok(v + ': no preview lines', !document.querySelector('#v2groups .v2prev'));
+          ok(v + ': no Hide previews toggle', !document.getElementById('v2PrevToggle'));
+          ok(v + ': no Unread section', ![...document.querySelectorAll('#v2groups .v2ghead h3')].some((h) => h.textContent === 'Unread'));
+        }
+        const before = calls('GET', /^\/v1\/recent$/).length;
+        v2SetView('group'); await refresh(false); await refresh(false);
+        eq('not asked for outside the Activity view', calls('GET', /^\/v1\/recent$/).length, before);
+      } finally { await recentCleanup(); }
+    },
+    activityRecentFails: async () => {
+      try {
+        await recentFixture();
+        delete window.__override['/v1/recent'];
+        window.__answer = { 'GET /v1/recent': Array.from({ length: 6 }, () => ({ status: 500, body: { error: 'Something failed.' } })) };
+        v2Recent = new Map();
+        v2SetView('activity');
+        await until(() => v2Recent === null);
+        ok('no preview lines', !document.querySelector('#v2groups .v2prev'));
+        eq('every tile still there', document.querySelectorAll('#v2groups .v2agent').length, 14);
+        ok('Unread still first (it comes from the list)', document.querySelector('#v2groups .v2ghead h3').textContent === 'Unread');
+      } finally { await recentCleanup(); }
+    },
+  });
   (async () => {
     for (const [name, run] of Object.entries(T)) {
       try { await run(); results.push({ name, ok: true }); }
