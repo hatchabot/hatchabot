@@ -127,6 +127,22 @@ export const REST_TOOLS: RestTool[] = [
     input_schema: obj({}),
     call: () => ({ method: 'GET', path: '/v1/agent-classes' }),
   },
+  {
+    name: 'get_model_scorecard', tier: 'read',
+    description:
+      "One row per agent of the owner's, for choosing its model: what it is for, state (asleep agents are not woken), source and model (pinned or the source default), "
+      + 'the last 30 days of calls and tokens, context size per call, how much it uses tools, error counts (malformed tool calls, failed turns, tool failures), '
+      + 'scheduled tasks, an estimated monthly cost at API prices, its share of a Claude plan, and cheaper models on the same source with the monthly saving. '
+      + 'evidence says whether the current model has enough history to judge. Read from what Hatchabot already recorded: cheap to call.',
+    input_schema: obj({ limit: { type: 'integer', minimum: 1, maximum: 100, description: 'most rows, costliest first (default 40)' } }),
+    call: ({ input }) => ({ method: 'GET', path: `/v1/model-scorecard${typeof input.limit === 'number' ? `?limit=${Math.trunc(input.limit)}` : ''}` }),
+  },
+  {
+    name: 'get_model_options', tier: 'read',
+    description: 'Per AI source the owner can use: the models it offers, their prices per million tokens, and one line on what each is good at (larger models are more reliable at tool use).',
+    input_schema: obj({}),
+    call: () => ({ method: 'GET', path: '/v1/model-options' }),
+  },
 
   // ---- agent lifecycle -----------------------------------------------------
   {

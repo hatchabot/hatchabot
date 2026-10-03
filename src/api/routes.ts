@@ -95,6 +95,8 @@ import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { completeWithProfile, pickMgmtProfile, runMgmtCompletion, usableForMgmt } from './mgmtLlm.js';
 import { checkOpsDrift, opsDriftOf } from '../ops/opsDrift.js';
 import { OPS_DIGEST_MESSAGE, OPS_SUGGEST_MESSAGE } from '../ops/opsAgent.js';
+import { buildScorecard } from '../orchestrator/modelScorecard.js';
+import { modelOptionsFor } from '../orchestrator/modelOptions.js';
 import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
 import { createOpsPush, unannounced } from '../ops/push.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
@@ -7022,6 +7024,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
 
   app.get('/v1/usage', async (req) => computeFleetUsage(ownerIdOf(req)));
+
+  // The model steward's two reads (docs/features.md, "Right-size"). Both come
+  // from what Hatchabot already holds — no container is asked anything and no
+  // sleeping agent is woken — and both are the caller's own: their agents,
+  // the sources they may use.
+  app.get<{ Querystring: { limit?: string } }>('/v1/model-scorecard', async (req) => {
+    const limit = Number(req.query?.limit);
+    return buildScorecard(store, ownerIdOf(req), { limit: Number.isFinite(limit) && limit > 0 ? limit : undefined });
+  });
+  app.get('/v1/model-options', async (req) => modelOptionsFor(store.listAIProfiles(ownerIdOf(req))));
 
   /** The fleet's use in the last hour, 3/6/9/12 hours, day or week, from what the sampler recorded — answers at once. */
   app.get<{ Querystring: { period?: string } }>('/v1/usage/periods', async (req, reply) => {

@@ -121,6 +121,12 @@ export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.no
       }
     }
     store.addTokenSample(a.id, a.aiProfileId, nowIso, u.totalTokens);
+    // The model scorecard's 30 days, from this same read: a review then needs
+    // no container at all, and an asleep agent keeps its last profile.
+    if (u.profile) {
+      const { purposes, ...rest } = u.profile;
+      store.setModelProfile(a.id, { ...rest, purpose: purposes[a.slug] }, nowIso);
+    }
     // Successful calls per slot, from the transcripts: the whole 8 days the
     // first time (replacing the log's partial counts), then from an hour
     // before the last slot written, so late-arriving calls land.

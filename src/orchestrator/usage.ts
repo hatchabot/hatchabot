@@ -50,6 +50,59 @@ export interface AgentUsage extends UsageSplit {
   recent?: Array<[string, number]>;
   /** The same 8 days as [end of 5-minute slot, calls]: the full count of successful calls. */
   recentCalls?: Array<[string, number]>;
+  /** The last 30 days by model, for the model scorecard (modelScorecard.ts). */
+  profile?: ModelProfile;
+}
+
+/** How one model's turns ended, counted from the transcripts (never their text). */
+export interface TurnErrors {
+  /** OpenClaw rejected a tool call the model wrote ("Provider completed tool call with malformed JSON arguments" and kin). */
+  malformedToolCall: number;
+  /** The call failed for another reason (overloaded, HTTP error, connection, terminated). */
+  providerError: number;
+  /** Refused for a rate limit: the source's, not the model's. */
+  rateLimited: number;
+  /** Stopped before it answered (aborted, idle timeout). */
+  aborted: number;
+  /** The answer ran out of output room (stopReason "length"). */
+  truncated: number;
+  /** Tool results that came back as errors (bad arguments, or the tool itself failing). */
+  toolFailed: number;
+  /** Failed calls OpenClaw retried within the same turn (those turns do not count as failed). */
+  retried: number;
+}
+export interface WindowModelStats extends UsageSplit {
+  calls: number;
+  /** Calls whose answer asked for at least one tool. */
+  toolUseCalls: number;
+  /** Turns: from a message (a person, a task, a peer) to the model's final answer. */
+  turns: number;
+  toolTurns: number;
+  /** Tool calls across those turns. */
+  toolCalls: number;
+  /** Turns that ended in an error (rate limits included; retried ones not). */
+  failedTurns: number;
+  /** Failed or truncated turns in the last 7 days. */
+  failed7d: number;
+  first: number;
+  last: number;
+  /** What a call carried in (input + cache), median and 90th percentile. */
+  ctxP50: number;
+  ctxP90: number;
+  err: TurnErrors;
+}
+export interface ModelProfile {
+  /** Start of the window (ms). */
+  since: number;
+  models: Record<string, WindowModelStats>;
+  /** OpenClaw's prompt-error events in the window. */
+  promptErrors: number;
+  /** Purpose excerpts by OpenClaw agent directory (the agent's slug, and "main"). */
+  purposes: Record<string, string>;
+  /** Enabled scheduled tasks of the owner's (OpenClaw's own upkeep jobs not counted); null = unreadable. */
+  crons: number | null;
+  /** The agent's first recorded call ever (ms), to know how much of the window it existed for. */
+  firstCall: number;
 }
 
 const EMPTY: AgentUsage = { totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, sessions: 0, byModel: [] };
@@ -70,12 +123,70 @@ const callSlots = {};
 // One call can be in two places (a deleted session's archive row and its
 // published .deleted file): each event id counts once.
 const seen = new Set();
-const add = (sid, at, msg, id) => {
+const n = (x) => (typeof x === "number" && isFinite(x) && x > 0 ? x : 0);
+// The model scorecard (modelScorecard.ts): the last 30 days per model — the
+// calls' split, what each carried in, how the turns used tools, and how they
+// ended. Counts only; no text leaves the container but the Purpose excerpt.
+const W30 = Date.now() - 30 * 86400000, W7 = Date.now() - 7 * 86400000;
+const win = {}; const turnOf = {}; let promptErrors = 0;
+const P = (model) => win[model] ||= { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, toolUseCalls: 0, turns: 0, toolTurns: 0, toolCalls: 0, failedTurns: 0, failed7d: 0, first: 0, last: 0, ctx: [],
+  err: { malformedToolCall: 0, providerError: 0, rateLimited: 0, aborted: 0, truncated: 0, toolFailed: 0, retried: 0 } };
+// OpenClaw's pre-dispatch rejections of a tool call the model wrote badly (2026.9.6).
+const MALFORMED = /malformed JSON arguments|incomplete or malformed tool call|incomplete tool call|invalid JSON arguments|unresolved tool calls/i;
+const LIMITED = /rate_limit|rate limit|\b429\b/i;
+const prof = (sid, at, msg) => {
+  if (!(at >= W30)) return;
+  const t = turnOf[sid] ||= { open: false, tools: 0, failed: "", model: "" };
+  if (msg.role === "user") { t.open = true; t.tools = 0; t.failed = ""; return; }
+  if (msg.role === "toolResult") { if (msg.isError === true && t.model) P(t.model).err.toolFailed++; return; }
+  if (msg.role !== "assistant" || msg.openclawDeliveryMirror || msg.model === "delivery-mirror") return;
+  const model = msg.model || "(unknown)"; t.model = model;
+  const m = P(model); const u = msg.usage || {};
+  const tok = n(u.input) + n(u.output) + n(u.cacheRead) + n(u.cacheWrite);
+  const parts = Array.isArray(msg.content) ? msg.content.filter((p) => p && p.type === "toolCall").length : 0;
+  if (tok > 0) {
+    m.calls++; m.input += n(u.input); m.output += n(u.output); m.cacheRead += n(u.cacheRead); m.cacheWrite += n(u.cacheWrite);
+    m.ctx.push(n(u.input) + n(u.cacheRead) + n(u.cacheWrite));
+    if (parts) m.toolUseCalls++;
+  }
+  if (!m.first || at < m.first) m.first = at; if (at > m.last) m.last = at;
+  // A call after a failed one, before anyone wrote again: OpenClaw retried, and
+  // the turn goes on — it did not fail after all.
+  if (!t.open) {
+    if (t.failed) { const f = P(t.failed); f.err.retried++; f.turns--; f.failedTurns--; if (t.failedAt >= W7) f.failed7d--; t.failed = ""; }
+    t.open = true; t.tools = 0;
+  }
+  t.tools += parts;
+  const sr = msg.stopReason;
+  if (sr === "toolUse" && parts) return;
+  t.open = false; m.turns++;
+  if (t.tools) { m.toolTurns++; m.toolCalls += t.tools; }
+  if (sr === "error" || sr === "aborted" || sr === "timeout") {
+    const e = String(msg.errorMessage || "");
+    if (LIMITED.test(e)) m.err.rateLimited++;
+    else if (MALFORMED.test(e)) m.err.malformedToolCall++;
+    else if (sr === "error") m.err.providerError++;
+    else m.err.aborted++;
+    m.failedTurns++; if (at >= W7) m.failed7d++; t.failed = model; t.failedAt = at;
+  } else {
+    t.failed = "";
+    if (sr === "length") { m.err.truncated++; if (at >= W7) m.failed7d++; }
+  }
+};
+const ev = (sid, at, e) => {
+  if (!e) return;
+  if (e.type === "custom" && /prompt-error/.test(String(e.customType || ""))) { if (at >= W30) promptErrors++; return; }
+  const msg = e.message; if (!msg || typeof msg !== "object") return;
+  if (e.id) { if (seen.has(e.id)) return; seen.add(e.id); }
+  prof(sid, at, msg);
+  add(sid, at, msg);
+};
+// Only these lines are parsed: calls, what people wrote, failed tools, prompt errors.
+const wanted = (s) => s.indexOf('"usage"') >= 0 || s.indexOf('"role":"user"') >= 0 || s.indexOf('"isError":true') >= 0 || s.indexOf("prompt-error") >= 0;
+const add = (sid, at, msg) => {
   const u = msg && msg.usage; if (!u || typeof u !== "object") return;
-  const n = (x) => (typeof x === "number" && isFinite(x) && x > 0 ? x : 0);
   // A copy of a reply sent to a channel ("delivery-mirror") carries no tokens: not a call.
   const tok = n(u.input) + n(u.output) + n(u.cacheRead) + n(u.cacheWrite); if (!tok) return;
-  if (id) { if (seen.has(id)) return; seen.add(id); }
   const m = models[msg.model || "(unknown)"] ||= { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, maxCtx: 0, s: new Set() };
   // What this call carried in: the prompt, cached or not. Big = a long conversation re-sent every call.
   const ctx = n(u.input) + n(u.cacheRead) + n(u.cacheWrite);
@@ -89,9 +200,9 @@ const add = (sid, at, msg, id) => {
 };
 const lines = (d, sid, text) => {
   for (const line of text.split(String.fromCharCode(10))) {
-    if (line.indexOf('"usage"') < 0) continue;
+    if (!wanted(line)) continue;
     let e; try { e = JSON.parse(line); } catch { continue; }
-    add(d + ":" + sid, Date.parse(e.timestamp) || 0, e.message, e.id);
+    ev(d + ":" + sid, Date.parse(e.timestamp) || 0, e);
   }
 };
 let dirs = []; try { dirs = fs.readdirSync(root); } catch {}
@@ -124,12 +235,15 @@ for (const d of dirs) {
     } finally { try { if (db) db.close(); } catch {} }
     if (rows) {
       usedDb = true;
+      // In conversation order, so a turn's calls are read in sequence (a stable
+      // sort keeps the table's order for events written in the same ms).
+      rows.sort((a, b) => (a.session_id < b.session_id ? -1 : a.session_id > b.session_id ? 1 : (Number(a.created_at) || 0) - (Number(b.created_at) || 0)));
       for (const r of rows) {
         let j = r.event_json;
         if (j == null && r.event_zstd) { try { j = zlib.zstdDecompressSync(Buffer.from(r.event_zstd)).toString("utf8"); } catch { bad++; continue; } }
-        if (!j || j.indexOf('"usage"') < 0) continue;
+        if (!j || !wanted(j)) continue;
         let e; try { e = JSON.parse(j); } catch { continue; }
-        add(d + ":" + r.session_id, Number(r.created_at) || 0, e && e.message, e && e.id);
+        ev(d + ":" + r.session_id, Number(r.created_at) || 0, e);
       }
       for (const a of archives) {
         let text; try { text = a.encoding === "zstd" ? zlib.zstdDecompressSync(Buffer.from(a.archive_blob)).toString("utf8") : Buffer.from(a.archive_blob).toString("utf8"); } catch { bad++; continue; }
@@ -152,6 +266,37 @@ for (const d of dirs) {
 }
 const out = { models: {}, sessions: sessions.size, first: first === Infinity ? 0 : first, last, bad, slots, callSlots, day, lastCtx };
 for (const [k, m] of Object.entries(models)) out.models[k] = { calls: m.calls, input: m.input, output: m.output, cacheRead: m.cacheRead, cacheWrite: m.cacheWrite, maxCtx: m.maxCtx, sessions: m.s.size };
+// The 30-day profile: context size per call as its median and 90th percentile (nearest rank).
+const rank = (c, p) => (c.length ? c[Math.max(0, Math.ceil(p * c.length) - 1)] : 0);
+const wm = {};
+for (const [k, m] of Object.entries(win)) {
+  const c = m.ctx.sort((a, b) => a - b); const { ctx, ...rest } = m;
+  if (m.calls || m.turns || m.err.toolFailed) wm[k] = { ...rest, ctxP50: rank(c, 0.5), ctxP90: rank(c, 0.9) };
+}
+// What each agent says it is for: the first lines of a Purpose (or Role,
+// Mission, "What you do") section of its SOUL.md, else its AGENTS.md.
+const purposes = {};
+const HEAD = /^#{1,3}[ \t]+(?:your[ \t]+|my[ \t]+)?(purpose|role|mission|job|what you do)\b.*$/im;
+for (const d of dirs) {
+  for (const f of ["SOUL.md", "AGENTS.md"]) {
+    let t = ""; try { t = fs.readFileSync(path.join(root, d, "agent", f), "utf8").slice(0, 65536); } catch { continue; }
+    const h = HEAD.exec(t); if (!h) continue;
+    const body = t.slice(h.index + h[0].length).split(/\n#{1,6}[ \t]/)[0].replace(/\s+/g, " ").trim();
+    if (body) { purposes[d] = body.slice(0, 240); break; }
+  }
+}
+// The owner's scheduled tasks (OpenClaw's own upkeep jobs carry a declaration key).
+let crons = null;
+try {
+  const sq = require("node:sqlite"); const sf = path.join(root, "..", "state", "openclaw.sqlite");
+  if (fs.existsSync(sf)) {
+    const sdb = new sq.DatabaseSync(sf, { readOnly: true });
+    try { sdb.exec("PRAGMA busy_timeout = 2000"); crons = sdb.prepare("SELECT enabled, declaration_key FROM cron_jobs").all().filter((j) => j.enabled && !j.declaration_key).length; }
+    finally { sdb.close(); }
+  }
+} catch { crons = null; }
+out.window = { since: W30, models: wm, promptErrors };
+out.purposes = purposes; out.crons = crons;
 process.stdout.write(JSON.stringify(out));
 `;
 
@@ -172,7 +317,8 @@ export async function agentUsage(
     if (opts.strict) throw new Error(`usage read exited ${res.code}: ${res.stderr.slice(-200)}`);
     return EMPTY;
   }
-  let raw: { models?: Record<string, UsageSplit & { calls: number; sessions: number; maxCtx?: number }>; sessions?: number; first?: number; last?: number; slots?: Record<string, number>; callSlots?: Record<string, number>; day?: { calls?: number; tokens?: number }; lastCtx?: number };
+  let raw: { models?: Record<string, UsageSplit & { calls: number; sessions: number; maxCtx?: number }>; sessions?: number; first?: number; last?: number; slots?: Record<string, number>; callSlots?: Record<string, number>; day?: { calls?: number; tokens?: number }; lastCtx?: number;
+    window?: { since?: number; models?: Record<string, WindowModelStats>; promptErrors?: number }; purposes?: Record<string, string>; crons?: number | null };
   try {
     raw = JSON.parse(res.stdout);
     if (!raw || typeof raw.models !== 'object') throw new Error('no usage object');
@@ -203,5 +349,15 @@ export async function agentUsage(
     ...(byModel.some((m) => m.maxContext !== undefined) ? { maxContext: Math.max(...byModel.map((m) => m.maxContext ?? 0)) } : {}),
     recent: Object.entries(raw.slots ?? {}).filter(([k, v]) => !Number.isNaN(Date.parse(k)) && typeof v === 'number').sort(([a], [b]) => a.localeCompare(b)),
     recentCalls: Object.entries(raw.callSlots ?? {}).filter(([k, v]) => !Number.isNaN(Date.parse(k)) && typeof v === 'number').sort(([a], [b]) => a.localeCompare(b)),
+    ...(raw.window && typeof raw.window.models === 'object' ? {
+      profile: {
+        since: Number(raw.window.since) || 0,
+        models: raw.window.models ?? {},
+        promptErrors: Number(raw.window.promptErrors) || 0,
+        purposes: raw.purposes && typeof raw.purposes === 'object' ? raw.purposes : {},
+        crons: typeof raw.crons === 'number' ? raw.crons : null,
+        firstCall: first,
+      },
+    } : {}),
   };
 }

@@ -20,6 +20,7 @@ import { whileBusy } from './busy.js';
 import { notifyAgentChat } from '../channels/notify.js';
 import { autoSnapshot, workspacePath, writeFileInAgent } from './snapshots.js';
 import { addCron, cronTargetFor, listCrons } from './crons.js';
+import { syncModelReviewCron } from './modelReview.js';
 import { clearStaleRuntimePins } from './runtimePins.js';
 import { syncConnections } from './googleConnections.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
@@ -370,6 +371,12 @@ async function runProvisionStepsInner(
         }
       }
       store.setPendingSchedules(agentId, stillPending.length ? stillPending : null);
+    }
+    // The management agent's weekly model review: made once, removed when
+    // HATCHABOT_MODEL_REVIEW=off (modelReview.ts). Best-effort.
+    if (agent.ops) {
+      await syncModelReviewCron({ store, provider, log }, agent, runtimeRef)
+        .catch((err) => log('schedule.model_review_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
     }
 
     // A clone's daily notes and USER.md are on the volume now. Kept as seeds,

@@ -208,6 +208,70 @@ promoting a base image and accounts stay in the app.
 Until you set one up, the older built-in chat remains in that box where a
 Claude source exists.
 
+## Right-size: the model steward
+
+Each agent should run on the **least capable model that does its job well**.
+Your Hatchabot agent looks after that as one of its main jobs, in both
+directions: a cheaper model for an agent that is overserved, a stronger one
+for an agent that struggles. Every change is still a card you Confirm.
+
+**What it reads.** Two tools, both cheap and both yours only (a family member's
+manager sees their own agents and the sources they may use):
+
+- `get_model_scorecard` (`GET /v1/model-scorecard`): one row per agent — what
+  it is for (a Purpose, Role or Mission section of its SOUL.md or AGENTS.md,
+  else its one-line description), awake or asleep, source, model and whether
+  it is set on the agent or follows the source, then the last 30 days: calls,
+  input / output / cache tokens, cache share, context size per call (median
+  and 90th percentile), share of turns that used tools and tools per turn,
+  error counts, scheduled tasks, the same use for a month at API list prices,
+  its share of a Claude plan, and cheaper models on the same source with the
+  monthly saving. `evidence` says whether the current model has enough history
+  to judge (none / thin / ok); `byModel` shows before and after a switch.
+  At most 40 rows (costliest first), rounded, so a review costs few tokens.
+- `get_model_options` (`GET /v1/model-options`): per source, the models it
+  offers with input / output / cache-read prices and one line on what each is
+  good at (prices from Anthropic's pricing page, 2026-10-03; larger models
+  are more reliable at tool use).
+
+**Where the figures come from.** The usage sampler already reads each running
+agent's transcripts every pass; it now keeps a 30-day profile from that same
+read (no extra command in the container). The scorecard is built from those
+stored profiles, so a review runs nothing in any container and **never wakes a
+sleeping agent**: an asleep agent shows its last reading and its age.
+
+**What the error counts are.** Counted from the transcripts, never their text:
+
+| Count | What it is |
+|---|---|
+| `malformedToolCall` | OpenClaw rejected a tool call the model wrote ("Provider completed tool call with malformed JSON arguments", incomplete tool calls) |
+| `failedTurns` / `failed7d` | turns that ended in an error, and failed or truncated turns in the last week |
+| `rateLimited` | refused for a rate limit: the source's limit, not the model's fault |
+| `providerError`, `aborted`, `truncated` | other provider failures; stopped before answering; ran out of output room |
+| `toolFailed` | tool results that came back as errors (a bad argument, or the tool itself failing) |
+| `retried` | failed calls OpenClaw retried within the turn (not counted as failed turns) |
+| `httpFailed8d` | non-429 HTTP failures the gateway log showed (8 days kept) |
+
+They are signals, not verdicts: a tool failing can be the tool's fault, and a
+turn that went wrong without an error (a poor answer) is not counted at all.
+
+**How it decides** (its AGENTS.md section "Model stewardship", kept current on
+every build): match purpose and tool use to the options; prefer no change when
+evidence is thin or the saving small; never move an agent with heavy tool use
+or recent errors to a smaller model without saying so; propose a stronger
+model (or "switch back") when an agent struggles; one `set_model` card per
+agent with a `why` that states the evidence and the saving; on a Claude plan
+the saving is room in the plan, not money.
+
+**The weekly review.** A scheduled task on your Hatchabot agent, "Weekly model
+review", Mondays 09:00, made when the agent is built and listed with its other
+tasks. Its short report goes where the agent already reaches you (its Telegram
+chat if it has one, else its conversation in the app): the proposals it filed,
+the estimated monthly saving, and the agents it left alone and why.
+`HATCHABOT_MODEL_REVIEW=off` in the settings file removes it at the next
+rebuild (it is made once: delete it by hand and it stays deleted until the
+setting goes off and on again).
+
 ## Creating & talking to agents
 
 **Telegram is optional.** Tick **No Telegram** when creating an agent (or
