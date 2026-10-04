@@ -507,12 +507,12 @@ turn is instruction files, and **loops** — the same work repeated without
 progress. It warns you, and proposes the fix as a card you Confirm. Hatchabot
 itself watches for loops between reviews and puts them under **Needs you**.
 
-Why (the 2026-10-04 measurement of this household's 41 running agents, 30
-days): context was 93–98% of a heavy chat agent's bill; those agents carried
+Why (a 30-day measurement of a real household's running agents, October
+2026): context was 93–98% of a heavy chat agent's bill; those agents carried
 200–700K tokens into every call and never compacted (OpenClaw compacts only
 near the model's 1M window); a turn's first call read the cache back 12% of the
 time against 96% inside a turn; a 100,000-token cap was the largest single
-lever (−42% to −60%). And that day a `/compact` sent to Stock Advisor on
+lever (−42% to −60%). And that day a `/compact` sent to one agent on
 Telegram could not summarise its 446K conversation within OpenClaw's 5-minute
 limit for a chat message, so OpenClaw retried it every ~5 minutes for hours —
 spending tokens each time — while Telegram showed nothing.
