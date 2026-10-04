@@ -1780,6 +1780,8 @@ const SCENARIOS = String.raw`(() => {
         ok('its label says so', t.getAttribute('aria-label').includes('Stuck in a loop'));
         const tip = tipText('Stock Watcher');
         ok('the tooltip has the incident and the fix: ' + tip.slice(0, 120), tip.includes(text) && tip.includes('Fix: Have Hatchabot compact it'));
+        if (!v2Recent) v2Recent = new Map();
+        eq('said once, not again as the last line', tipText('Stock Watcher').split(text).length - 1, 1);
         byText('.v2viewbar button', 'Needs you').click(); await sleep(50);
         const sec = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Needs you'));
         ok('a Needs you section', !!sec);

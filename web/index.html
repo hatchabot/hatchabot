@@ -11895,7 +11895,12 @@ function v2ShowTip(el) {
     + (a.botUsername ? `<br>On Telegram as @${esc(a.botUsername)}` : '') // an agent without Telegram says nothing about it (Chris, 2026-10-03)
     + (st.why.length ? `<ul>${st.why.slice(0, 4).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : '')
     + (() => { const line = v2CostLine(a); return line ? `<span class="v2tipcost">${line}</span>` : ''; })()
-    + (() => { const prev = v2PreviewOf(a), at = v2Recent?.get(a.id)?.at; return prev ? `<span class="v2tipprev">${at ? esc(ago(at)) + ' · ' : ''}${esc(prev)}</span>` : ''; })();
+    + (() => {
+      // A needs-you line is already in the list above: don't say it twice (2026-10-04).
+      const prev = v2PreviewOf(a), at = v2Recent?.get(a.id)?.at;
+      if (!prev || (prev.startsWith('needs you: ') && st.why.some((w) => prev.slice(11) === w))) return '';
+      return `<span class="v2tipprev">${at ? esc(ago(at)) + ' · ' : ''}${esc(prev)}</span>`;
+    })();
   tip.hidden = false;
   const r = el.querySelector('.v2ic').getBoundingClientRect();
   const w = tip.offsetWidth;
