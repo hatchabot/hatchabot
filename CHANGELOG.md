@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.119.1] — 2026-10-04
+
+### Fixed
+- **An agent whose machine is asleep or offline says so.** A runner that stopped answering (a laptop) left its agent's tile looking ready, and opening it showed `{"error":"No debug gateway for this agent."}`. The tile now reads "Its machine (Laptop runner) isn't answering — asleep or offline", and its chat opens a plain page saying the same, at once, instead of an error.
+
 ## [2.119.0] — 2026-10-04
 
 ### Added

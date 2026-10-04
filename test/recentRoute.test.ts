@@ -195,5 +195,13 @@ describe('a machine whose agent check hangs (2026-10-04)', () => {
     await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) });
     expect(Date.now() - t1).toBeLessThan(1_000); // skipped, not waited for again
     expect(calls).toBe(before);
+    // Every agent on that machine says its machine isn't answering (here the test world has one machine).
+    const list = (await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) })).json() as Array<{ id: string; hostUnreachable?: boolean; state: string }>;
+    expect(list.find((a) => a.id === 'r-tax')!.hostUnreachable).toBe(true);
+    // Its console answers in words, at once, instead of a JSON error.
+    const ui = await w.f.inject({ method: 'GET', url: '/v1/agents/r-tax/ui/', headers: as(OWNER) });
+    expect(ui.statusCode).toBe(503);
+    expect(ui.headers['content-type']).toMatch(/text\/html/);
+    expect(ui.body).toMatch(/isn(&#39;|&#x27;|')t answering/);
   }, 20_000);
 });

@@ -4858,9 +4858,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         }
         const chan = store.getChannelForAgent(a.id);
         const role = store.accessRole(a.id, ownerIdOf(req));
+        // Its machine missed a question in the last minute (asleep or offline):
+        // the tile says so instead of looking ready (2026-10-04).
+        const unreachable = a.state === 'RUNNING' && (slowHostUntil.get(a.hostId) ?? 0) > Date.now();
         return publicAgent(a, {
           // The machine owner's --all view of someone else's agent: metadata, not where their files live.
           foreign: a.ownerId !== ownerIdOf(req) && !role,
+          ...(unreachable ? { hostUnreachable: true, hostName: store.getHost(a.hostId)?.name } : {}),
           selfRestarts: rebuild?.running.restartCount || undefined,
           // Its memory: the cap it has (its own / class / default), what the
           // container actually runs with, and how it has fared against it.
@@ -6024,12 +6028,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return reply.header('content-type', 'text/javascript; charset=utf-8').header('cache-control', 'no-cache').send(GUEST_VIEW_SCRIPT);
   });
 
+  /** The console of an agent whose machine (a runner) isn't answering: a plain page, not JSON in the frame. */
+  const machineAway = (reply: FastifyReply, agent: Agent) => {
+    const host = store.getHost(agent.hostId)?.name ?? 'its machine';
+    const text = `${agent.name} runs on ${host}, which isn't answering — it may be asleep or offline. Its chat opens again once that machine is back.`;
+    return reply.code(503).header('cache-control', 'no-store').type('text/html; charset=utf-8')
+      .send(`<!doctype html><meta charset="utf-8"><title>${escapeHtml(agent.name)}</title><body style="font:15px system-ui,sans-serif;padding:32px;color:#555;max-width:520px">${escapeHtml(text)}</body>`);
+  };
   app.all<{ Params: { id: string; '*': string } }>('/v1/agents/:id/ui/*', NO_COMPRESS, async (req, reply) => {
     const me = ownerIdOf(req);
     const caller = consoleCaller(me, req.params.id);
     if (!caller) return reply.code(404).send({ error: 'No debug gateway for this agent.' });
+    // A machine already known not to answer: say so in words, without waiting on it.
+    if ((slowHostUntil.get(caller.agent.hostId) ?? 0) > Date.now()) return machineAway(reply, caller.agent);
     const target = await consoleTarget(caller.agent).catch(() => undefined);
-    if (!target) return reply.code(404).send({ error: 'No debug gateway for this agent.' });
+    if (!target) {
+      if (store.getHost(caller.agent.hostId)?.kind !== 'local') return machineAway(reply, caller.agent);
+      return reply.code(404).send({ error: 'No debug gateway for this agent.' });
+    }
     const path = `/${req.params['*'] ?? ''}`;
     const ready = await consoleAccess.ensureReady(target.agent);
     const identity = ready.mode === 'identity' || (ready.mode === 'unavailable' && !!ready.identity);
