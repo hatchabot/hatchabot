@@ -346,6 +346,43 @@ export class Store {
         agent_id TEXT NOT NULL, name TEXT NOT NULL, job_id TEXT, at TEXT NOT NULL,
         PRIMARY KEY (agent_id, name)
       );
+      -- Token health (tokenHealth.ts, docs/features.md "Token steward"): what
+      -- the usage sampler's transcript read said about each agent's
+      -- conversations, cache, scheduled runs, instruction files and loops, as
+      -- it last read it. Read by get_token_health: no container, no wake.
+      CREATE TABLE IF NOT EXISTS agent_token_health (
+        agent_id TEXT PRIMARY KEY, health TEXT NOT NULL, at TEXT NOT NULL
+      );
+      -- Loop lines the usage pass saw in an agent's gateway log (a channel
+      -- message stalled and retried, a compaction that failed): one row per
+      -- line, keyed so a re-read window adds nothing twice; pruned after 8 days.
+      CREATE TABLE IF NOT EXISTS agent_loop_marks (
+        agent_id TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, at TEXT NOT NULL,
+        ms INTEGER, channel TEXT,
+        PRIMARY KEY (agent_id, kind, key, at)
+      );
+      -- Loops Hatchabot's watcher found (tokenWatch.ts): open until the loop
+      -- stops; shown under Needs you, told once on the manager's chat.
+      CREATE TABLE IF NOT EXISTS token_incidents (
+        id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+        kind TEXT NOT NULL, key TEXT NOT NULL,
+        opened_at TEXT NOT NULL, updated_at TEXT NOT NULL, cleared_at TEXT, told_at TEXT,
+        count INTEGER NOT NULL, first_at TEXT, last_at TEXT, text TEXT NOT NULL, fix TEXT
+      );
+      CREATE INDEX IF NOT EXISTS token_incidents_agent ON token_incidents (agent_id, kind, key);
+      -- A per-agent context cap (compaction.ts): the model entry's
+      -- contextTokens Hatchabot writes into the agent's openclaw.json, and
+      -- which model it last wrote it for (so it can take it away again).
+      CREATE TABLE IF NOT EXISTS agent_context_caps (
+        agent_id TEXT PRIMARY KEY, tokens INTEGER, applied_model TEXT, applied_at TEXT, set_at TEXT NOT NULL
+      );
+      -- Compactions and context caps, recorded like model changes: who, how, why, before and after.
+      CREATE TABLE IF NOT EXISTS token_actions (
+        id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, owner_id TEXT NOT NULL, kind TEXT NOT NULL,
+        at TEXT NOT NULL, by TEXT NOT NULL, via TEXT NOT NULL, why TEXT, proposal_id TEXT,
+        detail TEXT, outcome TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS token_actions_owner ON token_actions (owner_id, at);
 
       -- Daily security-posture risk snapshots per owner: the set of active risk
       -- keys, so a run can be diffed against the previous one to flag what newly
@@ -765,6 +802,8 @@ export class Store {
       `ALTER TABLE agent_classes ADD COLUMN swap_allowance TEXT`,
       // "Clear from Needs you": the fingerprint of what was flagged when the owner cleared it.
       `ALTER TABLE agents ADD COLUMN attention_ack TEXT`,
+      // The message a managed task was made with, so a new release's wording reaches it (modelReview.ts).
+      `ALTER TABLE managed_crons ADD COLUMN message_hash TEXT`,
       // Installation-wide default AI source for NEW agents (single-select):
       // preselected in the create form and preferred by importTemplate's
       // silent fallback — the "household default" once per-member profiles
@@ -3241,13 +3280,131 @@ export class Store {
     return this.db.prepare(`DELETE FROM model_changes WHERE at < ?`).run(beforeIso).changes;
   }
 
-  managedCron(agentId: string, name: string): { jobId?: string; at: string } | undefined {
-    const r = this.db.prepare(`SELECT job_id, at FROM managed_crons WHERE agent_id = ? AND name = ?`).get(agentId, name) as { job_id: string | null; at: string } | undefined;
-    return r ? { jobId: r.job_id ?? undefined, at: r.at } : undefined;
+  managedCron(agentId: string, name: string): { jobId?: string; at: string; messageHash?: string } | undefined {
+    const r = this.db.prepare(`SELECT job_id, at, message_hash FROM managed_crons WHERE agent_id = ? AND name = ?`).get(agentId, name) as { job_id: string | null; at: string; message_hash: string | null } | undefined;
+    return r ? { jobId: r.job_id ?? undefined, at: r.at, ...(r.message_hash ? { messageHash: r.message_hash } : {}) } : undefined;
   }
-  setManagedCron(agentId: string, name: string, jobId: string | undefined, at: string): void {
-    this.db.prepare(`INSERT INTO managed_crons (agent_id, name, job_id, at) VALUES (?, ?, ?, ?)
-      ON CONFLICT(agent_id, name) DO UPDATE SET job_id = excluded.job_id, at = excluded.at`).run(agentId, name, jobId ?? null, at);
+  setManagedCron(agentId: string, name: string, jobId: string | undefined, at: string, messageHash?: string): void {
+    this.db.prepare(`INSERT INTO managed_crons (agent_id, name, job_id, at, message_hash) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(agent_id, name) DO UPDATE SET job_id = excluded.job_id, at = excluded.at, message_hash = excluded.message_hash`).run(agentId, name, jobId ?? null, at, messageHash ?? null);
+  }
+
+  // ---- token health, loops and the token ledger (tokenHealth.ts, tokenWatch.ts, compaction.ts) ----
+  setTokenHealth(agentId: string, health: unknown, at: string): void {
+    this.db.prepare(`INSERT INTO agent_token_health (agent_id, health, at) VALUES (?, ?, ?)
+      ON CONFLICT(agent_id) DO UPDATE SET health = excluded.health, at = excluded.at`).run(agentId, JSON.stringify(health), at);
+  }
+  /** The last stored token health per agent, with when it was read. */
+  tokenHealths(agentIds: string[]): Map<string, { health: unknown; at: string }> {
+    const out = new Map<string, { health: unknown; at: string }>();
+    if (!agentIds.length) return out;
+    const rows = this.db.prepare(`SELECT agent_id, health, at FROM agent_token_health WHERE agent_id IN (SELECT value FROM json_each(?))`)
+      .all(JSON.stringify(agentIds)) as Array<{ agent_id: string; health: string; at: string }>;
+    for (const r of rows) { try { out.set(r.agent_id, { health: JSON.parse(r.health), at: r.at }); } catch { /* a bad row reads as none */ } }
+    return out;
+  }
+  /** Loop lines from a log read; the same line read twice is kept once. Returns how many were new. */
+  addLoopMarks(agentId: string, marks: Array<{ kind: string; key: string; at: string; ms?: number; channel?: string }>): number {
+    const ins = this.db.prepare(`INSERT OR IGNORE INTO agent_loop_marks (agent_id, kind, key, at, ms, channel) VALUES (?, ?, ?, ?, ?, ?)`);
+    let n = 0;
+    this.db.transaction(() => { for (const m of marks) n += ins.run(agentId, m.kind, m.key, m.at, m.ms ?? null, m.channel ?? null).changes; })();
+    return n;
+  }
+  loopMarks(agentIds: string[], sinceIso: string): Array<{ agentId: string; kind: string; key: string; at: string; ms?: number; channel?: string }> {
+    if (!agentIds.length) return [];
+    return (this.db.prepare(`SELECT agent_id, kind, key, at, ms, channel FROM agent_loop_marks WHERE agent_id IN (SELECT value FROM json_each(?)) AND at >= ? ORDER BY at`)
+      .all(JSON.stringify(agentIds), sinceIso) as Array<{ agent_id: string; kind: string; key: string; at: string; ms: number | null; channel: string | null }>)
+      .map((r) => ({ agentId: r.agent_id, kind: r.kind, key: r.key, at: r.at, ...(r.ms != null ? { ms: r.ms } : {}), ...(r.channel ? { channel: r.channel } : {}) }));
+  }
+  pruneLoopMarks(beforeIso: string): number {
+    return this.db.prepare(`DELETE FROM agent_loop_marks WHERE at < ?`).run(beforeIso).changes;
+  }
+  /** Consults between agents (Hatchabot brokers them and records each on the target's timeline). */
+  consultEvents(agentIds: string[], sinceIso: string): Array<{ to: string; from: string; at: string }> {
+    if (!agentIds.length) return [];
+    const rows = this.db.prepare(`SELECT agent_id, at, detail FROM agent_events WHERE event = 'a2a.consult' AND at >= ? AND agent_id IN (SELECT value FROM json_each(?)) ORDER BY at`)
+      .all(sinceIso, JSON.stringify(agentIds)) as Array<{ agent_id: string; at: string; detail: string | null }>;
+    const out: Array<{ to: string; from: string; at: string }> = [];
+    for (const r of rows) {
+      const d = r.detail ? safeParse(r.detail) as { from?: unknown } | undefined : undefined;
+      if (d && typeof d.from === 'string') out.push({ to: r.agent_id, from: d.from, at: r.at });
+    }
+    return out;
+  }
+  openTokenIncident(i: TokenIncidentRow): void {
+    this.db.prepare(`INSERT INTO token_incidents (id, agent_id, owner_id, kind, key, opened_at, updated_at, cleared_at, told_at, count, first_at, last_at, text, fix)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)`)
+      .run(i.id, i.agentId, i.ownerId, i.kind, i.key, i.openedAt, i.updatedAt, i.count, i.firstAt ?? null, i.lastAt ?? null, i.text, i.fix ?? null);
+  }
+  updateTokenIncident(id: string, p: { updatedAt: string; count: number; firstAt?: string; lastAt?: string; text: string; fix?: string }): void {
+    this.db.prepare(`UPDATE token_incidents SET updated_at = ?, count = ?, first_at = ?, last_at = ?, text = ?, fix = ? WHERE id = ?`)
+      .run(p.updatedAt, p.count, p.firstAt ?? null, p.lastAt ?? null, p.text, p.fix ?? null, id);
+  }
+  clearTokenIncident(id: string, at: string): void {
+    this.db.prepare(`UPDATE token_incidents SET cleared_at = ? WHERE id = ? AND cleared_at IS NULL`).run(at, id);
+  }
+  reopenTokenIncident(id: string): void {
+    this.db.prepare(`UPDATE token_incidents SET cleared_at = NULL WHERE id = ?`).run(id);
+  }
+  markTokenIncidentTold(id: string, at: string): void {
+    this.db.prepare(`UPDATE token_incidents SET told_at = ? WHERE id = ?`).run(at, id);
+  }
+  /** Newest first. open = only those not cleared; sinceIso = still open, or opened or cleared since. */
+  listTokenIncidents(opts: { ownerId?: string; agentIds?: string[]; open?: boolean; sinceIso?: string; limit?: number } = {}): TokenIncidentRow[] {
+    const where: string[] = []; const args: unknown[] = [];
+    if (opts.ownerId) { where.push('owner_id = ?'); args.push(opts.ownerId); }
+    if (opts.agentIds) { where.push('agent_id IN (SELECT value FROM json_each(?))'); args.push(JSON.stringify(opts.agentIds)); }
+    if (opts.open) where.push('cleared_at IS NULL');
+    if (opts.sinceIso) { where.push('(cleared_at IS NULL OR cleared_at >= ? OR opened_at >= ?)'); args.push(opts.sinceIso, opts.sinceIso); }
+    const rows = this.db.prepare(`SELECT * FROM token_incidents ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY opened_at DESC LIMIT ?`)
+      .all(...args, Math.min(Math.max(1, opts.limit ?? 200), 2000)) as any[];
+    return rows.map((r) => ({
+      id: r.id, agentId: r.agent_id, ownerId: r.owner_id, kind: r.kind, key: r.key, openedAt: r.opened_at, updatedAt: r.updated_at,
+      ...(r.cleared_at ? { clearedAt: r.cleared_at } : {}), ...(r.told_at ? { toldAt: r.told_at } : {}),
+      count: r.count, ...(r.first_at ? { firstAt: r.first_at } : {}), ...(r.last_at ? { lastAt: r.last_at } : {}), text: r.text, ...(r.fix ? { fix: r.fix } : {}),
+    }));
+  }
+  /** Incidents told to this owner since a time (the watcher's hourly cap). */
+  tokenIncidentsToldSince(ownerId: string, sinceIso: string): number {
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM token_incidents WHERE owner_id = ? AND told_at >= ?`).get(ownerId, sinceIso) as { n: number }).n;
+  }
+  pruneTokenIncidents(beforeIso: string): number {
+    return this.db.prepare(`DELETE FROM token_incidents WHERE cleared_at IS NOT NULL AND cleared_at < ?`).run(beforeIso).changes;
+  }
+  getContextCap(agentId: string): { tokens?: number; appliedModel?: string; appliedAt?: string; setAt: string } | undefined {
+    const r = this.db.prepare(`SELECT tokens, applied_model, applied_at, set_at FROM agent_context_caps WHERE agent_id = ?`).get(agentId) as
+      { tokens: number | null; applied_model: string | null; applied_at: string | null; set_at: string } | undefined;
+    return r ? { ...(r.tokens != null ? { tokens: r.tokens } : {}), ...(r.applied_model ? { appliedModel: r.applied_model } : {}), ...(r.applied_at ? { appliedAt: r.applied_at } : {}), setAt: r.set_at } : undefined;
+  }
+  /** The owner's choice: a cap in tokens, or null for none (the row stays while a written cap is still to be taken away). */
+  setContextCap(agentId: string, tokens: number | null, at: string): void {
+    this.db.prepare(`INSERT INTO agent_context_caps (agent_id, tokens, set_at) VALUES (?, ?, ?)
+      ON CONFLICT(agent_id) DO UPDATE SET tokens = excluded.tokens, set_at = excluded.set_at`).run(agentId, tokens, at);
+    this.db.prepare(`DELETE FROM agent_context_caps WHERE agent_id = ? AND tokens IS NULL AND applied_model IS NULL`).run(agentId);
+  }
+  /** What Hatchabot last wrote into the agent's config: the model the cap is on, or null when it has none there. */
+  markContextCapApplied(agentId: string, model: string | null, at: string): void {
+    this.db.prepare(`UPDATE agent_context_caps SET applied_model = ?, applied_at = ? WHERE agent_id = ?`).run(model, at, agentId);
+    this.db.prepare(`DELETE FROM agent_context_caps WHERE agent_id = ? AND tokens IS NULL AND applied_model IS NULL`).run(agentId);
+  }
+  addTokenAction(a: TokenActionRow): void {
+    this.db.prepare(`INSERT INTO token_actions (id, agent_id, owner_id, kind, at, by, via, why, proposal_id, detail, outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(a.id, a.agentId, a.ownerId, a.kind, a.at, a.by, a.via, a.why ?? null, a.proposalId ?? null, JSON.stringify(a.detail ?? {}), a.outcome);
+  }
+  updateTokenAction(id: string, p: { detail: Record<string, unknown>; outcome: string }): void {
+    this.db.prepare(`UPDATE token_actions SET detail = ?, outcome = ? WHERE id = ?`).run(JSON.stringify(p.detail), p.outcome, id);
+  }
+  listTokenActions(opts: { ownerId?: string; agentId?: string; limit?: number } = {}): TokenActionRow[] {
+    const where: string[] = []; const args: unknown[] = [];
+    if (opts.ownerId) { where.push('owner_id = ?'); args.push(opts.ownerId); }
+    if (opts.agentId) { where.push('agent_id = ?'); args.push(opts.agentId); }
+    const rows = this.db.prepare(`SELECT * FROM token_actions ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY at DESC LIMIT ?`)
+      .all(...args, Math.min(Math.max(1, opts.limit ?? 50), 1000)) as any[];
+    return rows.map((r) => ({
+      id: r.id, agentId: r.agent_id, ownerId: r.owner_id, kind: r.kind, at: r.at, by: r.by, via: r.via,
+      ...(r.why ? { why: r.why } : {}), ...(r.proposal_id ? { proposalId: r.proposal_id } : {}),
+      detail: ((r.detail ? safeParse(r.detail) : undefined) ?? {}) as Record<string, unknown>, outcome: r.outcome,
+    }));
   }
   deleteManagedCron(agentId: string, name: string): void {
     this.db.prepare(`DELETE FROM managed_crons WHERE agent_id = ? AND name = ?`).run(agentId, name);
@@ -4679,6 +4836,45 @@ export function normalizeHandle(v: string | undefined | null): string | undefine
  * card, the guard's card, or the start-up backfill. `source` is the kind of
  * change: model, default-model, class, source-switch, source-default.
  */
+/** A loop Hatchabot's watcher found on an agent (tokenWatch.ts). */
+export interface TokenIncidentRow {
+  id: string;
+  agentId: string;
+  ownerId: string;
+  /** channel-retry | compaction-failing | task-failing | consult-ping-pong | tool-loop | model-failing */
+  kind: string;
+  /** What it is about within the kind: the channel event, the task id, the peer pair. */
+  key: string;
+  openedAt: string;
+  updatedAt: string;
+  clearedAt?: string;
+  toldAt?: string;
+  count: number;
+  firstAt?: string;
+  lastAt?: string;
+  /** What the owner reads under Needs you ("Stuck: Telegram message retried 12 times since 08:19 — …"). */
+  text: string;
+  /** The suggested fix. */
+  fix?: string;
+}
+
+/** A compaction or a context cap, recorded like a model change (compaction.ts). */
+export interface TokenActionRow {
+  id: string;
+  agentId: string;
+  ownerId: string;
+  kind: 'compaction' | 'context-cap';
+  at: string;
+  by: 'owner' | 'agent' | 'hatchabot';
+  via: 'app' | 'api' | 'proposal' | 'guard' | 'backfill';
+  why?: string;
+  proposalId?: string;
+  /** compaction: mode, lines, session, before/after context; context-cap: from, to, model, before figures. */
+  detail: Record<string, unknown>;
+  /** running | ok | failed | aborted | applied | pending-rebuild | not-applied */
+  outcome: string;
+}
+
 export interface ModelChangeRow {
   id: string;
   agentId: string;

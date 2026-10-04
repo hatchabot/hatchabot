@@ -2,6 +2,24 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.120.0] — 2026-10-04
+
+### Added
+- **The token steward** (docs/features.md → Token steward). The management agent now supervises how agents use AI, not only their models: conversation size, the prompt cache, cost by what started it, scheduled tasks, instruction files, thinking, and **loops**. OPS_SOUL names it a primary purpose; the managed AGENTS.md section "Model stewardship" became **"Token stewardship"** (replaced in place at each manager's next build, never both), loops first, budgets as advice only.
+- **`get_token_health`** (`GET /v1/token-health`): per agent of the caller's, context per call (median/p90/max), the main conversation now, compactions, its context cap, cache hit on a turn's first call (within 5 minutes) vs inside a turn, 30 days at API prices split chat / follow-ups / scheduled, scheduled tasks (runs a day, cost a run, failures, re-runs), instruction files injected each turn (OpenClaw's 20K-a-file / 60K caps, truncated files), thinking level, loop signals, open incidents and flags. Read on the existing usage pass (the same transcript read, plus file sizes, openclaw.json, OpenClaw's run receipts and ingress queue — counts and times only); stored; no exec, no wake.
+- **Loop signals** with thresholds as constants (`THRESHOLDS`, tested): a chat-app message retried ≥ 3 times after OpenClaw's handler limit (gateway log lines and the ingress queue's attempts), ≥ 3 failed compactions in 6 h, a scheduled task failing 3 runs in a row or re-run within 15 min of errors 3 times a day, two agents consulting each other ≥ 6 times both ways within 10-minute gaps (Hatchabot's own consult records), a turn with ≥ 80 tool calls or stopped by OpenClaw's loop guard, ≥ 5 model calls failing in a row (rate limits counted apart).
+- **Hatchabot's loop watcher**: after each usage pass (no new timer) a loop that is still going opens an incident — a Needs-you line on the agent ("Stuck: Telegram message retried 12 times since 08:19 — compacting a 446K conversation takes longer than the 5-minute limit") with the fix, the tile marked 🔁 — told once on the manager's Telegram (at most 3 an hour per owner); it clears itself when the loop stops. A consult loop is one incident for the pair: both agents named, shown on both tiles, told once, cleared once. `get_incidents` (`GET /v1/token-incidents`) for the management agent.
+- **`compact_agent`** card (`POST /v1/agents/:id/compact`): Hatchabot runs `openclaw sessions compact <main> --agent <slug> --timeout 1800000 --json` in the container itself, summarise (background, result to the owner's chat) or keep the last N lines (`--max-lines`, seconds). With a channel retry looping, the fast path runs at once and a summary starts right after the next stall; an abort by the retry is reported with the way through.
+- **`set_context_cap`** card (`PUT /v1/agents/:id/context-cap`): a per-agent cap stored by Hatchabot and written as the model entry's `contextTokens` under `models.providers.<provider>` — live on a running agent, on the next pass after it wakes, at every rebuild, and after a model change — with `--expect-current-json` so a hand edit is never overwritten.
+- Compactions and caps are recorded like model changes (`tokenActions` in `get_model_changes`), with who, how, why, before and after.
+- **"Weekly token review"**: the weekly review covers token use and opens with the savings line. A "Weekly model review" task made by an earlier release is found by Hatchabot's record or its old name and renamed and reworded in place (one `cron edit` patch: schedule, delivery and on/off kept; never a second task); one deleted by hand stays deleted.
+- **The manager's tile**: a small gold star in the middle of the icon's left edge (the one spot no other mark reaches) and a stronger gold edge (`--ops-ring`, per theme); tooltip "Hatchabot — supervises your agents' AI use".
+
+### Changed
+- **Every agent gets 30 minutes, not 5, for a Telegram message to get going** (`OPENCLAW_TELEGRAM_SPOOLED_HANDLER_TIMEOUT_MS=1800000` in the container env; `HATCHABOT_CHANNEL_HANDLER_TIMEOUT_MS`, `off` = OpenClaw's 5 minutes): a `/compact` of a large conversation was retried every ~5 minutes for hours (2026-10-04). Applies at each agent's next rebuild; an agent's own Environment value wins. Slack and Discord read no such setting in OpenClaw 2026.9.6.
+- There is no `stop_stuck_retry`: OpenClaw offers no supported way to cancel a pending chat-app event (`channels dead-letters` lists and resubmits failed ones only), and Hatchabot does not edit its queue.
+
+
 ## [2.119.1] — 2026-10-04
 
 ### Fixed

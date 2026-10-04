@@ -358,6 +358,8 @@ describe('buildRuntimeSpec', () => {
       // for itself survive a rebuild AND stay runnable by name.
       PATH: expect.stringContaining('/home/node/.local/bin'),
       NPM_CONFIG_PREFIX: '/home/node/.npm-global',
+      // How long a chat-app message may take to get going (channelTimeout.ts): not a credential.
+      OPENCLAW_TELEGRAM_SPOOLED_HANDLER_TIMEOUT_MS: '1800000',
     });
     expect(spec.hostMounts).toEqual([]); // no ~/.claude
     expect(spec.workspace.configPatch.provider).toBe('ollama');

@@ -29,6 +29,8 @@
     --bg: #14161a; --panel: #1e2127; --panel-2: #262a31; --line: #32363e;
     --text: #e8e6e1; --dim: #9a978f; --accent: #e8a33d; --accent-ink: #14161a;
     --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88; --info: #6aa7e8; --accent-text: #f0b458;
+    /* The Hatchabot agent's tile: a stronger edge in the one gold (its star is the gold itself). */
+    --ops-ring: color-mix(in srgb, #e8a33d 82%, #14161a);
     --radius: 12px;
     color-scheme: dark;
   }
@@ -36,6 +38,7 @@
     --bg: #14161a; --panel: #1e2127; --panel-2: #262a31; --line: #32363e;
     --text: #e8e6e1; --dim: #9a978f; --accent: #e8a33d; --accent-ink: #14161a;
     --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88; --info: #6aa7e8; --accent-text: #f0b458;
+    --ops-ring: color-mix(in srgb, #e8a33d 82%, #14161a);
     color-scheme: dark;
   }
   :root[data-theme="light"] {
@@ -44,6 +47,7 @@
        by, the New tile); gold TEXT on white uses --accent-text, darker, to read. */
     --text: #1a1c20; --dim: #6b7079; --accent: #e8a33d; --accent-ink: #14161a;
     --ok: #2f9e6a; --warn: #b5791a; --bad: #cc4b3e; --off: #9aa0a8; --info: #2f72c4; --accent-text: #8a5a0f;
+    --ops-ring: color-mix(in srgb, #e8a33d 70%, #000);
     color-scheme: light;
   }
   * { box-sizing: border-box; }
@@ -675,6 +679,24 @@
   .v2group .v2cost { border-color:var(--panel) }
   .v2cost.v2cost-hi { background:color-mix(in srgb, var(--accent) 17%, var(--panel)); border-color:color-mix(in srgb, var(--accent) 45%, var(--line)); color:var(--accent-text) }
   .v2tipcost { display:block; margin-top:6px }
+  /* The Hatchabot agent's tile (the manager, first and fixed): a stronger
+     edge in the gold (--ops-ring, darker than the accent on white, a deep
+     gold on dark) and a small gold star in the middle of its LEFT edge — the
+     one spot no other mark can reach: unread sits on the top-left corner and
+     quiet-for / shared on the bottom-left one (each under 20px of a 62px
+     edge), cost on the top edge's middle, needs-you on the top-right corner,
+     and the chat-app marks grow leftwards along the bottom from the right
+     corner. So the star stays clear with every other mark present. */
+  .v2ic.v2ic-ops { border:2px solid var(--ops-ring); box-shadow:0 0 0 1px color-mix(in srgb, var(--ops-ring) 30%, transparent) }
+  .v2star { position:absolute; left:-9px; top:50%; transform:translateY(-50%); width:19px; height:19px; border-radius:50%;
+            background:var(--panel); border:2px solid var(--bg); box-shadow:0 0 0 1px var(--ops-ring); display:grid; place-items:center; z-index:2 }
+  .v2group .v2star { border-color:var(--panel) }
+  .v2star svg { display:block; width:12px; height:12px }
+  .v2sbar .v2star { width:15px; height:15px; left:-7px }
+  .v2sbar .v2star svg { width:9px; height:9px }
+  /* The tooltip is the page's text colour (dark on the light theme, light on
+     the dark one): the gold mixed toward the page background reads on both. */
+  .v2tipops { display:block; margin-top:4px; color:color-mix(in srgb, var(--accent) 72%, var(--bg)); font-weight:600 }
   /* Settings → AI sources → Model prices. */
   .mp-wrap { overflow-x:auto; margin-top:4px }
   table.mp-tbl { border-collapse:collapse; width:100%; font-size:13px }
@@ -11038,6 +11060,9 @@ function agentAttention(a) {
   // Measured once a day by the security sweep (2026-09-30); keyed on the size
   // in whole GB so a cleared warning comes back only if it keeps growing.
   if (a.diskOver) out.push({ key: 'disk:' + Math.floor(a.diskOver.bytes / 1e9), icon: '💾', why: `it uses ${(a.diskOver.bytes / 1e9).toFixed(1)} GB of storage (the warning is at ${(a.diskOver.warnBytes / 1e9).toFixed(0)} GB) — ask it to clear old files, or look under Files` });
+  // A loop Hatchabot's watcher found (tokenWatch.ts): what repeats, since when, and the fix.
+  if ((a.stuck || []).length) out.push({ key: 'stuck:' + a.stuck.map(x => x.id).sort().join(','), icon: '🔁', stuck: true,
+    why: a.stuck.map(x => x.text + (x.fix ? `. Fix: ${x.fix}` : '')).join(' · ') });
   if (a.selfRestarts) out.push({ key: 'restart:' + a.selfRestarts, icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Status → Resources shows its memory against the cap` });
   return out;
 }
@@ -11466,6 +11491,7 @@ function v2Status(a) {
   else if (a.state === 'FAILED') st = { cls: 'blocked', glyph: '!', label: 'Failed' };
   else if (a.pendingAction) st = { cls: 'waiting', glyph: '✋', label: 'Waiting on you' };
   else if (waiting && v2Mine(a)) st = { cls: 'waiting', glyph: '👤', label: 'Someone wants to join' };
+  else if ((a.stuck || []).length && v2Mine(a) && a.state === 'RUNNING') st = { cls: 'blocked', glyph: '🔁', label: 'Stuck in a loop — using tokens' };
   else if (limited) st = { cls: 'blocked', glyph: '⏳', label: 'AI source rate-limited' };
   else if (a.state === 'STOPPED' && a.hibernatedAt) st = { cls: 'stopped', glyph: '💤', label: 'Asleep — wakes when someone writes to it, or when you open it' };
   else if (a.state === 'STOPPED') st = { cls: 'stopped', glyph: '⏸', label: 'Stopped' };
@@ -11531,11 +11557,16 @@ function v2IdleFor(a) {
   if (!(h >= 1)) return '';
   return h < 24 ? `${Math.floor(h)}h` : h < 24 * 7 ? `${Math.floor(h / 24)}d` : h < 24 * 365 ? `${Math.floor(h / (24 * 7))}w` : '1y+';
 }
+/** What the Hatchabot agent's star says (its tooltip, and the tile's label). */
+const V2_OPS_TIP = 'Hatchabot — supervises your agents\u2019 AI use';
+const V2_STAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.6l2.9 6 6.5.8-4.8 4.5 1.2 6.5L12 17.2l-5.8 3.2 1.2-6.5L2.6 9.4l6.5-.8z" style="fill:var(--accent);stroke:var(--ops-ring)" stroke-width="1.2" stroke-linejoin="round"/></svg>';
 function v2IconHTML(a, st, opts = {}) {
   const color = /^#[0-9a-f]{6}$/i.test(a.iconColor || '') ? a.iconColor : v2ColorFor(a.name);
   const face = a.icon ? esc(a.icon) : esc((a.name.trim()[0] || '?').toUpperCase());
   const idle = v2IdleFor(a);
-  return `<span class="v2ic${a.icon ? '' : ' mono'}"><span class="v2tint" style="background:${color}"></span><span class="v2em">${face}</span>`
+  return `<span class="v2ic${a.icon ? '' : ' mono'}${a.ops ? ' v2ic-ops' : ''}"><span class="v2tint" style="background:${color}"></span><span class="v2em">${face}</span>`
+    // The Hatchabot agent: a gold star in the middle of the left edge (see .v2star).
+    + (a.ops ? `<span class="v2star" title="${esc(V2_OPS_TIP)}" aria-hidden="true">${V2_STAR_SVG}</span>` : '')
     // Before the corner marks: they paint over it if a wide one ever meets them.
     + (opts.cost ? v2CostChip(a, !!st.glyph) : '')
     + (idle ? `<span class="v2idle" title="Quiet for ${esc(idle)} — last said something ${esc(ago(a.lastActiveAt))}">${esc(idle)}</span>` : '')
@@ -11831,7 +11862,7 @@ function renderV2() {
           const prev = v2PreviewOf(a);
           const cost = v2CostChip(a) ? `, about ${v2Money(v2CostOf(a).weekly)} a week at API prices` : '';
           return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) || a.ops ? ' data-v2fixed="1"' : ''}
-            aria-label="${esc(a.name)} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}${esc(cost)}${prev ? `. ${esc(prev)}` : ''}">${v2IconHTML(a, st, { cost: true })}<span class="v2name">${esc(a.name)}</span></button>`;
+            aria-label="${esc(a.name)}${a.ops ? ` (${esc(V2_OPS_TIP)})` : ''} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}${esc(cost)}${prev ? `. ${esc(prev)}` : ''}">${v2IconHTML(a, st, { cost: true })}<span class="v2name">${esc(a.name)}</span></button>`;
         }).join('') || (s.key === 'archived' ? '<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept.</span>' : '')}
       </div>
     </section>`).join('');
@@ -11861,11 +11892,16 @@ function v2ShowTip(el) {
   const a = v2Find(el.dataset.v2id); if (!a) return;
   const st = v2Status(a);
   const tip = $('v2Tip');
-  tip.innerHTML = `<b>${esc(a.name)} · ${esc(st.label)}</b>${a.persona ? esc(a.persona.slice(0, 140)) : ''}${!v2Mine(a) ? '<br>Shared with you.' : ''}`
+  tip.innerHTML = `<b>${esc(a.name)} · ${esc(st.label)}</b>${a.ops ? `<span class="v2tipops">★ ${esc(V2_OPS_TIP)}</span>` : ''}${a.persona ? esc(a.persona.slice(0, 140)) : ''}${!v2Mine(a) ? '<br>Shared with you.' : ''}`
     + (a.botUsername ? `<br>On Telegram as @${esc(a.botUsername)}` : '') // an agent without Telegram says nothing about it (Chris, 2026-10-03)
     + (st.why.length ? `<ul>${st.why.slice(0, 4).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : '')
     + (() => { const line = v2CostLine(a); return line ? `<span class="v2tipcost">${line}</span>` : ''; })()
-    + (() => { const prev = v2PreviewOf(a), at = v2Recent?.get(a.id)?.at; return prev ? `<span class="v2tipprev">${at ? esc(ago(at)) + ' · ' : ''}${esc(prev)}</span>` : ''; })();
+    + (() => {
+      // A needs-you line is already in the list above: don't say it twice (2026-10-04).
+      const prev = v2PreviewOf(a), at = v2Recent?.get(a.id)?.at;
+      if (!prev || (prev.startsWith('needs you: ') && st.why.some((w) => prev.slice(11) === w))) return '';
+      return `<span class="v2tipprev">${at ? esc(ago(at)) + ' · ' : ''}${esc(prev)}</span>`;
+    })();
   tip.hidden = false;
   const r = el.querySelector('.v2ic').getBoundingClientRect();
   const w = tip.offsetWidth;

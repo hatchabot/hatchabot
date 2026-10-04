@@ -899,7 +899,7 @@ export function summarize(tool: string, r: Resolved): string {
 export type Risk = 'routine' | 'disruptive' | 'careful';
 const CAREFUL = new Set(['build_image', 'rebuild_image', 'remove_image', 'build_base_candidate', 'try_base_candidate', 'delete_base_image',
   'pin_image', 'set_peers', 'update_definition', 'create_agent', 'restore_snapshot', 'remove_member', 'approve_member']);
-const DISRUPTIVE = new Set(['stop_agent', 'rebuild_agent', 'set_source', 'set_model', 'set_class', 'archive_agent', 'restore_agent',
+const DISRUPTIVE = new Set(['stop_agent', 'rebuild_agent', 'set_source', 'set_model', 'set_class', 'archive_agent', 'restore_agent', 'compact_agent', 'set_context_cap',
   'remove_telegram', 'add_telegram', 'remove_channel', 'end_base_trial', 'clone_agent', 'remove_cron', 'add_cron']);
 export function riskOf(tool: string): Risk {
   return CAREFUL.has(tool) ? 'careful' : DISRUPTIVE.has(tool) ? 'disruptive' : 'routine';

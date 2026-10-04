@@ -105,6 +105,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('agents', 'HATCHABOT_A2A_TIMEOUT_MS', '120000', 'How long a consult may take.'),
   s('agents', 'HATCHABOT_ASK_TIMEOUT_MS', '280000', 'How long an "ask" from the app may take.'),
   s('agents', 'HATCHABOT_WEB_CHAT_PER_HOUR', '60', 'Messages one person may send one agent per hour from the web chat.'),
+  s('agents', 'HATCHABOT_CHANNEL_HANDLER_TIMEOUT_MS', '1800000', 'How long a Telegram message may take to get going (a long /compact, say) before OpenClaw gives up on that try and retries it; OpenClaw\'s own is 5 minutes, and it retries until 8 tries and 24 hours. Applies at each agent\'s next rebuild; an agent\'s own Environment value wins. off = OpenClaw\'s 5 minutes. (Slack and Discord have no such setting.)'),
   s('agents', 'HATCHABOT_CONSOLE_IDENTITY', null, 'off gives agents rebuilt from now on the token console again (no OpenClaw chat for web-chat guests). Set it, and rebuild, before going back to an older release.'),
   s('agents', 'HATCHABOT_ALLOW_MACHINE_LOGIN', null, '1 allows NEW Claude sources that mount this machine\'s own ~/.claude into agents (read-write). Off since v2.39.0; use a setup token instead.'),
 

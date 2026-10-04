@@ -333,28 +333,30 @@ describe('model options', () => {
 // ---------------------------------------------------------------------------
 
 describe('the management agent as model steward', () => {
-  it('names model steward as a purpose, and keeps a managed "Model stewardship" section with the procedure', () => {
-    expect(OPS_SOUL).toMatch(/## Model steward\n[\s\S]*least capable model that\ndoes its job WELL/);
-    expect(OPS_MANAGED_HEADINGS).toContain('## Model stewardship');
-    const section = opsSection('## Model stewardship')!;
+  it('names token steward (the model included) as a purpose, and keeps a managed "Token stewardship" section with the model procedure', () => {
+    expect(OPS_SOUL).toMatch(/## Token steward\n[\s\S]*least\s+capable\s+model\s+that\s+does\s+its\s+job\s+WELL/);
+    expect(OPS_MANAGED_HEADINGS).toContain('## Token stewardship');
+    expect(OPS_MANAGED_HEADINGS).not.toContain('## Model stewardship');
+    const section = opsSection('## Token stewardship')!;
     for (const must of ['get_model_scorecard', 'get_model_options', 'Prefer no change', 'thin', 'heavy tool use', 'recent errors', 'set_model', 'why', 'Never wake a sleeping agent', 'only for the owner', 'STRONGER']) {
       expect(section, must).toContain(must);
     }
     // One section, not two headings' worth.
     expect(section.match(/^## /gm)).toHaveLength(1);
-    expect(OPS_AGENTS_MD.match(/^## Model stewardship$/gm)).toHaveLength(1);
+    expect(OPS_AGENTS_MD.match(/^## Token stewardship$/gm)).toHaveLength(1);
+    expect(OPS_AGENTS_MD.match(/^## Model stewardship$/gm)).toBeNull();
   });
 
   it('the section lands once on an older AGENTS.md and is replaced, not duplicated, on the next build', () => {
     const old = '# Operating notes\n\n## Who you act for\nOld text.\n\n## Memory\nOld memory note.\n';
-    const section = opsSection('## Model stewardship')!;
-    const once = replaceSection(old, '## Model stewardship', section);
-    expect(once.match(/## Model stewardship/g)).toHaveLength(1);
-    const stale = once.replace('Prefer no change.', 'Change everything.');
-    const twice = replaceSection(stale, '## Model stewardship', section);
-    expect(twice.match(/## Model stewardship/g)).toHaveLength(1);
-    expect(twice).toContain('Prefer no change.');
-    expect(twice).not.toContain('Change everything.');
+    const section = opsSection('## Token stewardship')!;
+    const once = replaceSection(old, '## Token stewardship', section);
+    expect(once.match(/## Token stewardship/g)).toHaveLength(1);
+    const stale = once.replace('Prefer no change:', 'Change everything:');
+    const twice = replaceSection(stale, '## Token stewardship', section);
+    expect(twice.match(/## Token stewardship/g)).toHaveLength(1);
+    expect(twice).toContain('Prefer no change:');
+    expect(twice).not.toContain('Change everything:');
     expect(twice).toContain('Old memory note.');
   });
 
@@ -369,7 +371,7 @@ describe('the management agent as model steward', () => {
   });
 
   it('the weekly review message asks for a short digest and no waking', () => {
-    expect(OPS_MODEL_REVIEW_MESSAGE).toMatch(/Model stewardship/);
+    expect(OPS_MODEL_REVIEW_MESSAGE).toMatch(/Token stewardship/);
     expect(OPS_MODEL_REVIEW_MESSAGE).toMatch(/one line each at most/);
     expect(OPS_MODEL_REVIEW_MESSAGE).toMatch(/Do not wake/);
   });
