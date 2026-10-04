@@ -2,7 +2,7 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## Unreleased
+## [2.118.0] — 2026-10-04
 
 ### Added
 - **Right-size, step 2: a model-change ledger** (docs/features.md → Right-size). Every change of an agent's model is recorded, whichever path made it: a `set_model` card (the management agent's or the owner's chat), the agent sheet's picker or bulk action (`via: app`), the API or CLI (a bearer token, `via: api`, with an optional `why`), a source's new default (`apply-default-model` for the switched agents, the plain source edit for every follower, any account's on a shared source), a class (assigned or edited) and a source switch (the agent's own, adopt-agents, migrate). Each row: agent, from, to, when, by (owner / agent / hatchabot), via, why, and the OLD model's figures at that moment from the stored profile (turns and calls per day, tools per turn, failed-turn / malformed-tool-call / tool-failure rates, context per call, a month at API prices). A week on, or once the new model has 20 turns, the NEW model's figures are read the same way and the change gets a verdict: kept-ok, worse, or not-enough-data (re-checked for 30 days). Stored data only: nothing is run in a container and no agent is woken.
