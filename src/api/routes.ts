@@ -4871,7 +4871,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Loops Hatchabot's watcher found (tokenWatch.ts): a "Needs you" line each, for the owner.
     const stuckBy = new Map<string, Array<{ id: string; kind: string; text: string; fix?: string; since?: string }>>();
     for (const i of store.listTokenIncidents({ ownerId: ownerIdOf(req), open: true })) {
-      stuckBy.set(i.agentId, [...(stuckBy.get(i.agentId) ?? []), { id: i.id, kind: i.kind, text: i.text, ...(i.fix ? { fix: i.fix } : {}), ...(i.firstAt ? { since: i.firstAt } : {}) }]);
+      // A consult loop is the pair's: on both tiles.
+      const on = i.kind === 'consult-ping-pong' ? i.key.split('+') : [i.agentId];
+      for (const id of on) stuckBy.set(id, [...(stuckBy.get(id) ?? []), { id: i.id, kind: i.kind, text: i.text, ...(i.fix ? { fix: i.fix } : {}), ...(i.firstAt ? { since: i.firstAt } : {}) }]);
     }
     return Promise.all(
       agents.map(async (a) => {

@@ -239,7 +239,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'schedule.apply_failed': 'tasks could not be written',
   'schedule.model_review_created': 'its weekly model review was scheduled',
   'schedule.model_review_removed': 'its weekly model review was removed',
-  'schedule.model_review_updated': 'its weekly review now covers token use as well as models',
+  'schedule.model_review_updated': 'its weekly review is now the Weekly token review (token use as well as models)',
   'schedule.model_review_failed': 'its weekly model review could not be scheduled',
   'snapshot.restored': 'memory files restored from a snapshot',
   'snapshot.safety_failed': 'the pre-restore safety snapshot failed',

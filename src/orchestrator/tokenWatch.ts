@@ -1,7 +1,7 @@
 import type { Agent } from '../domain/types.js';
 import type { Store, TokenIncidentRow } from '../store/store.js';
 import type { TokenHealthRaw } from './usage.js';
-import { incidentWords, loopSignals, THRESHOLDS, type LoopSignal } from './tokenHealth.js';
+import { consultPair, incidentWords, loopSignals, THRESHOLDS, type LoopSignal } from './tokenHealth.js';
 
 /**
  * Hatchabot's own loop watcher (docs/features.md, "Token steward"). After each
@@ -60,20 +60,27 @@ export async function runTokenWatch(deps: WatchDeps, now = Date.now()): Promise<
   for (const a of agents) {
     const health = store.tokenHealths([a.id]).get(a.id)?.health as TokenHealthRaw | undefined;
     const main = health?.main?.[a.slug];
-    for (const s of activeLoops(store, a, now, health)) {
-      const words = incidentWords(s, { conversationK: main ? Math.round(main.ctx / 1000) : undefined, agentName: (id) => nameOf.get(id) ?? 'another agent', now });
+    for (const sig of activeLoops(store, a, now, health)) {
+      // A consult loop belongs to the PAIR: one incident (on the first of the
+      // two, shown on both tiles), one message, cleared once — whichever of
+      // the two agents' readings sees it.
+      const pair = sig.kind === 'consult-ping-pong' ? consultPair(a.id, sig.key) : undefined;
+      const s: LoopSignal = pair ? { ...sig, key: pair.join('+') } : sig;
+      const owner = pair ? pair[0] : a.id;
+      const words = incidentWords(s, { conversationK: main && !pair ? Math.round(main.ctx / 1000) : undefined, agentName: (id) => nameOf.get(id) ?? 'another agent', now });
       // The same loop: same agent, kind and key, still open (its first time may move as more history is read).
-      const cur = open.find((i) => i.agentId === a.id && i.kind === s.kind && i.key === s.key);
+      const cur = open.find((i) => i.agentId === owner && i.kind === s.kind && i.key === s.key);
       if (cur) {
         seen.add(cur.id);
         store.updateTokenIncident(cur.id, { updatedAt: nowIso, count: s.count, firstAt: s.first, lastAt: s.last, text: words.text, fix: words.fix });
         continue;
       }
-      const row: TokenIncidentRow = { id: incidentId(a.id, s), agentId: a.id, ownerId: a.ownerId, kind: s.kind, key: s.key, openedAt: nowIso, updatedAt: nowIso,
+      if (seen.has(incidentId(owner, s))) continue; // the pair's other half, this same pass
+      const row: TokenIncidentRow = { id: incidentId(owner, s), agentId: owner, ownerId: a.ownerId, kind: s.kind, key: s.key, openedAt: nowIso, updatedAt: nowIso,
         count: s.count, firstAt: s.first, lastAt: s.last, text: words.text, fix: words.fix };
       // The same loop (same start) cleared on a quiet pass and going again:
       // opened again, not told again. A loop that starts afresh is a new one.
-      if (store.listTokenIncidents({ agentIds: [a.id], limit: 50 }).some((i) => i.id === row.id)) {
+      if (store.listTokenIncidents({ agentIds: [owner], limit: 50 }).some((i) => i.id === row.id)) {
         store.reopenTokenIncident(row.id);
         store.updateTokenIncident(row.id, { updatedAt: nowIso, count: s.count, firstAt: s.first, lastAt: s.last, text: words.text, fix: words.fix });
         seen.add(row.id);
@@ -97,7 +104,8 @@ export async function runTokenWatch(deps: WatchDeps, now = Date.now()): Promise<
     const agent = agents.find((a) => a.id === row.agentId);
     if (!agent) continue;
     if (store.tokenIncidentsToldSince(row.ownerId, new Date(now - 3_600_000).toISOString()) >= TELL_PER_HOUR) continue;
-    const told = await deps.tell(row.ownerId, agent, incidentMessage(agent.name, row)).catch(() => false);
+    // A consult loop's text already names both agents.
+    const told = await deps.tell(row.ownerId, agent, incidentMessage(row.kind === 'consult-ping-pong' ? undefined : agent.name, row)).catch(() => false);
     // Marked even when it reached nobody: the Needs-you line is there either
     // way, and a message that could not be delivered is not retried every pass.
     store.markTokenIncidentTold(row.id, nowIso);
@@ -108,6 +116,6 @@ export async function runTokenWatch(deps: WatchDeps, now = Date.now()): Promise<
 }
 
 /** The chat message: what, where to look, and the fix. */
-export function incidentMessage(agentName: string, i: Pick<TokenIncidentRow, 'text' | 'fix'>): string {
-  return `⚠️ Hatchabot: "${agentName}" — ${i.text}.${i.fix ? `\nFix: ${i.fix}` : ''}\nIt is under Needs you; ask me to fix it.`;
+export function incidentMessage(agentName: string | undefined, i: Pick<TokenIncidentRow, 'text' | 'fix'>): string {
+  return `⚠️ Hatchabot: ${agentName ? `"${agentName}" — ` : ''}${i.text}.${i.fix ? `\nFix: ${i.fix}` : ''}\nIt is under Needs you; ask me to fix it.`;
 }

@@ -210,7 +210,7 @@ export function loopSignals(input: {
     if (best.length && best[best.length - 1]!.at >= since) {
       const last = best[best.length - 1]!.at;
       out.push({ kind: 'consult-ping-pong', key: other, count: best.length, first: iso(best[0]!.at), last: iso(last), active: now - last <= T.activeMs,
-        detail: { with: other, minutes: Math.max(1, Math.round((last - best[0]!.at) / 60_000)) } });
+        detail: { with: other, self: input.agentId, minutes: Math.max(1, Math.round((last - best[0]!.at) / 60_000)) } });
     }
   }
 
@@ -236,6 +236,15 @@ export function loopSignals(input: {
       active: now - last <= T.activeMs, detail: { streaks: list.length, longest: worst[2] } });
   }
   return out;
+}
+
+/** The two agents of a consult loop in a stable order: one incident (and key) for the pair. */
+export function consultPair(a: string, b: string): [string, string] {
+  return a <= b ? [a, b] : [b, a];
+}
+/** Whether an incident shows on this agent: its own, or a consult loop it is half of (key "x+y"). */
+export function incidentConcerns(i: Pick<TokenIncidentRow, 'agentId' | 'kind' | 'key'>, agentId: string): boolean {
+  return i.agentId === agentId || (i.kind === 'consult-ping-pong' && i.key.split('+').includes(agentId));
 }
 
 // ---------------------------------------------------------------------------
@@ -282,9 +291,11 @@ export function incidentWords(s: LoopSignal, ctx: { conversationK?: number; agen
         fix: 'Look at the task and its last error (its Schedules tab, or ask Hatchabot); turn it off until it is fixed.',
       };
     case 'consult-ping-pong': {
-      const other = ctx.agentName?.(String(d.with)) ?? 'another agent';
+      // One incident for the pair: both named, in a stable order.
+      const [x, y] = consultPair(String(d.self ?? ''), String(d.with ?? ''));
+      const name = (id: string) => (id && ctx.agentName?.(id)) || 'another agent';
       return {
-        text: `Consult loop: it and "${other}" asked each other ${s.count} times in ${String(d.minutes)} minutes`,
+        text: `Consult loop: "${name(x)}" and "${name(y)}" asked each other ${s.count} times in ${String(d.minutes)} minutes`,
         fix: `Take one off the other's peers, or tell them when to stop asking. Hatchabot refuses a consult while one is in flight between them; this is them starting new ones.`,
       };
     }
@@ -430,7 +441,7 @@ export function tokenHealthRow(a: Agent, profile: AIProfile | undefined, stored:
     row.contextCap = { ...(ctx.cap.tokens ? { tokens: ctx.cap.tokens, compactsAtK: kOf(ctx.cap.tokens - Math.min(20_000, ctx.cap.tokens / 4)) } : {}),
       applied: !!ctx.cap.tokens && !!ctx.cap.appliedModel, ...(ctx.cap.appliedModel ? { model: ctx.cap.appliedModel } : {}) };
   }
-  row.incidents = ctx.incidents.filter((i) => i.agentId === a.id && !i.clearedAt).map((i) => ({ id: i.id, kind: i.kind, text: i.text, ...(i.fix ? { fix: i.fix } : {}), openedAt: i.openedAt, count: i.count }));
+  row.incidents = ctx.incidents.filter((i) => incidentConcerns(i, a.id) && !i.clearedAt).map((i) => ({ id: i.id, kind: i.kind, text: i.text, ...(i.fix ? { fix: i.fix } : {}), openedAt: i.openedAt, count: i.count }));
   if (h) {
     const mainNow = h.main?.[a.slug];
     row.conversation = {

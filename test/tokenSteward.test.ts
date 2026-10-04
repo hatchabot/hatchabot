@@ -17,7 +17,8 @@ import { channelHandlerTimeoutMs, channelTimeoutEnv, CHANNEL_HANDLER_TIMEOUT_DEF
 import { compactAgent, compactArgv, nextProviderEntry, parseCompactResult, syncContextCap } from '../src/orchestrator/compaction.js';
 import { buildRuntimeSpec, provisionAgent, syncDataSourceDocs } from '../src/orchestrator/provision.js';
 import { OPS_AGENTS_MD, OPS_RENAMED_HEADINGS, OPS_SOUL, opsSection } from '../src/ops/opsAgent.js';
-import { MODEL_REVIEW_NAME, reviewMessageHash, syncModelReviewCron } from '../src/orchestrator/modelReview.js';
+import { LEGACY_REVIEW_NAME, MODEL_REVIEW_NAME, reviewMessageHash, syncModelReviewCron } from '../src/orchestrator/modelReview.js';
+import { OPS_MODEL_REVIEW_MESSAGE } from '../src/ops/opsAgent.js';
 import { MANIFEST, toolDef } from '../src/mgmt/tools.js';
 import { REST_BY_NAME } from '../src/mgmt/restTools.js';
 import { riskOf } from '../src/mgmt/broker.js';
@@ -724,26 +725,12 @@ describe('the management agent as token steward', () => {
     }
   });
 
-  it('the weekly review covers it and opens with the savings line; a task made by an earlier release is reworded once', async () => {
+  it('the weekly review covers it and opens with the savings line', async () => {
     const { OPS_MODEL_REVIEW_MESSAGE } = await import('../src/ops/opsAgent.js');
+    expect(MODEL_REVIEW_NAME).toBe('Weekly token review');
     expect(OPS_MODEL_REVIEW_MESSAGE).toMatch(/get_incidents, get_token_health/);
     expect(OPS_MODEL_REVIEW_MESSAGE).toMatch(/first the savings line from get_model_changes/);
     expect(OPS_MODEL_REVIEW_MESSAGE).toMatch(/compact_agent, set_context_cap, set_model/);
-    const { store, provider } = await world();
-    store.setAgentOps('a1', true);
-    const agent = store.getAgent('a1')!;
-    store.setManagedCron('a1', MODEL_REVIEW_NAME, 'job-old', iso(Date.now())); // made before v2.120: no wording recorded
-    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'weekly')).toBe('updated');
-    expect(provider.execLog.at(-1)).toEqual(['cron', 'edit', 'job-old', '--message', OPS_MODEL_REVIEW_MESSAGE]);
-    expect(store.managedCron('a1', MODEL_REVIEW_NAME)?.messageHash).toBe(reviewMessageHash());
-    const n = provider.execLog.length;
-    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'weekly')).toBe('kept');
-    expect(provider.execLog.length).toBe(n);
-    // Deleted by hand: not argued with.
-    store.setManagedCron('a1', MODEL_REVIEW_NAME, 'job-gone', iso(Date.now()));
-    provider.execResponses.set('cron edit', { code: 1, stdout: '', stderr: 'Job not found: job-gone' });
-    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'weekly')).toBe('kept');
-    expect(store.managedCron('a1', MODEL_REVIEW_NAME)?.messageHash).toBe(reviewMessageHash());
   });
 });
 
@@ -786,5 +773,132 @@ describe('the chat-app handler limit', () => {
       (store as any).db.prepare('DELETE FROM agent_env').run();
       expect((await buildRuntimeSpec(deps, agent.id)).env.OPENCLAW_TELEGRAM_SPOOLED_HANDLER_TIMEOUT_MS).toBeUndefined();
     } finally { delete process.env.HATCHABOT_CHANNEL_HANDLER_TIMEOUT_MS; }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// "Weekly model review" becomes "Weekly token review", in place
+// ---------------------------------------------------------------------------
+
+describe('the weekly review task is renamed in place', () => {
+  async function opsWorld() {
+    const { store, provider } = await world();
+    store.setAgentOps('a1', true);
+    const agent = store.getAgent('a1')!;
+    // The mock's cron store, with a task made by an earlier release (schedule, delivery, off).
+    const jobs: Array<Record<string, unknown>> = [];
+    const orig = provider.exec.bind(provider);
+    provider.exec = async (ref, argv, opts) => {
+      const r = await orig(ref, argv, opts);
+      if (argv[0] === 'cron' && argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs }), stderr: '' };
+      if (argv[0] === 'cron' && argv[1] === 'add') { jobs.push({ id: `job-${jobs.length + 1}`, name: argv[argv.indexOf('--name') + 1], enabled: true, payload: {}, schedule: {} }); return { code: 0, stdout: JSON.stringify({ id: `job-${jobs.length}` }), stderr: '' }; }
+      if (argv[0] === 'cron' && argv[1] === 'edit') {
+        const j = jobs.find((x) => x.id === argv[2]);
+        if (!j) return { code: 1, stdout: '', stderr: `Job not found: ${argv[2]}` };
+        if (argv.includes('--name')) j.name = argv[argv.indexOf('--name') + 1];
+        if (argv.includes('--message')) j.payload = { kind: 'agentTurn', message: argv[argv.indexOf('--message') + 1] };
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (argv[0] === 'cron' && argv[1] === 'rm') { const i = jobs.findIndex((x) => x.id === argv[2]); if (i >= 0) jobs.splice(i, 1); return { code: 0, stdout: '', stderr: '' }; }
+      return r;
+    };
+    const old = { id: 'job-old', name: LEGACY_REVIEW_NAME, enabled: false, payload: { kind: 'agentTurn', message: 'old words' }, schedule: { kind: 'cron', expr: '0 9 * * 1', tz: 'America/Toronto' }, delivery: { mode: 'announce', channel: 'telegram', to: '555' } };
+    return { store, provider, agent, jobs, old };
+  }
+  const edits = (provider: MockProvider) => provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit');
+  const adds = (provider: MockProvider) => provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'add');
+
+  it('found by its managed record under the old name: renamed and reworded with one patch, schedule, delivery and on/off kept, never a second task', async () => {
+    const { store, provider, agent, jobs, old } = await opsWorld();
+    jobs.push({ ...old });
+    store.setManagedCron('a1', LEGACY_REVIEW_NAME, 'job-old', '2026-10-03T00:00:00Z');
+    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'weekly')).toBe('updated');
+    expect(edits(provider)).toEqual([['cron', 'edit', 'job-old', '--name', MODEL_REVIEW_NAME, '--message', OPS_MODEL_REVIEW_MESSAGE]]);
+    expect(adds(provider)).toEqual([]);
+    expect(jobs).toEqual([{ ...old, name: MODEL_REVIEW_NAME, payload: { kind: 'agentTurn', message: OPS_MODEL_REVIEW_MESSAGE } }]);
+    expect(store.managedCron('a1', LEGACY_REVIEW_NAME)).toBeUndefined();
+    expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toMatchObject({ jobId: 'job-old', messageHash: reviewMessageHash() });
+    // The next build: nothing to do, nothing run.
+    const n = provider.execLog.length;
+    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'weekly')).toBe('kept');
+    expect(provider.execLog.length).toBe(n);
+  });
+
+  it('found by its old name when Hatchabot has no record of it: adopted and renamed in place', async () => {
+    const { store, provider, agent, jobs, old } = await opsWorld();
+    jobs.push({ ...old });
+    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'weekly')).toBe('present');
+    expect(adds(provider)).toEqual([]);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({ id: 'job-old', name: MODEL_REVIEW_NAME, enabled: false, schedule: old.schedule, delivery: old.delivery });
+    expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toMatchObject({ jobId: 'job-old', messageHash: reviewMessageHash() });
+  });
+
+  it('deleted by hand stays deleted: the record moves to the new name, nothing is made again', async () => {
+    const { store, provider, agent, jobs } = await opsWorld();
+    store.setManagedCron('a1', LEGACY_REVIEW_NAME, 'job-old', '2026-10-03T00:00:00Z');
+    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'weekly')).toBe('kept');
+    expect(adds(provider)).toEqual([]);
+    expect(jobs).toEqual([]);
+    expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toMatchObject({ jobId: 'job-old', messageHash: reviewMessageHash() });
+    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'weekly')).toBe('kept');
+    expect(adds(provider)).toEqual([]);
+  });
+
+  it('a new agent gets "Weekly token review"; off removes a task under either name', async () => {
+    const { store, provider, agent, jobs, old } = await opsWorld();
+    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'weekly')).toBe('created');
+    expect(jobs.map((j) => j.name)).toEqual([MODEL_REVIEW_NAME]);
+    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'off')).toBe('removed');
+    expect(jobs).toEqual([]);
+    jobs.push({ ...old });
+    store.setManagedCron('a1', LEGACY_REVIEW_NAME, 'job-old', '2026-10-03T00:00:00Z');
+    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'off')).toBe('removed');
+    expect(jobs).toEqual([]);
+    expect(store.managedCron('a1', LEGACY_REVIEW_NAME)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A consult loop is one incident for the pair
+// ---------------------------------------------------------------------------
+
+describe('a consult loop between two agents', () => {
+  it('is ONE incident naming both, shown on both tiles, told once, cleared once', async () => {
+    const { store, f } = await world();
+    const now = Date.now();
+    // Kitchen and Stock asked each other 8 times, a minute apart, ending 2 minutes ago.
+    for (let i = 0; i < 8; i++) {
+      const [to, from] = i % 2 ? ['a1', 'a2'] : ['a2', 'a1'];
+      store.recordEvent(to, 'a2a.consult', { from, fromName: 'x', text: 'made-up' });
+    }
+    const rows = (store as any).db.prepare(`SELECT id FROM agent_events WHERE event = 'a2a.consult' ORDER BY id`).all() as Array<{ id: number }>;
+    rows.forEach((r, i) => (store as any).db.prepare('UPDATE agent_events SET at = ? WHERE id = ?').run(iso(now - (10 - i) * MIN), r.id));
+    const told: string[] = [];
+    const tell = async (_o: string, _a: unknown, text: string) => { told.push(text); return true; };
+    await runTokenWatch({ store, tell }, now);
+    const open = store.listTokenIncidents({ open: true });
+    expect(open).toHaveLength(1);
+    expect(open[0]).toMatchObject({ kind: 'consult-ping-pong', key: 'a1+a2', agentId: 'a1', count: 8 });
+    expect(open[0]!.text).toMatch(/^Consult loop: "(Stock|Kitchen)" and "(Stock|Kitchen)" asked each other 8 times in 7 minutes$/);
+    expect(open[0]!.text).toContain('"Stock"');
+    expect(open[0]!.text).toContain('"Kitchen"');
+    expect(told).toHaveLength(1);
+    expect(told[0]).toMatch(/^⚠️ Hatchabot: Consult loop: /);
+    // On both tiles, as the same incident.
+    const listed = (await f.inject({ method: 'GET', url: '/v1/agents', headers: H })).json();
+    expect(listed.find((a: any) => a.id === 'a1').stuck.map((x: any) => x.id)).toEqual([open[0]!.id]);
+    expect(listed.find((a: any) => a.id === 'a2').stuck.map((x: any) => x.id)).toEqual([open[0]!.id]);
+    expect(buildTokenHealth(store, OWNER).rows.every((r) => r.incidents.map((i) => i.id).join() === open[0]!.id)).toBe(true);
+    // Another pass: still one, still told once.
+    await runTokenWatch({ store, tell }, now + 5 * MIN);
+    expect(store.listTokenIncidents({ open: true })).toHaveLength(1);
+    expect(told).toHaveLength(1);
+    // Quiet for longer than activeMs: cleared, once, off both tiles.
+    await runTokenWatch({ store, tell }, now + T.activeMs + 10 * MIN);
+    expect(store.listTokenIncidents({ open: true })).toHaveLength(0);
+    expect(store.listTokenIncidents({ ownerId: OWNER })).toHaveLength(1);
+    const after = (await f.inject({ method: 'GET', url: '/v1/agents', headers: H })).json();
+    expect(after.filter((a: any) => a.stuck)).toEqual([]);
   });
 });

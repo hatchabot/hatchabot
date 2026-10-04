@@ -264,8 +264,8 @@ model (or "switch back") when an agent struggles; one `set_model` card per
 agent with a `why` that states the evidence and the saving; on a Claude plan
 the saving is room in the plan, not money.
 
-**The weekly review.** A scheduled task on your Hatchabot agent, "Weekly model
-review", Mondays 09:00, made when the agent is built and listed with its other
+**The weekly review.** A scheduled task on your Hatchabot agent, "Weekly token
+review" ("Weekly model review" until v2.120, renamed in place), Mondays 09:00, made when the agent is built and listed with its other
 tasks. Its short report goes where the agent already reaches you (its Telegram
 chat if it has one, else its conversation in the app): the Right-size line
 ("Right-size: ≈ $X this month", below) when there is a saving, the proposals
@@ -426,7 +426,9 @@ still going: a line under Needs you on the agent ("Stuck: Telegram message
 retried 12 times since 08:19 — compacting a 446K conversation takes longer than
 the 5-minute limit"), with the fix, and the tile marked 🔁 "Stuck in a loop".
 It is told once on the manager's Telegram (else the agent's own), at most 3
-incidents an hour per owner (the rest when the hour allows). When the loop
+incidents an hour per owner (the rest when the hour allows). A consult loop
+belongs to the pair: one incident naming both agents, shown on both tiles,
+told once and cleared once. When the loop
 stops, the incident clears itself; a loop that starts afresh is a new one.
 Deterministic: no model is asked, and nothing is changed on any agent.
 
@@ -497,9 +499,12 @@ OpenClaw's, not the agent's: a smaller conversation shrinks what each break
 costs); scheduled tasks; the model (the Right-size procedure); instruction
 files (suggest trimming, never rewrite another agent's files unasked);
 thinking (mention only); budgets as advice only — Hatchabot does not enforce
-one. The weekly review ("Weekly model review", Mondays 09:00) now covers all
-of it and opens with the savings line; a task made by an earlier release is
-given the new wording once, at the manager's next build.
+one. The weekly review, **"Weekly token review"** (Mondays 09:00), covers all
+of it and opens with the savings line. A "Weekly model review" task made by an
+earlier release is found (by Hatchabot's record of it, or by its old name) and
+renamed and reworded in place at the manager's next build — one patch, so its
+schedule, delivery and on/off stay as they were, and never a second task; one
+you deleted by hand stays deleted.
 
 ### The manager's tile
 
