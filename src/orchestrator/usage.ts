@@ -86,7 +86,7 @@ export interface TokenHealthRaw {
   files: Record<string, Record<string, number>>;
   compactions: { n: number; last: number; before: number };
   /** Scheduled tasks' runs in the 30 days (OpenClaw's own upkeep jobs left out); rr = [start, ms since the error before it]. */
-  jobs: Array<{ id: string; name?: string; runs: number; ok: number; error: number; interrupted: number; skipped: number; streak: number; first: number; last: number; lastStatus: string; rr: Array<[number, number]> }> | null;
+  jobs: Array<{ id: string; name?: string; off?: boolean; runs: number; ok: number; error: number; interrupted: number; skipped: number; streak: number; first: number; last: number; lastStatus: string; rr: Array<[number, number]> }> | null;
   /** Channel messages the gateway tried more than once (its ingress queue). */
   ingress: Array<{ ch: string; acct: string; id: string; st: string; att: number; first: number; last: number; why: string; fr: string }> | null;
   /** Turns with many tool calls: [end, tool calls]. */
@@ -462,11 +462,12 @@ try {
       sdb.exec("PRAGMA busy_timeout = 2000");
       try {
         const names = {}; const system = new Set();
-        for (const j of sdb.prepare("SELECT job_id, name, declaration_key FROM cron_jobs").all()) { if (j.declaration_key) system.add(j.job_id); else names[j.job_id] = String(j.name || "").slice(0, 60); }
+        const off = new Set();
+        for (const j of sdb.prepare("SELECT job_id, name, declaration_key, enabled FROM cron_jobs").all()) { if (Number(j.enabled) === 0) off.add(j.job_id); if (j.declaration_key) system.add(j.job_id); else names[j.job_id] = String(j.name || "").slice(0, 60); }
         const byJob = {};
         for (const r of sdb.prepare("SELECT job_id, status, started_at_ms, finished_at_ms FROM cron_run_receipts WHERE started_at_ms >= ? ORDER BY started_at_ms").all(W30)) {
           if (system.has(r.job_id)) continue;
-          const j = byJob[r.job_id] ||= { id: r.job_id, name: names[r.job_id], runs: 0, ok: 0, error: 0, interrupted: 0, skipped: 0, streak: 0, first: 0, last: 0, lastStatus: "", rr: [], prevErrAt: 0 };
+          const j = byJob[r.job_id] ||= { id: r.job_id, name: names[r.job_id], off: off.has(r.job_id) || undefined, runs: 0, ok: 0, error: 0, interrupted: 0, skipped: 0, streak: 0, first: 0, last: 0, lastStatus: "", rr: [], prevErrAt: 0 };
           const at = Number(r.started_at_ms) || 0;
           j.runs++; if (!j.first) j.first = at; j.last = at; j.lastStatus = r.status;
           if (j.prevErrAt && j.rr.length < 50) j.rr.push([at, at - j.prevErrAt]);

@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.120.1] — 2026-10-04
+
+### Fixed
+- **A scheduled task that failed long ago, or that you switched off, is no longer reported as a loop.** The loop watcher counted a task's failure streak as still going for 7 days after its last run, even when the task was paused (Meeting Scheduler's watchdog, switched off a week ago, came up as "re-ran 3 times after errors"). A failing task now counts as a live loop only while it is switched on and has failed in the last 2 days; the old incident clears itself at the next check.
+- **Clearing an agent from Needs you now removes the flag.** It used to move to a "🔕 Cleared" group and keep its 🔁 or ⚑ mark on the tile. Now a cleared agent goes back with the fine ones and its tile looks normal, until something new happens to it.
+
 ## [2.120.0] — 2026-10-04
 
 ### Added

@@ -278,6 +278,10 @@ describe('loop signals', () => {
     expect(loopSignals({ agentId: 'a1', health: health({ jobs: [job({ rr: rr.map(([a]) => [a, T.taskRerunWindowMs + 1] as [number, number]) })] }), marks: [], now })).toEqual([]);
     // Fixed since (the last run was fine): history, not an incident.
     expect(loopSignals({ agentId: 'a1', health: health({ jobs: [job({ streak: 3, lastStatus: 'ok' })] }), marks: [], now })[0]).toMatchObject({ active: false });
+    // Switched off by the owner: history, not a live loop (2026-10-04, Meeting Scheduler's paused watchdog).
+    expect(loopSignals({ agentId: 'a1', health: health({ jobs: [job({ streak: 11, lastStatus: 'error', off: true })] }), marks: [], now })[0]).toMatchObject({ active: false });
+    // Last failed more than taskActiveMs ago: history too.
+    expect(loopSignals({ agentId: 'a1', health: health({ jobs: [job({ streak: 11, lastStatus: 'error', last: now - T.taskActiveMs - HOUR })] }), marks: [], now })[0]).toMatchObject({ active: false });
   });
 
   it('(d) two agents consulting each other back and forth, from Hatchabot\'s own records', () => {

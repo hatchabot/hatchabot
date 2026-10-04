@@ -11491,12 +11491,12 @@ function v2Status(a) {
   else if (a.state === 'FAILED') st = { cls: 'blocked', glyph: '!', label: 'Failed' };
   else if (a.pendingAction) st = { cls: 'waiting', glyph: '✋', label: 'Waiting on you' };
   else if (waiting && v2Mine(a)) st = { cls: 'waiting', glyph: '👤', label: 'Someone wants to join' };
-  else if ((a.stuck || []).length && v2Mine(a) && a.state === 'RUNNING') st = { cls: 'blocked', glyph: '🔁', label: 'Stuck in a loop — using tokens' };
+  else if ((a.stuck || []).length && v2Mine(a) && a.state === 'RUNNING' && !attentionCleared(a)) st = { cls: 'blocked', glyph: '🔁', label: 'Stuck in a loop — using tokens' };
   else if (limited) st = { cls: 'blocked', glyph: '⏳', label: 'AI source rate-limited' };
   else if (a.state === 'STOPPED' && a.hibernatedAt) st = { cls: 'stopped', glyph: '💤', label: 'Asleep — wakes when someone writes to it, or when you open it' };
   else if (a.state === 'STOPPED') st = { cls: 'stopped', glyph: '⏸', label: 'Stopped' };
   else if (a.hostUnreachable) st = { cls: 'stopped', glyph: '⚠', label: `Its machine${a.hostName ? ` (${a.hostName})` : ''} isn't answering — asleep or offline` };
-  else if (why.length && v2Mine(a)) st = { cls: 'note', glyph: '⚑', label: 'Worth a look' };
+  else if (why.length && v2Mine(a) && !attentionCleared(a)) st = { cls: 'note', glyph: '⚑', label: 'Worth a look' };
   else st = { cls: 'ok', glyph: '', label: a.state === 'RUNNING' ? 'Ready' : a.state };
   return { ...st, why };
 }
@@ -11662,7 +11662,8 @@ function v2ViewKey(a, view = v2View) {
     case 'attention': {
       if ((pairings[a.id]?.length ?? 0) > 0) return ['n:2', '🔑 Knocking'];
       if (v2Unread(a)) return ['n:3', '💬 To read'];
-      if (attentionCleared(a)) return ['n:8', '🔕 Cleared'];
+      // Cleared means gone (Chris, 2026-10-04): back with the fine ones until something new happens.
+      if (attentionCleared(a)) return ['n:9', 'Fine'];
       if (a.state === 'FAILED' || a.opsDrift) return ['n:1', '❌ Failed or changed by hand'];
       if (a.rebuild) return ['n:4', a.rebuild.level === 'required' ? '🔄 To rebuild (required)' : '🔄 To rebuild'];
       if (agentAttention(a).length) return ['n:5', '⚠ Needs you'];

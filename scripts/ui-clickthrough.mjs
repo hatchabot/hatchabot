@@ -1794,6 +1794,11 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/agents'];
         await withAgents((x) => x.name === 'Stock Watcher' ? { ...x, stuck: [{ id: 'ti_2', kind: 'task-failing', text: 'Scheduled task "Prices" failed 3 runs in a row' }] } : undefined);
         ok('a new incident is a new key', attentionFingerprint(agents.find((x) => x.name === 'Stock Watcher')).includes('stuck:ti_2'));
+        // Cleared by the owner: the flag is gone — not a lingering "Cleared" group, no 🔁 on the tile (2026-10-04).
+        { const x = agents.find((y) => y.name === 'Stock Watcher'); x.attentionAck = attentionFingerprint(x); renderV2(); await sleep(30);
+          ok('cleared: no 🔁 on its tile', !tile('Stock Watcher').classList.contains('v2st-blocked'));
+          ok('cleared: no "Cleared" group', ![...document.querySelectorAll('#v2groups .v2ghead h3')].some((h) => h.textContent.includes('Cleared')));
+          x.attentionAck = undefined; }
         // Gone: off Needs you and back to normal.
         delete window.__override['/v1/agents']; await refresh(false);
         ok('back to normal', !tile('Stock Watcher').classList.contains('v2st-blocked'));

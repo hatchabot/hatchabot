@@ -77,6 +77,8 @@ export const THRESHOLDS = {
   activeMs: 6 * HOUR,
   /** How far back the report lists loop signals. */
   lookbackMs: 7 * DAY,
+  /** A failing scheduled task counts as a live loop for this long after its last failed run. */
+  taskActiveMs: 2 * DAY,
   /** Lines kept by the fast compaction (`--max-lines`) unless asked otherwise. */
   keepLines: 200,
 } as const;
@@ -184,7 +186,9 @@ export function loopSignals(input: {
     if (!failing && !rerunning) continue;
     const lastBad = j.lastStatus === 'error' || j.lastStatus === 'interrupted';
     out.push({ kind: 'task-failing', key: j.id, count: Math.max(j.streak, reruns.length), first: iso(rerunning ? reruns[0]![0] : j.first), last: iso(j.last),
-      active: lastBad && now - j.last <= T.lookbackMs,
+      // Still going only while it's switched on and failed lately: a task the owner
+      // paused, or one that last failed days ago, is history, not a loop (2026-10-04).
+      active: lastBad && !j.off && now - j.last <= T.taskActiveMs,
       detail: { task: j.name ?? j.id, streak: j.streak, reruns: reruns.length, failed: j.error + j.interrupted, runs: j.runs } });
   }
 
