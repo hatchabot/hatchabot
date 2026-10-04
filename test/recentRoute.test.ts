@@ -64,7 +64,7 @@ async function world(opts: { guestNewest?: boolean } = {}) {
   };
   /** The first look reads; the capture lands a moment later (it never holds up the answer). */
   const settle = async (who: string) => { await recent(who); await new Promise((r) => setTimeout(r, 30)); };
-  return { f, store, recent, settle, execShell, exec, start, execOnVolume };
+  return { f, store, recent, settle, execShell, exec, start, execOnVolume, provider };
 }
 
 describe('GET /v1/recent', () => {
@@ -173,5 +173,27 @@ describe('a machine that does not answer (2026-10-04)', () => {
     await new Promise((res) => setTimeout(res, 30));
     const again = (await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) })).json() as Array<{ id: string; lastActiveAt?: string }>;
     expect(again.find((a) => a.id === 'r-tax')!.lastActiveAt).toBeTruthy();
+  }, 20_000);
+});
+
+describe('a machine whose agent check hangs (2026-10-04)', () => {
+  it('the list answers within a few seconds and skips that machine for a minute', async () => {
+    const w = await world();
+    const realInfo = w.provider.info.bind(w.provider);
+    let calls = 0;
+    vi.spyOn(w.provider, 'info').mockImplementation(async (ref?: string) => {
+      if (ref === 'mock://r-tax') { calls++; return new Promise(() => {}) as never; } // a laptop that never answers
+      return realInfo(ref);
+    });
+    const t0 = Date.now();
+    const r = await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) });
+    expect(r.statusCode).toBe(200);
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    expect((r.json() as Array<{ id: string }>).map((a) => a.id)).toContain('r-tax');
+    const before = calls;
+    const t1 = Date.now();
+    await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) });
+    expect(Date.now() - t1).toBeLessThan(1_000); // skipped, not waited for again
+    expect(calls).toBe(before);
   }, 20_000);
 });

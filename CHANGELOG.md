@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.118.2] — 2026-10-04
+
+### Fixed
+- **…and the same for the other questions the list asks an agent's machine.** v2.118.1 stopped the activity read from waiting, but the list also asks each machine whether its agent needs a rebuild, and about its swap and images; for a laptop runner that was off, each of those still waited 60 seconds. Each now gets 3 seconds, and a machine that missed one is skipped for a minute, so polls don't pile up connections to it. Its agents still appear, without those details, until it answers again.
+
 ## [2.118.1] — 2026-10-04
 
 ### Fixed

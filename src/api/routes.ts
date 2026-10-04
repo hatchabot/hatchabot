@@ -4783,6 +4783,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!last || !IN_PROGRESS.has(last.event)) return undefined;
     return { at: last.at, step: eventLabel(last.event, last.detail) };
   };
+  // A machine that doesn't answer (a laptop runner asleep or offline) must
+  // not hold the whole list: each of its lookups gets a few seconds, and a
+  // machine that missed one is skipped for a minute so polls don't pile up
+  // slow connections to it (2026-10-04: the home screen sat on "Loading…"
+  // for 60 s per request while the laptop was off).
+  const slowHostUntil = new Map<string, number>();
+  const LIST_LOOKUP_MS = 3_000;
+  const forHost = <T,>(hostId: string, work: () => Promise<T>, fallback: T): Promise<T> => {
+    if ((slowHostUntil.get(hostId) ?? 0) > Date.now()) return Promise.resolve(fallback);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<T>((resolve) => {
+      timer = setTimeout(() => { slowHostUntil.set(hostId, Date.now() + 60_000); resolve(fallback); }, LIST_LOOKUP_MS);
+      (timer as { unref?: () => void }).unref?.();
+    });
+    const done = work().then((v) => { slowHostUntil.delete(hostId); return v; }, () => fallback);
+    return Promise.race([done, late]).finally(() => clearTimeout(timer));
+  };
   app.get<{ Querystring: { all?: string } }>('/v1/agents', async (req, reply) => {
     // ?all=1: the HOST OWNER's admin view — every user's agents, with their
     // ownerId, so orphans from other logins (an old test account's leftovers)
@@ -4808,7 +4825,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         let rebuild: Awaited<ReturnType<typeof rebuildNeedOf>> | undefined;
         if (a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
           try {
-            rebuild = await rebuildNeedOf(a);
+            rebuild = await forHost(a.hostId, () => rebuildNeedOf(a), undefined as Awaited<ReturnType<typeof rebuildNeedOf>> | undefined);
+            if (!rebuild) throw new Error('machine did not answer');
             noteSelfRestart(a, rebuild!.running);
             openclawVersion = rebuild!.running.openclawVersion;
             latestOpenclawVersion = rebuild!.current.openclawVersion;
@@ -4835,7 +4853,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           memoryKills: rebuild?.running.memOomKills,
           // Its swap (swap.ts): the allowance it should have, what the container
           // runs with, how much sits in swap now, and why none is given here.
-          ...(await swapViewOf(a, rebuild?.running)),
+          ...(await forHost(a.hostId, () => swapViewOf(a, rebuild?.running), {} as Awaited<ReturnType<typeof swapViewOf>>)),
           ...(role === 'owner' && (disks.get(a.id)?.bytes ?? 0) > diskWarn
             ? { diskOver: { bytes: disks.get(a.id)!.bytes, warnBytes: diskWarn, measuredAt: disks.get(a.id)!.measuredAt } }
             : {}),
@@ -4844,7 +4862,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // Pinned to an image its class doesn't prescribe → a trial (🧪 in the legend).
           // A pin to the tag that IS the fleet default's image (the candidate just
           // promoted) is no trial: nothing to discard, nothing to flag (Chris, 2026-09-24).
-          imageTrial: !a.ops && !!a.image && !(await defaultAliasesFor(a.hostId)).has(a.image) && (!a.classId || (classes.get(a.classId) ?? store.getAgentClass(a.classId))?.image !== a.image),
+          imageTrial: !a.ops && !!a.image && !(await forHost(a.hostId, () => defaultAliasesFor(a.hostId), new Set<string>([a.image]))).has(a.image) && (!a.classId || (classes.get(a.classId) ?? store.getAgentClass(a.classId))?.image !== a.image),
           /** What the viewer may do — drives which controls the app renders. */
           role,
           /** A member the owner lets chat from this app (the 💬 Chat panel, 2026-09-29). */
@@ -4895,7 +4913,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           /** When its container was last built (docker's creation time). */
           rebuiltAt: rebuild?.running.containerCreatedAt,
           /** True when it runs the fleet default — unpinned, or pinned to a tag that IS the default's image. */
-          imageIsDefault: !a.image || (await defaultAliasesFor(a.hostId)).has(a.image),
+          imageIsDefault: !a.image || (await forHost(a.hostId, () => defaultAliasesFor(a.hostId), new Set<string>([a.image]))).has(a.image),
           /** While it is being set up or rebuilt: the step it is on, and since when. */
           progress: progressOf(a),
         });
