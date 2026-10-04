@@ -1544,7 +1544,8 @@ const SCENARIOS = String.raw`(() => {
         eq('a member\'s line', prevOf('Meal Planner'), 'Robin: can we do tacos on Friday?');
         eq('a task that ran', prevOf('Budget Tracker'), '⏰ Daily brief ran');
         eq('no line, no row', prevOf('Stock Watcher'), null);
-        eq('Needs you as the page words it', prevOf('Car Upkeep'), 'needs you: waiting for a Telegram bot token');
+        eq('Needs you is not repeated as the last line', prevOf('Car Upkeep'), null);
+        ok('it is in the tooltip once, in the list', (() => { const t = tile('Car Upkeep'); v2ShowTip(t); const x = document.getElementById('v2Tip').textContent; document.getElementById('v2Tip').hidden = true; return x.split('waiting for a Telegram bot token').length - 1 === 1; })());
         ok('nothing under the tiles any more', !document.querySelector('#v2groups .v2prev'));
         ok('the tooltip says how long ago: ' + tipOf('Homework Helper'), / ago · You: thanks|just now · You: thanks/.test(tipOf('Homework Helper')));
         ok('the tile reads the line out', tile('Homework Helper').getAttribute('aria-label').includes('You: thanks'));
