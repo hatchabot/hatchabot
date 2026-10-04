@@ -1728,6 +1728,75 @@ const SCENARIOS = String.raw`(() => {
       } finally { if (aiDlg.open) aiDlg.close(); await costCleanup(); }
     },
   });
+  // ---- The token steward: the manager's star and ring, and a stuck loop under Needs you (made-up data) ----
+  const withAgents = async (patch) => {
+    const list = await (await fetch('/v1/agents')).json();
+    window.__override['/v1/agents'] = list.map((a) => patch(a) ?? a);
+    await refresh(false);
+  };
+  const agentsCleanup = async () => { delete window.__override['/v1/agents']; v2SetView('group'); await refresh(false); };
+  Object.assign(T, {
+    opsStar: async () => {
+      try {
+        // Every other mark on the manager's tile at once: unread, quiet-for, three chat apps, a cost chip.
+        await withAgents((a) => a.ops ? { ...a, unread: true, lastActiveAt: new Date(Date.now() - 5 * 3600e3).toISOString(), botUsername: 'HbBot', deepLink: 'https://t.me/x', webOnly: false,
+          otherChannels: [{ kind: 'discord', displayName: '@hb' }, { kind: 'slack', displayName: '@hb' }] } : undefined);
+        const ops = tile('Hatchabot');
+        const stars = [...document.querySelectorAll('#v2groups .v2star')];
+        eq('one star, on the Hatchabot tile only', stars.length, 1);
+        ok('the star is the manager\'s', ops.contains(stars[0]));
+        const ic = ops.querySelector('.v2ic');
+        ok('its icon has the ring', ic.classList.contains('v2ic-ops'));
+        ok('no other tile has it', document.querySelectorAll('#v2groups .v2ic-ops').length === 1);
+        const cs = getComputedStyle(ic), plain = getComputedStyle(tile('Meal Planner').querySelector('.v2ic'));
+        ok('a stronger edge than other tiles: ' + cs.borderTopWidth + ' vs ' + plain.borderTopWidth, parseFloat(cs.borderTopWidth) > parseFloat(plain.borderTopWidth));
+        ok('a different edge colour', cs.borderTopColor !== plain.borderTopColor);
+        // The middle of the left edge, clear of every other mark.
+        const r = stars[0].getBoundingClientRect(), box = ic.getBoundingClientRect();
+        ok('on the left edge', r.left < box.left && r.right > box.left);
+        ok('in its middle', Math.abs((r.top + r.bottom) / 2 - (box.top + box.bottom) / 2) < 2);
+        const hit = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+        const marks = [...ic.querySelectorAll('.v2unread, .v2idle, .v2cost, .v2badge, .v2tg')];
+        ok('the other marks are there: ' + marks.length, ic.querySelector('.v2unread') && ic.querySelector('.v2idle') && ic.querySelectorAll('.v2tg').length === 3);
+        for (const m of marks) ok('the star clears ' + m.className, !hit(r, m.getBoundingClientRect()));
+        ok('says what it is', stars[0].getAttribute('title') === 'Hatchabot — supervises your agents\u2019 AI use');
+        ok('and so does the tile, out loud', ops.getAttribute('aria-label').includes('Hatchabot — supervises your agents\u2019 AI use'));
+        ok('the tooltip says it', tipText('Hatchabot').includes('Hatchabot — supervises your agents\u2019 AI use'));
+        ok('another tile\'s tooltip does not', !tipText('Meal Planner').includes('supervises'));
+        // Dark theme: the ring is its own token there too.
+        document.documentElement.setAttribute('data-theme', 'dark');
+        const dark = getComputedStyle(ic).borderTopColor;
+        document.documentElement.setAttribute('data-theme', 'light');
+        ok('the ring has a dark-theme colour: ' + dark, dark && dark !== 'rgba(0, 0, 0, 0)');
+        eq('every view: the star stays', (v2SetView('cost'), document.querySelectorAll('#v2groups .v2star').length), 1);
+      } finally { await agentsCleanup(); }
+    },
+    stuckNeedsYou: async () => {
+      try {
+        const text = 'Stuck: Telegram message retried 12 times since 08:19 — compacting a 446K conversation takes longer than the 5-minute limit';
+        await withAgents((a) => a.name === 'Stock Watcher' ? { ...a, stuck: [{ id: 'ti_1', kind: 'channel-retry', text, fix: 'Have Hatchabot compact it keeping the last 200 lines.' }] } : undefined);
+        const t = tile('Stock Watcher');
+        ok('the tile is marked stuck', t.classList.contains('v2st-blocked') && t.querySelector('.v2badge')?.textContent === '🔁');
+        ok('its label says so', t.getAttribute('aria-label').includes('Stuck in a loop'));
+        const tip = tipText('Stock Watcher');
+        ok('the tooltip has the incident and the fix: ' + tip.slice(0, 120), tip.includes(text) && tip.includes('Fix: Have Hatchabot compact it'));
+        byText('.v2viewbar button', 'Needs you').click(); await sleep(50);
+        const sec = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Needs you'));
+        ok('a Needs you section', !!sec);
+        ok('the stuck agent is in it', [...sec.querySelectorAll('.v2agent .v2name')].some((n) => n.textContent === 'Stock Watcher'));
+        eq('nobody else is', [...sec.querySelectorAll('.v2agent .v2name')].map((n) => n.textContent), ['Stock Watcher']);
+        // Cleared from Needs you by the owner: the same incident stays cleared; a new one comes back.
+        const a = agents.find((x) => x.name === 'Stock Watcher');
+        ok('the clear key names the incident', attentionFingerprint(a).includes('stuck:ti_1'));
+        delete window.__override['/v1/agents'];
+        await withAgents((x) => x.name === 'Stock Watcher' ? { ...x, stuck: [{ id: 'ti_2', kind: 'task-failing', text: 'Scheduled task "Prices" failed 3 runs in a row' }] } : undefined);
+        ok('a new incident is a new key', attentionFingerprint(agents.find((x) => x.name === 'Stock Watcher')).includes('stuck:ti_2'));
+        // Gone: off Needs you and back to normal.
+        delete window.__override['/v1/agents']; await refresh(false);
+        ok('back to normal', !tile('Stock Watcher').classList.contains('v2st-blocked'));
+      } finally { await agentsCleanup(); }
+    },
+  });
   (async () => {
     for (const [name, run] of Object.entries(T)) {
       try { await run(); results.push({ name, ok: true }); }

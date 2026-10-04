@@ -399,7 +399,8 @@ export interface RuntimeProvider {
   /** Whether this provider's host compresses swap (zswap or zram), read through the host's own probe; cached briefly. */
   compressedSwap?(opts?: { fresh?: boolean }): Promise<import('../orchestrator/swap.js').CompressedSwap>;
 
-  /** Only the model-call lines ("[model-fetch] response …") logged since `sinceIso`, each prefixed with its timestamp. */
+  /** Only the model-call lines ("[model-fetch] response …") logged since `sinceIso`, each prefixed with its timestamp,
+   *  plus the loop lines token health counts (tokenHealth.ts LOOP_LINE: retried channel messages, failed compactions). */
   modelCallLog(runtimeRef: string, sinceIso: string): Promise<string>;
 
   /**

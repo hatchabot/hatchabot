@@ -255,8 +255,8 @@ sleeping agent**: an asleep agent shows its last reading and its age.
 They are signals, not verdicts: a tool failing can be the tool's fault, and a
 turn that went wrong without an error (a poor answer) is not counted at all.
 
-**How it decides** (its AGENTS.md section "Model stewardship", kept current on
-every build): read what happened to earlier changes first (`get_model_changes`,
+**How it decides** (its AGENTS.md section "Token stewardship" — called "Model
+stewardship" until v2.120 — kept current on every build; see Token steward below): read what happened to earlier changes first (`get_model_changes`,
 below); match purpose and tool use to the options; prefer no change when
 evidence is thin or the saving small; never move an agent with heavy tool use
 or recent errors to a smaller model without saying so; propose a stronger
@@ -343,6 +343,173 @@ the `set_model` cards confirmed in the last week, and, where an agent no
 longer runs that card's model, records the later change made in the app or
 through the API, timed from the last use of the card's model and marked
 approximate.
+
+## Token steward
+
+Your Hatchabot agent supervises how your agents use AI: not only which model
+each runs (Right-size, above) but how big their conversations grow, whether
+the prompt cache works, what their scheduled tasks cost, how much of every
+turn is instruction files, and **loops** — the same work repeated without
+progress. It warns you, and proposes the fix as a card you Confirm. Hatchabot
+itself watches for loops between reviews and puts them under **Needs you**.
+
+Why (the 2026-10-04 measurement of this household's 41 running agents, 30
+days): context was 93–98% of a heavy chat agent's bill; those agents carried
+200–700K tokens into every call and never compacted (OpenClaw compacts only
+near the model's 1M window); a turn's first call read the cache back 12% of the
+time against 96% inside a turn; a 100,000-token cap was the largest single
+lever (−42% to −60%). And that day a `/compact` sent to Stock Advisor on
+Telegram could not summarise its 446K conversation within OpenClaw's 5-minute
+limit for a chat message, so OpenClaw retried it every ~5 minutes for hours —
+spending tokens each time — while Telegram showed nothing.
+
+### What it reads
+
+- **`get_token_health`** (`GET /v1/token-health?agent=&limit=`): one row per
+  agent of yours, costliest first.
+
+  | Part | What | Source |
+  |---|---|---|
+  | `conversation` | context per call (input + cache) on its conversations — median, 90th percentile, largest, in thousands; the share over 100K; the main conversation (Telegram DM and console share it) at its last call; the largest one; compactions in 30 days | the transcripts |
+  | `contextCap` | the cap Hatchabot stored, whether it is in the agent's settings, and what it compacts at | Hatchabot |
+  | `cache` | cache reads ÷ everything carried in, on a turn's first call within 5 minutes of the previous call, and inside a turn (0% after a longer pause is normal: the cache lasts 5 minutes) | the transcripts |
+  | `cost30d` | 30 days at API list prices, split by what started the work: a person's turn (`chat`), a follow-up (a command finished, a sub-agent settled, restart recovery), scheduled (its own runs, a task delivered into the conversation, heartbeats) | the transcripts × pricing.ts |
+  | `scheduled` | tasks, runs in 30 days, failures, re-runs; per task runs a day, cost a run, failures, the failing streak, re-runs | OpenClaw's run receipts + the transcripts |
+  | `instructions` | the size of each file OpenClaw puts into every turn (AGENTS, SOUL, IDENTITY, USER, MEMORY, TOOLS), what it actually injects (20,000 characters a file, 60,000 in all), about how many tokens, and which are truncated | file sizes |
+  | `thinking` | the configured level (the agent's, its model's, or the default) and the share of conversation calls that thought | openclaw.json + the transcripts |
+  | `loops` | the loop signals below; `active` = still going | below |
+  | `incidents`, `flags` | open incidents; `large-conversation`, `compact-now`, `cache-break`, `big-instructions`, `task-failing`, `thinking-heavy`, `loop` | |
+
+- **`get_incidents`** (`GET /v1/token-incidents`): the loops Hatchabot's
+  watcher found, open first, then those that stopped in the last week.
+
+Everything is read on the usage pass Hatchabot already makes every 10 minutes:
+the same transcript read, plus the instruction files' sizes, openclaw.json,
+OpenClaw's scheduled-run receipts and its chat-app ingress queue (counts and
+times only — never message text, payloads or chat ids), plus the loop lines
+of the gateway log that pass already reads. Stored, so a review **runs nothing
+in any container and wakes no agent**; an asleep agent shows its last reading
+and its age.
+
+### Thresholds
+
+All in `THRESHOLDS` (src/orchestrator/tokenHealth.ts), tested.
+
+| Check | Threshold |
+|---|---|
+| Large conversation | median context per call ≥ 150,000 |
+| Compact now | the main conversation ≥ 250,000 |
+| Suggested cap | 150,000 (compacts at about 130,000); caps from 50,000 to 1,000,000 |
+| Cache break | a turn's first call within 5 min hits < 50%, over ≥ 10 such calls |
+| Big instructions | ≥ 40,000 characters injected a turn, or any file truncated |
+| Thinking-heavy | thinking in > 50% of ≥ 10 conversation calls |
+
+### Loop signals
+
+| Signal | When | Source |
+|---|---|---|
+| `channel-retry` | the same chat-app message stalled past OpenClaw's handler limit and retried ≥ 3 times; going while its last stall is under 15 minutes old or the queue still holds it | the gateway log ("applying retry policy (handler-timeout)", "keeping for retry", "dead-lettered") and the ingress queue's attempts; a manual compaction starting with it marks it a compaction |
+| `compaction-failing` | ≥ 3 failed compactions within 6 hours | the gateway log ("context-engine compaction failed" and kin) |
+| `task-failing` | a scheduled task failing 3 runs in a row, or started again within 15 minutes of an error 3 times in a day | OpenClaw's run receipts |
+| `consult-ping-pong` | two agents consulting each other ≥ 6 times, both ways, each within 10 minutes of the last | Hatchabot's own consult records |
+| `tool-loop` | a turn with ≥ 80 tool calls, or a run OpenClaw's loop guard stopped | the transcripts |
+| `model-failing` | ≥ 5 model calls failing in a row, rate limits apart | the transcripts |
+| `rate-limited` | ≥ 5 rate-limited in a row: shown, not an incident (the source's banner says so) | the transcripts |
+
+A signal is news while its last occurrence is under 6 hours old (15 minutes
+for a channel retry); the report lists the last 7 days.
+
+### The watcher: Needs you, without waiting for the weekly review
+
+After each usage pass Hatchabot opens an **incident** for every signal that is
+still going: a line under Needs you on the agent ("Stuck: Telegram message
+retried 12 times since 08:19 — compacting a 446K conversation takes longer than
+the 5-minute limit"), with the fix, and the tile marked 🔁 "Stuck in a loop".
+It is told once on the manager's Telegram (else the agent's own), at most 3
+incidents an hour per owner (the rest when the hour allows). When the loop
+stops, the incident clears itself; a loop that starts afresh is a new one.
+Deterministic: no model is asked, and nothing is changed on any agent.
+
+### The changes it proposes (cards; never automatic)
+
+- **`compact_agent`** (`POST /v1/agents/:id/compact`, `mode` summarise | lines,
+  `lines`): Hatchabot runs `openclaw sessions compact agent:<slug>:main
+  --agent <slug> --timeout 1800000 --json` in the container itself — the
+  gateway's own compaction, not a `/compact` in chat, so no chat-app limit
+  applies. *summarise*: the model writes a summary (minutes; in the
+  background; the result reaches your chat). *lines*: `--max-lines N` keeps the
+  last N transcript lines (seconds; the older detail is gone from the
+  conversation, MEMORY.md keeps what it saved). **The in-flight retry problem:**
+  each retry of a stuck `/compact` starts the same compaction again and aborts
+  whatever compaction is running. So when the agent's channel retry is looping,
+  *lines* runs at once — it finishes long before the next retry, and the
+  retried `/compact` then has a small transcript and goes through — and
+  *summarise* waits for the next stall (the moment OpenClaw has just cut off
+  the retry's own attempt), starts right after it, and says plainly if the next
+  retry aborted it anyway (the card recommends *lines* in that case). One
+  compaction per agent at a time; a busy session is tried again three times, a
+  minute apart; the agent must be running.
+- **`set_context_cap`** (`PUT /v1/agents/:id/context-cap`, `tokens`, null or 0
+  to remove): OpenClaw compacts before a turn once a conversation reaches its
+  context budget less a reserve (20K, at most a quarter); the budget is the
+  model's window unless its entry under `models.providers.<provider>.models[]`
+  has `contextTokens` (the 2026-10-04 test: 150,000 on Sonnet 5 = compaction at
+  130K). Hatchabot stores the cap per agent and writes that entry for the model
+  the agent runs: at once if it is running (a hot reload), on the next usage
+  pass after it wakes, at every rebuild, and again when its model changes. It
+  writes with `openclaw config set … --expect-current-json` (or
+  `--expect-current-absent`), so a hand edit made meanwhile is never
+  overwritten ("changed by hand"; it retries at the rebuild); taking the cap off
+  removes only Hatchabot's row (a richer hand-made row keeps everything but
+  `contextTokens`). Not for a local model.
+- **Stopping a stuck retry:** OpenClaw 2026.9.6 has no supported way to cancel
+  a pending chat-app event — `openclaw channels dead-letters` only lists and
+  resubmits events that already failed — so there is no such tool, and
+  Hatchabot does not touch its queue's database. The retry ends by itself after
+  8 tries and 24 hours, when the message finally goes through (after a
+  compaction, above), or at a rebuild with the longer limit (below).
+
+Both cards are recorded like model changes (`tokenActions` in
+`get_model_changes`): who (owner, agent, hatchabot), how (app, api,
+proposal), why, and before and after — the conversation's size before and
+after a compaction (summarise) or the lines kept, a cap's old and new value
+with the context figures at the change.
+
+### The fleet default: 30 minutes for a chat message
+
+Every agent's container gets `OPENCLAW_TELEGRAM_SPOOLED_HANDLER_TIMEOUT_MS=1800000`
+(OpenClaw's own is 5 minutes): how long a Telegram message may take to get
+going — a `/compact`, a long download — before OpenClaw gives up on that try
+and retries it. It applies at each agent's next rebuild; an agent's own
+Environment value wins; `HATCHABOT_CHANNEL_HANDLER_TIMEOUT_MS` changes it
+(`off` = OpenClaw's 5 minutes). The cost: a message that is truly wedged now
+holds its chat for 30 minutes before its retry, not 5. Slack and Discord use
+the same ingress drain with the same 5 minutes, but their 2026.9.6 plugins
+pass no limit and read no variable, so there is nothing to set for them.
+
+### How it decides
+
+Its managed AGENTS.md section **"Token stewardship"** (it replaced "Model
+stewardship" in place at each manager's next build): loops first (say so at
+once, with the fix); then conversation size (compact-now → `compact_agent`;
+large and uncapped → `set_context_cap 150000`); the cache (a break is
+OpenClaw's, not the agent's: a smaller conversation shrinks what each break
+costs); scheduled tasks; the model (the Right-size procedure); instruction
+files (suggest trimming, never rewrite another agent's files unasked);
+thinking (mention only); budgets as advice only — Hatchabot does not enforce
+one. The weekly review ("Weekly model review", Mondays 09:00) now covers all
+of it and opens with the savings line; a task made by an earlier release is
+given the new wording once, at the manager's next build.
+
+### The manager's tile
+
+The Hatchabot agent's tile carries a small gold star in the middle of its left
+edge and a stronger gold edge (`--ops-ring`, darker than the accent on white, a
+deep gold on dark); its tooltip says "Hatchabot — supervises your agents' AI
+use". The left edge's middle is the one spot no other mark reaches (unread on
+the top-left corner, quiet-for and shared on the bottom-left one, the cost chip
+on the top edge, needs-you on the top-right corner, chat-app marks along the
+bottom from the right), so the star stays clear with all of them present.
 
 ## Creating & talking to agents
 

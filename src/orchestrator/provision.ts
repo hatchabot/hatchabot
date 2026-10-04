@@ -21,6 +21,8 @@ import { notifyAgentChat } from '../channels/notify.js';
 import { autoSnapshot, workspacePath, writeFileInAgent } from './snapshots.js';
 import { addCron, cronTargetFor, listCrons } from './crons.js';
 import { syncModelReviewCron } from './modelReview.js';
+import { channelTimeoutEnv } from './channelTimeout.js';
+import { syncContextCap } from './compaction.js';
 import { clearStaleRuntimePins } from './runtimePins.js';
 import { syncConnections } from './googleConnections.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
@@ -71,7 +73,7 @@ import { buildGitSyncScript, buildPublicGitSyncScript, gitSyncReason, isPublicGi
 import type { Agent, Channel, Host } from '../domain/types.js';
 import { briefCause } from '../domain/redact.js';
 import { opsToolsFingerprint } from '../ops/opsTools.js';
-import { opsSection, OPS_MANAGED_HEADINGS } from '../ops/opsAgent.js';
+import { opsSection, OPS_MANAGED_HEADINGS, OPS_RENAMED_HEADINGS } from '../ops/opsAgent.js';
 import { consoleAllowUsers, consoleIdentityEnabled } from './consoleAccess.js';
 import { consoleIdentity, supportsConsoleIdentity } from '../openclaw/consoleIdentity.js';
 
@@ -333,6 +335,9 @@ async function runProvisionStepsInner(
       .catch((err) => log('connection.sync_failed', { agentId, error: String(err).slice(0, 200) }));
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
     await syncInstallDocs(deps, agentId, runtimeRef, log);
+    // Its context cap (compaction.ts), re-applied for the model it runs now.
+    await syncContextCap({ store, provider, log: (e, d) => log(e, { agentId, ...d }) }, store.getAgent(agentId) ?? agent, runtimeRef)
+      .catch((err) => log('token.context_cap_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
     await runRebuildHook(deps, agentId, runtimeRef, log);
     // Step 7.9: let the agent stop moving before anyone can talk to it — a
     // message that lands mid-settle has started a fresh session.
@@ -802,6 +807,11 @@ export async function buildRuntimeSpec(
       // Brave plugin from npm at startup, which its jail refuses — it then never
       // comes up healthy (seen live, 2026-09-18). It searches through Hatchabot.
       ...(searchKey && !agent.ops ? { BRAVE_API_KEY: searchKey } : {}),
+      // How long a chat-app message may take to get going before OpenClaw
+      // retries it: 30 minutes, not OpenClaw's 5, so a long /compact is not
+      // retried every 5 minutes for a day (channelTimeout.ts, 2026-10-04).
+      // Before perAgentEnv: the agent's own Environment value wins.
+      ...channelTimeoutEnv(),
       ...perAgentEnv,
       // Orientation, not configuration: the human name of the machine this
       // agent runs on, refreshed by every rebuild/move.
@@ -1056,6 +1066,9 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
       .catch((err) => log('connection.sync_failed', { agentId, error: String(err).slice(0, 200) }));
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
     await syncInstallDocs(deps, agentId, runtimeRef, log);
+    // Its context cap (compaction.ts), re-applied for the model it runs now.
+    await syncContextCap({ store, provider, log: (e, d) => log(e, { agentId, ...d }) }, store.getAgent(agentId) ?? agent, runtimeRef)
+      .catch((err) => log('token.context_cap_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
     await runRebuildHook(deps, agentId, runtimeRef, log);
     log('runtime.settling', { agentId });
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
@@ -1346,6 +1359,11 @@ export async function syncDataSourceDocs(
     // go stale between releases current on every build, instead of only when
     // the agent was first created (it refused work it could do, 2026-09-19).
     if (agent.ops) {
+      // A renamed section takes the old one's place; never both.
+      for (const [was, now] of Object.entries(OPS_RENAMED_HEADINGS)) {
+        if (!next.split('\n').some((l) => l.trimEnd() === was)) continue;
+        next = next.split('\n').some((l) => l.trimEnd() === now) ? removeSection(next, was) : replaceSection(next, was, opsSection(now) ?? '');
+      }
       for (const heading of OPS_MANAGED_HEADINGS) {
         const section = opsSection(heading);
         if (section) next = replaceSection(next, heading, section);

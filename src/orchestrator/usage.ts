@@ -52,7 +52,52 @@ export interface AgentUsage extends UsageSplit {
   recentCalls?: Array<[string, number]>;
   /** The last 30 days by model, for the model scorecard (modelScorecard.ts). */
   profile?: ModelProfile;
+  /** Token health (tokenHealth.ts): conversation size, cache, cost split, scheduled runs, instruction files, loop signals. */
+  health?: TokenHealthRaw;
 }
+
+/** [input, output, cacheRead, cacheWrite] */
+export type Mix4 = [number, number, number, number];
+/** [calls, cacheRead, carried in (input + cacheRead + cacheWrite)] */
+export type CacheTally = [number, number, number];
+/**
+ * What the reader says about an agent's token health (USAGE_READER_SCRIPT,
+ * the `health` part): counts, sizes and times, never text. Interpreted by
+ * tokenHealth.ts, whose thresholds decide what is a problem.
+ */
+export interface TokenHealthRaw {
+  v: 1;
+  since: number;
+  /** Context per call (input + cache) on conversations (not scheduled runs or sub-agents), last 30 days. */
+  conv: { calls: number; p50: number; p90: number; max: number; over100k: number };
+  /** Each agent directory's main conversation (`agent:<slug>:main`, Telegram DM and console share it): its last call's context. */
+  main: Record<string, { ctx: number; at: number }>;
+  /** The largest conversations by their last call's context. */
+  top: Array<{ kind: string; ctx: number; at: number; calls: number }>;
+  /** Conversations: a turn's first call within 5 min of the previous call, after more, and calls inside a turn. */
+  cache: { first5: CacheTally; firstCold: CacheTally; inside: CacheTally };
+  /** Token mixes per model: a person's turns, follow-ups (a command finished, a sub-agent settled), scheduled work. */
+  split: { chat: Record<string, Mix4>; followup: Record<string, Mix4>; scheduled: Record<string, Mix4> };
+  /** Scheduled runs' tokens per task id ("(recovered)" when the key was lost). */
+  jobTokens: Record<string, Record<string, Mix4>>;
+  thinking: { calls: number; of: number };
+  cfg: { thinkingDefault?: string; agentThinking: Record<string, string>; modelThinking: Record<string, string>; caps: Record<string, number> } | null;
+  /** Bytes of each instruction file, per agent directory. */
+  files: Record<string, Record<string, number>>;
+  compactions: { n: number; last: number; before: number };
+  /** Scheduled tasks' runs in the 30 days (OpenClaw's own upkeep jobs left out); rr = [start, ms since the error before it]. */
+  jobs: Array<{ id: string; name?: string; runs: number; ok: number; error: number; interrupted: number; skipped: number; streak: number; first: number; last: number; lastStatus: string; rr: Array<[number, number]> }> | null;
+  /** Channel messages the gateway tried more than once (its ingress queue). */
+  ingress: Array<{ ch: string; acct: string; id: string; st: string; att: number; first: number; last: number; why: string; fr: string }> | null;
+  /** Turns with many tool calls: [end, tool calls]. */
+  big: Array<[number, number]>;
+  /** Runs OpenClaw's tool-loop guard stopped. */
+  guard: number[];
+  /** Model calls failing in a row: [first, last, calls, of which rate-limited]. */
+  streaks: Array<[number, number, number, number]>;
+}
+/** The reader's floors (USAGE_READER_SCRIPT): the thresholds in tokenHealth.ts must be at or above them. */
+export const READER_FLOORS = { bigTurn: 20, streak: 2 } as const;
 
 /** How one model's turns ended, counted from the transcripts (never their text). */
 export interface TurnErrors {
@@ -142,6 +187,56 @@ const n = (x) => (typeof x === "number" && isFinite(x) && x > 0 ? x : 0);
 // ended. Counts only; no text leaves the container but the Purpose excerpt.
 const W30 = Date.now() - 30 * 86400000, W7 = Date.now() - 7 * 86400000;
 const win = {}; const turnOf = {}; let promptErrors = 0;
+// Token health (tokenHealth.ts): per conversation, how big it is, how the cache
+// fares on a turn's first call and inside a turn, where the cost goes (chat,
+// follow-ups, scheduled), and the loop signals the transcripts carry. Counts,
+// sizes and times only. The floors below only keep the output small: the
+// thresholds that decide are tokenHealth.ts's (a test keeps them above these).
+const BIG_TURN_FLOOR = 20, STREAK_FLOOR = 2, WARM = 300000;
+const keyOf = {}; const hs = {};
+const HW = { conv: [], over100k: 0, latest: {}, cache: { first5: [0, 0, 0], firstCold: [0, 0, 0], inside: [0, 0, 0] },
+  split: { chat: {}, followup: {}, scheduled: {} }, jobTok: {}, think: [0, 0], comp: { n: 0, last: 0, before: 0 }, big: [], guard: [], streaks: [] };
+const kindOf = (key) => !key ? "conv" : key.indexOf(":subagent:") >= 0 ? "sub" : /^agent:[^:]+:(cron|recovered)(:|$)/.test(key) ? "sched" : "conv";
+const LOOP_GUARD = /tool-loop|tool loop|compaction_loop_persisted/i;
+const addMix = (bucket, model, u) => { const m = bucket[model] ||= [0, 0, 0, 0]; m[0] += n(u.input); m[1] += n(u.output); m[2] += n(u.cacheRead); m[3] += n(u.cacheWrite); };
+const flushStreak = (s) => { if (s.fail && s.fail.n >= STREAK_FLOOR && HW.streaks.length < 200) HW.streaks.push([s.fail.first, s.fail.last, s.fail.n, s.fail.limited]); s.fail = null; };
+const health = (sid, at, msg) => {
+  if (!(at >= W30)) return;
+  const key = keyOf[sid] || ""; const kind = kindOf(key);
+  const s = hs[sid] ||= { opener: "person", fresh: true, lastCall: 0, fail: null };
+  if (msg.role === "user") {
+    const p = msg.provenance || {};
+    s.opener = !p.kind ? "person" : p.kind === "internal_system" && p.sourceTool === "cron" ? "cron" : p.kind === "heartbeat" || p.sourceTool === "heartbeat" ? "heartbeat" : "followup";
+    s.fresh = true; return;
+  }
+  if (msg.role !== "assistant" || msg.openclawDeliveryMirror || msg.model === "delivery-mirror") return;
+  const model = msg.model || "(unknown)"; const u = msg.usage || {};
+  const sr = msg.stopReason;
+  // Model calls failing in a row (a streak per conversation; rate limits marked).
+  if (sr === "error") {
+    const lim = LIMITED.test(String(msg.errorMessage || ""));
+    if (!s.fail) s.fail = { first: at, last: at, n: 0, limited: 0 };
+    s.fail.n++; s.fail.last = at; if (lim) s.fail.limited++;
+  } else flushStreak(s);
+  if ((sr === "error" || sr === "aborted") && LOOP_GUARD.test(String(msg.errorMessage || "")) && HW.guard.length < 200) HW.guard.push(at);
+  const tok = n(u.input) + n(u.output) + n(u.cacheRead) + n(u.cacheWrite);
+  if (!tok) return;
+  const carried = n(u.input) + n(u.cacheRead) + n(u.cacheWrite);
+  const cls = kind === "sched" || s.opener === "cron" || s.opener === "heartbeat" ? "scheduled" : s.opener === "followup" ? "followup" : "chat";
+  addMix(HW.split[cls], model, u);
+  if (kind === "sched") { const p = key.split(":"); const job = p[2] === "cron" && p[3] ? p[3] : "(recovered)"; addMix(HW.jobTok[job] ||= {}, model, u); }
+  if (kind === "conv") {
+    HW.conv.push(carried); if (carried > 100000) HW.over100k++;
+    const l = HW.latest[sid] ||= { key, at: 0, ctx: 0, calls: 0 }; l.calls++;
+    if (at >= l.at) { l.at = at; l.ctx = carried; }
+    const gap = s.lastCall ? at - s.lastCall : -1;
+    const c = s.fresh ? (gap >= 0 ? (gap <= WARM ? HW.cache.first5 : HW.cache.firstCold) : null) : (gap >= 0 && gap <= WARM ? HW.cache.inside : null);
+    if (c) { c[0]++; c[1] += n(u.cacheRead); c[2] += carried; }
+    HW.think[1]++;
+    if (Array.isArray(msg.content) && msg.content.some((p) => p && (p.type === "thinking" || p.type === "redacted_thinking"))) HW.think[0]++;
+  }
+  s.fresh = false; s.lastCall = at;
+};
 const P = (model) => win[model] ||= { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, toolUseCalls: 0, turns: 0, toolTurns: 0, toolCalls: 0, failedTurns: 0, failed7d: 0, first: 0, last: 0, ctx: [],
   err: { malformedToolCall: 0, providerError: 0, rateLimited: 0, aborted: 0, truncated: 0, toolFailed: 0, retried: 0 }, h: {} };
 // The same counts per UTC hour (HOUR_FIELDS in usage.ts), so the model-change
@@ -183,6 +278,7 @@ const prof = (sid, at, msg) => {
   if (sr === "toolUse" && parts) return;
   t.open = false; m.turns++; hb[5]++;
   if (t.tools) { m.toolTurns++; m.toolCalls += t.tools; hb[6]++; hb[7] += t.tools; }
+  if (t.tools >= BIG_TURN_FLOOR && HW.big.length < 300) HW.big.push([at, t.tools]);
   if (sr === "error" || sr === "aborted" || sr === "timeout") {
     const e = String(msg.errorMessage || "");
     const limited = LIMITED.test(e);
@@ -199,13 +295,19 @@ const prof = (sid, at, msg) => {
 const ev = (sid, at, e) => {
   if (!e) return;
   if (e.type === "custom" && /prompt-error/.test(String(e.customType || ""))) { if (at >= W30) promptErrors++; return; }
+  if (e.type === "compaction") {
+    if (e.id) { if (seen.has(e.id)) return; seen.add(e.id); }
+    if (at >= W30) { HW.comp.n++; if (at >= HW.comp.last) { HW.comp.last = at; HW.comp.before = n(e.tokensBefore); } }
+    return;
+  }
   const msg = e.message; if (!msg || typeof msg !== "object") return;
   if (e.id) { if (seen.has(e.id)) return; seen.add(e.id); }
+  health(sid, at, msg);
   prof(sid, at, msg);
   add(sid, at, msg);
 };
-// Only these lines are parsed: calls, what people wrote, failed tools, prompt errors.
-const wanted = (s) => s.indexOf('"usage"') >= 0 || s.indexOf('"role":"user"') >= 0 || s.indexOf('"isError":true') >= 0 || s.indexOf("prompt-error") >= 0;
+// Only these lines are parsed: calls, what people wrote, failed tools, prompt errors, compactions.
+const wanted = (s) => s.indexOf('"usage"') >= 0 || s.indexOf('"role":"user"') >= 0 || s.indexOf('"isError":true') >= 0 || s.indexOf("prompt-error") >= 0 || s.indexOf('"compaction"') >= 0;
 const add = (sid, at, msg) => {
   const u = msg && msg.usage; if (!u || typeof u !== "object") return;
   // A copy of a reply sent to a channel ("delivery-mirror") carries no tokens: not a call.
@@ -251,6 +353,10 @@ for (const d of dirs) {
       if (rows) {
         try { archives = db.prepare("SELECT session_id, encoding, archive_blob FROM session_transcript_archives").all(); }
         catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }
+        // Which conversation each session is (main, a chat app's, a scheduled
+        // run's): for token health only, so any failure here just leaves it unknown.
+        try { for (const k of db.prepare("SELECT session_id, session_key FROM session_windows").all()) if (k.session_key) keyOf[d + ":" + k.session_id] = String(k.session_key); } catch {}
+        try { for (const k of db.prepare("SELECT session_id, session_key FROM session_transcript_archives").all()) if (k.session_key && !keyOf[d + ":" + k.session_id]) keyOf[d + ":" + k.session_id] = String(k.session_key); } catch {}
       }
     } catch (e) {
       process.stderr.write("usage read failed for " + d + ": " + String((e && e.message) || e));
@@ -281,12 +387,14 @@ for (const d of dirs) {
   try { files = fs.readdirSync(sd).filter((f) => /\.jsonl(\.(reset|deleted)\.[^/]*)?$/.test(f) && f.indexOf("trajectory") < 0); } catch {}
   // A pre-migration .jsonl whose session the database already holds is the same calls again.
   if (usedDb) files = files.filter((f) => /\.(reset|deleted)\./.test(f));
+  try { const sj = JSON.parse(fs.readFileSync(path.join(sd, "sessions.json"), "utf8")); for (const [k, v] of Object.entries(sj || {})) if (v && v.sessionId && !keyOf[d + ":" + v.sessionId]) keyOf[d + ":" + v.sessionId] = k; } catch {}
   for (const f of files) {
     let text = "";
     try { const raw = fs.readFileSync(path.join(sd, f)); text = (f.endsWith(".zst") ? zlib.zstdDecompressSync(raw) : raw).toString("utf8"); } catch { bad++; continue; }
     lines(d, f.split(".")[0], text);
   }
 }
+for (const s of Object.values(hs)) flushStreak(s);
 const out = { models: {}, sessions: sessions.size, first: first === Infinity ? 0 : first, last, bad, slots, callSlots, day, lastCtx };
 for (const [k, m] of Object.entries(models)) out.models[k] = { calls: m.calls, input: m.input, output: m.output, cacheRead: m.cacheRead, cacheWrite: m.cacheWrite, maxCtx: m.maxCtx, sessions: m.s.size };
 // The 30-day profile: context size per call as its median and 90th percentile (nearest rank).
@@ -320,6 +428,75 @@ try {
     finally { sdb.close(); }
   }
 } catch { crons = null; }
+// Token health: the instruction files OpenClaw puts in every turn (sizes only),
+// the thinking and context settings, scheduled runs, and channel messages that
+// were retried (the gateway's own ingress queue: counts and times, no payload).
+const files = {};
+for (const d of dirs) {
+  const f = {};
+  for (const name of ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "BOOTSTRAP.md", "MEMORY.md", "TOOLS.md"]) {
+    try { const st = fs.statSync(path.join(root, d, "agent", name)); if (st.isFile()) f[name] = st.size; } catch {}
+  }
+  files[d] = f;
+}
+let cfg = null;
+try {
+  const c = JSON.parse(fs.readFileSync(path.join(root, "..", "openclaw.json"), "utf8")) || {};
+  const ag = c.agents || {}; const def = ag.defaults || {};
+  const lvl = (v) => (typeof v === "string" && v.length < 20 ? v : undefined);
+  const agentThinking = {};
+  for (const e of Array.isArray(ag.list) ? ag.list : []) if (e && e.id && lvl(e.thinkingDefault)) agentThinking[e.id] = lvl(e.thinkingDefault);
+  for (const [id, e] of Object.entries(ag.entries || {})) if (e && lvl(e.thinkingDefault)) agentThinking[id] = lvl(e.thinkingDefault);
+  const modelThinking = {};
+  for (const [ref, e] of Object.entries(def.models || {})) if (e && e.params && lvl(e.params.thinking)) modelThinking[ref] = lvl(e.params.thinking);
+  const caps = {};
+  for (const [p, pv] of Object.entries((c.models && c.models.providers) || {})) for (const m of (pv && Array.isArray(pv.models) ? pv.models : [])) if (m && m.id && typeof m.contextTokens === "number") caps[p + "/" + m.id] = m.contextTokens;
+  cfg = { thinkingDefault: lvl(def.thinkingDefault), agentThinking, modelThinking, caps };
+} catch { cfg = null; }
+let jobs = null, ingress = null;
+try {
+  const sq = require("node:sqlite"); const sf = path.join(root, "..", "state", "openclaw.sqlite");
+  if (fs.existsSync(sf)) {
+    const sdb = new sq.DatabaseSync(sf, { readOnly: true });
+    try {
+      sdb.exec("PRAGMA busy_timeout = 2000");
+      try {
+        const names = {}; const system = new Set();
+        for (const j of sdb.prepare("SELECT job_id, name, declaration_key FROM cron_jobs").all()) { if (j.declaration_key) system.add(j.job_id); else names[j.job_id] = String(j.name || "").slice(0, 60); }
+        const byJob = {};
+        for (const r of sdb.prepare("SELECT job_id, status, started_at_ms, finished_at_ms FROM cron_run_receipts WHERE started_at_ms >= ? ORDER BY started_at_ms").all(W30)) {
+          if (system.has(r.job_id)) continue;
+          const j = byJob[r.job_id] ||= { id: r.job_id, name: names[r.job_id], runs: 0, ok: 0, error: 0, interrupted: 0, skipped: 0, streak: 0, first: 0, last: 0, lastStatus: "", rr: [], prevErrAt: 0 };
+          const at = Number(r.started_at_ms) || 0;
+          j.runs++; if (!j.first) j.first = at; j.last = at; j.lastStatus = r.status;
+          if (j.prevErrAt && j.rr.length < 50) j.rr.push([at, at - j.prevErrAt]);
+          if (r.status === "error" || r.status === "interrupted") { j[r.status]++; j.streak++; j.prevErrAt = Number(r.finished_at_ms) || at; }
+          else { if (r.status === "ok") j.ok++; else if (r.status === "skipped") j.skipped++; if (r.status !== "running") { j.streak = 0; j.prevErrAt = 0; } }
+        }
+        jobs = Object.values(byJob).map(({ prevErrAt, ...j }) => j);
+      } catch { jobs = null; }
+      try {
+        ingress = sdb.prepare("SELECT channel_id, account_id, event_id, status, attempts, received_at, last_attempt_at, updated_at, last_error, failed_reason FROM channel_ingress_events WHERE attempts >= 2 AND updated_at >= ? ORDER BY updated_at DESC LIMIT 50").all(W30)
+          .map((r) => ({ ch: String(r.channel_id || "").slice(0, 20), acct: String(r.account_id || "").slice(0, 64), id: String(r.event_id || "").replace(/^0+(?=\d)/, "").slice(0, 40), st: String(r.status || ""), att: Number(r.attempts) || 0,
+            first: Number(r.received_at) || 0, last: Number(r.last_attempt_at) || Number(r.updated_at) || 0,
+            why: /handler-timeout|stalled/i.test(String(r.last_error || "")) ? "handler-timeout" : r.last_error ? "error" : "", fr: r.failed_reason ? String(r.failed_reason).slice(0, 40) : "" }));
+      } catch { ingress = null; }
+    } finally { sdb.close(); }
+  }
+} catch { jobs = null; ingress = null; }
+const main = {}; const top = [];
+for (const [sid, l] of Object.entries(HW.latest)) {
+  const d = sid.split(":")[0];
+  if (l.key === "agent:" + d + ":main" && (!main[d] || l.at > main[d].at)) main[d] = { ctx: l.ctx, at: l.at };
+  const kind = l.key === "agent:" + d + ":main" ? "main" : /:(group|channel|room):/.test(l.key) ? "group" : /:(direct|dm):|telegram|slack|discord/.test(l.key) ? "chat-app" : l.key ? "other" : "unknown";
+  top.push({ kind, ctx: l.ctx, at: l.at, calls: l.calls });
+}
+top.sort((a, b) => b.ctx - a.ctx);
+const cs = HW.conv.sort((a, b) => a - b);
+out.health = { v: 1, since: W30,
+  conv: { calls: cs.length, p50: rank(cs, 0.5), p90: rank(cs, 0.9), max: cs.length ? cs[cs.length - 1] : 0, over100k: HW.over100k },
+  main, top: top.slice(0, 5), cache: HW.cache, split: HW.split, jobTokens: HW.jobTok, thinking: { calls: HW.think[0], of: HW.think[1] },
+  cfg, files, compactions: HW.comp, jobs, ingress, big: HW.big, guard: HW.guard, streaks: HW.streaks };
 out.window = { since: W30, models: wm, promptErrors, hourly: true };
 out.purposes = purposes; out.crons = crons;
 process.stdout.write(JSON.stringify(out));
@@ -343,7 +520,8 @@ export async function agentUsage(
     return EMPTY;
   }
   let raw: { models?: Record<string, UsageSplit & { calls: number; sessions: number; maxCtx?: number }>; sessions?: number; first?: number; last?: number; slots?: Record<string, number>; callSlots?: Record<string, number>; day?: { calls?: number; tokens?: number }; lastCtx?: number;
-    window?: { since?: number; models?: Record<string, WindowModelStats>; promptErrors?: number; hourly?: boolean }; purposes?: Record<string, string>; crons?: number | null };
+    window?: { since?: number; models?: Record<string, WindowModelStats>; promptErrors?: number; hourly?: boolean }; purposes?: Record<string, string>; crons?: number | null;
+    health?: TokenHealthRaw };
   try {
     raw = JSON.parse(res.stdout);
     if (!raw || typeof raw.models !== 'object') throw new Error('no usage object');
@@ -385,5 +563,6 @@ export async function agentUsage(
         firstCall: first,
       },
     } : {}),
+    ...(raw.health && raw.health.v === 1 && typeof raw.health.conv === 'object' ? { health: raw.health } : {}),
   };
 }

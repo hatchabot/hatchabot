@@ -73,6 +73,10 @@ import { request as httpRequest } from 'node:http';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
 import { runUsageAlerts } from '../orchestrator/usageAlerts.js';
+import { buildTokenHealth, modelRefOf, THRESHOLDS as TOKEN_THRESHOLDS } from '../orchestrator/tokenHealth.js';
+import { runTokenWatch } from '../orchestrator/tokenWatch.js';
+import { compactAgent, CompactError, syncContextCap, type CompactMode } from '../orchestrator/compaction.js';
+import type { TokenHealthRaw } from '../orchestrator/usage.js';
 import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orchestrator/unread.js';
 import { guestConsoleSessionKey } from '../openclaw/consoleIdentity.js';
 import { webChatStoreKey } from '../orchestrator/webChat.js';
@@ -1709,6 +1713,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     try {
       for (const row of recordChanges(store, before, ledgerMeta(req, source))) {
         trace(row.agentId)('model.changed', { from: row.from ?? null, to: row.to, by: row.by, via: row.via, source: row.source });
+        // A context cap follows the model: written for the new one at once on a running agent.
+        const a = store.getContextCap(row.agentId) ? store.getAgent(row.agentId) : undefined;
+        if (a?.state === 'RUNNING' && a.runtimeRef) void syncContextCap({ store, provider: providerFor(a.hostId), log: (e, d) => trace(a.id)(e, d) }, a, a.runtimeRef).catch(() => undefined);
       }
     } catch (err) { app.log.warn({ err: String(err) }, 'model.ledger_failed'); }
   };
@@ -2081,12 +2088,38 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       });
     } catch (err) { app.log.warn({ err: String(err) }, 'model.guard_failed'); }
   };
+  /**
+   * After each usage pass (the same timer): Hatchabot's loop watcher opens and
+   * clears "Needs you" incidents from what the pass stored and tells each new
+   * one once on the manager's chat (tokenWatch.ts); and a context cap that is
+   * not yet in a running agent's config (it was asleep, or its model moved)
+   * is written there (compaction.ts). Never wakes an agent.
+   */
+  const runTokenSteward = async () => {
+    await runTokenWatch({ store, tell: tellUsageSpike, log: (event, detail) => { trace(String(detail.agentId ?? ''))(event, detail); } })
+      .catch((err) => app.log.warn({ err: String(err) }, 'token.watch_failed'));
+    for (const a of store.listAllActiveAgents()) {
+      const cap = a.state === 'RUNNING' && a.runtimeRef && !isBusy(a.id) ? store.getContextCap(a.id) : undefined;
+      if (!cap) continue;
+      const profile = store.getAIProfile(a.aiProfileId);
+      if (!profile) continue;
+      const ref = modelRefOf(a, profile);
+      const want = cap.tokens && profile.vendor !== 'local' ? `${ref.provider}/${ref.id}` : undefined;
+      if ((want ?? null) === (cap.appliedModel ?? null)) continue;
+      // A write that was refused (a hand edit, a busy gateway) waits 6 hours, not every pass; a rebuild tries at once.
+      if ((capRetryAt.get(a.id) ?? 0) > Date.now()) continue;
+      const r = await syncContextCap({ store, provider: providerFor(a.hostId), log: (e, d) => trace(a.id)(e, d) }, a, a.runtimeRef!).catch(() => 'failed' as const);
+      if (r === 'failed' || r === 'changed-by-hand') capRetryAt.set(a.id, Date.now() + 6 * 3_600_000); else capRetryAt.delete(a.id);
+    }
+  };
+  const capRetryAt = new Map<string, number>();
   const runUsageSample = () => {
     if (usageSampling) return usageSampling;
     usageSampling = sampleSourceUsage({ store, providerFor, log: (e, d) => app.log.info(d, e) })
       .then(async (r) => { usageSampledAt = new Date().toISOString(); if (r.limited) app.log.info(r, 'usage.sample_rate_limits_seen'); try { snapshotUsageFromSamples(); } catch (err) { app.log.warn({ err: String(err) }, 'usage.snapshot_failed'); }
         await runUsageAlerts({ store, tell: tellUsageSpike, log: (e, d) => app.log.info(d, e) }).catch((err) => app.log.warn({ err: String(err) }, 'usage.alerts_failed'));
         runModelGuard();
+        await runTokenSteward();
         return r; })
       .catch((err) => app.log.warn({ err: String(err) }, 'usage.sample_failed'))
       .finally(() => { usageSampling = null; });
@@ -4835,6 +4868,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // over HATCHABOT_AGENT_DISK_WARN_GB goes to Needs you (2026-09-30).
     const disks = store.agentDiskBytes();
     const diskWarn = diskWarnBytes();
+    // Loops Hatchabot's watcher found (tokenWatch.ts): a "Needs you" line each, for the owner.
+    const stuckBy = new Map<string, Array<{ id: string; kind: string; text: string; fix?: string; since?: string }>>();
+    for (const i of store.listTokenIncidents({ ownerId: ownerIdOf(req), open: true })) {
+      stuckBy.set(i.agentId, [...(stuckBy.get(i.agentId) ?? []), { id: i.id, kind: i.kind, text: i.text, ...(i.fix ? { fix: i.fix } : {}), ...(i.firstAt ? { since: i.firstAt } : {}) }]);
+    }
     return Promise.all(
       agents.map(async (a) => {
         let openclawVersion: string | undefined;
@@ -4893,6 +4931,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           /** Its chat lost its context (after a rebuild, or an idle reset) and
            *  the owner has not dealt with it yet — the app offers Recover. */
           contextReset: store.getContextReset(a.id),
+          /** A loop the watcher found and the fix (owner only): Needs you. */
+          ...(role === 'owner' && stuckBy.get(a.id) ? { stuck: stuckBy.get(a.id) } : {}),
           /** Slack and Discord, for the icon marks and the Messaging row. */
           otherChannels: store.listChannelsForAgent(a.id).filter((c) => c.kind !== 'telegram').map((c) => ({
             kind: c.kind,
@@ -7316,8 +7356,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       outcome: c.outcome, ...(c.reasons?.length ? { reasons: c.reasons } : {}),
       ...(c.guardProposalId && !c.guardProposalId.startsWith('none:') ? { guardCard: c.guardProposalId } : {}),
     }));
+    const tokenActions = store.listTokenActions({ ownerId, ...(agentId ? { agentId } : {}), limit: Math.min(limit, 50) }).map((t) => ({
+      id: t.id, agent: names.get(t.agentId) ?? '(deleted agent)', agentId: t.agentId, kind: t.kind, at: t.at, by: t.by, via: t.via,
+      ...(t.why ? { why: t.why } : {}), detail: t.detail, outcome: t.outcome,
+    }));
     return {
       changes,
+      tokenActions,
       savings: rightSizeSavings(store, ownerId),
       notes: [
         `outcome: pending until ${VERDICT_DAYS} days after the change (or ${EARLY_TURNS_N} turns on the new model); then kept-ok, worse (error rates up: failed turns, malformed tool calls, tool failures) or not-enough-data.`,
@@ -7333,6 +7378,109 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const model = String(req.query?.model ?? '').trim();
     if (!model) return reply.code(400).send({ error: 'Which model? Add ?model=…' });
     return assessModelChange(store, agent, store.getAIProfile(agent.aiProfileId), model);
+  });
+
+  // ---- the token steward (docs/features.md, "Token steward") ---------------
+  /**
+   * Token health: per agent of the caller's, conversation size, cache, cost
+   * split, scheduled tasks, instruction files, thinking, loop signals, its
+   * context cap and open incidents (tokenHealth.ts). Stored data only: no
+   * container is asked anything and no agent is woken.
+   */
+  app.get<{ Querystring: { limit?: string; agent?: string } }>('/v1/token-health', async (req, reply) => {
+    const ownerId = ownerIdOf(req);
+    const limit = Number(req.query?.limit);
+    let agentId: string | undefined;
+    if (req.query?.agent) {
+      const ref = String(req.query.agent).toLowerCase();
+      const hit = store.listAgents(ownerId).find((a) => a.state !== 'DELETED' && (a.id === req.query.agent || a.slug === ref || a.name.toLowerCase() === ref));
+      if (!hit) return reply.code(404).send({ error: `No agent of yours called "${req.query.agent}".` });
+      agentId = hit.id;
+    }
+    return buildTokenHealth(store, ownerId, { limit: Number.isFinite(limit) && limit > 0 ? limit : undefined, agentId });
+  });
+  /** The loops Hatchabot's watcher found: open ones first, then those cleared in the last week (tokenWatch.ts). */
+  app.get('/v1/token-incidents', async (req) => {
+    const ownerId = ownerIdOf(req);
+    const names = new Map(store.listAgents(ownerId).map((a) => [a.id, a.name]));
+    const all = store.listTokenIncidents({ ownerId, sinceIso: new Date(Date.now() - 7 * 86_400_000).toISOString(), limit: 100 });
+    const view = (i: (typeof all)[number]) => ({ id: i.id, agent: names.get(i.agentId) ?? '(deleted agent)', agentId: i.agentId, kind: i.kind, text: i.text, ...(i.fix ? { fix: i.fix } : {}),
+      count: i.count, ...(i.firstAt ? { since: i.firstAt } : {}), ...(i.lastAt ? { last: i.lastAt } : {}), openedAt: i.openedAt, ...(i.clearedAt ? { clearedAt: i.clearedAt } : {}), told: !!i.toldAt });
+    return {
+      open: all.filter((i) => !i.clearedAt).map(view),
+      recent: all.filter((i) => i.clearedAt).map(view),
+      notes: ['An incident opens when a loop is still going (its last occurrence within a few hours) and clears itself when it stops. Each is told once on the manager\'s chat. The fixes are cards: compact_agent, set_context_cap, set_cron_enabled, set_peers, rebuild_agent.'],
+    };
+  });
+  /**
+   * Compact one of the agent's conversations (its main one): Hatchabot runs
+   * `openclaw sessions compact` in the container itself, guarding against a
+   * chat-app retry that is looping (compaction.ts). mode "lines" keeps the
+   * last N lines (seconds); "summarise" runs in the background.
+   */
+  app.post<{ Params: { id: string }; Body: { mode?: string; lines?: number; why?: string } }>('/v1/agents/:id/compact', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const body = (req.body ?? {}) as { mode?: string; lines?: number };
+    const mode: CompactMode | undefined = body.mode === 'lines' ? 'lines' : body.mode === 'summarise' || body.mode === 'summarize' || body.mode === undefined ? 'summarise' : undefined;
+    if (!mode) return reply.code(400).send({ error: 'mode is "summarise" or "lines".' });
+    if (body.lines !== undefined && (!Number.isInteger(body.lines) || body.lines < 20 || body.lines > 5000)) return reply.code(400).send({ error: 'lines: a whole number from 20 to 5000.' });
+    if (isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy (rebuilding or moving) — try again shortly.' });
+    const meta = ledgerMeta(req, 'compact');
+    try {
+      const out = await compactAgent({ store, provider: providerFor(agent.hostId), tell: tellUsageSpike, log: (e, d) => trace(agent.id)(e, d) }, agent,
+        { mode, ...(body.lines !== undefined ? { lines: body.lines } : {}), meta: { by: meta.by, via: meta.via, ...(meta.why ? { why: meta.why } : {}), ...(meta.proposalId ? { proposalId: meta.proposalId } : {}) } });
+      return { ...out, action: { id: out.action.id, outcome: out.action.outcome, detail: out.action.detail } };
+    } catch (err) {
+      if (err instanceof CompactError) return reply.code(err.status).send({ error: err.message });
+      throw err;
+    }
+  });
+  /**
+   * The agent's context cap: OpenClaw compacts its conversations at about
+   * this − 20K (compaction.ts). tokens null takes it away. Stored here, written
+   * into the agent's config at once when it is running (else when it next
+   * is), at every rebuild, and again when its model changes.
+   */
+  app.put<{ Params: { id: string }; Body: { tokens?: number | null; why?: string } }>('/v1/agents/:id/context-cap', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const raw = (req.body as { tokens?: unknown } | undefined)?.tokens;
+    const T = TOKEN_THRESHOLDS;
+    if (raw !== null && (typeof raw !== 'number' || !Number.isInteger(raw) || raw < T.capMin || raw > T.capMax)) {
+      return reply.code(400).send({ error: `tokens: a whole number from ${T.capMin} to ${T.capMax}, or null to remove the cap.` });
+    }
+    const profile = store.getAIProfile(agent.aiProfileId);
+    if (raw !== null && profile?.vendor === 'local') return reply.code(400).send({ error: 'A local model costs nothing per token: no cap is needed.' });
+    const before = store.getContextCap(agent.id);
+    const health = store.tokenHealths([agent.id]).get(agent.id)?.health as TokenHealthRaw | undefined;
+    const meta = ledgerMeta(req, 'context-cap');
+    const now = new Date().toISOString();
+    store.setContextCap(agent.id, raw, now);
+    let outcome = 'pending';
+    if (agent.state === 'RUNNING' && agent.runtimeRef && !isBusy(agent.id)) {
+      const r = await syncContextCap({ store, provider: providerFor(agent.hostId), log: (e, d) => trace(agent.id)(e, d) }, agent, agent.runtimeRef).catch(() => 'failed' as const);
+      outcome = r === 'applied' || r === 'removed' || r === 'unchanged' || r === 'skipped' ? 'applied' : r;
+    }
+    const ref = profile ? modelRefOf(agent, profile) : undefined;
+    const action = {
+      id: `ta_${randomBytes(8).toString('hex')}`, agentId: agent.id, ownerId: agent.ownerId, kind: 'context-cap' as const, at: now,
+      by: meta.by, via: meta.via, ...(meta.why ? { why: meta.why.slice(0, 400) } : {}), ...(meta.proposalId ? { proposalId: meta.proposalId } : {}),
+      detail: { from: before?.tokens ?? null, to: raw, ...(ref ? { model: `${ref.provider}/${ref.id}` } : {}),
+        ...(health ? { before: { ctxP50K: Math.round(health.conv.p50 / 1000), ctxP90K: Math.round(health.conv.p90 / 1000), ...(health.main?.[agent.slug] ? { mainNowK: Math.round(health.main[agent.slug]!.ctx / 1000) } : {}) } } : {}) },
+      outcome,
+    };
+    store.addTokenAction(action);
+    trace(agent.id)('token.context_cap_set', { tokens: raw, outcome, by: meta.by, via: meta.via });
+    return {
+      tokens: raw, outcome,
+      ...(raw ? { compactsAt: raw - Math.min(20_000, raw / 4) } : {}),
+      message: raw === null
+        ? (outcome === 'applied' ? `"${agent.name}" has no context cap now: it compacts near its model's full window again.` : `"${agent.name}"'s cap comes off when it is next running.`)
+        : outcome === 'applied' ? `"${agent.name}" now compacts its conversations at about ${Math.round((raw - Math.min(20_000, raw / 4)) / 1000)}K tokens.`
+          : outcome === 'changed-by-hand' ? `Its model settings were changed by hand meanwhile; nothing was overwritten. The cap is stored and will be written at its next rebuild.`
+            : `Stored; it is written into "${agent.name}"'s settings when it is next running (or at its next rebuild).`,
+    };
   });
 
   /** The fleet's use in the last hour, 3/6/9/12 hours, day or week, from what the sampler recorded — answers at once. */

@@ -156,6 +156,34 @@ export const REST_TOOLS: RestTool[] = [
     },
   },
   {
+    name: 'get_token_health', tier: 'read',
+    description:
+      "Token health, one row per agent of the owner's (costliest first; asleep agents are not woken): conversation size (context per call median/p90/max in thousands, the main "
+      + 'conversation now, compactions), its context cap, the prompt cache (hit on a turn\'s first call within 5 minutes vs inside a turn), the 30 days\' cost at API prices split '
+      + 'chat / follow-ups / scheduled, scheduled tasks (runs per day, cost per run, failures, re-runs), instruction files injected every turn (characters, about how many tokens, '
+      + 'truncated ones), thinking level, LOOP SIGNALS (channel-retry, compaction-failing, task-failing, consult-ping-pong, tool-loop, model-failing; rate-limited apart; active = still going), '
+      + 'open incidents and flags (large-conversation, compact-now, cache-break, big-instructions, task-failing, thinking-heavy, loop). Also the thresholds and the newest compactions and caps. '
+      + 'Read from what Hatchabot already recorded: cheap to call.',
+    input_schema: obj({
+      agent: { type: 'string', minLength: 1, maxLength: 128, description: 'only this agent (id, slug or name)' },
+      limit: { type: 'integer', minimum: 1, maximum: 100, description: 'most rows, costliest first (default 40)' },
+    }),
+    call: ({ input }) => {
+      const q = new URLSearchParams();
+      if (typeof input.agent === 'string') q.set('agent', input.agent);
+      if (typeof input.limit === 'number') q.set('limit', String(Math.trunc(input.limit)));
+      return { method: 'GET', path: `/v1/token-health${q.size ? `?${q.toString()}` : ''}` };
+    },
+  },
+  {
+    name: 'get_incidents', tier: 'read',
+    description:
+      'The loops Hatchabot\'s own watcher found on the owner\'s agents, open ones first, then those that stopped in the last week: what (e.g. "Stuck: Telegram message retried 12 times since 08:19 — compacting a 446K conversation takes longer than the 5-minute limit"), '
+      + 'the suggested fix, how many times, since when, and whether the owner was told on the manager\'s chat. Each shows under Needs you on its agent until the loop stops.',
+    input_schema: obj({}),
+    call: () => ({ method: 'GET', path: '/v1/token-incidents' }),
+  },
+  {
     name: 'get_model_options', tier: 'read',
     description: 'Per AI source the owner can use: the models it offers, their prices per million tokens, and one line on what each is good at (larger models are more reliable at tool use).',
     input_schema: obj({}),
@@ -266,6 +294,62 @@ export const REST_TOOLS: RestTool[] = [
     input_schema: obj({ agent: agentRef, snapshot: str(128, 'snapshot id') }, ['agent', 'snapshot']),
     call: ({ agent, input }) => ({ method: 'POST', path: `/v1/agents/${agent!.id}/snapshots/${enc(need(input.snapshot, 'snapshot id'))}/restore`, body: {} }),
     card: ({ agent, input }) => `↩ Restore "${agent!.name}"'s SOUL.md, AGENTS.md and MEMORY.md to snapshot ${String(input.snapshot)} — what it learned since then is rolled back (the current files are snapshotted first)`,
+  },
+
+  // ---- the token steward ---------------------------------------------------
+  {
+    name: 'compact_agent', tier: 'mutate', agentArg: true,
+    description:
+      "Compact an agent's main conversation (the Telegram DM and console share it) so every later turn carries less. Hatchabot runs OpenClaw's own compaction in the container itself, "
+      + 'not a /compact in chat (a long summary outruns the chat app\'s time limit and is retried). mode "summarise" (default): the model writes a summary — minutes on a large conversation, '
+      + 'runs in the background, the result reaches the owner\'s chat. mode "lines": keep only the last `lines` transcript lines (default 200) — seconds, loses the older detail; the way '
+      + 'through when a stuck chat message keeps retrying a compaction. When such a retry is looping, a summary is started right after its next retry is cut off. Requires the owner\'s confirm; the agent must be running.',
+    input_schema: obj({
+      agent: agentRef,
+      mode: { type: 'string', enum: ['summarise', 'lines'] },
+      lines: { type: 'integer', minimum: 20, maximum: 5000, description: 'mode lines: how many of the newest transcript lines to keep (default 200)' },
+    }, ['agent']),
+    call: async ({ agent, input, get }) => {
+      const mode = input.mode === 'lines' ? 'lines' : 'summarise';
+      if (input.mode !== undefined && input.mode !== 'lines' && input.mode !== 'summarise') throw new Error('mode is "summarise" or "lines".');
+      // What the card says: the conversation's size now, and a stuck retry if there is one.
+      try {
+        const h = (await get(`/v1/token-health?agent=${encodeURIComponent(agent!.id)}`)) as { rows?: Array<{ conversation?: { mainNowK?: number }; incidents?: Array<{ kind: string; text: string }> }> };
+        const row = h.rows?.[0];
+        if (row?.conversation?.mainNowK) input.__sizeK = row.conversation.mainNowK;
+        const stuck = row?.incidents?.find((i) => i.kind === 'channel-retry');
+        if (stuck) input.__stuck = stuck.text;
+      } catch { /* the card says less */ }
+      return { method: 'POST', path: `/v1/agents/${agent!.id}/compact`, body: { mode, ...(typeof input.lines === 'number' ? { lines: Math.trunc(input.lines) } : {}) } };
+    },
+    card: ({ agent, input }) => {
+      const size = typeof input.__sizeK === 'number' ? ` (${input.__sizeK}K tokens now)` : '';
+      const head = input.mode === 'lines'
+        ? `🗜 Compact "${agent!.name}"'s conversation${size}: keep only its last ${typeof input.lines === 'number' ? Math.trunc(input.lines) : 200} transcript lines. Takes seconds; what came before is dropped from the conversation (its MEMORY.md keeps what it saved).`
+        : `🗜 Compact "${agent!.name}"'s conversation${size}: the model summarises it, then the summary replaces the older turns. Can take several minutes; you get the result on your chat.`;
+      return input.__stuck ? `${head}\n⚠ ${String(input.__stuck)}. ${input.mode === 'lines' ? 'Keeping the last lines finishes between its retries, and the retried message then goes through.' : 'Hatchabot starts the summary right after the next retry is cut off; if that retry aborts it again, keeping the last lines is the way through.'}` : head;
+    },
+    done: (r) => (r && typeof r === 'object' && 'message' in r ? String((r as { message: string }).message) : undefined),
+  },
+  {
+    name: 'set_context_cap', tier: 'mutate', agentArg: true,
+    description:
+      "Set an agent's context cap: OpenClaw then compacts its conversations when they reach about the cap − 20K tokens, instead of near the model's 1M window (the largest token lever: "
+      + 'heavy chat agents carried 200–700K into every call). Stored by Hatchabot and written into the agent\'s settings for the model it runs — now if it is running, again at every rebuild and when its model changes. '
+      + 'tokens: 50000–1000000 (150000 is a good start for a long chat); 0 removes the cap. Not for a local model. Requires the owner\'s confirm.',
+    input_schema: obj({
+      agent: agentRef,
+      tokens: { type: 'integer', minimum: 0, maximum: 1000000, description: '50000–1000000; 0 removes the cap' },
+    }, ['agent', 'tokens']),
+    call: ({ agent, input }) => {
+      const t = input.tokens === 0 || input.tokens === null ? null : input.tokens;
+      if (t !== null && (typeof t !== 'number' || !Number.isInteger(t) || t < 50_000 || t > 1_000_000)) throw new Error('tokens: a whole number from 50000 to 1000000, or 0 to remove the cap.');
+      return { method: 'PUT', path: `/v1/agents/${agent!.id}/context-cap`, body: { tokens: t } };
+    },
+    card: ({ agent, input }) => typeof input.tokens === 'number' && input.tokens > 0
+      ? `📏 Cap "${agent!.name}"'s conversations at ${Math.round(input.tokens / 1000)}K tokens: OpenClaw compacts them at about ${Math.round((input.tokens - Math.min(20_000, input.tokens / 4)) / 1000)}K (a summary replaces the older turns), so each call carries less. Applies now if it is running, and stays through rebuilds and model changes.`
+      : `📏 Remove "${agent!.name}"'s context cap: it compacts near its model's full window again.`,
+    done: (r) => (r && typeof r === 'object' && 'message' in r ? String((r as { message: string }).message) : undefined),
   },
 
   // ---- scheduled tasks -----------------------------------------------------

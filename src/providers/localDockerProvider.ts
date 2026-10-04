@@ -17,6 +17,7 @@ import type {
 } from './provider.js';
 import { ProviderError, parseByteSize, parseCgroupMemory, parseChannelsLabel, parseEmbedEngineLabel, parsePluginInstallLabel, parsePluginsLabel, type ContainerStats, type EmbedEngine } from './provider.js';
 import { CONTAINER_GEN } from '../orchestrator/rebuildPolicy.js';
+import { LOOP_LINE } from '../orchestrator/loopLines.js';
 import { dockerMemorySwap, parseCgroupLimit, parseSwapProbe, procCgroupPath, SWAP_PROBE_SCRIPT, type CompressedSwap } from '../orchestrator/swap.js';
 
 /** How much an imported archive may expand to on the volume (default 8 GiB). */
@@ -851,6 +852,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     return new Promise<string>((resolve, reject) => {
       const child = spawn(this.docker, this.#argv(['logs', '--since', sinceIso, '--timestamps', container]));
       const keep: string[] = [];
+      let loops = 0;
       let buf = '';
       const eat = (chunk: Buffer) => {
         buf += chunk.toString('utf8');
@@ -858,6 +860,9 @@ export class LocalDockerProvider implements RuntimeProvider {
         while ((nl = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
           if (line.includes('[model-fetch] response') && keep.length < 200_000) keep.push(line);
+          // …and the loop lines token health counts (a channel message stalled
+          // and retried, a compaction that failed): tokenHealth.ts LOOP_LINE.
+          else if (LOOP_LINE.test(line) && loops++ < 20_000) keep.push(line);
         }
         if (buf.length > 1_000_000) buf = ''; // a pathological line: drop it
       };

@@ -3,6 +3,7 @@ import type { RuntimeProvider } from '../providers/provider.js';
 import type { Agent } from '../domain/types.js';
 import { agentUsage } from './usage.js';
 import { estimateCost } from './pricing.js';
+import { parseLoopLines } from './loopLines.js';
 
 /**
  * AI-source usage visibility. Anthropic won't tell a setup-token how much of a
@@ -91,6 +92,11 @@ export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.no
       slots.set(slotOf(c.at), sb);
       if (c.at > maxAt) maxAt = c.at;
     }
+    // The loop lines the same read kept (a chat-app message retried past its
+    // handler limit, a failed compaction): token health's loop signals. A
+    // re-read window adds nothing twice (keyed by kind, event and time).
+    const loops = parseLoopLines(text);
+    if (loops.length) store.addLoopMarks(a.id, loops);
     store.addModelCallHours(a.id, a.aiProfileId, buckets);
     store.addModelCallSlots(a.id, a.aiProfileId, slots);
     calls += fresh.length;
@@ -127,6 +133,8 @@ export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.no
       const { purposes, ...rest } = u.profile;
       store.setModelProfile(a.id, { ...rest, purpose: purposes[a.slug] }, nowIso);
     }
+    // Token health from the same read (tokenHealth.ts): a review then wakes nothing.
+    if (u.health) store.setTokenHealth(a.id, u.health, nowIso);
     // Successful calls per slot, from the transcripts: the whole 8 days the
     // first time (replacing the log's partial counts), then from an hour
     // before the last slot written, so late-arriving calls land.
@@ -178,6 +186,7 @@ export async function sampleSourceUsage(deps: SampleDeps, now = Date.now()): Pro
   await Promise.all(Array.from({ length: Math.min(PASS_CONCURRENCY, queue.length) }, worker));
   if (queue.length) deps.log?.('usage.sample_incomplete', { remaining: queue.length });
   store.pruneSourceUsage(new Date(now - RETAIN_MS).toISOString());
+  store.pruneLoopMarks(new Date(now - RETAIN_MS).toISOString());
   return { agents, calls, limited };
 }
 

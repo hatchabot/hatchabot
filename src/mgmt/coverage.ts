@@ -30,6 +30,8 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/:id/move': 'set_group',
   'POST /v1/agents/icons/auto': 'app: internal — the home screen fills in icons',
   'POST /v1/agents/:id/checkpoint': 'checkpoint_memory',
+  'POST /v1/agents/:id/compact': 'compact_agent',
+  'PUT /v1/agents/:id/context-cap': 'set_context_cap',
   'POST /v1/agents/:id/recover-context': 'app: later — restore earlier conversations',
   'DELETE /v1/agents/:id/context-reset': 'app: browser — dismissing the "its chat was reset" notice',
   'POST /v1/agents/:id/move-host': 'app: later — move to another runner',
