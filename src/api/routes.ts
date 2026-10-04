@@ -4390,6 +4390,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return providerFor(a.hostId).execShell(a.runtimeRef, script);
     },
   });
+  const SESSIONS_FIRST_WAIT_MS = 3_000;
   const sessionsFor = async (a: Agent): Promise<Record<string, SessionEntry> | undefined> => {
     if (!a.runtimeRef || a.state !== 'RUNNING') return undefined;
     const hit = sessionsCache.get(a.id);
@@ -4403,10 +4404,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       return hit.value;
     }
-    const value = await readSessions(a); // first look: wait for it
-    sessionsCache.set(a.id, { fetchedAt: Date.now(), value });
-    void recentTracker.note(a, value);
-    return value;
+    // First look: wait for it, but not for long. A runner that's asleep or
+    // offline (a laptop) used to hold every list request for 60 s, so the
+    // whole home screen stayed on "Loading…" (2026-10-04). After a short wait
+    // the list goes on without this agent's activity; the read finishes in the
+    // background and fills the cache for the next poll.
+    const pending = readSessions(a).then((value) => {
+      sessionsCache.set(a.id, { fetchedAt: Date.now(), value });
+      void recentTracker.note(a, value);
+      return value;
+    });
+    // A read that fails is forgotten, so the next poll tries again.
+    pending.catch(() => { sessionsCache.delete(a.id); });
+    sessionsCache.set(a.id, { fetchedAt: Date.now(), value: undefined, refreshing: true });
+    const quick = await Promise.race([pending.catch(() => undefined), new Promise<undefined>((r) => setTimeout(() => r(undefined), SESSIONS_FIRST_WAIT_MS).unref?.())]);
+    return quick;
   };
   /** "Last active" = the newest session update in that file. */
   const lastActiveFor = async (a: Agent): Promise<string | undefined> => {

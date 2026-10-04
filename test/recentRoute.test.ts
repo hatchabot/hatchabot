@@ -148,3 +148,30 @@ describe('GET /v1/recent', () => {
     expect(publicClassFor('POST', '/v1/recent')).toBe('never');
   });
 });
+
+describe('a machine that does not answer (2026-10-04)', () => {
+  it('the agent list does not wait for it: it answers in a few seconds and fills that agent in later', async () => {
+    const w = await world();
+    // r-tax's machine hangs: its sessions read never returns (a laptop asleep).
+    const real = w.execShell.getMockImplementation()!;
+    let release: (() => void) | undefined;
+    w.execShell.mockImplementation(async (ref: string, script: string) => {
+      if (ref === 'mock://r-tax' && script.includes('sessions.json')) {
+        await new Promise<void>((r) => { release = r; });
+        return { code: 0, stdout: JSON.stringify({ 'agent:tax:cron:j1': { updatedAt: Date.now() } }), stderr: '' } as never;
+      }
+      return real(ref, script);
+    });
+    const t0 = Date.now();
+    const r = await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) });
+    const took = Date.now() - t0;
+    expect(r.statusCode).toBe(200);
+    expect(took).toBeLessThan(10_000);
+    const tax = (r.json() as Array<{ id: string; lastActiveAt?: string }>).find((a) => a.id === 'r-tax')!;
+    expect(tax.lastActiveAt).toBeUndefined();
+    release!();
+    await new Promise((res) => setTimeout(res, 30));
+    const again = (await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) })).json() as Array<{ id: string; lastActiveAt?: string }>;
+    expect(again.find((a) => a.id === 'r-tax')!.lastActiveAt).toBeTruthy();
+  }, 20_000);
+});

@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.118.1] — 2026-10-04
+
+### Fixed
+- **The home screen no longer waits for a machine that doesn't answer.** An agent on a runner that was asleep or offline (a laptop) held every agent-list request for up to 60 seconds, so the page stayed on "Loading…". The list now waits at most 3 seconds for an agent's activity, shows that agent without it, and fills it in on a later refresh once the machine answers.
+
 ## [2.118.0] — 2026-10-04
 
 ### Added
