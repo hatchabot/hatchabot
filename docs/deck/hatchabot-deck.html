@@ -183,7 +183,7 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
       <h3>Tiles in groups</h3>
       <p>Every agent is a tile you name, colour and drag into groups. The tile carries its state — rebuilding, stopped, unread, needs you — and a mark per app that reaches it.</p>
       <h3 style="margin-top:12pt">The manager is the first tile</h3>
-      <p>Your Hatchabot agent sits first, fixed in place. Ask it to make, fix, move or share an agent; it reads everything and changes nothing — each change is a card you confirm under Needs you.</p>
+      <p>Your Hatchabot agent sits first, fixed in place, with a gold star. Ask it to make, fix, move or share an agent; it reads everything and changes nothing — each change is a card you confirm under Needs you.</p>
       <h3 style="margin-top:12pt">View by, and what each costs</h3>
       <p>Regroup the page by Needs you, Model, Activity, Cost and more. A quiet chip shows a tile's last week at API prices — “$4/wk” — and Cost lists the fleet most expensive first. Status → Usage shows each source's requests and tokens.</p>
     </div>
@@ -194,16 +194,20 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
 <!-- 9b: the supervisor -->
 <section class="slide dark">
   <p class="eyebrow">The Hatchabot supervisor</p>
-  <h2 style="margin-bottom:8pt">A supervisor that keeps every agent on the right model</h2>
-  <p class="lead" style="margin-bottom:14pt;font-size:16pt">Your built-in Hatchabot agent watches how every agent uses its AI and keeps each one on the <b>least capable model that does its job well</b> — cheaper where an agent is overserved, stronger where it struggles. It proposes; you confirm every change.</p>
-  <div class="row compact">
-    <div class="card"><h3>A weekly review, on evidence</h3><p>A scorecard per agent: its purpose, tool use and failures, and its cost on each model its source offers. Thin evidence or a small saving: no change. It never wakes a sleeping agent.</p></div>
-    <div class="card"><h3>A quality guard</h3><p>Every model change is recorded with the old model's figures. Within a week the new one is measured the same way; if failed turns or tool errors rose, Hatchabot proposes switching back.</p></div>
-    <div class="card"><h3>The savings, shown</h3><p>Each switch to a cheaper model is counted against what the agent actually used since: “Right-size: ≈ $12.40 this month” on Usage and atop the weekly report.</p></div>
-    <div class="card"><h3>A cost on every tile</h3><p>“$4/wk” on each agent's icon, a Cost view most expensive first, and the price list behind every figure, with the date it was checked.</p></div>
+  <h2 style="margin-bottom:6pt">A supervisor for every agent's AI use</h2>
+  <p class="lead" style="margin-bottom:11pt;font-size:15pt">Your Hatchabot agent — the first tile, with the gold star — keeps each agent on the <b>least capable model that does its job well</b>, watches how agents spend tokens, and proposes the fix. You confirm every change.</p>
+  <div class="row compact" style="gap:0.22in">
+    <div class="card"><h3>Right model, on evidence</h3><p>A weekly scorecard per agent: purpose, tool use, failures, cost on each model its source offers. Thin evidence or a small saving: no change.</p></div>
+    <div class="card"><h3>A quality guard</h3><p>Every model change is recorded. If failed turns or tool errors rise on the new model, Hatchabot proposes switching back.</p></div>
+    <div class="card"><h3>The savings, shown</h3><p>“Right-size: ≈ $12.40 this month” on Usage and atop the weekly report; “$4/wk” on each tile, and a Cost view.</p></div>
   </div>
-  <p style="margin-top:8pt;font-size:11.5pt;color:#c9c2b5"><b style="color:#e8a33d">Coming next, not shipped yet:</b> conversation-size warnings and compaction · spotting an agent stuck in a loop · scheduled-task and cache checks · budgets.</p>
-  <div class="takeaway" style="bottom:0.9in;padding:10pt 16pt;font-size:13.5pt">ChatGPT's Auto picks a model per message, inside OpenAI's app, by its own rules; Claude's apps have you choose. Here it's per agent, under your control, with the savings shown.</div>
+  <div class="row compact" style="gap:0.22in;margin-top:0.14in">
+    <div class="card"><h3>Loops, caught as they happen</h3><p>A chat message retried again and again, a task failing run after run, two agents consulting in circles: flagged under Needs you, with one Telegram message.</p></div>
+    <div class="card"><h3>Conversations kept in size</h3><p>Every message re-sends the whole conversation. When one grows large, it proposes a compaction now, or a cap so the agent compacts on its own.</p></div>
+    <div class="card"><h3>A weekly token review</h3><p>Checks the prompt cache, what scheduled tasks cost, instruction-file size and thinking — and opens with the savings line.</p></div>
+  </div>
+  <p style="margin-top:8pt;font-size:11pt;color:#c9c2b5"><b style="color:#e8a33d">Coming next, not shipped yet:</b> budgets.</p>
+  <div class="takeaway" style="bottom:0.9in;padding:9pt 16pt;font-size:13pt">ChatGPT's Auto picks a model per message, inside OpenAI's app, by its own rules; Claude's apps have you choose. Here it's per agent, under your control, with the savings shown.</div>
   <p style="position:absolute;left:0.9in;right:0.9in;bottom:0.6in;margin:0;font-size:9.5pt;color:#7b8190">Dollar figures are estimates: measured tokens at Anthropic's list API prices (on a Claude plan, room in its limits rather than money). The figures in quotes are examples.</p>
   <div class="foot"><span>hatchabot.com</span><span>8</span></div>
 </section>
@@ -221,7 +225,7 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
     <tr><td class="k">Work while you sleep</td><td>Scheduled tasks, and event-triggered ones where a zero-cost check decides whether to wake the model at all.</td></tr>
     <tr><td class="k">Agents that consult each other</td><td>Your investing agent asks your tax and legal agents mid-task, with scoped tokens, loop guards and rate limits.</td></tr>
     <tr><td class="k">Reachable where people are</td><td>Telegram, Slack or Discord — or no chat app at all. Each agent has its own bot, and strangers who find it get silence.</td></tr>
-    <tr><td class="k">A manager and supervisor</td><td>Ask in plain words; every change is a card you confirm. It keeps each agent on the right model, with a quality guard and the savings shown.</td></tr>
+    <tr><td class="k">A manager and supervisor</td><td>Ask in plain words; every change is a card you confirm. It keeps each agent on the right model with the savings shown, and catches loops and oversized conversations.</td></tr>
   </table>
   <div class="takeaway">Each agent gets only what its job needs — which is what makes it safe to give them real work.</div>
   <div class="foot"><span>hatchabot.com</span><span>9</span></div>

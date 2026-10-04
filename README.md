@@ -33,9 +33,13 @@ change. The realised saving is shown ("Right-size: ≈ $12.40 this month"), each
 agent's tile carries its weekly cost ("$4/wk"), and a Cost view and the price
 list behind every figure are in the app. Dollar figures are estimates: measured
 tokens at Anthropic's list API prices (on a Claude plan, room in its limits
-rather than money). Coming next, not shipped yet: conversation-size warnings and
-compaction, spotting stuck loops, scheduled-task and cache checks, and budgets.
-See [Right-size](docs/features.md#right-size-the-model-steward).
+rather than money). It also watches how agents use tokens: an agent stuck in a
+loop is flagged under Needs you with one Telegram message; a conversation grown
+large gets a compaction or a per-agent conversation cap proposed as a card you
+confirm; and the "Weekly token review" checks the prompt cache and what
+scheduled tasks cost. Coming next, not shipped yet: budgets. See
+[Right-size](docs/features.md#right-size-the-model-steward) and
+[Token steward](docs/features.md#token-steward).
 
 **New here or catching up?** [docs/features.md](docs/features.md) is a
 task-first tour of everything the app does today — creating, training, moving,

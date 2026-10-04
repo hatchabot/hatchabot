@@ -30,12 +30,12 @@ export const STUB = `(() => {
     A('Budget Tracker', 'Money', '💰', '#c9b03a'),
     A('Stock Watcher', 'Money', '📈', '#2f9e8f'),
     A('Tax Filing', 'Money', '🧾', '#d05a5a', { state: 'STOPPED' }),
-    A('To Do', 'Household', '☑️', '#3a8fd0'),
+    A('To Do', 'Household', '☑️', '#3a8fd0', { stuck: [{ id: 'i1', signal: 'task-failing', text: 'Stuck: the morning reminder task failed 3 runs in a row', fix: 'ask your Hatchabot agent to look at it' }] }),
     A('Garden Notes', 'Household', '🌱', '#3aa36b', { webOnly: true, botUsername: undefined, deepLink: undefined }),
     A('Car Upkeep', 'Money', '🚗', '#d05a5a'),
     A('Hatchabot', '', '🐣', '#e0a13a', { ops: true, slug: 'hatchabot', webOnly: true, botUsername: undefined, deepLink: undefined }),
   ];
-  const PROFILE = { id: 'p1', name: 'Claude Max (household)', vendor: 'anthropic', kind: 'subscription', mine: true,
+  const PROFILE = { id: 'p1', name: 'Anthropic API (household)', vendor: 'anthropic', kind: 'api_key', credential: 'api-key', mine: true,
     ownerId: 'o1', model: 'claude-sonnet-5', models: [], shared: true, defaultSource: true };
   // 168 hourly buckets (a week), oldest first — the shape /v1/ai-profiles/usage returns.
   const shape = [0,0,1,2,5,9,12,14,13,10,7,5,3,2,1,1,0,0,1,3,6,10,13,14,12,9,6,4,2,1,1,0];
@@ -59,7 +59,15 @@ export const STUB = `(() => {
     hourly,
     others: { agents: 3, requests5h: 46, requests7d: 388 },
   }] };
+  // A week at API prices per agent — the shape /v1/costs returns. Made-up figures.
+  const c = (weekly, extra = {}) => ({ cost: weekly, weekly, monthly: Math.round(weekly * 30 / 7 * 100) / 100,
+    tier: weekly >= 100 ? 4 : weekly >= 50 ? 3 : weekly >= 10 ? 2 : 1, priced: true, ...extra });
+  const COSTS = { days: 7, at: now, bands: [10, 50, 100], agents: {
+    a1: c(6), a2: c(2), a3: c(0.5), a4: c(9), a5: c(4), a6: c(0.3), a7: c(12),
+    a8: c(18), a9: { ...c(0), tier: 1, local: true }, a10: { ...c(0), tier: 0 }, a11: c(3), a12: c(0.4), a13: c(1.5), a14: c(5),
+  } };
   const R = {
+    '/v1/costs': COSTS,
     '/v1/config': { authMode: 'identity', localAccounts: false, maxAgentsPerAccount: 50 },
     '/v1/agents': AGENTS,
     '/v1/ai-profiles': [PROFILE],
@@ -105,4 +113,5 @@ export const SHOTS = [
   { file: 'screenshot.png', width: 1500, height: 900, open: null },
   { file: 'screenshot-usage.png', width: 1400, height: 620, open: "openAiDlg('ai')" },
   { file: 'screenshot-agent.png', width: 1400, height: 800, open: "openV2Agent('a2','overview')" },
+  { file: 'screenshot-cost.png', width: 1500, height: 900, open: "v2SetView('cost')" },
 ];

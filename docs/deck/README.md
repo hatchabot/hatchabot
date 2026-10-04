@@ -2,7 +2,7 @@
 
 `hatchabot-deck.pdf` — 18 slides (16:9). It leads with the objection ("can't ChatGPT or
 Claude already do this?"), then the idea, the side-by-side comparison, what you actually buy from a frontier lab (inference — the rest is open source), the one-subscription
-household, the platform case, two agents built on it, the control panel, the Hatchabot supervisor (keeping each agent on the right model), features, operating a fleet, who gets in, ownership (every part of an agent is yours, and it fits in a file), principles, what Hatchabot adds
+household, the platform case, two agents built on it, the control panel, the Hatchabot supervisor (the right model per agent, loops, conversation size), features, operating a fleet, who gets in, ownership (every part of an agent is yours, and it fits in a file), principles, what Hatchabot adds
 to OpenClaw, how it works, and the 15-minute start.
 
 Comparison claims describe the CONSUMER chat apps as of September 2026 and were checked
@@ -28,8 +28,8 @@ docker run --rm -v "$PWD/docs/deck":/work -w /work hatchabot-runtime:latest \
 
 Edit the HTML, re-run, look at every page, commit both files.
 
-`screenshot.png` (the fleet), `screenshot-usage.png` (one AI source's usage) and
-`screenshot-agent.png` (one agent's settings) are rendered from the real `web/index.html`
+`screenshot.png` (the fleet), `screenshot-usage.png` (one AI source's usage),
+`screenshot-agent.png` (one agent's settings) and `screenshot-cost.png` (View by → Cost) are rendered from the real `web/index.html`
 driven by a stubbed `window.fetch` — invented household agents, no real names, tokens or
 usage. Regenerate them all with `node scripts/screenshots.mjs` (needs docker); the fleet,
 the data and the viewports live in `shot-data.mjs`. hatchabot.com carries the same files.

@@ -18,10 +18,13 @@ a quality guard proposes switching back if errors rise after a switch, and the
 realised saving is shown as one line ("Right-size: ≈ $12.40 this month"). Each
 agent's tile carries its cost for the last week ("$4/wk"), with a Cost view and
 the model price list in the app. You confirm every change. Dollar figures are
-estimates from measured tokens at Anthropic's list API prices. Coming next, not
-shipped yet: conversation-size warnings and compaction, spotting stuck loops,
-scheduled-task and cache checks, and budgets. See
-[Right-size](#right-size-the-model-steward), [Cost badges](#cost-badges) and
+estimates from measured tokens at Anthropic's list API prices. It also watches
+how agents use tokens: Hatchabot flags an agent stuck in a loop under Needs you
+and says so once on Telegram; a conversation grown large gets a compaction or
+a per-agent conversation cap proposed as a card; and the "Weekly token review"
+checks the prompt cache and what scheduled tasks cost. Coming next, not shipped
+yet: budgets. See [Right-size](#right-size-the-model-steward),
+[Token steward](#token-steward), [Cost badges](#cost-badges) and
 [Model prices](#model-prices).
 
 ## What Hatchabot is
@@ -65,8 +68,8 @@ The header holds:
   numbers the old dashboard showed (awake, tokens per hour, memory, last
   backup, spare bots) live under Status — Health, Usage, Resources — and under
   Settings → Telegram (Chris, 2026-09-26). What needs you shows at the top
-  (**Needs you**) and under View by → **Needs you**. A fresh install with
-  no manager yet shows the set-up box in the hub's place.
+  (**Needs you**) and under View by → **Needs you**. Until you have a
+  manager, a box at the top of the home screen offers to set one up.
 - **The setup guide doesn't disappear.** Until the first agent exists it shows
   itself — connect the AI, make a Telegram bot, create the agent. After that it
   keeps going with the four steps that decide whether the house is actually set
@@ -140,8 +143,10 @@ The header holds:
 - **Check an agent's health on its Overview**: the result appears right
   there, not in another panel.
 - Long introductions show two lines; **More** reveals the rest.
-- **Hatchabot itself is at the top**: your manager, with the fleet in tiles
-  beside it. Click it to talk; ask it to create, fix, move or share agents.
+- **Hatchabot itself is the first tile**: your manager, fixed first in
+  Default, with a small gold star on its left edge and a stronger gold
+  outline (see [The manager's tile](#the-managers-tile)). Click it to talk;
+  ask it to create, fix, move or share agents.
   Every change arrives as a card showing exactly what it will do, and nothing
   happens until you press its Confirm.
 - **Icons are picked for you.** The first time the new screen sees agents
@@ -150,6 +155,73 @@ The header holds:
   Change any of them by clicking the icon in its settings. Icons travel with
   the agent: backups, shared copies and agents sent to someone else keep
   theirs.
+
+### View by
+
+The bar above the agents: *Groups* is the arrangement
+you made — drag to reorder, drag between groups. The other views bin the same
+agents by **Machine**, **AI source**, **Model**, **Cost** (a week at API
+prices; see [Cost badges](#cost-badges)), **Image** (the fleet default, a
+pinned base image, or each derived image by name), **Pinned** (which image
+an agent is pinned to, or that it follows the fleet default), **Class**, **Status**,
+**Activity** (when each agent last did something: the last hour, today, this
+week, this month, longer ago, never) or **Rebuilt** (the same bins, by when
+its container was last built),
+read-only, remembered per device. **Needs you** bins by what wants you:
+Knocking, To read, To rebuild, Needs you, Fine — and **Cleared**: an
+agent you have taken out of the way with 🔕 (on the section's header for
+everyone in it, or on the agent's own sheet under its notices). Clearing
+remembers what was flagged, so the agent comes back the moment something
+new happens to it — a new restart, a new reason to rebuild, a failure —
+and **Show again** on its sheet brings it back by hand. Knocking and To
+read are not cleared this way: they go away by answering. The bar appears
+once there is more than one agent; the read-only views list their bins
+alphabetically (the two time views newest first), with *Shared with me* and
+*Archived* last. On the same
+bar in every view, **Age** (newest agent first), **Name** (A→Z) or
+**Activity** (most recently active first) orders the agents within each bin;
+press the active one again to flip it. Dragging an agent's icon still moves
+it to another group (or to Archived); positions inside a group follow the
+sort. The Cost view has its own **Cost** sort as well (most expensive first).
+
+### The Activity view: Unread first, and each agent's last line
+
+In View by → **Activity**, agents with replies you have not read (the blue dot)
+sit in an **Unread** section at the top, newest reply first, and are not
+repeated in the time bins below. Hovering a tile shows its last line in the
+tooltip, with how long ago: who spoke last and how it began ("You: thanks",
+"Robin: can we do tacos?", the agent's own words with no name), **⏰ Daily
+brief ran** when the last thing was a scheduled task, or **needs you: …** in
+Needs you's own words. The same line is in the tooltip in every view (read
+with the list, at most every 30 seconds). Nothing is added under the tiles,
+and a click on a tile does what it always does.
+
+- *Who sees which line*: what that person could already read in the agent's
+  console. The owner's console reads every conversation, so the owner sees
+  the newest of them (a member's Telegram line carries the member's name, a
+  web-chat guest's line the guest's). A web-chat guest sees only their own
+  conversation. A member who cannot chat with the agent here sees no line.
+  A line nobody can place is not shown.
+- *Cost*: none on a quiet agent. The line rides on the session read the
+  home screen's poll already does once a minute; only a conversation that
+  moved gets one more read of its last few messages, inside the agent's
+  container. The cleaned line (at most 120 characters) is kept, so an agent
+  that is asleep or stopped shows its last line without being woken or read.
+  The app asks for the lines (`GET /v1/recent?all=1`) only while the
+  Activity view is shown; if that fails, the view is drawn without them.
+  Message text is never written to the logs.
+
+### Resources
+
+In Status → Resources (or `hatchabot top [--sort cpu|mem|name]`): live
+CPU and memory per agent, per machine, as Docker measures it — one call per
+machine, refreshed every few seconds while the view is open; click Agent, CPU
+or any other column to sort (again to flip). Beside the memory: the container's **peak**
+since it started and how often it **hit its cap** (see "When a container
+restarts on its own"). A runner shows "not measurable" until its
+provider reports stats. The machine owner also sees the
+machine-level containers (the memory search service and its door, the
+Hatchabot agent's doorman); everyone else sees their own and shared agents.
 
 ### Cost badges
 
@@ -222,8 +294,8 @@ different one, in pricing.ts.
 
 ## Your Hatchabot agent (the manager)
 
-The box at the top of the home screen offers **Set it up**: a management agent
-of your own, one per account. It is an ordinary OpenClaw agent, so it runs on
+Until you have one, a box at the top of the home screen offers **Set it
+up**: a management agent of your own, one per account. It is an ordinary OpenClaw agent, so it runs on
 **whichever AI source you have** (Claude, OpenAI, Gemini or a local model),
 has the full console, remembers how you like things run, and can have a
 Telegram bot added later. **💬 Open** talks to it.
@@ -1775,68 +1847,6 @@ an agent still pins it. From the CLI:
 then `hatchabot image pin <agent> media`. Building runs a Dockerfile on the box,
 a privilege the local-host owner already has — so it, and the pin, are
 host-owner gated and never exposed to a co-tenant.
-
-**View by** (the home screen, above the agents): *Groups* is the arrangement
-you made — drag to reorder, drag between groups. The other views bin the same
-agents by **Machine**, **AI source**, **Model**, **Image** (the fleet default,
-a pinned base image, or each derived image by name), **Class**, **Status**,
-**Activity** (when each agent last did something: the last hour, today, this
-week, this month, longer ago, never) or **Rebuilt** (the same bins, by when
-its container was last built),
-read-only, remembered per device. **Needs you** bins by what wants you:
-Knocking, To read, To rebuild, Needs you, Fine — and **Cleared**: an
-agent you have taken out of the way with 🔕 (on the section's header for
-everyone in it, or on the agent's own sheet under its notices). Clearing
-remembers what was flagged, so the agent comes back the moment something
-new happens to it — a new restart, a new reason to rebuild, a failure —
-and **Show again** on its sheet brings it back by hand. Knocking and To
-read are not cleared this way: they go away by answering. The bar appears
-once there is more than one agent; the read-only views list their bins
-alphabetically (the two time views newest first), with *Shared with me* and
-*Archived* last. On the same
-bar in every view, **Age** (newest agent first), **Name** (A→Z) or
-**Activity** (most recently active first) orders the agents within each bin;
-press the active one again to flip it. Dragging an agent's icon still moves
-it to another group (or to Archived); positions inside a group follow the
-sort. The top bar carries the accent colour, fading into the page, and holds
-only the brand and your account; New agent, Inbox, Status, Setup guide and
-Settings sit in the Hatchabot panel beside the manager.
-
-**The Activity view: Unread first, and each agent's last line.** In
-View by → **Activity**, agents with replies you have not read (the blue dot)
-sit in an **Unread** section at the top, newest reply first, and are not
-repeated in the time bins below. Hovering a tile shows its last line in the
-tooltip, with how long ago: who spoke last and how it began ("You: thanks",
-"Robin: can we do tacos?", the agent's own words with no name), **⏰ Daily
-brief ran** when the last thing was a scheduled task, or **needs you: …** in
-Needs you's own words. The same line is in the tooltip in every view (read
-with the list, at most every 30 seconds). Nothing is added under the tiles,
-and a click on a tile does what it always does.
-
-- *Who sees which line*: what that person could already read in the agent's
-  console. The owner's console reads every conversation, so the owner sees
-  the newest of them (a member's Telegram line carries the member's name, a
-  web-chat guest's line the guest's). A web-chat guest sees only their own
-  conversation. A member who cannot chat with the agent here sees no line.
-  A line nobody can place is not shown.
-- *Cost*: none on a quiet agent. The line rides on the session read the
-  home screen's poll already does once a minute; only a conversation that
-  moved gets one more read of its last few messages, inside the agent's
-  container. The cleaned line (at most 120 characters) is kept, so an agent
-  that is asleep or stopped shows its last line without being woken or read.
-  The app asks for the lines (`GET /v1/recent?all=1`) only while the
-  Activity view is shown; if that fails, the view is drawn without them.
-  Message text is never written to the logs.
-
-**Resources** (Status → Resources; `hatchabot top [--sort cpu|mem|name]`): live
-CPU and memory per agent, per machine, as Docker measures it — one call per
-machine, refreshed every few seconds while the view is open; click Agent, CPU
-or any other column to sort (again to flip). Beside the memory: the container's **peak**
-since it started and how often it **hit its cap** (see "When a container
-restarts on its own"). A runner shows "not measurable" until its
-provider reports stats. The machine owner also sees the
-machine-level containers (the memory search service and its door, the
-Hatchabot agent's doorman); everyone else sees their own and shared agents.
 
 **Memory search engine** (an agent's ⚙ Settings → Advanced): where its
 semantic memory search runs — the engine built into its image (today's
