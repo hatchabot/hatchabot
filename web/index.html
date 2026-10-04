@@ -659,6 +659,30 @@
             background:var(--panel-2); color:var(--dim); border:1.5px solid var(--bg); font-size:10px; font-weight:700;
             display:grid; place-items:center; line-height:1; z-index:1; font-variant-numeric:tabular-nums }
   .v2sbar .v2idle { display:none }
+  /* What its last 7 days cost at API prices ("$12/wk"), straddling the icon's
+     top edge in the middle: the one edge no other mark uses (unread
+     top-left, needs-you top-right, quiet-for and shared bottom-left, chat
+     apps bottom-right). Absolute, so the tile keeps its size. Quiet like the
+     quiet-for chip; the dearest take the soft gold wash. The corner marks
+     sit above it if a wide one ever meets them. */
+  .v2cost { position:absolute; left:50%; top:-8px; transform:translateX(-50%); height:15px; padding:0 3px; border-radius:8px;
+            background:var(--panel-2); color:var(--dim); border:1.5px solid var(--bg); font-size:8.5px; font-weight:700;
+            letter-spacing:-.04em; display:flex; align-items:center; line-height:1; z-index:1; white-space:nowrap; pointer-events:none;
+            font-variant-numeric:tabular-nums }
+  .v2cost small { font-size:7px; font-weight:600; opacity:.8; margin-left:.5px }
+  /* A needs-you mark top-right: lean a little left, clear of it. */
+  .v2cost.v2cost-l { transform:translateX(calc(-50% - 3px)) }
+  .v2group .v2cost { border-color:var(--panel) }
+  .v2cost.v2cost-hi { background:color-mix(in srgb, var(--accent) 17%, var(--panel)); border-color:color-mix(in srgb, var(--accent) 45%, var(--line)); color:var(--accent-text) }
+  .v2tipcost { display:block; margin-top:6px }
+  /* Settings → AI sources → Model prices. */
+  .mp-wrap { overflow-x:auto; margin-top:4px }
+  table.mp-tbl { border-collapse:collapse; width:100%; font-size:13px }
+  .mp-tbl th { text-align:right; font-weight:600; color:var(--dim); font-size:12px; padding:4px 8px; border-bottom:1px solid var(--line); white-space:nowrap }
+  .mp-tbl td { text-align:right; padding:5px 8px; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; white-space:nowrap }
+  .mp-tbl th:first-child, .mp-tbl td:first-child { text-align:left; padding-left:0 }
+  .mp-tbl tr.mp-old td { color:var(--dim) }
+  .mp-note { margin:8px 0 0; line-height:1.5 }
   .v2tg { position:absolute; right:-6px; bottom:-6px; width:20px; height:20px; border-radius:50%; background:#2aabee;
           display:grid; place-items:center; border:2px solid var(--bg); z-index:1 }
   .v2tg svg { display:block; margin-left:-1px }
@@ -1608,6 +1632,11 @@
     <div class="actions" style="justify-content:flex-start">
       <button class="primary" id="aiAddBtn" onclick="addAiProfile()">Add source</button>
     </div>
+    </details>
+
+    <details class="sec-drawer" id="pricesDrawer" ontoggle="if (this.open) loadModelPrices()">
+      <summary><b>💲 Model prices</b> <span class="sub">— what each model costs per million tokens, and how caching changes it</span></summary>
+      <div id="modelPrices" style="margin-top:8px"><div class="sub">Loading…</div></div>
     </details>
 
     <details class="sec-drawer" id="mediaKeyDrawer">
@@ -8156,6 +8185,57 @@ const MODEL_PRICES = {
   'claude-opus-5-5': [4, 20], 'claude-opus-5': [5, 25], 'claude-opus-4-8': [5, 25], 'claude-opus-4-7': [5, 25], 'claude-opus-4-6': [5, 25],
   'claude-sonnet-5-5': [2, 10], 'claude-sonnet-5': [2, 10], 'claude-sonnet-4-6': [3, 15], 'claude-haiku-4-5': [1, 5], 'claude-fable-5-1': [10, 50], 'claude-fable-5': [10, 50],
 };
+// ---- Model prices (Settings → AI sources) ---------------------------------------
+// GET /v1/model-prices: the server's own price list (pricing.ts), so the panel
+// and every cost the app shows can never disagree. Opening it also refreshes
+// MODEL_PRICES above from the server.
+async function loadModelPrices() {
+  const el = $('modelPrices'); if (!el) return;
+  try {
+    const d = await api('/v1/model-prices');
+    for (const m of d.models || []) MODEL_PRICES[m.id] = [m.input, m.output];
+    el.innerHTML = renderModelPrices(d);
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+/** Settings → AI sources, with the price list open (from Status → Usage). */
+function openModelPrices() {
+  void openAiDlg('ai');
+  const d = $('pricesDrawer');
+  if (!d) return;
+  if (d.open) void loadModelPrices(); else d.open = true; // opening fires its toggle, which loads
+  d.scrollIntoView({ block: 'start' });
+}
+/** $5, $6.25, $0.50, $0.025: as many places as the price has, at least two after a point. */
+const mpUsd = (x) => '$' + (Number.isInteger(x) ? String(x) : (Math.round(x * 100) === x * 100 ? x.toFixed(2) : String(+x.toFixed(4))));
+const mpShare = (x) => `${+x.toFixed(4)}×`;
+function renderModelPrices(d) {
+  const rows = (d.models || []).map((m) => `<tr class="${m.legacy ? 'mp-old' : ''}"><td>${esc(m.label)}${m.legacy ? ' <span class="sub">(older)</span>' : ''}${m.limited ? ' <span class="sub">(invitation only)</span>' : ''}</td>
+    <td>${mpUsd(m.input)}</td><td>${mpUsd(m.output)}</td><td>${mpUsd(m.cacheRead)}</td><td>${mpUsd(m.cacheWrite)}</td></tr>`).join('');
+  const odd = (d.models || []).filter((m) => !m.legacy && m.cacheReadShare !== d.cacheReadDefault).map((m) => `${mpShare(m.cacheReadShare)} on ${esc(m.label)}`);
+  const when = (() => { const t = Date.parse(d.checked + 'T12:00:00Z'); return Number.isFinite(t) ? new Date(t).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : esc(d.checked); })();
+  const link = /^https:\/\//.test(d.source || '') ? `<a href="${esc(d.source)}" target="_blank" rel="noopener">Anthropic's pricing page</a>` : "Anthropic's pricing page";
+  // The worked example, figured from the list itself.
+  const ex = (d.models || []).find((m) => m.id === 'claude-opus-4-8');
+  const conv = 300_000, answer = 1_000;
+  const c2 = (x) => '$' + x.toFixed(2);
+  const example = ex ? `<p class="sub mp-note">For example, on ${esc(ex.label)} with a 300,000-token conversation: the part read from the cache costs about <b>${c2(conv * ex.cacheRead / 1e6)}</b> a message;
+    written again after a pause, about <b>${c2(conv * ex.cacheWrite / 1e6)}</b>; an answer of 1,000 tokens about <b>${c2(answer * ex.output / 1e6)}</b>.</p>` : '';
+  const unpriced = (d.unpriced || []).length
+    ? `<p class="sub mp-note">No price known: ${d.unpriced.map((m) => `<code>${esc(m)}</code>`).join(', ')} — their use shows as "no price known", never as $0.</p>`
+    : '<p class="sub mp-note">A model not on this list has no price known: its use shows as "no price known", never as $0.</p>';
+  return `<div class="mp-wrap"><table class="mp-tbl"><thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write (5 min)</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="sub mp-note">US dollars per million tokens. Cache read = ${mpShare(d.cacheReadDefault)} the input price${odd.length ? ` (${odd.join(', ')})` : ''}; cache write = ${mpShare(d.cacheWrite)} input.
+      Checked against ${link} on ${esc(when)}. Every cost in Hatchabot (Usage, the home screen's $/wk badges, Right-size) is figured from this list.</p>
+    <h4 class="v2sec" style="margin:12px 0 4px">How caching changes the price</h4>
+    <p class="sub mp-note">Every message re-sends the whole conversation to the model. Within about 5 minutes of the last one, the part it has already seen is
+      <b>read from Anthropic's cache</b> at a tenth of the input price (less on the models above). After a longer pause — or when the start of the prompt changes —
+      the whole conversation is <b>written to the cache again</b>, at 1.25× the input price. So quick back-and-forth is cheap, a message after a long pause in a
+      very long conversation is the expensive moment, and long conversations cost more on every turn.</p>
+    ${example}
+    <p class="sub mp-note">Local models${(d.local || []).length ? ` (${d.local.map((m) => `<code>${esc(m)}</code>`).join(', ')})` : ''}: $0 — their calls run on your own machine.</p>
+    ${unpriced}`;
+}
+
 function fmtTokens(n) {
   const v = Number(n) || 0; // guard undefined/NaN/string → "0" not "undefined"
   if (v >= 1e6) return (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + 'M';
@@ -8306,7 +8386,8 @@ function renderFleetUsage(f) {
   const breakdown = (bb.included || bb.api || bb.local) ? `
     <div style="display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--panel-2);margin:2px 0 6px">${seg('included', 'Subscription', 'var(--ok)')}${seg('api', 'API', 'var(--warn)')}${seg('local', 'Local', '#6b8fb5')}</div>
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">${legend('included', 'subscription', 'var(--ok)')}${legend('api', 'API', 'var(--warn)')}${legend('local', 'local', '#6b8fb5')}</div>` : '';
-  const totalCost = f.cost ? `<span class="sub">· <b style="color:var(--warn)">est. ${fmtCostRange(f.cost)}</b> API cost</span>` : '';
+  const totalCost = (f.cost ? `<span class="sub">· <b style="color:var(--warn)">est. ${fmtCostRange(f.cost)}</b> API cost</span>` : '')
+    + ` <a href="#" class="sub" id="fleetUsagePrices" style="font-size:13px;font-weight:400" onclick="event.preventDefault(); openModelPrices()">model prices</a>`;
   // Spike warnings of the last week (sent to Telegram when they happened).
   const alerts = (f.alerts || []).map((x) => `<div class="sub" style="margin:2px 0">⚠️ <b>${esc(x.name)}</b> used ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}${x.told ? '' : ' · not sent (no Telegram)'}</div>`).join('');
   $('fleetUsageBody').innerHTML = `
@@ -11285,6 +11366,7 @@ async function refresh(withMeta) {
     agents = await api('/v1/agents');
     agentsLoaded = true;
     if (UI_V2) void v2LoadRecent(); // each agent's last line, for its tooltip (at most every 30 s)
+    if (UI_V2) void v2LoadCosts(); // the cost badges (at most every 5 minutes)
     $('offlineBanner').hidden = true; // reached the server: any earlier warning is stale
     // The classic Activity card; v2 hides it (Status → Activity loads its own).
     if (!UI_V2) loadActivity();
@@ -11448,11 +11530,13 @@ function v2IdleFor(a) {
   if (!(h >= 1)) return '';
   return h < 24 ? `${Math.floor(h)}h` : h < 24 * 7 ? `${Math.floor(h / 24)}d` : h < 24 * 365 ? `${Math.floor(h / (24 * 7))}w` : '1y+';
 }
-function v2IconHTML(a, st) {
+function v2IconHTML(a, st, opts = {}) {
   const color = /^#[0-9a-f]{6}$/i.test(a.iconColor || '') ? a.iconColor : v2ColorFor(a.name);
   const face = a.icon ? esc(a.icon) : esc((a.name.trim()[0] || '?').toUpperCase());
   const idle = v2IdleFor(a);
   return `<span class="v2ic${a.icon ? '' : ' mono'}"><span class="v2tint" style="background:${color}"></span><span class="v2em">${face}</span>`
+    // Before the corner marks: they paint over it if a wide one ever meets them.
+    + (opts.cost ? v2CostChip(a, !!st.glyph) : '')
     + (idle ? `<span class="v2idle" title="Quiet for ${esc(idle)} — last said something ${esc(ago(a.lastActiveAt))}">${esc(idle)}</span>` : '')
     + (st.glyph ? `<span class="v2badge v2b-${st.cls}" aria-hidden="true">${st.glyph}</span>` : '')
     + (!v2Mine(a) ? '<span class="v2badge v2b-shared" aria-hidden="true">👥</span>' : '')
@@ -11465,7 +11549,7 @@ function v2IconHTML(a, st) {
 
 // How the home screen is grouped: by the groups you made, or by where and on
 // what the agents run. A per-device choice; "group" is the one you can rearrange.
-const V2_VIEWS = [['group', 'Groups'], ['attention', 'Needs you'], ['host', 'Machine'], ['source', 'AI source'], ['model', 'Model'], ['image', 'Image'], ['pinned', 'Pinned'], ['class', 'Class'], ['state', 'Status'], ['activity', 'Activity'], ['rebuilt', 'Rebuilt']];
+const V2_VIEWS = [['group', 'Groups'], ['attention', 'Needs you'], ['host', 'Machine'], ['source', 'AI source'], ['model', 'Model'], ['cost', 'Cost'], ['image', 'Image'], ['pinned', 'Pinned'], ['class', 'Class'], ['state', 'Status'], ['activity', 'Activity'], ['rebuilt', 'Rebuilt']];
 /** The Activity view's first section: agents with replies waiting to be read. */
 const V2_UNREAD = 'act:unread';
 /** Time-since bins, oldest last; the key's leading digit keeps them in order. */
@@ -11485,14 +11569,21 @@ let v2View = (() => { try { const v = localStorage.getItem('hb-v2-view'); return
 // buttons that rewrite it. Remembered per device.
 let v2Sort = (() => { try { const v = JSON.parse(localStorage.getItem('hb-v2-sort') || 'null'); return v && ['age', 'name', 'activity'].includes(v.key) ? v : { key: 'age', dir: -1 }; } catch { return { key: 'age', dir: -1 }; } })();
 function v2SetSort(key) {
-  // Age and Activity start newest / most recent first; Name starts A→Z. Again flips.
-  v2Sort = { key, dir: v2Sort.key === key ? -v2Sort.dir : (key === 'name' ? 1 : -1) };
-  try { localStorage.setItem('hb-v2-sort', JSON.stringify(v2Sort)); } catch {}
+  // Age, Activity and Cost start newest / most recent / dearest first; Name starts A→Z. Again flips.
+  const cur = v2CurSort();
+  const next = { key, dir: cur.key === key ? -cur.dir : (key === 'name' ? 1 : -1) };
+  if (v2View === 'cost') { v2CostSort = next; try { localStorage.setItem('hb-v2-sort-cost', JSON.stringify(next)); } catch {} }
+  else { v2Sort = next; try { localStorage.setItem('hb-v2-sort', JSON.stringify(next)); } catch {} }
   renderV2();
 }
-const v2SortKey = () => v2Sort.key;
+// The Cost view keeps a sort of its own, most expensive first until you pick
+// another; the other views keep theirs (Age · Name · Activity).
+let v2CostSort = (() => { try { const v = JSON.parse(localStorage.getItem('hb-v2-sort-cost') || 'null'); return v && ['cost', 'age', 'name', 'activity'].includes(v.key) ? v : { key: 'cost', dir: -1 }; } catch { return { key: 'cost', dir: -1 }; } })();
+const v2CurSort = () => (v2View === 'cost' ? v2CostSort : v2Sort);
+const v2SortKey = () => v2CurSort().key;
 function v2BinCmp(x, y) {
-  const key = v2SortKey(), dir = v2Sort.dir;
+  const key = v2SortKey(), dir = v2CurSort().dir;
+  if (key === 'cost') return dir * ((v2CostOf(x)?.weekly ?? -1) - (v2CostOf(y)?.weekly ?? -1)) || x.name.localeCompare(y.name);
   if (key === 'age') return dir * String(x.createdAt || '').localeCompare(String(y.createdAt || '')) || x.name.localeCompare(y.name);
   if (key === 'activity') {
     if (!x.lastActiveAt !== !y.lastActiveAt) return x.lastActiveAt ? -1 : 1; // never-active last either way
@@ -11518,6 +11609,7 @@ function v2ViewKey(a, view = v2View) {
       const [k, l] = v2AgeBin(a.lastActiveAt, 'Active'); return ['act:' + k, l];
     }
     case 'rebuilt': { const [k, l] = v2AgeBin(a.rebuiltAt, 'Rebuilt'); return ['rb:' + k, l]; }
+    case 'cost': return v2CostBin(a);
     case 'image': {
       // The fleet default, a pinned base image, or a derived image (its own bin, by name).
       // A pin to a tag that IS the default's image (2026.9.6 just promoted, say) is the default too.
@@ -11581,6 +11673,80 @@ function v2PreviewOf(a) {
   return typeof said === 'string' ? said : '';
 }
 
+// ---- Cost badges and View by → Cost -------------------------------------------
+// GET /v1/costs (orchestrator/agentCosts.ts): each agent's last 7 days at API
+// prices, as a monthly rate, from what the usage sampler stored — it never
+// reads a container or wakes an agent. Read with the list poll, at most every
+// 5 minutes (the server caches as long). Agents on a local model have no
+// cost; an unknown model's price has no badge.
+let v2Costs = null, v2CostsBusy = false, v2CostsAt = 0;
+const V2_COSTS_EVERY_MS = 5 * 60_000;
+/** A week under this many dollars shows no badge: the cheap ones say nothing, which keeps the screen calm. */
+const V2_COST_BADGE_MIN_USD = 1;
+/** A week from this many dollars takes the soft gold wash. */
+const V2_COST_GOLD_FROM_USD = 100;
+/** View by → Cost's section for a band: the edges come with the costs (COST_BANDS in agentCosts.ts, $10 / $50 / $100). */
+function v2CostBandLabel(tier) {
+  const b = Array.isArray(v2Costs?.bands) && v2Costs.bands.length ? v2Costs.bands : [10, 50, 100];
+  const n = (x) => Number(x).toLocaleString('en-US');
+  if (tier <= 1) return `Under $${n(b[0])} a week`;
+  if (tier > b.length) return `Over $${n(b[b.length - 1])} a week`;
+  return `$${n(b[tier - 2])}–${n(b[tier - 1])} a week`;
+}
+async function v2LoadCosts(force = false) {
+  if (v2CostsBusy || (!force && Date.now() - v2CostsAt < V2_COSTS_EVERY_MS)) return;
+  v2CostsBusy = true;
+  try {
+    const r = await api('/v1/costs?days=7');
+    v2Costs = r && typeof r.agents === 'object' ? { off: !!r.off, agents: r.agents || {}, bands: r.bands } : null;
+  } catch { v2Costs = null; }
+  finally { v2CostsBusy = false; v2CostsAt = Date.now(); }
+  if (v2Costs?.off && v2View === 'cost') v2View = 'group'; // the owner turned them off: not a view to land on
+  renderV2();
+}
+const v2CostsOff = () => !!v2Costs?.off;
+const v2CostOf = (a) => (v2Costs && !v2Costs.off ? v2Costs.agents[a.id] : undefined);
+/** "$3.40", "$86", "$1,240". */
+function v2Money(x) {
+  return x < 10 ? '$' + (Math.round(x * 100) / 100).toFixed(2) : '$' + Math.round(x).toLocaleString('en-US');
+}
+/** The badge's figure: "$4/wk", "$240/wk", "$1.2k/wk"; '' under V2_COST_BADGE_MIN_USD. */
+function v2WeekChipText(usd) {
+  if (!(usd >= V2_COST_BADGE_MIN_USD)) return '';
+  const whole = Math.round(usd);
+  return whole < 1000 ? `$${whole}/wk` : `$${(usd / 1000).toFixed(1).replace(/\.0$/, '')}k/wk`;
+}
+/** The chip's markup: the figure, then a smaller "/wk". */
+function v2WeekChipHTML(text) {
+  const i = text.indexOf('/');
+  return i > 0 ? `${esc(text.slice(0, i))}<small>${esc(text.slice(i))}</small>` : esc(text);
+}
+function v2CostChip(a, crowded = false) {
+  const c = v2CostOf(a);
+  if (!c || !c.priced || c.local) return '';
+  const text = v2WeekChipText(c.weekly);
+  return text ? `<span class="v2cost${c.weekly >= V2_COST_GOLD_FROM_USD ? ' v2cost-hi' : ''}${crowded ? ' v2cost-l' : ''}" aria-hidden="true">${v2WeekChipHTML(text)}</span>` : '';
+}
+/** The tooltip's cost line (every view), or ''. */
+function v2CostLine(a) {
+  const c = v2CostOf(a);
+  if (!c || !c.tier) return '';
+  if (c.local) return 'Runs on a local model: no API cost';
+  if (!c.priced) return 'Cost: no price known for its model';
+  return `≈&nbsp;${v2Money(c.cost)} in the last 7 days at API prices (≈&nbsp;${v2Money(c.monthly)}&nbsp;a&nbsp;month)`
+    + (c.plan ? `<br>on ${v2Mine(a) ? 'your' : 'its owner\'s'} Claude plan — counts against its limits` : '');
+}
+/** View by → Cost: the dearest band first, then no price known, then no use. */
+function v2CostBin(a) {
+  if (!v2Costs) return ['$:d', 'Cost not read yet'];
+  const c = v2CostOf(a);
+  if (!c) return ['$:c', 'No cost shown'];
+  if (!c.tier) return ['$:b', 'No usage this week'];
+  if (!c.priced) return ['$:a', 'No price known'];
+  const t = c.local ? 1 : c.tier;
+  return ['$:' + (100 - t), v2CostBandLabel(t)];
+}
+
 function renderV2() {
   if (v2drag.active) return; // never re-render out from under a drag
   // Until the first list arrives the page keeps its "Loading…" line: an
@@ -11628,22 +11794,29 @@ function renderV2() {
   else if (live.some(v2Mine)) section('archived', 'Archived', V2_ARCHIVE); // somewhere to drop one
 
   // Time bins keep their own order (recent → old); other views go alphabetical. Shared and Archived last.
-  const timeView = v2View === 'activity' || v2View === 'rebuilt';
+  // ...and Cost keeps its tiers in order, dearest first.
+  const timeView = v2View === 'activity' || v2View === 'rebuilt' || v2View === 'cost';
   if (v2View !== 'group') sections.sort((x, y) => (x.key === 'shared' || x.key === 'archived') - (y.key === 'shared' || y.key === 'archived') || (y.key === V2_UNREAD) - (x.key === V2_UNREAD) || (timeView ? x.key.localeCompare(y.key) : x.label.localeCompare(y.label)));
   // Unread: newest reply first, whatever the sort.
   const newestFirst = (x, y) => String(y.lastActiveAt || '').localeCompare(String(x.lastActiveAt || '')) || x.name.localeCompare(y.name);
   for (const s of sections) s.items.sort((p, q) => ((q.a.ops ? 1 : 0) - (p.a.ops ? 1 : 0)) || (s.key === V2_UNREAD ? newestFirst(p.a, q.a) : v2BinCmp(p.a, q.a))); // the manager stays first
-  const sortBar = `<span class="v2binsort">${[['age', 'Age'], ['name', 'Name'], ['activity', 'Activity']].map(([k, l]) => {
+  // A Cost section's header says what its agents came to this week.
+  if (v2View === 'cost') for (const s of sections) {
+    const sum = s.items.reduce((t, { a }) => { const c = v2CostOf(a); return t + (c && c.priced && !c.local ? c.weekly : 0); }, 0);
+    if (sum > 0 && s.key.startsWith('$:')) s.note = `≈ ${v2Money(sum)} this week`;
+  }
+  const sortBar = `<span class="v2binsort">${[...(v2View === 'cost' ? [['cost', 'Cost']] : []), ['age', 'Age'], ['name', 'Name'], ['activity', 'Activity']].map(([k, l]) => {
     const on = v2SortKey() === k;
-    const title = k === 'age' ? 'Newest agent first; again for oldest first' : k === 'name' ? 'A→Z; again for Z→A' : 'Most recently active first; again for quietest first';
-    return `<button class="${on ? 'on' : ''}" onclick="v2SetSort('${k}')" title="${title}">${l}${on ? (v2Sort.dir > 0 ? ' ▲' : ' ▼') : ''}</button>`;
+    const title = k === 'cost' ? 'Most expensive first; again for cheapest first' : k === 'age' ? 'Newest agent first; again for oldest first' : k === 'name' ? 'A→Z; again for Z→A' : 'Most recently active first; again for quietest first';
+    return `<button class="${on ? 'on' : ''}" onclick="v2SetSort('${k}')" title="${title}">${l}${on ? (v2CurSort().dir > 0 ? ' ▲' : ' ▼') : ''}</button>`;
   }).join('')}</span>`;
-  const viewBar = live.length > 1 ? `<div class="v2viewbar" role="tablist" aria-label="Group agents by">${V2_VIEWS.map(([k, l]) =>
+  const views = v2CostsOff() ? V2_VIEWS.filter(([k]) => k !== 'cost') : V2_VIEWS;
+  const viewBar = live.length > 1 ? `<div class="v2viewbar" role="tablist" aria-label="Group agents by">${views.map(([k, l]) =>
     `<button role="tab" aria-selected="${k === v2View}" class="${k === v2View ? 'on' : ''}" onclick="v2SetView('${k}')">${esc(l)}</button>`).join('')}${sortBar}</div>` : '';
   v2SectionsNow = sections;
   const html = viewBar + sections.map(s => `
     <section class="v2group${v2IsCollapsed(s.key) ? ' collapsed' : ''}">
-      <div class="v2ghead"><h3${s.key.startsWith('g:') && s.drop ? ` class="group-name" tabindex="0" title="Double-click to rename" ondblclick="editGroupName(this)" onkeydown="if (event.key === 'Enter' && !this.isContentEditable) { event.preventDefault(); editGroupName(this); }"` : ''}>${esc(s.label)}</h3><span class="n">${s.items.length}</span>
+      <div class="v2ghead"><h3${s.key.startsWith('g:') && s.drop ? ` class="group-name" tabindex="0" title="Double-click to rename" ondblclick="editGroupName(this)" onkeydown="if (event.key === 'Enter' && !this.isContentEditable) { event.preventDefault(); editGroupName(this); }"` : ''}>${esc(s.label)}</h3><span class="n">${s.items.length}</span>${s.note ? `<span class="n v2gnote">${esc(s.note)}</span>` : ''}
         <span class="v2gtools">
           ${s.key.startsWith('g:') && s.drop ? `<button onclick="editGroupName(this.closest('.v2ghead').querySelector('h3'))" title="Rename this group" aria-label="Rename group">✏️</button><button onclick="moveGroup('${jsq(s.drop)}','up')" title="Move this group up" aria-label="Move group up">↑</button><button onclick="moveGroup('${jsq(s.drop)}','down')" title="Move this group down" aria-label="Move group down">↓</button>` : ''}
           ${s.items.some(({ a }) => v2Mine(a) && a.state !== 'ARCHIVED') ? `<button onclick="v2BulkSection('${jsq(s.key)}','${jsq(s.label)}')" title="Bulk actions on the agents in this section">⚡</button>` : ''}
@@ -11655,8 +11828,9 @@ function renderV2() {
         ${s.items.map(({ a, child }) => {
           const st = v2Status(a);
           const prev = v2PreviewOf(a);
+          const cost = v2CostChip(a) ? `, about ${v2Money(v2CostOf(a).weekly)} a week at API prices` : '';
           return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) || a.ops ? ' data-v2fixed="1"' : ''}
-            aria-label="${esc(a.name)} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}${prev ? `. ${esc(prev)}` : ''}">${v2IconHTML(a, st)}<span class="v2name">${esc(a.name)}</span></button>`;
+            aria-label="${esc(a.name)} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}${esc(cost)}${prev ? `. ${esc(prev)}` : ''}">${v2IconHTML(a, st, { cost: true })}<span class="v2name">${esc(a.name)}</span></button>`;
         }).join('') || (s.key === 'archived' ? '<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept.</span>' : '')}
       </div>
     </section>`).join('');
@@ -11689,6 +11863,7 @@ function v2ShowTip(el) {
   tip.innerHTML = `<b>${esc(a.name)} · ${esc(st.label)}</b>${a.persona ? esc(a.persona.slice(0, 140)) : ''}${!v2Mine(a) ? '<br>Shared with you.' : ''}`
     + (a.botUsername ? `<br>On Telegram as @${esc(a.botUsername)}` : '') // an agent without Telegram says nothing about it (Chris, 2026-10-03)
     + (st.why.length ? `<ul>${st.why.slice(0, 4).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : '')
+    + (() => { const line = v2CostLine(a); return line ? `<span class="v2tipcost">${line}</span>` : ''; })()
     + (() => { const prev = v2PreviewOf(a), at = v2Recent?.get(a.id)?.at; return prev ? `<span class="v2tipprev">${at ? esc(ago(at)) + ' · ' : ''}${esc(prev)}</span>` : ''; })();
   tip.hidden = false;
   const r = el.querySelector('.v2ic').getBoundingClientRect();

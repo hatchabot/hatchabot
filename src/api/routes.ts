@@ -77,10 +77,11 @@ import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orches
 import { guestConsoleSessionKey } from '../openclaw/consoleIdentity.js';
 import { webChatStoreKey } from '../orchestrator/webChat.js';
 import { RecentTracker, RECENT_CAP, orderRecent, previewFor, previewLine, type RecentPeople, type RecentViewer } from '../orchestrator/recent.js';
+import { COST_BANDS, costBadgesOn, costsFor, TtlCache, type AgentCost } from '../orchestrator/agentCosts.js';
 import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
-import { estimateCost, pricesNothing } from '../orchestrator/pricing.js';
+import { CACHE_READ_DEFAULT, CACHE_WRITE_MULTIPLIER, estimateCost, priceList, pricesNothing, PRICES_CHECKED, PRICES_SOURCE } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
 import {
   agentArchiveName,
@@ -101,7 +102,7 @@ import { OPS_DIGEST_MESSAGE, OPS_SUGGEST_MESSAGE } from '../ops/opsAgent.js';
 import { buildScorecard } from '../orchestrator/modelScorecard.js';
 import { assessModelChange, backfillModelLedger, evaluateModelChanges, fileGuardProposals, recordChanges, rightSizeSavings, snapshotModels, EARLY_TURNS as EARLY_TURNS_N, VERDICT_AFTER_DAYS as VERDICT_DAYS, type ChangeMeta, type ModelFigures } from '../orchestrator/modelLedger.js';
 import type { PendingConfirm } from '../mgmt/pendingStore.js';
-import { modelOptionsFor } from '../orchestrator/modelOptions.js';
+import { modelOption, modelOptionsFor } from '../orchestrator/modelOptions.js';
 import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
 import { createOpsPush, unannounced } from '../ops/push.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
@@ -4538,6 +4539,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     };
   });
 
+  /**
+   * The home screen's cost badges and View by → Cost (agentCosts.ts): what
+   * each agent this person sees cost at API prices over the last `days`
+   * (7 by default), and as a monthly rate. From the sampler's stored
+   * profiles only: no container is read and no agent is woken. One answer
+   * per person and window for five minutes. A web-chat guest gets none.
+   */
+  const costCache = new TtlCache<Record<string, AgentCost>>(5 * 60_000);
+  app.get<{ Querystring: { days?: string } }>('/v1/costs', async (req, reply) => {
+    const days = req.query.days === undefined ? 7 : Number(req.query.days);
+    if (!Number.isInteger(days) || days < 1 || days > 30) return reply.code(400).send({ error: 'days must be a whole number from 1 to 30.' });
+    if (!costBadgesOn()) return { off: true, days, agents: {} };
+    const me = ownerIdOf(req);
+    const { value, at } = costCache.get(`${me}|${days}`, Date.now(), () => costsFor(store, me, days));
+    return { days, at: new Date(at).toISOString(), bands: COST_BANDS, agents: value };
+  });
+
   // ---- rebuild policy: which agents need a rebuild, and which the machine
   // does on its own (rebuildPolicy.ts) ---------------------------------------
 
@@ -7213,6 +7231,34 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return buildScorecard(store, ownerIdOf(req), { limit: Number.isFinite(limit) && limit > 0 ? limit : undefined });
   });
   app.get('/v1/model-options', async (req) => modelOptionsFor(store.listAIProfiles(ownerIdOf(req))));
+  /**
+   * The price list every cost in the app is figured from (pricing.ts): per
+   * model, per million tokens, with the date it was checked. Plus the models
+   * this person's sources and agents use that have no price (another
+   * vendor's) and the local ones (free), so the panel can name them.
+   */
+  app.get('/v1/model-prices', async (req) => {
+    const me = ownerIdOf(req);
+    const sources = store.listAIProfiles(me);
+    const byId = new Map(sources.map((p) => [p.id, p]));
+    const local = new Set<string>(), unpriced = new Set<string>();
+    const note = (model: string | undefined, vendor: string | undefined) => {
+      if (!model) return;
+      if (vendor === 'local') local.add(model);
+      else if (!modelOption(model)) unpriced.add(model);
+    };
+    for (const p of sources) for (const m of [p.model, ...(p.models ?? [])]) note(m, p.vendor);
+    for (const a of store.listVisibleAgents(me)) {
+      const p = byId.get(a.aiProfileId) ?? store.getAIProfile(a.aiProfileId);
+      note(a.model ?? p?.model, p?.vendor);
+    }
+    return {
+      checked: PRICES_CHECKED, source: PRICES_SOURCE,
+      cacheWrite: CACHE_WRITE_MULTIPLIER, cacheReadDefault: CACHE_READ_DEFAULT,
+      models: priceList(),
+      local: [...local].sort(), unpriced: [...unpriced].sort(),
+    };
+  });
   /**
    * The model-change ledger (modelLedger.ts): the caller's changes, newest
    * first, with the old model's figures at the change, the new model's a week

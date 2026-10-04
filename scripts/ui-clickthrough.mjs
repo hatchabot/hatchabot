@@ -1590,6 +1590,144 @@ const SCENARIOS = String.raw`(() => {
       } finally { await recentCleanup(); }
     },
   });
+  // ---- Cost badges ("$12/wk") and View by → Cost (made-up figures) ----
+  const COSTS = (() => {
+    const c = (weekly, extra = {}) => ({ cost: weekly, weekly, monthly: Math.round(weekly * 30 / 7 * 100) / 100, tier: weekly >= 100 ? 4 : weekly >= 50 ? 3 : weekly >= 10 ? 2 : 1, priced: true, ...extra });
+    return { days: 7, at: new Date().toISOString(), bands: [10, 50, 100], agents: {
+      a1: c(1240),                   // Homework Helper: $1.2k/wk, gold
+      a2: c(240),                    // Soccer Schedule
+      a3: c(64),                     // Piano Practice
+      a4: c(18, { plan: true }),     // Meal Planner, on the household's Claude plan
+      a5: c(4),                      // Grocery Runner
+      a6: c(0.4),                    // Home Maintenance: under $1, no badge
+      a7: { ...c(0), tier: 1, priced: false }, // Travel Planner: no price known
+      a8: c(120),                    // Budget Tracker
+      a9: { ...c(0), tier: 1, local: true },   // Stock Watcher: a local model
+      a10: { ...c(0), tier: 0 },     // Tax Filing: nothing this week
+      a11: c(12),                    // To Do
+      a12: c(0.9),                   // Garden Notes: no badge
+      a13: c(52),                    // Car Upkeep
+      a14: c(7),                     // Hatchabot
+    } };
+  })();
+  const costFixture = async (body = COSTS) => { window.__override['/v1/costs'] = body; await v2LoadCosts(true); };
+  const costCleanup = async () => {
+    delete window.__override['/v1/costs']; delete window.__override['/v1/model-prices'];
+    v2SetView('group'); await v2LoadCosts(true); // the stub answers {}: no costs
+    await refresh(false);
+  };
+  const chipOf = (name) => tile(name)?.querySelector('.v2cost') || null;
+  const tipText = (name) => { const t = tile(name); v2ShowTip(t); const txt = document.getElementById('v2Tip').textContent.replace(/\u00a0/g, ' '); document.getElementById('v2Tip').hidden = true; return txt; };
+  const tileSizes = () => [...document.querySelectorAll('#v2groups .v2agent')].map((t) => t.getBoundingClientRect().height + 'x' + t.getBoundingClientRect().width);
+  Object.assign(T, {
+    costBadges: async () => {
+      try {
+        const before = tileSizes();
+        await costFixture();
+        ok('asked for the last 7 days', calls('GET', /^\/v1\/costs$/).some((c) => c.url.includes('days=7')));
+        eq('Homework Helper', chipOf('Homework Helper')?.textContent, '$1.2k/wk');
+        ok('$100 a week and more take the gold wash', chipOf('Homework Helper').classList.contains('v2cost-hi') && chipOf('Budget Tracker').classList.contains('v2cost-hi'));
+        eq('Soccer Schedule', chipOf('Soccer Schedule')?.textContent, '$240/wk');
+        eq('Meal Planner', chipOf('Meal Planner')?.textContent, '$18/wk');
+        ok('under $100 is the quiet chip', !chipOf('Meal Planner').classList.contains('v2cost-hi') && !chipOf('Car Upkeep').classList.contains('v2cost-hi'));
+        eq('Grocery Runner, $1 and up', chipOf('Grocery Runner')?.textContent, '$4/wk');
+        for (const name of ['Home Maintenance', 'Garden Notes', 'Travel Planner', 'Stock Watcher', 'Tax Filing']) ok(name + ': no badge (under $1, no price, local, or no use)', !chipOf(name));
+        eq('tiles keep their size', tileSizes(), before);
+        ok('the tile says it out loud', tile('Meal Planner').getAttribute('aria-label').includes('about $18 a week at API prices'));
+        const chip = chipOf('Homework Helper').getBoundingClientRect(), ic = tile('Homework Helper').querySelector('.v2ic').getBoundingClientRect();
+        ok('the chip sits on the icon\'s top edge, centred', chip.top < ic.top && chip.bottom > ic.top && Math.abs((chip.left + chip.right) / 2 - (ic.left + ic.right) / 2) < 2);
+        // Loaded with the list poll, at most every 5 minutes.
+        const n = calls('GET', /^\/v1\/costs$/).length;
+        await refresh(false); await refresh(false);
+        eq('not re-read on every poll', calls('GET', /^\/v1\/costs$/).length, n);
+      } finally { await costCleanup(); }
+    },
+    costTooltip: async () => {
+      try {
+        await costFixture();
+        for (const v of ['group', 'activity', 'cost']) {
+          v2SetView(v); await sleep(30);
+          const meal = tipText('Meal Planner');
+          ok(v + ': the week and the month: ' + meal, meal.includes('≈ $18 in the last 7 days at API prices (≈ $77 a month)'));
+          ok(v + ': the plan note', meal.includes('on your Claude plan — counts against its limits'));
+        }
+        v2SetView('group');
+        ok('no plan note on an API-priced agent', tipText('Car Upkeep').includes('≈ $52 in the last 7 days') && !tipText('Car Upkeep').includes('Claude plan'));
+        ok('no price known', tipText('Travel Planner').includes('no price known'));
+        ok('a local model', tipText('Stock Watcher').includes('local model'));
+        ok('nothing for a quiet week', !tipText('Tax Filing').includes('API prices'));
+      } finally { await costCleanup(); }
+    },
+    costView: async () => {
+      try {
+        await costFixture();
+        const btn = byText('.v2viewbar button', 'Cost'); ok('a Cost view', !!btn);
+        btn.click(); await sleep(50);
+        ok('the view switched', v2View === 'cost');
+        const heads = [...document.querySelectorAll('#v2groups .v2ghead h3')].map((h) => h.textContent);
+        eq('sections, dearest first', heads.filter((h) => h !== 'Archived'), ['Over $100 a week', '$50–100 a week', '$10–50 a week', 'Under $10 a week', 'No price known', 'No usage this week']);
+        const sec = (label) => [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent === label);
+        const namesIn = (label) => [...sec(label).querySelectorAll('.v2agent .v2name')].map((n) => n.textContent);
+        eq('most expensive first', namesIn('Over $100 a week'), ['Homework Helper', 'Soccer Schedule', 'Budget Tracker']);
+        eq('$50–100', namesIn('$50–100 a week'), ['Piano Practice', 'Car Upkeep']);
+        eq('the manager stays first; then dearest', namesIn('Under $10 a week'), ['Hatchabot', 'Grocery Runner', 'Garden Notes', 'Home Maintenance', 'Stock Watcher']);
+        eq('the week\'s total in the header', sec('Over $100 a week').querySelector('.v2gnote')?.textContent, '≈ $1,600 this week');
+        eq('$10–50 total', sec('$10–50 a week').querySelector('.v2gnote')?.textContent, '≈ $30 this week');
+        ok('no total where nothing is priced', !sec('No usage this week').querySelector('.v2gnote'));
+        // The Sort control works here as elsewhere; Cost is its own, first, choice in this view.
+        const sortBtns = () => [...document.querySelectorAll('.v2binsort button')].map((b) => b.textContent.replace(/ [▲▼]$/, ''));
+        eq('sort buttons', sortBtns(), ['Cost', 'Age', 'Name', 'Activity']);
+        byText('.v2binsort button', 'Name').click(); await sleep(30);
+        eq('Name A→Z inside a band', namesIn('Over $100 a week'), ['Budget Tracker', 'Homework Helper', 'Soccer Schedule']);
+        byText('.v2binsort button', 'Cost').click(); await sleep(30);
+        eq('back to dearest first', namesIn('Over $100 a week'), ['Homework Helper', 'Soccer Schedule', 'Budget Tracker']);
+        byText('.v2binsort button', 'Cost').click(); await sleep(30);
+        eq('again: cheapest first', namesIn('Over $100 a week'), ['Budget Tracker', 'Soccer Schedule', 'Homework Helper']);
+        byText('.v2binsort button', 'Cost').click(); await sleep(30);
+        const groupsSort = JSON.stringify(v2Sort);
+        byText('.v2viewbar button', 'Groups').click(); await sleep(30);
+        eq('Groups has no Cost sort', sortBtns(), ['Age', 'Name', 'Activity']);
+        eq('the other views keep their own sort', JSON.stringify(v2Sort), groupsSort);
+      } finally { await costCleanup(); }
+    },
+    costBadgesOff: async () => {
+      try {
+        await costFixture();
+        v2SetView('cost');
+        await costFixture({ off: true, days: 7, agents: {} });
+        ok('no badges', !document.querySelector('#v2groups .v2cost'));
+        ok('no Cost view', !byText('.v2viewbar button', 'Cost'));
+        ok('off the Cost view', v2View === 'group');
+        ok('no cost line in the tooltip', !tipText('Meal Planner').includes('API prices'));
+      } finally { await costCleanup(); }
+    },
+    modelPrices: async () => {
+      try {
+        window.__override['/v1/model-prices'] = { checked: '2026-10-03', source: 'https://platform.claude.com/docs/en/about-claude/pricing', cacheWrite: 1.25, cacheReadDefault: 0.1,
+          models: [
+            { id: 'claude-opus-5-5', label: 'Opus 5.5', input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5, cacheReadShare: 0.05 },
+            { id: 'claude-opus-4-8', label: 'Opus 4.8', input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25, cacheReadShare: 0.1 },
+            { id: 'claude-haiku-4-5', label: 'Haiku 4.5', input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25, cacheReadShare: 0.1 },
+            { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, cacheReadShare: 0.1, legacy: true } ],
+          local: ['qwen3:8b'], unpriced: ['gemini-9-pro'] };
+        openModelPrices();
+        await until(() => aiDlg.open && document.getElementById('pricesDrawer').open);
+        const box = await until(() => document.querySelector('#modelPrices .mp-tbl') && document.getElementById('modelPrices'));
+        const row = [...box.querySelectorAll('tbody tr')].find((r) => r.textContent.includes('Opus 4.8'));
+        eq('a row per model: input, output, cache read, cache write', [...row.querySelectorAll('td')].slice(1).map((td) => td.textContent), ['$5', '$25', '$0.50', '$6.25']);
+        ok('an older model is dimmed', [...box.querySelectorAll('tbody tr.mp-old')].some((r) => r.textContent.includes('Sonnet 4.6')));
+        const text = box.textContent.replace(/\s+/g, ' ');
+        ok('the multipliers: ' + text.slice(0, 200), text.includes('Cache read = 0.1× the input price (0.05× on Opus 5.5)') && text.includes('cache write = 1.25× input'));
+        ok('the date it was checked', /Checked against Anthropic's pricing page on .*2026/.test(text));
+        eq('the link', box.querySelector('a[href^="https://platform.claude.com"]')?.getAttribute('href'), 'https://platform.claude.com/docs/en/about-claude/pricing');
+        ok('what caching does', text.includes('Every message re-sends the whole conversation') && text.includes('1.25×'));
+        ok('the worked example', text.includes('300,000-token conversation') && text.includes('$0.15') && text.includes('$1.88') && text.includes('$0.03'));
+        ok('local models are free', text.includes('qwen3:8b') && text.includes('$0'));
+        ok('no price known, named', text.includes('No price known: gemini-9-pro'));
+        aiDlg.close();
+      } finally { if (aiDlg.open) aiDlg.close(); await costCleanup(); }
+    },
+  });
   (async () => {
     for (const [name, run] of Object.entries(T)) {
       try { await run(); results.push({ name, ok: true }); }
