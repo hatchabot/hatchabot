@@ -146,7 +146,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r('*', /^\/v1\/(agent-classes|agent-todos|agent-peers|groups|inbox|proposals|pending|events|resources|usage|operator-profile)(\/.*)?$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),
   r(READ, /^\/v1\/(ai-profiles|ai-profiles\/usage|ai-profiles\/:id\/available-models)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['POST'], /^\/v1\/ai-profiles\/usage\/sample$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
-  r(READ, /^\/v1\/(model-scorecard|model-options)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
+  r(READ, /^\/v1\/(model-scorecard|model-options|model-changes)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(READ, /^\/v1\/(hosts|images|images\/:name\/log|runtime|runtime\/build|runtime\/capabilities|runtime\/images|runtime\/images\/:tag\/history|backups|bots|bot-inventory|pool|discord-bots|slack-apps|connections|channels\/connectors|channels\/slack\/manifest|machine-defaults|rebuild-policy|rebuild-concurrency|embed-default|embedder|embedder\/guests|media-key|search-key|google-oauth\/client|ops-agent)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['POST'], /^\/v1\/ops-agent\/suggest$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['DELETE'], /^\/v1\/connections\/:id$/, 'signed-in', 'Removing a Google connection'),

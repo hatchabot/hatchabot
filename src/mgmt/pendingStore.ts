@@ -44,6 +44,10 @@ export interface Resolved {
   /** approve_member */ code?: string;
   /** approve_member: the waiting person's name and @handle, for the card */ who?: string;
   /** remove_member */ userId?: string;
+  /** set_model: what the scorecard says, and the risks of a downgrade (modelLedger.ts assessModelChange). */
+  check?: { from: string; evidence: string; warnings: string[]; downgrade: boolean };
+  /** set_model filed by the quality guard: the ledger change it would undo. */
+  guardOf?: string;
   /** create_agent / update_definition */ spec?: AuthorSpec;
 }
 
@@ -61,7 +65,8 @@ export interface PendingConfirm {
   createdAtMs: number;
   expiresAtMs: number;
   status: 'pending' | 'confirmed' | 'cancelled' | 'expired';
-  source?: 'chat' | 'agent';
+  /** chat / agent: prepared by the owner's chat or management agent; guard: Hatchabot's quality guard (modelLedger.ts). */
+  source?: 'chat' | 'agent' | 'guard';
   note?: string;
   risk?: 'routine' | 'disruptive' | 'careful';
 }

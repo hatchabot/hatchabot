@@ -138,6 +138,24 @@ export const REST_TOOLS: RestTool[] = [
     call: ({ input }) => ({ method: 'GET', path: `/v1/model-scorecard${typeof input.limit === 'number' ? `?limit=${Math.trunc(input.limit)}` : ''}` }),
   },
   {
+    name: 'get_model_changes', tier: 'read',
+    description:
+      "The owner's model-change ledger, newest first: each change of an agent's model (who made it — owner, agent or hatchabot — how, and why), "
+      + "the old model's figures at the change (turns per day, tools per turn, error rates, monthly cost at API prices), the new model's figures a week on, "
+      + 'and the verdict (pending, kept-ok, worse, not-enough-data). Also savings: what switches to cheaper models saved this month (line = "Right-size: ≈ $X this month"; '
+      + 'on a Claude plan that is room in the plan, priced at API rates). Stored data only: cheap, wakes nothing.',
+    input_schema: obj({
+      agent: { type: 'string', minLength: 1, maxLength: 128, description: 'only this agent (id or name)' },
+      limit: { type: 'integer', minimum: 1, maximum: 200, description: 'most changes, newest first (default 30)' },
+    }),
+    call: ({ input }) => {
+      const q = new URLSearchParams();
+      if (typeof input.agent === 'string') q.set('agent', input.agent);
+      if (typeof input.limit === 'number') q.set('limit', String(Math.trunc(input.limit)));
+      return { method: 'GET', path: `/v1/model-changes${q.size ? `?${q.toString()}` : ''}` };
+    },
+  },
+  {
     name: 'get_model_options', tier: 'read',
     description: 'Per AI source the owner can use: the models it offers, their prices per million tokens, and one line on what each is good at (larger models are more reliable at tool use).',
     input_schema: obj({}),

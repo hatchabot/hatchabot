@@ -358,11 +358,12 @@ describe('the management agent as model steward', () => {
     expect(twice).toContain('Old memory note.');
   });
 
-  it('both reads are on its menu as read tools, served by the ops door without a why', () => {
+  it('its reads are on its menu as read tools, served by the ops door without a why', () => {
     expect(toolDef('get_model_scorecard')?.tier).toBe('read');
     expect(toolDef('get_model_options')?.tier).toBe('read');
+    expect(toolDef('get_model_changes')?.tier).toBe('read');
     const door = opsDoorTools().filter((t) => t.name.startsWith('get_model_'));
-    expect(door).toHaveLength(2);
+    expect(door).toHaveLength(3);
     for (const t of door) expect(JSON.stringify(t.inputSchema)).not.toContain('"why"');
     expect(MANIFEST.filter((t) => t.name === 'get_model_scorecard')).toHaveLength(1);
   });

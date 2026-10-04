@@ -323,6 +323,30 @@ const SCENARIOS = String.raw`(() => {
       eq('confirm and cancel sent', [calls('POST', /\/c1\/confirm$/).length, calls('POST', /\/c2\/cancel$/).length], [1, 1]);
       window.__answer = {}; delete window.__override['/v1/proposals'];
     },
+    modelCards: async () => {
+      // Right-size step 2: a set_model card carries the scorecard's evidence and a
+      // downgrade's risks; the quality guard's switch-back card says who made it.
+      window.__override['/v1/proposals'] = { pending: [
+        { confirmId: 'm1', tool: 'set_model', agentId: 'a1', risk: 'disruptive', source: 'agent', note: 'mostly short answers',
+          summary: 'Set "Homework Helper" model: claude-sonnet-5 → claude-haiku-4-5 (a smaller or cheaper model)\nEvidence (6 days, now claude-sonnet-5): 4 turns …\n⚠ Thin evidence: 4 turns on claude-sonnet-5 in 6 days.',
+          check: { downgrade: true, evidence: 'Evidence (6 days, now claude-sonnet-5): 4 turns (0.7/day), 3.5 tools per turn, tools in 75% of turns, context ~12K per call, no errors; ≈ $4.10 a month → ≈ $2.05 on claude-haiku-4-5 at API prices.',
+            warnings: ['Thin evidence: 4 turns on claude-sonnet-5 in 6 days.', 'Heavy tool use: 3.5 tools per turn, tools in 75% of turns. Smaller models make more malformed or wrong tool calls.'] } },
+        { confirmId: 'g1', tool: 'set_model', agentId: 'a2', risk: 'disruptive', source: 'guard',
+          summary: '↩ Switch "Piano Practice" back to claude-sonnet-5\nHatchabot\'s quality guard: since "Piano Practice" moved from claude-sonnet-5 to claude-haiku-4-5 …\nBefore (claude-sonnet-5, 30 days): 120 turns, failed 0%\nAfter (claude-haiku-4-5, 7 days): 30 turns, failed 13.3%\nWorse: failed turns 0% → 13.3% of turns (4 on claude-haiku-4-5).' } ], recent: [] };
+      window.__answer = { 'POST /v1/proposals/g1/confirm': [{ status: 200, body: { text: '✅ Switched back.' } }] };
+      v2PropSig = '';
+      await loadProposals();
+      const cards = await until(() => { const l = [...document.querySelectorAll('#v2PropList > div')]; return l.length === 2 ? l : null; });
+      ok('the headline is the first line only', cards[0].firstElementChild.nextElementSibling.textContent.startsWith('Set "Homework Helper" model: claude-sonnet-5 → claude-haiku-4-5') && !cards[0].textContent.includes('4 turns …'));
+      ok('the evidence is on the card', cards[0].querySelector('.prop-evidence')?.textContent.includes('3.5 tools per turn'));
+      eq('each risk is marked', [...cards[0].querySelectorAll('.prop-risks > div')].map((d) => d.textContent.slice(0, 16)), ['⚠ Thin evidence:', '⚠ Heavy tool use']);
+      ok('the guard card says who prepared it', cards[1].textContent.includes("Prepared by Hatchabot's quality guard") && cards[1].textContent.includes('Before (claude-sonnet-5'));
+      ok('a card without a check shows its whole text', cards[1].textContent.includes('Worse: failed turns'));
+      [...cards[1].querySelectorAll('button')].find((b) => b.textContent.includes('Confirm')).click();
+      await until(() => cards[1].textContent.includes('✅ Switched back.'));
+      eq('confirm sent', calls('POST', /\/g1\/confirm$/).length, 1);
+      window.__answer = {}; delete window.__override['/v1/proposals'];
+    },
     headerDoors: async () => {
       await openAiDlg(); ok('Settings opens', aiDlg.open); aiDlg.close();
       await openFleet(); ok('Status opens', v2FleetDlg.open); v2FleetDlg.close();
@@ -461,6 +485,24 @@ const SCENARIOS = String.raw`(() => {
       fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
       try { localStorage.removeItem('hb-fleet-usage-period'); } catch {} fleetUsagePeriod = 'day';
     },
+    rightSizeLine: async () => {
+      // Status → Usage: one line with what the cheaper switches saved this month (Right-size).
+      const now = Date.now();
+      const base = { period: 'day', from: new Date(now - 864e5).toISOString(), to: new Date(now).toISOString(), bucketMinutes: 60, buckets: [],
+        agents: [], totals: { tokens: 0, requests: 0, limited: 0 }, byBilling: {}, cost: null };
+      window.__override['/v1/usage/periods'] = { ...base, rightSize: { line: 'Right-size: ≈ $12.40 this month', savingUSD: 12.4, apiUSD: 12.4, planUSD: 0, month: '2026-10' } };
+      openFleetUsage();
+      const line = await until(() => document.getElementById('rightSizeLine'));
+      ok('the savings line shows', line.textContent.includes('Right-size: ≈ $12.40 this month'));
+      fleetUsageDlg.close();
+      window.__override['/v1/usage/periods'] = base;
+      const asked = calls('GET', /\/v1\/usage\/periods$/).length;
+      openFleetUsage();
+      await until(() => calls('GET', /\/v1\/usage\/periods$/).length > asked && document.getElementById('fleetUsageBody').textContent.includes('Nothing used'));
+      await sleep(50);
+      ok('no line when nothing was saved', !document.getElementById('rightSizeLine'));
+      fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
+    },
     sheetPollKeepsTabs: async () => {
       // A poll must not reload the Files or Discord tab under someone (night review #18).
       // Cleans up even when it fails: a leftover STOPPED override broke the checks after it.
@@ -580,6 +622,9 @@ const SCENARIOS = String.raw`(() => {
     },
     pollFetchesLess: async () => {
       // No /members fan-out on v2, no /pairing for web-only agents, no hidden Activity card, a light backups read (night review #24/#25/#47).
+      // Let a refresh still running from the scenario before (the tab shown again starts one) finish first:
+      // its pairing round landed in this pass and counted a1 twice when the timing shifted.
+      await sleep(400);
       pairTick = 0; mgmtTick = 0;
       const mark = window.__calls.length;
       await refresh(false);

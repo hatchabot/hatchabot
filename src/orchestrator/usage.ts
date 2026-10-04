@@ -90,7 +90,18 @@ export interface WindowModelStats extends UsageSplit {
   ctxP50: number;
   ctxP90: number;
   err: TurnErrors;
+  /** The same counts per UTC hour ("2026-10-03T01"), only hours with something in them; see HOUR_FIELDS. Absent in profiles read before v2.118. */
+  h?: Record<string, number[]>;
 }
+
+/**
+ * What each number of an hour's bucket (WindowModelStats.h) is. `failed` are
+ * turns that ended in an error after any retry, `limitedTurns` the part of
+ * them that were rate limits (the source's, not the model's); `malformed` are
+ * malformed tool calls whether or not OpenClaw retried them.
+ */
+export const HOUR_FIELDS = ['calls', 'input', 'output', 'cacheRead', 'cacheWrite', 'turns', 'toolTurns', 'toolCalls', 'failed', 'malformed', 'toolFailed', 'limitedTurns', 'truncated'] as const;
+export type HourField = (typeof HOUR_FIELDS)[number];
 export interface ModelProfile {
   /** Start of the window (ms). */
   since: number;
@@ -103,6 +114,8 @@ export interface ModelProfile {
   crons: number | null;
   /** The agent's first recorded call ever (ms), to know how much of the window it existed for. */
   firstCall: number;
+  /** Each model's `h` hour buckets were read (v2.118+): an empty model list then means idle, not unknown. */
+  hourly?: boolean;
 }
 
 const EMPTY: AgentUsage = { totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, sessions: 0, byModel: [] };
@@ -130,7 +143,10 @@ const n = (x) => (typeof x === "number" && isFinite(x) && x > 0 ? x : 0);
 const W30 = Date.now() - 30 * 86400000, W7 = Date.now() - 7 * 86400000;
 const win = {}; const turnOf = {}; let promptErrors = 0;
 const P = (model) => win[model] ||= { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, toolUseCalls: 0, turns: 0, toolTurns: 0, toolCalls: 0, failedTurns: 0, failed7d: 0, first: 0, last: 0, ctx: [],
-  err: { malformedToolCall: 0, providerError: 0, rateLimited: 0, aborted: 0, truncated: 0, toolFailed: 0, retried: 0 } };
+  err: { malformedToolCall: 0, providerError: 0, rateLimited: 0, aborted: 0, truncated: 0, toolFailed: 0, retried: 0 }, h: {} };
+// The same counts per UTC hour (HOUR_FIELDS in usage.ts), so the model-change
+// ledger can read a model's use from a switch on (modelLedger.ts).
+const H = (model, at) => { const k = new Date(at).toISOString().slice(0, 13); return P(model).h[k] ||= [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; };
 // OpenClaw's pre-dispatch rejections of a tool call the model wrote badly (2026.9.6).
 const MALFORMED = /malformed JSON arguments|incomplete or malformed tool call|incomplete tool call|invalid JSON arguments|unresolved tool calls/i;
 const LIMITED = /rate_limit|rate limit|\b429\b/i;
@@ -138,39 +154,46 @@ const prof = (sid, at, msg) => {
   if (!(at >= W30)) return;
   const t = turnOf[sid] ||= { open: false, tools: 0, failed: "", model: "" };
   if (msg.role === "user") { t.open = true; t.tools = 0; t.failed = ""; return; }
-  if (msg.role === "toolResult") { if (msg.isError === true && t.model) P(t.model).err.toolFailed++; return; }
+  if (msg.role === "toolResult") { if (msg.isError === true && t.model) { P(t.model).err.toolFailed++; H(t.model, at)[10]++; } return; }
   if (msg.role !== "assistant" || msg.openclawDeliveryMirror || msg.model === "delivery-mirror") return;
   const model = msg.model || "(unknown)"; t.model = model;
   const m = P(model); const u = msg.usage || {};
   const tok = n(u.input) + n(u.output) + n(u.cacheRead) + n(u.cacheWrite);
   const parts = Array.isArray(msg.content) ? msg.content.filter((p) => p && p.type === "toolCall").length : 0;
+  const hb = H(model, at);
   if (tok > 0) {
     m.calls++; m.input += n(u.input); m.output += n(u.output); m.cacheRead += n(u.cacheRead); m.cacheWrite += n(u.cacheWrite);
     m.ctx.push(n(u.input) + n(u.cacheRead) + n(u.cacheWrite));
     if (parts) m.toolUseCalls++;
+    hb[0]++; hb[1] += n(u.input); hb[2] += n(u.output); hb[3] += n(u.cacheRead); hb[4] += n(u.cacheWrite);
   }
   if (!m.first || at < m.first) m.first = at; if (at > m.last) m.last = at;
   // A call after a failed one, before anyone wrote again: OpenClaw retried, and
   // the turn goes on — it did not fail after all.
   if (!t.open) {
-    if (t.failed) { const f = P(t.failed); f.err.retried++; f.turns--; f.failedTurns--; if (t.failedAt >= W7) f.failed7d--; t.failed = ""; }
+    if (t.failed) {
+      const f = P(t.failed); f.err.retried++; f.turns--; f.failedTurns--; if (t.failedAt >= W7) f.failed7d--;
+      const fb = H(t.failed, t.failedAt); fb[5]--; fb[8]--; if (t.failedLimited) fb[11]--;
+      t.failed = "";
+    }
     t.open = true; t.tools = 0;
   }
   t.tools += parts;
   const sr = msg.stopReason;
   if (sr === "toolUse" && parts) return;
-  t.open = false; m.turns++;
-  if (t.tools) { m.toolTurns++; m.toolCalls += t.tools; }
+  t.open = false; m.turns++; hb[5]++;
+  if (t.tools) { m.toolTurns++; m.toolCalls += t.tools; hb[6]++; hb[7] += t.tools; }
   if (sr === "error" || sr === "aborted" || sr === "timeout") {
     const e = String(msg.errorMessage || "");
-    if (LIMITED.test(e)) m.err.rateLimited++;
-    else if (MALFORMED.test(e)) m.err.malformedToolCall++;
+    const limited = LIMITED.test(e);
+    if (limited) { m.err.rateLimited++; hb[11]++; }
+    else if (MALFORMED.test(e)) { m.err.malformedToolCall++; hb[9]++; }
     else if (sr === "error") m.err.providerError++;
     else m.err.aborted++;
-    m.failedTurns++; if (at >= W7) m.failed7d++; t.failed = model; t.failedAt = at;
+    m.failedTurns++; hb[8]++; if (at >= W7) m.failed7d++; t.failed = model; t.failedAt = at; t.failedLimited = limited;
   } else {
     t.failed = "";
-    if (sr === "length") { m.err.truncated++; if (at >= W7) m.failed7d++; }
+    if (sr === "length") { m.err.truncated++; hb[12]++; if (at >= W7) m.failed7d++; }
   }
 };
 const ev = (sid, at, e) => {
@@ -271,7 +294,9 @@ const rank = (c, p) => (c.length ? c[Math.max(0, Math.ceil(p * c.length) - 1)] :
 const wm = {};
 for (const [k, m] of Object.entries(win)) {
   const c = m.ctx.sort((a, b) => a - b); const { ctx, ...rest } = m;
-  if (m.calls || m.turns || m.err.toolFailed) wm[k] = { ...rest, ctxP50: rank(c, 0.5), ctxP90: rank(c, 0.9) };
+  // Only the hours with something in them.
+  const h = {}; for (const [hk, v] of Object.entries(m.h)) if (v.some((x) => x)) h[hk] = v;
+  if (m.calls || m.turns || m.err.toolFailed) wm[k] = { ...rest, h, ctxP50: rank(c, 0.5), ctxP90: rank(c, 0.9) };
 }
 // What each agent says it is for: the first lines of a Purpose (or Role,
 // Mission, "What you do") section of its SOUL.md, else its AGENTS.md.
@@ -295,7 +320,7 @@ try {
     finally { sdb.close(); }
   }
 } catch { crons = null; }
-out.window = { since: W30, models: wm, promptErrors };
+out.window = { since: W30, models: wm, promptErrors, hourly: true };
 out.purposes = purposes; out.crons = crons;
 process.stdout.write(JSON.stringify(out));
 `;
@@ -318,7 +343,7 @@ export async function agentUsage(
     return EMPTY;
   }
   let raw: { models?: Record<string, UsageSplit & { calls: number; sessions: number; maxCtx?: number }>; sessions?: number; first?: number; last?: number; slots?: Record<string, number>; callSlots?: Record<string, number>; day?: { calls?: number; tokens?: number }; lastCtx?: number;
-    window?: { since?: number; models?: Record<string, WindowModelStats>; promptErrors?: number }; purposes?: Record<string, string>; crons?: number | null };
+    window?: { since?: number; models?: Record<string, WindowModelStats>; promptErrors?: number; hourly?: boolean }; purposes?: Record<string, string>; crons?: number | null };
   try {
     raw = JSON.parse(res.stdout);
     if (!raw || typeof raw.models !== 'object') throw new Error('no usage object');
@@ -354,6 +379,7 @@ export async function agentUsage(
         since: Number(raw.window.since) || 0,
         models: raw.window.models ?? {},
         promptErrors: Number(raw.window.promptErrors) || 0,
+        ...(raw.window.hourly === true ? { hourly: true } : {}),
         purposes: raw.purposes && typeof raw.purposes === 'object' ? raw.purposes : {},
         crons: typeof raw.crons === 'number' ? raw.crons : null,
         firstCall: first,

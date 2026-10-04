@@ -256,7 +256,8 @@ They are signals, not verdicts: a tool failing can be the tool's fault, and a
 turn that went wrong without an error (a poor answer) is not counted at all.
 
 **How it decides** (its AGENTS.md section "Model stewardship", kept current on
-every build): match purpose and tool use to the options; prefer no change when
+every build): read what happened to earlier changes first (`get_model_changes`,
+below); match purpose and tool use to the options; prefer no change when
 evidence is thin or the saving small; never move an agent with heavy tool use
 or recent errors to a smaller model without saying so; propose a stronger
 model (or "switch back") when an agent struggles; one `set_model` card per
@@ -266,11 +267,82 @@ the saving is room in the plan, not money.
 **The weekly review.** A scheduled task on your Hatchabot agent, "Weekly model
 review", Mondays 09:00, made when the agent is built and listed with its other
 tasks. Its short report goes where the agent already reaches you (its Telegram
-chat if it has one, else its conversation in the app): the proposals it filed,
-the estimated monthly saving, and the agents it left alone and why.
+chat if it has one, else its conversation in the app): the Right-size line
+("Right-size: ≈ $X this month", below) when there is a saving, the proposals
+it filed, the estimated monthly saving, changes that went worse, and the agents
+it left alone and why. (A task made before this release keeps its message; its
+notes, which ask for the line, reach it at its next build.)
 `HATCHABOT_MODEL_REVIEW=off` in the settings file removes it at the next
 rebuild (it is made once: delete it by hand and it stays deleted until the
 setting goes off and on again).
+
+**The change ledger** (`get_model_changes`, `GET /v1/model-changes`). Every
+change of an agent's model is recorded, by whichever path: a `set_model` card
+(prepared by your Hatchabot agent or your chat, confirmed by you), the agent
+sheet's picker or the bulk action, the API or CLI (a `why` in the body is
+kept), a source's new default (the agents you switch with it, and every agent
+that follows the default, any account's on a shared source), a class
+(assigned, or edited) and a source switch. Each row says who decided (`by`:
+owner, agent, hatchabot), how it arrived (`via`: app, api, proposal, guard,
+backfill), why, and the OLD model's figures at that moment from the stored
+profile: turns and calls per day, tools per turn, the share of turns that
+failed (not counting rate limits; cut-off answers count), malformed tool calls
+per turn, tool failures per tool call, context per call, and a month at API
+prices.
+
+A week after the change, or as soon as the new model has 20 turns, the new
+model's figures are read the same way, from the change to now (or to the
+agent's next change), and the change gets a verdict:
+
+| Verdict | When |
+|---|---|
+| `kept-ok` | at least 5 turns on the new model and none of the rates below rose |
+| `worse` | failed turns up 5 points (and at least 2), malformed tool calls up 2 points per turn (at least 2), or tool failures up 10 points per tool call (at least 3). With the old model's figures unknown: 10%, 3% and 25% |
+| `not-enough-data` | fewer than 5 turns on the new model, or no reading since the change; looked at again for 30 days |
+
+Deltas, because the usual rates are low; a floor of real counts, because one
+bad afternoon is not a trend; a higher bar for tool failures, because the tool
+can be at fault. Rate limits never count: they are the source's.
+
+**The quality guard.** Two parts, both mechanisms:
+
+- *On the card.* A `set_model` card shows the scorecard's evidence for that
+  agent (days, turns, tools per turn, context, errors, the month now and on the
+  new model). For a downgrade (a cheaper or smaller model) it adds the risks,
+  plainly: **thin evidence** (the scorecard's none or thin: under 10 turns or 3
+  days on the current model), **heavy tool use** (over 3 tools per turn, or
+  tools in over half the turns), **recent errors** (failed turns this week that
+  were not rate limits, malformed tool calls in 30 days). You still decide; the
+  management agent is told the same in the tool's answer.
+- *After the switch.* A change whose verdict is `worse` gets ONE switch-back
+  card from Hatchabot itself, in Needs you, marked "Prepared by Hatchabot's
+  quality guard", with the before and after figures; the manager's Telegram
+  (or Discord) says something is waiting, as for any card. Nothing switches
+  until you confirm. No card for a change that was itself a switch-back, for
+  an agent that has moved on to another model since, or when its source no
+  longer offers the old model; Cancel means the guard does not ask again about
+  that switch.
+
+**The realised saving.** For each switch to a cheaper model: the tokens the
+agent actually used on the new model since the switch (to its next change) ×
+the price difference at API list prices, summed for the calendar month. On a
+Claude plan nothing is billed per token, so it is "≈ $X at API prices" with
+its share of what the source carried that month: room in the plan, not money.
+Upgrades are not netted off. It shows as one line on Status → Usage
+("Right-size: ≈ $12.40 this month"), opens the weekly review's report, and is
+in `get_model_changes` (`savings`).
+
+**Where the figures come from.** The usage reader keeps each model's counts
+per UTC hour for the 30 days (only hours with something in them), so a
+model's use from a switch on is a sum of hours. Nothing new runs in a
+container, and nothing wakes an agent: an asleep agent's verdict and saving
+come from its last reading.
+
+**Before the ledger.** At start-up, Hatchabot seeds it once (idempotent) from
+the `set_model` cards confirmed in the last week, and, where an agent no
+longer runs that card's model, records the later change made in the app or
+through the API, timed from the last use of the card's model and marked
+approximate.
 
 ## Creating & talking to agents
 

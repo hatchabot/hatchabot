@@ -323,6 +323,23 @@ export class Store {
       CREATE TABLE IF NOT EXISTS agent_model_profiles (
         agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, at TEXT NOT NULL
       );
+      -- The model-change ledger (modelLedger.ts, docs/features.md "Right-size"):
+      -- every change of an agent's model, by any path, with who made it and
+      -- why, the old model's figures at that moment, and — a week on — the
+      -- new model's, with a verdict. JSON columns: before/after figures.
+      CREATE TABLE IF NOT EXISTS model_changes (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+        from_model TEXT, to_model TEXT NOT NULL, profile_id TEXT,
+        at TEXT NOT NULL,
+        by TEXT NOT NULL, via TEXT NOT NULL, source TEXT NOT NULL,
+        why TEXT, proposal_id TEXT, approx INTEGER NOT NULL DEFAULT 0,
+        before TEXT, after TEXT,
+        outcome TEXT NOT NULL DEFAULT 'pending', outcome_at TEXT, reasons TEXT,
+        guard_proposal_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS model_changes_agent ON model_changes (agent_id, at);
+      CREATE INDEX IF NOT EXISTS model_changes_owner ON model_changes (owner_id, at);
       -- Scheduled tasks Hatchabot itself put on an agent (the weekly model
       -- review), so it makes each once and can take it away again.
       CREATE TABLE IF NOT EXISTS managed_crons (
@@ -2254,6 +2271,7 @@ export class Store {
         `UPDATE OR IGNORE member_identities SET user_id = ? WHERE user_id = ?`,
         `UPDATE discord_bots SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE mgmt_proposals SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE model_changes SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE OR IGNORE agent_seen SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE ops_tokens SET owner_id = ? WHERE owner_id = ?`,
       ]) {
@@ -3168,6 +3186,61 @@ export class Store {
     for (const r of rows) { try { out.set(r.agent_id, { profile: JSON.parse(r.profile), at: r.at }); } catch { /* a bad row reads as none */ } }
     return out;
   }
+  // ---- the model-change ledger (modelLedger.ts) ---------------------------
+  /** False when a row with this id is already there (a backfill run twice). */
+  addModelChange(c: ModelChangeRow): boolean {
+    return this.db.prepare(
+      `INSERT OR IGNORE INTO model_changes (id, agent_id, owner_id, from_model, to_model, profile_id, at, by, via, source, why, proposal_id, approx, before, outcome)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+    ).run(c.id, c.agentId, c.ownerId, c.from ?? null, c.to, c.profileId ?? null, c.at, c.by, c.via, c.source, c.why ?? null, c.proposalId ?? null,
+      c.approx ? 1 : 0, c.before ? JSON.stringify(c.before) : null).changes === 1;
+  }
+  /** One owner's changes (newest first), or every owner's with ownerId undefined. */
+  listModelChanges(opts: { ownerId?: string; agentId?: string; outcomes?: string[]; sinceIso?: string; limit?: number } = {}): ModelChangeRow[] {
+    const where: string[] = []; const args: unknown[] = [];
+    if (opts.ownerId !== undefined) { where.push('owner_id = ?'); args.push(opts.ownerId); }
+    if (opts.agentId !== undefined) { where.push('agent_id = ?'); args.push(opts.agentId); }
+    if (opts.outcomes?.length) { where.push(`outcome IN (SELECT value FROM json_each(?))`); args.push(JSON.stringify(opts.outcomes)); }
+    if (opts.sinceIso) { where.push('at >= ?'); args.push(opts.sinceIso); }
+    const rows = this.db.prepare(`SELECT * FROM model_changes ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY at DESC, rowid DESC LIMIT ?`)
+      .all(...args, Math.max(1, Math.min(opts.limit ?? 500, 5000))) as any[];
+    return rows.map(rowToModelChange);
+  }
+  getModelChange(id: string): ModelChangeRow | undefined {
+    const r = this.db.prepare(`SELECT * FROM model_changes WHERE id = ?`).get(id) as any;
+    return r ? rowToModelChange(r) : undefined;
+  }
+  /** Any change of this agent's from a proposal: a backfill's "already recorded". */
+  modelChangeForProposal(proposalId: string): ModelChangeRow | undefined {
+    const r = this.db.prepare(`SELECT * FROM model_changes WHERE proposal_id = ? ORDER BY at LIMIT 1`).get(proposalId) as any;
+    return r ? rowToModelChange(r) : undefined;
+  }
+  setModelChangeOutcome(id: string, outcome: string, after: unknown, reasons: string[], at: string): void {
+    this.db.prepare(`UPDATE model_changes SET outcome = ?, after = ?, reasons = ?, outcome_at = ? WHERE id = ?`)
+      .run(outcome, after === undefined ? null : JSON.stringify(after), JSON.stringify(reasons), at, id);
+  }
+  /** Better figures for the old model than a backfill could have (its hour buckets, read later). */
+  setModelChangeBefore(id: string, before: unknown): void {
+    this.db.prepare(`UPDATE model_changes SET before = ? WHERE id = ?`).run(JSON.stringify(before), id);
+  }
+  /** Once per change: false when a guard card was already filed for it. */
+  claimModelChangeGuard(id: string, proposalId: string): boolean {
+    return this.db.prepare(`UPDATE model_changes SET guard_proposal_id = ? WHERE id = ? AND guard_proposal_id IS NULL`).run(proposalId, id).changes === 1;
+  }
+  /** Confirmed set_model cards (the start-up backfill reads them; a week is all the table keeps). */
+  confirmedModelProposals(): Array<{ id: string; ownerId: string; record: unknown; outcome?: string; resolvedAtMs?: number }> {
+    const rows = this.db.prepare(`SELECT id, owner_id, record, outcome, resolved_at_ms FROM mgmt_proposals WHERE status = 'confirmed' ORDER BY resolved_at_ms`)
+      .all() as Array<{ id: string; owner_id: string; record: string; outcome: string | null; resolved_at_ms: number | null }>;
+    return rows.flatMap((r) => {
+      const record = safeJson<{ tool?: string } | undefined>(r.record, undefined);
+      return record?.tool === 'set_model' ? [{ id: r.id, ownerId: r.owner_id, record, outcome: r.outcome ?? undefined, resolvedAtMs: r.resolved_at_ms ?? undefined }] : [];
+    });
+  }
+  /** Ledger rows older than about 13 months go: the savings view counts months, not years. */
+  pruneModelChanges(beforeIso: string): number {
+    return this.db.prepare(`DELETE FROM model_changes WHERE at < ?`).run(beforeIso).changes;
+  }
+
   managedCron(agentId: string, name: string): { jobId?: string; at: string } | undefined {
     const r = this.db.prepare(`SELECT job_id, at FROM managed_crons WHERE agent_id = ? AND name = ?`).get(agentId, name) as { job_id: string | null; at: string } | undefined;
     return r ? { jobId: r.job_id ?? undefined, at: r.at } : undefined;
@@ -4596,6 +4669,55 @@ function safeJson<T>(raw: unknown, fallback: T): T {
 export function normalizeHandle(v: string | undefined | null): string | undefined {
   const t = String(v ?? '').trim().replace(/^@/, '').toLowerCase();
   return t || undefined;
+}
+
+/**
+ * One model change in the ledger (modelLedger.ts). `by` is who decided:
+ * the owner by hand, their management agent (a card the owner confirmed) or
+ * Hatchabot (the quality guard's switch-back, confirmed by the owner). `via`
+ * is how it arrived: the app, the API (a bearer token, the CLI), a proposal
+ * card, the guard's card, or the start-up backfill. `source` is the kind of
+ * change: model, default-model, class, source-switch, source-default.
+ */
+export interface ModelChangeRow {
+  id: string;
+  agentId: string;
+  ownerId: string;
+  from?: string;
+  to: string;
+  profileId?: string;
+  at: string;
+  by: 'owner' | 'agent' | 'hatchabot';
+  via: 'app' | 'api' | 'proposal' | 'guard' | 'backfill';
+  source: string;
+  why?: string;
+  proposalId?: string;
+  /** The time is an estimate (a backfill that had to infer it). */
+  approx?: boolean;
+  /** Figures on the old model at the change (modelLedger.ts ModelFigures); undefined = unknown. */
+  before?: unknown;
+  after?: unknown;
+  outcome: 'pending' | 'kept-ok' | 'worse' | 'not-enough-data';
+  outcomeAt?: string;
+  reasons?: string[];
+  guardProposalId?: string;
+}
+
+function rowToModelChange(r: any): ModelChangeRow {
+  return {
+    id: r.id, agentId: r.agent_id, ownerId: r.owner_id,
+    ...(r.from_model ? { from: r.from_model } : {}), to: r.to_model,
+    ...(r.profile_id ? { profileId: r.profile_id } : {}),
+    at: r.at, by: r.by, via: r.via, source: r.source,
+    ...(r.why ? { why: r.why } : {}), ...(r.proposal_id ? { proposalId: r.proposal_id } : {}),
+    ...(r.approx ? { approx: true } : {}),
+    ...(r.before ? { before: safeJson(r.before, undefined) } : {}),
+    ...(r.after ? { after: safeJson(r.after, undefined) } : {}),
+    outcome: r.outcome,
+    ...(r.outcome_at ? { outcomeAt: r.outcome_at } : {}),
+    ...(r.reasons ? { reasons: safeJson<string[]>(r.reasons, []) } : {}),
+    ...(r.guard_proposal_id ? { guardProposalId: r.guard_proposal_id } : {}),
+  };
 }
 
 function rowToAgent(r: any): Agent {

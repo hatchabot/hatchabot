@@ -151,6 +151,19 @@ struggles. Saving money by breaking an agent is not a saving.
 8. Report briefly: the proposals you filed, the estimated monthly saving, then
    the agents you left alone and why, one line each at most (skip the
    obvious). Every change waits for the owner's Confirm.
+9. Learn from what happened: get_model_changes is the ledger of every model
+   change (yours, the owner's, Hatchabot's) with the figures before and a
+   week after, and a verdict (kept-ok, worse, not-enough-data). Read it in
+   the weekly review before proposing: do not re-propose a switch that went
+   "worse", and say so when one of yours did. A worse change already has
+   Hatchabot's own switch-back card waiting for the owner: do not file a
+   second one.
+10. Start the weekly review's report with the ledger's savings line, as it is
+   ("Right-size: ≈ $X this month"; on a Claude plan it is room in the plan,
+   not money). Leave it out when there is none.
+11. When you file a downgrade, Hatchabot puts the scorecard's evidence and
+   any risk (thin evidence, heavy tool use, recent errors) on the card itself
+   and tells you in the tool's answer: pass those risks on to the owner.
 
 ## Memory
 Keep notes in MEMORY.md on what the owner prefers (which agents matter most,
@@ -179,9 +192,10 @@ export const OPS_DIGEST_MESSAGE = [
  * file proposals — set_model cards the owner confirms or drops.
  */
 export const OPS_MODEL_REVIEW_MESSAGE = [
-  'Weekly model review. Follow your "Model stewardship" notes: read get_model_scorecard and get_model_options,',
+  'Weekly model review. Follow your "Model stewardship" notes: read get_model_changes, get_model_scorecard and get_model_options,',
   'and file a set_model proposal only where the evidence supports it, each with a why that states the evidence and the saving.',
-  'Do not wake or look inside sleeping agents. Reply with a short digest: the proposals you filed, the estimated monthly saving,',
+  'Do not wake or look inside sleeping agents. Reply with a short digest: first the savings line from get_model_changes if there is one,',
+  'then the proposals you filed, the estimated monthly saving, last week\'s changes that went worse,',
   'and the agents you left alone and why, one line each at most. If nothing should change, say so in one sentence.',
 ].join(' ');
 

@@ -36,6 +36,8 @@ import { SEARCH_KEY_REF } from '../orchestrator/provision.js';
 interface Confirmer {
   broker: Broker;
   setAuth: (req: FastifyRequest) => void;
+  /** The card being executed: its calls carry its id, so the model-change ledger knows who prepared it (routes.ts ledgerMeta). */
+  setProposal: (id: string | undefined) => void;
 }
 
 export interface MgmtChatDeps {
@@ -80,11 +82,12 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     const existing = confirmers.get(ownerId);
     if (existing) return existing;
     let headers: Record<string, string> = {};
+    let proposalId: string | undefined;
     const requester: Requester = async (method, path, body) => {
       const res = await app.inject({
         method: method as 'GET',
         url: path,
-        headers: { ...headers, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+        headers: { ...headers, ...(proposalId ? { 'x-hatchabot-proposal': proposalId } : {}), ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
         payload: body !== undefined ? JSON.stringify(body) : undefined,
       });
       const parsed = (() => { try { return res.json(); } catch { return res.body; } })();
@@ -113,6 +116,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
         // request: the route's class and step-up apply to the change itself.
         Object.assign(headers, publicReplayHeaders(req));
       },
+      setProposal: (id) => { proposalId = id; },
     };
     confirmers.set(ownerId, confirmer);
     return confirmer;
@@ -138,6 +142,8 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       note: rec?.note,
       risk: rec?.risk ?? 'routine',
       expiresAtMs: rec?.expiresAtMs,
+      // set_model: the scorecard's evidence and a downgrade's risks, shown on the card.
+      check: rec?.resolved.check ? { evidence: rec.resolved.check.evidence, warnings: rec.resolved.check.warnings, downgrade: rec.resolved.check.downgrade } : undefined,
       spec: rec?.resolved.spec
         ? {
             name: rec.resolved.spec.name,
@@ -176,8 +182,10 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       // Read the card before it resolves: afterwards its author is what tells us
       // whether the management agent is waiting to hear how it went.
       rec = store.getMgmtProposal<PendingConfirm>(id) as PendingConfirm | undefined;
+      c.setProposal(id);
       out = await c.broker.confirm(id, verb, { ...WEB_WHO, ownerId });
     } finally {
+      c.setProposal(undefined);
       release();
       if (confirming.get(ownerId) === chained) confirming.delete(ownerId);
     }
@@ -268,7 +276,10 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
           deps.pushOps?.(agent.ownerId,
             `🔑 Your Hatchabot manager has prepared a change and is waiting for you.`,
             r.pending.summary.split('\n')[0]);
-          return text(`Filed for the owner's approval: "${r.pending.summary.split('\n')[0]}". It is NOT done. It appears under "Needs you" on their Hatchabot home screen and only happens if they press Confirm there. Tell them so; never say it succeeded.`);
+          const warned = r.pending.warnings?.length
+            ? ` Hatchabot put these risks on the card, for the owner to weigh: ${r.pending.warnings.join(' ')} Say so when you tell them about it.`
+            : '';
+          return text(`Filed for the owner's approval: "${r.pending.summary.split('\n')[0]}". It is NOT done. It appears under "Needs you" on their Hatchabot home screen and only happens if they press Confirm there. Tell them so; never say it succeeded.${warned}`);
         }
         if (r.ok) return text(JSON.stringify(r.data).slice(0, 12_000));
         return text(`Error ${r.error.code}: ${r.error.message}`, true);

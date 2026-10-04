@@ -103,6 +103,8 @@ export interface ApiClient {
   stopAgent(id: string): Promise<void>;
   rebuildAgent(id: string): Promise<void>;
   setModel(id: string, model: string): Promise<void>;
+  /** What the card for "this agent → that model" should say (GET /v1/agents/:id/model-check). Optional: older fakes. */
+  modelCheck?(id: string, model: string): Promise<{ from: string; evidence: string; warnings: string[]; downgrade: boolean }>;
   approvePairing(id: string, code: string): Promise<void>;
   denyPairing(id: string, code: string): Promise<void>;
   removeMember(id: string, userId: string): Promise<void>;
@@ -150,7 +152,7 @@ export type ErrCode =
 
 export type ToolResult =
   | { ok: true; tool: string; data: unknown }
-  | { ok: true; tool: string; pending: { confirmId: string; summary: string } }
+  | { ok: true; tool: string; pending: { confirmId: string; summary: string; warnings?: string[] } }
   | { ok: false; tool: string; error: { code: ErrCode; message: string } };
 
 export interface Proposer {
@@ -260,7 +262,8 @@ export class Broker {
         AUTHORING_TOOLS.has(name) ? AUTHORING_TTL_MS : undefined,
       );
       this.#audit('mgmt.propose', { tool: name, confirmId: rec.id, resolved, ...who });
-      return { ok: true, tool: name, pending: { confirmId: rec.id, summary } };
+      const warnings = resolved.check?.warnings;
+      return { ok: true, tool: name, pending: { confirmId: rec.id, summary, ...(warnings?.length ? { warnings } : {}) } };
     } catch (e) {
       if (e instanceof BrokerError) return { ok: false, tool: name, error: { code: e.code, message: e.message } };
       return { ok: false, tool: name, error: { code: 'UPSTREAM_ERROR', message: String((e as Error).message ?? e) } };
@@ -645,7 +648,10 @@ export class Broker {
             `"${model}" isn't offered by this agent's source. Options: ${allowed.join(', ') || '(none)'}.`,
           );
         }
-        return { ...base, model };
+        // The scorecard's evidence on the card, and a downgrade's risks stated
+        // plainly (docs/features.md, "Right-size"): the owner still decides.
+        const check = await this.api.modelCheck?.(agent.id, model).catch(() => undefined);
+        return { ...base, model, ...(check ? { check: { from: check.from, evidence: check.evidence, warnings: check.warnings ?? [], downgrade: !!check.downgrade } } : {}) };
       }
       case 'approve_member': {
         const code = args.code;
@@ -868,8 +874,12 @@ export function summarize(tool: string, r: Resolved): string {
       return `⏹ Stop "${r.agentName}"`;
     case 'rebuild_agent':
       return `🔄 Rebuild "${r.agentName}" (memory kept)`;
-    case 'set_model':
-      return `Set "${r.agentName}" model → ${r.model}`;
+    case 'set_model': {
+      const head = r.check?.from && r.check.from !== r.model
+        ? `Set "${r.agentName}" model: ${r.check.from} → ${r.model}${r.check.downgrade ? ' (a smaller or cheaper model)' : ''}`
+        : `Set "${r.agentName}" model → ${r.model}`;
+      return [head, r.check?.evidence, ...(r.check?.warnings ?? []).map((w) => `⚠ ${w}`)].filter(Boolean).join('\n');
+    }
     case 'approve_member':
       return `✅ Admit ${r.who ?? 'the person with pairing code ' + r.code} (code ${r.code}) to "${r.agentName}"`;
     case 'remove_member':

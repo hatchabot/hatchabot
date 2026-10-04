@@ -99,6 +99,8 @@ import { completeWithProfile, pickMgmtProfile, runMgmtCompletion, usableForMgmt 
 import { checkOpsDrift, opsDriftOf } from '../ops/opsDrift.js';
 import { OPS_DIGEST_MESSAGE, OPS_SUGGEST_MESSAGE } from '../ops/opsAgent.js';
 import { buildScorecard } from '../orchestrator/modelScorecard.js';
+import { assessModelChange, backfillModelLedger, evaluateModelChanges, fileGuardProposals, recordChanges, rightSizeSavings, snapshotModels, EARLY_TURNS as EARLY_TURNS_N, VERDICT_AFTER_DAYS as VERDICT_DAYS, type ChangeMeta, type ModelFigures } from '../orchestrator/modelLedger.js';
+import type { PendingConfirm } from '../mgmt/pendingStore.js';
 import { modelOptionsFor } from '../orchestrator/modelOptions.js';
 import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
 import { createOpsPush, unannounced } from '../ops/push.js';
@@ -1677,6 +1679,47 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
 
   /**
+   * The model-change ledger (modelLedger.ts): who made a change and how. A
+   * card confirmed in "Needs you" executes with the header naming it (set by
+   * the confirmer, mgmtChat.ts); the card itself, read here and owner-scoped,
+   * says whether the owner's chat, their management agent or Hatchabot's
+   * quality guard prepared it, and why. Otherwise the owner did it: in the
+   * app (a session cookie) or through the API (a bearer token: the CLI, a
+   * script), with an optional `why` in the body.
+   */
+  const ledgerMeta = (req: FastifyRequest, source: string): ChangeMeta => {
+    const pid = req.headers['x-hatchabot-proposal'];
+    if (typeof pid === 'string' && pid) {
+      const rec = store.getMgmtProposal<PendingConfirm>(pid);
+      if (rec && rec.ownerId === ownerIdOf(req)) {
+        return {
+          by: rec.source === 'agent' ? 'agent' : rec.source === 'guard' ? 'hatchabot' : 'owner',
+          via: rec.source === 'guard' ? 'guard' : 'proposal', source, proposalId: pid,
+          why: rec.note ?? (rec.source === 'guard' ? `Quality guard: switch back (${rec.summary.split('\n').find((l) => l.startsWith('Worse:'))?.slice(7).replace(/\.$/, '') ?? 'worse after the switch'})` : undefined),
+        };
+      }
+    }
+    const auth = req.headers.authorization;
+    const why = (req.body as { why?: unknown } | undefined)?.why;
+    return { by: 'owner', via: typeof auth === 'string' && /^bearer\s/i.test(auth) ? 'api' : 'app', source, ...(typeof why === 'string' && why.trim() ? { why } : {}) };
+  };
+  /** Record each agent whose model moved since `before` (snapshotModels). Never fails the change it follows. */
+  const recordLedger = (req: FastifyRequest, source: string, before: Map<string, string | undefined>): void => {
+    try {
+      for (const row of recordChanges(store, before, ledgerMeta(req, source))) {
+        trace(row.agentId)('model.changed', { from: row.from ?? null, to: row.to, by: row.by, via: row.via, source: row.source });
+      }
+    } catch (err) { app.log.warn({ err: String(err) }, 'model.ledger_failed'); }
+  };
+  /** Snapshot these agents' models, run the change, and record each agent whose model moved. */
+  const ledgered = async <T>(req: FastifyRequest, source: string, agentIds: Iterable<string>, change: () => T | Promise<T>): Promise<T> => {
+    const before = snapshotModels(store, agentIds);
+    const out = await change();
+    recordLedger(req, source, before);
+    return out;
+  };
+
+  /**
    * Q4 of the 2026-09-11 review: a class is a "set" action plus a tag, and a
    * later class edit re-applies to every tagged agent. So when an agent's
    * source or model is changed by hand (card or bulk) to something the class
@@ -1940,7 +1983,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       store.upsertAgentClass({ id: cls.id, ownerId: cls.ownerId, name, model, aiProfileId, image, memoryCap, swapAllowance });
       // Propagate the (possibly changed) model/source/image to every agent in the class.
       let applied = 0, needRebuild = 0; const skipped: string[] = [];
-      for (const a of store.listAgentsInClass(cls.id)) {
+      const members = store.listAgentsInClass(cls.id);
+      await ledgered(req, 'class', members.map((a) => a.id), async () => {
+      for (const a of members) {
         if (a.state === 'ARCHIVED') continue; // nothing to apply to; it keeps its tag
         // A class cap reaches members without a cap of their own, live.
         // Its swap allowance too (swap.ts), which a class cap can also shrink.
@@ -1965,6 +2010,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (r.error) skipped.push(`${a.name}: ${r.error}`);
         else { applied++; if (r.rebuild) needRebuild++; }
       }
+      });
       return { class: store.getAgentClass(cls.id), applied, needRebuild, skipped };
     },
   );
@@ -1994,7 +2040,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (classId === null) { store.setAgentClass(agent.id, null); await applyCap(); return { classId: null, rebuild: false }; }
     const cls = store.getAgentClass(classId);
     if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'No such class.' });
-    const r = await applyClassToAgent(agent, cls);
+    const r = await ledgered(req, 'class', [agent.id], () => applyClassToAgent(agent, cls));
     if (r.error) return reply.code(400).send({ error: r.error });
     store.setAgentClass(agent.id, cls.id);
     await applyCap();
@@ -2019,16 +2065,40 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     return false;
   };
+  /**
+   * After each usage pass: model changes that are due get their verdict from
+   * the profiles just stored, and a worse one gets Hatchabot's switch-back
+   * card (once), announced the way other cards are (modelLedger.ts).
+   */
+  const runModelGuard = () => {
+    try {
+      evaluateModelChanges(store);
+      fileGuardProposals({
+        store,
+        push: (ownerId, headline, detail) => void opsPush.waiting(ownerId, headline, detail),
+        log: (event, detail) => { trace(String(detail.agentId ?? 'admin'))(event, detail); },
+      });
+    } catch (err) { app.log.warn({ err: String(err) }, 'model.guard_failed'); }
+  };
   const runUsageSample = () => {
     if (usageSampling) return usageSampling;
     usageSampling = sampleSourceUsage({ store, providerFor, log: (e, d) => app.log.info(d, e) })
       .then(async (r) => { usageSampledAt = new Date().toISOString(); if (r.limited) app.log.info(r, 'usage.sample_rate_limits_seen'); try { snapshotUsageFromSamples(); } catch (err) { app.log.warn({ err: String(err) }, 'usage.snapshot_failed'); }
         await runUsageAlerts({ store, tell: tellUsageSpike, log: (e, d) => app.log.info(d, e) }).catch((err) => app.log.warn({ err: String(err) }, 'usage.alerts_failed'));
+        runModelGuard();
         return r; })
       .catch((err) => app.log.warn({ err: String(err) }, 'usage.sample_failed'))
       .finally(() => { usageSampling = null; });
     return usageSampling;
   };
+  // The model-change ledger at start-up: seed it once from the set_model cards
+  // confirmed before it existed (idempotent: keyed by the card), and forget
+  // changes older than about 13 months.
+  try {
+    const seeded = backfillModelLedger(store);
+    if (seeded) app.log.info({ seeded }, 'model.ledger_backfilled');
+    store.pruneModelChanges(new Date(Date.now() - 400 * 86_400_000).toISOString());
+  } catch (err) { app.log.warn({ err: String(err) }, 'model.ledger_backfill_failed'); }
   if (!process.env.VITEST) {
     const every = Number(process.env.HATCHABOT_USAGE_SAMPLE_MS ?? 600_000);
     if (every > 0) {
@@ -3542,10 +3612,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+      // A new default (or a menu that drops a pin) moves every agent that
+      // follows it, any account's: each such change goes in the ledger.
+      const followers = (parsed.data.model !== undefined || 'models' in ((req.body ?? {}) as object))
+        ? snapshotModels(store, store.listAllActiveAgents().filter((a) => a.aiProfileId === profile.id).map((a) => a.id)) : undefined;
       if (parsed.data.model !== undefined) store.setAIProfileModel(profile.id, parsed.data.model);
       if ('models' in ((req.body ?? {}) as object)) {
         store.setAIProfileModels(profile.id, parsed.data.models);
       }
+      if (followers) recordLedger(req, 'source-default', followers);
       if (parsed.data.shared !== undefined) {
         // A machine-login subscription profile (no stored token) IS the
         // operator's ~/.claude, bind-mounted into an agent's container. Sharing
@@ -3704,7 +3779,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return reply.code(400).send({ error: 'The target must be a shared source — agents from other accounts are on this one.' });
       }
       const tally = { switched: 0, rebuilding: 0, classDetached: 0, skipped: [] as Array<{ name: string; reason: string }> };
-      for (const a of onIt) switchAgentToSource(a, target, b, tally);
+      await ledgered(req, 'source-switch', onIt.map((a) => a.id), () => { for (const a of onIt) switchAgentToSource(a, target, b, tally); });
       trace('admin')('source.migrated', { from: from.id, to: target.id, ...tally, skipped: tally.skipped.length });
       return { ...tally, agents: onIt.length, otherAccounts: new Set(onIt.filter((a) => a.ownerId !== ownerIdOf(req)).map((a) => a.ownerId)).size };
     },
@@ -3744,7 +3819,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         : mine.filter((a) => a.aiProfileId !== target.id); // "all" = everything not already here
 
       const tally = { switched: 0, rebuilding: 0, classDetached: 0, skipped: [] as Array<{ name: string; reason: string }> };
-      for (const a of requested) switchAgentToSource(a, target, parsed.data, tally);
+      await ledgered(req, 'source-switch', requested.map((a) => a.id), () => { for (const a of requested) switchAgentToSource(a, target, parsed.data, tally); });
       return tally;
     },
   );
@@ -3781,6 +3856,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const oldDefault = profile.model;
 
       const mine = store.listAgents(ownerIdOf(req)).filter((a) => a.aiProfileId === profile.id);
+      const ledgerBefore = snapshotModels(store, mine.map((a) => a.id));
+      // On a shared source, other accounts' followers move with the default too.
+      const othersBefore = snapshotModels(store, store.listAllActiveAgents().filter((a) => a.aiProfileId === profile.id && a.ownerId !== ownerIdOf(req)).map((a) => a.id));
 
       // First pin/clear each agent, collecting the models the held ones must
       // keep. Held = "runs today": its override, or the OLD default if it was a
@@ -3810,6 +3888,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // `menu` is built from OUR held models only, so scope the sweep to us —
       // another owner's pin isn't ours to clear.
       store.clearStaleAgentModels(profile.id, menu, ownerIdOf(req));
+      // The switched agents' changes go in the ledger; the held ones did not move.
+      recordLedger(req, 'default-model', ledgerBefore);
+      recordLedger(req, 'source-default', othersBefore);
 
       // Apply the new default LIVE to the switched agents that are RUNNING —
       // OpenClaw reads the model per turn, so `models set` takes effect on the
@@ -4854,6 +4935,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const ledgerBefore = snapshotModels(store, [agent.id]);
       const parsed = z
         .object({
           name: z.string().trim().min(1).max(64).optional(),
@@ -5308,6 +5390,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       if (flippingMemory) store.setAgentSharedMemory(agent.id, shared!);
       const classDetached = (switchingProfile || model !== undefined) && detachClassIfDrifted(agent.id);
+      if (switchingProfile || model !== undefined) recordLedger(req, model !== undefined ? 'model' : 'source-switch', ledgerBefore);
 
       return { ...publicAgent(store.getAgent(agent.id)!, { classDetached }), ...(sameImage !== undefined ? { sameImage } : {}) };
     },
@@ -6821,8 +6904,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const model = ((req.body as { model?: string | null } | undefined)?.model ?? null) || null;
       const problem = modelOverrideProblem(profile, model);
       if (problem) return reply.code(400).send({ error: problem });
-      store.setAgentModel(agent.id, model);
-      const classDetached = detachClassIfDrifted(agent.id);
+      const classDetached = await ledgered(req, 'model', [agent.id], () => { store.setAgentModel(agent.id, model); return detachClassIfDrifted(agent.id); });
       const applied = effectiveModel(store.getAgent(agent.id)!, profile);
       const how = await applyModelToRuntime(agent.id);
       return { model: applied, live: how === 'live', staged: how === 'staged', rebuild: how === 'rebuild', classDetached };
@@ -7131,6 +7213,51 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return buildScorecard(store, ownerIdOf(req), { limit: Number.isFinite(limit) && limit > 0 ? limit : undefined });
   });
   app.get('/v1/model-options', async (req) => modelOptionsFor(store.listAIProfiles(ownerIdOf(req))));
+  /**
+   * The model-change ledger (modelLedger.ts): the caller's changes, newest
+   * first, with the old model's figures at the change, the new model's a week
+   * on and the verdict, plus what the cheaper switches saved this month.
+   * Stored data only: verdicts that are due are worked out here from the
+   * stored profiles (nothing is asked of any container).
+   */
+  app.get<{ Querystring: { limit?: string; agent?: string } }>('/v1/model-changes', async (req) => {
+    const ownerId = ownerIdOf(req);
+    try { evaluateModelChanges(store, Date.now(), ownerId); } catch (err) { app.log.warn({ err: String(err) }, 'model.ledger_eval_failed'); }
+    const limit = Math.min(Math.max(1, Number(req.query?.limit) || 30), 200);
+    const names = new Map(store.listAgents(ownerId).map((a) => [a.id, a.name]));
+    const agentRef = req.query?.agent;
+    const agentId = agentRef ? [...names.entries()].find(([id, n]) => id === agentRef || n.toLowerCase() === agentRef.toLowerCase())?.[0] ?? '-' : undefined;
+    const brief = (f: ModelFigures | undefined) => f && {
+      model: f.model, days: f.days, turns: f.turns, turnsPerDay: f.turnsPerDay, callsPerDay: f.callsPerDay, toolsPerTurn: f.toolsPerTurn, toolTurnShare: f.toolTurnShare,
+      badTurns: f.badTurns, malformed: f.malformed, toolFailed: f.toolFailed, rates: f.rates, ...(f.ctxK ? { ctxK: f.ctxK } : {}), ...(f.monthlyUSD !== undefined ? { monthlyUSD: f.monthlyUSD } : {}),
+    };
+    const changes = store.listModelChanges({ ownerId, agentId, limit }).map((c) => ({
+      id: c.id, agent: names.get(c.agentId) ?? '(deleted agent)', agentId: c.agentId,
+      from: c.from ?? null, to: c.to, at: c.at, ...(c.approx ? { approx: true } : {}),
+      by: c.by, via: c.via, source: c.source, ...(c.why ? { why: c.why } : {}),
+      before: brief(c.before as ModelFigures | undefined) ?? 'unknown',
+      ...(c.after ? { after: brief(c.after as ModelFigures) } : {}),
+      outcome: c.outcome, ...(c.reasons?.length ? { reasons: c.reasons } : {}),
+      ...(c.guardProposalId && !c.guardProposalId.startsWith('none:') ? { guardCard: c.guardProposalId } : {}),
+    }));
+    return {
+      changes,
+      savings: rightSizeSavings(store, ownerId),
+      notes: [
+        `outcome: pending until ${VERDICT_DAYS} days after the change (or ${EARLY_TURNS_N} turns on the new model); then kept-ok, worse (error rates up: failed turns, malformed tool calls, tool failures) or not-enough-data.`,
+        'by: owner (by hand), agent (your card, the owner confirmed), hatchabot (the quality guard\'s switch-back, the owner confirmed). via: app, api, proposal, guard, backfill.',
+        'A worse change gets one switch-back card from Hatchabot in "Needs you"; it never switches by itself.',
+      ],
+    };
+  });
+  /** What a set_model card for this agent and model should say (the broker asks when it files one). */
+  app.get<{ Params: { id: string }; Querystring: { model?: string } }>('/v1/agents/:id/model-check', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const model = String(req.query?.model ?? '').trim();
+    if (!model) return reply.code(400).send({ error: 'Which model? Add ?model=…' });
+    return assessModelChange(store, agent, store.getAIProfile(agent.aiProfileId), model);
+  });
 
   /** The fleet's use in the last hour, 3/6/9/12 hours, day or week, from what the sampler recorded — answers at once. */
   app.get<{ Querystring: { period?: string } }>('/v1/usage/periods', async (req, reply) => {
@@ -7140,7 +7267,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Spike warnings of the last week, newest first, with the agent's name (usageAlerts.ts).
     const alerts = store.usageAlertsSince(new Date(Date.now() - 7 * 86_400_000).toISOString(), { ownerId })
       .map((x) => ({ ...x, name: store.getAgent(x.agentId)?.name ?? 'an agent' }));
-    return { ...computeUsagePeriod(store, ownerId, period as UsagePeriod), sampledAt: usageSampledAt, alerts };
+    // Right-size: what the cheaper switches saved this month (modelLedger.ts); one line on the page.
+    let rightSize: { line: string; savingUSD: number; apiUSD: number; planUSD: number; month: string } | undefined;
+    try {
+      const rs = rightSizeSavings(store, ownerId);
+      if (rs.line) rightSize = { line: rs.line, savingUSD: rs.savingUSD, apiUSD: rs.apiUSD, planUSD: rs.planUSD, month: rs.month };
+    } catch (err) { app.log.warn({ err: String(err) }, 'model.savings_failed'); }
+    return { ...computeUsagePeriod(store, ownerId, period as UsagePeriod), sampledAt: usageSampledAt, alerts, ...(rightSize ? { rightSize } : {}) };
   });
 
   /** Daily fleet-usage snapshots for the trend chart, oldest → newest, with a

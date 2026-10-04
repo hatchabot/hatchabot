@@ -8315,6 +8315,7 @@ function renderFleetUsage(f) {
     </div>
     <div style="font-size:20px;font-weight:700;margin-top:8px">${fmtTokens(f.totals.tokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">· ${fmtN(f.totals.requests)} request${f.totals.requests === 1 ? '' : 's'}${f.totals.limited ? ` · <b style="color:var(--bad)">${f.totals.limited}</b> refused` : ''} · ${span}</span> ${totalCost}</div>
     ${partial}
+    ${f.rightSize?.line ? `<div class="sub" id="rightSizeLine" style="margin:4px 0 8px" title="What switching agents to cheaper models saved this month: tokens used on the new model × the price difference, at API list prices">✂️ ${esc(f.rightSize.line)}</div>` : ''}
     ${alerts ? `<div style="margin:6px 0 8px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
     ${breakdown}
     ${f.totals.tokens ? fleetUsageBars(f.buckets, 'tokens', `Tokens ${per}`, period) : ''}
@@ -11145,18 +11146,41 @@ function mgmtProposalCard(p, into) {
   card.style.cssText = 'align-self:stretch;border:1px solid var(--warn);border-radius:10px;padding:10px 12px;font-size:14px';
   // Who prepared it and how much care it deserves — then Hatchabot's own
   // description of the change. The agent's reason comes last, marked as its words.
-  if (p.source === 'agent' || (p.risk && p.risk !== 'routine')) {
+  if (p.source === 'agent' || p.source === 'guard' || (p.risk && p.risk !== 'routine')) {
     const meta = document.createElement('div');
     meta.className = 'prop-meta';
     const risk = { disruptive: ['Restarts or interrupts something', 'warn'], careful: ['Read carefully', 'bad'] }[p.risk];
     if (risk) { const b = document.createElement('span'); b.className = `v2pill ${risk[1]}`; b.textContent = risk[0]; meta.appendChild(b); }
     if (p.source === 'agent') { const w = document.createElement('span'); w.textContent = 'Prepared by your Hatchabot agent'; meta.appendChild(w); }
+    if (p.source === 'guard') { const w = document.createElement('span'); w.textContent = "Prepared by Hatchabot's quality guard"; meta.appendChild(w); }
     card.appendChild(meta);
   }
   const head = document.createElement('div');
   head.style.cssText = 'white-space:pre-wrap;font-family:inherit';
-  head.textContent = p.summary;
+  // A model change carries the scorecard's evidence and a downgrade's risks
+  // (Right-size): the headline, then the evidence, then each risk, marked.
+  head.textContent = p.check ? String(p.summary).split('\n')[0] : p.summary;
   card.appendChild(head);
+  if (p.check) {
+    if (p.check.evidence) {
+      const ev = document.createElement('div');
+      ev.className = 'sub prop-evidence';
+      ev.style.cssText = 'margin-top:4px;white-space:pre-wrap';
+      ev.textContent = p.check.evidence;
+      card.appendChild(ev);
+    }
+    if (Array.isArray(p.check.warnings) && p.check.warnings.length) {
+      const box = document.createElement('div');
+      box.className = 'prop-risks';
+      box.style.cssText = 'margin-top:6px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)';
+      for (const w of p.check.warnings) {
+        const line = document.createElement('div');
+        line.textContent = `⚠ ${w}`;
+        box.appendChild(line);
+      }
+      card.appendChild(box);
+    }
+  }
   if (p.note) {
     const note = document.createElement('div');
     note.className = 'prop-note';
