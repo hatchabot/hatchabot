@@ -8,6 +8,10 @@
 export const STUB = `(() => {
   window.HATCHABOT_VERSION = '__VERSION__';
   const now = new Date().toISOString();
+  // Set by scripts/screenshots.mjs only: the pictures also show weekly cost
+  // chips and one agent stuck in a loop. The click-through (which shares this
+  // stub) sets its own costs and incidents per scenario, so it gets neither.
+  const SHOT = !!window.__HB_SHOT;
   const ago = (m) => new Date(Date.now() - m * 60000).toISOString();
   let n = 0;
   const A = (name, group, icon, color, extra = {}) => ({
@@ -30,7 +34,7 @@ export const STUB = `(() => {
     A('Budget Tracker', 'Money', '💰', '#c9b03a'),
     A('Stock Watcher', 'Money', '📈', '#2f9e8f'),
     A('Tax Filing', 'Money', '🧾', '#d05a5a', { state: 'STOPPED' }),
-    A('To Do', 'Household', '☑️', '#3a8fd0', { stuck: [{ id: 'i1', signal: 'task-failing', text: 'Stuck: the morning reminder task failed 3 runs in a row', fix: 'ask your Hatchabot agent to look at it' }] }),
+    A('To Do', 'Household', '☑️', '#3a8fd0', !SHOT ? {} : { stuck: [{ id: 'i1', signal: 'task-failing', text: 'Stuck: the morning reminder task failed 3 runs in a row', fix: 'ask your Hatchabot agent to look at it' }] }),
     A('Garden Notes', 'Household', '🌱', '#3aa36b', { webOnly: true, botUsername: undefined, deepLink: undefined }),
     A('Car Upkeep', 'Money', '🚗', '#d05a5a'),
     A('Hatchabot', '', '🐣', '#e0a13a', { ops: true, slug: 'hatchabot', webOnly: true, botUsername: undefined, deepLink: undefined }),
@@ -67,7 +71,7 @@ export const STUB = `(() => {
     a8: c(18), a9: { ...c(0), tier: 1, local: true }, a10: { ...c(0), tier: 0 }, a11: c(3), a12: c(0.4), a13: c(1.5), a14: c(5),
   } };
   const R = {
-    '/v1/costs': COSTS,
+    ...(SHOT ? { '/v1/costs': COSTS } : {}),
     '/v1/config': { authMode: 'identity', localAccounts: false, maxAgentsPerAccount: 50 },
     '/v1/agents': AGENTS,
     '/v1/ai-profiles': [PROFILE],

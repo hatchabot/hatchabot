@@ -31,7 +31,7 @@ const work = mkdtempSync(join(tmpdir(), 'hb-shots-'));
 try {
   for (const shot of SHOTS) {
     // Light theme, the stub, then (after the app has painted) whatever this shot opens.
-    const head = `<head><script>localStorage.setItem('theme','light')</script><script>${STUB.replace('__VERSION__', version)}</script>`;
+    const head = `<head><script>localStorage.setItem('theme','light');window.__HB_SHOT=true</script><script>${STUB.replace('__VERSION__', version)}</script>`;
     const tail = shot.open ? `<script>setTimeout(() => { ${shot.open}; }, 2500)</script></body>` : '</body>';
     const name = shot.file.replace(/\.png$/, '.html');
     writeFileSync(join(work, name), page.replace('<head>', head).replace('</body>', tail));
