@@ -1,6 +1,6 @@
 # Hatchabot — the pitch
 
-## Your AI should be a staff, not a search box.
+## Your AI should be your own staff, not a search box.
 
 You already pay for a brilliant model. It remembers you, runs tasks on a
 schedule and reads your Drive — for one person, inside one app. Both Claude and

@@ -22,6 +22,21 @@ propose-only key, tells you what happened afterwards, and — given its own
 Telegram bot — messages your phone when something is waiting. See
 [docs/ops-agent-design.md](docs/ops-agent-design.md).
 
+**And it supervises what the fleet spends on AI.** The same Hatchabot agent
+keeps each agent on the least capable model that does its job well, in both
+directions: a cheaper model for an agent that is overserved, a stronger one for
+an agent that struggles. A weekly review reads a scorecard of evidence per agent
+(what it is for, tool use, errors, and its cost on each model its source
+offers); every model change is recorded, and if failed turns or tool errors rise
+after a switch, a quality guard proposes switching back. You confirm every
+change. The realised saving is shown ("Right-size: ≈ $12.40 this month"), each
+agent's tile carries its weekly cost ("$4/wk"), and a Cost view and the price
+list behind every figure are in the app. Dollar figures are estimates: measured
+tokens at Anthropic's list API prices (on a Claude plan, room in its limits
+rather than money). Coming next, not shipped yet: conversation-size warnings and
+compaction, spotting stuck loops, scheduled-task and cache checks, and budgets.
+See [Right-size](docs/features.md#right-size-the-model-steward).
+
 **New here or catching up?** [docs/features.md](docs/features.md) is a
 task-first tour of everything the app does today — creating, training, moving,
 adopting, backing up, and operating a fleet of agents.

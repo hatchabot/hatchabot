@@ -1,7 +1,7 @@
 # Hatchabot features — a tour
 
 What exists today, in one place. Each section says how to do the thing; where a
-deeper doc exists, it's linked instead of duplicated. Updated 2026-09-27.
+deeper doc exists, it's linked instead of duplicated. Updated 2026-10-04.
 
 **Start here: you don't have to do any of it yourself.** Hatchabot ships with a
 manager — *your Hatchabot agent* — that you talk to in plain words: "which
@@ -10,6 +10,19 @@ Agent back on the fleet image". It reads everything and changes nothing:
 anything that would alter your fleet comes back as a card you confirm. Nobody
 else's agent platform hands you an agent whose job is running the platform.
 See [Your Hatchabot agent](#your-hatchabot-agent-the-manager).
+
+**It is also the fleet's supervisor.** Your Hatchabot agent keeps each agent on
+the least capable model that does its job well, in both directions, from a
+scorecard of evidence it reviews every week; every model change is recorded,
+a quality guard proposes switching back if errors rise after a switch, and the
+realised saving is shown as one line ("Right-size: ≈ $12.40 this month"). Each
+agent's tile carries its cost for the last week ("$4/wk"), with a Cost view and
+the model price list in the app. You confirm every change. Dollar figures are
+estimates from measured tokens at Anthropic's list API prices. Coming next, not
+shipped yet: conversation-size warnings and compaction, spotting stuck loops,
+scheduled-task and cache checks, and budgets. See
+[Right-size](#right-size-the-model-steward); the cost badges are described
+further down ("Cost badges").
 
 ## What Hatchabot is
 
