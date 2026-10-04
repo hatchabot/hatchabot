@@ -1574,6 +1574,71 @@ and a click on a tile does what it always does.
   Activity view is shown; if that fails, the view is drawn without them.
   Message text is never written to the logs.
 
+**Cost badges** (2026-10-04): a small, quiet chip on the top edge of a tile's
+icon says what the agent's **last 7 days cost at API prices** — "$4/wk",
+"$240/wk", "$1.2k/wk" (whole dollars; thousands with one decimal). A week
+under **$1** shows nothing (most agents), so the screen stays calm; a week of
+**$100 or more** takes the soft gold wash. The chip sits at the middle of the
+top edge, the one place no other mark uses (unread top-left, needs-you
+top-right, quiet-for and shared bottom-left, chat apps bottom-right), leans a
+little left beside a needs-you mark, and the corner marks paint over it if a
+wide one ever meets them. It is absolutely placed, so tiles keep their size.
+The constants are `V2_COST_BADGE_MIN_USD` and `V2_COST_GOLD_FROM_USD` in
+web/index.html.
+
+- *The measure*: the tokens each model actually used in the last 7 days
+  (rolling) — input, output, cache reads at the model's share, cache writes
+  at 1.25× — priced at the model's list price, as everywhere else in the app
+  (Usage, Right-size). A local model is $0 and gets no chip; a model with no
+  known price gets no chip, and the tooltip says "no price known".
+- *The tooltip*, in every view: "≈ $18 in the last 7 days at API prices (≈ $77
+  a month)" and, on a Claude plan, "on your Claude plan — counts against its
+  limits" (a plan is not billed per token, but this is the room it takes).
+- *View by → Cost*: bands of a week's cost — **Over $100 a week**, **$50–100
+  a week**, **$10–50 a week**, **Under $10 a week** — then *No price known*
+  and *No usage this week*. Each band's header shows its total for the week
+  ("≈ $1,600 this week"). Inside a band the most expensive comes first: the
+  Sort control there has a **Cost** choice (first, and the default for this
+  view; again for cheapest first) beside Age · Name · Activity, which work as
+  everywhere. The Cost view remembers its own sort; the other views keep
+  theirs. The band edges are one list, `COST_BANDS` in
+  src/orchestrator/agentCosts.ts ([10, 50, 100]); the app names the bands
+  from it.
+- *Where it comes from*: `GET /v1/costs?days=7` →
+  `{ days, at, bands, agents: { id: { cost, weekly, monthly, tier, priced,
+  plan?, local?, partial?, approx? } } }`, figured from the hour buckets the
+  usage sampler already stores (agent_model_profiles): no container is read
+  and no agent is woken. An agent last read before the hour buckets (before
+  v2.118) is estimated from its 30-day totals and marked `approx`. Each
+  answer is cached five minutes per person; the app reads it with the list
+  poll at most every five minutes. Scoped like the agent list: the owner's
+  agents and the ones shared with a member; a **web-chat guest gets no cost**
+  for the agent they chat with (they don't pay for it). A signed-in read at
+  the public address.
+- *Off*: `HATCHABOT_COST_BADGES=off` in .env hides the chips, the tooltip
+  line and View by → Cost.
+
+**Model prices** (Settings → AI sources → 💲 Model prices; also the "model
+prices" link on Status → Usage): the price list every cost in the app is
+figured from, per model and per million tokens — input, output, cache read,
+cache write (5-minute cache) — older models dimmed, with the date the prices
+were checked against [Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
+(`PRICES_CHECKED` in src/orchestrator/pricing.ts) and the multipliers (cache
+read 0.1× input, 0.05× on Opus 5.5, 0.025× on Fable 5.1; cache write 1.25×).
+Under it, what caching means in a conversation: every message re-sends the
+whole conversation; within about five minutes the part the model has seen is
+read from the cache at a tenth of the input price; after a longer pause (or
+when the start of the prompt changes) the whole conversation is written again
+at 1.25×. So quick back-and-forth is cheap, a message after a long pause in a
+very long conversation is the expensive moment, and long conversations cost
+more on every turn. Worked example, Opus 4.8 and a 300,000-token
+conversation: read from the cache ≈ $0.15, written again ≈ $1.88, an answer of
+1,000 tokens ≈ $0.03. Local models are $0; a model in use here with no price
+is named as "no price known". The panel reads `GET /v1/model-prices` (the
+server's own table), so the page and the server cannot disagree; a test
+fails if a model the app offers (modelOptions' catalog) has no price, or a
+different one, in pricing.ts.
+
 **Resources** (Status → Resources; `hatchabot top [--sort cpu|mem|name]`): live
 CPU and memory per agent, per machine, as Docker measures it — one call per
 machine, refreshed every few seconds while the view is open; click Agent, CPU

@@ -112,6 +112,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('usage', 'HATCHABOT_USAGE_ALERT_RATIO', '3', 'Warn on Telegram when an agent\'s last 24 hours are this many times its usual day...'),
   s('usage', 'HATCHABOT_USAGE_ALERT_MIN_TOKENS', '20000000', '...and at least this many tokens.'),
   s('usage', 'HATCHABOT_USAGE_ALERT_NEW_TOKENS', '100000000', 'An agent with under 3 measured days: warn at this many tokens in 24 hours.'),
+  s('usage', 'HATCHABOT_COST_BADGES', 'on', 'The home screen\'s cost badges ($$ to $$$$: each agent\'s last 7 days at API prices, as a monthly rate) and View by → Cost. off hides them.'),
   s('usage', 'HATCHABOT_USAGE_SAMPLE_MS', '600000', 'How often usage and rate limits are read from the agents (0 = never).'),
   s('usage', 'HATCHABOT_USAGE_CONCURRENCY', '6', 'Agents read at once in a usage pass.'),
   s('usage', 'HATCHABOT_USAGE_PASS_MS', '300000', 'Longest one usage pass may take.'),

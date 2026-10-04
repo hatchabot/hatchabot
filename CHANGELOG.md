@@ -2,6 +2,19 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.119.0] — 2026-10-04
+
+### Added
+- **Cost badges on the home screen.** A small, quiet chip on the top edge of each agent's icon says what its last 7 days cost at API prices: "$4/wk", "$240/wk", "$1.2k/wk". Nothing under $1 a week (most agents); $100 a week and more take the soft gold wash. Priced from the tokens each model actually used (input, output, cache reads at the model's share, cache writes at 1.25×), the same pricing as Usage and Right-size. A local model is $0 and gets no chip; a model with no known price gets none either. Tiles keep their size; the chip sits under the corner marks if a wide one meets them.
+- **The tooltip says it in every view**: "≈ $18 in the last 7 days at API prices (≈ $77 a month)", and on a Claude plan "on your Claude plan — counts against its limits".
+- **View by → Cost**: Over $100 a week · $50–100 · $10–50 · Under $10 · No price known · No usage this week, each header with its total for the week; most expensive first (a **Cost** sort, this view's own and its default, beside Age · Name · Activity). The band edges are one list (`COST_BANDS`, [10, 50, 100]).
+- **`GET /v1/costs?days=7`**: each visible agent's cost, weekly and monthly figures and band, from the usage sampler's stored hour buckets — no container is read and no agent is woken; cached five minutes per person, read by the app at most every five minutes. A web-chat guest gets no cost. `HATCHABOT_COST_BADGES=off` hides the chips, the tooltip line and the view.
+- **Model prices** (Settings → AI sources, and a "model prices" link on Status → Usage): per model, input, output, cache read and cache write (5-minute) per million tokens, the date the prices were checked against Anthropic's pricing page (`PRICES_CHECKED`, 2026-10-03), the multipliers, and a plain explanation of what cache reads and writes mean in a conversation with a worked example (Opus 4.8, a 300,000-token conversation: ≈ $0.15 read, ≈ $1.88 written again, ≈ $0.03 for a 1,000-token answer). Local models $0; models in use with no price are named. From `GET /v1/model-prices`, the server's own table.
+
+### Fixed
+- Opus 4.5, Sonnet 4.5 and Mythos 5 were offered by the model steward with prices but had none in pricing.ts, so Usage showed their use as "no price known". The two tables now price every model alike, and a test keeps them so.
+
+
 ## [2.118.2] — 2026-10-04
 
 ### Fixed
