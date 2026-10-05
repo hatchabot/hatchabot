@@ -7,7 +7,7 @@ import { priceMix, type TokenMix } from './modelOptions.js';
 /**
  * Budgets (docs/features.md, "Budgets"): a monthly limit in US dollars at API
  * prices, on one agent or on the whole machine. At 80% the owner gets a
- * "Needs you" line and one message on the manager's chat; at 100% the same,
+ * "Alerts" line and one message on the manager's chat; at 100% the same,
  * and — when the budget says so — the agent is paused (stopped, as the Stop
  * button does) until the 1st of next month, until its budget is raised, or
  * until someone starts it by hand (then not again that month). The manager
@@ -151,7 +151,7 @@ export function budgetView(store: Store, b: BudgetRow, spent: number, now: numbe
 const money = (x: number) => (x >= 100 ? `$${Math.round(x)}` : `$${x.toFixed(2)}`);
 const whole = (x: number) => (Number.isInteger(x) ? `$${x}` : `$${x.toFixed(2)}`);
 
-/** The Needs-you line for a budget at 80% or more ("" below that). */
+/** The Alerts line for a budget at 80% or more ("" below that). */
 export function budgetLine(v: BudgetView, whose: string): string {
   const of = `its ${whole(v.usd)} budget for ${monthName(v.month)}`;
   if (v.paused) return `Paused: ${whose} used ${of} (${money(v.spent)}). It starts again on ${v.resetsOn} — or raise the budget, or start it now`;

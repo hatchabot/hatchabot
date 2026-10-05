@@ -19,7 +19,7 @@ realised saving is shown as one line ("Right-size: ≈ $12.40 this month"). Each
 agent's tile carries its cost for the last week ("$4/wk"), with a Cost view and
 the model price list in the app. You confirm every change. Dollar figures are
 estimates from measured tokens at Anthropic's list API prices. It also watches
-how agents use tokens: Hatchabot flags an agent stuck in a loop under Needs you
+how agents use tokens: Hatchabot flags an agent stuck in a loop under Alerts
 and says so once on Telegram; a conversation grown large gets a compaction or
 a per-agent conversation cap proposed as a card; and the "Weekly token review"
 checks the prompt cache and what scheduled tasks cost. An agent, or the whole
@@ -69,7 +69,7 @@ The header holds:
   numbers the old dashboard showed (awake, tokens per hour, memory, last
   backup, spare bots) live under Status — Health, Usage, Resources — and under
   Settings → Telegram (Chris, 2026-09-26). What needs you shows at the top
-  (**Needs you**) and under View by → **Needs you**. Until you have a
+  (**Alerts**) and under View by → **Alerts**. Until you have a
   manager, a box at the top of the home screen offers to set one up.
 - **The setup guide doesn't disappear.** Until the first agent exists it shows
   itself — connect the AI, make a Telegram bot, create the agent. After that it
@@ -82,7 +82,7 @@ The header holds:
   still honest a month later. **Setup** sits in the top bar next to Settings,
   with a badge counting what is left; there is also an entry in the account
   menu, and a button in the classic look's toolbar.
-- **Needs you** collects what needs you: changes your manager prepared
+- **Alerts** collects what needs you: changes your manager prepared
   (Confirm / Cancel), the ones that were confirmed and then *failed*, with the
   reason, and **people knocking** — an *expected* join request (strangers
   never get this far; see *Members & invites*) with **Let them in**,
@@ -168,8 +168,8 @@ an agent is pinned to, or that it follows the fleet default), **Class**, **Statu
 **Activity** (when each agent last did something: the last hour, today, this
 week, this month, longer ago, never) or **Rebuilt** (the same bins, by when
 its container was last built),
-read-only, remembered per device. **Needs you** bins by what wants you:
-Knocking, To read, To rebuild, Needs you, Fine — and **Cleared**: an
+read-only, remembered per device. **Alerts** bins by what wants you:
+Knocking, To read, To rebuild, Alerts, Fine — and **Cleared**: an
 agent you have taken out of the way with 🔕 (on the section's header for
 everyone in it, or on the agent's own sheet under its notices). Clearing
 remembers what was flagged, so the agent comes back the moment something
@@ -193,7 +193,7 @@ repeated in the time bins below. Hovering a tile shows its last line in the
 tooltip, with how long ago: who spoke last and how it began ("You: thanks",
 "Robin: can we do tacos?", the agent's own words with no name), **⏰ Daily
 brief ran** when the last thing was a scheduled task, or **needs you: …** in
-Needs you's own words. The same line is in the tooltip in every view (read
+Alerts's own words. The same line is in the tooltip in every view (read
 with the list, at most every 30 seconds). Nothing is added under the tiles,
 and a click on a tile does what it always does.
 
@@ -315,7 +315,7 @@ sources → 💵 **Budgets** (every agent of yours in one table: this month, las
 month, a month at its pace now, and a suggested budget about 1.25× that,
 rounded), or ask the Hatchabot agent (`set_budget`, a card you confirm).
 
-- **At 80% and at 100%**: a line under Needs you ("Used 84% of its $50 budget
+- **At 80% and at 100%**: a line under Alerts ("Used 84% of its $50 budget
   for October ($42.10) — on pace for $63") and one message on your Hatchabot
   agent's chat. Each is said once a month per budget amount; a new amount
   warns afresh.
@@ -353,7 +353,7 @@ Telegram bot added later. **💬 Open** talks to it.
 It can look at everything about your agents (health, logs, usage, their files
 and memory) and it can *prepare* changes: archive, rebuild, switch AI source,
 scheduled tasks, images and the rest. It cannot carry any of them out. What it
-prepares appears under **Needs you**, on the home screen and above the
+prepares appears under **Alerts**, on the home screen and above the
 conversation, and happens only when you press **Confirm**, with your own
 sign-in. Replying "yes" in its chat approves nothing, on purpose.
 
@@ -519,7 +519,7 @@ can be at fault. Rate limits never count: they are the source's.
   were not rate limits, malformed tool calls in 30 days). You still decide; the
   management agent is told the same in the tool's answer.
 - *After the switch.* A change whose verdict is `worse` gets ONE switch-back
-  card from Hatchabot itself, in Needs you, marked "Prepared by Hatchabot's
+  card from Hatchabot itself, in Alerts, marked "Prepared by Hatchabot's
   quality guard", with the before and after figures; the manager's Telegram
   (or Discord) says something is waiting, as for any card. Nothing switches
   until you confirm. No card for a change that was itself a switch-back, for
@@ -555,7 +555,7 @@ each runs (Right-size, above) but how big their conversations grow, whether
 the prompt cache works, what their scheduled tasks cost, how much of every
 turn is instruction files, and **loops** — the same work repeated without
 progress. It warns you, and proposes the fix as a card you Confirm. Hatchabot
-itself watches for loops between reviews and puts them under **Needs you**.
+itself watches for loops between reviews and puts them under **Alerts**.
 
 Why (a 30-day measurement of a real household's running agents, October
 2026): context was 93–98% of a heavy chat agent's bill; those agents carried
@@ -623,10 +623,10 @@ All in `THRESHOLDS` (src/orchestrator/tokenHealth.ts), tested.
 A signal is news while its last occurrence is under 6 hours old (15 minutes
 for a channel retry); the report lists the last 7 days.
 
-### The watcher: Needs you, without waiting for the weekly review
+### The watcher: Alerts, without waiting for the weekly review
 
 After each usage pass Hatchabot opens an **incident** for every signal that is
-still going: a line under Needs you on the agent ("Stuck: Telegram message
+still going: a line under Alerts on the agent ("Stuck: Telegram message
 retried 12 times since 08:19 — compacting a 446K conversation takes longer than
 the 5-minute limit"), with the fix, and the tile marked 🔁 "Stuck in a loop".
 It is told once on the manager's Telegram (else the agent's own), at most 3
@@ -1311,7 +1311,7 @@ leaves no trace where anyone looks: the container log stops, and the agent
 simply comes back. Hatchabot notices the restart count going up, writes a
 line in the agent's **Setup log** with the exit code ("quit cleanly (exit 0)
 without saying why", "killed for memory (exit 137)") and when, and lists the
-agent under Needs you with "its process quit and was started again".
+agent under Alerts with "its process quit and was started again".
 Restarts that happened while Hatchabot itself was not running are not
 noticed; the count on the card still is.
 
@@ -1331,7 +1331,7 @@ a **class** can carry a cap for its agents (Settings → Classes), and an
 rebuild, and sticks across rebuilds. A member may go up to the machine's
 per-agent maximum (`HATCHABOT_AGENT_MEMORY_MAX`, 8g); the machine's owner
 beyond it. An agent that hits its cap or has processes killed for memory
-shows under Needs you with a **Give it 1 GB more** button on its sheet.
+shows under Alerts with a **Give it 1 GB more** button on its sheet.
 
 The agent is told its budget: `HATCHABOT_MEMORY_CAP` in its environment and a
 "Memory budget" section in its AGENTS.md, refreshed when the cap changes, so
@@ -1433,7 +1433,7 @@ The trade-offs:
 ## Bulk actions on what you can see
 
 Every section on the home screen — a group, or a bin of whatever **View by**
-is showing (an image, a status, a Needs-you bin, an activity age…) — has a
+is showing (an image, a status, a Alerts bin, an activity age…) — has a
 **⚡** in its header that opens Bulk actions with exactly those agents
 ticked, and a **⧉** that copies their names (one per line, in the order
 shown). Inside Bulk actions, the current View by's sections are also filter
@@ -1660,7 +1660,7 @@ Recent warnings show at the top of Status → Usage and on the agent's Usage.
 Settings: `HATCHABOT_USAGE_ALERT_RATIO` (3), `HATCHABOT_USAGE_ALERT_MIN_TOKENS`
 (20000000), `HATCHABOT_USAGE_ALERT_NEW_TOKENS` (100000000).
 
-**View by → AI source / Model** on the home screen (📊 Sources in the classic look) answers "who runs on what": each AI source with its
+**View by → Source / Model** on the home screen (📊 Sources in the classic look) answers "who runs on what": each AI source with its
 credential kind, the agents on it and each agent's current model (pins and
 pending switches flagged), plus a models-in-use tally. The card's status line
 also names each agent's AI source (when more than one exists) alongside its

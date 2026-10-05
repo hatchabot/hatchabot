@@ -213,7 +213,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
   // ---- the management agent's door (docs/ops-agent-design.md) --------------
   // Reached only through the ops server, with the agent's propose-only key.
   // Reads run as its owner, in process. Changes are filed as proposals in the
-  // owner's "Needs you" list; they execute later, with the auth of
+  // owner's "Alerts" list; they execute later, with the auth of
   // whoever presses Confirm — never with anything the agent holds.
   const OPEN_PROPOSALS_CAP = 20;
   const opsWeb = makeOpsWeb({ braveKey: () => secrets.get(SEARCH_KEY_REF).catch(() => undefined), ...deps.opsWeb });
@@ -279,7 +279,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
           const warned = r.pending.warnings?.length
             ? ` Hatchabot put these risks on the card, for the owner to weigh: ${r.pending.warnings.join(' ')} Say so when you tell them about it.`
             : '';
-          return text(`Filed for the owner's approval: "${r.pending.summary.split('\n')[0]}". It is NOT done. It appears under "Needs you" on their Hatchabot home screen and only happens if they press Confirm there. Tell them so; never say it succeeded.${warned}`);
+          return text(`Filed for the owner's approval: "${r.pending.summary.split('\n')[0]}". It is NOT done. It appears under "Alerts" on their Hatchabot home screen and only happens if they press Confirm there. Tell them so; never say it succeeded.${warned}`);
         }
         if (r.ok) return text(JSON.stringify(r.data).slice(0, 12_000));
         return text(`Error ${r.error.code}: ${r.error.message}`, true);

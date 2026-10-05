@@ -380,7 +380,7 @@ export function guardCardText(agentName: string, c: ModelChangeRow): string {
  * One switch-back card per worse change — never for a change that was itself
  * a switch-back (no ping-pong), never when the agent has moved on since, and
  * only to a model its source still offers. The card is an ordinary
- * set_model proposal in "Needs you", marked as the guard's; nothing switches
+ * set_model proposal in "Alerts", marked as the guard's; nothing switches
  * until the owner confirms it.
  */
 export function fileGuardProposals(deps: GuardDeps): string[] {

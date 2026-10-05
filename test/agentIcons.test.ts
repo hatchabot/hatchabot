@@ -88,7 +88,7 @@ describe('picking icons', () => {
   });
 });
 
-describe('clearing an agent from Needs you', () => {
+describe('clearing an agent from Alerts', () => {
   it('PATCH stores the fingerprint of what was flagged, the list carries it, and null shows it again', async () => {
     const { store, f } = await world();
     store.insertAgent(agent('a1', 'Stock Advisor'));

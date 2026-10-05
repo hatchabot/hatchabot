@@ -409,7 +409,7 @@ describe('get_token_health', () => {
 });
 
 describe('the loop watcher', () => {
-  it('opens a Needs-you incident, tells it once on the manager\'s chat, keeps it updated, and clears it when the loop stops', async () => {
+  it('opens a Alerts incident, tells it once on the manager\'s chat, keeps it updated, and clears it when the loop stops', async () => {
     const { store, f } = await world();
     const now = Date.now();
     store.setTokenHealth('a1', stuckHealth(now), iso(now));
@@ -420,7 +420,7 @@ describe('the loop watcher', () => {
     expect(opened).toHaveLength(1);
     expect(told).toHaveLength(1);
     expect(told[0]).toMatch(/"Stock" — Stuck: Telegram message retried 12 times since .* — compacting a 446K conversation takes longer than the 5-minute limit\.\nFix: .*last 200 lines/);
-    // On the owner's list, as Needs you; not on another account's.
+    // On the owner's list, as Alerts; not on another account's.
     const listed = (await f.inject({ method: 'GET', url: '/v1/agents', headers: H })).json();
     expect(listed.find((a: any) => a.id === 'a1').stuck[0]).toMatchObject({ kind: 'channel-retry', text: expect.stringMatching(/^Stuck: Telegram message retried 12 times/) });
     expect(listed.find((a: any) => a.id === 'a2').stuck).toBeUndefined();
@@ -434,7 +434,7 @@ describe('the loop watcher', () => {
     expect(await runTokenWatch({ store, tell }, now + 10 * MIN)).toHaveLength(0);
     expect(told).toHaveLength(1);
     expect(store.listTokenIncidents({ open: true })[0]!.count).toBe(14);
-    // It went through: cleared, off Needs you.
+    // It went through: cleared, off Alerts.
     const h3 = stuckHealth(now); h3.ingress![0]!.st = 'completed';
     store.setTokenHealth('a1', h3, iso(now + 20 * MIN));
     await runTokenWatch({ store, tell }, now + 20 * MIN);
@@ -443,7 +443,7 @@ describe('the loop watcher', () => {
     expect((await f.inject({ method: 'GET', url: '/v1/token-incidents', headers: H })).json().recent).toHaveLength(1);
   });
 
-  it('tells at most TELL_PER_HOUR an hour per owner; the rest wait their turn, and are all under Needs you meanwhile', async () => {
+  it('tells at most TELL_PER_HOUR an hour per owner; the rest wait their turn, and are all under Alerts meanwhile', async () => {
     const { store } = await world();
     const now = Date.now();
     // Five failing tasks on one agent: five incidents.

@@ -179,7 +179,7 @@ export const REST_TOOLS: RestTool[] = [
     name: 'get_incidents', tier: 'read',
     description:
       'The loops Hatchabot\'s own watcher found on the owner\'s agents, open ones first, then those that stopped in the last week: what (e.g. "Stuck: Telegram message retried 12 times since 08:19 — compacting a 446K conversation takes longer than the 5-minute limit"), '
-      + 'the suggested fix, how many times, since when, and whether the owner was told on the manager\'s chat. Each shows under Needs you on its agent until the loop stops.',
+      + 'the suggested fix, how many times, since when, and whether the owner was told on the manager\'s chat. Each shows under Alerts on its agent until the loop stops.',
     input_schema: obj({}),
     call: () => ({ method: 'GET', path: '/v1/token-incidents' }),
   },
@@ -365,7 +365,7 @@ export const REST_TOOLS: RestTool[] = [
   {
     name: 'set_budget', tier: 'mutate', agentArg: true,
     description:
-      "Set an agent's monthly budget in US dollars at API prices (the cost badges' figures). At 80% and 100% the owner gets a Needs-you line and one message. "
+      "Set an agent's monthly budget in US dollars at API prices (the cost badges' figures). At 80% and 100% the owner gets a line under Alerts and one message. "
       + 'at_limit "warn" (default) only tells; "pause" stops the agent at 100% until the 1st of next month — or until the budget is raised, or the owner starts it (it then runs on until the 1st). '
       + 'Your own agent (the manager) can only warn. usd 0 removes the budget. Suggest from get_budgets: suggested, or what the owner asked. Requires the owner\'s confirm.',
     input_schema: obj({

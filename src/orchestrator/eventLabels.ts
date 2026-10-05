@@ -186,9 +186,9 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'model.guard_failed': 'the model quality guard did not run',
   'model.savings_failed': 'the Right-size saving could not be worked out',
   // The token steward (tokenWatch.ts, compaction.ts).
-  'token.incident_opened': (d) => `Hatchabot spotted a loop (${String(d.kind ?? 'loop')}, ${String(d.count ?? '?')} times) — under Needs you`,
+  'token.incident_opened': (d) => `Hatchabot spotted a loop (${String(d.kind ?? 'loop')}, ${String(d.count ?? '?')} times) — under Alerts`,
   'token.incident_cleared': (d) => `the loop stopped (${String(d.kind ?? 'loop')})`,
-  'token.incident_told': (d) => d.told ? 'told the owner about the loop on the manager\'s chat' : 'the loop is under Needs you (no chat to tell)',
+  'token.incident_told': (d) => d.told ? 'told the owner about the loop on the manager\'s chat' : 'the loop is under Alerts (no chat to tell)',
   'token.compaction_started': (d) => d.mode === 'lines' ? 'compacting its conversation (keeping the last lines)' : `compacting its conversation (a summary${d.retryLoop ? ', after its stuck message\'s next retry' : ''})`,
   'token.compaction_done': (d) => d.outcome === 'ok' ? `conversation compacted${d.afterK !== undefined ? ` to ${String(d.afterK)}K tokens` : ''}` : `compaction ${String(d.outcome ?? 'failed')}`,
   'budget.set': (d) => d.usd ? `monthly budget set to $${d.usd}${d.atLimit === 'pause' ? ', pausing at the limit' : ''}` : 'monthly budget removed',

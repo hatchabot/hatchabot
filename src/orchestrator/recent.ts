@@ -395,9 +395,9 @@ export function previewFor(record: RecentRecord | undefined, viewer: RecentViewe
   return viewer.kind === 'owner' ? { at: line.at, by: 'you', text: line.text } : undefined;
 }
 
-/** The one dim line under a row: a Needs-you state first, else who said what, else the task that ran. */
+/** The one dim line under a row: a Alerts state first, else who said what, else the task that ran. */
 export function previewLine(p: RecentPreview | undefined, needsYou?: string): string {
-  if (needsYou) return cleanPreview(`needs you: ${needsYou}`);
+  if (needsYou) return cleanPreview(`alert: ${needsYou}`);
   if (!p) return '';
   if (p.by === 'task') return `⏰ ${p.task} ran`;
   if (p.by === 'you') return cleanPreview(`You: ${p.text}`);

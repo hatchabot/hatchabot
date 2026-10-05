@@ -300,7 +300,7 @@ export async function claimFirstContact(
  * where a stranger's DM is dropped without a word, so the prompt never came.
  * Copying or sharing the Telegram invite now opens one window like this: the
  * door is `pairing` for 30 minutes, a knock that fits it (the invite's
- * @handle when it named one, anyone otherwise) is SHOWN under "Needs you" as
+ * @handle when it named one, anyone otherwise) is SHOWN under "Alerts" as
  * wanting to join, and nothing is admitted until the owner taps "Let them
  * in". Unlike claimFirstContact there is no watcher binding the first knock:
  * the window is only what expectedKnock and the rest-door rules read.

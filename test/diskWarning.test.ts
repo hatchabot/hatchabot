@@ -8,7 +8,7 @@ import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**
  * 2026-09-30: an agent over HATCHABOT_AGENT_DISK_WARN_GB, as measured by the
- * daily sweep, reaches the owner's agent list (the page's Needs you reason).
+ * daily sweep, reaches the owner's agent list (the page's Alerts reason).
  */
 class MemSecrets implements SecretStore {
   map = new Map<string, string>();

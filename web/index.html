@@ -613,14 +613,18 @@
   .v2group.collapsed { padding-bottom:12px }
   .v2group.collapsed .v2ghead { margin-bottom:0 }
   .v2ghead { display:flex; align-items:baseline; gap:10px; margin-bottom:6px }
-  .v2viewbar { display:flex; gap:4px; flex-wrap:wrap; margin:2px 0 10px }
+  /* Two zones (2026-10-05): the view pills wrap inside their own box, the
+     sort buttons keep theirs on the right — they used to share one wrapping
+     row and run into each other. On a phone the sort drops to its own line. */
+  .v2viewbar { display:flex; gap:6px 12px; align-items:flex-start; margin:2px 0 10px }
+  .v2views { display:flex; gap:4px; flex-wrap:wrap; flex:1 1 auto; min-width:0 }
   .v2viewbar button { font-size:12px; padding:3px 10px; border-radius:999px; border:1px solid var(--line); background:transparent; color:var(--dim); cursor:pointer }
   /* Selected: the same soft wash as the Hatchabot agent's icon tile (its gold at 17%), not a full gold chip. */
   .v2costbar { display:flex; gap:4px; flex-wrap:wrap; align-items:center; margin:-4px 0 10px }
-  .v2costbar .lbl { font-size:12px; color:var(--dim); margin-right:2px }
   .v2costbar .su-period { font-size:12px; padding:2px 9px }
   .v2viewbar button.on { background:color-mix(in srgb, var(--accent) 17%, var(--panel)); border-color:color-mix(in srgb, var(--accent) 45%, var(--line)); color:var(--text) }
-  .v2binsort { display:inline-flex; gap:4px; align-items:center; margin-left:auto; padding-left:8px }
+  .v2binsort { display:flex; gap:4px; align-items:center; flex:none; margin-left:auto }
+  @media (max-width: 620px) { .v2viewbar { flex-wrap:wrap } .v2binsort { margin-left:0 } }
   .v2ghead h3 { margin:0; font-size:12px; letter-spacing:.09em; text-transform:uppercase; color:var(--dim); font-weight:650 }
   .v2ghead .n { font-size:12px; color:var(--dim); font-variant-numeric:tabular-nums }
   .v2ghead .v2gtools { margin-left:auto; display:flex; gap:4px }
@@ -1016,7 +1020,7 @@
       </div>
     </section>
     <section id="v2Proposals" hidden aria-labelledby="v2PropTitle">
-      <div class="v2ghead"><h3 id="v2PropTitle">Needs you</h3><span class="n" id="v2PropCount"></span></div>
+      <div class="v2ghead"><h3 id="v2PropTitle">Alerts</h3><span class="n" id="v2PropCount"></span></div>
       <div id="v2JoinList" style="display:grid;gap:8px;margin-bottom:8px"></div>
       <div id="v2PropList"></div>
     </section>
@@ -6033,9 +6037,9 @@ async function openFleetActions(preset) {
   const needsRebuild = (a) => !isRechecking(a) && ((a.pendingModel && a.pendingModel !== a.model) || a.rebuild || a.peersPending);
   const needs = list.filter(needsRebuild).length;
   if (needs) chips.push(['needs-rebuild', `Needs rebuild (${needs})`]);
-  // The same rule as the home screen's Needs you: an agent the owner cleared is not counted.
+  // The same rule as the home screen's Alerts: an agent the owner cleared is not counted.
   const attn = list.filter(a => agentAttention(a).length && !attentionCleared(a)).length;
-  if (attn) chips.push(['attention', `Needs you (${attn})`]);
+  if (attn) chips.push(['attention', `Alerts (${attn})`]);
   // The home screen's current View by, as chips: one per section it shows
   // (image, status, needs-you, activity…), so a set you can see is a set you
   // can act on. Groups, sources, classes and machines already have theirs.
@@ -7191,8 +7195,8 @@ function agentNotices(a, opts = {}) {
       ${a.state === 'FAILED' && a.stateReason && !opts.skipFailure ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
       ${botNameNote(a)}
       ${attentionFingerprint(a) && v2Mine(a) ? (attentionCleared(a)
-        ? `<div class="pair sub">🔕 <span class="grow">Cleared from Needs you — it comes back if something new happens.</span><button onclick="clearAttention('${a.id}', false)">Show again</button></div>`
-        : `<div class="pair sub"><span class="grow"></span><button onclick="clearAttention('${a.id}')" title="Take it out of Needs you until something new happens">🔕 Clear from Needs you</button></div>`) : ''}
+        ? `<div class="pair sub">🔕 <span class="grow">Cleared from Alerts — it comes back if something new happens.</span><button onclick="clearAttention('${a.id}', false)">Show again</button></div>`
+        : `<div class="pair sub"><span class="grow"></span><button onclick="clearAttention('${a.id}')" title="Take it out of Alerts until something new happens">🔕 Clear from Alerts</button></div>`) : ''}
       ${a.state === 'ARCHIVED' ? `<div class="pair">📥 <span class="grow">Archived — everything is kept, but its Telegram bot went back in the pool for another agent. Restore gives it a <b>new</b> bot; members will need the new link.</span></div>` : ''}
       ${(isRechecking(a) ? [] : (a.dataSources ?? []).filter(d => d.syncError)).map(d => `
         <div class="pair">
@@ -8279,7 +8283,7 @@ function renderBudgets(d) {
       <div class="sub" style="flex-basis:100%">"Pause it" here pauses every agent but your Hatchabot agent when the machine reaches its budget.</div></div>` : '';
   return `${machine}<div class="mp-wrap"><table class="mp-tbl bg-tbl"><thead><tr><th>Agent</th><th>${esc(month)}</th><th>Last month</th><th>A month now</th><th style="text-align:left">Monthly budget</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="5" class="sub">No agents yet.</td></tr>'}</tbody></table></div>
-    <p class="sub mp-note">US dollars at API list prices, the same as the cost badges — on a Claude plan it is an equivalent, not a bill. You hear at 80% and at 100% (under Needs you, and once on your Hatchabot agent's chat). <b>Pause it</b> stops the agent at 100% until the 1st of next month — raise the budget or start it to bring it back sooner (started by hand, it runs on until the 1st). Empty a box and Save to remove a budget.</p>`;
+    <p class="sub mp-note">US dollars at API list prices, the same as the cost badges — on a Claude plan it is an equivalent, not a bill. You hear at 80% and at 100% (under Alerts, and once on your Hatchabot agent's chat). <b>Pause it</b> stops the agent at 100% until the 1st of next month — raise the budget or start it to bring it back sooner (started by hand, it runs on until the 1st). Empty a box and Save to remove a budget.</p>`;
 }
 async function saveBudget(key) {
   const raw = $('bgUsd_' + key)?.value.trim();
@@ -8817,7 +8821,7 @@ function renderFleet() {
 
   $('fleetAttention').innerHTML = attention.length
     ? `<div style="border:1px solid var(--warn);border-radius:8px;padding:10px;margin-top:6px">
-        <b>Needs you</b>
+        <b>Alerts</b>
         ${attention.map(a => {
           const why = a.state === 'FAILED' ? `failed — ${esc(a.stateReason || 'unknown')}`
             : a.pendingAction?.type === 'bot_token' ? 'waiting for a Telegram bot'
@@ -9094,7 +9098,7 @@ function renderAllowKnocks(a) {
   const sel = $('tgAllowKnocks'); if (!sel) return;
   sel.value = a?.allowKnocks ? 'on' : 'off';
   $('tgAllowKnocksHelp').innerHTML = a?.allowKnocks
-    ? 'Anyone who finds the bot can ask, and waits under <b>Needs you</b> — how it worked before v2.13.'
+    ? 'Anyone who finds the bot can ask, and waits under <b>Alerts</b> — how it worked before v2.13.'
     // Said as it is (2026-09-30): an open window answers anyone, not only the invitee.
     : 'Only people you invite, or already know from another agent. Strangers get no answer — except while an invite or ‘Let them in again’ window is open (30 minutes): then anyone who messages gets a pairing reply, and the first one is let in unless the invite named their @handle.';
 }
@@ -9534,8 +9538,8 @@ async function openInviteKnockWindow() {
   if (!invShare?.code || !invShare?.id) return '';
   try {
     const r = await api(`/v1/agents/${invShare.id}/invites/${encodeURIComponent(invShare.code)}/knock-window`, { method: 'POST', body: {} });
-    return r.alreadyOpen ? ' Anyone can knock on this agent, so their request will show under Needs you.'
-      : ` For the next ${r.minutes} minutes their message shows under Needs you — tap Let them in.`;
+    return r.alreadyOpen ? ' Anyone can knock on this agent, so their request will show under Alerts.'
+      : ` For the next ${r.minutes} minutes their message shows under Alerts — tap Let them in.`;
   } catch (e) { toast(e.message, 8000); return null; }
 }
 
@@ -11068,7 +11072,7 @@ function tocDotColor(a) {
 /**
  * Every status on an agent that wants the owner's attention, as {icon, why} —
  * one entry per KIND (same-kind reasons merged), in priority order. The single
- * source for the Jump legend's icons (and the Bulk "Needs you" filter),
+ * source for the Jump legend's icons (and the Bulk "Alerts" filter),
  * so a new card warning only has to be added here to surface everywhere.
  */
 /**
@@ -11091,7 +11095,7 @@ function recheckNote(a) {
   return n ? `<div class="pair">🛠 <span class="grow sub">Working on it — ${n} issue${n > 1 ? 's' : ''} will be re-checked when this finishes; anything still wrong reappears here.</span></div>` : '';
 }
 
-// "Clear from Needs you": what is flagged, as a stable fingerprint (kinds, not
+// "Clear from Alerts": what is flagged, as a stable fingerprint (kinds, not
 // counts that tick — more cap hits do not re-flag; a NEW restart or a new
 // rebuild reason does). Stored on the agent, so every device agrees.
 function attentionFingerprint(a) {
@@ -11107,7 +11111,7 @@ async function clearAttention(id, on = true) {
   try {
     await api(`/v1/agents/${id}`, { method: 'PATCH', body: { attentionAck: on ? attentionFingerprint(a) : null } });
     a.attentionAck = on ? attentionFingerprint(a) : undefined;
-    toast(on ? `${a.name} cleared from Needs you — it comes back if something new happens.` : `${a.name} is back under Needs you.`);
+    toast(on ? `${a.name} cleared from Alerts — it comes back if something new happens.` : `${a.name} is back under Alerts.`);
     await refresh(false);
   } catch (e) { toast(e.message); }
 }
@@ -11118,7 +11122,7 @@ async function clearAttentionSection(key) {
   for (const a of list) {
     try { await api(`/v1/agents/${a.id}`, { method: 'PATCH', body: { attentionAck: attentionFingerprint(a) } }); a.attentionAck = attentionFingerprint(a); n++; } catch { /* next */ }
   }
-  toast(`Cleared ${n} agent${n === 1 ? '' : 's'} from Needs you — they come back if something new happens.`);
+  toast(`Cleared ${n} agent${n === 1 ? '' : 's'} from Alerts — they come back if something new happens.`);
   await refresh(false);
 }
 function agentAttention(a) {
@@ -11672,7 +11676,7 @@ function v2IconHTML(a, st, opts = {}) {
 
 // How the home screen is grouped: by the groups you made, or by where and on
 // what the agents run. A per-device choice; "group" is the one you can rearrange.
-const V2_VIEWS = [['group', 'Groups'], ['attention', 'Needs you'], ['host', 'Machine'], ['source', 'AI source'], ['model', 'Model'], ['cost', 'Cost'], ['image', 'Image'], ['pinned', 'Pinned'], ['class', 'Class'], ['state', 'Status'], ['activity', 'Activity'], ['rebuilt', 'Rebuilt']];
+const V2_VIEWS = [['group', 'Groups'], ['attention', 'Alerts'], ['host', 'Machine'], ['source', 'Source'], ['model', 'Model'], ['cost', 'Cost'], ['image', 'Image'], ['pinned', 'Pinned'], ['class', 'Class'], ['state', 'Status'], ['activity', 'Activity'], ['rebuilt', 'Rebuilt']];
 /** The Activity view's first section: agents with replies waiting to be read. */
 const V2_UNREAD = 'act:unread';
 /** Time-since bins, oldest last; the key's leading digit keeps them in order. */
@@ -11757,7 +11761,7 @@ function v2ViewKey(a, view = v2View) {
       if (attentionCleared(a)) return ['n:9', 'Fine'];
       if (a.state === 'FAILED' || a.opsDrift) return ['n:1', '❌ Failed or changed by hand'];
       if (a.rebuild) return ['n:4', a.rebuild.level === 'required' ? '🔄 To rebuild (required)' : '🔄 To rebuild'];
-      if (agentAttention(a).length) return ['n:5', '⚠ Needs you'];
+      if (agentAttention(a).length) return ['n:5', '⚠ Alerts'];
       return ['n:9', 'Fine'];
     }
     default: return null;
@@ -11788,11 +11792,11 @@ async function v2LoadRecent(force = false) {
   renderV2(); // the tiles' spoken labels carry the line
 }
 /** The agent's last line, shown in its tooltip (not under the tile, Chris 2026-10-03):
- *  what needs you (as Needs you words it), else who said what last. */
+ *  what needs you (as Alerts words it), else who said what last. */
 function v2PreviewOf(a) {
   if (!v2Recent) return '';
   const need = v2Mine(a) && !attentionCleared(a) ? agentAttention(a)[0] : null;
-  if (need) return `needs you: ${need.why}`;
+  if (need) return `alert: ${need.why}`;
   const said = v2Recent.get(a.id)?.said;
   return typeof said === 'string' ? said : '';
 }
@@ -11957,10 +11961,10 @@ function renderV2() {
     return `<button class="${on ? 'on' : ''}" onclick="v2SetSort('${k}')" title="${title}">${l}${on ? (v2CurSort().dir > 0 ? ' ▲' : ' ▼') : ''}</button>`;
   }).join('')}</span>`;
   const views = v2CostsOff() ? V2_VIEWS.filter(([k]) => k !== 'cost') : V2_VIEWS;
-  const viewBar = live.length > 1 ? `<div class="v2viewbar" role="tablist" aria-label="Group agents by">${views.map(([k, l]) =>
-    `<button role="tab" aria-selected="${k === v2View}" class="${k === v2View ? 'on' : ''}" onclick="v2SetView('${k}')">${esc(l)}</button>`).join('')}${sortBar}</div>` : '';
+  const viewBar = live.length > 1 ? `<div class="v2viewbar"><div class="v2views" role="tablist" aria-label="Group agents by">${views.map(([k, l]) =>
+    `<button role="tab" aria-selected="${k === v2View}" class="${k === v2View ? 'on' : ''}" onclick="v2SetView('${k}')">${esc(l)}</button>`).join('')}</div>${sortBar}</div>` : '';
   // View by → Cost: the window its sections and every icon's chip show.
-  const costBar = v2View === 'cost' && !v2CostsOff() ? `<div class="v2costbar" role="group" aria-label="Cost over"><span class="lbl">Cost over</span>${V2_COST_PERIODS.map(([k, l, w]) =>
+  const costBar = v2View === 'cost' && !v2CostsOff() ? `<div class="v2costbar" role="group" aria-label="Cost over">${V2_COST_PERIODS.map(([k, l, w]) =>
     `<button class="su-period${k === v2CostPeriod ? ' on' : ''}" aria-pressed="${k === v2CostPeriod}" title="What each agent cost in ${w}, at API prices" onclick="v2SetCostPeriod('${k}')">${esc(l)}</button>`).join('')}</div>` : '';
   v2SectionsNow = sections;
   const html = viewBar + costBar + sections.map(s => `
@@ -11970,7 +11974,7 @@ function renderV2() {
           ${s.key.startsWith('g:') && s.drop ? `<button onclick="editGroupName(this.closest('.v2ghead').querySelector('h3'))" title="Rename this group" aria-label="Rename group">✏️</button><button onclick="moveGroup('${jsq(s.drop)}','up')" title="Move this group up" aria-label="Move group up">↑</button><button onclick="moveGroup('${jsq(s.drop)}','down')" title="Move this group down" aria-label="Move group down">↓</button>` : ''}
           ${s.items.some(({ a }) => v2Mine(a) && a.state !== 'ARCHIVED') ? `<button onclick="v2BulkSection('${jsq(s.key)}','${jsq(s.label)}')" title="Bulk actions on the agents in this section">⚡</button>` : ''}
           ${s.items.length ? `<button onclick="v2CopySection('${jsq(s.key)}')" title="Copy the names of the agents in this section" aria-label="Copy agent names">⧉</button>` : ''}
-          ${v2View === 'attention' && ['n:1', 'n:4', 'n:5'].includes(s.key) && s.items.some(({ a }) => v2Mine(a)) ? `<button onclick="clearAttentionSection('${jsq(s.key)}')" title="Clear these from Needs you — each comes back if something new happens to it" aria-label="Clear from Needs you">🔕</button>` : ''}
+          ${v2View === 'attention' && ['n:1', 'n:4', 'n:5'].includes(s.key) && s.items.some(({ a }) => v2Mine(a)) ? `<button onclick="clearAttentionSection('${jsq(s.key)}')" title="Clear these from Alerts — each comes back if something new happens to it" aria-label="Clear from Alerts">🔕</button>` : ''}
           <button onclick="v2Fold('${jsq(s.key)}')" aria-expanded="${!v2IsCollapsed(s.key)}">${v2IsCollapsed(s.key) ? 'Show' : 'Hide'}</button>
         </span></div>
       <div class="v2grid"${s.drop !== null ? ` data-v2drop="${esc(s.drop)}"` : ''}>
@@ -12016,7 +12020,7 @@ function v2ShowTip(el) {
     + (() => {
       // A needs-you line is already in the list above: don't say it twice (2026-10-04).
       const prev = v2PreviewOf(a), at = v2Recent?.get(a.id)?.at;
-      if (!prev || (prev.startsWith('needs you: ') && st.why.some((w) => prev.slice(11) === w))) return '';
+      if (!prev || (prev.startsWith('alert: ') && st.why.some((w) => prev.slice(7) === w))) return '';
       return `<span class="v2tipprev">${at ? esc(ago(at)) + ' · ' : ''}${esc(prev)}</span>`;
     })();
   tip.hidden = false;
@@ -12786,7 +12790,7 @@ async function v2LoadChans(id) {
           <option value="off"${r.allowKnocks ? '' : ' selected'}>Invite only (default)</option>
           <option value="on"${r.allowKnocks ? ' selected' : ''}>Anyone can knock</option>
         </select>
-        <span class="sub" style="flex-basis:100%">${r.allowKnocks ? 'Anyone who finds a bot of this agent can ask, and waits under Needs you.' : 'Only people you invite, or already know from another agent. Strangers get no answer — except while an invite or ‘Let them in again’ window is open (30 minutes): then anyone who messages gets a pairing reply, and the first one is let in unless the invite named their @handle.'} One setting for every app this agent is on.</span>
+        <span class="sub" style="flex-basis:100%">${r.allowKnocks ? 'Anyone who finds a bot of this agent can ask, and waits under Alerts.' : 'Only people you invite, or already know from another agent. Strangers get no answer — except while an invite or ‘Let them in again’ window is open (30 minutes): then anyone who messages gets a pairing reply, and the first one is let in unless the invite named their @handle.'} One setting for every app this agent is on.</span>
       </div>`}
       ${kind === 'telegram' ? `<div class="v2chan-rooms">
         <label for="chanRich-telegram" style="margin:0">Rich messages</label>
@@ -13284,7 +13288,7 @@ function v2InlineHealth(id, name) {
 
 /**
  * The hub: this account's management agent. An OpenClaw agent that runs on
- * any AI source; it prepares changes and they wait in "Needs you".
+ * any AI source; it prepares changes and they wait in "Alerts".
  * Until one is set up, the older built-in chat (Claude-only) stays as a stopgap
  * where it can work at all.
  */
@@ -13327,7 +13331,7 @@ function renderV2Stats() {
   const mine = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED');
   // The numbers row is gone (Chris, 2026-09-26: never acted on; a clean hub is
   // worth more). Everything it showed lives under Status, and what needs you
-  // shows below the hub and under View by → Needs you. Only the Bulk actions
+  // shows below the hub and under View by → Alerts. Only the Bulk actions
   // button's visibility is still decided here.
   if ($('v2BulkBtn')) $('v2BulkBtn').hidden = mine.length < 2;
 }

@@ -1686,7 +1686,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   /**
    * The model-change ledger (modelLedger.ts): who made a change and how. A
-   * card confirmed in "Needs you" executes with the header naming it (set by
+   * card confirmed in "Alerts" executes with the header naming it (set by
    * the confirmer, mgmtChat.ts); the card itself, read here and owner-scoped,
    * says whether the owner's chat, their management agent or Hatchabot's
    * quality guard prepared it, and why. Otherwise the owner did it: in the
@@ -2091,7 +2091,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
   /**
    * After each usage pass (the same timer): Hatchabot's loop watcher opens and
-   * clears "Needs you" incidents from what the pass stored and tells each new
+   * clears "Alerts" incidents from what the pass stored and tells each new
    * one once on the manager's chat (tokenWatch.ts); and a context cap that is
    * not yet in a running agent's config (it was asleep, or its model moved)
    * is written there (compaction.ts). Never wakes an agent.
@@ -4568,7 +4568,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     return { byChannelId, byKey };
   };
-  /** The Needs-you states the line carries (the app's wording), unless the owner cleared them. */
+  /** The Alerts states the line carries (the app's wording), unless the owner cleared them. */
   const recentNeedsYou = (a: Agent): string | undefined => {
     const cleared = new Set((a.attentionAck ?? '').split('\n'));
     if (a.state === 'FAILED' && !cleared.has('failed')) return 'it failed';
@@ -4602,7 +4602,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           asleep: !!a.hibernatedAt || a.state !== 'RUNNING' || undefined,
           line: previewLine(preview, needsYou),
           by: needsYou ? 'needs-you' : preview?.by,
-          /** The last line alone, without a Needs-you state (the app words those itself). */
+          /** The last line alone, without a Alerts state (the app words those itself). */
           said: previewLine(preview),
         };
       }))).filter((r): r is NonNullable<typeof r> => !!r);
@@ -4906,10 +4906,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const classes = new Map(store.listAgentClasses(ownerIdOf(req)).map((c) => [c.id, c]));
     const classNames = new Map([...classes].map(([id, c]) => [id, c.name]));
     // The daily storage measurement (posture.ts measureAgentDisks): an agent
-    // over HATCHABOT_AGENT_DISK_WARN_GB goes to Needs you (2026-09-30).
+    // over HATCHABOT_AGENT_DISK_WARN_GB goes to Alerts (2026-09-30).
     const disks = store.agentDiskBytes();
     const diskWarn = diskWarnBytes();
-    // Loops Hatchabot's watcher found (tokenWatch.ts): a "Needs you" line each, for the owner.
+    // Loops Hatchabot's watcher found (tokenWatch.ts): a "Alerts" line each, for the owner.
     const stuckBy = new Map<string, Array<{ id: string; kind: string; text: string; fix?: string; since?: string }>>();
     for (const i of store.listTokenIncidents({ ownerId: ownerIdOf(req), open: true })) {
       // A consult loop is the pair's: on both tiles.
@@ -4917,7 +4917,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       for (const id of on) stuckBy.set(id, [...(stuckBy.get(id) ?? []), { id: i.id, kind: i.kind, text: i.text, ...(i.fix ? { fix: i.fix } : {}), ...(i.firstAt ? { since: i.firstAt } : {}) }]);
     }
     // Budgets (budgets.ts): this month's figures for each agent with one, and
-    // the machine's on the manager's tile for the machine owner — Needs you.
+    // the machine's on the manager's tile for the machine owner — Alerts.
     const budgetNow = Date.now(), budgetTz = machineTz(), budgetMonth = monthKey(budgetNow, budgetTz);
     const budgetRows = new Map(store.listBudgets().map((b) => [b.scope, b]));
     const budgetSpend = budgetRows.size ? monthSpend(store, budgetMonth) : new Map<string, number>();
@@ -4987,9 +4987,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           /** Its chat lost its context (after a rebuild, or an idle reset) and
            *  the owner has not dealt with it yet — the app offers Recover. */
           contextReset: store.getContextReset(a.id),
-          /** A loop the watcher found and the fix (owner only): Needs you. */
+          /** A loop the watcher found and the fix (owner only): Alerts. */
           ...(role === 'owner' && stuckBy.get(a.id) ? { stuck: stuckBy.get(a.id) } : {}),
-          /** Its monthly budget, this month's spend against it, and a pause (owner only): Needs you from 80%. */
+          /** Its monthly budget, this month's spend against it, and a pause (owner only): Alerts from 80%. */
           ...(role === 'owner' && budgetOf(a) ? { budget: { ...budgetOf(a)!, ...(budgetOf(a)!.level ? { line: budgetLine(budgetOf(a)!, 'it') } : {}) } } : {}),
           ...(role === 'owner' && machinePaused.has(a.id) ? { budgetPaused: { scope: 'machine', at: machinePaused.get(a.id) } } : {}),
           ...(a.ops && machineBudget ? { machineBudget: { ...machineBudget, ...(machineBudget.level ? { line: budgetLine(machineBudget, 'this Hatchabot') } : {}) } } : {}),
@@ -5155,7 +5155,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
            *  immediate. `null` clears (the app then shows a picked default). */
           icon: z.string().refine(validIcon, { message: 'icon must be a single emoji' }).nullable().optional(),
           iconColor: z.string().refine(validIconColor, { message: 'iconColor must look like #3a8fd0' }).nullable().optional(),
-          /** Clear it from Needs you: what was flagged, as the app fingerprints it; it shows again when that changes. `null` shows it again now. */
+          /** Clear it from Alerts: what was flagged, as the app fingerprints it; it shows again when that changes. `null` shows it again now. */
           attentionAck: z.string().max(4000).nullable().optional(),
           /** `never` keeps this agent awake whatever HATCHABOT_HIBERNATE_AFTER says; `null` follows the machine. */
           hibernate: z.enum(['never']).nullable().optional(),
@@ -7439,7 +7439,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       notes: [
         `outcome: pending until ${VERDICT_DAYS} days after the change (or ${EARLY_TURNS_N} turns on the new model); then kept-ok, worse (error rates up: failed turns, malformed tool calls, tool failures) or not-enough-data.`,
         'by: owner (by hand), agent (your card, the owner confirmed), hatchabot (the quality guard\'s switch-back, the owner confirmed). via: app, api, proposal, guard, backfill.',
-        'A worse change gets one switch-back card from Hatchabot in "Needs you"; it never switches by itself.',
+        'A worse change gets one switch-back card from Hatchabot in "Alerts"; it never switches by itself.',
       ],
     };
   });
@@ -7603,7 +7603,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       ...(ownsLocalHost(req) ? { machine: machineBudgetView(now) } : {}),
       notes: [
         'Dollars at API list prices, the same as the cost badges; on a Claude plan they are an equivalent, not a bill. A month is the calendar month in the machine\'s time zone; spend is read every 10 minutes.',
-        'At 80% and at 100% the owner gets a Needs-you line and one message. atLimit "pause" stops the agent at 100% until the 1st (or until the budget is raised, or it is started by hand — then it runs on until the 1st); "warn" only tells. The manager is never paused.',
+        'At 80% and at 100% the owner gets a line under Alerts and one message. atLimit "pause" stops the agent at 100% until the 1st (or until the budget is raised, or it is started by hand — then it runs on until the 1st); "warn" only tells. The manager is never paused.',
       ],
     };
   });
@@ -10642,7 +10642,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * minutes so the person it is for can knock (2026-09-30). The dialog
    * promised a "wants to join" prompt, but under Invite only a stranger's DM
    * is dropped in silence and nothing ever showed. The knock is only SHOWN —
-   * under Needs you, and pushed like any other — and the owner's tap admits
+   * under Alerts, and pushed like any other — and the owner's tap admits
    * it; when the invite named an @handle, only that person's knock is shown
    * and everyone else's is turned away by the sweep as before.
    */
@@ -11062,7 +11062,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     for (const key of unannounced(announcedPairings, [...found.keys(), ...carried])) {
       const f = found.get(key);
       if (!f) continue;
-      void opsPush.waiting(f.ownerId, f.headline, 'Let them in — or turn them away — under "Needs you".');
+      void opsPush.waiting(f.ownerId, f.headline, 'Let them in — or turn them away — under "Alerts".');
     }
     // Agents built before the door rested shut are still in `pairing`, where a
     // stranger's DM is answered with a code. Their config is on the volume and

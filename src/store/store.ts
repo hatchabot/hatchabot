@@ -362,7 +362,7 @@ export class Store {
         PRIMARY KEY (agent_id, kind, key, at)
       );
       -- Loops Hatchabot's watcher found (tokenWatch.ts): open until the loop
-      -- stops; shown under Needs you, told once on the manager's chat.
+      -- stops; shown under Alerts, told once on the manager's chat.
       CREATE TABLE IF NOT EXISTS token_incidents (
         id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, owner_id TEXT NOT NULL,
         kind TEXT NOT NULL, key TEXT NOT NULL,
@@ -827,7 +827,7 @@ export class Store {
       // Compressed swap (swap.ts): an agent's or a class's allowance on top of its memory cap; "off" or a size, NULL = inherit.
       `ALTER TABLE agents ADD COLUMN swap_allowance TEXT`,
       `ALTER TABLE agent_classes ADD COLUMN swap_allowance TEXT`,
-      // "Clear from Needs you": the fingerprint of what was flagged when the owner cleared it.
+      // "Clear from Alerts": the fingerprint of what was flagged when the owner cleared it.
       `ALTER TABLE agents ADD COLUMN attention_ack TEXT`,
       // The message a managed task was made with, so a new release's wording reaches it (modelReview.ts).
       `ALTER TABLE managed_crons ADD COLUMN message_hash TEXT`,
@@ -4947,7 +4947,7 @@ export interface TokenIncidentRow {
   count: number;
   firstAt?: string;
   lastAt?: string;
-  /** What the owner reads under Needs you ("Stuck: Telegram message retried 12 times since 08:19 — …"). */
+  /** What the owner reads under Alerts ("Stuck: Telegram message retried 12 times since 08:19 — …"). */
   text: string;
   /** The suggested fix. */
   fix?: string;

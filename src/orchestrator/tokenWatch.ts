@@ -8,14 +8,14 @@ import { consultPair, incidentWords, loopSignals, THRESHOLDS, type LoopSignal } 
  * usage pass — the existing 10-minute timer, so nothing new is scheduled and no
  * container is asked anything more — every agent's loop signals are read from
  * what that pass stored. A signal that is still going opens an INCIDENT: a
- * "Needs you" line on the agent ("Stuck: Telegram message retried 12 times
+ * "Alerts" line on the agent ("Stuck: Telegram message retried 12 times
  * since 08:19 — …") with the suggested fix, told ONCE on the manager's chat.
  * When the loop stops, the incident clears itself. Deterministic: no model is
  * asked anything, and nothing is changed on any agent — the fixes are cards the
  * owner confirms (compact_agent, set_context_cap) or the app's own buttons.
  */
 
-/** At most this many incidents are told per owner per hour; the rest still show under Needs you. */
+/** At most this many incidents are told per owner per hour; the rest still show under Alerts. */
 export const TELL_PER_HOUR = 3;
 /** Cleared incidents are kept this long (get_incidents shows the recent ones). */
 export const KEEP_CLEARED_MS = 14 * 86_400_000;
@@ -24,7 +24,7 @@ export interface WatchDeps {
   store: Store;
   /** Tell the owner (the manager's Telegram, else the agent's own); resolves true if it reached them. */
   tell(ownerId: string, agent: Agent, text: string): Promise<boolean>;
-  /** The Needs-you list changed (the app polls; a push may follow). */
+  /** The Alerts list changed (the app polls; a push may follow). */
   log?(event: string, detail: Record<string, unknown>): void;
 }
 
@@ -106,7 +106,7 @@ export async function runTokenWatch(deps: WatchDeps, now = Date.now()): Promise<
     if (store.tokenIncidentsToldSince(row.ownerId, new Date(now - 3_600_000).toISOString()) >= TELL_PER_HOUR) continue;
     // A consult loop's text already names both agents.
     const told = await deps.tell(row.ownerId, agent, incidentMessage(row.kind === 'consult-ping-pong' ? undefined : agent.name, row)).catch(() => false);
-    // Marked even when it reached nobody: the Needs-you line is there either
+    // Marked even when it reached nobody: the Alerts line is there either
     // way, and a message that could not be delivered is not retried every pass.
     store.markTokenIncidentTold(row.id, nowIso);
     deps.log?.('token.incident_told', { agentId: row.agentId, kind: row.kind, told });
@@ -117,5 +117,5 @@ export async function runTokenWatch(deps: WatchDeps, now = Date.now()): Promise<
 
 /** The chat message: what, where to look, and the fix. */
 export function incidentMessage(agentName: string | undefined, i: Pick<TokenIncidentRow, 'text' | 'fix'>): string {
-  return `⚠️ Hatchabot: ${agentName ? `"${agentName}" — ` : ''}${i.text}.${i.fix ? `\nFix: ${i.fix}` : ''}\nIt is under Needs you; ask me to fix it.`;
+  return `⚠️ Hatchabot: ${agentName ? `"${agentName}" — ` : ''}${i.text}.${i.fix ? `\nFix: ${i.fix}` : ''}\nIt is under Alerts; ask me to fix it.`;
 }

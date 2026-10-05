@@ -264,7 +264,7 @@ export function clockOf(t: string | number, now = Date.now()): string {
 }
 const chan = (c: unknown) => (typeof c === 'string' && c && c !== 'channel' ? c[0]!.toUpperCase() + c.slice(1) : 'Chat-app');
 
-/** What the owner reads under Needs you and on the manager's chat, and the fix. */
+/** What the owner reads under Alerts and on the manager's chat, and the fix. */
 export function incidentWords(s: LoopSignal, ctx: { conversationK?: number; agentName?: (id: string) => string; now?: number; fleetLimitMs?: number } = {}): { text: string; fix: string } {
   const now = ctx.now ?? Date.now();
   const T = THRESHOLDS;

@@ -85,8 +85,8 @@ const SCENARIOS = String.raw`(() => {
       ok('symbol only: the label is hidden', getComputedStyle(header.querySelector('.lbl')).display === 'none');
     },
     viewBy: async () => {
-      const btn = byText('button', 'Needs you');
-      ok('a "Needs you" view button', !!btn);
+      const btn = byText('button', 'Alerts');
+      ok('a "Alerts" view button', !!btn);
       btn.click(); await sleep(100);
       ok('the view switched', v2View !== 'group');
       byText('button', 'Groups').click(); await sleep(100);
@@ -879,7 +879,7 @@ const SCENARIOS = String.raw`(() => {
         eq('no window until it is sent', calls('POST', /\/knock-window$/).length, 0);
         byText('#inviteDlg button', 'Copy Telegram invite').click();
         await until(() => calls('POST', /^\/v1\/agents\/a1\/invites\/TGCODE\/knock-window$/).length === 1);
-        await until(() => document.getElementById('toast').textContent.includes('Needs you'));
+        await until(() => document.getElementById('toast').textContent.includes('Alerts'));
         inviteDlg.close();
 
         window.__override['/v1/agents/a1/members'] = [
@@ -1076,7 +1076,7 @@ const SCENARIOS = String.raw`(() => {
         await refresh(false);
         openV2Agent('a1', 'overview');
         const why = await until(() => [...document.querySelectorAll('.v2why li')].find((li) => li.textContent.includes('GB of storage')));
-        ok('Needs you says how big: ' + why.textContent, why.textContent.includes('it uses 12.4 GB of storage (the warning is at 10 GB)'));
+        ok('Alerts says how big: ' + why.textContent, why.textContent.includes('it uses 12.4 GB of storage (the warning is at 10 GB)'));
         v2Close();
         // The security check lists who is over.
         window.__override['/v1/security/posture'] = { comparedToPrior: false, changes: { added: [], removed: [] }, report: { install: [], agents: [],
@@ -1544,7 +1544,7 @@ const SCENARIOS = String.raw`(() => {
         eq('a member\'s line', prevOf('Meal Planner'), 'Robin: can we do tacos on Friday?');
         eq('a task that ran', prevOf('Budget Tracker'), '⏰ Daily brief ran');
         eq('no line, no row', prevOf('Stock Watcher'), null);
-        eq('Needs you is not repeated as the last line', prevOf('Car Upkeep'), null);
+        eq('Alerts is not repeated as the last line', prevOf('Car Upkeep'), null);
         ok('it is in the tooltip once, in the list', (() => { const t = tile('Car Upkeep'); v2ShowTip(t); const x = document.getElementById('v2Tip').textContent; document.getElementById('v2Tip').hidden = true; return x.split('waiting for a Telegram bot token').length - 1 === 1; })());
         ok('nothing under the tiles any more', !document.querySelector('#v2groups .v2prev'));
         ok('the tooltip says how long ago: ' + tipOf('Homework Helper'), / ago · You: thanks|just now · You: thanks/.test(tipOf('Homework Helper')));
@@ -1662,7 +1662,7 @@ const SCENARIOS = String.raw`(() => {
     costView: async () => {
       try {
         await costFixture();
-        const btn = byText('.v2viewbar button', 'Cost'); ok('a Cost view', !!btn);
+        const btn = byText('.v2views button', 'Cost'); ok('a Cost view', !!btn);
         btn.click(); await sleep(50);
         ok('the view switched', v2View === 'cost');
         const heads = [...document.querySelectorAll('#v2groups .v2ghead h3')].map((h) => h.textContent);
@@ -1686,7 +1686,7 @@ const SCENARIOS = String.raw`(() => {
         eq('again: cheapest first', namesIn('Over $100 a week'), ['Budget Tracker', 'Soccer Schedule', 'Homework Helper']);
         byText('.v2binsort button', 'Cost').click(); await sleep(30);
         const groupsSort = JSON.stringify(v2Sort);
-        byText('.v2viewbar button', 'Groups').click(); await sleep(30);
+        byText('.v2views button', 'Groups').click(); await sleep(30);
         eq('Groups has no Cost sort', sortBtns(), ['Age', 'Name', 'Activity']);
         eq('the other views keep their own sort', JSON.stringify(v2Sort), groupsSort);
       } finally { await costCleanup(); }
@@ -1730,7 +1730,7 @@ const SCENARIOS = String.raw`(() => {
         v2SetView('cost');
         await costFixture({ off: true, days: 7, agents: {} });
         ok('no badges', !document.querySelector('#v2groups .v2cost'));
-        ok('no Cost view', !byText('.v2viewbar button', 'Cost'));
+        ok('no Cost view', !byText('.v2views button', 'Cost'));
         ok('off the Cost view', v2View === 'group');
         ok('no cost line in the tooltip', !tipText('Meal Planner').includes('API prices'));
       } finally { await costCleanup(); }
@@ -1762,7 +1762,7 @@ const SCENARIOS = String.raw`(() => {
       } finally { if (aiDlg.open) aiDlg.close(); await costCleanup(); }
     },
   });
-  // ---- The token steward: the manager's star and ring, and a stuck loop under Needs you (made-up data) ----
+  // ---- The token steward: the manager's star and ring, and a stuck loop under Alerts (made-up data) ----
   const withAgents = async (patch) => {
     const list = await (await fetch('/v1/agents')).json();
     window.__override['/v1/agents'] = list.map((a) => patch(a) ?? a);
@@ -1816,12 +1816,12 @@ const SCENARIOS = String.raw`(() => {
         ok('the tooltip has the incident and the fix: ' + tip.slice(0, 120), tip.includes(text) && tip.includes('Fix: Have Hatchabot compact it'));
         if (!v2Recent) v2Recent = new Map();
         eq('said once, not again as the last line', tipText('Stock Watcher').split(text).length - 1, 1);
-        byText('.v2viewbar button', 'Needs you').click(); await sleep(50);
-        const sec = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Needs you'));
-        ok('a Needs you section', !!sec);
+        byText('.v2views button', 'Alerts').click(); await sleep(50);
+        const sec = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Alerts'));
+        ok('a Alerts section', !!sec);
         ok('the stuck agent is in it', [...sec.querySelectorAll('.v2agent .v2name')].some((n) => n.textContent === 'Stock Watcher'));
         eq('nobody else is', [...sec.querySelectorAll('.v2agent .v2name')].map((n) => n.textContent), ['Stock Watcher']);
-        // Cleared from Needs you by the owner: the same incident stays cleared; a new one comes back.
+        // Cleared from Alerts by the owner: the same incident stays cleared; a new one comes back.
         const a = agents.find((x) => x.name === 'Stock Watcher');
         ok('the clear key names the incident', attentionFingerprint(a).includes('stuck:ti_1'));
         delete window.__override['/v1/agents'];
@@ -1832,7 +1832,7 @@ const SCENARIOS = String.raw`(() => {
           ok('cleared: no 🔁 on its tile', !tile('Stock Watcher').classList.contains('v2st-blocked'));
           ok('cleared: no "Cleared" group', ![...document.querySelectorAll('#v2groups .v2ghead h3')].some((h) => h.textContent.includes('Cleared')));
           x.attentionAck = undefined; }
-        // Gone: off Needs you and back to normal.
+        // Gone: off Alerts and back to normal.
         delete window.__override['/v1/agents']; await refresh(false);
         ok('back to normal', !tile('Stock Watcher').classList.contains('v2st-blocked'));
       } finally { await agentsCleanup(); }
@@ -1847,10 +1847,10 @@ const SCENARIOS = String.raw`(() => {
         ok('the paused tile says why: ' + t.getAttribute('aria-label'), t.getAttribute('aria-label').includes('monthly budget is used up'));
         ok('its tooltip has the line', tipText('Stock Watcher').includes('Paused: it used its $20 budget'));
         ok('the 80% line is in the tooltip', tipText('Meal Planner').includes('Used 82% of its $50 budget'));
-        byText('.v2viewbar button', 'Needs you').click(); await sleep(50);
-        const sec = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Needs you'));
+        byText('.v2views button', 'Alerts').click(); await sleep(50);
+        const sec = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Alerts'));
         const names = [...sec.querySelectorAll('.v2agent .v2name')].map((n) => n.textContent);
-        ok('both are under Needs you: ' + names, names.includes('Stock Watcher') && names.includes('Meal Planner'));
+        ok('both are under Alerts: ' + names, names.includes('Stock Watcher') && names.includes('Meal Planner'));
         const meal = agents.find((x) => x.name === 'Meal Planner');
         ok('the clear key names month, level and amount', attentionFingerprint(meal).includes('budget:' + month + ':80:50'));
         // The Usage tab: its budget, set in place.

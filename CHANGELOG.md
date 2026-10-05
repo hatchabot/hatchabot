@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.122.1] — 2026-10-05
+
+### Changed
+- **"Needs you" is now "Alerts"** everywhere you read it: the View by pill, its sections, the panel of cards waiting for you, "Clear from Alerts", the tooltip's first line ("alert: …"), the Hatchabot agent's messages ("It is under Alerts") and its notes, and the docs.
+- **View by → "AI source" is now "Source"** (the pill only: elsewhere "AI source" stays, since "source" alone would be confused with an agent's data sources).
+- **The View by bar no longer runs into the sort buttons**: the view pills wrap inside their own box and the sort buttons keep theirs on the right; on a phone the sort drops to its own line. The Cost view's window pills lose their "Cost over" label.
+
 ## [2.122.0] — 2026-10-05
 
 ### Added

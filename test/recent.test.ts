@@ -200,10 +200,10 @@ describe('what each person is shown', () => {
   it('a personal conversation nobody can place shows nothing, rather than a guess', () => {
     expect(previewFor(rec({ 'agent:k:guest:aaaaaaaaaaaaaaaa': { at: NOW, role: 'user', text: 'who?' } }), owner, people)).toBeUndefined();
   });
-  it('a scheduled task: "⏰ <name> ran"; Needs you wins over everything', () => {
+  it('a scheduled task: "⏰ <name> ran"; Alerts wins over everything', () => {
     const r = rec({ 'agent:k:cron:j': { at: NOW, role: 'assistant', text: 'brief', task: 'Daily brief' } });
     expect(previewLine(previewFor(r, owner, people))).toBe('⏰ Daily brief ran');
-    expect(previewLine(previewFor(r, owner, people), 'waiting for a Telegram bot token')).toBe('needs you: waiting for a Telegram bot token');
+    expect(previewLine(previewFor(r, owner, people), 'waiting for a Telegram bot token')).toBe('alert: waiting for a Telegram bot token');
     expect(previewLine(undefined)).toBe('');
   });
   it('an empty line (nothing to show) gives way to the next conversation', () => {

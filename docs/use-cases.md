@@ -300,6 +300,6 @@ the review confirms).
   allow-knocks, rooms, Change bot, Sync name, Re-check, drain/hosts,
   backups, proposals) and CLI-only (`users`, `tasks runs`). Undocumented as
   deliberate anywhere.
-- Decided 2026-09-27 (Chris): "Needs you" everywhere (was also "Needs attention", "Waiting for you"); "Detach" for taking a bot or app off an agent (was "Take … off", "Remove from"); "Move to another Hatchabot" in the app for `rehost` (was "Move to another cluster", "Rehost"; the CLI verb and the API name stay). Done in v2.87.2.
+- Decided 2026-09-27 (Chris): "Alerts" everywhere (was also "Needs attention", "Waiting for you"); "Detach" for taking a bot or app off an agent (was "Take … off", "Remove from"); "Move to another Hatchabot" in the app for `rehost` (was "Move to another cluster", "Rehost"; the CLI verb and the API name stay). Done in v2.87.2.
   for the cross-server move.
 - Whether group rooms need a rebuild is stated only in the toast after saving.
