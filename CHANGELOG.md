@@ -2,7 +2,7 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [Unreleased]
+## [2.121.0] — 2026-10-05
 
 ### Added
 - **Budgets** (docs/features.md → Budgets). A monthly budget in US dollars at API prices (the cost badges' figures; on a Claude plan an equivalent) for an agent, or for the whole machine. At 80% and 100%: a Needs-you line and one message on the Hatchabot agent's chat, once a month per amount. At the limit, per budget: **warn** (default) or **pause** — the agent is stopped (never mid-turn; an asleep one without a wake) until the 1st of next month, until the budget is raised, or until it is started by hand (then it runs on until the 1st). The machine budget's pause stops every agent but the Hatchabot agent, which is never paused.
