@@ -1625,7 +1625,7 @@ const SCENARIOS = String.raw`(() => {
       try {
         const before = tileSizes();
         await costFixture();
-        ok('asked for the last 7 days', calls('GET', /^\/v1\/costs$/).some((c) => c.url.includes('days=7')));
+        ok('asked for a week (the default window)', calls('GET', /^\/v1\/costs$/).some((c) => c.url.includes('period=1w')));
         eq('Homework Helper', chipOf('Homework Helper')?.textContent, '$1.2k/wk');
         ok('$100 a week and more take the gold wash', chipOf('Homework Helper').classList.contains('v2cost-hi') && chipOf('Budget Tracker').classList.contains('v2cost-hi'));
         eq('Soccer Schedule', chipOf('Soccer Schedule')?.textContent, '$240/wk');
@@ -1690,6 +1690,39 @@ const SCENARIOS = String.raw`(() => {
         eq('Groups has no Cost sort', sortBtns(), ['Age', 'Name', 'Activity']);
         eq('the other views keep their own sort', JSON.stringify(v2Sort), groupsSort);
       } finally { await costCleanup(); }
+    },
+    costPeriods: async () => {
+      try {
+        await costFixture();
+        v2SetView('cost'); await sleep(30);
+        const pills = () => [...document.querySelectorAll('.v2costbar .su-period')];
+        eq('eight windows', pills().map((b) => b.textContent), ['1 hr', '3 hr', '6 hr', '9 hr', '12 hr', '1 day', '1 wk', '1 mo']);
+        eq('a week by default', pills().filter((b) => b.classList.contains('on')).map((b) => b.textContent), ['1 wk']);
+        // Three hours: the server's answer for that window (made-up figures).
+        const c = (cost, tier, extra = {}) => ({ cost, weekly: Math.round(cost * 56 * 100) / 100, monthly: Math.round(cost * 240 * 100) / 100, tier, priced: true, ...extra });
+        window.__override['/v1/costs'] = { days: 0.125, period: '3h', hours: 3, bands: [0.2, 1, 2], chipMin: 0.02, suffix: '/3h', at: new Date().toISOString(), agents: {
+          a1: c(2.5, 4), a5: c(0.35, 2), a12: c(0.01, 1), a4: c(1.2, 3, { plan: true }), a10: { ...c(0, 0) },
+        } };
+        const mark = window.__calls.length;
+        byText('.v2costbar button', '3 hr').click();
+        await until(() => v2Costs?.period === '3h');
+        ok('asked for 3 hours', window.__calls.slice(mark).some((x) => x.method === 'GET' && x.url.includes('/v1/costs?period=3h')));
+        await sleep(30);
+        eq('the pill moved', pills().filter((b) => b.classList.contains('on')).map((b) => b.textContent), ['3 hr']);
+        eq('the chip shows the window: Homework Helper', chipOf('Homework Helper')?.textContent, '$3/3h');
+        ok('gold from the window\'s top band', chipOf('Homework Helper').classList.contains('v2cost-hi') && !chipOf('Meal Planner').classList.contains('v2cost-hi'));
+        eq('cents under a dollar', chipOf('Grocery Runner')?.textContent, '$0.35/3h');
+        ok('under the window\'s smallest chip: none', !chipOf('Garden Notes'));
+        const heads = [...document.querySelectorAll('#v2groups .v2ghead h3')].map((h) => h.textContent);
+        ok('bands for 3 hours: ' + heads.join(' | '), heads.includes('Over $2 in the last 3 hours') && heads.includes('$1–2 in the last 3 hours') && heads.includes('$0.20–1 in the last 3 hours') && heads.includes('No usage in the last 3 hours'));
+        ok('the tooltip says the window', tipText('Meal Planner').includes('≈ $1.20 in the last 3 hours at API prices (≈ $288 a month at that pace)'));
+        ok('and the tile out loud', tile('Homework Helper').getAttribute('aria-label').includes('about $2.50 in the last 3 hours at API prices'));
+        v2SetView('group'); await sleep(30);
+        eq('the chips follow it in every view', chipOf('Homework Helper')?.textContent, '$3/3h');
+        ok('no pills outside the Cost view', !document.querySelector('.v2costbar'));
+        let kept = null; try { kept = localStorage.getItem('hb-cost-period'); } catch {}
+        eq('remembered in this browser', kept, '3h');
+      } finally { delete window.__override['/v1/costs']; v2SetCostPeriod('1w'); await costCleanup(); }
     },
     costBadgesOff: async () => {
       try {

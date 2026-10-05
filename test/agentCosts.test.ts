@@ -6,7 +6,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { HOUR_FIELDS, type HourField, type WindowModelStats } from '../src/orchestrator/usage.js';
 import type { StoredProfile } from '../src/orchestrator/modelScorecard.js';
-import { agentCost, COST_BANDS, costsFor, tierOf, TtlCache } from '../src/orchestrator/agentCosts.js';
+import { agentCost, COST_BANDS, COST_PERIODS, costsFor, tierOf, TtlCache } from '../src/orchestrator/agentCosts.js';
 import { publicClassFor } from '../src/api/publicRoutes.js';
 
 /** The home screen's cost badges: GET /v1/costs and what it is figured from (made-up agents and numbers). */
@@ -140,6 +140,34 @@ describe('agentCost: the last 7 days at API prices', () => {
   });
 });
 
+describe('cost windows (View by → Cost\'s pills)', () => {
+  it('eight windows, a week the default; each with bands about the week\'s scaled, rising, and a chip floor below its first band', () => {
+    expect(Object.keys(COST_PERIODS)).toEqual(['1h', '3h', '6h', '9h', '12h', '1d', '1w', '1m']);
+    expect(COST_PERIODS['1w']).toMatchObject({ hours: 168, bands: COST_BANDS, chipMin: 1, suffix: '/wk' });
+    expect(COST_PERIODS['1m']!.hours).toBe(720); // the sampler keeps 30 days of hour buckets
+    for (const [k, p] of Object.entries(COST_PERIODS)) {
+      expect(p.bands.length, k).toBe(3);
+      expect([...p.bands].sort((a, b) => a - b), k).toEqual([...p.bands]);
+      expect(p.chipMin, k).toBeLessThan(p.bands[0]!);
+      // Within a factor of two of the week's edges scaled to the window.
+      p.bands.forEach((edge, i) => { const scaled = COST_BANDS[i]! * p.hours / 168; expect(edge / scaled, `${k} ${edge}`).toBeGreaterThan(0.5); expect(edge / scaled, `${k} ${edge}`).toBeLessThan(2); });
+    }
+  });
+
+  it('the last hour is exact: the current hour so far, plus the covered part of the one before', () => {
+    // NOW is 12:30. The 11:00 bucket is half inside the last hour, the 12:00 one (30 minutes so far) all of it.
+    const p = profile({ 'claude-haiku-4-5': model({ [NOW - HOUR]: { input: 2e6 }, [NOW]: { input: 1e6 }, [NOW - 3 * HOUR]: { input: 9e6 } }) });
+    expect(agentCost(AGENT, stored(p), API, 1 / 24, NOW).cost).toBe(2); // $1 of the 11:00 hour + $1
+    expect(agentCost(AGENT, stored(p), API, 3 / 24, NOW).cost).toBe(7.5); // + half of 09:00
+  });
+
+  it('with a window\'s bands the tier is the window\'s cost against them', () => {
+    const p = profile({ 'claude-haiku-4-5': model({ [NOW]: { input: 1.2e6 } }) }); // $1.20 this hour
+    expect(agentCost(AGENT, stored(p), API, 3 / 24, NOW, COST_PERIODS['3h']!.bands)).toMatchObject({ cost: 1.2, tier: 3 });
+    expect(agentCost(AGENT, stored(p), API, 7, NOW)).toMatchObject({ weekly: 1.2, tier: 1 }); // the week's rate against $10/$50/$100
+  });
+});
+
 describe('TtlCache', () => {
   it('answers from the cache inside the window and computes again after it', () => {
     const cache = new TtlCache<number>(5 * 60_000);
@@ -209,6 +237,20 @@ describe('GET /v1/costs', () => {
     expect(body.agents['c-gem']).toMatchObject({ priced: false });
     expect(body.agents['c-local']).toMatchObject({ cost: 0, local: true });
     expect(body.agents['c-idle']).toMatchObject({ cost: 0, tier: 0 });
+  });
+
+  it('period=3h: that window, its bands and chip; an unknown period, or period with days, is refused', async () => {
+    const w = await world();
+    const r = await w.f.inject({ method: 'GET', url: '/v1/costs?period=3h', headers: as(OWNER) });
+    expect(r.statusCode).toBe(200);
+    const b = r.json();
+    expect(b).toMatchObject({ period: '3h', hours: 3, bands: [0.2, 1, 2], chipMin: 0.02, suffix: '/3h' });
+    expect(b.agents['c-big']).toMatchObject({ cost: 0, tier: 0 }); // its use was a day ago
+    const m = (await w.f.inject({ method: 'GET', url: '/v1/costs?period=1m', headers: as(OWNER) })).json();
+    expect(m.agents['c-big']).toMatchObject({ cost: 120, tier: 2 }); // $120 in 30 days: the $40–200 band
+    expect((await w.f.inject({ method: 'GET', url: '/v1/costs?period=2h', headers: as(OWNER) })).statusCode).toBe(400);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/costs?period=1w&days=7', headers: as(OWNER) })).statusCode).toBe(400);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/costs?period=1w', headers: as(OWNER) })).json().agents['c-big']).toMatchObject({ cost: 120, weekly: 120, tier: 4 });
   });
 
   it('never reads a container, starts or wakes an agent', async () => {

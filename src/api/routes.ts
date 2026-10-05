@@ -82,7 +82,7 @@ import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orches
 import { guestConsoleSessionKey } from '../openclaw/consoleIdentity.js';
 import { webChatStoreKey } from '../orchestrator/webChat.js';
 import { RecentTracker, RECENT_CAP, orderRecent, previewFor, previewLine, type RecentPeople, type RecentViewer } from '../orchestrator/recent.js';
-import { COST_BANDS, costBadgesOn, costsFor, TtlCache, type AgentCost } from '../orchestrator/agentCosts.js';
+import { COST_BANDS, COST_PERIODS, costBadgesOn, costsFor, DEFAULT_COST_PERIOD, TtlCache, type AgentCost } from '../orchestrator/agentCosts.js';
 import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
@@ -4623,13 +4623,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * per person and window for five minutes. A web-chat guest gets none.
    */
   const costCache = new TtlCache<Record<string, AgentCost>>(5 * 60_000);
-  app.get<{ Querystring: { days?: string } }>('/v1/costs', async (req, reply) => {
-    const days = req.query.days === undefined ? 7 : Number(req.query.days);
-    if (!Number.isInteger(days) || days < 1 || days > 30) return reply.code(400).send({ error: 'days must be a whole number from 1 to 30.' });
+  app.get<{ Querystring: { days?: string; period?: string } }>('/v1/costs', async (req, reply) => {
+    // period: the window View by → Cost's pills choose (COST_PERIODS: 1h … 1m),
+    // with its bands; days: the older whole-day form (bands of a week's rate).
+    const period = req.query.period;
+    if (period !== undefined && !(period in COST_PERIODS)) return reply.code(400).send({ error: `period is one of ${Object.keys(COST_PERIODS).join(', ')}.` });
+    if (period !== undefined && req.query.days !== undefined) return reply.code(400).send({ error: 'Give period or days, not both.' });
+    const p = period !== undefined ? COST_PERIODS[period]! : req.query.days === undefined ? COST_PERIODS[DEFAULT_COST_PERIOD]! : undefined;
+    const days = p ? p.hours / 24 : Number(req.query.days);
+    if (!p && (!Number.isInteger(days) || days < 1 || days > 30)) return reply.code(400).send({ error: 'days must be a whole number from 1 to 30.' });
     if (!costBadgesOn()) return { off: true, days, agents: {} };
     const me = ownerIdOf(req);
-    const { value, at } = costCache.get(`${me}|${days}`, Date.now(), () => costsFor(store, me, days));
-    return { days, at: new Date(at).toISOString(), bands: COST_BANDS, agents: value };
+    const key = period ?? (req.query.days === undefined ? DEFAULT_COST_PERIOD : `d${days}`);
+    const { value, at } = costCache.get(`${me}|${key}`, Date.now(), () => costsFor(store, me, days, Date.now(), period !== undefined ? p!.bands : undefined));
+    return {
+      days, at: new Date(at).toISOString(), bands: period !== undefined ? p!.bands : COST_BANDS, agents: value,
+      ...(period !== undefined ? { period, hours: p!.hours, chipMin: p!.chipMin, suffix: p!.suffix } : {}),
+    };
   });
 
   // ---- rebuild policy: which agents need a rebuild, and which the machine

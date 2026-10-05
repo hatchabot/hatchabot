@@ -30,12 +30,31 @@ const r2 = (x: number) => Math.round(x * 100) / 100;
  * place to change them; the app builds its section names from this list.
  */
 export const COST_BANDS: readonly number[] = [10, 50, 100];
-/** 0 = no use in the window; else 1 (the cheapest band) to COST_BANDS.length + 1. */
+/** 0 = no use in the window; else 1 (the cheapest band) to bands.length + 1. */
 export type CostTier = number;
-export function tierOf(weekly: number, used: boolean): CostTier {
+export function tierOf(amount: number, used: boolean, bands: readonly number[] = COST_BANDS): CostTier {
   if (!used) return 0;
-  return 1 + COST_BANDS.filter((edge) => weekly >= edge).length;
+  return 1 + bands.filter((edge) => amount >= edge).length;
 }
+
+/**
+ * The windows View by → Cost offers (its row of pills; the icon chips follow
+ * the one chosen, a week by default). Each has its own bands — about the
+ * week's $10 / $50 / $100 scaled to the window, rounded — the smallest amount
+ * worth a chip (a week's $1, scaled), and the chip's suffix.
+ */
+export interface CostPeriod { hours: number; bands: readonly number[]; chipMin: number; suffix: string }
+export const COST_PERIODS: Readonly<Record<string, CostPeriod>> = {
+  '1h': { hours: 1, bands: [0.05, 0.25, 0.5], chipMin: 0.01, suffix: '/1h' },
+  '3h': { hours: 3, bands: [0.2, 1, 2], chipMin: 0.02, suffix: '/3h' },
+  '6h': { hours: 6, bands: [0.4, 2, 4], chipMin: 0.04, suffix: '/6h' },
+  '9h': { hours: 9, bands: [0.5, 2.5, 5], chipMin: 0.05, suffix: '/9h' },
+  '12h': { hours: 12, bands: [0.75, 4, 7.5], chipMin: 0.07, suffix: '/12h' },
+  '1d': { hours: 24, bands: [1.5, 7.5, 15], chipMin: 0.15, suffix: '/day' },
+  '1w': { hours: 168, bands: COST_BANDS, chipMin: 1, suffix: '/wk' },
+  '1m': { hours: 720, bands: [40, 200, 400], chipMin: 4, suffix: '/mo' },
+};
+export const DEFAULT_COST_PERIOD = '1w';
 
 export interface AgentCost {
   /** API-price cost of the window, USD. */
@@ -59,13 +78,21 @@ export interface AgentCost {
 
 const LOCAL_MODEL = /^(ollama|local|lmstudio|llamacpp)\//i;
 
-/** One agent's cost over `days` ending at `now`, from its stored profile (undefined = never read). */
+/**
+ * One agent's cost over `days` (a fraction for hours: 1/24 is the last hour)
+ * ending at `now`, from its stored profile (undefined = never read). The
+ * window is exact: an hour bucket it only partly covers counts for that part
+ * (its use spread evenly over the hour, or over the part of the current hour
+ * gone by). `bands`: the tier is the window's cost against these; without,
+ * the week's rate against COST_BANDS.
+ */
 export function agentCost(
   agent: Pick<Agent, 'createdAt'>,
   stored: { profile: StoredProfile; at: string } | undefined,
   source: { kind?: string; vendor?: string } | undefined,
   days: number,
   now = Date.now(),
+  bands?: readonly number[],
 ): AgentCost {
   const local = source?.vendor === 'local';
   const plan = !local && source?.kind === 'subscription';
@@ -73,16 +100,18 @@ export function agentCost(
   const p = stored?.profile;
   if (p && p.models) {
     const hours = p.hourly === true || Object.values(p.models).some((s) => s.h && Object.keys(s.h).length);
-    // The window's hour buckets: the `days × 24` most recent hours, this one included.
-    const fromHour = new Date(now - days * DAY + HOUR).toISOString().slice(0, 13);
+    const from = now - days * DAY;
     const readAt = Date.parse(stored!.at) || now;
     for (const [model, s] of Object.entries(p.models)) {
       let mix: TokenMix;
       if (hours) {
         mix = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
         for (const [h, v] of Object.entries(s.h ?? {})) {
-          if (h < fromHour) continue;
-          HOUR_FIELDS.forEach((f, i) => { if (f in mix) mix[f as keyof TokenMix] += Number(v[i]) || 0; });
+          const start = Date.parse(`${h}:00:00Z`);
+          if (!(start + HOUR > from) || start > now) continue;
+          const span = Math.max(1, Math.min(HOUR, now - start));
+          const w = start >= from ? 1 : Math.max(0, Math.min(1, (start + span - from) / span));
+          HOUR_FIELDS.forEach((f, i) => { if (f in mix) mix[f as keyof TokenMix] += (Number(v[i]) || 0) * w; });
         }
       } else {
         // A profile from before v2.118 has the 30 days' totals only: its daily
@@ -107,7 +136,7 @@ export function agentCost(
     cost: r2(cost),
     weekly: r2(weekly),
     monthly: r2(cost * 30 / days),
-    tier: tierOf(weekly, used > 0),
+    tier: bands ? tierOf(cost, used > 0, bands) : tierOf(weekly, used > 0),
     priced,
     ...(unpriced > 0 && cost > 0 ? { partial: true } : {}),
     ...(plan ? { plan: true } : {}),
@@ -121,7 +150,7 @@ export function agentCost(
  * A web-chat guest of an agent gets no cost for it: they don't pay for it
  * and it is not theirs to weigh.
  */
-export function costsFor(store: Store, viewer: string, days: number, now = Date.now()): Record<string, AgentCost> {
+export function costsFor(store: Store, viewer: string, days: number, now = Date.now(), bands?: readonly number[]): Record<string, AgentCost> {
   const agents = store.listVisibleAgents(viewer).filter((a) => a.state !== 'DELETED' && a.state !== 'DELETING')
     .filter((a) => a.ownerId === viewer || (store.accessRole(a.id, viewer) && !store.webChatAllowed(a.id, viewer)));
   const profiles = store.modelProfiles(agents.map((a) => a.id)) as Map<string, { profile: StoredProfile; at: string }>;
@@ -129,7 +158,7 @@ export function costsFor(store: Store, viewer: string, days: number, now = Date.
   const out: Record<string, AgentCost> = {};
   for (const a of agents) {
     if (!sources.has(a.aiProfileId)) sources.set(a.aiProfileId, store.getAIProfile(a.aiProfileId));
-    out[a.id] = agentCost(a, profiles.get(a.id), sources.get(a.aiProfileId), days, now);
+    out[a.id] = agentCost(a, profiles.get(a.id), sources.get(a.aiProfileId), days, now, bands);
   }
   return out;
 }

@@ -256,9 +256,22 @@ web/index.html.
   theirs. The band edges are one list, `COST_BANDS` in
   src/orchestrator/agentCosts.ts ([10, 50, 100]); the app names the bands
   from it.
-- *Where it comes from*: `GET /v1/costs?days=7` →
-  `{ days, at, bands, agents: { id: { cost, weekly, monthly, tier, priced,
-  plan?, local?, partial?, approx? } } }`, figured from the hour buckets the
+- *The window* (since v2.122.0): a row of pills under View by when Cost is
+  chosen — **1 hr · 3 hr · 6 hr · 9 hr · 12 hr · 1 day · 1 wk · 1 mo** — sets
+  the window for the sections, their totals, the tooltip and **every icon's
+  chip, in every view** ("$0.35/3h", "$12/day", "$150/mo"; cents under a
+  dollar). A week is the default; the choice is remembered per browser. Each
+  window has its own bands, about the week's $10 / $50 / $100 scaled to it and
+  rounded (an hour: $0.05 / $0.25 / $0.50; a day: $1.50 / $7.50 / $15; 30
+  days: $40 / $200 / $400), its smallest chip (a week's $1, scaled) and its
+  gold from the top band — `COST_PERIODS` in src/orchestrator/agentCosts.ts.
+  Windows are exact: an hour bucket the window only partly covers counts for
+  that part, so "1 hr" is the last 60 minutes, not the clock hour. The
+  sampler reads every 10 minutes, so the short windows trail by up to that.
+- *Where it comes from*: `GET /v1/costs?period=1h|3h|6h|9h|12h|1d|1w|1m`
+  (or the older `?days=1…30`, banded by a week's rate) →
+  `{ days, at, bands, period?, hours?, chipMin?, suffix?, agents: { id: {
+  cost, weekly, monthly, tier, priced, plan?, local?, partial?, approx? } } }`, figured from the hour buckets the
   usage sampler already stores (agent_model_profiles): no container is read
   and no agent is woken. An agent last read before the hour buckets (before
   v2.118) is estimated from its 30-day totals and marked `approx`. Each

@@ -616,6 +616,9 @@
   .v2viewbar { display:flex; gap:4px; flex-wrap:wrap; margin:2px 0 10px }
   .v2viewbar button { font-size:12px; padding:3px 10px; border-radius:999px; border:1px solid var(--line); background:transparent; color:var(--dim); cursor:pointer }
   /* Selected: the same soft wash as the Hatchabot agent's icon tile (its gold at 17%), not a full gold chip. */
+  .v2costbar { display:flex; gap:4px; flex-wrap:wrap; align-items:center; margin:-4px 0 10px }
+  .v2costbar .lbl { font-size:12px; color:var(--dim); margin-right:2px }
+  .v2costbar .su-period { font-size:12px; padding:2px 9px }
   .v2viewbar button.on { background:color-mix(in srgb, var(--accent) 17%, var(--panel)); border-color:color-mix(in srgb, var(--accent) 45%, var(--line)); color:var(--text) }
   .v2binsort { display:inline-flex; gap:4px; align-items:center; margin-left:auto; padding-left:8px }
   .v2ghead h3 { margin:0; font-size:12px; letter-spacing:.09em; text-transform:uppercase; color:var(--dim); font-weight:650 }
@@ -11802,24 +11805,40 @@ function v2PreviewOf(a) {
 // cost; an unknown model's price has no badge.
 let v2Costs = null, v2CostsBusy = false, v2CostsAt = 0;
 const V2_COSTS_EVERY_MS = 5 * 60_000;
-/** A week under this many dollars shows no badge: the cheap ones say nothing, which keeps the screen calm. */
+// The window the chips and View by → Cost show (COST_PERIODS in agentCosts.ts),
+// chosen with the pills above the Cost view; a week unless changed, per browser.
+const V2_COST_PERIODS = [['1h', '1 hr', 'the last hour'], ['3h', '3 hr', 'the last 3 hours'], ['6h', '6 hr', 'the last 6 hours'], ['9h', '9 hr', 'the last 9 hours'],
+  ['12h', '12 hr', 'the last 12 hours'], ['1d', '1 day', 'the last day'], ['1w', '1 wk', 'the last 7 days'], ['1m', '1 mo', 'the last 30 days']];
+let v2CostPeriod = (() => { try { const v = localStorage.getItem('hb-cost-period'); return V2_COST_PERIODS.some(([k]) => k === v) ? v : '1w'; } catch { return '1w'; } })();
+/** "the last 3 hours": the window of the figures on screen (the answer's, not a pill just pressed). */
+const v2CostWindow = () => (V2_COST_PERIODS.find(([k]) => k === (v2Costs?.period || v2CostPeriod)) ?? V2_COST_PERIODS[6])[2];
+function v2SetCostPeriod(p) {
+  v2CostPeriod = V2_COST_PERIODS.some(([k]) => k === p) ? p : '1w';
+  try { localStorage.setItem('hb-cost-period', v2CostPeriod); } catch {}
+  renderV2(); // the pill moves at once; the figures follow
+  void v2LoadCosts(true);
+}
+/** A week under this many dollars shows no badge: the cheap ones say nothing, which keeps the screen calm. Other windows: chipMin from the server. */
 const V2_COST_BADGE_MIN_USD = 1;
-/** A week from this many dollars takes the soft gold wash. */
+/** A week from this many dollars takes the soft gold wash; other windows: their top band. */
 const V2_COST_GOLD_FROM_USD = 100;
 /** View by → Cost's section for a band: the edges come with the costs (COST_BANDS in agentCosts.ts, $10 / $50 / $100). */
 function v2CostBandLabel(tier) {
   const b = Array.isArray(v2Costs?.bands) && v2Costs.bands.length ? v2Costs.bands : [10, 50, 100];
-  const n = (x) => Number(x).toLocaleString('en-US');
-  if (tier <= 1) return `Under $${n(b[0])} a week`;
-  if (tier > b.length) return `Over $${n(b[b.length - 1])} a week`;
-  return `$${n(b[tier - 2])}–${n(b[tier - 1])} a week`;
+  const n = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: x < 1 && x > 0 ? 2 : 0 });
+  const per = v2Costs?.period && v2Costs.period !== '1w' ? `in ${v2CostWindow()}` : 'a week';
+  if (tier <= 1) return `Under $${n(b[0])} ${per}`;
+  if (tier > b.length) return `Over $${n(b[b.length - 1])} ${per}`;
+  return `$${n(b[tier - 2])}–${n(b[tier - 1])} ${per}`;
 }
 async function v2LoadCosts(force = false) {
   if (v2CostsBusy || (!force && Date.now() - v2CostsAt < V2_COSTS_EVERY_MS)) return;
   v2CostsBusy = true;
   try {
-    const r = await api('/v1/costs?days=7');
-    v2Costs = r && typeof r.agents === 'object' ? { off: !!r.off, agents: r.agents || {}, bands: r.bands } : null;
+    const asked = v2CostPeriod;
+    const r = await api(`/v1/costs?period=${asked}`);
+    if (asked !== v2CostPeriod) return; // another pill was pressed meanwhile: its answer is the one that counts
+    v2Costs = r && typeof r.agents === 'object' ? { off: !!r.off, agents: r.agents || {}, bands: r.bands, period: r.period || '1w', chipMin: r.chipMin, suffix: r.suffix } : null;
   } catch { v2Costs = null; }
   finally { v2CostsBusy = false; v2CostsAt = Date.now(); }
   if (v2Costs?.off && v2View === 'cost') v2View = 'group'; // the owner turned them off: not a view to land on
@@ -11831,11 +11850,12 @@ const v2CostOf = (a) => (v2Costs && !v2Costs.off ? v2Costs.agents[a.id] : undefi
 function v2Money(x) {
   return x < 10 ? '$' + (Math.round(x * 100) / 100).toFixed(2) : '$' + Math.round(x).toLocaleString('en-US');
 }
-/** The badge's figure: "$4/wk", "$240/wk", "$1.2k/wk"; '' under V2_COST_BADGE_MIN_USD. */
-function v2WeekChipText(usd) {
-  if (!(usd >= V2_COST_BADGE_MIN_USD)) return '';
+/** The badge's figure: "$4/wk", "$240/wk", "$1.2k/wk", "$0.35/3h"; '' under the window's smallest chip. */
+function v2WeekChipText(usd, suffix = '/wk', min = V2_COST_BADGE_MIN_USD) {
+  if (!(usd >= min)) return '';
+  if (usd < 1) return `$${usd.toFixed(2)}${suffix}`;
   const whole = Math.round(usd);
-  return whole < 1000 ? `$${whole}/wk` : `$${(usd / 1000).toFixed(1).replace(/\.0$/, '')}k/wk`;
+  return whole < 1000 ? `$${whole}${suffix}` : `$${(usd / 1000).toFixed(1).replace(/\.0$/, '')}k${suffix}`;
 }
 /** The chip's markup: the figure, then a smaller "/wk". */
 function v2WeekChipHTML(text) {
@@ -11845,8 +11865,11 @@ function v2WeekChipHTML(text) {
 function v2CostChip(a, crowded = false) {
   const c = v2CostOf(a);
   if (!c || !c.priced || c.local) return '';
-  const text = v2WeekChipText(c.weekly);
-  return text ? `<span class="v2cost${c.weekly >= V2_COST_GOLD_FROM_USD ? ' v2cost-hi' : ''}${crowded ? ' v2cost-l' : ''}" aria-hidden="true">${v2WeekChipHTML(text)}</span>` : '';
+  const week = !v2Costs.period || v2Costs.period === '1w';
+  const amount = week ? c.weekly : c.cost;
+  const gold = week ? V2_COST_GOLD_FROM_USD : (v2Costs.bands || []).slice(-1)[0] ?? Infinity;
+  const text = week ? v2WeekChipText(amount) : v2WeekChipText(amount, v2Costs.suffix || '', v2Costs.chipMin ?? 0.01);
+  return text ? `<span class="v2cost${amount >= gold ? ' v2cost-hi' : ''}${crowded ? ' v2cost-l' : ''}" aria-hidden="true">${v2WeekChipHTML(text)}</span>` : '';
 }
 /** The tooltip's cost line (every view), or ''. */
 function v2CostLine(a) {
@@ -11854,7 +11877,7 @@ function v2CostLine(a) {
   if (!c || !c.tier) return '';
   if (c.local) return 'Runs on a local model: no API cost';
   if (!c.priced) return 'Cost: no price known for its model';
-  return `≈&nbsp;${v2Money(c.cost)} in the last 7 days at API prices (≈&nbsp;${v2Money(c.monthly)}&nbsp;a&nbsp;month)`
+  return `≈&nbsp;${v2Money(c.cost)} in ${v2CostWindow().replace(/ /g, '&nbsp;')} at API prices (≈&nbsp;${v2Money(c.monthly)}&nbsp;a&nbsp;month${['1w', '1m'].includes(v2Costs?.period || '1w') ? '' : ' at that pace'})`
     + (c.plan ? `<br>on ${v2Mine(a) ? 'your' : 'its owner\'s'} Claude plan — counts against its limits` : '')
     + (a.budget ? `<br>Budget: ${v2Money(a.budget.spent)} of ${v2Money(a.budget.usd)} this month (${a.budget.pct}%)` : '');
 }
@@ -11863,7 +11886,7 @@ function v2CostBin(a) {
   if (!v2Costs) return ['$:d', 'Cost not read yet'];
   const c = v2CostOf(a);
   if (!c) return ['$:c', 'No cost shown'];
-  if (!c.tier) return ['$:b', 'No usage this week'];
+  if (!c.tier) return ['$:b', v2Costs.period && v2Costs.period !== '1w' ? `No usage in ${v2CostWindow()}` : 'No usage this week'];
   if (!c.priced) return ['$:a', 'No price known'];
   const t = c.local ? 1 : c.tier;
   return ['$:' + (100 - t), v2CostBandLabel(t)];
@@ -11924,8 +11947,9 @@ function renderV2() {
   for (const s of sections) s.items.sort((p, q) => ((q.a.ops ? 1 : 0) - (p.a.ops ? 1 : 0)) || (s.key === V2_UNREAD ? newestFirst(p.a, q.a) : v2BinCmp(p.a, q.a))); // the manager stays first
   // A Cost section's header says what its agents came to this week.
   if (v2View === 'cost') for (const s of sections) {
-    const sum = s.items.reduce((t, { a }) => { const c = v2CostOf(a); return t + (c && c.priced && !c.local ? c.weekly : 0); }, 0);
-    if (sum > 0 && s.key.startsWith('$:')) s.note = `≈ ${v2Money(sum)} this week`;
+    const week = !v2Costs?.period || v2Costs.period === '1w';
+    const sum = s.items.reduce((t, { a }) => { const c = v2CostOf(a); return t + (c && c.priced && !c.local ? (week ? c.weekly : c.cost) : 0); }, 0);
+    if (sum > 0 && s.key.startsWith('$:')) s.note = `≈ ${v2Money(sum)} ${week ? 'this week' : 'in ' + v2CostWindow()}`;
   }
   const sortBar = `<span class="v2binsort">${[...(v2View === 'cost' ? [['cost', 'Cost']] : []), ['age', 'Age'], ['name', 'Name'], ['activity', 'Activity']].map(([k, l]) => {
     const on = v2SortKey() === k;
@@ -11935,8 +11959,11 @@ function renderV2() {
   const views = v2CostsOff() ? V2_VIEWS.filter(([k]) => k !== 'cost') : V2_VIEWS;
   const viewBar = live.length > 1 ? `<div class="v2viewbar" role="tablist" aria-label="Group agents by">${views.map(([k, l]) =>
     `<button role="tab" aria-selected="${k === v2View}" class="${k === v2View ? 'on' : ''}" onclick="v2SetView('${k}')">${esc(l)}</button>`).join('')}${sortBar}</div>` : '';
+  // View by → Cost: the window its sections and every icon's chip show.
+  const costBar = v2View === 'cost' && !v2CostsOff() ? `<div class="v2costbar" role="group" aria-label="Cost over"><span class="lbl">Cost over</span>${V2_COST_PERIODS.map(([k, l, w]) =>
+    `<button class="su-period${k === v2CostPeriod ? ' on' : ''}" aria-pressed="${k === v2CostPeriod}" title="What each agent cost in ${w}, at API prices" onclick="v2SetCostPeriod('${k}')">${esc(l)}</button>`).join('')}</div>` : '';
   v2SectionsNow = sections;
-  const html = viewBar + sections.map(s => `
+  const html = viewBar + costBar + sections.map(s => `
     <section class="v2group${v2IsCollapsed(s.key) ? ' collapsed' : ''}">
       <div class="v2ghead"><h3${s.key.startsWith('g:') && s.drop ? ` class="group-name" tabindex="0" title="Double-click to rename" ondblclick="editGroupName(this)" onkeydown="if (event.key === 'Enter' && !this.isContentEditable) { event.preventDefault(); editGroupName(this); }"` : ''}>${esc(s.label)}</h3><span class="n">${s.items.length}</span>${s.note ? `<span class="n v2gnote">${esc(s.note)}</span>` : ''}
         <span class="v2gtools">
@@ -11950,7 +11977,7 @@ function renderV2() {
         ${s.items.map(({ a, child }) => {
           const st = v2Status(a);
           const prev = v2PreviewOf(a);
-          const cost = v2CostChip(a) ? `, about ${v2Money(v2CostOf(a).weekly)} a week at API prices` : '';
+          const cost = v2CostChip(a) ? (!v2Costs.period || v2Costs.period === '1w' ? `, about ${v2Money(v2CostOf(a).weekly)} a week at API prices` : `, about ${v2Money(v2CostOf(a).cost)} in ${v2CostWindow()} at API prices`) : '';
           return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) || a.ops ? ' data-v2fixed="1"' : ''}
             aria-label="${esc(a.name)}${a.ops ? ` (${esc(V2_OPS_TIP)})` : ''} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}${esc(cost)}${prev ? `. ${esc(prev)}` : ''}">${v2IconHTML(a, st, { cost: true })}<span class="v2name">${esc(a.name)}</span></button>`;
         }).join('') || (s.key === 'archived' ? '<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept.</span>' : '')}

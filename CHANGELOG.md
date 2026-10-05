@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.122.0] — 2026-10-05
+
+### Added
+- **View by → Cost: a window for the figures.** A row of pills under View by when Cost is chosen — 1 hr, 3 hr, 6 hr, 9 hr, 12 hr, 1 day, 1 wk, 1 mo — sets what the sections, their totals, the tooltip and every icon's chip (in every view) show: "$0.35/3h", "$12/day", "$150/mo". A week stays the default, and the choice is remembered in the browser. Each window has its own bands (about the week's $10 / $50 / $100 scaled to it), smallest chip and gold mark (`COST_PERIODS` in agentCosts.ts). `GET /v1/costs?period=…`.
+
+### Changed
+- Cost windows are exact to the minute: an hour bucket the window only partly covers counts for that part (the last hour is the last 60 minutes, not the clock hour; a week no longer leaves out the partial hour at its start).
+
 ## [2.121.0] — 2026-10-05
 
 ### Added
