@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.127.0] — 2026-10-05
+
+### Added
+- **Spend over time**: one chart for all your agents (Usage) and for one agent (its Usage tab) — what each slice cost at API prices as a stacked bar of cache writes, cache reads, output and new input (left axis), and the tokens behind it as a line (right axis). Ranges 24 hours (hourly), 7 days (3-hourly), 30 days (daily); hover a slice for its parts. `GET /v1/usage/spend?range=day|week|month[&agent=id]`.
+
+### Changed
+- Usage says less: Claude-plan figures carry a `*` and one footnote ("Claude plan use priced at API rates — not money you pay") instead of a sentence; the Right-size line reads "✂️ Right-size: ≈ $66.71 this month*". The tokens-per-slice bars and the 30-day per-day trend gave way to the new chart; the billing-split bar shows only when there is more than one kind. Token counts past a billion read "1.2B".
+- **Fleet usage is now called Usage.**
+
 ## [2.126.0] — 2026-10-05
 
 ### Added

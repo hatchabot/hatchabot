@@ -999,7 +999,7 @@
       <button id="importBtn" class="hbtn" title="Open a .hatchabot file — a full backup is restored as the same agent; a shared template becomes a fresh agent you give your own bot" onclick="$('importFile').click()">Import</button>
       <button id="galleryBtn" class="hbtn" title="Start a new agent from one you already have" onclick="openGallery()">📋 Templates</button>
       <button id="fleetBtn" class="hbtn" title="Fleet health — states, activity, backups, and runtime at a glance" onclick="openFleetHealth()">📊 Health</button>
-      <button id="fleetUsageBtn" class="hbtn" title="Fleet usage — every running agent ranked by tokens" onclick="openFleetUsage()">📊 Usage</button>
+      <button id="fleetUsageBtn" class="hbtn" title="Usage — every running agent ranked by tokens, and what it cost" onclick="openFleetUsage()">📊 Usage</button>
       <button id="fleetSourcesBtn" class="hbtn" title="Which agents are on which AI source, and which models" onclick="openFleetSources()">📊 Sources</button>
       <button id="setupGuideBtn" class="hbtn" title="The setup checklist — what is done, what is left" onclick="openSetupGuide()">⚑ Setup guide</button>
       <button id="helpBtn" class="hbtn" title="Good to know — key concepts worth remembering" onclick="helpDlg.showModal()">❔ Help</button>
@@ -2374,7 +2374,7 @@
 
 <dialog id="fleetUsageDlg" style="width:min(640px,96vw)">
   <div style="display:flex;justify-content:space-between;align-items:baseline">
-    <h3 style="margin:0">Fleet usage</h3>
+    <h3 style="margin:0">Usage</h3>
     <button class="hbtn" onclick="loadFleetUsage()">Refresh</button>
   </div>
   <div id="fleetUsageBody" style="margin-top:14px">Loading…</div>
@@ -8484,6 +8484,7 @@ function renderModelPrices(d) {
 
 function fmtTokens(n) {
   const v = Number(n) || 0; // guard undefined/NaN/string → "0" not "undefined"
+  if (v >= 1e9) return (v / 1e9).toFixed(v >= 1e10 ? 0 : 1).replace(/\.0$/, '') + 'B';
   if (v >= 1e6) return (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + 'M';
   if (v >= 1e3) return (v / 1e3).toFixed(0) + 'K';
   return String(v);
@@ -8530,7 +8531,70 @@ async function loadUsage() {
     if (usageAgentId === forId) renderUsage(u);
   } catch (e) { if (usageAgentId === forId) $('usageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
-function renderUsage(u) { $('usageBody').innerHTML = usageHTML(u, usageAgentId); }
+// ---- Spend over time (GET /v1/usage/spend): the same chart for all agents and for one ----
+// Stacked bars of what each slice cost at API prices — cache writes, cache
+// reads, output, new input (left axis, dollars) — and the tokens behind it as
+// a line on the right axis (Chris asked for the second axis, 2026-10-05).
+const SPEND_PARTS = [['cacheWrite', 'Cache writes', '#c9822b'], ['cacheRead', 'Cache reads', '#4f9a8f'], ['output', 'Output', '#7a6fd6'], ['input', 'New input', '#8a8f98']];
+const SPEND_RANGE_LABELS = [['day', '24 hours'], ['week', '7 days'], ['month', '30 days']];
+let spendRange = (() => { try { const v = localStorage.getItem('hb-spend-range'); return SPEND_RANGE_LABELS.some(([k]) => k === v) ? v : 'week'; } catch { return 'week'; } })();
+/** A box the loader fills; agentId '' = every agent of yours. */
+const spendChartBox = (agentId) => `<div class="spendchart" data-agent="${esc(agentId || '')}"><div class="sub">Loading…</div></div>`;
+function setSpendRange(r, btn) {
+  spendRange = SPEND_RANGE_LABELS.some(([k]) => k === r) ? r : 'week';
+  try { localStorage.setItem('hb-spend-range', spendRange); } catch {}
+  const box = btn?.closest('.spendchart');
+  if (box) void loadSpendChart(box);
+}
+async function loadSpendCharts(root) { for (const el of (root || document).querySelectorAll('.spendchart')) void loadSpendChart(el); }
+async function loadSpendChart(el) {
+  const agent = el.dataset.agent;
+  try {
+    const d = await api(`/v1/usage/spend?range=${spendRange}${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`);
+    if (el.isConnected) el.innerHTML = spendChartHTML(d) + (agent && d.planShare > 0 ? '<div class="sub" style="margin-top:2px">* Claude plan use priced at API rates — not money you pay.</div>' : '');
+  } catch (e) { if (el.isConnected) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+/** A round axis top at or above x: 1, 2, 2.5 or 5 × a power of ten. */
+function niceTop(x) {
+  if (!(x > 0)) return 1;
+  const p = 10 ** Math.floor(Math.log10(x));
+  return [1, 2, 2.5, 5, 10].map((m) => m * p).find((v) => v >= x);
+}
+function spendChartHTML(d) {
+  const b = d.buckets || [];
+  const cost = (x) => SPEND_PARTS.reduce((t, [k]) => t + (x[k] || 0), 0);
+  const W = 640, H = 210, L = 46, R = 50, T = 10, B = 24, iw = W - L - R, ih = H - T - B;
+  const topC = niceTop(Math.max(0, ...b.map(cost))), topT = niceTop(Math.max(0, ...b.map((x) => x.tokens)));
+  const n = Math.max(1, b.length), slot = iw / n, bw = Math.max(1.5, slot * 0.72);
+  const yC = (v) => T + ih - (v / topC) * ih, yT = (v) => T + ih - (v / topT) * ih;
+  // Axis ticks sit on round values (0, half, top of 1/2/2.5/5 × 10^k): say them as they are — $12.5, not $13; $0, not $0.00.
+  const money = (v) => v === 0 ? '$0' : `$${+v.toPrecision(3)}`;
+  const grid = [0, 0.5, 1].map((f) => `<line x1="${L}" x2="${W - R}" y1="${yC(topC * f)}" y2="${yC(topC * f)}" style="stroke:var(--line)" stroke-width="1"${f ? ' stroke-dasharray="3 3"' : ''}/>
+    <text x="${L - 6}" y="${yC(topC * f) + 4}" text-anchor="end" font-size="11" style="fill:var(--dim)">${money(topC * f)}</text>
+    <text x="${W - R + 6}" y="${yC(topC * f) + 4}" font-size="11" style="fill:var(--dim)">${fmtTokens(topT * f)}</text>`).join('');
+  const when = (iso) => { const t = new Date(iso); return d.range === 'day' ? t.toLocaleTimeString([], { hour: 'numeric' }) : d.range === 'week' ? t.toLocaleDateString([], { weekday: 'short' }) : t.toLocaleDateString([], { month: 'short', day: 'numeric' }); };
+  const every = Math.max(1, Math.round(n / 6));
+  const xl = b.map((x, i) => (i % every === 0 && i < n - every / 2) ? `<text x="${L + i * slot + slot / 2}" y="${H - 6}" text-anchor="middle" font-size="11" style="fill:var(--dim)">${esc(when(x.at))}</text>` : '').join('');
+  const bars = b.map((x, i) => {
+    let y = T + ih;
+    const segs = SPEND_PARTS.map(([k, , c]) => { const h = ((x[k] || 0) / topC) * ih; if (h <= 0) return ''; y -= h; return `<rect x="${L + i * slot + (slot - bw) / 2}" y="${y}" width="${bw}" height="${h}" fill="${c}"/>`; }).join('');
+    const tip = `${new Date(x.at).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' })} — ≈ ${v2Money(cost(x))}: ${SPEND_PARTS.map(([k, l]) => `${l.toLowerCase()} ${v2Money(x[k] || 0)}`).join(', ')}; ${fmtTokens(x.tokens)} tokens`;
+    return `<g>${segs}<rect x="${L + i * slot}" y="${T}" width="${slot}" height="${ih}" fill="transparent"><title>${esc(tip)}</title></rect></g>`;
+  }).join('');
+  const pts = b.map((x, i) => `${(L + i * slot + slot / 2).toFixed(1)},${yT(x.tokens).toFixed(1)}`).join(' ');
+  const line = b.length ? `<polyline points="${pts}" fill="none" style="stroke:var(--text)" stroke-opacity=".75" stroke-width="1.6" stroke-linejoin="round" pointer-events="none"/>` : '';
+  const t = d.totals || {};
+  const star = d.planShare > 0 ? '*' : '';
+  const pills = SPEND_RANGE_LABELS.map(([k, l]) => `<button class="su-period${k === d.range ? ' on' : ''}" aria-pressed="${k === d.range}" onclick="setSpendRange('${k}', this)">${l}</button>`).join('');
+  const legend = SPEND_PARTS.map(([k, l, c]) => `<span class="sub" style="display:inline-flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:${c};display:inline-block"></span>${l} ${v2Money(t[k] || 0)}</span>`).join('')
+    + `<span class="sub" style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis)</span>`;
+  return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin:2px 0 4px">
+      <span class="su-periods" style="margin:0">${pills}</span>
+      <span class="sub">≈ <b>${v2Money(t.cost || 0)}</b>${star} · ${fmtTokens(t.tokens || 0)} tokens</span></div>
+    <div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;display:block" role="img" aria-label="Spend at API prices per ${d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : d.bucketHours + ' hours'}, by part, with tokens as a line">${grid}${bars}${line}${xl}</svg></div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:2px 0 4px">${legend}</div>`;
+}
+function renderUsage(u) { $('usageBody').innerHTML = usageHTML(u, usageAgentId); void loadSpendCharts($('usageBody')); }
 function usageHTML(u, agentId) {
   if (!u.sessions) return '<div class="sub">No sessions yet — nothing used.</div>';
   const models = u.byModel.map(m => m.model);
@@ -8555,6 +8619,7 @@ function usageHTML(u, agentId) {
   return `<div style="font-size:22px;font-weight:700">${fmtTokens(u.totalTokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">in all</span></div>
      <div class="sub" style="margin:2px 0 8px">${fmtN(n(u.calls))} call${u.calls === 1 ? '' : 's'} · ${u.sessions} session${u.sessions > 1 ? 's' : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(agentId, models)}</div>
      ${alerts ? `<div style="margin:0 0 8px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
+     ${agentId ? `<h4 class="v2sec" style="margin-top:6px">Spend over time</h4>${spendChartBox(agentId)}` : ''}
      ${day}${ctx}${split}
      ${rows}`;
 }
@@ -8639,7 +8704,8 @@ function renderFleetUsage(f) {
     ? `<span title="${label}: ${fmtTokens(bb[key])} (${Math.round(bb[key] / bTot * 100)}%)" style="background:${color};height:100%;width:${bb[key] / bTot * 100}%;display:inline-block"></span>` : '';
   const legend = (key, label, color) => (bb[key] > 0)
     ? `<span class="sub" style="display:inline-flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:${color};display:inline-block"></span>${label} ${Math.round(bb[key] / bTot * 100)}%</span>` : '';
-  const breakdown = (bb.included || bb.api || bb.local) ? `
+  // The billing split says something only when there is more than one kind.
+  const breakdown = [bb.included, bb.api, bb.local].filter((x) => x > 0).length > 1 ? `
     <div style="display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--panel-2);margin:2px 0 6px">${seg('included', 'Subscription', 'var(--ok)')}${seg('api', 'API', 'var(--warn)')}${seg('local', 'Local', '#6b8fb5')}</div>
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">${legend('included', 'subscription', 'var(--ok)')}${legend('api', 'API', 'var(--warn)')}${legend('local', 'local', '#6b8fb5')}</div>` : '';
   const totalCost = (f.cost ? `<span class="sub">· <b style="color:var(--warn)">est. ${fmtCostRange(f.cost)}</b> API cost</span>` : '')
@@ -8650,104 +8716,32 @@ function renderFleetUsage(f) {
     + ((f.alerts || []).length > 1 ? `<div style="text-align:right;margin-top:2px"><button class="hbtn" style="font-size:12px" onclick="dismissSpike()">Clear all</button></div>` : '');
   // At API prices, part by part (agentCosts.ts windowPricing): every agent, plan ones as an equivalent.
   const pr = f.pricing;
-  const PART = [['cacheWrite', 'Cache writes', '#c9822b'], ['output', 'Output', '#7a6fd6'], ['cacheRead', 'Cache reads', '#4f9a8f'], ['input', 'New input', '#8a8f98']];
+  const PART = SPEND_PARTS;
+  const planStar = (pr && pr.billing.plan > 0) || (f.rightSize?.planUSD > 0);
   const pricing = pr && pr.total > 0 ? `<h4 class="v2sec" style="margin-top:12px">At API prices</h4>
-    <div style="margin:2px 0 6px"><b style="font-size:16px">≈ ${v2Money(pr.total)}</b> <span class="sub">in the ${span} · ≈ ${v2Money(pr.monthly)} a month at this pace${pr.unpriced ? ' · some models have no price and are left out' : ''}</span></div>
+    <div style="margin:2px 0 6px"><b style="font-size:16px">≈ ${v2Money(pr.total)}</b>${pr.billing.plan > 0 ? '*' : ''} <span class="sub">in the ${span} · ≈ ${v2Money(pr.monthly)} a month at this pace${pr.unpriced ? ' · some models have no price and are left out' : ''}</span></div>
     <div style="display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--panel-2)" role="img" aria-label="What it went on">${PART.map(([k, l, c]) => pr.parts[k] > 0 ? `<span title="${l}: ${v2Money(pr.parts[k])}" style="background:${c};width:${pr.parts[k] / pr.total * 100}%"></span>` : '').join('')}</div>
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 6px">${PART.map(([k, l, c]) => pr.parts[k] > 0 ? `<span class="sub" style="display:inline-flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:${c};display:inline-block"></span>${l} ${v2Money(pr.parts[k])} (${Math.round(pr.parts[k] / pr.total * 100)}%)</span>` : '').join('')}</div>
     ${pr.models.length ? `<div class="sub" style="margin:2px 0">By model: ${pr.models.slice(0, 6).map((m) => `${esc(m.model)} ${v2Money(m.cost)}`).join(' · ')}</div>` : ''}
-    <div class="sub" style="margin:2px 0 8px">${pr.billing.plan > 0 ? `${pr.billing.api > 0 ? `${v2Money(pr.billing.api)} on API keys (billed); ` : ''}${v2Money(pr.billing.plan)} on Claude plans — an equivalent: the room it takes in the plan's limits, not a bill. ` : 'All on API keys: what you are billed, before any discount. '}Every message re-sends the conversation, so cache writes (a conversation written again after a pause) are usually the most of it.</div>` : '';
+    ${pr.billing.plan > 0 && pr.billing.api > 0 ? `<div class="sub" style="margin:2px 0 8px">${v2Money(pr.billing.api)} on API keys, ${v2Money(pr.billing.plan)}* on Claude plans</div>` : ''}
+    <h4 class="v2sec" style="margin-top:10px">Spend over time</h4>${spendChartBox('')}` : `<h4 class="v2sec" style="margin-top:10px">Spend over time</h4>${spendChartBox('')}`;
   $('fleetUsageBody').innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
       <span class="su-periods" style="margin:0;flex-wrap:wrap">${FLEET_USAGE_PERIODS.map(([k, l]) => btn(k, l)).join('')}</span>
     </div>
     <div style="font-size:20px;font-weight:700;margin-top:8px">${fmtTokens(f.totals.tokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">· ${fmtN(f.totals.requests)} request${f.totals.requests === 1 ? '' : 's'}${f.totals.limited ? ` · <b style="color:var(--bad)">${f.totals.limited}</b> refused` : ''} · ${span}</span> ${totalCost}</div>
     ${partial}
-    ${f.rightSize?.line ? `<div class="sub" id="rightSizeLine" style="margin:4px 0 8px" title="What switching agents to cheaper models saved this month: tokens used on the new model × the price difference, at API list prices">✂️ ${esc(f.rightSize.line)}</div>` : ''}
+    ${f.rightSize?.line ? `<div class="sub" id="rightSizeLine" style="margin:4px 0 8px" title="What switching agents to cheaper models saved this month: tokens used on the new model × the price difference, at API list prices">✂️ Right-size: ≈ $${Number(f.rightSize.savingUSD).toFixed(2)} this month${f.rightSize.planUSD > 0 ? '*' : ''}</div>` : ''}
     ${alerts ? `<div style="margin:6px 0 8px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
     ${pricing}
     ${breakdown}
-    ${f.totals.tokens ? fleetUsageBars(f.buckets, 'tokens', `Tokens ${per}`, period) : ''}
     ${f.totals.requests ? fleetUsageBars(f.buckets, 'requests', `Requests ${per}`, period) : ''}
 
     ${rows || `<div class="sub" style="margin:8px 0">Nothing used in the ${span}.</div>`}
-    <h4 class="v2sec" style="margin-top:14px">Per day, last 30 days</h4>
-    <div id="fleetUsageTrend"></div>`;
-  void renderUsageTrend();
+    ${planStar ? `<div class="sub" style="margin-top:12px">* Claude plan use priced at API rates — not money you pay.</div>` : ''}`;
+  void loadSpendCharts($('fleetUsageBody'));
 }
 
-// Daily trend — accrues as you check usage (a snapshot is recorded each open).
-async function renderUsageTrend() {
-  const el = $('fleetUsageTrend');
-  if (!el) return;
-  try {
-    const { points } = await api('/v1/usage/history');
-    const pts = points.filter(p => p.delta !== undefined && p.delta !== null);
-    if (pts.length < 2) {
-      el.innerHTML = `<div class="sub" style="margin:0 0 12px">📈 Daily-use trend builds here as you check usage — one point per day (${points.length} so far).</div>`;
-      return;
-    }
-    // A real chart: stacked bars per day by billing (same colours as the split
-    // above), y-axis gridlines with token values, value labels, a 7-day average
-    // line, and the day's estimated API cost under the bar. All SVG, no library.
-    const COLORS = { included: 'var(--ok)', api: 'var(--warn)', local: '#6b8fb5' };
-    const W = 640, H = 180, L = 52, R = 12, T = 22, B = 34;
-    const iw = W - L - R, ih = H - T - B;
-    const n = pts.length, slot = iw / n, bw = Math.max(4, Math.min(28, slot * 0.66));
-    // Per-day split: scale the fleet-wide byBilling share of that day's total onto the delta.
-    const split = pts.map(p => {
-      const bb = p.byBilling || {}; const tot = (bb.included || 0) + (bb.api || 0) + (bb.local || 0);
-      const f = tot > 0 ? (k) => (bb[k] || 0) / tot * p.delta : (k) => (k === 'included' ? p.delta : 0);
-      return { included: f('included'), api: f('api'), local: f('local') };
-    });
-    const max = Math.max(...pts.map(p => p.delta), 1);
-    // Nice y ticks: 4 steps at a round token count.
-    const rawStep = max / 4, mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
-    const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(v => v >= rawStep) || rawStep;
-    const yMax = Math.ceil(max / step) * step;
-    const y = v => T + ih - (v / yMax) * ih;
-    let svg = '';
-    for (let v = 0; v <= yMax + 1e-9; v += step) {
-      svg += `<line x1="${L}" x2="${W - R}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" stroke="var(--line)" stroke-width="1"/>` +
-        `<text x="${L - 6}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--dim)">${fmtTokens(v)}</text>`;
-    }
-    // 7-day trailing average line.
-    const avg = pts.map((p, i) => { const w = pts.slice(Math.max(0, i - 6), i + 1); return w.reduce((s, q) => s + q.delta, 0) / w.length; });
-    const cx = i => L + slot * i + slot / 2;
-    const labelEvery = n > 16 ? Math.ceil(n / 12) : 1;
-    pts.forEach((p, i) => {
-      const x = cx(i) - bw / 2; let yTop = T + ih;
-      const d = new Date(p.day + 'T00:00:00');
-      const title = `${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}: ${fmtTokens(p.delta)} tokens` +
-        ` (subscription ${fmtTokens(split[i].included)}, API ${fmtTokens(split[i].api)}, local ${fmtTokens(split[i].local)})` +
-        (p.costHigh ? ` · est. API cost up to ${fmtCostRange({ low: 0, high: p.costHigh }).replace(/^\$0(\.00)? ?– ?/, '')}` : '');
-      svg += `<g><title>${esc(title)}</title>`;
-      for (const k of ['included', 'api', 'local']) {
-        const h = split[i][k] / yMax * ih; if (h <= 0) continue;
-        yTop -= h;
-        svg += `<rect x="${x.toFixed(1)}" y="${yTop.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(h, 0.8).toFixed(1)}" fill="${COLORS[k]}" opacity=".9" rx="1.5"/>`;
-      }
-      if (p.delta > 0 && (n <= 20 || i % labelEvery === 0)) svg += `<text x="${cx(i).toFixed(1)}" y="${(yTop - 3).toFixed(1)}" text-anchor="middle" font-size="9" fill="var(--fg)">${fmtTokens(p.delta)}</text>`;
-      if (i % labelEvery === 0 || i === n - 1) svg += `<text x="${cx(i).toFixed(1)}" y="${H - B + 12}" text-anchor="middle" font-size="9.5" fill="var(--dim)">${d.getMonth() + 1}/${d.getDate()}</text>`;
-      if (p.costHigh > 0.005) svg += `<text x="${cx(i).toFixed(1)}" y="${H - B + 24}" text-anchor="middle" font-size="9" fill="var(--warn)">${p.costHigh < 1 ? '$' + p.costHigh.toFixed(2) : '$' + Math.round(p.costHigh)}</text>`;
-      svg += '</g>';
-    });
-    svg += `<polyline fill="none" stroke="var(--fg)" stroke-opacity=".55" stroke-width="1.5" stroke-dasharray="4 3" points="${avg.map((v, i) => cx(i).toFixed(1) + ',' + y(v).toFixed(1)).join(' ')}"/>`;
-    const total = pts.reduce((s, p) => s + p.delta, 0), peak = pts.reduce((m, p) => p.delta > m.delta ? p : m, pts[0]);
-    el.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin-bottom:2px">
-        <span class="sub"><b>Tokens used per day</b> · last ${n} days: ${fmtTokens(total)} total, avg ${fmtTokens(Math.round(total / n))}/day, peak ${fmtTokens(peak.delta)} on ${new Date(peak.day + 'T00:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
-        <span class="sub" style="display:inline-flex;gap:10px;flex-wrap:wrap">
-          <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${COLORS.included};vertical-align:-1px"></span> subscription</span>
-          <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${COLORS.api};vertical-align:-1px"></span> API</span>
-          <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${COLORS.local};vertical-align:-1px"></span> local</span>
-          <span><span style="display:inline-block;width:14px;border-top:2px dashed var(--fg);opacity:.6;vertical-align:3px"></span> 7-day avg</span>
-        </span>
-      </div>
-      <div style="overflow-x:auto;margin-bottom:10px"><svg viewBox="0 0 ${W} ${H}" width="100%" style="min-width:420px;max-width:${W}px;display:block;font-family:inherit">${svg}</svg></div>
-      <div class="sub" style="margin:-6px 0 12px">Hover a bar for the split. Orange figures under a day are that day's estimated API cost (API-keyed agents only). Days accrue as usage is checked or by the daily job.</div>`;
-  } catch { el.innerHTML = ''; }
-}
 
 let healthAgentId = null;
 const HEALTH_BADGE = {
@@ -12497,12 +12491,12 @@ function v2RenderSheet() {
 let v2UsageCache = null;
 async function v2LoadUsage(id) {
   const fresh = v2UsageCache && v2UsageCache.id === id && Date.now() - v2UsageCache.at < 60_000;
-  if (fresh) { $('v2UsageBody').innerHTML = v2UsageCache.html; return; }
+  if (fresh) { $('v2UsageBody').innerHTML = v2UsageCache.html; void loadSpendCharts($('v2UsageBody')); return; }
   try {
     const u = await api(`/v1/agents/${id}/usage`);
     const html = usageHTML(u, id);
     v2UsageCache = { id, at: Date.now(), html };
-    if ($('v2UsageBody') && v2AgentId === id) $('v2UsageBody').innerHTML = html;
+    if ($('v2UsageBody') && v2AgentId === id) { $('v2UsageBody').innerHTML = html; void loadSpendCharts($('v2UsageBody')); }
   } catch (e) { if ($('v2UsageBody') && v2AgentId === id) $('v2UsageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 

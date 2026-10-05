@@ -6,7 +6,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { HOUR_FIELDS, type HourField, type WindowModelStats } from '../src/orchestrator/usage.js';
 import type { StoredProfile } from '../src/orchestrator/modelScorecard.js';
-import { agentCost, COST_BANDS, COST_PERIODS, costsFor, priceParts, tierOf, TtlCache, windowPricing } from '../src/orchestrator/agentCosts.js';
+import { agentCost, COST_BANDS, COST_PERIODS, costsFor, priceParts, spendSeries, tierOf, TtlCache, windowPricing } from '../src/orchestrator/agentCosts.js';
 import { priceMix } from '../src/orchestrator/modelOptions.js';
 import { publicClassFor } from '../src/api/publicRoutes.js';
 
@@ -193,6 +193,34 @@ describe('a window at API prices, part by part (Usage)', () => {
     expect(Object.keys(pr.agents).sort()).toEqual(['c-big', 'c-plan']);
     expect(pr.unpriced).toBe(true); // Garden Notes on gemini-9-pro
     expect(windowPricing(w.store, STRANGER, 24, now).total).toBe(0);
+  });
+});
+
+describe('spend over time (the Usage chart)', () => {
+  it('slices of the range, part by part, tokens beside; one agent or all; the plan share', async () => {
+    const w = await world();
+    const now = Date.parse('2026-10-05T12:30:00Z');
+    w.store.setModelProfile('c-big', profile({ 'claude-opus-4-8': model({ [now - 2 * HOUR]: { cacheWrite: 1.6e6, output: 0.2e6 }, [now - 30 * HOUR]: { input: 1e6 } }) }), iso(now));
+    w.store.setModelProfile('c-plan', profile({ 'claude-sonnet-5': model({ [now - 2 * HOUR]: { input: 2.5e6 } }) }), iso(now));
+    const day = spendSeries(w.store, OWNER, 'day', { now });
+    expect(day.buckets).toHaveLength(24);
+    expect(day.bucketHours).toBe(1);
+    expect(day.buckets.at(-1)!.at).toBe('2026-10-05T12:00:00.000Z');
+    const b = day.buckets.find((x) => x.at === '2026-10-05T10:00:00.000Z')!;
+    expect(b).toMatchObject({ cacheWrite: 10, output: 5, input: 5, cacheRead: 0, tokens: 4.3e6 });
+    expect(day.totals.cost).toBe(20); // the hour 30 h ago is outside; tokens on a model with no price count, at no cost
+    expect(day.planShare).toBe(0.25);
+    const week = spendSeries(w.store, OWNER, 'week', { now });
+    expect(week.buckets).toHaveLength(56);
+    expect(week.totals.cost).toBe(25); // now with the $5 of input 30 hours ago
+    const one = spendSeries(w.store, OWNER, 'day', { now, agentId: 'c-plan' });
+    expect(one.totals).toMatchObject({ cost: 5, input: 5 });
+    expect(one.planShare).toBe(1);
+    expect(spendSeries(w.store, STRANGER, 'month', { now }).totals.cost).toBe(0);
+    const r = await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=year', headers: as(OWNER) });
+    expect(r.statusCode).toBe(400);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=day&agent=c-big', headers: as(STRANGER) })).statusCode).toBe(404);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=month', headers: as(OWNER) })).json().buckets).toHaveLength(30);
   });
 });
 

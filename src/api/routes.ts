@@ -82,7 +82,7 @@ import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orches
 import { guestConsoleSessionKey } from '../openclaw/consoleIdentity.js';
 import { webChatStoreKey } from '../orchestrator/webChat.js';
 import { RecentTracker, RECENT_CAP, orderRecent, previewFor, previewLine, type RecentPeople, type RecentViewer } from '../orchestrator/recent.js';
-import { COST_BANDS, COST_PERIODS, costBadgesOn, costsFor, DEFAULT_COST_PERIOD, TtlCache, windowPricing, type AgentCost } from '../orchestrator/agentCosts.js';
+import { COST_BANDS, COST_PERIODS, costBadgesOn, costsFor, DEFAULT_COST_PERIOD, TtlCache, windowPricing, spendSeries, SPEND_RANGES, type AgentCost, type SpendRange } from '../orchestrator/agentCosts.js';
 import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
@@ -7775,6 +7775,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const one = typeof b.agentId === 'string' && typeof b.at === 'string' ? { agentId: b.agentId, at: b.at } : undefined;
     const cleared = store.dismissUsageAlerts(ownerId, new Date().toISOString(), one);
     return { cleared };
+  });
+
+  /**
+   * Spend over time at API prices, part by part (new input, cache writes,
+   * cache reads, output), with the tokens behind it: the Usage chart for all
+   * of the caller's agents, or one of them (?agent=id). From the sampler's hour
+   * buckets: nothing is read from a container.
+   */
+  app.get<{ Querystring: { range?: string; agent?: string } }>('/v1/usage/spend', async (req, reply) => {
+    const range = (req.query?.range ?? 'week') as SpendRange;
+    if (!(range in SPEND_RANGES)) return reply.code(400).send({ error: `range is one of ${Object.keys(SPEND_RANGES).join(', ')}.` });
+    let agentId: string | undefined;
+    if (req.query?.agent) {
+      const a = ownedAgent(req, String(req.query.agent));
+      if (!a) return reply.code(404).send({ error: 'Not found' });
+      agentId = a.id;
+    }
+    return spendSeries(store, ownerIdOf(req), range, { agentId });
   });
 
   /** The fleet's use in the last hour, 3/6/9/12 hours, day or week, from what the sampler recorded — answers at once. */

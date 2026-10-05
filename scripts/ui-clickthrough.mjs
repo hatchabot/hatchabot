@@ -512,12 +512,13 @@ const SCENARIOS = String.raw`(() => {
         agents: [{ id: 'a1', name: 'Homework Helper', state: 'RUNNING', tokens: 5000, requests: 2, limited: 0, billing: 'included', cost: null }],
         totals: { tokens: 5000, requests: 2, limited: 0 }, byBilling: { included: 5000, api: 0, local: 0 }, cost: null };
       openFleetUsage();
-      const six = await until(() => [...document.querySelectorAll('#fleetUsageBody .su-period')].find((b) => b.textContent === '6h'));
-      eq('the choices', [...document.querySelectorAll('#fleetUsageBody .su-period')].map((b) => b.textContent), ['Hour', '3h', '6h', '9h', '12h', 'Day', 'Week']);
+      const six = await until(() => [...document.querySelectorAll('#fleetUsageBody .su-period')].filter((b) => !b.closest('.spendchart')).find((b) => b.textContent === '6h'));
+      eq('the choices', [...document.querySelectorAll('#fleetUsageBody .su-period')].filter((b) => !b.closest('.spendchart')).map((b) => b.textContent), ['Hour', '3h', '6h', '9h', '12h', 'Day', 'Week']);
       six.click();
       await until(() => calls('GET', /\/v1\/usage\/periods$/).length && document.getElementById('fleetUsageBody').textContent.includes('last 6 hours'));
       ok('6h is the one on', document.querySelector('#fleetUsageBody .su-period.on').textContent === '6h');
-      ok('bars per 15 minutes', document.getElementById('fleetUsageBody').textContent.includes('Tokens per 15 minutes'));
+      ok('bars per 15 minutes', document.getElementById('fleetUsageBody').textContent.includes('Requests per 15 minutes'));
+      ok('one spend chart for the fleet', document.querySelectorAll('#fleetUsageBody .spendchart').length === 1 && document.querySelector('#fleetUsageBody .spendchart').dataset.agent === '');
       fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
       // A spike warning of the last week shows at the top.
       window.__override['/v1/usage/periods'] = { period: 'day', from: at(1440), to: new Date(now).toISOString(), bucketMinutes: 60, buckets: [],
@@ -534,7 +535,8 @@ const SCENARIOS = String.raw`(() => {
       ok('a month at this pace', body.textContent.includes('≈ $3,702 a month at this pace'));
       ok('what it went on', body.textContent.includes('Cache writes $82') && body.textContent.includes('(67%)') && body.textContent.includes('New input $5.00'));
       ok('by model', body.textContent.includes('By model: claude-sonnet-5 $100 · claude-opus-4-8 $23'));
-      ok('a plan is an equivalent', body.textContent.includes('on Claude plans — an equivalent'));
+      ok('a plan is a footnote, not a paragraph', body.textContent.includes('* Claude plan use priced at API rates — not money you pay.') && !body.textContent.includes('the room it takes'));
+      ok('the title is Usage', fleetUsageDlg.querySelector('.v2ptitle, h3').textContent.trim().startsWith('Usage'));
       const mark = window.__calls.length;
       body.querySelector('button[aria-label="Clear this warning"]').click();
       const one = await until(() => window.__calls.slice(mark).find((c) => c.method === 'POST' && c.path === '/v1/usage/alerts/dismiss'));
@@ -544,6 +546,30 @@ const SCENARIOS = String.raw`(() => {
       eq('Clear all clears every one', all.body, {});
       fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
       try { localStorage.removeItem('hb-fleet-usage-period'); } catch {} fleetUsagePeriod = 'day';
+    },
+    spendChart: async () => {
+      // Spend over time: stacked parts at API prices, tokens on the right axis — the same chart for all agents and for one (made-up figures).
+      const now = Date.now(), H = 3600e3;
+      const series = (agent) => ({ range: 'week', bucketHours: 3, planShare: 1,
+        buckets: Array.from({ length: 56 }, (_, i) => ({ at: new Date(now - (56 - i) * 3 * H).toISOString(), cacheWrite: i % 7 ? 2 : 6, cacheRead: 0.5, output: 0.4, input: 0.1, tokens: (i % 5 + 1) * 3e6 })),
+        totals: { cacheWrite: 136, cacheRead: 28, output: 22.4, input: 5.6, cost: 192, tokens: 504e6 } });
+      window.__override['/v1/usage/spend'] = series('');
+      const box = document.createElement('div'); box.innerHTML = spendChartBox(''); document.body.append(box);
+      await loadSpendCharts(box);
+      const svg = await until(() => box.querySelector('svg'));
+      ok('stacked: four parts in a bar', svg.querySelectorAll('g')[0].querySelectorAll('rect').length === 5);
+      ok('a token line', !!svg.querySelector('polyline'));
+      ok('a dollar axis and a token axis', svg.textContent.includes('$') && /M/.test(svg.textContent));
+      ok('the legend names the right axis', box.textContent.includes('Tokens (right axis)') && box.textContent.includes('Cache writes $136'));
+      ok('a hover tip per slice', svg.querySelector('title').textContent.includes('cache writes'));
+      const mark = window.__calls.length;
+      byText('.spendchart button', '30 days').click();
+      await until(() => window.__calls.slice(mark).some((c) => c.url.includes('/v1/usage/spend?range=month')));
+      box.remove();
+      // An agent's Usage tab carries the same chart, for it alone.
+      const html = usageHTML({ totalTokens: 1e6, calls: 3, sessions: 1, byModel: [] }, 'a1');
+      ok('the agent view has it', html.includes('class="spendchart" data-agent="a1"'));
+      delete window.__override['/v1/usage/spend']; try { localStorage.removeItem('hb-spend-range'); } catch {} spendRange = 'week';
     },
     rightSizeLine: async () => {
       // Usage: one line with what the cheaper switches saved this month (Right-size).

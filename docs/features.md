@@ -1680,7 +1680,21 @@ and the background passes move on. It is never read as "the container is
 gone": a call skipped this way answers like a timeout, so no agent is marked
 failed. When it comes back, the next probe lets calls through.
 
-**Usage — at API prices** (v2.125.1): under the totals, what the window
+**Spend over time** (v2.127.0): one chart, the same for all your agents (in
+Usage) and for one agent (its Usage tab): what each slice cost at API prices
+as a stacked bar — cache writes, cache reads, output, new input — on the left
+axis, and the tokens behind it as a line on the right axis (Chris asked for
+the second axis). Its own range: 24 hours (hourly), 7 days (every 3 hours) or
+30 days (daily), remembered per browser; a slice's tooltip gives its parts.
+From the sampler's hour buckets (`GET /v1/usage/spend?range=day|week|month
+[&agent=id]`, agentCosts.ts `spendSeries`). It replaced the tokens-per-slice
+bars and the 30-day per-day trend. Plan use carries a `*` and one footnote —
+"Claude plan use priced at API rates — not money you pay" — instead of a
+sentence on every line; the Right-size line on Usage is just "✂️ Right-size:
+≈ $66.71 this month*" (the Hatchabot agent's report keeps the full wording).
+The panel is called **Usage** (it was "Fleet usage").
+
+**Usage — at API prices** (v2.126.0): under the totals, what the window
 cost at API list prices for every agent of yours — plan ones too, as an
 equivalent — with a month at that pace, a bar of what it went on (cache
 writes, output, cache reads, new input: on a long conversation cache writes
@@ -1702,8 +1716,7 @@ tokens summed call by call from its own transcripts — input, output, cache
 reads and cache writes — plus calls in slots and hours), not from reading each container, so
 stopped agents count for what they used while they ran. Nothing here is a
 lifetime figure or an average, so a burst days ago does not read as use right
-now; the 30-day daily trend below is the longer view, its daily point now
-written by the sampler. Cost is honest about its limits — only API-keyed
+now; **Spend over time** is the longer view. Cost is honest about its limits — only API-keyed
 agents have a per-token price (subscription and local agents show
 "included" / "local", both $0). Each agent is priced at its own measured mix
 (cache reads, usually most of the tokens, cost a tenth of input); before an

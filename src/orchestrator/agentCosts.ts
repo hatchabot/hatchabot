@@ -260,3 +260,70 @@ export function windowPricing(store: Store, viewer: string, hours: number, now =
     ...(unpriced ? { unpriced: true } : {}),
   };
 }
+
+// ---- spend over time, part by part (the Usage chart, fleet and agent alike) ----
+
+export type SpendRange = 'day' | 'week' | 'month';
+export const SPEND_RANGES: Record<SpendRange, { buckets: number; bucketHours: number }> = {
+  day: { buckets: 24, bucketHours: 1 },
+  week: { buckets: 56, bucketHours: 3 },
+  month: { buckets: 30, bucketHours: 24 },
+};
+export interface SpendBucket extends CostParts { at: string; tokens: number }
+export interface SpendSeries {
+  range: SpendRange;
+  bucketHours: number;
+  buckets: SpendBucket[];
+  totals: CostParts & { cost: number; tokens: number };
+  /** Share of the cost on Claude plans (an equivalent, not a bill), 0–1. */
+  planShare: number;
+}
+
+/**
+ * What the owner's agents (or one of them) cost at API prices, slice by slice
+ * — new input, cache writes, cache reads, output — and the tokens behind it,
+ * from the sampler's hour buckets. The last bucket ends with the current hour.
+ */
+export function spendSeries(store: Store, viewer: string, range: SpendRange, opts: { agentId?: string; now?: number } = {}): SpendSeries {
+  const now = opts.now ?? Date.now();
+  const { buckets: n, bucketHours } = SPEND_RANGES[range];
+  const size = bucketHours * HOUR;
+  const end = Math.floor(now / HOUR) * HOUR + HOUR; // the end of the current hour
+  const start = end - n * size;
+  const out: SpendBucket[] = Array.from({ length: n }, (_, i) => ({ at: new Date(start + i * size).toISOString(), ...noParts(), tokens: 0 }));
+  const agents = store.listAgents(viewer).filter((a) => a.state !== 'DELETED' && a.state !== 'DELETING' && (!opts.agentId || a.id === opts.agentId));
+  const profiles = store.modelProfiles(agents.map((a) => a.id)) as Map<string, { profile: StoredProfile; at: string }>;
+  let plan = 0, all = 0;
+  for (const a of agents) {
+    const src = store.getAIProfile(a.aiProfileId);
+    if (src?.vendor === 'local') continue;
+    for (const [model, st] of Object.entries(profiles.get(a.id)?.profile.models ?? {})) {
+      for (const [h, v] of Object.entries(st.h ?? {})) {
+        const at = Date.parse(`${h}:00:00Z`);
+        if (!(at >= start && at < end)) continue;
+        const b = out[Math.floor((at - start) / size)]!;
+        const mix: TokenMix = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+        HOUR_FIELDS.forEach((f, i) => { if (f in mix) mix[f as keyof TokenMix] += Number(v[i]) || 0; });
+        b.tokens += mix.input + mix.output + mix.cacheRead + mix.cacheWrite;
+        const pp = priceParts(model, mix);
+        if (!pp) continue;
+        (Object.keys(pp) as Array<keyof CostParts>).forEach((k) => { b[k] += pp[k]; });
+        const c = pp.input + pp.cacheWrite + pp.cacheRead + pp.output;
+        all += c;
+        if (src?.kind === 'subscription') plan += c;
+      }
+    }
+  }
+  const totals = { ...noParts(), cost: 0, tokens: 0 };
+  for (const b of out) {
+    (['input', 'cacheWrite', 'cacheRead', 'output'] as const).forEach((k) => { totals[k] += b[k]; b[k] = Math.round(b[k] * 10_000) / 10_000; });
+    totals.tokens += b.tokens;
+    b.tokens = Math.round(b.tokens);
+  }
+  totals.cost = totals.input + totals.cacheWrite + totals.cacheRead + totals.output;
+  return {
+    range, bucketHours, buckets: out,
+    totals: { input: r2(totals.input), cacheWrite: r2(totals.cacheWrite), cacheRead: r2(totals.cacheRead), output: r2(totals.output), cost: r2(totals.cost), tokens: Math.round(totals.tokens) },
+    planShare: all > 0 ? Math.round((plan / all) * 1000) / 1000 : 0,
+  };
+}
