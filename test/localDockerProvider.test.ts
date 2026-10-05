@@ -3,7 +3,8 @@ import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { LocalDockerProvider, SEED_STEP_MARK, secretValuesOf, seedFailure, seedStepLabel } from '../src/providers/localDockerProvider.js';
+import { LocalDockerProvider, remoteTarget, SEED_STEP_MARK, secretValuesOf, seedFailure, seedStepLabel, tcpReachable } from '../src/providers/localDockerProvider.js';
+import { createServer, type AddressInfo } from 'node:net';
 
 /**
  * The only real provider, and previously untested — mutation testing showed
@@ -434,7 +435,7 @@ describe('remote (fleet) provider — points docker at a remote daemon', () => {
   writeFileSync(rstub, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(RLOG)}\nexit 0\n`, { mode: 0o755 });
   chmodSync(rstub, 0o755);
   const HOST = 'ssh://runner@10.0.0.9';
-  const remote = new LocalDockerProvider({ docker: rstub, image: 'test-image:latest', host: HOST });
+  const remote = new LocalDockerProvider({ docker: rstub, image: 'test-image:latest', host: HOST, reachProbe: async () => true });
   const rargv = () => (existsSync(RLOG) ? readFileSync(RLOG, 'utf8') : '');
 
   beforeEach(() => writeFileSync(RLOG, ''));
@@ -507,5 +508,72 @@ describe('execShell with a secret sends the script over stdin', () => {
     // Without `secret`, the old argv form (non-secret scripts are unchanged).
     await provider.execShell('rt-1', 'echo hi');
     expect(argv()).toMatch(/^exec \S+ bash -c echo hi$/m);
+  });
+});
+
+describe('a remote machine that is asleep or offline answers at once (2026-10-05)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'acl-reach-'));
+  const LOG = join(dir, 'argv.log');
+  const stub = join(dir, 'docker');
+  writeFileSync(stub, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(LOG)}\necho running\nexit 0\n`, { mode: 0o755 });
+  chmodSync(stub, 0o755);
+  const ran = () => (existsSync(LOG) ? readFileSync(LOG, 'utf8').split('\n').filter(Boolean) : []);
+  beforeEach(() => writeFileSync(LOG, ''));
+
+  it('where it is reached: ssh (22 unless given), tcp; anything else is not probed', () => {
+    expect(remoteTarget('ssh://laptop.local')).toEqual({ host: 'laptop.local', port: 22 });
+    expect(remoteTarget('ssh://runner@10.0.0.9:2222')).toEqual({ host: '10.0.0.9', port: 2222 });
+    expect(remoteTarget('tcp://10.0.0.9:2376')).toEqual({ host: '10.0.0.9', port: 2376 });
+    expect(remoteTarget('unix:///var/run/docker.sock')).toBeUndefined();
+  });
+
+  it('down: no docker call is made; status is unknown (never "gone"), exec is a timeout, streams and copies fail at once', async () => {
+    let probes = 0;
+    const p = new LocalDockerProvider({ docker: stub, image: 'test-image:latest', host: 'ssh://runner@10.0.0.9', reachProbe: async () => { probes++; return false; } });
+    const t0 = Date.now();
+    expect(await p.reachable()).toBe(false);
+    expect((await p.status('docker://hatchabot-kitchen-helper-df918a55')).phase).toBe('unknown');
+    const r = await p.execShell('docker://hatchabot-kitchen-helper-df918a55', 'true');
+    expect(r).toMatchObject({ code: 1, timedOut: true, unreachable: true });
+    await expect(p.importState('docker://hatchabot-kitchen-helper-df918a55', Buffer.from(''))).rejects.toMatchObject({ userMessage: expect.stringContaining("isn't answering") });
+    const stream = p.streamFromVolume('docker://hatchabot-kitchen-helper-df918a55', ['cat', 'x']);
+    await expect(new Promise((_, reject) => stream.on('error', reject))).rejects.toBeTruthy();
+    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(ran()).toEqual([]);
+    expect(probes).toBe(1); // remembered: one probe for all of these
+  });
+
+  it('back up: the next probe after the down window lets calls through', async () => {
+    let up = false, probes = 0;
+    const p = new LocalDockerProvider({ docker: stub, image: 'test-image:latest', host: 'ssh://runner@10.0.0.9', reachProbe: async () => { probes++; return up; } });
+    expect(await p.reachable()).toBe(false);
+    up = true;
+    expect(await p.reachable()).toBe(false); // still inside the 30 s it is remembered
+    const real = Date.now;
+    try {
+      Date.now = () => real() + 31_000;
+      expect(await p.reachable()).toBe(true);
+      await p.execShell('docker://hatchabot-kitchen-helper-df918a55', 'true');
+    } finally { Date.now = real; }
+    expect(probes).toBe(2);
+    expect(ran().length).toBe(1);
+  });
+
+  it('this machine is never probed', async () => {
+    let probes = 0;
+    const p = new LocalDockerProvider({ docker: stub, image: 'test-image:latest', reachProbe: async () => { probes++; return false; } });
+    expect(await p.reachable()).toBe(true);
+    await p.execShell('docker://hatchabot-kitchen-helper-df918a55', 'true');
+    expect(probes).toBe(0);
+    expect(ran().length).toBe(1);
+  });
+
+  it('the connect test: a listening port answers, a closed one does not', async () => {
+    const srv = createServer((c) => c.destroy());
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+    const port = (srv.address() as AddressInfo).port;
+    expect(await tcpReachable('127.0.0.1', port, 2000)).toBe(true);
+    await new Promise<void>((r) => srv.close(() => r()));
+    expect(await tcpReachable('127.0.0.1', port, 2000)).toBe(false);
   });
 });

@@ -53,22 +53,38 @@ remembered in that browser; **✨ New look** in the classic header, or
 The header holds:
 - **New agent**, whose panel also offers *start from a template* and *open a
   .hatchabot file*.
-- **Status** (a green pulse; called Fleet until v2.47.2): one panel with tabs for Health, Usage, Resources, Activity, and
-  Tools (bulk actions, rebuild all, sort A→Z).
-- **Bulk actions** (a bolt), shown once there are two agents to pick from.
-- The four are symbols only — pulse, bolt, gear, plus — with the name on hover
-  (Chris, 2026-09-27).
+- **Usage** (a bar chart) and **Resources** (a chip), each opening its own
+  panel. They replaced **Status** on 2026-10-05 (v2.123.0, Chris): its Tools
+  tab repeated Bulk actions (Rebuild all moved into Bulk actions, memory
+  search for every agent into Settings → Hosts), its Health tab repeated the
+  home screen (what it alone showed — each machine, the latest backup, the
+  OpenClaw version — is the machine line at the foot of the home screen, its
+  problems Alerts on the Hatchabot agent's tile), and Activity is the home
+  screen's last section.
+- **Bulk actions** (a bolt), shown once there are two agents to pick from;
+  **Rebuild all** is at its foot.
+- The five are symbols only — chart, chip, bolt, gear, plus — with the name on
+  hover (Chris, 2026-09-27). On a phone they tighten, and under 400 px wide the
+  wordmark gives way to the logo.
 - **Settings**: this machine's settings, opened directly.
 - An inbox button, which appears only when someone has sent you an agent.
 - The account menu: who you're signed in as, light or dark appearance,
   install as an app, help, the classic look, the version, and sign out.
 
 - **No hub.** The Hatchabot agent is the first tile of the **Default** group,
-  fixed in place (it cannot be dragged), and **Status**, **Bulk actions**,
-  **Settings** and **New** are buttons in the header beside your account. The
-  numbers the old dashboard showed (awake, tokens per hour, memory, last
-  backup, spare bots) live under Status — Health, Usage, Resources — and under
-  Settings → Telegram (Chris, 2026-09-26). What needs you shows at the top
+  fixed in place (it cannot be dragged), and **Usage**, **Resources**, **Bulk
+  actions**, **Settings** and **New** are buttons in the header beside your
+  account. The numbers the old dashboard showed live under Usage and
+  Resources, the machine line at the foot of the home screen, and Settings →
+  Telegram (Chris, 2026-09-26; Status retired 2026-10-05).
+- **The foot of the home screen**: **Activity** — the newest dozen events
+  (rebuilds, members let in, snapshots, failures in red), read with the list
+  at most every 30 seconds, foldable; **See all** opens the full log (filter by
+  agent, each event's detail). Under it, for the machine's owner, **the machine
+  line**: each machine and its agents (a runner says whether it answers),
+  the latest backup (late, incomplete or keyless in amber), the OpenClaw
+  version. A runner that is not answering and backups that are late are also
+  **Alerts** on the Hatchabot agent's tile. What needs you shows at the top
   (**Alerts**) and under View by → **Alerts**. Until you have a
   manager, a box at the top of the home screen offers to set one up.
 - **The setup guide doesn't disappear.** Until the first agent exists it shows
@@ -214,7 +230,7 @@ and a click on a tile does what it always does.
 
 ### Resources
 
-In Status → Resources (or `hatchabot top [--sort cpu|mem|name]`): live
+In **Resources** (its own header button; or `hatchabot top [--sort cpu|mem|name]`): live
 CPU and memory per agent, per machine, as Docker measures it — one call per
 machine, refreshed every few seconds while the view is open; click Agent, CPU
 or any other column to sort (again to flip). Beside the memory: the container's **peak**
@@ -287,7 +303,7 @@ web/index.html.
 ### Model prices
 
 In Settings → AI sources → 💲 Model prices (also the "model prices" link on
-Status → Usage): the price list every cost in the app is
+Usage): the price list every cost in the app is
 figured from, per model and per million tokens — input, output, cache read,
 cache write (5-minute cache) — older models dimmed, with the date the prices
 were checked against [Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
@@ -533,7 +549,7 @@ agent actually used on the new model since the switch (to its next change) ×
 the price difference at API list prices, summed for the calendar month. On a
 Claude plan nothing is billed per token, so it is "≈ $X at API prices" with
 its share of what the source carried that month: room in the plan, not money.
-Upgrades are not netted off. It shows as one line on Status → Usage
+Upgrades are not netted off. It shows as one line on Usage
 ("Right-size: ≈ $12.40 this month"), opens the weekly review's report, and is
 in `get_model_changes` (`savings`).
 
@@ -1316,7 +1332,7 @@ agent under Alerts with "its process quit and was started again".
 Restarts that happened while Hatchabot itself was not running are not
 noticed; the count on the card still is.
 
-**Status → Resources** shows, beside each container's memory, its **peak**
+**Resources** shows, beside each container's memory, its **peak**
 since it started and how many times it **hit its cap** (the kernel had to
 reclaim; a process killed for memory is counted separately), and warns when
 every container's peak at once would want more than 80% of the machine.
@@ -1420,7 +1436,7 @@ The trade-offs:
 - **Slower rather than sudden.** An agent over its cap with an allowance
   slows down (its cold memory is compressed) instead of having processes
   killed; it still has a hard ceiling (cap + allowance), and the cap hits and
-  the swap in use show on its sheet and in Status → Resources.
+  the swap in use show on its sheet and in Resources.
 - **Per agent, capped.** Only agents given an allowance swap; nobody can
   give one more swap than its cap.
 - **Never plain disk swap.** Uncompressed disk swap is slow to come back and
@@ -1622,15 +1638,18 @@ manager's key alone opens nothing from another container.
 
 ## Fleet operations
 
-**Status → Health** is the fleet dashboard: counts (running / stopped /
-failed / working), a "needs you" list (failed agents with their reason,
-agents waiting for a bot, running agents idle over 14 days), and a per-agent
-line with state, model, and last activity. The host owner also sees **backup
-health** (latest set and its age) and **runtime** (image version, upgrade
-available). **Run health checks** probes each running agent's in-container
-gateway live.
+**When a machine is down** (a laptop runner asleep or offline; since
+v2.123.0): before any call to another machine, Hatchabot makes a quick TCP
+connect to its ssh (or tcp) port — 2.5 seconds at most, the answer kept 15
+seconds when it is there and 30 when it is not. A machine that does not
+answer is skipped at once: its agents' tiles say "Its machine isn't
+answering", Resources lists it with that line instead of waiting, its
+agents' panels (health, usage, logs, files, tasks) say so instead of hanging,
+and the background passes move on. It is never read as "the container is
+gone": a call skipped this way answers like a timeout, so no agent is marked
+failed. When it comes back, the next probe lets calls through.
 
-**Status → Usage** is the fleet rollup **by period** — Hour, 3h, 6h, 9h, 12h, Day or Week:
+**Usage** (its own header button) is the fleet rollup **by period** — Hour, 3h, 6h, 9h, 12h, Day or Week:
 what your agents used in that window, as tokens and requests per agent
 (ranked by tokens for the window, with refusals in red), two charts of the
 same over the window (5-minute, 15-minute up to 6 hours, 30-minute up to 12 hours, hourly or 2-hour buckets), the billing split,
@@ -1657,7 +1676,7 @@ over the last week). At 3× usual and at least 20M tokens — or 100M for an
 agent with under 3 measured days — it sends you one Telegram message (from
 your Hatchabot agent's bot, else the busy agent's) naming the agent, the
 amount, the multiple and the busiest hour; at most one per agent a day.
-Recent warnings show at the top of Status → Usage and on the agent's Usage.
+Recent warnings show at the top of Usage and on the agent's Usage.
 Settings: `HATCHABOT_USAGE_ALERT_RATIO` (3), `HATCHABOT_USAGE_ALERT_MIN_TOKENS`
 (20000000), `HATCHABOT_USAGE_ALERT_NEW_TOKENS` (100000000).
 
@@ -1911,7 +1930,7 @@ replies continue meanwhile) and checks the engine answers; the row says
 never left without one. Switching back re-indexes the same way. CLI:
 `hatchabot embedder use <agent> shared|baked`.
 
-**The whole fleet** (Status → Tools → *Memory search*, machine owner): how
+**The whole fleet** (Settings → Hosts → *Memory search service*, machine owner): how
 many agents are on the shared service, what **new agents** get (their own
 engine, or the shared service — `HATCHABOT_EMBED_DEFAULT`), and **Move the
 rest**: *now* rebuilds the idle running ones through the queue, two at a
@@ -2019,7 +2038,7 @@ your real server or agents. Put a throwaway BotFather token in a git-ignored
 `.env.smoke` at the repo root (`HATCHABOT_SMOKE_BOT_TOKEN=…`); without one
 the test skips cleanly, so it's safe in CI or cron.
 
-## Status → Resources: clearing the peaks
+## Resources: clearing the peaks
 
 The **peak** column is the most memory a container has used since it started,
 and **cap hits** how often it ran into its cap — both kept by the kernel, so

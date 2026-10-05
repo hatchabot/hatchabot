@@ -1,5 +1,5 @@
 /**
- * Status → Usage, by period: what the fleet used in the last hour, day or
+ * Usage, by period: what the fleet used in the last hour, day or
  * week, per agent and per bucket — all from what the background sampler has
  * already recorded (token counter samples every ten minutes; calls in
  * five-minute slots and hours), so it answers at once and needs no container.

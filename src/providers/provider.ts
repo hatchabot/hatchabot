@@ -224,6 +224,9 @@ export interface ExecResult {
   /** The command was killed for taking too long — a hung daemon, not a
    *  command that ran and failed. Callers must not read "gone" into it. */
   timedOut?: boolean;
+  /** Not run at all: the remote machine did not answer a quick connect
+   *  (asleep or offline). Shaped like a timeout, so it never reads as "gone". */
+  unreachable?: boolean;
 }
 
 export interface RuntimeProvider {
@@ -380,6 +383,12 @@ export interface RuntimeProvider {
   logs(runtimeRef: string, lines: number): Promise<string>;
   /** Live CPU and memory of every Hatchabot container on this daemon (docker stats). */
   stats?(): Promise<ContainerStats[]>;
+  /**
+   * For a provider that drives another machine: whether it answers a quick
+   * connect now (cached for a few seconds). Undefined = always reachable
+   * (this machine). Calls to a machine that does not answer fail at once.
+   */
+  reachable?(): Promise<boolean>;
   /**
    * Change a container's memory cap and swap allowance in place — running or
    * stopped, no restart (docker update). `swap` is the allowance on top of the

@@ -236,7 +236,7 @@ describe('a runner (remote daemon) is probed through its own daemon', () => {
     writeFileSync(join(dir, 'probe.out'), probe({ zswap: 'Y', compressor: 'zstd', swaps: [SWAPFILE] }));
     try {
       writeFileSync(LOG, '');
-      const remote = new LocalDockerProvider({ docker: STUB, image: 'test-image:latest', host: 'ssh://runner@10.0.0.9' });
+      const remote = new LocalDockerProvider({ docker: STUB, image: 'test-image:latest', host: 'ssh://runner@10.0.0.9', reachProbe: async () => true });
       const s = await remote.compressedSwap();
       expect(s.kind).toBe('zswap');
       const run = argv().split('\n').find((l) => l.includes('zswap.%s'))!;
@@ -249,7 +249,7 @@ describe('a runner (remote daemon) is probed through its own daemon', () => {
 
   it('a runner whose probe answers nothing gets no swap', async () => {
     writeFileSync(LOG, '');
-    const remote = new LocalDockerProvider({ docker: STUB, image: 'test-image:latest', host: 'ssh://runner@10.0.0.10' });
+    const remote = new LocalDockerProvider({ docker: STUB, image: 'test-image:latest', host: 'ssh://runner@10.0.0.10', reachProbe: async () => true });
     await remote.provision(spec({ memory: '3g', memorySwap: '1g' }) as never);
     expect(createLine()).toContain('--memory 3g --memory-swap 3g');
   });
@@ -511,7 +511,7 @@ exit 0
     expect(live.get(refs[2])).toEqual({ running: false, dockerMemory: GiB, dockerMemorySwap: GiB }); // stopped: no cgroup to read
     expect(live.has(refs[3])).toBe(false);
     expect(readFileSync(join(d, 'argv'), 'utf8')).not.toContain('exec'); // this machine: files, no process in the agent
-    const remote = new LocalDockerProvider({ docker: st, image: 'test-image:latest', host: 'ssh://runner@10.0.0.9' });
+    const remote = new LocalDockerProvider({ docker: st, image: 'test-image:latest', host: 'ssh://runner@10.0.0.9', reachProbe: async () => true });
     const r = await remote.memoryLimitsLive(refs.slice(0, 1));
     expect(r.get(refs[0])?.cgroup).toEqual({ memoryMax: 3 * GiB, swapMax: null });
     expect(readFileSync(join(d, 'argv'), 'utf8')).toContain('-H ssh://runner@10.0.0.9 exec hatchabot-kitchen-helper-df918a55 cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max');

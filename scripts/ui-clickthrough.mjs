@@ -81,8 +81,45 @@ const SCENARIOS = String.raw`(() => {
       ok('no hub box with a manager', document.querySelector('.v2hub').hidden);
       const header = document.querySelector('#v2Header .v2hubactions');
       ok('the actions sit in the header', !!header);
-      eq('header buttons', [...header.querySelectorAll('button:not([hidden])')].map((b) => b.getAttribute('aria-label')), ['Status', 'Bulk actions', 'Settings', 'New agent']);
+      eq('header buttons', [...header.querySelectorAll('button:not([hidden])')].map((b) => b.getAttribute('aria-label')), ['Usage', 'Resources', 'Bulk actions', 'Settings', 'New agent']);
       ok('symbol only: the label is hidden', getComputedStyle(header.querySelector('.lbl')).display === 'none');
+    },
+    homeFoot: async () => {
+      // The foot of the home screen (Status retired, 2026-10-05): Activity, then the machine line (made-up data).
+      const now = Date.now(), iso = (m) => new Date(now - m * 60000).toISOString();
+      window.__override['/v1/events'] = [
+        { id: 2, agentId: 'a1', agentName: 'Homework Helper', at: iso(5), event: 'agent.rebuilt', detail: {} },
+        { id: 1, agentId: 'a2', agentName: 'Soccer Schedule', at: iso(50), event: 'provision.failed', detail: {} },
+      ];
+      window.__override['/v1/hosts'] = [
+        { id: 'h1', name: 'This machine', kind: 'local', hostname: 'home-box', agentCount: 12 },
+        { id: 'h2', name: 'Laptop runner', kind: 'cloud', agentCount: 2, reachable: false },
+      ];
+      window.__override['/v1/backups'] = { backups: [{ date: new Date(now - 5 * 864e5).toISOString().slice(0, 10), hasKey: true, complete: true }], keepDays: 14, missing: [] };
+      window.__override['/v1/runtime'] = { imageVersion: '2026.9.6', upgradeAvailable: false };
+      const owner = myAccount.hostOwner; myAccount.hostOwner = true;
+      try {
+        await v2LoadActivity(true); await v2LoadMachine(true);
+        const act = document.getElementById('v2Activity');
+        ok('an Activity section at the foot', !act.hidden && act.textContent.includes('Homework Helper') && act.textContent.includes('Soccer Schedule'));
+        ok('below the agents', document.getElementById('v2groups').compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING);
+        ok('a failure in red', !!act.querySelector('.v2actrow .bad'));
+        byText('#v2Activity button', 'See all').click();
+        await until(() => auditDlg.open); ok('See all opens the full log', auditDlg.open); auditDlg.close();
+        byText('#v2Activity button', 'Hide').click();
+        ok('it folds', document.getElementById('v2ActList').hidden && byText('#v2Activity button', 'Show'));
+        byText('#v2Activity button', 'Show').click();
+        const line = document.getElementById('v2Machine');
+        ok('the machine line: ' + line.textContent, !line.hidden && line.textContent.includes('home-box · 12 agents') && line.textContent.includes('Laptop runner · 2 agents · not answering') && line.textContent.includes('OpenClaw 2026.9.6'));
+        ok('late backups said', line.textContent.includes('the latest is 5 days old'));
+        const tip = tipText('Hatchabot');
+        ok('the Hatchabot agent carries the machine\'s alerts: ' + tip.slice(0, 200), tip.includes("Laptop runner isn't answering") && tip.includes('backups: the latest is 5 days old'));
+      } finally {
+        myAccount.hostOwner = owner;
+        for (const k of ['/v1/events', '/v1/hosts', '/v1/backups', '/v1/runtime']) delete window.__override[k];
+        try { localStorage.removeItem('hb-activity-folded'); } catch {}
+        v2Machine = null; v2PaintMachine(); await refresh(false);
+      }
     },
     viewBy: async () => {
       const btn = byText('button', 'Alerts');
@@ -349,7 +386,13 @@ const SCENARIOS = String.raw`(() => {
     },
     headerDoors: async () => {
       await openAiDlg(); ok('Settings opens', aiDlg.open); aiDlg.close();
-      await openFleet(); ok('Status opens', v2FleetDlg.open); v2FleetDlg.close();
+      document.querySelector('#v2Header .v2hubactions button[aria-label="Usage"]').click();
+      await until(() => fleetUsageDlg.open); ok('Usage opens its own panel', fleetUsageDlg.open); fleetUsageDlg.close();
+      document.querySelector('#v2Header .v2hubactions button[aria-label="Resources"]').click();
+      await until(() => fleetResDlg.open); ok('Resources opens its own panel', fleetResDlg.open); fleetResDlg.close();
+      ok('no Status panel any more', typeof openFleet === 'undefined' && !document.getElementById('v2FleetDlg'));
+      ok('Rebuild all sits in Bulk actions', !!byText('#fleetActionsDlg button', 'Rebuild all'));
+      ok('memory search for every agent sits in Settings → Hosts', !!document.querySelector('#embedBox #embedFleetRow'));
       document.getElementById('fabBtn').click(); ok('New opens the create dialog', createDlg.open); createDlg.close();
       document.querySelector('#v2Header .v2hubactions button[aria-label="Settings"]').click();
       await until(() => aiDlg.open); aiDlg.close();
@@ -462,7 +505,7 @@ const SCENARIOS = String.raw`(() => {
       await sleep(50);
     },
     usageHours: async () => {
-      // Status → Usage offers 3, 6, 9 and 12 hours between Hour and Day (Chris, 2026-09-28).
+      // Usage offers 3, 6, 9 and 12 hours between Hour and Day (Chris, 2026-09-28).
       const now = Date.now(), at = (m) => new Date(Math.floor((now - m * 60000) / 900000) * 900000).toISOString();
       window.__override['/v1/usage/periods'] = { period: '6h', from: at(360), to: new Date(now).toISOString(), bucketMinutes: 15,
         buckets: [360, 345, 30, 15].map((m) => ({ at: at(m), tokens: m === 15 ? 5000 : 0, requests: m === 15 ? 2 : 0, limited: 0 })),
@@ -486,7 +529,7 @@ const SCENARIOS = String.raw`(() => {
       try { localStorage.removeItem('hb-fleet-usage-period'); } catch {} fleetUsagePeriod = 'day';
     },
     rightSizeLine: async () => {
-      // Status → Usage: one line with what the cheaper switches saved this month (Right-size).
+      // Usage: one line with what the cheaper switches saved this month (Right-size).
       const now = Date.now();
       const base = { period: 'day', from: new Date(now - 864e5).toISOString(), to: new Date(now).toISOString(), bucketMinutes: 60, buckets: [],
         agents: [], totals: { tokens: 0, requests: 0, limited: 0 }, byBilling: {}, cost: null };

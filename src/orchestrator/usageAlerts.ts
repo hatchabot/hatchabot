@@ -94,7 +94,7 @@ export function usageSpikeText(s: UsageSpike): string {
     : s.usual < 1e6 ? `after a quiet week (its usual day: ${fmt(s.usual)})`
     : `about ${Math.round(s.tokens / s.usual)}× its usual day (${fmt(s.usual)})`;
   const peak = s.peakHour ? ` The busiest hour began ${new Date(s.peakHour.at).toISOString().slice(11, 16)} UTC (${fmt(s.peakHour.tokens)}).` : '';
-  return `⚠️ Hatchabot: "${s.agent.name}" used ${fmt(s.tokens)} tokens in the last 24 hours — ${than}.${peak} Status → Usage shows it by the hour; a scheduled task or a long conversation is the usual cause.`;
+  return `⚠️ Hatchabot: "${s.agent.name}" used ${fmt(s.tokens)} tokens in the last 24 hours — ${than}.${peak} Usage shows it by the hour; a scheduled task or a long conversation is the usual cause.`;
 }
 
 export interface UsageAlertDeps {

@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
-import type { Readable } from 'node:stream';
+import { PassThrough, type Readable } from 'node:stream';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, connect } from 'node:net';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
@@ -28,6 +28,8 @@ import { batchConfigCommands, buildConfigCommands, describeConfigCommands, seedI
 const execFileP = promisify(execFile);
 
 export interface LocalDockerOptions {
+  /** A remote machine's quick connect test (tests); default a TCP connect to its ssh or tcp port. */
+  reachProbe?: (host: string, port: number, timeoutMs: number) => Promise<boolean>;
   /** The HTTP client the health probe uses (tests). */
   fetchImpl?: typeof fetch;
   /** Image built by scripts/build-runtime-image.sh. */
@@ -118,12 +120,48 @@ export class LocalDockerProvider implements RuntimeProvider {
     this.docker = opts.docker ?? 'docker';
     this.remote = !!opts.host;
     this.#conn = opts.host ? ['-H', opts.host] : [];
+    this.#target = opts.host ? remoteTarget(opts.host) : undefined;
+    this.#reachProbe = opts.reachProbe ?? tcpReachable;
     this.key = this.remote ? 'remote-docker' : 'local-docker';
   }
 
   /** Full argv for a docker call: connection args first, then the command. */
   #argv(args: string[]): string[] {
     return [...this.#conn, ...args];
+  }
+
+  /**
+   * A remote machine that is asleep or offline (a laptop runner) used to hold
+   * every call to it for ssh's connect timeout — a minute or two — so pages
+   * like Resources hung (Chris, 2026-10-05). Before any docker call to another
+   * machine, a quick TCP connect to its ssh/tcp port says whether it is there:
+   * remembered REACH_OK_MS when it is, REACH_DOWN_MS when it is not (calls
+   * then fail at once, shaped like a timeout so nothing reads "gone").
+   * One probe at a time; this machine is never probed.
+   */
+  #reach: { at: number; ok: boolean } | undefined;
+  #reachPending: Promise<boolean> | undefined;
+  readonly #reachProbe: (host: string, port: number, timeoutMs: number) => Promise<boolean>;
+  readonly #target: { host: string; port: number } | undefined;
+  async reachable(): Promise<boolean> {
+    if (!this.#target) return true;
+    const now = Date.now(), r = this.#reach;
+    if (r && now - r.at < (r.ok ? REACH_OK_MS : REACH_DOWN_MS)) return r.ok;
+    if (!this.#reachPending) {
+      const t = this.#target;
+      this.#reachPending = this.#reachProbe(t.host, t.port, REACH_PROBE_MS).catch(() => false)
+        .then((ok) => { this.#reach = { at: Date.now(), ok }; return ok; })
+        .finally(() => { this.#reachPending = undefined; });
+    }
+    return this.#reachPending;
+  }
+  /** Known down right now (no probe): for the few calls that cannot wait on one. */
+  #knownDown(): boolean {
+    const r = this.#reach;
+    return !!this.#target && !!r && !r.ok && Date.now() - r.at < REACH_DOWN_MS;
+  }
+  #unreachableError(): ProviderError {
+    return new ProviderError('remote docker host unreachable', "Its machine isn't answering — it may be asleep or offline.");
   }
 
   /**
@@ -650,7 +688,8 @@ export class LocalDockerProvider implements RuntimeProvider {
   }
 
   /** A docker command with `input` on its stdin; a timeout answers timedOut, as #docker does. */
-  #execStdin(args: string[], input: string, timeoutMs?: number): Promise<ExecResult> {
+  async #execStdin(args: string[], input: string, timeoutMs?: number): Promise<ExecResult> {
+    if (!(await this.reachable())) return { code: 1, stdout: '', stderr: `cannot connect: ${UNREACHABLE_WORDS}`, timedOut: true, unreachable: true };
     return new Promise<ExecResult>((resolve) => {
       const child = spawn(this.docker, this.#argv(args));
       let stdout = '', stderr = '', timedOut = false;
@@ -696,6 +735,8 @@ export class LocalDockerProvider implements RuntimeProvider {
     // killing the docker client alone leaves the one-shot streaming into the
     // daemon's log until cat/tar finishes (28th audit).
     const { name, flags } = this.#oneShot('fs');
+    // A stream cannot wait on a probe: a machine already known to be down fails it at once.
+    if (this.#knownDown()) { const dead = new PassThrough(); queueMicrotask(() => dead.destroy(this.#unreachableError())); return dead; }
     const child = spawn(this.docker, this.#argv([
       'run', '--rm', ...flags, '--network', 'none', '-v', `${volume}:/home/node:ro`, this.image, ...argv,
     ]), { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -849,6 +890,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     // Stream and filter: an agent that polls an inbox logs thousands of lines a
     // day, so never buffer the whole log — keep only the model-call results.
     const { container } = this.#names(runtimeRef);
+    if (!(await this.reachable())) throw this.#unreachableError();
     return new Promise<string>((resolve, reject) => {
       const child = spawn(this.docker, this.#argv(['logs', '--since', sinceIso, '--timestamps', container]));
       const keep: string[] = [];
@@ -1065,6 +1107,7 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   async importState(runtimeRef: string, data: Buffer): Promise<void> {
     const { volume } = this.#names(runtimeRef);
+    if (!(await this.reachable())) throw this.#unreachableError();
     await new Promise<void>((resolve, reject) => {
       // An archive is untrusted input, so it must not dictate ownership or
       // carry setuid bits — but the runtime runs as uid 1000 and has to be
@@ -1136,6 +1179,7 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   async importWorkspace(runtimeRef: string, slug: string, data: Buffer): Promise<void> {
     const { volume } = this.#names(runtimeRef);
+    if (!(await this.reachable())) throw this.#unreachableError();
     const dir = `/vol/.openclaw/agents/${slug}/agent`;
     await new Promise<void>((resolve, reject) => {
       const { name: ioName, flags: ioFlags } = this.#oneShot('io');
@@ -1370,6 +1414,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     return p;
   }
   async #openTunnel(target: { dest: string; port?: string }, port: number): Promise<{ host: string; port: number } | undefined> {
+    if (!(await this.reachable())) return undefined;
     const local = await freePort();
     const child = spawn('ssh', sshTunnelArgs(target, local, port), { stdio: 'ignore' });
     child.unref(); // never keeps the process alive…
@@ -1663,6 +1708,7 @@ export class LocalDockerProvider implements RuntimeProvider {
   /** Run a docker command, piping `data` to its stdin (for tar-over-stdin on a
    *  remote daemon, where bind mounts of this box's paths aren't possible). */
   async #runStdin(args: string[], data: Buffer, oneShot?: string): Promise<ExecResult> {
+    if (!(await this.reachable())) throw this.#unreachableError();
     return new Promise<ExecResult>((resolve, reject) => {
       const child = spawn(this.docker, this.#argv(args));
       // A stalled daemon/runner must fail the call, not pin the agent busy forever.
@@ -1688,6 +1734,7 @@ export class LocalDockerProvider implements RuntimeProvider {
   }
 
   async #docker(args: string[], timeoutMs?: number): Promise<ExecResult> {
+    if (!(await this.reachable())) return { code: 1, stdout: '', stderr: `cannot connect: ${UNREACHABLE_WORDS}`, timedOut: true, unreachable: true };
     try {
       const { stdout, stderr } = await execFileP(this.docker, this.#argv(args), {
         maxBuffer: 8 * 1024 * 1024,
@@ -1781,6 +1828,30 @@ export function seedFailure(res: { stdout: string; stderr: string }, secrets: st
   return `seed failed${step ? ` at ${JSON.stringify(step)}` : ''}: ${detail || '(no output)'}`;
 }
 
+
+const REACH_PROBE_MS = 2_500;
+const REACH_OK_MS = 15_000;
+const REACH_DOWN_MS = 30_000;
+const UNREACHABLE_WORDS = "the machine isn't answering (asleep or offline)";
+
+/** Where a remote docker endpoint is to be reached: ssh://[user@]host[:port] (22) or tcp://host:port. */
+export function remoteTarget(dockerHost: string): { host: string; port: number } | undefined {
+  const m = /^(ssh|tcp):\/\/(?:[^@/\s]+@)?(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+)(?::(\d{1,5}))?\/?$/.exec(dockerHost.trim());
+  if (!m) return undefined;
+  const port = m[3] ? Number(m[3]) : m[1] === 'ssh' ? 22 : 2375;
+  return { host: m[2]!.replace(/^\[|\]$/g, ''), port };
+}
+
+/** A TCP connect within `timeoutMs`: true when something answered on the port. */
+export function tcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = connect({ host, port });
+    const done = (ok: boolean) => { sock.destroy(); resolve(ok); };
+    sock.setTimeout(timeoutMs, () => done(false));
+    sock.once('connect', () => done(true));
+    sock.once('error', () => done(false));
+  });
+}
 
 /** `ssh://user@host[:port]` → what ssh wants, or undefined for anything else. */
 export function sshTarget(dockerHost: string): { dest: string; port?: string } | undefined {

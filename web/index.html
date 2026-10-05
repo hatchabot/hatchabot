@@ -481,6 +481,17 @@
     .v2brandtext { flex-direction:column; align-items:flex-start; gap:1px; font-size:18px; line-height:1.1 }
     .v2top #v2AppVer { font-size:10px; align-self:flex-start }
   }
+  /* Five header buttons since Usage and Resources replaced Status (2026-10-05): on a
+     phone they and the account button tighten, and the narrowest keep the logo only. */
+  @media (max-width:460px) {
+    .v2top { gap:6px }
+    .v2top .v2hubactions { gap:5px; width:auto }
+    .v2hubactions .v2btn { width:34px; height:34px }
+    .v2top .v2avatar { width:34px; height:34px }
+  }
+  @media (max-width:400px) {
+    .v2top .v2brandtext { display:none }
+  }
   .res-sort { background:none; border:0; padding:0; font:inherit; color:inherit; cursor:pointer }
   .res-sort.on { color:var(--accent-text, var(--accent)) }
   .hb-loading { display:flex; align-items:center; gap:10px; padding:28px 8px; color:var(--dim); font-size:15px }
@@ -608,6 +619,15 @@
   .v2gear { display:inline-flex; align-items:center; gap:6px }
   .v2gear span { font-size:19px; line-height:1 }
   /* A soft outline per group: the groups read as shelves, not one long list. */
+  /* The home screen's foot (2026-10-05): Activity, then the machine line. */
+  .v2actlist { display:grid; gap:0; margin-top:6px }
+  .v2actrow { display:flex; gap:10px; padding:5px 0; border-top:1px solid color-mix(in srgb, var(--line) 60%, transparent); font-size:13px; min-width:0 }
+  .v2actrow:first-child { border-top:0 }
+  .v2actrow .t { color:var(--dim); white-space:nowrap; min-width:64px; font-variant-numeric:tabular-nums }
+  .v2actrow .w { min-width:0; overflow-wrap:anywhere }
+  .v2actrow .bad { color:var(--bad) }
+  .v2machine { display:flex; gap:6px 18px; flex-wrap:wrap; font-size:12px; color:var(--dim); padding:4px 4px 12px }
+  .v2machine .warn { color:var(--warn); font-weight:600 }
   .v2group { margin-bottom:16px; border:1px solid color-mix(in srgb, var(--line) 70%, transparent); border-radius:16px;
              padding:12px 14px 6px; background:color-mix(in srgb, var(--panel) 45%, transparent) }
   .v2group.collapsed { padding-bottom:12px }
@@ -941,7 +961,8 @@
         <div class="v2popsep"></div>
         <button role="menuitem" onclick="v2CloseAccount(); openInbox()">Inbox</button>
         <button role="menuitem" onclick="v2CloseAccount(); installApp()">Install as an app</button>
-        <button role="menuitem" onclick="v2CloseAccount(); openFleet()">Status</button>
+        <button role="menuitem" onclick="v2CloseAccount(); openFleetUsage()">Usage</button>
+        <button role="menuitem" onclick="v2CloseAccount(); openFleetResources()">Resources</button>
         <button role="menuitem" onclick="v2CloseAccount(); openSetupGuide()">Setup guide</button>
         <button role="menuitem" onclick="v2CloseAccount(); helpDlg.showModal()">Help</button>
         <button role="menuitem" onclick="location.search = '?ui=classic'">Classic look</button>
@@ -1013,7 +1034,8 @@
           <div class="v2face" aria-hidden="true">🐣</div>
         <div class="v2hubactions" id="v2HubActions" aria-label="Fleet actions">
           <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" aria-label="Inbox" title="Agents people have sent you"><span class="v2glyph em" aria-hidden="true">📥</span><span class="lbl">Inbox</span><span class="v2count" id="v2InboxCount"></span></button>
-          <button class="v2btn" id="v2FleetBtn" onclick="openFleet()" aria-label="Status" title="Status — health, usage, resources and activity across all your agents"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="2.5 12.5 6.5 12.5 9.5 5 13.5 19.5 16.5 10.5 18.5 12.5 21.5 12.5"/></svg></span><span class="lbl">Status</span></button>
+          <button class="v2btn" id="v2UsageBtn" onclick="openFleetUsage()" aria-label="Usage" title="Usage — requests and tokens across your agents, by hour, day or week"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V11M10 20V5M16 20v-6M21 20H3"/></svg></span><span class="lbl">Usage</span></button>
+          <button class="v2btn" id="v2ResBtn" onclick="openFleetResources()" aria-label="Resources" title="Resources — CPU, memory and swap of every agent, machine by machine"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M10 10h4v4h-4zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></span><span class="lbl">Resources</span></button>
           <button class="v2btn" id="v2BulkBtn" hidden onclick="openFleetActions()" aria-label="Bulk actions" title="Bulk actions — switch model, rebuild, stop or start a selection of agents, picked by AI source, group, machine or state"><span class="v2glyph em" aria-hidden="true">⚡</span><span class="lbl">Bulk actions</span></button>
           <button class="v2btn" onclick="openAiDlg()" aria-label="Settings" title="Settings — AI sources, people, Telegram bots, machines, backups, security"><span class="v2glyph em" aria-hidden="true">⚙️</span><span class="lbl">Settings</span></button>
           <button class="v2btn v2new" onclick="$('fabBtn').click()" aria-label="New agent" title="Create a new agent"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 4v16M4 12h16"/></svg></span><span class="lbl">New</span></button>
@@ -1031,6 +1053,12 @@
       <div class="v2newgroup" id="v2NewGroup">＋ Drag an icon here to start a new group — you name it right there</div>
       <div class="v2newgroup v2trash" id="v2Trash">🗑 Drop here to delete — it asks first</div>
     </div>
+    <section class="v2group" id="v2Activity" hidden aria-labelledby="v2ActTitle">
+      <div class="v2ghead"><h3 id="v2ActTitle">Activity</h3><span class="n" id="v2ActCount"></span>
+        <span class="v2gtools"><button onclick="openAudit()" title="The full log: filter by agent, see each event's detail">See all</button><button id="v2ActFold" onclick="v2FoldActivity()" aria-expanded="true">Hide</button></span></div>
+      <div class="v2actlist" id="v2ActList"></div>
+    </section>
+    <div class="v2machine" id="v2Machine" hidden aria-label="This Hatchabot's machines, backups and runtime"></div>
   </div>
 </div>
 <div class="v2tip" id="v2Tip" hidden></div>
@@ -1073,11 +1101,6 @@
   </div>
 </dialog>
 
-<dialog id="v2FleetDlg" aria-label="Fleet">
-  <h3 style="margin:0">Status</h3>
-  <div class="tabs" role="tablist" id="v2FleetTabs"></div>
-  <div id="v2FleetBody"></div>
-</dialog>
 
 <button class="fab fab-top" id="topBtn" title="Back to top" hidden>↑</button>
 <button class="fab" id="fabBtn" title="New agent" hidden>+</button>
@@ -1758,6 +1781,7 @@
       <div><b>🧠 Memory search service</b> <span class="sub" id="embedStatus">…</span></div>
       <div class="sub" style="margin-top:2px">One engine on this machine for every agent's semantic memory search, instead of one inside each agent (about 290 MB each). Nothing uses it until an agent is switched to it.</div>
       <div class="actions" id="embedActions" style="justify-content:flex-start;margin-top:6px"></div>
+      <div id="embedFleetRow" hidden style="margin-top:8px"><div id="embedFleetBody" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"></div></div>
     </div>
     <h4 style="margin:16px 0 4px">Add a runner</h4>
     <div class="sub" style="margin-bottom:6px">
@@ -2612,6 +2636,10 @@
 
   <div class="sub" id="faErr" style="color:var(--bad);margin-top:8px"></div>
   <div id="faResults" class="sub" style="margin-top:8px"></div>
+  <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <b>Rebuild everything</b><button onclick="rebuildAll()">Rebuild all</button>
+    <span class="sub" style="flex-basis:100%">A new container for every running agent, memory kept. Picks up a new runtime image or network. Stopped and sleeping agents are rebuilt when they next start.</span>
+  </div>
   <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px;flex-wrap:wrap">
     <button onclick="fleetActionsDlg.close()">Close</button>
     <button class="primary" id="faApplyBtn" onclick="faApply()">Apply</button>
@@ -4085,7 +4113,7 @@ function showTabPane(name) {
   if (name === 'access') { void loadAccounts(); void loadSecondFactor(); void loadReach(true); }
   if (name === 'classes') loadClasses();
   if (name === 'conn') loadConnections();
-  if (name === 'hosts') { loadHosts(); loadEmbedder(); }
+  if (name === 'hosts') { loadHosts(); loadEmbedder(); void loadEmbedFleet(); }
   if (name === 'pool') loadPool();
   if (name === 'discord') void loadPoolPane('discord');
   if (name === 'slack') void loadPoolPane('slack');
@@ -8171,6 +8199,95 @@ async function loadActivity() {
   } catch { /* the feed is never worth breaking the page for */ }
 }
 
+// ---- the home screen's foot: Activity and the machine line (Status retired, 2026-10-05) ----
+// Activity: the newest events, read with the list poll at most every 30 s;
+// "See all" opens the full log. The machine line (the machine owner's): each
+// machine and whether it answers, the latest backup, the OpenClaw version —
+// what Status → Health showed that the home screen did not. A machine that
+// is not answering, or backups that are late, are also Alerts on the
+// Hatchabot agent's tile (agentAttention).
+const V2_ACT_N = 12;
+let v2ActAt = 0, v2ActBusy = false;
+const v2ActFolded = () => { try { return localStorage.getItem('hb-activity-folded') === '1'; } catch { return false; } };
+function v2FoldActivity() {
+  const folded = !v2ActFolded();
+  try { localStorage.setItem('hb-activity-folded', folded ? '1' : '0'); } catch {}
+  v2PaintActivityFold();
+}
+function v2PaintActivityFold() {
+  const f = v2ActFolded();
+  $('v2ActList').hidden = f;
+  $('v2ActFold').textContent = f ? 'Show' : 'Hide';
+  $('v2ActFold').setAttribute('aria-expanded', String(!f));
+}
+async function v2LoadActivity(force = false) {
+  if (v2ActBusy || (!force && Date.now() - v2ActAt < 30_000)) return;
+  v2ActBusy = true;
+  try {
+    const evs = await api(`/v1/events?limit=${V2_ACT_N}`);
+    const box = $('v2Activity');
+    box.hidden = !evs.length;
+    $('v2ActCount').textContent = evs.length ? String(evs.length) : '';
+    $('v2ActList').innerHTML = evs.map(e => {
+      const what = EVENT_WORDS[e.event] ?? e.event.replace(/[._]/g, ' ');
+      const bad = /fail|missing|unhealthy|rolled_back/.test(e.event);
+      return `<div class="v2actrow"><span class="t" title="${esc(new Date(e.at).toLocaleString())}">${esc(ago(e.at))}</span>
+        <span class="w"><b>${esc(e.agentName ?? 'agent')}</b> <span${bad ? ' class="bad"' : ''}>${esc(what)}</span></span></div>`;
+    }).join('');
+    v2PaintActivityFold();
+  } catch { /* never worth breaking the page for */ }
+  finally { v2ActBusy = false; v2ActAt = Date.now(); }
+}
+let v2Machine = null, v2MachineAt = 0, v2MachineBusy = false;
+async function v2LoadMachine(force = false) {
+  if (!myAccount?.hostOwner || v2MachineBusy || (!force && Date.now() - v2MachineAt < 60_000)) return;
+  v2MachineBusy = true;
+  try {
+    const [hs, b, rt] = await Promise.all([api('/v1/hosts').catch(() => null), api('/v1/backups').catch(() => null), api('/v1/runtime').catch(() => null)]);
+    const latest = b?.backups?.[0];
+    let backup = null;
+    if (b) {
+      if (!latest) backup = { warn: 'none yet — the nightly job runs at 03:30' };
+      else {
+        const ageDays = Math.floor((Date.now() - Date.parse(latest.date + 'T00:00:00')) / 86400000);
+        const why = [ageDays > 2 ? `the latest is ${ageDays} days old` : '', latest.complete === false ? 'the latest is incomplete' : '', !latest.hasKey ? 'no key' : '',
+          (b.missing ?? []).length ? `${b.missing.length} agent${b.missing.length === 1 ? '' : 's'} not covered` : ''].filter(Boolean).join(', ');
+        backup = { date: latest.date, ageDays, ...(why ? { warn: why } : {}) };
+      }
+    }
+    v2Machine = { hosts: Array.isArray(hs) ? hs : [], backup, runtime: rt };
+    v2PaintMachine();
+    renderV2(); // the Hatchabot agent's tile carries the machine's alerts
+  } catch { /* the line stays as it was */ }
+  finally { v2MachineBusy = false; v2MachineAt = Date.now(); }
+}
+function v2PaintMachine() {
+  const el = $('v2Machine'); if (!el) return;
+  if (!v2Machine) { el.hidden = true; return; }
+  const parts = v2Machine.hosts.map(h => {
+    const n = `${h.agentCount ?? 0} agent${h.agentCount === 1 ? '' : 's'}`;
+    if (h.kind === 'local') return `<span>🖥 ${esc(h.hostname || h.name)} · ${n}</span>`;
+    return `<span>💻 ${esc(h.name)} · ${n} · ${h.reachable === false ? '<span class="warn">not answering</span>' : h.reachable ? 'answering' : 'not checked'}</span>`;
+  });
+  const bk = v2Machine.backup;
+  if (bk) parts.push(bk.date ? `<span>💾 Backup ${esc(bk.date)}${bk.ageDays ? ` (${bk.ageDays}d ago)` : ''}${bk.warn ? ` · <span class="warn">${esc(bk.warn)}</span>` : ''}</span>` : `<span>💾 Backups: <span class="warn">${esc(bk.warn)}</span></span>`);
+  const rt = v2Machine.runtime;
+  if (rt?.imageVersion) parts.push(`<span>OpenClaw ${esc(rt.imageVersion)}${rt.upgradeAvailable && rt.npmLatest ? ` · ${esc(rt.npmLatest)} out` : ''}</span>`);
+  el.innerHTML = parts.join('');
+  el.hidden = !parts.length;
+}
+/** The machine's alerts, on the Hatchabot agent's tile (its owner's, who owns the machine). */
+function v2MachineAlerts() {
+  if (!v2Machine) return [];
+  const out = [];
+  for (const h of v2Machine.hosts) if (h.kind !== 'local' && h.reachable === false && (h.agentCount ?? 0) > 0) {
+    out.push({ key: 'runner-down:' + h.id, icon: '💻', why: `${h.name} isn't answering (asleep or offline?) — its ${h.agentCount} agent${h.agentCount === 1 ? '' : 's'} can't be reached until it is back` });
+  }
+  const bk = v2Machine.backup;
+  if (bk?.warn) out.push({ key: `backup:${bk.date || 'none'}:${bk.warn}`, icon: '💾', why: `backups: ${bk.warn} (⚙ Settings → Backups)` });
+  return out;
+}
+
 // The full audit log: same feed as the card, but browsable — filter to one
 // agent, pull more, and see each event's recorded detail and exact time.
 async function openAudit(agentId) {
@@ -8240,7 +8357,7 @@ async function loadModelPrices() {
     el.innerHTML = renderModelPrices(d);
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
-/** Settings → AI sources, with the price list open (from Status → Usage). */
+/** Settings → AI sources, with the price list open (from Usage). */
 function openModelPrices() {
   void openAiDlg('ai');
   const d = $('pricesDrawer');
@@ -8429,7 +8546,7 @@ function openFleetUsage() {
   fleetUsageDlg.showModal();
   loadFleetUsage();
 }
-// The period of the Status → Usage view (hour, 3–12 hours, day, week); remembered per browser.
+// The period of the Usage panel (hour, 3–12 hours, day, week); remembered per browser.
 const FLEET_USAGE_PERIODS = [['hour', 'Hour'], ['3h', '3h'], ['6h', '6h'], ['9h', '9h'], ['12h', '12h'], ['day', 'Day'], ['week', 'Week']];
 let fleetUsagePeriod = (() => { try { return localStorage.getItem('hb-fleet-usage-period') || 'day'; } catch { return 'day'; } })();
 function setFleetUsagePeriod(p) {
@@ -8631,7 +8748,7 @@ function openFleetHealth() {
 
 /** 📊 Sources: which of your agents are on which AI source, and which model
  *  each runs now. Mirrors `hatchabot sources`. */
-// Memory search across the fleet (Status → Tools): what new agents get, and moving the rest.
+// Memory search across the fleet (Settings → Hosts, under the service): what new agents get, and moving the rest.
 async function loadEmbedFleet() {
   const row = $('embedFleetRow'), el = $('embedFleetBody');
   if (!row || !myAccount.hostOwner) return;
@@ -8725,7 +8842,7 @@ async function openFleetResources() {
   // Only while this view is the one showing: another Fleet tab, or a closed
   // panel, must not keep `docker stats` running on every machine.
   fleetResTimer = setInterval(() => {
-    const showing = fleetResDlg.open || (v2FleetDlg?.open && v2FleetTab === 'resources');
+    const showing = fleetResDlg.open;
     if (showing) draw(); else { clearInterval(fleetResTimer); fleetResTimer = null; }
   }, 5000);
 }
@@ -11159,7 +11276,8 @@ function agentAttention(a) {
   if (a.budget?.line) out.push({ key: `budget:${a.budget.month}:${a.budget.level}:${a.budget.usd}${a.budget.paused ? ':p' : ''}`, icon: a.budget.paused ? '⏸' : '💵', why: a.budget.line + ' (Usage → Monthly budget)' });
   if (a.budgetPaused && !a.budget?.paused) out.push({ key: 'mbudget-pause:' + a.budgetPaused.at, icon: '⏸', why: "paused by this Hatchabot's monthly budget — it starts again on the 1st, when the machine's budget is raised, or when you start it" });
   if (a.machineBudget?.line) out.push({ key: `mbudget:${a.machineBudget.month}:${a.machineBudget.level}:${a.machineBudget.usd}`, icon: '💵', why: 'This Hatchabot (every agent): ' + a.machineBudget.line.replace(/^Over /, 'over ').replace(/^Used /, 'used ') + ' (⚙ Settings → AI sources → Budgets)' });
-  if (a.selfRestarts) out.push({ key: 'restart:' + a.selfRestarts, icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Status → Resources shows its memory against the cap` });
+  if (a.ops && v2Mine(a)) out.push(...v2MachineAlerts());
+  if (a.selfRestarts) out.push({ key: 'restart:' + a.selfRestarts, icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Resources shows its memory against the cap` });
   return out;
 }
 
@@ -11489,8 +11607,8 @@ async function refresh(withMeta) {
     if (UI_V2) void v2LoadRecent(); // each agent's last line, for its tooltip (at most every 30 s)
     if (UI_V2) void v2LoadCosts(); // the cost badges (at most every 5 minutes)
     $('offlineBanner').hidden = true; // reached the server: any earlier warning is stale
-    // The classic Activity card; v2 hides it (Status → Activity loads its own).
-    if (!UI_V2) loadActivity();
+    // The classic Activity card; v2 has its own at the foot of the home screen, with the machine line.
+    if (!UI_V2) loadActivity(); else { void v2LoadActivity(); void v2LoadMachine(); }
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
     if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); loadFleetKeys(); void loadSecurityNotices(); }
@@ -12624,7 +12742,7 @@ function v2Pane(a, tab) {
     }
     case 'usage': return (v2Mine(a) && a.state !== 'ARCHIVED' ? row('Monthly budget', `<div id="v2BudgetRow" data-agent="${esc(a.id)}" style="flex-basis:100%"><div class="sub">Loading…</div></div>`) : '')
       + (run ? `<div id="v2UsageBody" style="padding:4px 2px">Loading…</div>`
-      : row('Usage', `<span>${v2NotRunning(a, 'its figures')} They are read from its container; Status → Usage still counts what it used while running.</span>`));
+      : row('Usage', `<span>${v2NotRunning(a, 'its figures')} They are read from its container; Usage still counts what it used while running.</span>`));
     case 'schedule': return run ? slot('cronBody') : row('Scheduled tasks', `<span>${v2NotRunning(a, 'its tasks')}</span>`);
     case 'files': return built ? `<div id="v2Files" data-agent="${id}"><div class="sub">Loading…</div></div>`
       : row('Files', '<span>Nothing is built yet.</span>');
@@ -13228,56 +13346,12 @@ function v2ConvertPanels() {
     }
   }
 }
-// ---- the Fleet panel: health, usage, resources, activity, fleet-wide tools ----------------
-// ("AI in use" left the panel in v2.43.0: View by → AI source / Model on the
-// home screen show the same thing. The classic look keeps its 📊 Sources dialog.)
-// Four views that used to be separate panels become tabs of one. Each view's
-// own dialog body is borrowed into the tab (ids and loaders unchanged) and put
-// back when the tab changes or the panel closes.
-const V2_FLEET = [
-  ['health', 'Health', 'fleetDlg'],
-  ['usage', 'Usage', 'fleetUsageDlg'],
-  ['resources', 'Resources', 'fleetResDlg'],
-  ['activity', 'Activity', 'auditDlg'],
-  ['tools', 'Tools', null],
-];
-const V2_FLEET_OPEN = {}; // the original openers, captured by initV2
-let v2FleetTab = 'health';
-function v2ParkFleet() {
-  if (fleetResTimer) { clearInterval(fleetResTimer); fleetResTimer = null; }
-  for (const el of $('v2FleetBody').querySelectorAll(':scope > [data-v2from]')) $(el.dataset.v2from).append(el);
-  $('v2FleetBody').innerHTML = '';
-}
-/** Run an opener with its dialog's showModal disarmed, so it loads into the
- *  borrowed body without popping its own panel. */
-async function v2WithoutModal(dlg, fn) {
-  const show = dlg.showModal;
-  dlg.showModal = () => {};
-  try { await fn(); } finally { dlg.showModal = show; }
-}
-async function openFleet(tab = v2FleetTab, arg) {
-  v2FleetTab = V2_FLEET.some(([k]) => k === tab) ? tab : 'health';
-  $('v2FleetTabs').innerHTML = V2_FLEET.map(([k, label]) =>
-    `<button class="tab" role="tab" aria-selected="${k === v2FleetTab}" onclick="openFleet('${k}')">${label}</button>`).join('');
-  v2ParkFleet();
-  if (!v2FleetDlg.open) v2FleetDlg.showModal();
-  const [, , dlgId] = V2_FLEET.find(([k]) => k === v2FleetTab);
-  if (!dlgId) {
-    $('v2FleetBody').innerHTML = `
-      <div class="v2row"><div class="v2k">Bulk actions</div><div class="v2v"><button onclick="openFleetActions()">⚡ Choose agents…</button>
-        <span class="sub">Switch model, rebuild, stop or start a selection — by AI source, group, machine or state.</span></div></div>
-      <div class="v2row"><div class="v2k">Rebuild everything</div><div class="v2v"><button onclick="rebuildAll()">Rebuild all</button>
-        <span class="sub">New container for every running agent, memory kept. Picks up a new runtime image or network. Stopped and sleeping agents are rebuilt when they next start.</span></div></div>
-      <div class="v2row" id="embedFleetRow" hidden><div class="v2k">Memory search</div><div class="v2v" id="embedFleetBody"></div></div>
-`;
-    void loadEmbedFleet();
-    return;
-  }
-  const body = $(`${dlgId}Body`);
-  $('v2FleetBody').append(body);
-  await v2WithoutModal($(dlgId), () => V2_FLEET_OPEN[v2FleetTab](arg));
-}
-v2FleetDlg.addEventListener('close', v2ParkFleet);
+// ---- Status retired (Chris, 2026-10-05) ----------------------------------------------------
+// Usage and Resources are header buttons opening their own panels; Activity is
+// the home screen's last section; Health's machine facts (runners, backups,
+// OpenClaw) are the machine line under it, its problems Alerts on the
+// Hatchabot agent's tile; Tools went to Bulk actions (Rebuild all) and
+// Settings → Hosts (memory search for every agent).
 
 // ---- health, inline on an agent's Overview -----------------------------------------------
 function v2InlineHealth(id, name) {
@@ -13520,12 +13594,7 @@ function initV2() {
     for (const el of [...dlg.children]) if (!el.classList.contains('v2pbar')) body.append(el);
     dlg.append(body);
   };
-  for (const [, , dlgId] of V2_FLEET) if (dlgId) wrapBody($(dlgId), `${dlgId}Body`, true);
   wrapBody(healthDlg, 'healthDlgBody', false);
-  Object.assign(V2_FLEET_OPEN, { health: openFleetHealth, usage: openFleetUsage, resources: openFleetResources, activity: openAudit });
-  openFleetHealth = () => openFleet('health');
-  openFleetUsage = () => openFleet('usage');
-  openAudit = (agentId) => openFleet('activity', agentId);
   // The voice and web-search keys are outside services an agent can use —
   // they sit with the Google accounts under Connections, not with AI sources.
   $('paneConn').insertAdjacentHTML('beforeend', '<h4 class="v2sec">Keys for extra abilities</h4>');

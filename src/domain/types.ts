@@ -186,7 +186,7 @@ export interface Agent {
   swapAllowance?: string;
   /** Cap hits the container had recorded when the cap was last set — hits before that are old news. */
   memoryCapBaseline?: number;
-  /** The high-water mark kept since the owner last cleared the peaks (Status → Resources), and when. */
+  /** The high-water mark kept since the owner last cleared the peaks (Resources), and when. */
   memoryPeakSince?: number;
   memoryPeakClearedAt?: string;
   /** The AI profile the runtime was last configured with (vs the desired one). */

@@ -2226,8 +2226,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const ownerId = ownerIdOf(req);
     const admin = ownsLocalHost(req);
     const active = store.listAllActiveAgents().filter((a) => admin || a.ownerId === ownerId);
-    return store.listHosts(ownerId).map((h) => ({
+    const hosts = store.listHosts(ownerId);
+    // Whether each other machine answers a quick connect now (the provider's
+    // cached probe, the same one every call to it goes through): the home
+    // screen's machine line and its alert (2026-10-05).
+    const reach = new Map(await Promise.all(hosts.filter((h) => h.kind !== 'local').map(async (h) =>
+      [h.id, await (async () => (await providerFor(h.id).reachable?.()) ?? true)().catch(() => undefined)] as const)));
+    return hosts.map((h) => ({
       ...h,
+      ...(reach.has(h.id) && reach.get(h.id) !== undefined ? { reachable: reach.get(h.id) } : {}),
       agentCount: active.filter((a) => a.hostId === h.id).length,
       // The local host's stored NAME is a label ("This machine (studio-mini)");
       // this is the machine itself. Agent cards want the bare hostname, and
@@ -2393,7 +2400,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     const envFile = process.env.HATCHABOT_ENV_FILE ?? join(process.cwd(), '.env');
     const wrote = await writeEnvVar(envFile, 'HATCHABOT_EMBED_DEFAULT', mode, () => true,
-      'Written by Hatchabot: which memory search engine new agents get (Status → Tools).')
+      'Written by Hatchabot: which memory search engine new agents get (Settings → Hosts).')
       .catch((err: unknown) => ({ ok: false, error: String(err) }));
     if (!wrote.ok) return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
     process.env.HATCHABOT_EMBED_DEFAULT = mode;
@@ -2507,6 +2514,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const hosts = await Promise.all(store.listHosts(ownerId).map(async (h) => {
       const provider = providerFor(h.id);
       if (!provider.stats) return { id: h.id, name: h.name, kind: h.kind, containers: [], error: 'not measurable' };
+      // A machine that is asleep or offline answers at once, not after ssh's connect timeout (2026-10-05).
+      if (provider.reachable && !(await provider.reachable())) return { id: h.id, name: h.name, kind: h.kind, containers: [], unreachable: true, error: "Its machine isn't answering — it may be asleep or offline." };
       try {
         const rows = await statsFor(h.id, provider);
         type Row = ContainerStats & { agentId?: string; agentName?: string; role: 'agent' | 'hatchabot' | 'embedder' | 'embed-door' | 'doorman'; mine?: boolean; shared?: boolean };
@@ -4900,6 +4909,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const all = req.query.all === '1';
     if (all && !ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const agents = all ? store.listAllActiveAgents() : store.listVisibleAgents(ownerIdOf(req));
+    // Machines that do not answer a quick connect (asleep or offline): their
+    // agents' lookups are skipped for a minute and their tiles say so at once,
+    // rather than each lookup finding out by timing out (2026-10-05).
+    await Promise.all([...new Set(agents.filter((a) => a.state === 'RUNNING' || a.state === 'STOPPED').map((a) => a.hostId))].map(async (hostId) => {
+      const up = await (async () => (await providerFor(hostId).reachable?.()) ?? true)().catch(() => true);
+      if (!up) slowHostUntil.set(hostId, Date.now() + 60_000);
+    }));
     // Fleet-wide lookups once per request (publicAgent's per-agent versions are
     // for single-agent responses; on a 45-agent list they were 3 queries each).
     const peersPendingSet = store.agentsWithPeersPending(ownerIdOf(req));

@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.123.0] — 2026-10-05
+
+### Fixed
+- **A machine that is asleep or offline no longer makes pages hang** (Resources sat waiting while the laptop runner was off). Before any call to another machine, Hatchabot now makes a quick connect to its ssh/tcp port (at most 2.5 s; the answer kept 15 s when it is there, 30 s when it is not). A machine that does not answer is skipped at once: Resources lists it as "Its machine isn't answering — it may be asleep or offline", its agents' tiles say so straight away, their panels (health, usage, logs, files, tasks) fail fast instead of waiting a minute or two for ssh, and the background passes move on. A skipped call answers like a timeout, so an agent is never read as gone or marked failed. `GET /v1/hosts` carries each runner's `reachable`.
+
+### Changed
+- **Status is gone.** **Usage** and **Resources** are header buttons of their own, each opening its own panel. **Activity** is the last section of the home screen (the newest dozen events, foldable; **See all** opens the full log). What Health showed that the home screen did not is the **machine line** at the foot (each machine and its agents, whether a runner answers, the latest backup, the OpenClaw version), and its problems — a runner not answering, backups late, incomplete or keyless — are **Alerts** on the Hatchabot agent's tile. Tools went: **Rebuild all** is at the foot of Bulk actions, and memory search for every agent is in Settings → Hosts beside the service. The account menu has Usage and Resources instead of Status.
+- With five header buttons, a phone tightens them, and under 400 px the wordmark gives way to the logo.
+
 ## [2.122.3] — 2026-10-05
 
 ### Fixed
