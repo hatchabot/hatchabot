@@ -917,6 +917,12 @@ export class Store {
       // management agent reads its tool list once, when its gateway starts, so
       // an upgrade that adds a tool needs it restarted before it can see one.
       `ALTER TABLE agents ADD COLUMN applied_app_version TEXT`,
+      // Budgets (v2.124.0): "switch to a cheaper model" at the limit, and the
+      // one reply a paused agent's bot sends each chat.
+      `ALTER TABLE budget_pauses ADD COLUMN kind TEXT NOT NULL DEFAULT 'pause'`,
+      `ALTER TABLE budget_pauses ADD COLUMN from_model TEXT`,
+      `ALTER TABLE budget_pauses ADD COLUMN to_model TEXT`,
+      `ALTER TABLE budget_pauses ADD COLUMN replies TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -3424,14 +3430,14 @@ export class Store {
   // ---- budgets (budgets.ts) ----
   listBudgets(): BudgetRow[] {
     return (this.db.prepare(`SELECT * FROM budgets`).all() as any[]).map((r) => ({
-      scope: r.scope, ownerId: r.owner_id, usd: r.usd, atLimit: r.at_limit === 'pause' ? 'pause' : 'warn', setAt: r.set_at, ...(r.set_by ? { setBy: r.set_by } : {}),
+      scope: r.scope, ownerId: r.owner_id, usd: r.usd, atLimit: r.at_limit === 'pause' || r.at_limit === 'cheaper' ? r.at_limit : 'warn', setAt: r.set_at, ...(r.set_by ? { setBy: r.set_by } : {}),
     }));
   }
   getBudget(scope: string): BudgetRow | undefined {
     return this.listBudgets().find((b) => b.scope === scope);
   }
   /** usd null removes it. */
-  setBudget(scope: string, ownerId: string, usd: number | null, atLimit: 'warn' | 'pause', at: string, by?: string): void {
+  setBudget(scope: string, ownerId: string, usd: number | null, atLimit: 'warn' | 'pause' | 'cheaper', at: string, by?: string): void {
     if (usd === null) { this.db.prepare(`DELETE FROM budgets WHERE scope = ?`).run(scope); return; }
     this.db.prepare(`INSERT INTO budgets (scope, owner_id, usd, at_limit, set_at, set_by) VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(scope) DO UPDATE SET owner_id = excluded.owner_id, usd = excluded.usd, at_limit = excluded.at_limit, set_at = excluded.set_at, set_by = excluded.set_by`)
@@ -3476,15 +3482,24 @@ export class Store {
     if (opts.open) where.push('resumed_at IS NULL');
     if (opts.month) { where.push('month = ?'); args.push(opts.month); }
     return (this.db.prepare(`SELECT * FROM budget_pauses ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY paused_at`).all(...args) as any[])
-      .map((r) => ({ agentId: r.agent_id, month: r.month, scope: r.scope, pausedAt: r.paused_at, ...(r.resumed_at ? { resumedAt: r.resumed_at } : {}), ...(r.resumed_by ? { resumedBy: r.resumed_by } : {}) }));
+      .map((r) => ({ agentId: r.agent_id, month: r.month, scope: r.scope, pausedAt: r.paused_at, kind: r.kind === 'cheaper' ? 'cheaper' as const : 'pause' as const,
+        ...(r.kind === 'cheaper' ? { fromModel: r.from_model ?? null } : {}), ...(r.to_model ? { toModel: r.to_model } : {}),
+        ...(r.replies ? { replies: safeParse(r.replies) as Record<string, { u: number; at: number }> } : {}),
+        ...(r.resumed_at ? { resumedAt: r.resumed_at } : {}), ...(r.resumed_by ? { resumedBy: r.resumed_by } : {}) }));
   }
   getBudgetPause(agentId: string, month: string): BudgetPauseRow | undefined {
     return this.listBudgetPauses({ month }).find((p) => p.agentId === agentId);
   }
   /** Paused (again) this month: an earlier resume that was not the owner's own is replaced. */
-  addBudgetPause(agentId: string, month: string, scope: string, at: string): void {
-    this.db.prepare(`INSERT INTO budget_pauses (agent_id, month, scope, paused_at) VALUES (?, ?, ?, ?)
-      ON CONFLICT(agent_id, month) DO UPDATE SET scope = excluded.scope, paused_at = excluded.paused_at, resumed_at = NULL, resumed_by = NULL`).run(agentId, month, scope, at);
+  addBudgetPause(agentId: string, month: string, scope: string, at: string, cheaper?: { fromModel: string | null; toModel: string }): void {
+    this.db.prepare(`INSERT INTO budget_pauses (agent_id, month, scope, paused_at, kind, from_model, to_model) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(agent_id, month) DO UPDATE SET scope = excluded.scope, paused_at = excluded.paused_at, kind = excluded.kind,
+        from_model = excluded.from_model, to_model = excluded.to_model, resumed_at = NULL, resumed_by = NULL`)
+      .run(agentId, month, scope, at, cheaper ? 'cheaper' : 'pause', cheaper?.fromModel ?? null, cheaper?.toModel ?? null);
+  }
+  /** The chats a paused agent's bot has answered: chat id → the newest update seen, and when it last replied. */
+  setBudgetPauseReplies(agentId: string, month: string, replies: Record<string, { u: number; at: number }>): void {
+    this.db.prepare(`UPDATE budget_pauses SET replies = ? WHERE agent_id = ? AND month = ?`).run(JSON.stringify(replies), agentId, month);
   }
   resumeBudgetPause(agentId: string, month: string, at: string, by: string): void {
     this.db.prepare(`UPDATE budget_pauses SET resumed_at = ?, resumed_by = ? WHERE agent_id = ? AND month = ? AND resumed_at IS NULL`).run(at, by, agentId, month);
@@ -4958,16 +4973,25 @@ export interface BudgetRow {
   scope: string;
   ownerId: string;
   usd: number;
-  atLimit: 'warn' | 'pause';
+  atLimit: 'warn' | 'pause' | 'cheaper';
   setAt: string;
   setBy?: string;
 }
-/** An agent a budget paused (budgets.ts). resumedBy: owner | new-month | budget-raised | gone. */
+/**
+ * An agent a budget paused, or moved to a cheaper model (budgets.ts).
+ * resumedBy: owner | new-month | budget-raised | started | gone.
+ */
 export interface BudgetPauseRow {
   agentId: string;
   month: string;
   scope: string;
   pausedAt: string;
+  kind: 'pause' | 'cheaper';
+  /** cheaper: the agent's own model pin before the switch (null = its source's default). */
+  fromModel?: string | null;
+  /** cheaper: the model it was moved to. */
+  toModel?: string;
+  replies?: Record<string, { u: number; at: number }>;
   resumedAt?: string;
   resumedBy?: string;
 }
@@ -4980,7 +5004,7 @@ export interface TokenActionRow {
   kind: 'compaction' | 'context-cap' | 'budget';
   at: string;
   by: 'owner' | 'agent' | 'hatchabot';
-  via: 'app' | 'api' | 'proposal' | 'guard' | 'backfill';
+  via: 'app' | 'api' | 'proposal' | 'guard' | 'backfill' | 'budget';
   why?: string;
   proposalId?: string;
   /** compaction: mode, lines, session, before/after context; context-cap: from, to, model, before figures. */
@@ -4998,7 +5022,7 @@ export interface ModelChangeRow {
   profileId?: string;
   at: string;
   by: 'owner' | 'agent' | 'hatchabot';
-  via: 'app' | 'api' | 'proposal' | 'guard' | 'backfill';
+  via: 'app' | 'api' | 'proposal' | 'guard' | 'backfill' | 'budget';
   source: string;
   why?: string;
   proposalId?: string;

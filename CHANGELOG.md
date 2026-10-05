@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.124.0] — 2026-10-05
+
+### Added
+- **Budgets: "cheaper model" at the limit.** Beside *warn me* and *pause it*, a budget can move the agent at 100% to the cheapest model its AI source offers, live, until the 1st — it keeps answering. Its own model comes back on the 1st or as soon as the budget is raised; a model set by hand wins for the rest of the month. Recorded in the model ledger as Hatchabot's (`via: budget`): no quality-guard verdict or switch-back card, and left out of Right-size's savings. `set_budget` takes `at_limit: "cheaper"`; the machine budget can do the same for every agent but the Hatchabot agent.
+- **A paused agent answers whoever writes to it** on Telegram, once a chat (direct chats; at most every 12 hours): it is paused for its budget, when it is back, and that messages sent meanwhile may not reach it. The bot's queue is read without confirming anything, as a sleeping agent's is, so the messages are still there when it is back within the day.
+- **A monthly budget for new agents**: Settings → Hosts → Defaults for this machine → *Monthly budget for new agents* ("50", "50 pause", "50 cheaper"; `HATCHABOT_NEW_AGENT_BUDGET`). The Hatchabot agent's only warns.
+
 ## [2.123.0] — 2026-10-05
 
 ### Fixed

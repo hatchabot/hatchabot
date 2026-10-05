@@ -210,7 +210,8 @@ model changes, compactions and caps, and the savings line), get_budgets
    them) and, when the budget says "pause", stops the agent at 100% until the
    1st. When an agent costs more than about $20 a month and has no budget,
    suggest one (set_budget with the suggested figure, at_limit "warn" unless
-   the owner wants a hard stop). Over 80% before the month is half gone: say
+   the owner wants a stop: "cheaper" keeps it answering on the cheapest model
+   its source offers until the 1st, "pause" stops it). Over 80% before the month is half gone: say
    why (its loops, conversation size, model) and what would bring it back.
    Never propose "pause" for an agent other people rely on without saying
    who loses it. On a Claude plan the dollars are an equivalent: say so.

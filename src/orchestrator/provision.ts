@@ -1,4 +1,5 @@
 import { ensureOpsServer } from '../ops/opsServer.js';
+import { newAgentBudget } from './budgets.js';
 import { claudePlanAllowed, CLAUDE_PLAN_HOSTED } from '../config/claudePlan.js';
 import { clearOpsDrift } from '../ops/opsDrift.js';
 import { randomBytes } from 'node:crypto';
@@ -171,6 +172,9 @@ export function createAgentRecord(store: Store, input: CreateAgentInput): Agent 
     updatedAt: now,
   };
   store.insertAgent(agent);
+  // The machine's monthly budget for new agents (budgets.ts), if it has one.
+  const budget = newAgentBudget();
+  if (budget) store.setBudget(agent.id, agent.ownerId, budget.usd, budget.atLimit, now, 'default');
   // The fleet default for memory search: shared once the owner flipped it
   // (Status → Tools); only where the service is — this machine.
   if (embedDefault() === 'shared' && host.kind === 'local') store.setAgentEmbedMode(agent.id, 'shared');

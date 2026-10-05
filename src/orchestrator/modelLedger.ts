@@ -307,7 +307,8 @@ export function recordChange(store: Store, c: ChangeMeta & { agentId: string; fr
  * the change is RECHECK_DAYS old. Returns the changes that became "worse".
  */
 export function evaluateModelChanges(store: Store, now = Date.now(), ownerId?: string): ModelChangeRow[] {
-  const open = store.listModelChanges({ ownerId, outcomes: ['pending', 'not-enough-data'], limit: 5000 });
+  // A budget's own switch (budgets.ts "cheaper") is no right-sizing to judge: it gets no verdict and no switch-back card.
+  const open = store.listModelChanges({ ownerId, outcomes: ['pending', 'not-enough-data'], limit: 5000 }).filter((c) => c.via !== 'budget');
   if (!open.length) return [];
   const agentIds = [...new Set(open.map((c) => c.agentId))];
   const profiles = store.modelProfiles(agentIds) as Map<string, { profile: StoredProfile; at: string }>;
@@ -487,7 +488,7 @@ export function rightSizeSavings(store: Store, ownerId: string, now = Date.now()
   const earlier = new Map<string, number>();
   const shareCache = new Map<string, number>();
   for (const c of changes) {
-    if (!c.from) continue;
+    if (!c.from || c.via === 'budget') continue; // a budget's switch, and its switch back, are not Right-size's
     const stored = profiles.get(c.agentId);
     if (!stored || !hasHours(stored.profile)) continue;
     const next = changes.find((x) => x.agentId === c.agentId && x.at > c.at);

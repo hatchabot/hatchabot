@@ -75,7 +75,7 @@ import { agentUsage } from '../orchestrator/usage.js';
 import { runUsageAlerts } from '../orchestrator/usageAlerts.js';
 import { buildTokenHealth, modelRefOf, THRESHOLDS as TOKEN_THRESHOLDS } from '../orchestrator/tokenHealth.js';
 import { runTokenWatch } from '../orchestrator/tokenWatch.js';
-import { MACHINE, MAX_BUDGET, MIN_BUDGET, budgetLine, budgetView, machineTz, monthKey, monthSpend, prevMonth, runBudgets, suggestBudget, type BudgetView } from '../orchestrator/budgets.js';
+import { MACHINE, MAX_BUDGET, MIN_BUDGET, budgetLine, budgetView, machineTz, monthKey, monthSpend, pausedReplySweep, prevMonth, runBudgets, suggestBudget, type BudgetView } from '../orchestrator/budgets.js';
 import { compactAgent, CompactError, syncContextCap, type CompactMode } from '../orchestrator/compaction.js';
 import type { TokenHealthRaw } from '../orchestrator/usage.js';
 import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orchestrator/unread.js';
@@ -2136,6 +2136,35 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           return true;
         },
         resume: async (a) => (await startStopped(a)).ok,
+        // "Switch to a cheaper model" at the limit: the cheapest model its source
+        // offers, live, in the ledger as the budget's (the quality guard and the
+        // Right-size savings leave such changes out); its own pin comes back after.
+        downgrade: async (a) => {
+          const profile = store.getAIProfile(a.aiProfileId);
+          if (!profile || profile.vendor === 'local') return undefined;
+          const price = (m: string) => { const o = modelOption(m); return o ? o.input + o.output / 5 : undefined; };
+          const cur = effectiveModel(a, profile);
+          const offered = [...new Set([profile.model, ...(profile.models ?? [])].filter((m): m is string => !!m))];
+          const cheapest = offered.filter((m) => price(m) !== undefined && !modelOverrideProblem(profile, m)).sort((x, y) => price(x)! - price(y)!)[0];
+          const now = price(cur);
+          if (!cheapest || now === undefined || price(cheapest)! >= now) return undefined;
+          const from = a.model ?? null;
+          const before = snapshotModels(store, [a.id]);
+          store.setAgentModel(a.id, cheapest);
+          await applyModelToRuntime(a.id).catch(() => 'failed' as const);
+          recordChanges(store, before, { by: 'hatchabot', via: 'budget', source: 'budget', why: 'Its monthly budget was reached: the cheapest model its source offers, until the 1st.' });
+          return { from, to: cheapest };
+        },
+        restoreModel: async (a, pin) => {
+          const profile = store.getAIProfile(a.aiProfileId);
+          if (!profile) return false;
+          const back = pin && !modelOverrideProblem(profile, pin) ? pin : null;
+          const before = snapshotModels(store, [a.id]);
+          store.setAgentModel(a.id, back);
+          await applyModelToRuntime(a.id).catch(() => 'failed' as const);
+          recordChanges(store, before, { by: 'hatchabot', via: 'budget', source: 'budget', why: 'Back to its own model: a new month, or its budget raised.' });
+          return true;
+        },
         log: (event, detail) => { trace(String(detail.agentId ?? 'admin'))(event, detail); },
       }, Date.now(), opts).catch((err) => { app.log.warn({ err: String(err) }, 'budget.pass_failed'); });
     };
@@ -2143,6 +2172,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     budgetPassing = p;
     return p;
   };
+  // A paused agent's bot answers whoever writes to it, once a chat (budgets.ts).
+  let replySweeping = false;
+  const runPausedReplies = async () => {
+    if (replySweeping || !store.listBudgetPauses({ open: true }).some((p) => p.kind === 'pause')) return;
+    replySweeping = true;
+    try { await pausedReplySweep({ store, secretOf: (ref) => secrets.get(ref), log: (event, detail) => { trace(String(detail.agentId ?? 'admin'))(event, detail); } }); }
+    catch (err) { app.log.warn({ err: String(err) }, 'budget.reply_failed'); }
+    finally { replySweeping = false; }
+  };
+  if (!process.env.VITEST) setInterval(() => { void runPausedReplies(); }, 60_000).unref();
   const runUsageSample = () => {
     if (usageSampling) return usageSampling;
     usageSampling = sampleSourceUsage({ store, providerFor, log: (e, d) => app.log.info(d, e) })
@@ -7574,7 +7613,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // ---- budgets (budgets.ts, docs/features.md "Budgets") -------------------
   const budgetBody = z.object({
     usd: z.number().min(MIN_BUDGET).max(MAX_BUDGET).nullable(),
-    atLimit: z.enum(['warn', 'pause']).optional(),
+    atLimit: z.enum(['warn', 'pause', 'cheaper']).optional(),
     why: z.string().max(400).optional(),
   });
   const billingOf = (a: Agent): 'plan' | 'api' | 'local' => {
@@ -7619,13 +7658,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       ...(ownsLocalHost(req) ? { machine: machineBudgetView(now) } : {}),
       notes: [
         'Dollars at API list prices, the same as the cost badges; on a Claude plan they are an equivalent, not a bill. A month is the calendar month in the machine\'s time zone; spend is read every 10 minutes.',
-        'At 80% and at 100% the owner gets a line under Alerts and one message. atLimit "pause" stops the agent at 100% until the 1st (or until the budget is raised, or it is started by hand — then it runs on until the 1st); "warn" only tells. The manager is never paused.',
+        'At 80% and at 100% the owner gets a line under Alerts and one message. atLimit "pause" stops the agent at 100% until the 1st (or until the budget is raised, or it is started by hand — then it runs on until the 1st); "cheaper" moves it to the cheapest model its source offers until then (a model changed by hand wins); "warn" only tells. The manager is never paused or moved.',
       ],
     };
   });
   const budgetMessage = (name: string, b: { usd: number; atLimit: string } | null, view?: BudgetView): string => {
     if (!b) return `${name} has no budget now.`;
-    const line = `${name}'s budget: $${b.usd} a month, ${b.atLimit === 'pause' ? 'pausing at the limit' : 'warning at 80% and 100%'}.`;
+    const line = `${name}'s budget: $${b.usd} a month, ${b.atLimit === 'pause' ? 'pausing at the limit' : b.atLimit === 'cheaper' ? 'moving to a cheaper model at the limit' : 'warning at 80% and 100%'}.`;
     return view ? `${line} Spent so far this month: $${view.spent.toFixed(2)} (${view.pct}%).` : line;
   };
   /** One agent's monthly budget (owner only): usd null removes it. */
@@ -7633,10 +7672,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = ownedAgent(req, req.params.id);
     if (!agent || agent.state === 'DELETED') return reply.code(404).send({ error: 'Not found' });
     const parsed = budgetBody.safeParse(req.body ?? {});
-    if (!parsed.success) return reply.code(400).send({ error: `usd: a number from ${MIN_BUDGET} to ${MAX_BUDGET} (US dollars a month), or null to remove it; atLimit: "warn" or "pause".` });
+    if (!parsed.success) return reply.code(400).send({ error: `usd: a number from ${MIN_BUDGET} to ${MAX_BUDGET} (US dollars a month), or null to remove it; atLimit: "warn", "pause" or "cheaper".` });
     const before = store.getBudget(agent.id);
     const atLimit = parsed.data.atLimit ?? before?.atLimit ?? 'warn';
-    if (agent.ops && atLimit === 'pause' && parsed.data.usd !== null) return reply.code(400).send({ error: 'Your Hatchabot agent is never paused (it is how you manage the others): its budget can only warn.' });
+    if (agent.ops && atLimit !== 'warn' && parsed.data.usd !== null) return reply.code(400).send({ error: 'Your Hatchabot agent is never paused or moved to another model by a budget (it is how you manage the others): its budget can only warn.' });
     const meta = ledgerMeta(req, 'budget');
     const nowIso = new Date().toISOString();
     store.setBudget(agent.id, agent.ownerId, parsed.data.usd, atLimit, nowIso, meta.by);
@@ -7657,7 +7696,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.put('/v1/budgets/machine', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const parsed = budgetBody.safeParse(req.body ?? {});
-    if (!parsed.success) return reply.code(400).send({ error: `usd: a number from ${MIN_BUDGET} to ${MAX_BUDGET} (US dollars a month), or null to remove it; atLimit: "warn" or "pause".` });
+    if (!parsed.success) return reply.code(400).send({ error: `usd: a number from ${MIN_BUDGET} to ${MAX_BUDGET} (US dollars a month), or null to remove it; atLimit: "warn", "pause" or "cheaper".` });
     const before = store.getBudget(MACHINE);
     const atLimit = parsed.data.atLimit ?? before?.atLimit ?? 'warn';
     store.setBudget(MACHINE, ownerIdOf(req), parsed.data.usd, atLimit, new Date().toISOString(), ledgerMeta(req, 'budget').by);
@@ -7962,6 +8001,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = createAgentRecord(store, { ownerId, name, persona: OPS_AGENT_PERSONA, aiProfileId: profile.id, hostId: host.id, ownerOnlyMemory: true });
     store.setAgentWebOnly(agent.id, true);
     store.setAgentOps(agent.id, true);
+    // The machine's default budget for new agents may say pause or cheaper: the manager's can only warn.
+    { const b = store.getBudget(agent.id); if (b && b.atLimit !== 'warn') store.setBudget(agent.id, b.ownerId, b.usd, 'warn', new Date().toISOString(), b.setBy); }
     store.setAgentIcon(agent.id, OPS_AGENT_ICON, '#e0a13a');
     store.setAgentSeed(agent.id, { 'SOUL.md': OPS_SOUL, 'AGENTS.md': OPS_AGENTS_MD });
     // A morning look at the fleet. Created by Hatchabot (the agent itself has

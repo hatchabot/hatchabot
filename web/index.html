@@ -8380,13 +8380,13 @@ function bgState(v) {
   if (!v) return '';
   const pace = v.onPace && v.onPace > v.spent ? ` · on pace for ${bgMoney(v.onPace)}` : '';
   const cls = v.level ? ' class="bg-hi"' : '';
-  return `<span${cls}>${bgMoney(v.spent)} of ${bgMoney(v.usd)} (${v.pct}%)</span>${pace}${v.paused ? ' · <b>paused</b>' : ''}`;
+  return `<span${cls}>${bgMoney(v.spent)} of ${bgMoney(v.usd)} (${v.pct}%)</span>${pace}${v.paused ? ' · <b>paused</b>' : v.downgraded ? ` · <b>on ${esc(v.downgraded.to.replace(/^.*\//, ''))}</b> until ${esc(v.resetsOn)}` : ''}`;
 }
 function bgControls(key, b, suggested, manager) {
   const usd = b ? b.usd : '';
   return `<input type="number" id="bgUsd_${key}" min="1" max="100000" step="1" value="${usd}" placeholder="${suggested ? 'e.g. ' + suggested : 'none'}" aria-label="Monthly budget in US dollars">
-    <select id="bgAt_${key}" aria-label="At the limit"${manager ? ' disabled title="Your Hatchabot agent is never paused: its budget only warns."' : ''}>
-      <option value="warn"${b?.atLimit !== 'pause' ? ' selected' : ''}>warn me</option><option value="pause"${b?.atLimit === 'pause' ? ' selected' : ''}>pause it</option></select>
+    <select id="bgAt_${key}" aria-label="At the limit"${manager ? ' disabled title="Your Hatchabot agent is never paused or moved to another model: its budget only warns."' : ''}>
+      <option value="warn"${!b || b.atLimit === 'warn' ? ' selected' : ''}>warn me</option><option value="cheaper"${b?.atLimit === 'cheaper' ? ' selected' : ''}>cheaper model</option><option value="pause"${b?.atLimit === 'pause' ? ' selected' : ''}>pause it</option></select>
     <button onclick="saveBudget('${key}')">Save</button>`;
 }
 function renderBudgets(d) {
@@ -8399,16 +8399,16 @@ function renderBudgets(d) {
   const machine = m ? `<div class="pair" style="margin:0 0 10px;flex-wrap:wrap;gap:8px;align-items:center"><b>This whole Hatchabot</b>
       <span class="sub">${bgMoney(m.spent)} in ${esc(month)} so far · ${bgMoney(m.lastMonth)} last month · every agent, everyone's</span>
       <div class="bg-form" style="flex-basis:100%">${bgControls('machine', m.budget, 0, false)}${m.budget ? `<span class="sub">${bgState(m.budget)}</span>` : ''}</div>
-      <div class="sub" style="flex-basis:100%">"Pause it" here pauses every agent but your Hatchabot agent when the machine reaches its budget.</div></div>` : '';
+      <div class="sub" style="flex-basis:100%">Here "pause it" pauses, and "cheaper model" moves, every agent but your Hatchabot agent when the machine reaches its budget.</div></div>` : '';
   return `${machine}<div class="mp-wrap"><table class="mp-tbl bg-tbl"><thead><tr><th>Agent</th><th>${esc(month)}</th><th>Last month</th><th>A month now</th><th style="text-align:left">Monthly budget</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="5" class="sub">No agents yet.</td></tr>'}</tbody></table></div>
-    <p class="sub mp-note">US dollars at API list prices, the same as the cost badges — on a Claude plan it is an equivalent, not a bill. You hear at 80% and at 100% (under Alerts, and once on your Hatchabot agent's chat). <b>Pause it</b> stops the agent at 100% until the 1st of next month — raise the budget or start it to bring it back sooner (started by hand, it runs on until the 1st). Empty a box and Save to remove a budget.</p>`;
+    <p class="sub mp-note">US dollars at API list prices, the same as the cost badges — on a Claude plan it is an equivalent, not a bill. You hear at 80% and at 100% (under Alerts, and once on your Hatchabot agent's chat). <b>Cheaper model</b> moves it at 100% to the cheapest model its AI source offers until the 1st — it keeps answering; raise the budget to switch it back sooner (change its model yourself and the budget leaves it alone). <b>Pause it</b> stops the agent at 100% until the 1st — raise the budget or start it to bring it back sooner (started by hand, it runs on until the 1st); anyone who writes to it on Telegram gets one reply saying so. Empty a box and Save to remove a budget.</p>`;
 }
 async function saveBudget(key) {
   const raw = $('bgUsd_' + key)?.value.trim();
   const usd = raw === '' ? null : Number(raw);
   if (usd !== null && !(usd >= 1 && usd <= 100000)) return toast('A budget is from $1 to $100,000 a month — or empty the box to remove it.');
-  const atLimit = $('bgAt_' + key)?.value === 'pause' ? 'pause' : 'warn';
+  const atLimit = ['pause', 'cheaper'].includes($('bgAt_' + key)?.value) ? $('bgAt_' + key).value : 'warn';
   try {
     const r = await api(key === 'machine' ? '/v1/budgets/machine' : `/v1/agents/${key}/budget`, { method: 'PUT', body: { usd, atLimit } });
     toast(r.message || 'Saved.', 6000);

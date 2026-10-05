@@ -366,21 +366,22 @@ export const REST_TOOLS: RestTool[] = [
     name: 'set_budget', tier: 'mutate', agentArg: true,
     description:
       "Set an agent's monthly budget in US dollars at API prices (the cost badges' figures). At 80% and 100% the owner gets a line under Alerts and one message. "
-      + 'at_limit "warn" (default) only tells; "pause" stops the agent at 100% until the 1st of next month — or until the budget is raised, or the owner starts it (it then runs on until the 1st). '
+      + 'at_limit "warn" (default) only tells; "pause" stops the agent at 100% until the 1st of next month — or until the budget is raised, or the owner starts it (it then runs on until the 1st); '
+      + '"cheaper" moves it to the cheapest model its source offers until the 1st (its own model comes back then, or when the budget is raised; a model the owner sets by hand wins) — a softer stop for an agent people rely on. '
       + 'Your own agent (the manager) can only warn. usd 0 removes the budget. Suggest from get_budgets: suggested, or what the owner asked. Requires the owner\'s confirm.',
     input_schema: obj({
       agent: agentRef,
       usd: { type: 'number', minimum: 0, maximum: 100000, description: 'US dollars a month; 0 removes the budget' },
-      at_limit: { type: 'string', enum: ['warn', 'pause'] },
+      at_limit: { type: 'string', enum: ['warn', 'pause', 'cheaper'] },
     }, ['agent', 'usd']),
     call: ({ agent, input }) => {
       const usd = input.usd === 0 || input.usd === null ? null : input.usd;
       if (usd !== null && (typeof usd !== 'number' || !Number.isFinite(usd) || usd < 1 || usd > 100_000)) throw new Error('usd: from 1 to 100000 US dollars a month, or 0 to remove the budget.');
-      if (input.at_limit !== undefined && input.at_limit !== 'warn' && input.at_limit !== 'pause') throw new Error('at_limit is "warn" or "pause".');
+      if (input.at_limit !== undefined && input.at_limit !== 'warn' && input.at_limit !== 'pause' && input.at_limit !== 'cheaper') throw new Error('at_limit is "warn", "pause" or "cheaper".');
       return { method: 'PUT', path: `/v1/agents/${agent!.id}/budget`, body: { usd, ...(input.at_limit ? { atLimit: input.at_limit } : {}) } };
     },
     card: ({ agent, input }) => typeof input.usd === 'number' && input.usd > 0
-      ? `💵 Give "${agent!.name}" a budget of $${input.usd} a month (at API prices): you hear at 80% and 100%${input.at_limit === 'pause' ? ', and at 100% it pauses until the 1st (raise the budget or start it to bring it back sooner)' : '; it keeps working past it'}.`
+      ? `💵 Give "${agent!.name}" a budget of $${input.usd} a month (at API prices): you hear at 80% and 100%${input.at_limit === 'pause' ? ', and at 100% it pauses until the 1st (raise the budget or start it to bring it back sooner)' : input.at_limit === 'cheaper' ? ', and at 100% it moves to the cheapest model its source offers until the 1st (raise the budget to switch back sooner)' : '; it keeps working past it'}.`
       : `💵 Remove "${agent!.name}"'s monthly budget.`,
     done: (r) => (r && typeof r === 'object' && 'message' in r ? String((r as { message: string }).message) : undefined),
   },

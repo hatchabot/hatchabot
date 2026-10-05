@@ -95,6 +95,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('limits', 'HATCHABOT_FILES_MB_SLACK', '100', 'Largest file an agent sends or receives on Slack (up to 1000).'),
 
   // Agents
+  s('agents', 'HATCHABOT_NEW_AGENT_BUDGET', null, 'A monthly budget every new agent starts with, in US dollars at API prices: "50", "50 pause" or "50 cheaper" (Settings → Hosts → Defaults for this machine). Unset: none.'),
   s('agents', 'HATCHABOT_HIBERNATE_AFTER', null, 'Put agents to sleep after this long without use, e.g. 36h (90m, 6h, 2d). Unset: they never sleep.'),
   s('agents', 'HATCHABOT_REBUILD_POLICY', 'required-only', 'What the machine rebuilds on its own: required-only, auto (also recommended ones, in the quiet hours) or manual.'),
   s('agents', 'HATCHABOT_REBUILD_QUIET_HOURS', '3-5', 'Local hours for automatic rebuilds, "from-to" (wraps midnight).'),

@@ -8,8 +8,11 @@ import { HOUR_FIELDS, type HourField, type WindowModelStats } from '../src/orche
 import type { StoredProfile } from '../src/orchestrator/modelScorecard.js';
 import type { Agent } from '../src/domain/types.js';
 import {
-  budgetLine, budgetView, dailyCosts, dayKey, levelOf, MACHINE, monthElapsed, monthKey, nextMonth, prevMonth, runBudgets, suggestBudget, type BudgetDeps,
+  budgetLine, budgetView, dailyCosts, dayKey, levelOf, MACHINE, monthElapsed, monthKey, nextMonth, parseNewAgentBudget, pausedReplySweep, pausedReplyText, prevMonth, REPLY_EVERY_MS, runBudgets, suggestBudget, type BudgetDeps,
 } from '../src/orchestrator/budgets.js';
+import { MACHINE_DEFAULTS } from '../src/orchestrator/machineDefaults.js';
+import { createAgentRecord } from '../src/orchestrator/provision.js';
+import { evaluateModelChanges, recordChange, rightSizeSavings } from '../src/orchestrator/modelLedger.js';
 import { REST_BY_NAME } from '../src/mgmt/restTools.js';
 import { riskOf } from '../src/mgmt/broker.js';
 import { COVERAGE } from '../src/mgmt/coverage.js';
@@ -317,5 +320,164 @@ describe('the budget routes', () => {
     expect(OPS_AGENTS_MD).not.toContain('does not enforce a budget');
     expect(OPS_MODEL_REVIEW_MESSAGE).toContain('get_budgets');
     expect(OPS_MODEL_REVIEW_MESSAGE).toContain('set_budget');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v2.124.0: a cheaper model at the limit, a paused agent's reply, a default for new agents
+// ---------------------------------------------------------------------------
+
+describe('"cheaper model" at the limit', () => {
+  const cheapWorld = () => {
+    const w = world();
+    const switches: Array<[string, string | null]> = [];
+    w.deps.downgrade = async (a) => { const from = a.model ?? null; w.store.setAgentModel(a.id, 'claude-haiku-4-5'); switches.push([a.id, 'claude-haiku-4-5']); return { from, to: 'claude-haiku-4-5' }; };
+    w.deps.restoreModel = async (a, pin) => { w.store.setAgentModel(a.id, pin); switches.push([a.id, pin]); return true; };
+    return { ...w, switches };
+  };
+
+  it('moves it at 100%, says so once, and the line says until when', async () => {
+    const { store, agent, deps, told, switches } = cheapWorld();
+    agent('k1', 'Recipe Box', { model: 'claude-opus-4-8' });
+    store.setBudget('k1', OWNER, 20, 'cheaper', iso(NOW));
+    store.setModelProfile('k1', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    const r = await runBudgets(deps, NOW);
+    expect(r.downgraded).toEqual(['k1']);
+    expect(store.getAgent('k1')!.model).toBe('claude-haiku-4-5');
+    expect(store.getAgent('k1')!.state).toBe('RUNNING'); // it keeps answering
+    expect(told).toHaveLength(1);
+    expect(told[0]!.text).toContain('"Recipe Box" has used its $20 budget for October ($25.00): it now runs on claude-haiku-4-5 until November 1.');
+    const v = budgetView(store, store.getBudget('k1')!, 25, NOW, 'UTC', 'k1');
+    expect(v.downgraded).toMatchObject({ to: 'claude-haiku-4-5' });
+    expect(budgetLine(v, 'it')).toBe('Over its $20 budget for October ($25.00): on claude-haiku-4-5 until November 1 — raise the budget to switch back now');
+    await runBudgets(deps, NOW + 10 * MIN);
+    expect(switches).toHaveLength(1);
+    expect(told).toHaveLength(1);
+  });
+
+  it('a raised budget, or a new month, puts its own model back; a model changed by hand is left alone', async () => {
+    const { store, agent, deps, switches } = cheapWorld();
+    agent('k2', 'Garden Notes', { model: 'claude-opus-4-8' });
+    agent('k3', 'Tide Tables');
+    for (const id of ['k2', 'k3']) { store.setBudget(id, OWNER, 20, 'cheaper', iso(NOW)); store.setModelProfile(id, profile(NOW, opus(NOW - DAY, 25)), iso(NOW)); }
+    await runBudgets(deps, NOW);
+    store.setBudget('k2', OWNER, 40, 'cheaper', iso(NOW));
+    store.setAgentModel('k3', 'claude-sonnet-5'); // the owner chose a model themselves
+    const r = await runBudgets(deps, NOW + MIN, { record: false });
+    expect(r.resumed).toEqual(['k2']);
+    expect(store.getAgent('k2')!.model).toBe('claude-opus-4-8');
+    expect(store.getBudgetPause('k3', '2026-10')!.resumedBy).toBe('owner');
+    expect(store.getAgent('k3')!.model).toBe('claude-sonnet-5');
+    await runBudgets(deps, NOW + 2 * MIN, { record: false });
+    expect(store.getAgent('k3')!.model).toBe('claude-sonnet-5'); // left alone until the 1st
+    // k2 over again: moved again; then November puts its model (no pin: null) back.
+    store.setBudget('k2', OWNER, 20, 'cheaper', iso(NOW));
+    await runBudgets(deps, NOW + 3 * MIN, { record: false });
+    expect(store.getAgent('k2')!.model).toBe('claude-haiku-4-5');
+    await runBudgets(deps, Date.parse('2026-11-01T00:05:00Z'), { record: false });
+    expect(store.getAgent('k2')!.model).toBe('claude-opus-4-8');
+    expect(switches.at(-1)).toEqual(['k2', 'claude-opus-4-8']);
+  });
+
+  it('nothing cheaper on its source: it says so and changes nothing', async () => {
+    const { store, agent, deps, told } = world();
+    deps.downgrade = async () => undefined;
+    agent('k4', 'Lab Notes');
+    store.setBudget('k4', OWNER, 10, 'cheaper', iso(NOW));
+    store.setModelProfile('k4', profile(NOW, opus(NOW - DAY, 12)), iso(NOW));
+    await runBudgets(deps, NOW);
+    expect(told[0]!.text).toContain('it was already on the cheapest model its source offers, so it keeps working as it is');
+  });
+
+  it('a budget\'s switch is not Right-size\'s: no verdict, no switch-back card, not in the savings', () => {
+    const { store, agent } = world();
+    agent('k5', 'Errands', { model: 'claude-haiku-4-5' });
+    store.setModelProfile('k5', profile(NOW, { 'claude-haiku-4-5': model({ [NOW - 9 * DAY]: { input: 1e6, turns: 50 } }) }), iso(NOW));
+    recordChange(store, { agentId: 'k5', from: 'claude-opus-4-8', to: 'claude-haiku-4-5', by: 'hatchabot', via: 'budget', source: 'budget', at: iso(NOW - 10 * DAY) }, NOW);
+    expect(evaluateModelChanges(store, NOW)).toEqual([]);
+    expect(store.listModelChanges({ agentId: 'k5' })[0]!.outcome).toBe('pending');
+    expect(rightSizeSavings(store, OWNER, NOW).savingUSD).toBe(0);
+  });
+});
+
+describe('a paused agent answers on Telegram, once a chat', () => {
+  const fakeTelegram = (updates: unknown[]) => {
+    const sent: Array<{ chat_id: number; text: string }> = [];
+    const f = (async (url: string, init?: { body?: string }) => {
+      if (url.includes('/getUpdates')) return new Response(JSON.stringify({ ok: true, result: updates }));
+      if (url.includes('/sendMessage')) { sent.push(JSON.parse(init!.body!)); return new Response(JSON.stringify({ ok: true })); }
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+    return { f, sent };
+  };
+  const paused = async () => {
+    const { store, agent, deps } = world();
+    agent('t1', 'Trip Planner');
+    store.insertChannel({ id: 'ch1', agentId: 't1', kind: 'telegram', accountId: 'trip_test_bot', secretRef: 'bot/t1', deepLink: 'https://t.me/trip_test_bot', createdAt: 'now' } as never);
+    store.setBudget('t1', OWNER, 20, 'pause', iso(NOW));
+    store.setModelProfile('t1', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    await runBudgets(deps, NOW);
+    expect(store.getAgent('t1')!.state).toBe('STOPPED');
+    return store;
+  };
+  const msg = (id: number, chat: number, at: number, type = 'private', bot = false) => ({ update_id: id, message: { date: Math.floor(at / 1000), chat: { id: chat, type }, from: { is_bot: bot } } });
+
+  it('one reply per person, not to groups or bots or older messages; nothing confirmed', async () => {
+    const store = await paused();
+    const later = NOW + 5 * MIN;
+    const { f, sent } = fakeTelegram([msg(10, 4242, NOW - DAY), msg(11, 4242, later), msg(12, 4242, later + MIN), msg(13, -100777, later, 'supergroup'), msg(14, 5151, later, 'private', true)]);
+    const deps = { store, secretOf: async () => 'token-x', fetchImpl: f };
+    expect(await pausedReplySweep(deps, later + 2 * MIN)).toBe(1);
+    expect(sent).toEqual([{ chat_id: 4242, text: pausedReplyText('Trip Planner', 't1', '2026-10') }]);
+    expect(sent[0]!.text).toBe('⏸ Trip Planner is paused: it has used its budget for October. It is back on November 1, or sooner if its owner raises the budget. Messages sent while it is paused may not reach it.');
+    expect(await pausedReplySweep(deps, later + 3 * MIN)).toBe(0); // the same messages: answered already
+  });
+
+  it('writes again: quiet for 12 hours, then one more reply', async () => {
+    const store = await paused();
+    const t = NOW + 5 * MIN;
+    const tg1 = fakeTelegram([msg(20, 4242, t)]);
+    await pausedReplySweep({ store, secretOf: async () => 'token-x', fetchImpl: tg1.f }, t + MIN);
+    const tg2 = fakeTelegram([msg(20, 4242, t), msg(21, 4242, t + HOUR)]);
+    expect(await pausedReplySweep({ store, secretOf: async () => 'token-x', fetchImpl: tg2.f }, t + HOUR + MIN)).toBe(0);
+    const tg3 = fakeTelegram([msg(20, 4242, t), msg(21, 4242, t + HOUR), msg(22, 4242, t + REPLY_EVERY_MS + 2 * HOUR)]);
+    expect(await pausedReplySweep({ store, secretOf: async () => 'token-x', fetchImpl: tg3.f }, t + REPLY_EVERY_MS + 2 * HOUR + MIN)).toBe(1);
+  });
+});
+
+describe('a monthly budget for new agents', () => {
+  it('"50", "50 pause", "50 cheaper", or off', () => {
+    expect(parseNewAgentBudget('50')).toEqual({ usd: 50, atLimit: 'warn' });
+    expect(parseNewAgentBudget('$75 pause')).toEqual({ usd: 75, atLimit: 'pause' });
+    expect(parseNewAgentBudget('20 cheaper')).toEqual({ usd: 20, atLimit: 'cheaper' });
+    expect(parseNewAgentBudget('0.5')).toBeUndefined();
+    expect(parseNewAgentBudget('lots')).toBeUndefined();
+    const spec = MACHINE_DEFAULTS.find((d) => d.key === 'newBudget')!;
+    expect(spec.env).toBe('HATCHABOT_NEW_AGENT_BUDGET');
+    expect(spec.check('50 Pause')).toEqual({ ok: true, value: '50 pause' });
+    expect(spec.check('off')).toEqual({ ok: true, value: '' });
+    expect(spec.check('free')).toMatchObject({ ok: false });
+  });
+
+  it('a new agent starts with it; none without it', () => {
+    const { store } = world();
+    const prev = process.env.HATCHABOT_NEW_AGENT_BUDGET;
+    try {
+      process.env.HATCHABOT_NEW_AGENT_BUDGET = '40 cheaper';
+      const a = createAgentRecord(store, { ownerId: OWNER, name: 'Fresh One', aiProfileId: 'key', hostId: 'h1' });
+      expect(store.getBudget(a.id)).toMatchObject({ usd: 40, atLimit: 'cheaper', setBy: 'default' });
+      delete process.env.HATCHABOT_NEW_AGENT_BUDGET;
+      const b = createAgentRecord(store, { ownerId: OWNER, name: 'Fresh Two', aiProfileId: 'key', hostId: 'h1' });
+      expect(store.getBudget(b.id)).toBeUndefined();
+    } finally { if (prev === undefined) delete process.env.HATCHABOT_NEW_AGENT_BUDGET; else process.env.HATCHABOT_NEW_AGENT_BUDGET = prev; }
+  });
+
+  it('the manager\'s can only warn (route)', async () => {
+    const { f } = await app();
+    const r = await f.inject({ method: 'PUT', url: '/v1/agents/rops/budget', headers: as(OWNER), payload: { usd: 50, atLimit: 'cheaper' } });
+    expect(r.statusCode).toBe(400);
+    const ok = await f.inject({ method: 'PUT', url: '/v1/agents/r1/budget', headers: as(OWNER), payload: { usd: 50, atLimit: 'cheaper' } });
+    expect(ok.json().budget).toMatchObject({ atLimit: 'cheaper' });
+    expect(ok.json().message).toContain('moving to a cheaper model at the limit');
   });
 });

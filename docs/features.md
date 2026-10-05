@@ -337,14 +337,27 @@ rounded), or ask the Hatchabot agent (`set_budget`, a card you confirm).
   agent's chat. Each is said once a month per budget amount; a new amount
   warns afresh.
 - **At the limit** — your choice per budget: **warn me** (the default: it keeps
-  working) or **pause it**. Paused, the agent is stopped as the Stop button
+  working), **cheaper model**, or **pause it**. *Cheaper model* (v2.124.0)
+  moves it to the cheapest model its AI source offers, live, until the 1st —
+  it keeps answering; its own model comes back on the 1st or as soon as the
+  budget is raised, and a model you set by hand wins for the rest of the
+  month. The switch is in the model ledger as Hatchabot's ("budget"): the
+  quality guard gives it no verdict and no switch-back card, and Right-size's
+  savings leave it out. *Pause it*: Paused, the agent is stopped as the Stop button
   does (its tile: "Paused — its monthly budget is used up"), never in the
   middle of a turn (it waits for three quiet minutes), and an asleep agent is
   paused without being woken. It starts again on the **1st of next month**, as
   soon as the budget is **raised** (or removed, or set to warn), or when you
   **start it** — then it runs on until the 1st. A rebuild that brings it up
   while it is still over pauses it again. Telegram keeps messages sent to a
-  paused agent for 24 hours.
+  paused agent for 24 hours, and **whoever writes to it gets one reply** from
+  its bot (direct chats; at most once a chat every 12 hours): "⏸ Trip Planner
+  is paused: it has used its budget for October. It is back on November 1, or
+  sooner if its owner raises the budget. …". Nothing is confirmed to Telegram,
+  so the agent still gets the messages when it is back within the day.
+- **New agents** can start with a budget: Settings → Hosts → Defaults for this
+  machine → *Monthly budget for new agents* — "50", "50 pause" or "50 cheaper"
+  (`HATCHABOT_NEW_AGENT_BUDGET`). The Hatchabot agent's only warns.
 - **The whole machine**: the machine owner can give this Hatchabot one
   budget (every agent's spend, everyone's) in the same panel; "pause it" there
   pauses every agent but the Hatchabot agent. Its line is on the Hatchabot
