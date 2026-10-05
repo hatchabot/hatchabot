@@ -626,6 +626,8 @@
   .v2binsort { display:flex; gap:4px; align-items:center; flex:none; margin-left:auto }
   @media (max-width: 620px) { .v2viewbar { flex-wrap:wrap } .v2binsort { margin-left:0 } }
   .v2ghead h3 { margin:0; font-size:12px; letter-spacing:.09em; text-transform:uppercase; color:var(--dim); font-weight:650 }
+  /* A Cost band reads like its chips: "$10–50/wk", not "/WK". */
+  .v2ghead h3.v2h-money { text-transform:none; letter-spacing:.03em }
   .v2ghead .n { font-size:12px; color:var(--dim); font-variant-numeric:tabular-nums }
   .v2ghead .v2gtools { margin-left:auto; display:flex; gap:4px }
   .v2ghead .v2gtools button { background:none; border:0; color:var(--dim); cursor:pointer; font-size:12.5px; padding:2px 6px }
@@ -11970,7 +11972,7 @@ function renderV2() {
   v2SectionsNow = sections;
   const html = viewBar + costBar + sections.map(s => `
     <section class="v2group${v2IsCollapsed(s.key) ? ' collapsed' : ''}">
-      <div class="v2ghead"><h3${s.key.startsWith('g:') && s.drop ? ` class="group-name" tabindex="0" title="Double-click to rename" ondblclick="editGroupName(this)" onkeydown="if (event.key === 'Enter' && !this.isContentEditable) { event.preventDefault(); editGroupName(this); }"` : ''}>${esc(s.label)}</h3><span class="n">${s.items.length}</span>${s.note ? `<span class="n v2gnote">${esc(s.note)}</span>` : ''}
+      <div class="v2ghead"><h3${/^\$:\d/.test(s.key) ? ' class="v2h-money"' : ''}${s.key.startsWith('g:') && s.drop ? ` class="group-name" tabindex="0" title="Double-click to rename" ondblclick="editGroupName(this)" onkeydown="if (event.key === 'Enter' && !this.isContentEditable) { event.preventDefault(); editGroupName(this); }"` : ''}>${esc(s.label)}</h3><span class="n">${s.items.length}</span>${s.note ? `<span class="n v2gnote">${esc(s.note)}</span>` : ''}
         <span class="v2gtools">
           ${s.key.startsWith('g:') && s.drop ? `<button onclick="editGroupName(this.closest('.v2ghead').querySelector('h3'))" title="Rename this group" aria-label="Rename group">✏️</button><button onclick="moveGroup('${jsq(s.drop)}','up')" title="Move this group up" aria-label="Move group up">↑</button><button onclick="moveGroup('${jsq(s.drop)}','down')" title="Move this group down" aria-label="Move group down">↓</button>` : ''}
           ${s.items.some(({ a }) => v2Mine(a) && a.state !== 'ARCHIVED') ? `<button onclick="v2BulkSection('${jsq(s.key)}','${jsq(s.label)}')" title="Bulk actions on the agents in this section">⚡</button>` : ''}

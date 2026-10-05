@@ -1674,6 +1674,8 @@ const SCENARIOS = String.raw`(() => {
         eq('the manager stays first; then dearest', namesIn('<$10/wk'), ['Hatchabot', 'Grocery Runner', 'Garden Notes', 'Home Maintenance', 'Stock Watcher']);
         eq('the week\'s total in the header', sec('>$100/wk').querySelector('.v2gnote')?.textContent, '($1,600 total)');
         eq('$10–50 total', sec('$10–50/wk').querySelector('.v2gnote')?.textContent, '($30 total)');
+        ok('a band heading stays as written ("/wk", not "/WK")', getComputedStyle(sec('>$100/wk').querySelector('h3')).textTransform === 'none');
+        ok('other headings keep the house capitals', getComputedStyle(sec('No usage').querySelector('h3')).textTransform === 'uppercase');
         ok('no total where nothing is priced', !sec('No usage').querySelector('.v2gnote'));
         // The Sort control works here as elsewhere; Cost is its own, first, choice in this view.
         const sortBtns = () => [...document.querySelectorAll('.v2binsort button')].map((b) => b.textContent.replace(/ [▲▼]$/, ''));

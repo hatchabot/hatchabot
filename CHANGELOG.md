@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.122.3] — 2026-10-05
+
+### Fixed
+- Cost band headings are no longer set in capitals ("$10–50/WK"): they read as written, like the chips.
+
 ## [2.122.2] — 2026-10-05
 
 ### Changed
