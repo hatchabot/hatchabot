@@ -357,7 +357,7 @@ export const REST_TOOLS: RestTool[] = [
     description:
       "Monthly budgets: each of the owner's agents with what it spent this calendar month and last (US dollars at API list prices; on a Claude plan an equivalent, not a bill), "
       + 'its monthly rate now (monthlyNow: the last 7 days × 30/7, so a recent cap or model change shows), a suggested budget (about 1.25× that, rounded), and its budget if it has one: usd, atLimit (warn | pause), '
-      + 'spent, pct, onPace (the month at this pace), level (80 = warned, 100 = reached), paused. For the machine owner also the whole machine\'s budget. '
+      + 'spent, pct, onPace (the month at this pace), level (80 = warned, 100 = reached), paused; and alertEvery when the owner hears every $X (every, passed, next). For the machine owner also the whole machine\'s budget and alert. '
       + 'Read from what Hatchabot already recorded: cheap to call.',
     input_schema: obj({}),
     call: () => ({ method: 'GET', path: '/v1/budgets' }),
@@ -383,6 +383,27 @@ export const REST_TOOLS: RestTool[] = [
     card: ({ agent, input }) => typeof input.usd === 'number' && input.usd > 0
       ? `💵 Give "${agent!.name}" a budget of $${input.usd} a month (at API prices): you hear at 80% and 100%${input.at_limit === 'pause' ? ', and at 100% it pauses until the 1st (raise the budget or start it to bring it back sooner)' : input.at_limit === 'cheaper' ? ', and at 100% it moves to the cheapest model its source offers until the 1st (raise the budget to switch back sooner)' : '; it keeps working past it'}.`
       : `💵 Remove "${agent!.name}"'s monthly budget.`,
+    done: (r) => (r && typeof r === 'object' && 'message' in r ? String((r as { message: string }).message) : undefined),
+  },
+
+  {
+    name: 'set_spend_alert', tier: 'mutate', agentArg: true,
+    description:
+      "Tell the owner each time an agent's spend this month passes another `every` US dollars (at API prices; the cost badges' figures): at $X, $2X, $3X … — a message on the manager's chat (at most one an hour per agent) and a line under Alerts. "
+      + 'Counts from now: steps already passed this month are not told. Starts again each month. Separate from set_budget (a limit with an action); an agent can have both. '
+      + 'every 0 stops the alerts. A good step is about a quarter of what the agent costs a month (get_budgets monthlyNow), so the owner hears a few times a month. Requires the owner\'s confirm.',
+    input_schema: obj({
+      agent: agentRef,
+      every: { type: 'number', minimum: 0, maximum: 100000, description: 'US dollars; 0 stops the alerts' },
+    }, ['agent', 'every']),
+    call: ({ agent, input }) => {
+      const every = input.every === 0 || input.every === null ? null : input.every;
+      if (every !== null && (typeof every !== 'number' || !Number.isFinite(every) || every < 1 || every > 100_000)) throw new Error('every: from 1 to 100000 US dollars, or 0 to stop the alerts.');
+      return { method: 'PUT', path: `/v1/agents/${agent!.id}/spend-alert`, body: { every } };
+    },
+    card: ({ agent, input }) => typeof input.every === 'number' && input.every > 0
+      ? `🔔 Tell you each time "${agent!.name}" spends another $${input.every} this month (at API prices): at $${input.every}, $${input.every * 2}, $${input.every * 3} … — on your chat and under Alerts.`
+      : `🔔 Stop the spending alerts for "${agent!.name}".`,
     done: (r) => (r && typeof r === 'object' && 'message' in r ? String((r as { message: string }).message) : undefined),
   },
 

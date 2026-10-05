@@ -114,6 +114,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(['POST', 'DELETE', 'PUT', 'PATCH'], /^\/v1\/runtime(\/.*)?$/, 'step-up', 'Images (build, rebuild, delete, promote)'),
   r(['PUT'], /^\/v1\/(machine-defaults|rebuild-policy|rebuild-concurrency|embed-default)$/, 'step-up', 'Machine settings (defaults, rebuild policy, memory search)'),
   r(['PUT'], /^\/v1\/budgets\/machine$/, 'step-up', 'Machine settings (defaults, rebuild policy, memory search)'),
+  r(['PUT'], /^\/v1\/spend-alert\/machine$/, 'step-up', 'Machine settings (defaults, rebuild policy, memory search)'),
   r(['POST', 'DELETE'], /^\/v1\/(embedder|embed)\/.*$/, 'step-up', 'Machine settings (defaults, rebuild policy, memory search)'),
   r(['POST', 'DELETE'], /^\/v1\/backups(\/.*)?$/, 'step-up', 'Backups (run, restore, delete) and downloads of an agent'),
   r(READ, /^\/v1\/agents\/:id\/(backup|export|fs\/archive)$/, 'step-up', 'Backups (run, restore, delete) and downloads of an agent'),

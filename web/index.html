@@ -1701,7 +1701,7 @@
     </details>
 
     <details class="sec-drawer" id="budgetsDrawer" ontoggle="if (this.open) loadBudgets()">
-      <summary><b>💵 Budgets</b> <span class="sub">— a monthly limit for an agent, or for this whole Hatchabot</span></summary>
+      <summary><b>💵 Budgets</b> <span class="sub">— hear each time an agent spends another $X, or give it a monthly limit</span></summary>
       <div id="budgetsBody" style="margin-top:8px"><div class="sub">Loading…</div></div>
     </details>
 
@@ -8389,20 +8389,40 @@ function bgControls(key, b, suggested, manager) {
       <option value="warn"${!b || b.atLimit === 'warn' ? ' selected' : ''}>warn me</option><option value="cheaper"${b?.atLimit === 'cheaper' ? ' selected' : ''}>cheaper model</option><option value="pause"${b?.atLimit === 'pause' ? ' selected' : ''}>pause it</option></select>
     <button onclick="saveBudget('${key}')">Save</button>`;
 }
+/** "Tell me every $…": an input and Save; with the month so far when set. */
+function bgStepControls(key, v) {
+  return `<span class="bg-form"><span class="sub">every $</span><input type="number" id="bgStep_${key}" min="1" max="100000" step="1" value="${v ? v.every : ''}" placeholder="none" aria-label="Tell me each time it spends another this many dollars">
+    <button onclick="saveStep('${key}')">Save</button></span>`;
+}
+const bgStepState = (v) => v ? `next at ${bgMoney(v.next)}` : '';
+async function saveStep(key) {
+  const raw = $('bgStep_' + key)?.value.trim();
+  const every = raw === '' ? null : Number(raw);
+  if (every !== null && !(every >= 1 && every <= 100000)) return toast('A step is from $1 to $100,000 — or empty the box to stop the alerts.');
+  try {
+    const r = await api(key === 'machine' ? '/v1/spend-alert/machine' : `/v1/agents/${key}/spend-alert`, { method: 'PUT', body: { every } });
+    toast(r.message || 'Saved.', 6000);
+    if ($('budgetsBody') && $('budgetsDrawer')?.open) void loadBudgets();
+    if ($('v2BudgetRow')) void v2LoadBudgetRow($('v2BudgetRow').dataset.agent);
+    await refresh(false);
+  } catch (e) { toast(e.message, 8000); }
+}
 function renderBudgets(d) {
   const month = bgMonthName(d.month);
   const mine = (d.agents || []).filter((a) => a.state !== 'ARCHIVED');
   const rows = mine.map((a) => `<tr><td class="bg-l">${esc(a.name)}${a.billing === 'plan' ? ' <span class="sub">(plan)</span>' : a.billing === 'local' ? ' <span class="sub">(local)</span>' : ''}</td>
     <td>${bgMoney(a.spent)}</td><td>${bgMoney(a.lastMonth)}</td><td>${bgMoney(a.monthlyNow)}</td>
+    <td class="bg-l">${bgStepControls(a.id, a.alertEvery)}${a.alertEvery ? `<div class="sub">${bgStepState(a.alertEvery)}</div>` : ''}</td>
     <td class="bg-l"><div class="bg-form">${bgControls(a.id, a.budget, a.suggested, a.manager)}</div>${a.budget ? `<div class="sub">${bgState(a.budget)}</div>` : ''}</td></tr>`).join('');
   const m = d.machine;
   const machine = m ? `<div class="pair" style="margin:0 0 10px;flex-wrap:wrap;gap:8px;align-items:center"><b>This whole Hatchabot</b>
       <span class="sub">${bgMoney(m.spent)} in ${esc(month)} so far · ${bgMoney(m.lastMonth)} last month · every agent, everyone's</span>
-      <div class="bg-form" style="flex-basis:100%">${bgControls('machine', m.budget, 0, false)}${m.budget ? `<span class="sub">${bgState(m.budget)}</span>` : ''}</div>
+      <div class="bg-form" style="flex-basis:100%"><span class="sub">Tell me</span>${bgStepControls('machine', m.alertEvery)}${m.alertEvery ? `<span class="sub">${bgStepState(m.alertEvery)}</span>` : ''}</div>
+      <div class="bg-form" style="flex-basis:100%"><span class="sub">Monthly limit</span>${bgControls('machine', m.budget, 0, false)}${m.budget ? `<span class="sub">${bgState(m.budget)}</span>` : ''}</div>
       <div class="sub" style="flex-basis:100%">Here "pause it" pauses, and "cheaper model" moves, every agent but your Hatchabot agent when the machine reaches its budget.</div></div>` : '';
-  return `${machine}<div class="mp-wrap"><table class="mp-tbl bg-tbl"><thead><tr><th>Agent</th><th>${esc(month)}</th><th>Last month</th><th>A month now</th><th style="text-align:left">Monthly budget</th></tr></thead>
-    <tbody>${rows || '<tr><td colspan="5" class="sub">No agents yet.</td></tr>'}</tbody></table></div>
-    <p class="sub mp-note">US dollars at API list prices, the same as the cost badges — on a Claude plan it is an equivalent, not a bill. You hear at 80% and at 100% (under Alerts, and once on your Hatchabot agent's chat). <b>Cheaper model</b> moves it at 100% to the cheapest model its AI source offers until the 1st — it keeps answering; raise the budget to switch it back sooner (change its model yourself and the budget leaves it alone). <b>Pause it</b> stops the agent at 100% until the 1st — raise the budget or start it to bring it back sooner (started by hand, it runs on until the 1st); anyone who writes to it on Telegram gets one reply saying so. Empty a box and Save to remove a budget.</p>`;
+  return `${machine}<div class="mp-wrap"><table class="mp-tbl bg-tbl"><thead><tr><th>Agent</th><th>${esc(month)}</th><th>Last month</th><th>A month now</th><th style="text-align:left">Tell me</th><th style="text-align:left">Monthly limit</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="6" class="sub">No agents yet.</td></tr>'}</tbody></table></div>
+    <p class="sub mp-note">US dollars at API list prices, the same as the cost badges — on a Claude plan it is an equivalent, not a bill. <b>Tell me every $…</b>: a message (at most one an hour per agent) and a line under Alerts each time this month's spend passes another step — at $100, $200, $300 … for 100; it counts from when you set it, and starts again each month. <b>Monthly limit</b>: you hear at 80% and at 100% (under Alerts, and once on your Hatchabot agent's chat). <b>Cheaper model</b> moves it at 100% to the cheapest model its AI source offers until the 1st — it keeps answering; raise the budget to switch it back sooner (change its model yourself and the budget leaves it alone). <b>Pause it</b> stops the agent at 100% until the 1st — raise the budget or start it to bring it back sooner (started by hand, it runs on until the 1st); anyone who writes to it on Telegram gets one reply saying so. Empty a box and Save to remove a budget.</p>`;
 }
 async function saveBudget(key) {
   const raw = $('bgUsd_' + key)?.value.trim();
@@ -8424,8 +8444,9 @@ async function v2LoadBudgetRow(id) {
     const d = await api('/v1/budgets');
     const a = (d.agents || []).find((x) => x.id === id);
     if (!a || $('v2BudgetRow')?.dataset.agent !== id) return;
-    el.innerHTML = `<div class="bg-form">${bgControls(id, a.budget, a.suggested, a.manager)}</div>
-      <div class="sub" style="margin-top:4px">${a.budget ? bgState(a.budget) + ' · ' : ''}${bgMoney(a.spent)} in ${esc(bgMonthName(d.month))} so far, ${bgMoney(a.lastMonth)} last month, about ${bgMoney(a.monthlyNow)} a month at its pace now (API prices${a.billing === 'plan' ? '; on your Claude plan an equivalent' : ''}).${a.budget ? '' : ` A budget of $${a.suggested} would fit its use now.`} <a href="#" onclick="openBudgets();return false">All budgets</a></div>`;
+    el.innerHTML = `<div class="bg-form"><span class="sub">Tell me</span>${bgStepControls(id, a.alertEvery)}${a.alertEvery ? `<span class="sub">${bgStepState(a.alertEvery)}</span>` : ''}</div>
+      <div class="bg-form" style="margin-top:6px"><span class="sub">Limit</span>${bgControls(id, a.budget, a.suggested, a.manager)}</div>
+      <div class="sub" style="margin-top:4px">${a.budget ? bgState(a.budget) + ' · ' : ''}${bgMoney(a.spent)} in ${esc(bgMonthName(d.month))} so far, ${bgMoney(a.lastMonth)} last month, about ${bgMoney(a.monthlyNow)} a month at its pace now (API prices${a.billing === 'plan' ? '; on your Claude plan an equivalent' : ''}).${a.alertEvery || a.budget ? '' : ` Every $${Math.max(1, Math.round(a.suggested / 4))} would tell you a few times a month.`} <a href="#" onclick="openBudgets();return false">All budgets</a></div>`;
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 /** Settings → AI sources, with Budgets open. */
@@ -11274,6 +11295,9 @@ function agentAttention(a) {
   // Budgets (budgets.ts): from 80%, and a pause; keyed on the month, level and
   // amount, so a cleared line comes back at 100% or with a new budget.
   if (a.budget?.line) out.push({ key: `budget:${a.budget.month}:${a.budget.level}:${a.budget.usd}${a.budget.paused ? ':p' : ''}`, icon: a.budget.paused ? '⏸' : '💵', why: a.budget.line + ' (Usage → Monthly budget)' });
+  // "Tell me every $X": keyed on the step passed, so a cleared line comes back at the next one.
+  if (a.spendStep?.line) out.push({ key: `step:${a.spendStep.month}:${a.spendStep.passed}:${a.spendStep.every}`, icon: '🔔', why: a.spendStep.line });
+  if (a.machineStep?.line) out.push({ key: `mstep:${a.machineStep.month}:${a.machineStep.passed}:${a.machineStep.every}`, icon: '🔔', why: 'This Hatchabot (every agent): ' + a.machineStep.line.replace(/^Spent /, 'spent ') });
   if (a.budgetPaused && !a.budget?.paused) out.push({ key: 'mbudget-pause:' + a.budgetPaused.at, icon: '⏸', why: "paused by this Hatchabot's monthly budget — it starts again on the 1st, when the machine's budget is raised, or when you start it" });
   if (a.machineBudget?.line) out.push({ key: `mbudget:${a.machineBudget.month}:${a.machineBudget.level}:${a.machineBudget.usd}`, icon: '💵', why: 'This Hatchabot (every agent): ' + a.machineBudget.line.replace(/^Over /, 'over ').replace(/^Used /, 'used ') + ' (⚙ Settings → AI sources → Budgets)' });
   if (a.ops && v2Mine(a)) out.push(...v2MachineAlerts());
@@ -12004,7 +12028,8 @@ function v2CostLine(a) {
   if (!c.priced) return 'Cost: no price known for its model';
   return `≈&nbsp;${v2Money(c.cost)} in ${v2CostWindow().replace(/ /g, '&nbsp;')} at API prices (≈&nbsp;${v2Money(c.monthly)}&nbsp;a&nbsp;month${['1w', '1m'].includes(v2Costs?.period || '1w') ? '' : ' at that pace'})`
     + (c.plan ? `<br>on ${v2Mine(a) ? 'your' : 'its owner\'s'} Claude plan — counts against its limits` : '')
-    + (a.budget ? `<br>Budget: ${v2Money(a.budget.spent)} of ${v2Money(a.budget.usd)} this month (${a.budget.pct}%)` : '');
+    + (a.budget ? `<br>Budget: ${v2Money(a.budget.spent)} of ${v2Money(a.budget.usd)} this month (${a.budget.pct}%)` : '')
+    + (a.spendStep ? `<br>🔔 every ${v2Money(a.spendStep.every)} · next at ${v2Money(a.spendStep.next)}` : '');
 }
 /** View by → Cost: the dearest band first, then no price known, then no use. */
 function v2CostBin(a) {
@@ -12740,7 +12765,7 @@ function v2Pane(a, tab) {
         ${a.parentAgentId ? B('💡 Propose to master', `distillToMaster('${id}','${n}')`) : ''}`) : ''}
       ${slot('paneEditPeers')}`;
     }
-    case 'usage': return (v2Mine(a) && a.state !== 'ARCHIVED' ? row('Monthly budget', `<div id="v2BudgetRow" data-agent="${esc(a.id)}" style="flex-basis:100%"><div class="sub">Loading…</div></div>`) : '')
+    case 'usage': return (v2Mine(a) && a.state !== 'ARCHIVED' ? row('Spending', `<div id="v2BudgetRow" data-agent="${esc(a.id)}" style="flex-basis:100%"><div class="sub">Loading…</div></div>`) : '')
       + (run ? `<div id="v2UsageBody" style="padding:4px 2px">Loading…</div>`
       : row('Usage', `<span>${v2NotRunning(a, 'its figures')} They are read from its container; Usage still counts what it used while running.</span>`));
     case 'schedule': return run ? slot('cronBody') : row('Scheduled tasks', `<span>${v2NotRunning(a, 'its tasks')}</span>`);

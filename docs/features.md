@@ -325,7 +325,25 @@ different one, in pricing.ts.
 
 ### Budgets
 
-Since v2.121.0, an agent can have a **monthly budget** in US dollars at API
+**Tell me every $X** (v2.125.0, Chris: "warned each time the spend increases
+by $100"): give an agent a step — $5 for a quiet one, $100 for a busy one —
+and each time its spend this month passes the next multiple ($100, $200,
+$300 …) you get a message on your Hatchabot agent's chat ("💵 "Stock Advisor"
+has spent $212 in October — you hear every $100. On pace for $750.") and a
+🔔 line under Alerts (cleared until the next step). At most one message an
+hour per agent: steps passed meanwhile come as one, with the latest total. It
+counts from when you set it — steps already passed this month are not told —
+and starts again on the 1st. Set it in the agent's Usage tab (Spending → Tell
+me every $…), in Settings → AI sources → 💵 Budgets (a column for every
+agent, and a row for the whole machine), by asking the Hatchabot agent
+(`set_spend_alert`, a card), or for every new agent (Settings → Hosts →
+Defaults for this machine, `HATCHABOT_NEW_AGENT_ALERT_EVERY`). The cost
+tooltip shows "🔔 every $100 · next at $300". `PUT /v1/agents/:id/spend-alert`
+`{ every | null }`, `PUT /v1/spend-alert/machine`; `get_budgets` carries
+`alertEvery`. It is separate from the monthly limit below; an agent can have
+both.
+
+**The monthly limit:** Since v2.121.0, an agent can have a **monthly budget** in US dollars at API
 prices — the cost badges' figures (on a Claude plan an equivalent, not a
 bill). Set it in the agent's **Usage** tab (Monthly budget), in Settings → AI
 sources → 💵 **Budgets** (every agent of yours in one table: this month, last

@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.125.0] — 2026-10-05
+
+### Added
+- **"Tell me every $X"** for an agent, or for the whole machine: each time this month's spend passes the next multiple of X ($100, $200, $300 … for 100) you get a message on the Hatchabot agent's chat and a 🔔 line under Alerts — at most one message an hour per agent (steps passed meanwhile are one message with the latest total). It counts from when it is set, and starts again each month. In the agent's Usage tab (Spending), a column in Settings → AI sources → Budgets (and a row for the machine), the **`set_spend_alert`** card, and a default for new agents (Settings → Hosts → Defaults for this machine; `HATCHABOT_NEW_AGENT_ALERT_EVERY`). `PUT /v1/agents/:id/spend-alert`, `PUT /v1/spend-alert/machine`; `get_budgets` and `GET /v1/budgets` carry `alertEvery`. Separate from the monthly limit (now labelled so); an agent can have both.
+
 ## [2.124.0] — 2026-10-05
 
 ### Added

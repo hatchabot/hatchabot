@@ -11,7 +11,7 @@
 import { hibernateAfterMs } from './hibernate.js';
 import { formatMemoryCap, MEMORY_CAP_CEILING_BYTES, MEMORY_CAP_MIN_BYTES, parseMemoryCap } from './memoryCap.js';
 import { formatSwapAllowance, parseSwapAllowance } from './swap.js';
-import { MAX_BUDGET, MIN_BUDGET, parseNewAgentBudget } from './budgets.js';
+import { MAX_BUDGET, MIN_BUDGET, parseNewAgentBudget, parseStep } from './budgets.js';
 
 export type ChannelKindForFiles = 'telegram' | 'discord' | 'slack';
 /** What each app accepts at most (Telegram's Bot API; a Discord server at its highest boost; Slack held well below its 1 GB). */
@@ -28,7 +28,7 @@ export function filesMb(kind: ChannelKindForFiles, agentOverride?: number, env: 
   return Math.min(Math.max(1, want), FILES_MB_MAX[kind]);
 }
 
-export type DefaultKey = 'sleepAfter' | 'agentMemory' | 'agentSwap' | 'engineMemory' | 'filesTelegram' | 'filesDiscord' | 'filesSlack' | 'newBudget';
+export type DefaultKey = 'sleepAfter' | 'agentMemory' | 'agentSwap' | 'engineMemory' | 'filesTelegram' | 'filesDiscord' | 'filesSlack' | 'newBudget' | 'newAlertEvery';
 export interface DefaultSpec {
   key: DefaultKey;
   env: string;
@@ -77,6 +77,21 @@ export const MACHINE_DEFAULTS: DefaultSpec[] = [
       const b = parseNewAgentBudget(v);
       if (!b) return { ok: false, error: `A number of dollars from ${MIN_BUDGET} to ${MAX_BUDGET}, then "pause" or "cheaper" if you like — like 50, 50 pause or 50 cheaper — or off.` };
       return { ok: true, value: b.atLimit === 'warn' ? String(b.usd) : `${b.usd} ${b.atLimit}` };
+    },
+    applies: 'to agents created from now on',
+  },
+  {
+    key: 'newAlertEvery',
+    env: 'HATCHABOT_NEW_AGENT_ALERT_EVERY',
+    label: 'Tell me every $… a new agent spends',
+    help: 'US dollars: each time a new agent\'s spend this month passes another this much, you get a message and a line under Alerts (at $25, $50, $75 … for 25). "off" for none. Change any agent\'s own afterwards (its Usage tab).',
+    fallback: 'off',
+    check(input) {
+      const v = String(input).trim().toLowerCase();
+      if (v === '' || v === 'off' || v === 'none' || v === '0') return { ok: true, value: '' };
+      const n = parseStep(v);
+      if (n === undefined) return { ok: false, error: `A number of dollars from ${MIN_BUDGET} to ${MAX_BUDGET}, like 25 — or off.` };
+      return { ok: true, value: String(n) };
     },
     applies: 'to agents created from now on',
   },

@@ -1,5 +1,5 @@
 import type { Agent } from '../domain/types.js';
-import type { BudgetRow, Store } from '../store/store.js';
+import type { BudgetRow, SpendAlertRow, Store } from '../store/store.js';
 import { HOUR_FIELDS } from './usage.js';
 import type { StoredProfile } from './modelScorecard.js';
 import { priceMix, type TokenMix } from './modelOptions.js';
@@ -306,8 +306,73 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     }
   }
   store.pruneBudgetMarks(prevMonth(prevMonth(month)));
+
+  // 3. "Tell me every $X": each time the month's spend passes the next multiple.
+  for (const al of store.listSpendAlerts()) {
+    if (al.scope !== MACHINE && !byId.has(al.scope)) continue;
+    const spent = al.scope === MACHINE ? machineSpent : spend.get(al.scope) ?? 0;
+    const k = stepsPassed(spent, al.stepUsd);
+    let st = store.spendAlertState(al.scope, month);
+    // A step changed without being primed (not through the app): count from where the spend is now.
+    if (st && st.stepUsd !== al.stepUsd) { store.setSpendAlertState(al.scope, month, al.stepUsd, k, null); continue; }
+    // A new month starts from nothing: its first multiple is told.
+    st ??= { stepUsd: al.stepUsd, kTold: 0 };
+    if (k <= st.kTold) continue;
+    // At most one a scope an hour: several steps passed meanwhile are one message with the latest total.
+    if (st.toldAt && now - Date.parse(st.toldAt) < STEP_TELL_EVERY_MS) continue;
+    const agent = al.scope === MACHINE ? agents.find((a) => a.ownerId === al.ownerId && a.ops) : byId.get(al.scope);
+    if (!agent) continue;
+    const ok = await deps.tell(al.ownerId, agent, stepMessage(al, spent, month, agent, now, tz)).catch(() => false);
+    store.setSpendAlertState(al.scope, month, al.stepUsd, k, nowIso);
+    told++;
+    deps.log?.('budget.step_told', { agentId: agent.id, scope: al.scope === MACHINE ? MACHINE : 'agent', spent: r2(spent), every: al.stepUsd, told: ok });
+  }
+  store.pruneSpendAlertState(prevMonth(prevMonth(month)));
   return { paused, resumed, downgraded, told };
 }
+
+// ---- "Tell me every $X" -----------------------------------------------------------
+
+/** At most one step message per agent (or for the machine) an hour. */
+export const STEP_TELL_EVERY_MS = 3_600_000;
+/** Whole multiples of `step` that `spent` has passed (a cent's rounding forgiven). */
+export const stepsPassed = (spent: number, step: number) => (step > 0 ? Math.floor(spent / step + 1e-9) : 0);
+
+export interface StepView {
+  every: number;
+  month: string;
+  spent: number;
+  /** Multiples passed this month. */
+  passed: number;
+  /** The next multiple. */
+  next: number;
+}
+export function stepView(a: SpendAlertRow, spent: number, now: number, tz: string): StepView {
+  const passed = stepsPassed(spent, a.stepUsd);
+  return { every: a.stepUsd, month: monthKey(now, tz), spent: r2(spent), passed, next: r2((passed + 1) * a.stepUsd) };
+}
+/** The Alerts line once a multiple has been passed this month ("" before). */
+export function stepLine(v: StepView): string {
+  return v.passed ? `Spent ${money(v.spent)} in ${monthName(v.month)} — you hear every ${whole(v.every)} (next at ${whole(v.next)})` : '';
+}
+/** A step set (or changed) now counts from where the month's spend is: what was passed before is not told. */
+export function primeSpendAlert(store: Store, scope: string, step: number, spent: number, now: number, tz: string): void {
+  store.setSpendAlertState(scope, monthKey(now, tz), step, stepsPassed(spent, step), null);
+}
+export function stepMessage(a: SpendAlertRow, spent: number, month: string, agent: Agent, now: number, tz: string): string {
+  const elapsed = monthElapsed(now, tz);
+  const pace = elapsed >= 2 / 31 ? spent / elapsed : undefined;
+  const whose = a.scope === MACHINE ? 'This Hatchabot (every agent)' : `"${agent.name}"`;
+  return `💵 Hatchabot: ${whose} has spent ${money(spent)} in ${monthName(month)} — you hear every ${whole(a.stepUsd)}.${pace && pace > spent * 1.05 ? ` On pace for ${money(pace)}.` : ''}`
+    + `\nAsk me what it went on, or to make ${a.scope === MACHINE ? 'the agents' : 'it'} cheaper.`;
+}
+/** HATCHABOT_NEW_AGENT_ALERT_EVERY: "25" (dollars); off/empty = none. */
+export function parseStep(raw: string | undefined): number | undefined {
+  const m = /^\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*$/.exec(raw ?? '');
+  const n = m ? Number(m[1]) : NaN;
+  return n >= MIN_BUDGET && n <= MAX_BUDGET ? n : undefined;
+}
+export const newAgentStep = (env: NodeJS.ProcessEnv = process.env) => parseStep(env.HATCHABOT_NEW_AGENT_ALERT_EVERY);
 
 /** The chat message for a budget mark; `acted`: what the budget paused or moved this pass. */
 export function budgetMessage(b: BudgetRow, spent: number, level: 80 | 100, month: string, agent: Agent, acted: Array<{ a: Agent; to?: string }>, now: number, tz: string): string {

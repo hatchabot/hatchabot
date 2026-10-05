@@ -75,7 +75,7 @@ import { agentUsage } from '../orchestrator/usage.js';
 import { runUsageAlerts } from '../orchestrator/usageAlerts.js';
 import { buildTokenHealth, modelRefOf, THRESHOLDS as TOKEN_THRESHOLDS } from '../orchestrator/tokenHealth.js';
 import { runTokenWatch } from '../orchestrator/tokenWatch.js';
-import { MACHINE, MAX_BUDGET, MIN_BUDGET, budgetLine, budgetView, machineTz, monthKey, monthSpend, pausedReplySweep, prevMonth, runBudgets, suggestBudget, type BudgetView } from '../orchestrator/budgets.js';
+import { MACHINE, MAX_BUDGET, MIN_BUDGET, budgetLine, budgetView, machineTz, monthKey, monthSpend, pausedReplySweep, prevMonth, primeSpendAlert, runBudgets, stepLine, stepView, suggestBudget, type BudgetView, type StepView } from '../orchestrator/budgets.js';
 import { compactAgent, CompactError, syncContextCap, type CompactMode } from '../orchestrator/compaction.js';
 import type { TokenHealthRaw } from '../orchestrator/usage.js';
 import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orchestrator/unread.js';
@@ -4978,6 +4978,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const budgetSpend = budgetRows.size ? monthSpend(store, budgetMonth) : new Map<string, number>();
     const budgetOf = (a: Agent) => { const b = budgetRows.get(a.id); return b ? budgetView(store, b, budgetSpend.get(a.id) ?? 0, budgetNow, budgetTz, a.id) : undefined; };
     const machineBudget = budgetRows.has(MACHINE) && ownsLocalHost(req) ? machineBudgetView(budgetNow).budget : undefined;
+    // "Tell me every $X": the month so far against the step, and its Alerts line once a multiple is passed.
+    const stepRows = new Map(store.listSpendAlerts().map((x) => [x.scope, x]));
+    const stepSpend = stepRows.size ? (budgetSpend.size ? budgetSpend : monthSpend(store, budgetMonth)) : new Map<string, number>();
+    const stepOf = (scope: string): (StepView & { line?: string }) | undefined => {
+      const al = stepRows.get(scope); if (!al) return undefined;
+      const v = stepView(al, scope === MACHINE ? [...stepSpend.values()].reduce((x, y) => x + y, 0) : stepSpend.get(scope) ?? 0, budgetNow, budgetTz);
+      return { ...v, ...(v.passed ? { line: stepLine(v) } : {}) };
+    };
+    const machineStep = stepRows.has(MACHINE) && ownsLocalHost(req) ? stepOf(MACHINE) : undefined;
     // Paused by the machine's budget: the agent's own tile says so.
     const machinePaused = new Map(store.listBudgetPauses({ open: true, month: budgetMonth }).filter((p) => p.scope === MACHINE).map((p) => [p.agentId, p.pausedAt]));
     return Promise.all(
@@ -5047,6 +5056,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           /** Its monthly budget, this month's spend against it, and a pause (owner only): Alerts from 80%. */
           ...(role === 'owner' && budgetOf(a) ? { budget: { ...budgetOf(a)!, ...(budgetOf(a)!.level ? { line: budgetLine(budgetOf(a)!, 'it') } : {}) } } : {}),
           ...(role === 'owner' && machinePaused.has(a.id) ? { budgetPaused: { scope: 'machine', at: machinePaused.get(a.id) } } : {}),
+          ...(role === 'owner' && stepOf(a.id) ? { spendStep: stepOf(a.id) } : {}),
+          ...(a.ops && machineStep ? { machineStep } : {}),
           ...(a.ops && machineBudget ? { machineBudget: { ...machineBudget, ...(machineBudget.level ? { line: budgetLine(machineBudget, 'this Hatchabot') } : {}) } } : {}),
           /** Slack and Discord, for the icon marks and the Messaging row. */
           otherChannels: store.listChannelsForAgent(a.id).filter((c) => c.kind !== 'telegram').map((c) => ({
@@ -7621,12 +7632,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'plan' : 'api';
   };
   /** The machine-wide budget's view (its spend is every agent's, any owner's). */
-  const machineBudgetView = (now = Date.now()): { budget?: BudgetView; spent: number; lastMonth: number } => {
+  const machineBudgetView = (now = Date.now()): { budget?: BudgetView; alertEvery?: StepView; spent: number; lastMonth: number } => {
     const tz = machineTz(), month = monthKey(now, tz);
     const sum = (m: Map<string, number>) => Math.round([...m.values()].reduce((x, y) => x + y, 0) * 100) / 100;
     const spent = sum(monthSpend(store, month));
     const b = store.getBudget(MACHINE);
-    return { ...(b ? { budget: budgetView(store, b, spent, now, tz) } : {}), spent, lastMonth: sum(monthSpend(store, prevMonth(month))) };
+    const al = store.getSpendAlert(MACHINE);
+    return { ...(b ? { budget: budgetView(store, b, spent, now, tz) } : {}), ...(al ? { alertEvery: stepView(al, spent, now, tz) } : {}), spent, lastMonth: sum(monthSpend(store, prevMonth(month))) };
   };
   /**
    * Budgets: each of the caller's agents with what it spent this month and
@@ -7651,6 +7663,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         spent: r2(spent.get(a.id) ?? 0), lastMonth: r2(last.get(a.id) ?? 0), monthlyNow: monthly,
         suggested: suggestBudget(monthly),
         ...(b ? { budget: budgetView(store, b, spent.get(a.id) ?? 0, now, tz, a.id) } : {}),
+        ...(store.getSpendAlert(a.id) ? { alertEvery: stepView(store.getSpendAlert(a.id)!, spent.get(a.id) ?? 0, now, tz) } : {}),
       };
     }).sort((x, y) => y.monthlyNow - x.monthlyNow);
     return {
@@ -7704,6 +7717,50 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     await runBudgetPass({ record: false });
     const v = machineBudgetView();
     return { ...v, message: budgetMessage('This Hatchabot', parsed.data.usd === null ? null : { usd: parsed.data.usd, atLimit }, v.budget) };
+  });
+
+  /**
+   * "Tell me every $X" (budgets.ts): a message and an Alerts line each time
+   * the month's spend passes the next multiple of `every` (at most one an
+   * hour). Counts from now: multiples already passed this month are not told.
+   * every null removes it.
+   */
+  const stepBody = z.object({ every: z.number().min(MIN_BUDGET).max(MAX_BUDGET).nullable() });
+  const stepMessageFor = (name: string, every: number | null, v?: StepView) => every === null ? `${name}: no spending alerts now.`
+    : `${name}: you hear each time this month's spend passes another $${every}${v ? ` — $${v.spent.toFixed(2)} so far, next at $${v.next}` : ''}.`;
+  app.put<{ Params: { id: string } }>('/v1/agents/:id/spend-alert', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent || agent.state === 'DELETED') return reply.code(404).send({ error: 'Not found' });
+    const parsed = stepBody.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: `every: US dollars from ${MIN_BUDGET} to ${MAX_BUDGET}, or null to stop the alerts.` });
+    const now = Date.now(), tz = machineTz(), nowIso = new Date(now).toISOString();
+    const meta = ledgerMeta(req, 'budget');
+    const before = store.getSpendAlert(agent.id);
+    store.setSpendAlert(agent.id, agent.ownerId, parsed.data.every, nowIso, meta.by);
+    const spent = monthSpend(store, monthKey(now, tz), [agent.id]).get(agent.id) ?? 0;
+    if (parsed.data.every !== null) primeSpendAlert(store, agent.id, parsed.data.every, spent, now, tz);
+    store.addTokenAction({
+      id: `ta_${randomBytes(8).toString('hex')}`, agentId: agent.id, ownerId: agent.ownerId, kind: 'budget', at: nowIso,
+      by: meta.by, via: meta.via, ...(meta.why ? { why: meta.why.slice(0, 400) } : {}), ...(meta.proposalId ? { proposalId: meta.proposalId } : {}),
+      detail: { alertEvery: { from: before?.stepUsd ?? null, to: parsed.data.every } }, outcome: 'applied',
+    });
+    trace(agent.id)('budget.step_set', { every: parsed.data.every, by: meta.by, via: meta.via });
+    const al = store.getSpendAlert(agent.id);
+    const v = al ? stepView(al, spent, now, tz) : undefined;
+    return { alertEvery: v ?? null, message: stepMessageFor(`"${agent.name}"`, parsed.data.every, v) };
+  });
+  app.put('/v1/spend-alert/machine', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const parsed = stepBody.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: `every: US dollars from ${MIN_BUDGET} to ${MAX_BUDGET}, or null to stop the alerts.` });
+    const now = Date.now(), tz = machineTz();
+    store.setSpendAlert(MACHINE, ownerIdOf(req), parsed.data.every, new Date(now).toISOString(), ledgerMeta(req, 'budget').by);
+    const spent = [...monthSpend(store, monthKey(now, tz)).values()].reduce((x, y) => x + y, 0);
+    if (parsed.data.every !== null) primeSpendAlert(store, MACHINE, parsed.data.every, spent, now, tz);
+    trace('admin')('budget.machine_step_set', { every: parsed.data.every });
+    const al = store.getSpendAlert(MACHINE);
+    const v = al ? stepView(al, spent, now, tz) : undefined;
+    return { alertEvery: v ?? null, message: stepMessageFor('This Hatchabot', parsed.data.every, v) };
   });
 
   /** The fleet's use in the last hour, 3/6/9/12 hours, day or week, from what the sampler recorded — answers at once. */

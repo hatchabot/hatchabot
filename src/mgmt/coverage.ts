@@ -33,6 +33,8 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/:id/compact': 'compact_agent',
   'PUT /v1/agents/:id/context-cap': 'set_context_cap',
   'PUT /v1/agents/:id/budget': 'set_budget',
+  'PUT /v1/agents/:id/spend-alert': 'set_spend_alert',
+  'PUT /v1/spend-alert/machine': 'app: fleet-wide/irreversible — the machine-wide spending alert is the machine owner\'s, in the app (⚙ Settings → AI sources → Budgets)',
   'PUT /v1/budgets/machine': 'app: fleet-wide/irreversible — a budget that can pause every agent on the machine is set by the machine owner in the app (⚙ Settings → Budgets)',
   'POST /v1/agents/:id/recover-context': 'app: later — restore earlier conversations',
   'DELETE /v1/agents/:id/context-reset': 'app: browser — dismissing the "its chat was reset" notice',

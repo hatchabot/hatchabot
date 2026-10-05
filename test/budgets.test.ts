@@ -11,6 +11,7 @@ import {
   budgetLine, budgetView, dailyCosts, dayKey, levelOf, MACHINE, monthElapsed, monthKey, nextMonth, parseNewAgentBudget, pausedReplySweep, pausedReplyText, prevMonth, REPLY_EVERY_MS, runBudgets, suggestBudget, type BudgetDeps,
 } from '../src/orchestrator/budgets.js';
 import { MACHINE_DEFAULTS } from '../src/orchestrator/machineDefaults.js';
+import { primeSpendAlert, stepLine, stepView, STEP_TELL_EVERY_MS } from '../src/orchestrator/budgets.js';
 import { createAgentRecord } from '../src/orchestrator/provision.js';
 import { evaluateModelChanges, recordChange, rightSizeSavings } from '../src/orchestrator/modelLedger.js';
 import { REST_BY_NAME } from '../src/mgmt/restTools.js';
@@ -479,5 +480,94 @@ describe('a monthly budget for new agents', () => {
     const ok = await f.inject({ method: 'PUT', url: '/v1/agents/r1/budget', headers: as(OWNER), payload: { usd: 50, atLimit: 'cheaper' } });
     expect(ok.json().budget).toMatchObject({ atLimit: 'cheaper' });
     expect(ok.json().message).toContain('moving to a cheaper model at the limit');
+  });
+});
+
+describe('"tell me every $X"', () => {
+  it('counts from when it is set, tells each new multiple, at most once an hour, and starts again each month', async () => {
+    const { store, agent, deps, told } = world();
+    agent('s1', 'Stock Watcher');
+    const spendAt = (usd: number, at: number) => { store.setModelProfile('s1', profile(at, opus(at - HOUR, usd)), iso(at)); };
+    spendAt(250, NOW);
+    await runBudgets(deps, NOW);
+    store.setSpendAlert('s1', OWNER, 100, iso(NOW));
+    primeSpendAlert(store, 's1', 100, 250, NOW, 'UTC'); // what the app does when it is set
+    await runBudgets(deps, NOW + MIN);
+    expect(told).toEqual([]); // $100 and $200 were passed before: not told
+    spendAt(320, NOW + 2 * MIN);
+    await runBudgets(deps, NOW + 2 * MIN);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.text).toMatch(/^💵 Hatchabot: "Stock Watcher" has spent \$320 in October — you hear every \$100\./);
+    spendAt(430, NOW + 20 * MIN);
+    await runBudgets(deps, NOW + 20 * MIN);
+    expect(told).toHaveLength(1); // within the hour: held
+    spendAt(520, NOW + 70 * MIN);
+    await runBudgets(deps, NOW + 70 * MIN);
+    expect(told).toHaveLength(2); // $400 and $500 in one message, the latest total
+    expect(told[1]!.text).toContain('has spent $520 in October');
+    const v = stepView(store.getSpendAlert('s1')!, 520, NOW + 70 * MIN, 'UTC');
+    expect(v).toMatchObject({ every: 100, passed: 5, next: 600 });
+    expect(stepLine(v)).toBe('Spent $520 in October — you hear every $100 (next at $600)');
+    // November: from nothing; its first $100 is told.
+    const nov = Date.parse('2026-11-02T12:00:00Z');
+    store.setModelProfile('s1', profile(nov, opus(nov - HOUR, 130)), iso(nov));
+    await runBudgets(deps, nov);
+    expect(told).toHaveLength(3);
+    expect(told[2]!.text).toContain('has spent $130 in November');
+    expect(STEP_TELL_EVERY_MS).toBe(3_600_000);
+  });
+
+  it('for the whole machine: every agent\'s spend, told on the manager\'s chat', async () => {
+    const { store, agent, deps, told } = world();
+    agent('ops', 'Hatchabot', { ops: true });
+    agent('m1', 'Errands');
+    agent('m2', 'Theirs', {}, OTHER);
+    store.setModelProfile('m1', profile(NOW, opus(NOW - DAY, 60)), iso(NOW));
+    store.setModelProfile('m2', profile(NOW, opus(NOW - DAY, 45)), iso(NOW));
+    store.setSpendAlert(MACHINE, OWNER, 50, iso(NOW));
+    await runBudgets(deps, NOW);
+    expect(told).toHaveLength(1);
+    expect(told[0]).toMatchObject({ owner: OWNER, via: 'Hatchabot' });
+    expect(told[0]!.text).toContain('This Hatchabot (every agent) has spent $105 in October — you hear every $50.');
+  });
+
+  it('the routes: set from now, read on the list and in get_budgets; removed with null; the machine\'s is the machine owner\'s', async () => {
+    const { f, store } = await app();
+    const now = Date.now();
+    store.setModelProfile('r1', { since: now - 30 * DAY, models: opus(now, 30), promptErrors: 0, crons: 0, firstCall: now - 60 * DAY, hourly: true } as StoredProfile, iso(now));
+    const { recordCostDays, machineTz } = await import('../src/orchestrator/budgets.js');
+    recordCostDays(store, machineTz(), now);
+    expect((await f.inject({ method: 'PUT', url: '/v1/agents/r1/spend-alert', headers: as(OWNER), payload: { every: 0.5 } })).statusCode).toBe(400);
+    const r = await f.inject({ method: 'PUT', url: '/v1/agents/r1/spend-alert', headers: as(OWNER), payload: { every: 10 } });
+    expect(r.json()).toMatchObject({ alertEvery: { every: 10, passed: 3, next: 40 } });
+    expect(r.json().message).toContain('you hear each time this month\'s spend passes another $10');
+    const list = (await f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) })).json() as Array<{ id: string; spendStep?: { line?: string } }>;
+    expect(list.find((a) => a.id === 'r1')!.spendStep!.line).toMatch(/you hear every \$10 \(next at \$40\)$/);
+    const g = (await f.inject({ method: 'GET', url: '/v1/budgets', headers: as(OWNER) })).json();
+    expect(g.agents.find((a: { id: string }) => a.id === 'r1').alertEvery).toMatchObject({ every: 10 });
+    expect((await f.inject({ method: 'PUT', url: '/v1/spend-alert/machine', headers: as(OTHER), payload: { every: 10 } })).statusCode).toBe(403);
+    const m = await f.inject({ method: 'PUT', url: '/v1/spend-alert/machine', headers: as(OWNER), payload: { every: 100 } });
+    expect(m.json().alertEvery).toMatchObject({ every: 100 });
+    await f.inject({ method: 'PUT', url: '/v1/agents/r1/spend-alert', headers: as(OWNER), payload: { every: null } });
+    expect(store.getSpendAlert('r1')).toBeUndefined();
+  });
+
+  it('the chat card, and the default for new agents', () => {
+    const set = REST_BY_NAME.get('set_spend_alert')!;
+    expect(set.tier).toBe('mutate');
+    expect(COVERAGE['PUT /v1/agents/:id/spend-alert']).toBe('set_spend_alert');
+    const agent = { id: 'r1', name: 'Garden Notes' } as Agent;
+    expect(set.call({ agent, input: { every: 25 } } as never)).toEqual({ method: 'PUT', path: '/v1/agents/r1/spend-alert', body: { every: 25 } });
+    expect(set.card!({ agent, input: { every: 25 } } as never)).toContain('at $25, $50, $75');
+    const spec = MACHINE_DEFAULTS.find((d) => d.key === 'newAlertEvery')!;
+    expect(spec.check('25')).toEqual({ ok: true, value: '25' });
+    expect(spec.check('off')).toEqual({ ok: true, value: '' });
+    const { store } = world();
+    const prev = process.env.HATCHABOT_NEW_AGENT_ALERT_EVERY;
+    try {
+      process.env.HATCHABOT_NEW_AGENT_ALERT_EVERY = '25';
+      const a = createAgentRecord(store, { ownerId: OWNER, name: 'Fresh Three', aiProfileId: 'key', hostId: 'h1' });
+      expect(store.getSpendAlert(a.id)).toMatchObject({ stepUsd: 25, setBy: 'default' });
+    } finally { if (prev === undefined) delete process.env.HATCHABOT_NEW_AGENT_ALERT_EVERY; else process.env.HATCHABOT_NEW_AGENT_ALERT_EVERY = prev; }
   });
 });

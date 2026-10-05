@@ -403,6 +403,16 @@ export class Store {
         at TEXT NOT NULL, told_at TEXT,
         PRIMARY KEY (scope, month, level, usd)
       );
+      -- "Tell me every $X" (budgets.ts): a message each time a month's spend
+      -- passes the next multiple of the step, per agent or for the machine.
+      CREATE TABLE IF NOT EXISTS spend_alerts (
+        scope TEXT PRIMARY KEY, owner_id TEXT NOT NULL, step_usd REAL NOT NULL, set_at TEXT NOT NULL, set_by TEXT
+      );
+      -- How far each step alert got this month: the multiple told, and when.
+      CREATE TABLE IF NOT EXISTS spend_alert_state (
+        scope TEXT NOT NULL, month TEXT NOT NULL, step_usd REAL NOT NULL, k_told INTEGER NOT NULL, told_at TEXT,
+        PRIMARY KEY (scope, month)
+      );
       -- Agents a budget paused: started again on the 1st, when the budget is
       -- raised, or by hand (resumed_by 'owner': not paused again that month).
       CREATE TABLE IF NOT EXISTS budget_pauses (
@@ -3497,6 +3507,29 @@ export class Store {
         from_model = excluded.from_model, to_model = excluded.to_model, resumed_at = NULL, resumed_by = NULL`)
       .run(agentId, month, scope, at, cheaper ? 'cheaper' : 'pause', cheaper?.fromModel ?? null, cheaper?.toModel ?? null);
   }
+  listSpendAlerts(): SpendAlertRow[] {
+    return (this.db.prepare(`SELECT * FROM spend_alerts`).all() as any[]).map((r) => ({ scope: r.scope, ownerId: r.owner_id, stepUsd: r.step_usd, setAt: r.set_at, ...(r.set_by ? { setBy: r.set_by } : {}) }));
+  }
+  getSpendAlert(scope: string): SpendAlertRow | undefined {
+    return this.listSpendAlerts().find((a) => a.scope === scope);
+  }
+  /** step null removes it. */
+  setSpendAlert(scope: string, ownerId: string, step: number | null, at: string, by?: string): void {
+    if (step === null) { this.db.prepare(`DELETE FROM spend_alerts WHERE scope = ?`).run(scope); this.db.prepare(`DELETE FROM spend_alert_state WHERE scope = ?`).run(scope); return; }
+    this.db.prepare(`INSERT INTO spend_alerts (scope, owner_id, step_usd, set_at, set_by) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(scope) DO UPDATE SET owner_id = excluded.owner_id, step_usd = excluded.step_usd, set_at = excluded.set_at, set_by = excluded.set_by`).run(scope, ownerId, step, at, by ?? null);
+  }
+  spendAlertState(scope: string, month: string): { stepUsd: number; kTold: number; toldAt?: string } | undefined {
+    const r = this.db.prepare(`SELECT step_usd, k_told, told_at FROM spend_alert_state WHERE scope = ? AND month = ?`).get(scope, month) as { step_usd: number; k_told: number; told_at: string | null } | undefined;
+    return r ? { stepUsd: r.step_usd, kTold: r.k_told, ...(r.told_at ? { toldAt: r.told_at } : {}) } : undefined;
+  }
+  setSpendAlertState(scope: string, month: string, stepUsd: number, kTold: number, toldAt: string | null): void {
+    this.db.prepare(`INSERT INTO spend_alert_state (scope, month, step_usd, k_told, told_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(scope, month) DO UPDATE SET step_usd = excluded.step_usd, k_told = excluded.k_told, told_at = excluded.told_at`).run(scope, month, stepUsd, kTold, toldAt);
+  }
+  pruneSpendAlertState(beforeMonth: string): number {
+    return this.db.prepare(`DELETE FROM spend_alert_state WHERE month < ?`).run(beforeMonth).changes;
+  }
   /** The chats a paused agent's bot has answered: chat id → the newest update seen, and when it last replied. */
   setBudgetPauseReplies(agentId: string, month: string, replies: Record<string, { u: number; at: number }>): void {
     this.db.prepare(`UPDATE budget_pauses SET replies = ? WHERE agent_id = ? AND month = ?`).run(JSON.stringify(replies), agentId, month);
@@ -4974,6 +5007,14 @@ export interface BudgetRow {
   ownerId: string;
   usd: number;
   atLimit: 'warn' | 'pause' | 'cheaper';
+  setAt: string;
+  setBy?: string;
+}
+/** "Tell me every $X" (budgets.ts): scope is an agent's id, or 'machine'. */
+export interface SpendAlertRow {
+  scope: string;
+  ownerId: string;
+  stepUsd: number;
   setAt: string;
   setBy?: string;
 }
