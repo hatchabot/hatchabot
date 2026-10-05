@@ -571,3 +571,24 @@ describe('"tell me every $X"', () => {
     } finally { if (prev === undefined) delete process.env.HATCHABOT_NEW_AGENT_ALERT_EVERY; else process.env.HATCHABOT_NEW_AGENT_ALERT_EVERY = prev; }
   });
 });
+
+describe('spike warnings can be cleared from Usage', () => {
+  it('one, or all of the owner\'s; kept in the store, gone from the page; never another owner\'s', async () => {
+    const { f, store } = await app();
+    const base = Date.now();
+    const t = (h: number) => new Date(base - h * HOUR).toISOString();
+    store.addUsageAlert({ agentId: 'r1', ownerId: OWNER, at: t(30), tokens: 44e6, usual: 15e6, told: true });
+    store.addUsageAlert({ agentId: 'rops', ownerId: OWNER, at: t(50), tokens: 74e6, usual: 25e6, told: true });
+    store.addUsageAlert({ agentId: 'x1', ownerId: OTHER, at: t(20), tokens: 9e6, usual: 2e6, told: true });
+    const shown = async (who: string) => ((await f.inject({ method: 'GET', url: '/v1/usage/periods?period=day', headers: as(who) })).json().alerts as Array<{ agentId: string }>).map((a) => a.agentId);
+    expect(await shown(OWNER)).toEqual(['r1', 'rops']);
+    expect((await f.inject({ method: 'POST', url: '/v1/usage/alerts/dismiss', headers: as(OWNER), payload: { agentId: 'r1' } })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'POST', url: '/v1/usage/alerts/dismiss', headers: as(OWNER), payload: { agentId: 'r1', at: t(30) } })).json()).toEqual({ cleared: 1 });
+    expect(await shown(OWNER)).toEqual(['rops']);
+    expect((await f.inject({ method: 'POST', url: '/v1/usage/alerts/dismiss', headers: as(OWNER), payload: { agentId: 'x1', at: t(20) } })).json()).toEqual({ cleared: 0 });
+    expect((await f.inject({ method: 'POST', url: '/v1/usage/alerts/dismiss', headers: as(OWNER), payload: {} })).json()).toEqual({ cleared: 1 });
+    expect(await shown(OWNER)).toEqual([]);
+    expect(await shown(OTHER)).toEqual(['x1']);
+    expect(store.usageAlertsSince(t(100), { ownerId: OWNER, dismissed: true })).toHaveLength(2);
+  });
+});

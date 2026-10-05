@@ -933,6 +933,8 @@ export class Store {
       `ALTER TABLE budget_pauses ADD COLUMN from_model TEXT`,
       `ALTER TABLE budget_pauses ADD COLUMN to_model TEXT`,
       `ALTER TABLE budget_pauses ADD COLUMN replies TEXT`,
+      // A spike warning the owner cleared from Usage (v2.125.1): kept, not shown.
+      `ALTER TABLE usage_alerts ADD COLUMN dismissed_at TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -3568,11 +3570,17 @@ export class Store {
       .run(a.agentId, a.ownerId, a.at, Math.round(a.tokens), Math.round(a.usual), a.told ? 1 : 0);
   }
   /** Warnings at or after `sinceIso`, newest first; for one owner, or one agent. */
-  usageAlertsSince(sinceIso: string, by: { ownerId?: string; agentId?: string }): Array<{ agentId: string; at: string; tokens: number; usual: number; told: boolean }> {
+  usageAlertsSince(sinceIso: string, by: { ownerId?: string; agentId?: string; dismissed?: boolean }): Array<{ agentId: string; at: string; tokens: number; usual: number; told: boolean }> {
     const rows = this.db.prepare(
-      `SELECT agent_id, at, tokens, usual, told FROM usage_alerts WHERE at >= ? AND (? IS NULL OR owner_id = ?) AND (? IS NULL OR agent_id = ?) ORDER BY at DESC`,
-    ).all(sinceIso, by.ownerId ?? null, by.ownerId ?? null, by.agentId ?? null, by.agentId ?? null) as Array<{ agent_id: string; at: string; tokens: number; usual: number; told: number }>;
+      `SELECT agent_id, at, tokens, usual, told FROM usage_alerts WHERE at >= ? AND (? IS NULL OR owner_id = ?) AND (? IS NULL OR agent_id = ?) AND (? = 1 OR dismissed_at IS NULL) ORDER BY at DESC`,
+    ).all(sinceIso, by.ownerId ?? null, by.ownerId ?? null, by.agentId ?? null, by.agentId ?? null, by.dismissed ? 1 : 0) as Array<{ agent_id: string; at: string; tokens: number; usual: number; told: number }>;
     return rows.map((r) => ({ agentId: r.agent_id, at: r.at, tokens: r.tokens, usual: r.usual, told: !!r.told }));
+  }
+  /** Clear spike warnings from view: one (agent and time), or every one of this owner's. Returns how many. */
+  dismissUsageAlerts(ownerId: string, at: string, one?: { agentId: string; at: string }): number {
+    return one
+      ? this.db.prepare(`UPDATE usage_alerts SET dismissed_at = ? WHERE owner_id = ? AND agent_id = ? AND at = ? AND dismissed_at IS NULL`).run(at, ownerId, one.agentId, one.at).changes
+      : this.db.prepare(`UPDATE usage_alerts SET dismissed_at = ? WHERE owner_id = ? AND dismissed_at IS NULL`).run(at, ownerId).changes;
   }
   /** The newest token counter reading for an agent, if any. */
   latestTokenTotal(agentId: string): number | undefined {

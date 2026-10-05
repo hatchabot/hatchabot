@@ -1680,6 +1680,18 @@ and the background passes move on. It is never read as "the container is
 gone": a call skipped this way answers like a timeout, so no agent is marked
 failed. When it comes back, the next probe lets calls through.
 
+**Usage — at API prices** (v2.125.1): under the totals, what the window
+cost at API list prices for every agent of yours — plan ones too, as an
+equivalent — with a month at that pace, a bar of what it went on (cache
+writes, output, cache reads, new input: on a long conversation cache writes
+are usually two thirds), the cost by model, and how much is billed on API
+keys and how much is plan room. Each agent's row carries its own figure
+(hover for its split). From the sampler's hour buckets (agentCosts.ts
+`windowPricing`), the same prices as the badges; nothing is read from a
+container. **Spike warnings** at the top can be cleared: ✕ on one, **Clear
+all** for every one (`POST /v1/usage/alerts/dismiss`; kept in the store, off
+the page; a new spike shows again). The panel's introductory paragraph is gone.
+
 **Usage** (its own header button) is the fleet rollup **by period** — Hour, 3h, 6h, 9h, 12h, Day or Week:
 what your agents used in that window, as tokens and requests per agent
 (ranked by tokens for the window, with refusals in red), two charts of the

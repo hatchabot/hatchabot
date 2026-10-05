@@ -2,7 +2,7 @@ import type { Agent } from '../domain/types.js';
 import type { Store } from '../store/store.js';
 import { HOUR_FIELDS } from './usage.js';
 import { coverageDays, type StoredProfile } from './modelScorecard.js';
-import { priceMix, type TokenMix } from './modelOptions.js';
+import { modelOption, priceMix, type TokenMix } from './modelOptions.js';
 
 /**
  * What each agent costs at API prices, for the home screen's cost badges
@@ -179,3 +179,84 @@ export class TtlCache<T> {
 
 /** HATCHABOT_COST_BADGES=off hides the badges, View by → Cost and the tooltip's cost line. */
 export const costBadgesOn = (): boolean => !/^(off|0|false|no)$/i.test(String(process.env.HATCHABOT_COST_BADGES ?? '').trim());
+
+// ---- what a window cost, and on what (Usage's "At API prices", 2026-10-05) ----
+
+/** Each model's tokens in [now − hours, now], from the hour buckets, a bucket the window only partly covers counted for that part. */
+export function mixesInWindow(p: StoredProfile | undefined, hours: number, now: number): Map<string, TokenMix> {
+  const out = new Map<string, TokenMix>();
+  if (!p?.models) return out;
+  const from = now - hours * HOUR;
+  for (const [model, s] of Object.entries(p.models)) {
+    const mix: TokenMix = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    for (const [h, v] of Object.entries(s.h ?? {})) {
+      const start = Date.parse(`${h}:00:00Z`);
+      if (!(start + HOUR > from) || start > now) continue;
+      const span = Math.max(1, Math.min(HOUR, now - start));
+      const w = start >= from ? 1 : Math.max(0, Math.min(1, (start + span - from) / span));
+      HOUR_FIELDS.forEach((f, i) => { if (f in mix) mix[f as keyof TokenMix] += (Number(v[i]) || 0) * w; });
+    }
+    if (mix.input + mix.output + mix.cacheRead + mix.cacheWrite > 0) out.set(model, mix);
+  }
+  return out;
+}
+
+/** A cost split by what it paid for, USD. */
+export interface CostParts { input: number; cacheWrite: number; cacheRead: number; output: number }
+const noParts = (): CostParts => ({ input: 0, cacheWrite: 0, cacheRead: 0, output: 0 });
+/** One model's token mix priced part by part (the same arithmetic as priceMix); undefined when the model has no price. */
+export function priceParts(model: string, t: TokenMix): CostParts | undefined {
+  const m = modelOption(model);
+  if (!m) return undefined;
+  return { input: (t.input * m.input) / 1e6, cacheWrite: (1.25 * t.cacheWrite * m.input) / 1e6, cacheRead: (m.cacheRead * t.cacheRead * m.input) / 1e6, output: (t.output * m.output) / 1e6 };
+}
+
+export interface WindowPricing {
+  hours: number;
+  /** All the owner's agents at API prices, USD (plan agents as an equivalent). */
+  total: number;
+  /** The same as a month at this pace (× 720 / hours). */
+  monthly: number;
+  parts: CostParts;
+  /** How much of it is on API keys (billed) and on Claude plans (an equivalent). */
+  billing: { api: number; plan: number };
+  /** Per model, dearest first. */
+  models: Array<{ model: string; cost: number }>;
+  /** Per agent of the owner's: its window at API prices. */
+  agents: Record<string, { cost: number; parts: CostParts }>;
+  /** Tokens on models with no known price were left out. */
+  unpriced?: boolean;
+}
+
+export function windowPricing(store: Store, viewer: string, hours: number, now = Date.now()): WindowPricing {
+  const agents = store.listAgents(viewer).filter((a) => a.state !== 'DELETED' && a.state !== 'DELETING');
+  const profiles = store.modelProfiles(agents.map((a) => a.id)) as Map<string, { profile: StoredProfile; at: string }>;
+  const parts = noParts(), billing = { api: 0, plan: 0 }, byModel = new Map<string, number>();
+  const per: Record<string, { cost: number; parts: CostParts }> = {};
+  let unpriced = false;
+  for (const a of agents) {
+    const src = store.getAIProfile(a.aiProfileId);
+    if (src?.vendor === 'local') continue;
+    const ap = noParts();
+    for (const [model, mix] of mixesInWindow(profiles.get(a.id)?.profile, hours, now)) {
+      const pp = priceParts(model, mix);
+      if (!pp) { if (!LOCAL_MODEL.test(model)) unpriced = true; continue; }
+      (Object.keys(ap) as Array<keyof CostParts>).forEach((k) => { ap[k] += pp[k]; });
+      byModel.set(model.replace(/^.*\//, ''), (byModel.get(model.replace(/^.*\//, '')) ?? 0) + pp.input + pp.cacheWrite + pp.cacheRead + pp.output);
+    }
+    const cost = ap.input + ap.cacheWrite + ap.cacheRead + ap.output;
+    if (!(cost > 0)) continue;
+    (Object.keys(parts) as Array<keyof CostParts>).forEach((k) => { parts[k] += ap[k]; });
+    if (src?.kind === 'subscription') billing.plan += cost; else billing.api += cost;
+    per[a.id] = { cost: r2(cost), parts: { input: r2(ap.input), cacheWrite: r2(ap.cacheWrite), cacheRead: r2(ap.cacheRead), output: r2(ap.output) } };
+  }
+  const total = parts.input + parts.cacheWrite + parts.cacheRead + parts.output;
+  return {
+    hours, total: r2(total), monthly: r2((total * 720) / hours),
+    parts: { input: r2(parts.input), cacheWrite: r2(parts.cacheWrite), cacheRead: r2(parts.cacheRead), output: r2(parts.output) },
+    billing: { api: r2(billing.api), plan: r2(billing.plan) },
+    models: [...byModel].map(([model, cost]) => ({ model, cost: r2(cost) })).filter((m) => m.cost > 0).sort((x, y) => y.cost - x.cost),
+    agents: per,
+    ...(unpriced ? { unpriced: true } : {}),
+  };
+}

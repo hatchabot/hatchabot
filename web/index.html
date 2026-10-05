@@ -2377,11 +2377,6 @@
     <h3 style="margin:0">Fleet usage</h3>
     <button class="hbtn" onclick="loadFleetUsage()">Refresh</button>
   </div>
-  <div class="sub" style="margin:4px 0 0">
-    What your agents used in the last hour, day or week — tokens (new input, cache reads and writes, and output) and requests, per
-    agent — from the usage samples Hatchabot takes every ten minutes. Usage, not a bill: subscription
-    and local agents have no per-token cost.
-  </div>
   <div id="fleetUsageBody" style="margin-top:14px">Loading…</div>
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
     <button class="primary" onclick="fleetUsageDlg.close()">Close</button>
@@ -8555,7 +8550,8 @@ function usageHTML(u, agentId) {
   const big = n(u.lastContext) >= 150_000;
   const ctx = u.lastContext !== undefined ? `<div style="margin:2px 0"><b>Conversation size now:</b> ${fmtTokens(u.lastContext)} tokens a call${u.maxContext ? ` <span class="sub">(largest ever ${fmtTokens(u.maxContext)})</span>` : ''}</div>
     ${big ? `<div class="sub" style="margin:2px 0 6px">Every call carries this much in. A long-running conversation or a scheduled task that keeps adding to it is the usual cause; a fresh session makes each call far smaller.</div>` : ''}` : '';
-  const alerts = (u.alerts || []).map(x => `<div class="sub">⚠️ ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}</div>`).join('');
+  const alerts = (u.alerts || []).map(x => `<div class="sub" style="display:flex;gap:6px;align-items:baseline"><span class="grow">⚠️ ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}</span>`
+    + `<button class="hbtn" style="padding:0 6px;font-size:12px" title="Clear this warning" aria-label="Clear this warning" onclick="dismissSpike('${jsq(x.agentId || agentId)}','${jsq(x.at)}').then(() => { this.closest('div').remove(); })">✕</button></div>`).join('');
   return `<div style="font-size:22px;font-weight:700">${fmtTokens(u.totalTokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">in all</span></div>
      <div class="sub" style="margin:2px 0 8px">${fmtN(n(u.calls))} call${u.calls === 1 ? '' : 's'} · ${u.sessions} session${u.sessions > 1 ? 's' : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(agentId, models)}</div>
      ${alerts ? `<div style="margin:0 0 8px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
@@ -8574,6 +8570,14 @@ function setFleetUsagePeriod(p) {
   fleetUsagePeriod = FLEET_USAGE_PERIODS.some(([k]) => k === p) ? p : 'day';
   try { localStorage.setItem('hb-fleet-usage-period', fleetUsagePeriod); } catch {}
   void loadFleetUsage();
+}
+/** Clear one spike warning (its agent and time), or all of them. */
+async function dismissSpike(agentId, at) {
+  try {
+    await api('/v1/usage/alerts/dismiss', { method: 'POST', body: agentId ? { agentId, at } : {} });
+    void loadFleetUsage();
+    if (v2UsageCache) v2UsageCache = null;
+  } catch (e) { toast(e.message, 8000); }
 }
 async function loadFleetUsage() {
   if (!$('fleetUsageBody').childElementCount) $('fleetUsageBody').innerHTML = 'Loading…';
@@ -8616,6 +8620,7 @@ function renderFleetUsage(f) {
   const rows = f.agents.map((a, i) => {
     const pct = Math.max(2, Math.round(((a.tokens || a.requests) / max) * 100));
     const cost = usageCost(a);
+    const ap = f.pricing?.agents?.[a.id];
     return `<div class="pair" style="padding:6px 0;align-items:flex-start">
       <span class="grow">
         <span class="sub" style="display:inline-block;width:1.4em">${i + 1}.</span> <b>${esc(a.name)}</b>
@@ -8624,7 +8629,7 @@ function renderFleetUsage(f) {
       </span>
       <span style="text-align:right;margin-left:10px;white-space:nowrap">
         <b>${fmtTokens(a.tokens)}</b> <span class="sub">tokens</span>
-        ${cost.text ? `<div class="sub"${cost.dim ? '' : ' style="color:var(--warn)"'}>${cost.text}</div>` : ''}
+        ${ap ? `<div class="sub" title="At API prices: cache writes ${v2Money(ap.parts.cacheWrite)}, output ${v2Money(ap.parts.output)}, cache reads ${v2Money(ap.parts.cacheRead)}, new input ${v2Money(ap.parts.input)}">≈ ${v2Money(ap.cost)} at API prices${a.billing === 'included' ? ' · on a plan' : ''}</div>` : cost.text ? `<div class="sub"${cost.dim ? '' : ' style="color:var(--warn)"'}>${cost.text}</div>` : ''}
       </span>
     </div>`;
   }).join('');
@@ -8639,8 +8644,19 @@ function renderFleetUsage(f) {
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">${legend('included', 'subscription', 'var(--ok)')}${legend('api', 'API', 'var(--warn)')}${legend('local', 'local', '#6b8fb5')}</div>` : '';
   const totalCost = (f.cost ? `<span class="sub">· <b style="color:var(--warn)">est. ${fmtCostRange(f.cost)}</b> API cost</span>` : '')
     + ` <a href="#" class="sub" id="fleetUsagePrices" style="font-size:13px;font-weight:400" onclick="event.preventDefault(); openModelPrices()">model prices</a>`;
-  // Spike warnings of the last week (sent to Telegram when they happened).
-  const alerts = (f.alerts || []).map((x) => `<div class="sub" style="margin:2px 0">⚠️ <b>${esc(x.name)}</b> used ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}${x.told ? '' : ' · not sent (no Telegram)'}</div>`).join('');
+  // Spike warnings of the last week (sent to Telegram when they happened); ✕ clears one, "Clear all" every one.
+  const alerts = (f.alerts || []).map((x) => `<div class="sub" style="margin:2px 0;display:flex;gap:6px;align-items:baseline"><span class="grow">⚠️ <b>${esc(x.name)}</b> used ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}${x.told ? '' : ' · not sent (no Telegram)'}</span>`
+    + `<button class="hbtn" style="padding:0 6px;font-size:12px" title="Clear this warning" aria-label="Clear this warning" onclick="dismissSpike('${jsq(x.agentId)}','${jsq(x.at)}')">✕</button></div>`).join('')
+    + ((f.alerts || []).length > 1 ? `<div style="text-align:right;margin-top:2px"><button class="hbtn" style="font-size:12px" onclick="dismissSpike()">Clear all</button></div>` : '');
+  // At API prices, part by part (agentCosts.ts windowPricing): every agent, plan ones as an equivalent.
+  const pr = f.pricing;
+  const PART = [['cacheWrite', 'Cache writes', '#c9822b'], ['output', 'Output', '#7a6fd6'], ['cacheRead', 'Cache reads', '#4f9a8f'], ['input', 'New input', '#8a8f98']];
+  const pricing = pr && pr.total > 0 ? `<h4 class="v2sec" style="margin-top:12px">At API prices</h4>
+    <div style="margin:2px 0 6px"><b style="font-size:16px">≈ ${v2Money(pr.total)}</b> <span class="sub">in the ${span} · ≈ ${v2Money(pr.monthly)} a month at this pace${pr.unpriced ? ' · some models have no price and are left out' : ''}</span></div>
+    <div style="display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--panel-2)" role="img" aria-label="What it went on">${PART.map(([k, l, c]) => pr.parts[k] > 0 ? `<span title="${l}: ${v2Money(pr.parts[k])}" style="background:${c};width:${pr.parts[k] / pr.total * 100}%"></span>` : '').join('')}</div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 6px">${PART.map(([k, l, c]) => pr.parts[k] > 0 ? `<span class="sub" style="display:inline-flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:${c};display:inline-block"></span>${l} ${v2Money(pr.parts[k])} (${Math.round(pr.parts[k] / pr.total * 100)}%)</span>` : '').join('')}</div>
+    ${pr.models.length ? `<div class="sub" style="margin:2px 0">By model: ${pr.models.slice(0, 6).map((m) => `${esc(m.model)} ${v2Money(m.cost)}`).join(' · ')}</div>` : ''}
+    <div class="sub" style="margin:2px 0 8px">${pr.billing.plan > 0 ? `${pr.billing.api > 0 ? `${v2Money(pr.billing.api)} on API keys (billed); ` : ''}${v2Money(pr.billing.plan)} on Claude plans — an equivalent: the room it takes in the plan's limits, not a bill. ` : 'All on API keys: what you are billed, before any discount. '}Every message re-sends the conversation, so cache writes (a conversation written again after a pause) are usually the most of it.</div>` : '';
   $('fleetUsageBody').innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
       <span class="su-periods" style="margin:0;flex-wrap:wrap">${FLEET_USAGE_PERIODS.map(([k, l]) => btn(k, l)).join('')}</span>
@@ -8649,6 +8665,7 @@ function renderFleetUsage(f) {
     ${partial}
     ${f.rightSize?.line ? `<div class="sub" id="rightSizeLine" style="margin:4px 0 8px" title="What switching agents to cheaper models saved this month: tokens used on the new model × the price difference, at API list prices">✂️ ${esc(f.rightSize.line)}</div>` : ''}
     ${alerts ? `<div style="margin:6px 0 8px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
+    ${pricing}
     ${breakdown}
     ${f.totals.tokens ? fleetUsageBars(f.buckets, 'tokens', `Tokens ${per}`, period) : ''}
     ${f.totals.requests ? fleetUsageBars(f.buckets, 'requests', `Requests ${per}`, period) : ''}

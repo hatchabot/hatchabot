@@ -82,7 +82,7 @@ import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orches
 import { guestConsoleSessionKey } from '../openclaw/consoleIdentity.js';
 import { webChatStoreKey } from '../orchestrator/webChat.js';
 import { RecentTracker, RECENT_CAP, orderRecent, previewFor, previewLine, type RecentPeople, type RecentViewer } from '../orchestrator/recent.js';
-import { COST_BANDS, COST_PERIODS, costBadgesOn, costsFor, DEFAULT_COST_PERIOD, TtlCache, type AgentCost } from '../orchestrator/agentCosts.js';
+import { COST_BANDS, COST_PERIODS, costBadgesOn, costsFor, DEFAULT_COST_PERIOD, TtlCache, windowPricing, type AgentCost } from '../orchestrator/agentCosts.js';
 import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
@@ -7763,6 +7763,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { alertEvery: v ?? null, message: stepMessageFor('This Hatchabot', parsed.data.every, v) };
   });
 
+  /**
+   * Clear spike warnings from Usage (and the agent's Usage tab): one — its
+   * agent and time — or all of this person's. They were told when they
+   * happened; this only takes them off the page (2026-10-05).
+   */
+  app.post<{ Body: { agentId?: string; at?: string } }>('/v1/usage/alerts/dismiss', async (req, reply) => {
+    const ownerId = ownerIdOf(req);
+    const b = (req.body ?? {}) as { agentId?: unknown; at?: unknown };
+    if ((b.agentId === undefined) !== (b.at === undefined)) return reply.code(400).send({ error: 'Give both agentId and at for one warning, or neither for all of them.' });
+    const one = typeof b.agentId === 'string' && typeof b.at === 'string' ? { agentId: b.agentId, at: b.at } : undefined;
+    const cleared = store.dismissUsageAlerts(ownerId, new Date().toISOString(), one);
+    return { cleared };
+  });
+
   /** The fleet's use in the last hour, 3/6/9/12 hours, day or week, from what the sampler recorded — answers at once. */
   app.get<{ Querystring: { period?: string } }>('/v1/usage/periods', async (req, reply) => {
     const period = String(req.query?.period ?? 'day');
@@ -7777,7 +7791,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const rs = rightSizeSavings(store, ownerId);
       if (rs.line) rightSize = { line: rs.line, savingUSD: rs.savingUSD, apiUSD: rs.apiUSD, planUSD: rs.planUSD, month: rs.month };
     } catch (err) { app.log.warn({ err: String(err) }, 'model.savings_failed'); }
-    return { ...computeUsagePeriod(store, ownerId, period as UsagePeriod), sampledAt: usageSampledAt, alerts, ...(rightSize ? { rightSize } : {}) };
+    // At API prices, part by part, for every agent of theirs (plan agents as an equivalent): agentCosts.ts windowPricing.
+    const PERIOD_HOURS: Record<string, number> = { hour: 1, '3h': 3, '6h': 6, '9h': 9, '12h': 12, day: 24, week: 168 };
+    let pricing: ReturnType<typeof windowPricing> | undefined;
+    try { pricing = windowPricing(store, ownerId, PERIOD_HOURS[period] ?? 24); } catch (err) { app.log.warn({ err: String(err) }, 'usage.pricing_failed'); }
+    return { ...computeUsagePeriod(store, ownerId, period as UsagePeriod), sampledAt: usageSampledAt, alerts, ...(rightSize ? { rightSize } : {}), ...(pricing ? { pricing } : {}) };
   });
 
   /** Daily fleet-usage snapshots for the trend chart, oldest → newest, with a

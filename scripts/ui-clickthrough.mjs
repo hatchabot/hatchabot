@@ -522,9 +522,26 @@ const SCENARIOS = String.raw`(() => {
       // A spike warning of the last week shows at the top.
       window.__override['/v1/usage/periods'] = { period: 'day', from: at(1440), to: new Date(now).toISOString(), bucketMinutes: 60, buckets: [],
         agents: [], totals: { tokens: 0, requests: 0, limited: 0 }, byBilling: {}, cost: null,
-        alerts: [{ agentId: 'a1', name: 'Homework Helper', at: new Date(now - 3600000).toISOString(), tokens: 100e6, usual: 20e6, told: true }] };
+        alerts: [{ agentId: 'a1', name: 'Homework Helper', at: new Date(now - 3600000).toISOString(), tokens: 100e6, usual: 20e6, told: true },
+          { agentId: 'a2', name: 'Soccer Schedule', at: new Date(now - 7200000).toISOString(), tokens: 60e6, usual: 20e6, told: true }],
+        pricing: { hours: 24, total: 123.4, monthly: 3702, parts: { cacheWrite: 82.1, output: 16.3, cacheRead: 20, input: 5 }, billing: { api: 0, plan: 123.4 },
+          models: [{ model: 'claude-sonnet-5', cost: 100 }, { model: 'claude-opus-4-8', cost: 23.4 }], agents: {} } };
       openFleetUsage();
       await until(() => document.getElementById('fleetUsageBody').textContent.includes('about 5× its usual day'));
+      const body = document.getElementById('fleetUsageBody');
+      ok('no intro paragraph', !fleetUsageDlg.textContent.includes('Usage, not a bill'));
+      ok('at API prices: the total and the pace', body.textContent.includes('≈ $123 in the last 24 hours') || body.textContent.includes('≈ $123'));
+      ok('a month at this pace', body.textContent.includes('≈ $3,702 a month at this pace'));
+      ok('what it went on', body.textContent.includes('Cache writes $82') && body.textContent.includes('(67%)') && body.textContent.includes('New input $5.00'));
+      ok('by model', body.textContent.includes('By model: claude-sonnet-5 $100 · claude-opus-4-8 $23'));
+      ok('a plan is an equivalent', body.textContent.includes('on Claude plans — an equivalent'));
+      const mark = window.__calls.length;
+      body.querySelector('button[aria-label="Clear this warning"]').click();
+      const one = await until(() => window.__calls.slice(mark).find((c) => c.method === 'POST' && c.path === '/v1/usage/alerts/dismiss'));
+      eq('clears that one', one.body, { agentId: 'a1', at: new Date(now - 3600000).toISOString() });
+      byText('#fleetUsageBody button', 'Clear all').click();
+      const all = await until(() => window.__calls.slice(mark).filter((c) => c.path === '/v1/usage/alerts/dismiss')[1]);
+      eq('Clear all clears every one', all.body, {});
       fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
       try { localStorage.removeItem('hb-fleet-usage-period'); } catch {} fleetUsagePeriod = 'day';
     },

@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.126.0] — 2026-10-05
+
+### Added
+- **Usage → At API prices**: what the window cost for every agent of yours at API list prices (plan agents as an equivalent), a month at that pace, what it went on — cache writes, output, cache reads, new input — the cost by model, and the billed (API key) vs plan split. Every agent's row carries its own figure (hover for its split). `GET /v1/usage/periods` carries `pricing` (agentCosts.ts `windowPricing`).
+- **Spike warnings can be cleared**: ✕ on one, **Clear all** for every one, in Usage and on the agent's Usage tab (`POST /v1/usage/alerts/dismiss`). They were already told on Telegram when they happened; a new spike still shows.
+
+### Changed
+- The Usage panel's introductory paragraph is gone.
+
 ## [2.125.0] — 2026-10-05
 
 ### Added

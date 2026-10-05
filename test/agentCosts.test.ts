@@ -6,7 +6,8 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { HOUR_FIELDS, type HourField, type WindowModelStats } from '../src/orchestrator/usage.js';
 import type { StoredProfile } from '../src/orchestrator/modelScorecard.js';
-import { agentCost, COST_BANDS, COST_PERIODS, costsFor, tierOf, TtlCache } from '../src/orchestrator/agentCosts.js';
+import { agentCost, COST_BANDS, COST_PERIODS, costsFor, priceParts, tierOf, TtlCache, windowPricing } from '../src/orchestrator/agentCosts.js';
+import { priceMix } from '../src/orchestrator/modelOptions.js';
 import { publicClassFor } from '../src/api/publicRoutes.js';
 
 /** The home screen's cost badges: GET /v1/costs and what it is figured from (made-up agents and numbers). */
@@ -165,6 +166,33 @@ describe('cost windows (View by → Cost\'s pills)', () => {
     const p = profile({ 'claude-haiku-4-5': model({ [NOW]: { input: 1.2e6 } }) }); // $1.20 this hour
     expect(agentCost(AGENT, stored(p), API, 3 / 24, NOW, COST_PERIODS['3h']!.bands)).toMatchObject({ cost: 1.2, tier: 3 });
     expect(agentCost(AGENT, stored(p), API, 7, NOW)).toMatchObject({ weekly: 1.2, tier: 1 }); // the week's rate against $10/$50/$100
+  });
+});
+
+describe('a window at API prices, part by part (Usage)', () => {
+  it('the parts add up to the price, model by model', () => {
+    const mix = { input: 1e6, output: 2e5, cacheRead: 5e6, cacheWrite: 3e6 };
+    for (const m of ['claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5', 'claude-opus-5-5']) {
+      const p = priceParts(m, mix)!;
+      expect(p.input + p.cacheWrite + p.cacheRead + p.output, m).toBeCloseTo(priceMix(m, mix)!, 9);
+    }
+    expect(priceParts('gemini-9-pro', mix)).toBeUndefined();
+  });
+
+  it('every agent of the owner\'s, plan ones too; a month at the pace; by model; another owner\'s and local ones left out', async () => {
+    const w = await world();
+    const now = Date.now();
+    w.store.setModelProfile('c-big', profile({ 'claude-opus-4-8': model({ [now - HOUR]: { cacheWrite: 1.6e6, output: 0.2e6 } }) }), iso(now)); // $10 + $5
+    w.store.setModelProfile('c-plan', profile({ 'claude-sonnet-5': model({ [now - HOUR]: { input: 2.5e6 } }) }), iso(now)); // $5 on the plan
+    const pr = windowPricing(w.store, OWNER, 24, now);
+    expect(pr.total).toBeCloseTo(20, 6);
+    expect(pr.parts).toMatchObject({ cacheWrite: 10, output: 5, input: 5, cacheRead: 0 });
+    expect(pr.billing).toEqual({ api: 15, plan: 5 });
+    expect(pr.monthly).toBeCloseTo(600, 6);
+    expect(pr.models).toEqual([{ model: 'claude-opus-4-8', cost: 15 }, { model: 'claude-sonnet-5', cost: 5 }]);
+    expect(Object.keys(pr.agents).sort()).toEqual(['c-big', 'c-plan']);
+    expect(pr.unpriced).toBe(true); // Garden Notes on gemini-9-pro
+    expect(windowPricing(w.store, STRANGER, 24, now).total).toBe(0);
   });
 });
 
