@@ -21,6 +21,8 @@ export interface UsageBucket { at: string; tokens: number; requests: number; lim
 export interface UsageAgentRow {
   id: string; name: string; state: string;
   tokens: number; requests: number; limited: number;
+  /** Requests that failed for another reason than a rate limit. */
+  failed?: number;
   billing: 'included' | 'api' | 'local'; profileName?: string; model?: string;
   cost: CostRange | null;
   /** API tokens with no known price for its model: the page says so rather than "$0.00+". */
@@ -33,7 +35,7 @@ export interface UsagePeriodView {
   bucketMinutes: number;
   buckets: UsageBucket[];
   agents: UsageAgentRow[];
-  totals: { tokens: number; requests: number; limited: number };
+  totals: { tokens: number; requests: number; limited: number; failed: number };
   byBilling: Record<string, number>;
   cost: (CostRange & { agents: number }) | null;
   /** When token counting began for the newest-started agent — a window that starts earlier is partial. */
@@ -73,8 +75,8 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
   // numbers are its owner's, not a member's (one rule on every usage surface, 30th audit).
   const agents = store.listAgents(ownerId).filter((a) => a.state !== 'DELETED');
   const ids = new Set(agents.map((a) => a.id));
-  const per = new Map<string, { tokens: number; requests: number; limited: number }>();
-  const row = (id: string) => { let r = per.get(id); if (!r) { r = { tokens: 0, requests: 0, limited: 0 }; per.set(id, r); } return r; };
+  const per = new Map<string, { tokens: number; requests: number; limited: number; failed: number }>();
+  const row = (id: string) => { let r = per.get(id); if (!r) { r = { tokens: 0, requests: 0, limited: 0, failed: 0 }; per.set(id, r); } return r; };
   // Tokens by the source each reading was taken on (token_samples.profile_id),
   // so an agent moved from an API key to a subscription keeps its API tokens
   // priced and its subscription tokens included (2026-09-30; both were
@@ -122,19 +124,19 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
   // by the hour from the hourly table.
   if (period === 'week') {
     for (const h of store.modelCallHoursForAgents(ids, hourOf(from))) {
-      const r = row(h.agentId); r.requests += h.ok + h.failed + h.limited; r.limited += h.limited;
+      const r = row(h.agentId); r.requests += h.ok + h.failed + h.limited; r.limited += h.limited; r.failed += h.failed;
       const b = bucket(`${h.hour}:00:00Z`); if (b) { b.requests += h.ok + h.failed + h.limited; b.limited += h.limited; }
     }
   } else {
     for (const sl of store.modelCallSlotsForAgents(ids, slotOf(from))) {
-      const r = row(sl.agentId); r.requests += sl.ok + sl.failed + sl.limited; r.limited += sl.limited;
+      const r = row(sl.agentId); r.requests += sl.ok + sl.failed + sl.limited; r.limited += sl.limited; r.failed += sl.failed;
       const b = bucket(`${sl.slot}:00Z`); if (b) { b.requests += sl.ok + sl.failed + sl.limited; b.limited += sl.limited; }
     }
   }
 
   const byBilling: Record<string, number> = { included: 0, api: 0, local: 0 };
   const rows: UsageAgentRow[] = agents.map((a) => {
-    const r = per.get(a.id) ?? { tokens: 0, requests: 0, limited: 0 };
+    const r = per.get(a.id) ?? { tokens: 0, requests: 0, limited: 0, failed: 0 };
     // The source that carried most of the window's tokens names the row;
     // with no tokens, the agent's current one.
     const spent = [...(byProfile.get(a.id) ?? new Map<string, number>())];
@@ -167,7 +169,7 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
   const cost = billed.length
     ? { low: billed.reduce((s, r) => s + r.cost!.low, 0), high: billed.reduce((s, r) => s + r.cost!.high, 0), partial: billed.some((r) => r.cost!.partial) || rows.some((r) => r.unpriced), agents: billed.length }
     : null;
-  const totals = { tokens: rows.reduce((s, r) => s + r.tokens, 0), requests: rows.reduce((s, r) => s + r.requests, 0), limited: rows.reduce((s, r) => s + r.limited, 0) };
+  const totals = { tokens: rows.reduce((s, r) => s + r.tokens, 0), requests: rows.reduce((s, r) => s + r.requests, 0), limited: rows.reduce((s, r) => s + r.limited, 0), failed: rows.reduce((s, r) => s + (r.failed ?? 0), 0) };
   // What each agent's readings can know reaches FIRST_READ_REACH_MS before its
   // first sample: a first reading reads the transcripts' last 8 days, writing
   // them when there were calls and showing there were none when not. Taking

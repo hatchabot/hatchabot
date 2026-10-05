@@ -54,7 +54,7 @@ describe('computeUsagePeriod', () => {
     expect(v.bucketMinutes).toBe(5);
     expect(v.buckets.length).toBeGreaterThanOrEqual(12);
     expect(v.agents.map((a) => [a.name, a.tokens, a.requests, a.limited])).toEqual([['Den', 400, 3, 1], ['Kitchen', 50, 0, 0]]);
-    expect(v.totals).toEqual({ tokens: 450, requests: 3, limited: 1 });
+    expect(v.totals).toEqual({ tokens: 450, requests: 3, limited: 1, failed: 0 });
     expect(v.buckets.reduce((s, b) => s + b.tokens, 0)).toBe(450);
     expect(v.buckets.reduce((s, b) => s + b.requests, 0)).toBe(3);
     // Den is API-keyed: an estimate on its current model; Kitchen is included.

@@ -505,23 +505,27 @@ const SCENARIOS = String.raw`(() => {
       await sleep(50);
     },
     usageHours: async () => {
-      // Usage offers 3, 6, 9 and 12 hours between Hour and Day (Chris, 2026-09-28).
+      // Usage (2026-10-05): the warnings, At API prices and the savings — no By agent table, no period pills.
       const now = Date.now(), at = (m) => new Date(Math.floor((now - m * 60000) / 900000) * 900000).toISOString();
-      window.__override['/v1/usage/periods'] = { period: '6h', from: at(360), to: new Date(now).toISOString(), bucketMinutes: 15,
-        buckets: [360, 345, 30, 15].map((m) => ({ at: at(m), tokens: m === 15 ? 5000 : 0, requests: m === 15 ? 2 : 0, limited: 0 })),
+      window.__override['/v1/usage/periods'] = { period: 'day', from: at(1440), to: new Date(now).toISOString(), bucketMinutes: 60, buckets: [],
         agents: [{ id: 'a1', name: 'Homework Helper', state: 'RUNNING', tokens: 5000, requests: 2, limited: 0, billing: 'included', cost: null }],
         totals: { tokens: 5000, requests: 2, limited: 0 }, byBilling: { included: 5000, api: 0, local: 0 }, cost: null };
       openFleetUsage();
-      const six = await until(() => [...document.querySelectorAll('#fleetUsageBody .su-period')].filter((b) => !b.closest('.spendchart')).find((b) => b.textContent === '6h'));
-      eq('the choices', [...document.querySelectorAll('#fleetUsageBody .su-period')].filter((b) => !b.closest('.spendchart')).map((b) => b.textContent), ['Hour', '3h', '6h', '9h', '12h', 'Day', 'Week']);
-      six.click();
-      await until(() => calls('GET', /\/v1\/usage\/periods$/).length && document.getElementById('fleetUsageBody').textContent.includes('last 6 hours'));
-      ok('6h is the one on', document.querySelector('#fleetUsageBody .su-period.on').textContent === '6h');
-      const tbl = document.querySelector('#fleetUsageBody table');
-      ok('the period is a table: agent, requests, tokens, price, model', !!tbl && [...tbl.querySelectorAll('thead th')].map((h) => h.textContent).join('|') === 'Agent|Requests|Tokens|At API prices|Model');
-      ok('a row per agent, and the total', tbl.textContent.includes('Homework Helper') && tbl.querySelector('tfoot').textContent.includes('All'));
-      ok('no bar charts of requests any more', !document.getElementById('fleetUsageBody').textContent.includes('Requests per'));
-      ok('one spend chart for the fleet', document.querySelectorAll('#fleetUsageBody .spendchart').length === 1 && document.querySelector('#fleetUsageBody .spendchart').dataset.agent === '');
+      const body = await until(() => document.querySelector('#fleetUsageBody .spendchart') && document.getElementById('fleetUsageBody'));
+      ok('asks for the day', calls('GET', /\/v1\/usage\/periods$/).some((c) => c.url.includes('period=day')));
+      ok('no By agent section', !body.querySelector('table') && !body.textContent.includes('By agent'));
+      ok('no period pills outside the chart', ![...body.querySelectorAll('.su-period')].some((b) => !b.closest('.spendchart')));
+      ok('one spend chart for the fleet', body.querySelectorAll('.spendchart').length === 1 && body.querySelector('.spendchart').dataset.agent === '');
+      ok('model prices sits by the heading', !!document.getElementById('fleetUsagePrices'));
+      ok('no failure line on a clean day', !document.getElementById('usageFailed'));
+      fleetUsageDlg.close();
+      window.__override['/v1/usage/periods'] = { ...window.__override['/v1/usage/periods'],
+        agents: [{ id: 'a1', name: 'Homework Helper', state: 'RUNNING', tokens: 5000, requests: 20, limited: 9, failed: 1, billing: 'included', cost: null },
+                 { id: 'a2', name: 'Soccer Schedule', state: 'RUNNING', tokens: 900, requests: 4, limited: 3, failed: 0, billing: 'included', cost: null }],
+        totals: { tokens: 5900, requests: 24, limited: 12, failed: 1 } };
+      openFleetUsage();
+      const fl = await until(() => document.getElementById('usageFailed'));
+      ok('one line with what did not go through: ' + fl.textContent, fl.textContent.includes('12 refused (rate limits) · 1 failed — Homework Helper 10 · Soccer Schedule 3'));
       fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
       // A spike warning of the last week shows at the top.
       window.__override['/v1/usage/periods'] = { period: 'day', from: at(1440), to: new Date(now).toISOString(), bucketMinutes: 60, buckets: [],
@@ -532,19 +536,18 @@ const SCENARIOS = String.raw`(() => {
           models: [{ model: 'claude-sonnet-5', cost: 100 }, { model: 'claude-opus-4-8', cost: 23.4 }], agents: {} } };
       openFleetUsage();
       await until(() => document.getElementById('fleetUsageBody').textContent.includes('about 5× its usual day'));
-      const body = document.getElementById('fleetUsageBody');
+      const body2 = document.getElementById('fleetUsageBody');
       ok('no intro paragraph', !fleetUsageDlg.textContent.includes('Usage, not a bill'));
-      ok('a plan is a footnote, not a paragraph', body.textContent.includes('* Claude plan use priced at API rates — not money you pay.') && !body.textContent.includes('the room it takes'));
+      ok('a plan is a footnote, not a paragraph', body2.textContent.includes('* Claude plan use priced at API rates — not money you pay.') && !body2.textContent.includes('the room it takes'));
       ok('the title is Usage', fleetUsageDlg.querySelector('.v2ptitle, h3').textContent.trim().startsWith('Usage'));
       const mark = window.__calls.length;
-      body.querySelector('button[aria-label="Clear this warning"]').click();
+      body2.querySelector('button[aria-label="Clear this warning"]').click();
       const one = await until(() => window.__calls.slice(mark).find((c) => c.method === 'POST' && c.path === '/v1/usage/alerts/dismiss'));
       eq('clears that one', one.body, { agentId: 'a1', at: new Date(now - 3600000).toISOString() });
       byText('#fleetUsageBody button', 'Clear all').click();
       const all = await until(() => window.__calls.slice(mark).filter((c) => c.path === '/v1/usage/alerts/dismiss')[1]);
       eq('Clear all clears every one', all.body, {});
       fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
-      try { localStorage.removeItem('hb-fleet-usage-period'); } catch {} fleetUsagePeriod = 'day';
     },
     spendChart: async () => {
       // Spend over time: stacked parts at API prices, tokens on the right axis — the same chart for all agents and for one (made-up figures).
@@ -618,7 +621,7 @@ const SCENARIOS = String.raw`(() => {
       window.__override['/v1/usage/periods'] = base;
       const asked = calls('GET', /\/v1\/usage\/periods$/).length;
       openFleetUsage();
-      await until(() => calls('GET', /\/v1\/usage\/periods$/).length > asked && document.getElementById('fleetUsageBody').textContent.includes('Nothing used'));
+      await until(() => calls('GET', /\/v1\/usage\/periods$/).length > asked && !!document.querySelector('#fleetUsageBody .spendchart'));
       await sleep(50);
       ok('no section when nothing was saved', !document.getElementById('savedByModels'));
       fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
@@ -1209,24 +1212,6 @@ const SCENARIOS = String.raw`(() => {
         try { v2Close(); } catch {}
         delete window.__override['/v1/agents']; delete window.__override['/v1/security/posture'];
         await refresh(false);
-      }
-    },
-    unpricedModel: async () => {
-      try {
-        const now = Date.now();
-        window.__override['/v1/usage/periods'] = { period: 'day', from: new Date(now - 864e5).toISOString(), to: new Date(now).toISOString(), bucketMinutes: 60, buckets: [],
-          agents: [
-            { id: 'a1', name: 'Homework Helper', state: 'RUNNING', tokens: 5000, requests: 2, limited: 0, billing: 'api', model: 'claude-made-up-9', cost: null, unpriced: true },
-            { id: 'a2', name: 'Meal Planner', state: 'RUNNING', tokens: 4000, requests: 2, limited: 0, billing: 'included', model: 'claude-sonnet-5', cost: { low: 0.02, high: 0.02, partial: false } }],
-          totals: { tokens: 9000, requests: 4, limited: 0 }, byBilling: { included: 3000, api: 6000, local: 0 }, cost: { low: 0.02, high: 0.02, partial: true, agents: 1 } };
-        openFleetUsage();
-        const body = await until(() => { const el = document.getElementById('fleetUsageBody'); return el.textContent.includes('Meal Planner') ? el : null; });
-        ok('an unknown price is said, not $0.00+: ' + body.textContent.slice(0, 300), body.textContent.includes('API — no price known for claude-made-up-9') && !body.textContent.includes('$0.00+'));
-        ok('an agent now on a subscription keeps the cost of its API part', body.textContent.includes('est. $0.02 (API part)'));
-        ok('the breakdown names the token kinds', document.body.textContent.includes('tokens (new input, cache reads and writes, and output)'));
-      } finally {
-        if (fleetUsageDlg.open) fleetUsageDlg.close();
-        delete window.__override['/v1/usage/periods'];
       }
     },
     // A hosted Hatchabot takes Claude by API key only (2026-09-30): no Claude plan option in Settings or the setup guide.

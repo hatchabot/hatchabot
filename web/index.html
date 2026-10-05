@@ -8504,17 +8504,6 @@ function fmtCostRange(c) {
   const lo = fmtUsd(c.low), hi = fmtUsd(c.high);
   return (lo === hi ? lo : `${lo}–${hi}`) + (c.partial ? '+' : '');
 }
-// The per-agent cost cell: a $ range for API-keyed agents, else why it's free.
-// Billing follows the source each reading was taken on (2026-09-30), so an
-// agent moved off an API key keeps a cost for the API part of the window.
-function usageCost(a) {
-  if (a.cost) return { text: 'est. ' + fmtCostRange(a.cost) + (a.billing !== 'api' ? ' (API part)' : ''), dim: false };
-  // No price known for its model: "$0.00+" read as nearly free.
-  if (a.unpriced) return { text: `API — no price known for ${esc(a.model || 'its model')}`, dim: false };
-  if (a.billing === 'local') return { text: 'local', dim: true };
-  if (a.billing === 'included') return { text: 'included', dim: true };
-  return { text: '', dim: true };
-}
 function billingLine(agentId, models) {
   const a = (agents ?? []).find(x => x.id === agentId);
   const p = (profiles ?? []).find(x => x.id === a?.aiProfileId);
@@ -8684,14 +8673,6 @@ function openFleetUsage() {
   fleetUsageDlg.showModal();
   loadFleetUsage();
 }
-// The period of the Usage panel (hour, 3–12 hours, day, week); remembered per browser.
-const FLEET_USAGE_PERIODS = [['hour', 'Hour'], ['3h', '3h'], ['6h', '6h'], ['9h', '9h'], ['12h', '12h'], ['day', 'Day'], ['week', 'Week']];
-let fleetUsagePeriod = (() => { try { return localStorage.getItem('hb-fleet-usage-period') || 'day'; } catch { return 'day'; } })();
-function setFleetUsagePeriod(p) {
-  fleetUsagePeriod = FLEET_USAGE_PERIODS.some(([k]) => k === p) ? p : 'day';
-  try { localStorage.setItem('hb-fleet-usage-period', fleetUsagePeriod); } catch {}
-  void loadFleetUsage();
-}
 /** Clear one spike warning (its agent and time), or all of them. */
 async function dismissSpike(agentId, at) {
   try {
@@ -8704,7 +8685,8 @@ async function loadFleetUsage() {
   if (!$('fleetUsageBody').childElementCount) $('fleetUsageBody').innerHTML = 'Loading…';
   try {
     // From the sampler's records, not the containers: it answers at once.
-    renderFleetUsage(await api(`/v1/usage/periods?period=${fleetUsagePeriod}`));
+    // The day's answer carries the spike warnings, the savings and the plan share; the chart reads its own range.
+    renderFleetUsage(await api('/v1/usage/periods?period=day'));
   } catch (e) {
     $('fleetUsageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`;
   }
@@ -8729,43 +8711,25 @@ function savedByModels(rs) {
     </tbody></table></div>`;
 }
 function renderFleetUsage(f) {
-  const period = f.period || fleetUsagePeriod;
-  const span = period === 'hour' ? 'last hour' : period === 'day' ? 'last 24 hours' : period === 'week' ? 'last 7 days' : `last ${parseInt(period)} hours`;
-  const btn = (p, l) => `<button class="su-period${period === p ? ' on' : ''}" onclick="setFleetUsagePeriod('${p}')" aria-pressed="${period === p}">${l}</button>`;
-  const partial = f.countingSince && Date.parse(f.countingSince) > Date.parse(f.from)
-    ? `<div class="sub" style="margin:4px 0 8px">Counting began ${esc(ago(f.countingSince))} for the newest agent, so this window is partial for it.</div>` : '';
-  // The period's table (Chris, 2026-10-05: a table, not bars): requests, tokens, the cost at API prices, the model.
-  const num = 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap';
-  const rows = f.agents.map((a) => {
-    const ap = f.pricing?.agents?.[a.id];
-    const cost = ap ? `<span title="Cache writes ${v2Money(ap.parts.cacheWrite)}, cache reads ${v2Money(ap.parts.cacheRead)}, output ${v2Money(ap.parts.output)}, new input ${v2Money(ap.parts.input)}">${v2Money(ap.cost)}${a.billing === 'included' ? '*' : ''}</span>`
-      : (() => { const c = usageCost(a); return c.text ? `<span class="sub">${c.text}</span>` : '<span class="sub">—</span>'; })();
-    return `<tr><td><a href="#" onclick="event.preventDefault(); fleetUsageDlg.close(); openEdit('${a.id}','${jsq(a.name)}')">${esc(a.name)}</a>${a.state !== 'RUNNING' ? ` <span class="sub">${esc(a.state.toLowerCase())}</span>` : ''}</td>
-      <td style="${num}">${fmtN(a.requests)}${a.limited ? ` <b style="color:var(--bad)" title="refused">(${a.limited})</b>` : ''}</td><td style="${num}">${fmtTokens(a.tokens)}</td><td style="${num}">${cost}</td>
-      <td class="sub" style="white-space:nowrap;text-align:left">${esc((a.model || '').replace(/^.*\//, ''))}</td></tr>`;
-  }).join('');
-  const sumCost = Object.values(f.pricing?.agents || {}).reduce((t, x) => t + x.cost, 0);
-  const table = f.agents.length ? `<div class="mp-wrap"><table class="mp-tbl" style="margin-top:4px"><thead><tr><th style="text-align:left">Agent</th><th>Requests</th><th>Tokens</th><th>At API prices</th><th style="text-align:left">Model</th></tr></thead>
-    <tbody>${rows}</tbody>
-    <tfoot><tr><td><b>All</b></td><td style="${num}"><b>${fmtN(f.totals.requests)}</b></td><td style="${num}"><b>${fmtTokens(f.totals.tokens)}</b></td><td style="${num}"><b>${sumCost ? v2Money(sumCost) + (f.pricing?.billing?.plan > 0 ? '*' : '') : ''}</b></td><td></td></tr></tfoot></table></div>`
-    : `<div class="sub" style="margin:8px 0">Nothing used in the ${span}.</div>`;
+  // The By agent table went (Chris, 2026-10-05: less to read): the picker above
+  // the chart narrows to any agents, and each agent's Usage tab has its own.
   const planStar = (f.pricing?.billing?.plan > 0) || (f.rightSize?.planUSD > 0);
   // Spike warnings of the last week (sent to Telegram when they happened); ✕ clears one, "Clear all" every one.
   const alerts = (f.alerts || []).map((x) => `<div class="sub" style="margin:2px 0;display:flex;gap:6px;align-items:baseline"><span class="grow">⚠️ <b>${esc(x.name)}</b> used ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}${x.told ? '' : ' · not sent (no Telegram)'}</span>`
     + `<button class="hbtn" style="padding:0 6px;font-size:12px" title="Clear this warning" aria-label="Clear this warning" onclick="dismissSpike('${jsq(x.agentId)}','${jsq(x.at)}')">✕</button></div>`).join('')
     + ((f.alerts || []).length > 1 ? `<div style="text-align:right;margin-top:2px"><button class="hbtn" style="font-size:12px" onclick="dismissSpike()">Clear all</button></div>` : '');
+  // Requests that did not go through in the last 24 hours: one line, only when there were any (Chris, 2026-10-05).
+  const bad = (a) => (a.limited || 0) + (a.failed || 0);
+  const worst = (f.agents || []).filter((a) => bad(a) > 0).sort((x, y) => bad(y) - bad(x));
+  const lim = f.totals?.limited || 0, fail = f.totals?.failed || 0;
+  const failLine = lim + fail ? `<div class="sub" id="usageFailed" style="margin:0 0 10px">⛔ Last 24 hours: ${[lim ? `<b style="color:var(--bad)">${fmtN(lim)}</b> refused (rate limits)` : '', fail ? `<b style="color:var(--bad)">${fmtN(fail)}</b> failed` : ''].filter(Boolean).join(' · ')}`
+    + `${worst.length ? ` — ${worst.slice(0, 3).map((a) => `${esc(a.name)} ${fmtN(bad(a))}`).join(' · ')}${worst.length > 3 ? ` · ${worst.length - 3} more` : ''}` : ''}</div>` : '';
   $('fleetUsageBody').innerHTML = `
     ${alerts ? `<div style="margin:0 0 10px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
-    <h4 class="v2sec" style="margin-top:4px">At API prices</h4>
+    ${failLine}
+    <h4 class="v2sec" style="margin-top:4px;display:flex;justify-content:space-between;align-items:baseline">At API prices <a href="#" id="fleetUsagePrices" style="text-transform:none;letter-spacing:0;font-weight:400" onclick="event.preventDefault(); openModelPrices()">model prices</a></h4>
     ${spendChartBox('')}
     ${savedByModels(f.rightSize)}
-    <h4 class="v2sec" style="margin-top:14px">By agent</h4>
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-      <span class="su-periods" style="margin:0;flex-wrap:wrap">${FLEET_USAGE_PERIODS.map(([k, l]) => btn(k, l)).join('')}</span>
-      <span class="sub">${fmtTokens(f.totals.tokens)} tokens · ${fmtN(f.totals.requests)} request${f.totals.requests === 1 ? '' : 's'}${f.totals.limited ? ` · <b style="color:var(--bad)">${f.totals.limited}</b> refused` : ''} · ${span} · <a href="#" id="fleetUsagePrices" onclick="event.preventDefault(); openModelPrices()">model prices</a></span>
-    </div>
-    ${partial}
-    ${table}
     ${planStar ? `<div class="sub" style="margin-top:12px">* Claude plan use priced at API rates — not money you pay.</div>` : ''}`;
   void loadSpendCharts($('fleetUsageBody'));
 }

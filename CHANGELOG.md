@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.130.0] — 2026-10-05
+
+### Changed
+- **Usage says less**: the *By agent* table and its Hour … Week pills are gone (the agent picker narrows the chart to any agents; each agent's Usage tab has its own). "model prices" sits beside the *At API prices* heading.
+
+### Added
+- **Requests that did not go through** in the last 24 hours, as one line at the top of Usage — only when there were any: refused (rate limits) and failed, and the agents with the most. `GET /v1/usage/periods` totals and rows carry `failed`.
+
 ## [2.129.0] — 2026-10-05
 
 ### Changed

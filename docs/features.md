@@ -1685,9 +1685,11 @@ failed. When it comes back, the next probe lets calls through.
 browser), the range (24 hours, 7 days, 30 days), the total with a month at
 that pace, a **pie** of what it went on (cache writes, cache reads, output,
 new input) with each part's amount and share beside it, the cost by model,
-and the chart below. Under it, **By agent**: the period's (Hour … Week) table
-of requests, tokens, the cost at API prices and the model, with a total row —
-it replaced the requests bars and the per-agent bars. **Saved by cheaper
+and the chart below. (A *By agent* table under it went in v2.130.0, less to
+read: the picker narrows to any agents, and each agent's Usage tab has its
+own.) Requests that did not go through in the last 24 hours are **one line**
+at the top, only when there were any: "⛔ Last 24 hours: 12 refused (rate
+limits) · 1 failed — Stock Advisor 9 · …". **Saved by cheaper
 models** (v2.129.0; it was the "Right-size" line) lists each switch to a
 cheaper model still saving this month — agent, old → new model, since when,
 this month on the new model, what the same use would have cost on the old
