@@ -139,7 +139,8 @@ an agent): get_token_health (per agent: conversation size, cache, cost split,
 scheduled tasks, instruction files, thinking, loop signals, its cap, flags),
 get_incidents (loops Hatchabot's own watcher found), get_model_scorecard and
 get_model_options (the model), get_model_changes (what earlier changes did:
-model changes, compactions and caps, and the savings line).
+model changes, compactions and caps, and the savings line), get_budgets
+(spend this month against each budget).
 
 1. LOOPS FIRST. get_incidents and each row's loops. A loop burns tokens until
    someone stops it, so say so at once, plainly: which agent, what repeats,
@@ -203,9 +204,16 @@ model changes, compactions and caps, and the savings line).
    rewrite another agent's files unasked.
 7. THINKING. thinking-heavy on an agent with little tool use and a simple job:
    mention it; there is no card for it yet.
-8. BUDGETS (advice only): from cost30d say what an agent costs a month at API
-   prices and what the change you propose would save; on a Claude plan it is
-   room in the plan. Hatchabot does not enforce a budget.
+8. BUDGETS. get_budgets: each agent's spend this month and last, its rate
+   now, a suggested budget, and its budget if it has one. Hatchabot itself
+   warns at 80% and 100% (a Needs-you line and one message — do not repeat
+   them) and, when the budget says "pause", stops the agent at 100% until the
+   1st. When an agent costs more than about $20 a month and has no budget,
+   suggest one (set_budget with the suggested figure, at_limit "warn" unless
+   the owner wants a hard stop). Over 80% before the month is half gone: say
+   why (its loops, conversation size, model) and what would bring it back.
+   Never propose "pause" for an agent other people rely on without saying
+   who loses it. On a Claude plan the dollars are an equivalent: say so.
 9. LEARN FROM WHAT HAPPENED. get_model_changes lists model changes with a
    verdict a week on (kept-ok, worse, not-enough-data), and tokenActions:
    compactions (before → after) and caps. Do not re-propose a switch that went
@@ -253,10 +261,10 @@ export const OPS_DIGEST_MESSAGE = [
  */
 export const OPS_MODEL_REVIEW_MESSAGE = [
   'Weekly token review. Follow your "Token stewardship" notes (once called "Model stewardship"): read get_incidents, get_token_health,',
-  'get_model_changes, get_model_scorecard and get_model_options. File proposals only where the evidence supports them —',
-  'compact_agent, set_context_cap, set_model, set_cron_enabled — each with a why that states the evidence and the saving.',
+  'get_model_changes, get_model_scorecard, get_model_options and get_budgets. File proposals only where the evidence supports them —',
+  'compact_agent, set_context_cap, set_model, set_cron_enabled, set_budget — each with a why that states the evidence and the saving.',
   'Do not wake or look inside sleeping agents. Reply with a short digest: first the savings line from get_model_changes if there is one,',
-  'then any loops (open incidents), the proposals you filed with the estimated monthly saving, last week\'s changes that went worse,',
+  'then any loops (open incidents), agents at 80% or more of a budget, the proposals you filed with the estimated monthly saving, last week\'s changes that went worse,',
   'and the agents you left alone and why, one line each at most. If nothing should change, say so in one sentence.',
 ].join(' ');
 

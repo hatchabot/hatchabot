@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [Unreleased]
+
+### Added
+- **Budgets** (docs/features.md → Budgets). A monthly budget in US dollars at API prices (the cost badges' figures; on a Claude plan an equivalent) for an agent, or for the whole machine. At 80% and 100%: a Needs-you line and one message on the Hatchabot agent's chat, once a month per amount. At the limit, per budget: **warn** (default) or **pause** — the agent is stopped (never mid-turn; an asleep one without a wake) until the 1st of next month, until the budget is raised, or until it is started by hand (then it runs on until the 1st). The machine budget's pause stops every agent but the Hatchabot agent, which is never paused.
+- Set in the agent's Usage tab (Monthly budget), in Settings → AI sources → 💵 Budgets (every agent: this month, last month, its rate now, a suggested budget), or by the Hatchabot agent: **`get_budgets`** and the **`set_budget`** card. `GET /v1/budgets`, `PUT /v1/agents/:id/budget`, `PUT /v1/budgets/machine`. A paused tile says "Paused — its monthly budget is used up"; the tooltip's cost line adds the month against the budget.
+- Spend per agent per day (the machine's time zone) is kept in `agent_cost_days`, written after each usage pass from the sampler's hour buckets, so a month's first days still count after its 30-day window moves on.
+
+### Changed
+- The Hatchabot agent's "Token stewardship" notes: budgets are no longer advice only — it reads `get_budgets`, suggests a budget for an agent over about $20 a month without one, and the weekly token review lists agents at 80% or more of a budget.
+
 ## [2.120.1] — 2026-10-04
 
 ### Fixed

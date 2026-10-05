@@ -37,9 +37,11 @@ rather than money). It also watches how agents use tokens: an agent stuck in a
 loop is flagged under Needs you with one Telegram message; a conversation grown
 large gets a compaction or a per-agent conversation cap proposed as a card you
 confirm; and the "Weekly token review" checks the prompt cache and what
-scheduled tasks cost. Coming next, not shipped yet: budgets. See
-[Right-size](docs/features.md#right-size-the-model-steward) and
-[Token steward](docs/features.md#token-steward).
+scheduled tasks cost. Any agent, or the whole machine, can have a monthly
+budget: a warning at 80% and 100%, and if you choose, a pause at the limit
+until the 1st. See [Right-size](docs/features.md#right-size-the-model-steward),
+[Token steward](docs/features.md#token-steward) and
+[Budgets](docs/features.md#budgets).
 
 **New here or catching up?** [docs/features.md](docs/features.md) is a
 task-first tour of everything the app does today — creating, training, moving,

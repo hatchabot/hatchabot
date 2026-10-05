@@ -75,6 +75,7 @@ import { agentUsage } from '../orchestrator/usage.js';
 import { runUsageAlerts } from '../orchestrator/usageAlerts.js';
 import { buildTokenHealth, modelRefOf, THRESHOLDS as TOKEN_THRESHOLDS } from '../orchestrator/tokenHealth.js';
 import { runTokenWatch } from '../orchestrator/tokenWatch.js';
+import { MACHINE, MAX_BUDGET, MIN_BUDGET, budgetLine, budgetView, machineTz, monthKey, monthSpend, prevMonth, runBudgets, suggestBudget, type BudgetView } from '../orchestrator/budgets.js';
 import { compactAgent, CompactError, syncContextCap, type CompactMode } from '../orchestrator/compaction.js';
 import type { TokenHealthRaw } from '../orchestrator/usage.js';
 import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orchestrator/unread.js';
@@ -2113,6 +2114,35 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
   };
   const capRetryAt = new Map<string, number>();
+  /**
+   * Budgets (budgets.ts): after each usage pass, and at once when a budget
+   * changes (record: false — the cost days are as fresh as the last pass).
+   * One pass at a time.
+   */
+  let budgetPassing: Promise<unknown> | null = null;
+  const runBudgetPass = (opts: { record?: boolean } = {}): Promise<unknown> => {
+    const go = async () => {
+      if (budgetPassing) await budgetPassing.catch(() => {});
+      return runBudgets({
+        store, tell: tellUsageSpike, isBusy,
+        pause: async (a) => {
+          const now = store.getAgent(a.id);
+          if (!now?.runtimeRef || isBusy(a.id)) return false;
+          if (now.state === 'STOPPED' && now.hibernatedAt) { store.setHibernated(a.id, null); return true; }
+          if (now.state !== 'RUNNING') return false;
+          await whileBusy(a.id, async () => { await providerFor(now.hostId).stop(now.runtimeRef!); });
+          store.setHibernated(a.id, null);
+          store.setAgentState(a.id, 'STOPPED');
+          return true;
+        },
+        resume: async (a) => (await startStopped(a)).ok,
+        log: (event, detail) => { trace(String(detail.agentId ?? 'admin'))(event, detail); },
+      }, Date.now(), opts).catch((err) => { app.log.warn({ err: String(err) }, 'budget.pass_failed'); });
+    };
+    const p = go().finally(() => { if (budgetPassing === p) budgetPassing = null; });
+    budgetPassing = p;
+    return p;
+  };
   const runUsageSample = () => {
     if (usageSampling) return usageSampling;
     usageSampling = sampleSourceUsage({ store, providerFor, log: (e, d) => app.log.info(d, e) })
@@ -2120,6 +2150,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         await runUsageAlerts({ store, tell: tellUsageSpike, log: (e, d) => app.log.info(d, e) }).catch((err) => app.log.warn({ err: String(err) }, 'usage.alerts_failed'));
         runModelGuard();
         await runTokenSteward();
+        await runBudgetPass();
         return r; })
       .catch((err) => app.log.warn({ err: String(err) }, 'usage.sample_failed'))
       .finally(() => { usageSampling = null; });
@@ -4875,6 +4906,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const on = i.kind === 'consult-ping-pong' ? i.key.split('+') : [i.agentId];
       for (const id of on) stuckBy.set(id, [...(stuckBy.get(id) ?? []), { id: i.id, kind: i.kind, text: i.text, ...(i.fix ? { fix: i.fix } : {}), ...(i.firstAt ? { since: i.firstAt } : {}) }]);
     }
+    // Budgets (budgets.ts): this month's figures for each agent with one, and
+    // the machine's on the manager's tile for the machine owner — Needs you.
+    const budgetNow = Date.now(), budgetTz = machineTz(), budgetMonth = monthKey(budgetNow, budgetTz);
+    const budgetRows = new Map(store.listBudgets().map((b) => [b.scope, b]));
+    const budgetSpend = budgetRows.size ? monthSpend(store, budgetMonth) : new Map<string, number>();
+    const budgetOf = (a: Agent) => { const b = budgetRows.get(a.id); return b ? budgetView(store, b, budgetSpend.get(a.id) ?? 0, budgetNow, budgetTz, a.id) : undefined; };
+    const machineBudget = budgetRows.has(MACHINE) && ownsLocalHost(req) ? machineBudgetView(budgetNow).budget : undefined;
+    // Paused by the machine's budget: the agent's own tile says so.
+    const machinePaused = new Map(store.listBudgetPauses({ open: true, month: budgetMonth }).filter((p) => p.scope === MACHINE).map((p) => [p.agentId, p.pausedAt]));
     return Promise.all(
       agents.map(async (a) => {
         let openclawVersion: string | undefined;
@@ -4939,6 +4979,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           contextReset: store.getContextReset(a.id),
           /** A loop the watcher found and the fix (owner only): Needs you. */
           ...(role === 'owner' && stuckBy.get(a.id) ? { stuck: stuckBy.get(a.id) } : {}),
+          /** Its monthly budget, this month's spend against it, and a pause (owner only): Needs you from 80%. */
+          ...(role === 'owner' && budgetOf(a) ? { budget: { ...budgetOf(a)!, ...(budgetOf(a)!.level ? { line: budgetLine(budgetOf(a)!, 'it') } : {}) } } : {}),
+          ...(role === 'owner' && machinePaused.has(a.id) ? { budgetPaused: { scope: 'machine', at: machinePaused.get(a.id) } } : {}),
+          ...(a.ops && machineBudget ? { machineBudget: { ...machineBudget, ...(machineBudget.level ? { line: budgetLine(machineBudget, 'this Hatchabot') } : {}) } } : {}),
           /** Slack and Discord, for the icon marks and the Messaging row. */
           otherChannels: store.listChannelsForAgent(a.id).filter((c) => c.kind !== 'telegram').map((c) => ({
             kind: c.kind,
@@ -7499,6 +7543,102 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           : outcome === 'changed-by-hand' ? `Its model settings were changed by hand meanwhile; nothing was overwritten. The cap is stored and will be written at its next rebuild.`
             : `Stored; it is written into "${agent.name}"'s settings when it is next running (or at its next rebuild).`,
     };
+  });
+
+  // ---- budgets (budgets.ts, docs/features.md "Budgets") -------------------
+  const budgetBody = z.object({
+    usd: z.number().min(MIN_BUDGET).max(MAX_BUDGET).nullable(),
+    atLimit: z.enum(['warn', 'pause']).optional(),
+    why: z.string().max(400).optional(),
+  });
+  const billingOf = (a: Agent): 'plan' | 'api' | 'local' => {
+    const p = store.getAIProfile(a.aiProfileId);
+    return p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'plan' : 'api';
+  };
+  /** The machine-wide budget's view (its spend is every agent's, any owner's). */
+  const machineBudgetView = (now = Date.now()): { budget?: BudgetView; spent: number; lastMonth: number } => {
+    const tz = machineTz(), month = monthKey(now, tz);
+    const sum = (m: Map<string, number>) => Math.round([...m.values()].reduce((x, y) => x + y, 0) * 100) / 100;
+    const spent = sum(monthSpend(store, month));
+    const b = store.getBudget(MACHINE);
+    return { ...(b ? { budget: budgetView(store, b, spent, now, tz) } : {}), spent, lastMonth: sum(monthSpend(store, prevMonth(month))) };
+  };
+  /**
+   * Budgets: each of the caller's agents with what it spent this month and
+   * last, its monthly rate now, a suggested budget, and its budget if it has
+   * one; the machine's budget for the machine owner. At API prices (on a
+   * Claude plan an equivalent); stored figures only — nothing is woken.
+   */
+  app.get('/v1/budgets', async (req) => {
+    const me = ownerIdOf(req);
+    const now = Date.now(), tz = machineTz(), month = monthKey(now, tz);
+    const mine = store.listAgents(me).filter((a) => a.state !== 'DELETED' && a.state !== 'DELETING' && a.state !== 'ARCHIVED');
+    const ids = mine.map((a) => a.id);
+    const spent = monthSpend(store, month, ids), last = monthSpend(store, prevMonth(month), ids);
+    // Its pace this week (× 30/7): a change a few days ago (a cap, a compaction, a cheaper model) shows at once.
+    const rates = costsFor(store, me, 7, now);
+    const r2 = (x: number) => Math.round(x * 100) / 100;
+    const agents = mine.map((a) => {
+      const b = store.getBudget(a.id);
+      const monthly = rates[a.id]?.monthly ?? 0;
+      return {
+        id: a.id, name: a.name, ...(a.ops ? { manager: true } : {}), state: a.state, billing: billingOf(a),
+        spent: r2(spent.get(a.id) ?? 0), lastMonth: r2(last.get(a.id) ?? 0), monthlyNow: monthly,
+        suggested: suggestBudget(monthly),
+        ...(b ? { budget: budgetView(store, b, spent.get(a.id) ?? 0, now, tz, a.id) } : {}),
+      };
+    }).sort((x, y) => y.monthlyNow - x.monthlyNow);
+    return {
+      month, tz, agents,
+      ...(ownsLocalHost(req) ? { machine: machineBudgetView(now) } : {}),
+      notes: [
+        'Dollars at API list prices, the same as the cost badges; on a Claude plan they are an equivalent, not a bill. A month is the calendar month in the machine\'s time zone; spend is read every 10 minutes.',
+        'At 80% and at 100% the owner gets a Needs-you line and one message. atLimit "pause" stops the agent at 100% until the 1st (or until the budget is raised, or it is started by hand — then it runs on until the 1st); "warn" only tells. The manager is never paused.',
+      ],
+    };
+  });
+  const budgetMessage = (name: string, b: { usd: number; atLimit: string } | null, view?: BudgetView): string => {
+    if (!b) return `${name} has no budget now.`;
+    const line = `${name}'s budget: $${b.usd} a month, ${b.atLimit === 'pause' ? 'pausing at the limit' : 'warning at 80% and 100%'}.`;
+    return view ? `${line} Spent so far this month: $${view.spent.toFixed(2)} (${view.pct}%).` : line;
+  };
+  /** One agent's monthly budget (owner only): usd null removes it. */
+  app.put<{ Params: { id: string } }>('/v1/agents/:id/budget', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent || agent.state === 'DELETED') return reply.code(404).send({ error: 'Not found' });
+    const parsed = budgetBody.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: `usd: a number from ${MIN_BUDGET} to ${MAX_BUDGET} (US dollars a month), or null to remove it; atLimit: "warn" or "pause".` });
+    const before = store.getBudget(agent.id);
+    const atLimit = parsed.data.atLimit ?? before?.atLimit ?? 'warn';
+    if (agent.ops && atLimit === 'pause' && parsed.data.usd !== null) return reply.code(400).send({ error: 'Your Hatchabot agent is never paused (it is how you manage the others): its budget can only warn.' });
+    const meta = ledgerMeta(req, 'budget');
+    const nowIso = new Date().toISOString();
+    store.setBudget(agent.id, agent.ownerId, parsed.data.usd, atLimit, nowIso, meta.by);
+    store.addTokenAction({
+      id: `ta_${randomBytes(8).toString('hex')}`, agentId: agent.id, ownerId: agent.ownerId, kind: 'budget', at: nowIso,
+      by: meta.by, via: meta.via, ...(meta.why || parsed.data.why ? { why: (meta.why ?? parsed.data.why)!.slice(0, 400) } : {}), ...(meta.proposalId ? { proposalId: meta.proposalId } : {}),
+      detail: { from: before ? { usd: before.usd, atLimit: before.atLimit } : null, to: parsed.data.usd === null ? null : { usd: parsed.data.usd, atLimit } }, outcome: 'applied',
+    });
+    trace(agent.id)('budget.set', { usd: parsed.data.usd, atLimit, by: meta.by, via: meta.via });
+    // A raised budget frees a paused agent at once; a lowered one pauses at once (if quiet).
+    await runBudgetPass({ record: false });
+    const b = store.getBudget(agent.id);
+    const tz = machineTz(), now = Date.now();
+    const view = b ? budgetView(store, b, monthSpend(store, monthKey(now, tz), [agent.id]).get(agent.id) ?? 0, now, tz, agent.id) : undefined;
+    return { budget: view ?? null, message: budgetMessage(`"${agent.name}"`, b ? { usd: b.usd, atLimit: b.atLimit } : null, view) };
+  });
+  /** The whole machine's monthly budget (the machine owner only): every agent's spend, any owner's. */
+  app.put('/v1/budgets/machine', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const parsed = budgetBody.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: `usd: a number from ${MIN_BUDGET} to ${MAX_BUDGET} (US dollars a month), or null to remove it; atLimit: "warn" or "pause".` });
+    const before = store.getBudget(MACHINE);
+    const atLimit = parsed.data.atLimit ?? before?.atLimit ?? 'warn';
+    store.setBudget(MACHINE, ownerIdOf(req), parsed.data.usd, atLimit, new Date().toISOString(), ledgerMeta(req, 'budget').by);
+    trace('admin')('budget.machine_set', { usd: parsed.data.usd, atLimit });
+    await runBudgetPass({ record: false });
+    const v = machineBudgetView();
+    return { ...v, message: budgetMessage('This Hatchabot', parsed.data.usd === null ? null : { usd: parsed.data.usd, atLimit }, v.budget) };
   });
 
   /** The fleet's use in the last hour, 3/6/9/12 hours, day or week, from what the sampler recorded — answers at once. */
@@ -11305,14 +11445,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return publicAgent(store.setAgentState(agent.id, 'STOPPED'));
   });
 
-  app.post<{ Params: { id: string } }>('/v1/agents/:id/start', async (req, reply) => {
-    const agent = ownedAgent(req, req.params.id);
-    if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
-    if (movedAway(agent, reply)) return reply;
-    if (busyNow(agent, reply)) return reply;
-    if (agent.state !== 'STOPPED') {
-      return reply.code(409).send({ error: `Cannot start while ${agent.state}` });
-    }
+  /**
+   * Start a STOPPED agent: the Start button, and a budget pause ending
+   * (budgets.ts). One that needs a REQUIRED rebuild comes up rebuilt.
+   */
+  const startStopped = async (agent: Agent): Promise<{ ok: boolean; rebuilding?: boolean; agent?: Agent }> => {
+    if (!agent.runtimeRef || agent.state !== 'STOPPED' || isBusy(agent.id) || agent.migratedTo) return { ok: false };
     // A stopped agent is never rebuilt on the machine's own initiative (a
     // rebuild starts it). Starting it is the moment: one that needs a
     // REQUIRED rebuild comes up rebuilt instead of as it was.
@@ -11320,7 +11458,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const need = await rebuildNeedOf(agent).then((r) => r?.need, () => undefined);
       if (need?.level === 'required' && kickRebuild(agent.id)) {
         trace(agent.id)('rebuild.on_start', { reasons: need.reasons });
-        return reply.code(202).send({ ...publicAgent(store.getAgent(agent.id)!), rebuilding: true });
+        return { ok: true, rebuilding: true, agent: store.getAgent(agent.id)! };
       }
     }
     // Its cap and swap allowance as they are now, as a wake does (swap.ts).
@@ -11331,7 +11469,26 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // After the store says RUNNING, as a wake does: what runs once it is up reads that.
     const started = store.setAgentState(agent.id, 'RUNNING');
     clearPinsWhenUp(started);
-    return publicAgent(started);
+    return { ok: true, agent: started };
+  };
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/start', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (movedAway(agent, reply)) return reply;
+    if (busyNow(agent, reply)) return reply;
+    if (agent.state !== 'STOPPED') {
+      return reply.code(409).send({ error: `Cannot start while ${agent.state}` });
+    }
+    const r = await startStopped(agent);
+    if (!r.ok || !r.agent) return reply.code(409).send({ error: 'It could not be started just now — try again shortly.' });
+    // Started by hand while a budget has it paused: it runs on until the 1st (budgets.ts).
+    const month = monthKey(Date.now(), machineTz());
+    const pause = store.getBudgetPause(agent.id, month);
+    if (pause && !pause.resumedAt) {
+      store.resumeBudgetPause(agent.id, month, new Date().toISOString(), 'owner');
+      trace(agent.id)('budget.started_by_hand', {});
+    }
+    return r.rebuilding ? reply.code(202).send({ ...publicAgent(r.agent), rebuilding: true }) : publicAgent(r.agent);
   });
 
   // ---- Hibernation (src/orchestrator/hibernate.ts) ------------------------

@@ -22,10 +22,11 @@ estimates from measured tokens at Anthropic's list API prices. It also watches
 how agents use tokens: Hatchabot flags an agent stuck in a loop under Needs you
 and says so once on Telegram; a conversation grown large gets a compaction or
 a per-agent conversation cap proposed as a card; and the "Weekly token review"
-checks the prompt cache and what scheduled tasks cost. Coming next, not shipped
-yet: budgets. See [Right-size](#right-size-the-model-steward),
-[Token steward](#token-steward), [Cost badges](#cost-badges) and
-[Model prices](#model-prices).
+checks the prompt cache and what scheduled tasks cost. An agent, or the whole
+machine, can have a monthly budget: you hear at 80% and 100%, and an agent can
+be paused at its limit until the 1st. See [Right-size](#right-size-the-model-steward),
+[Token steward](#token-steward), [Cost badges](#cost-badges),
+[Model prices](#model-prices) and [Budgets](#budgets).
 
 ## What Hatchabot is
 
@@ -291,6 +292,42 @@ is named as "no price known". The panel reads `GET /v1/model-prices` (the
 server's own table), so the page and the server cannot disagree; a test
 fails if a model the app offers (modelOptions' catalog) has no price, or a
 different one, in pricing.ts.
+
+### Budgets
+
+Since v2.121.0, an agent can have a **monthly budget** in US dollars at API
+prices — the cost badges' figures (on a Claude plan an equivalent, not a
+bill). Set it in the agent's **Usage** tab (Monthly budget), in Settings → AI
+sources → 💵 **Budgets** (every agent of yours in one table: this month, last
+month, a month at its pace now, and a suggested budget about 1.25× that,
+rounded), or ask the Hatchabot agent (`set_budget`, a card you confirm).
+
+- **At 80% and at 100%**: a line under Needs you ("Used 84% of its $50 budget
+  for October ($42.10) — on pace for $63") and one message on your Hatchabot
+  agent's chat. Each is said once a month per budget amount; a new amount
+  warns afresh.
+- **At the limit** — your choice per budget: **warn me** (the default: it keeps
+  working) or **pause it**. Paused, the agent is stopped as the Stop button
+  does (its tile: "Paused — its monthly budget is used up"), never in the
+  middle of a turn (it waits for three quiet minutes), and an asleep agent is
+  paused without being woken. It starts again on the **1st of next month**, as
+  soon as the budget is **raised** (or removed, or set to warn), or when you
+  **start it** — then it runs on until the 1st. A rebuild that brings it up
+  while it is still over pauses it again. Telegram keeps messages sent to a
+  paused agent for 24 hours.
+- **The whole machine**: the machine owner can give this Hatchabot one
+  budget (every agent's spend, everyone's) in the same panel; "pause it" there
+  pauses every agent but the Hatchabot agent. Its line is on the Hatchabot
+  agent's tile.
+- **Your Hatchabot agent** is never paused (it is how you manage the others):
+  its own budget can only warn.
+- **The month** is the calendar month in the machine's time zone. Spend is
+  read every 10 minutes, from the usage sampler's hour buckets, and kept per
+  day (`agent_cost_days`), so the month's first days still count after the
+  sampler's 30 days have moved on.
+- **API**: `GET /v1/budgets`, `PUT /v1/agents/:id/budget` (`{ usd | null,
+  atLimit: "warn" | "pause" }`), `PUT /v1/budgets/machine` (the machine owner).
+  Budget changes are recorded with compactions and caps (`tokenActions`).
 
 ## Your Hatchabot agent (the manager)
 
@@ -652,8 +689,9 @@ large and uncapped → `set_context_cap 150000`); the cache (a break is
 OpenClaw's, not the agent's: a smaller conversation shrinks what each break
 costs); scheduled tasks; the model (the Right-size procedure); instruction
 files (suggest trimming, never rewrite another agent's files unasked);
-thinking (mention only); budgets as advice only — Hatchabot does not enforce
-one. The weekly review, **"Weekly token review"** (Mondays 09:00), covers all
+thinking (mention only); budgets (`get_budgets`: suggest one for an agent
+costing more than about $20 a month without one, say why an agent is over 80%
+early; Hatchabot itself sends the 80% and 100% messages). The weekly review, **"Weekly token review"** (Mondays 09:00), covers all
 of it and opens with the savings line. A "Weekly model review" task made by an
 earlier release is found (by Hatchabot's record of it, or by its old name) and
 renamed and reworded in place at the manager's next build — one patch, so its

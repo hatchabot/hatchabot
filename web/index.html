@@ -705,6 +705,13 @@
   .mp-tbl th:first-child, .mp-tbl td:first-child { text-align:left; padding-left:0 }
   .mp-tbl tr.mp-old td { color:var(--dim) }
   .mp-note { margin:8px 0 0; line-height:1.5 }
+  /* Settings → AI sources → Budgets, and the agent's Usage tab. */
+  .bg-tbl td input { width:84px; text-align:right }
+  .bg-tbl td select { width:auto }
+  .bg-tbl td.bg-l { text-align:left; white-space:normal }
+  .bg-hi { color:var(--warn, #b7791f); font-weight:600 }
+  .bg-form { display:flex; gap:8px; align-items:center; flex-wrap:wrap }
+  .bg-form input { width:96px }
   .v2tg { position:absolute; right:-6px; bottom:-6px; width:20px; height:20px; border-radius:50%; background:#2aabee;
           display:grid; place-items:center; border:2px solid var(--bg); z-index:1 }
   .v2tg svg { display:block; margin-left:-1px }
@@ -1659,6 +1666,11 @@
     <details class="sec-drawer" id="pricesDrawer" ontoggle="if (this.open) loadModelPrices()">
       <summary><b>💲 Model prices</b> <span class="sub">— what each model costs per million tokens, and how caching changes it</span></summary>
       <div id="modelPrices" style="margin-top:8px"><div class="sub">Loading…</div></div>
+    </details>
+
+    <details class="sec-drawer" id="budgetsDrawer" ontoggle="if (this.open) loadBudgets()">
+      <summary><b>💵 Budgets</b> <span class="sub">— a monthly limit for an agent, or for this whole Hatchabot</span></summary>
+      <div id="budgetsBody" style="margin-top:8px"><div class="sub">Loading…</div></div>
     </details>
 
     <details class="sec-drawer" id="mediaKeyDrawer">
@@ -8227,6 +8239,76 @@ function openModelPrices() {
   if (d.open) void loadModelPrices(); else d.open = true; // opening fires its toggle, which loads
   d.scrollIntoView({ block: 'start' });
 }
+// ---- Budgets (Settings → AI sources → Budgets; orchestrator/budgets.ts) -------
+// GET /v1/budgets: each of your agents' spend this month against its budget,
+// and the whole machine's budget for the machine owner. Saving one runs the
+// budget check at once: a raised budget starts a paused agent again.
+const bgMoney = (x) => (x >= 100 ? '$' + Math.round(x).toLocaleString('en-US') : '$' + (Math.round(x * 100) / 100).toFixed(2));
+const bgMonthName = (m) => new Date(Date.UTC(+m.slice(0, 4), +m.slice(5, 7) - 1, 15)).toLocaleDateString(undefined, { month: 'long', timeZone: 'UTC' });
+async function loadBudgets() {
+  const el = $('budgetsBody'); if (!el) return;
+  try { el.innerHTML = renderBudgets(await api('/v1/budgets')); } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+/** "$41.10 of $50 (82%) · on pace for $63" for a budget view. */
+function bgState(v) {
+  if (!v) return '';
+  const pace = v.onPace && v.onPace > v.spent ? ` · on pace for ${bgMoney(v.onPace)}` : '';
+  const cls = v.level ? ' class="bg-hi"' : '';
+  return `<span${cls}>${bgMoney(v.spent)} of ${bgMoney(v.usd)} (${v.pct}%)</span>${pace}${v.paused ? ' · <b>paused</b>' : ''}`;
+}
+function bgControls(key, b, suggested, manager) {
+  const usd = b ? b.usd : '';
+  return `<input type="number" id="bgUsd_${key}" min="1" max="100000" step="1" value="${usd}" placeholder="${suggested ? 'e.g. ' + suggested : 'none'}" aria-label="Monthly budget in US dollars">
+    <select id="bgAt_${key}" aria-label="At the limit"${manager ? ' disabled title="Your Hatchabot agent is never paused: its budget only warns."' : ''}>
+      <option value="warn"${b?.atLimit !== 'pause' ? ' selected' : ''}>warn me</option><option value="pause"${b?.atLimit === 'pause' ? ' selected' : ''}>pause it</option></select>
+    <button onclick="saveBudget('${key}')">Save</button>`;
+}
+function renderBudgets(d) {
+  const month = bgMonthName(d.month);
+  const mine = (d.agents || []).filter((a) => a.state !== 'ARCHIVED');
+  const rows = mine.map((a) => `<tr><td class="bg-l">${esc(a.name)}${a.billing === 'plan' ? ' <span class="sub">(plan)</span>' : a.billing === 'local' ? ' <span class="sub">(local)</span>' : ''}</td>
+    <td>${bgMoney(a.spent)}</td><td>${bgMoney(a.lastMonth)}</td><td>${bgMoney(a.monthlyNow)}</td>
+    <td class="bg-l"><div class="bg-form">${bgControls(a.id, a.budget, a.suggested, a.manager)}</div>${a.budget ? `<div class="sub">${bgState(a.budget)}</div>` : ''}</td></tr>`).join('');
+  const m = d.machine;
+  const machine = m ? `<div class="pair" style="margin:0 0 10px;flex-wrap:wrap;gap:8px;align-items:center"><b>This whole Hatchabot</b>
+      <span class="sub">${bgMoney(m.spent)} in ${esc(month)} so far · ${bgMoney(m.lastMonth)} last month · every agent, everyone's</span>
+      <div class="bg-form" style="flex-basis:100%">${bgControls('machine', m.budget, 0, false)}${m.budget ? `<span class="sub">${bgState(m.budget)}</span>` : ''}</div>
+      <div class="sub" style="flex-basis:100%">"Pause it" here pauses every agent but your Hatchabot agent when the machine reaches its budget.</div></div>` : '';
+  return `${machine}<div class="mp-wrap"><table class="mp-tbl bg-tbl"><thead><tr><th>Agent</th><th>${esc(month)}</th><th>Last month</th><th>A month now</th><th style="text-align:left">Monthly budget</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="5" class="sub">No agents yet.</td></tr>'}</tbody></table></div>
+    <p class="sub mp-note">US dollars at API list prices, the same as the cost badges — on a Claude plan it is an equivalent, not a bill. You hear at 80% and at 100% (under Needs you, and once on your Hatchabot agent's chat). <b>Pause it</b> stops the agent at 100% until the 1st of next month — raise the budget or start it to bring it back sooner (started by hand, it runs on until the 1st). Empty a box and Save to remove a budget.</p>`;
+}
+async function saveBudget(key) {
+  const raw = $('bgUsd_' + key)?.value.trim();
+  const usd = raw === '' ? null : Number(raw);
+  if (usd !== null && !(usd >= 1 && usd <= 100000)) return toast('A budget is from $1 to $100,000 a month — or empty the box to remove it.');
+  const atLimit = $('bgAt_' + key)?.value === 'pause' ? 'pause' : 'warn';
+  try {
+    const r = await api(key === 'machine' ? '/v1/budgets/machine' : `/v1/agents/${key}/budget`, { method: 'PUT', body: { usd, atLimit } });
+    toast(r.message || 'Saved.', 6000);
+    if ($('budgetsBody') && $('budgetsDrawer')?.open) void loadBudgets();
+    if ($('v2BudgetRow')) void v2LoadBudgetRow($('v2BudgetRow').dataset.agent);
+    await refresh(false);
+  } catch (e) { toast(e.message, 8000); }
+}
+/** The agent sheet's Usage tab: its budget, editable in place. */
+async function v2LoadBudgetRow(id) {
+  const el = $('v2BudgetRow'); if (!el || el.dataset.agent !== id) return;
+  try {
+    const d = await api('/v1/budgets');
+    const a = (d.agents || []).find((x) => x.id === id);
+    if (!a || $('v2BudgetRow')?.dataset.agent !== id) return;
+    el.innerHTML = `<div class="bg-form">${bgControls(id, a.budget, a.suggested, a.manager)}</div>
+      <div class="sub" style="margin-top:4px">${a.budget ? bgState(a.budget) + ' · ' : ''}${bgMoney(a.spent)} in ${esc(bgMonthName(d.month))} so far, ${bgMoney(a.lastMonth)} last month, about ${bgMoney(a.monthlyNow)} a month at its pace now (API prices${a.billing === 'plan' ? '; on your Claude plan an equivalent' : ''}).${a.budget ? '' : ` A budget of $${a.suggested} would fit its use now.`} <a href="#" onclick="openBudgets();return false">All budgets</a></div>`;
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+/** Settings → AI sources, with Budgets open. */
+function openBudgets() {
+  void openAiDlg('ai');
+  const d = $('budgetsDrawer'); if (!d) return;
+  if (d.open) void loadBudgets(); else d.open = true;
+  d.scrollIntoView({ block: 'start' });
+}
 /** $5, $6.25, $0.50, $0.025: as many places as the price has, at least two after a point. */
 const mpUsd = (x) => '$' + (Number.isInteger(x) ? String(x) : (Math.round(x * 100) === x * 100 ? x.toFixed(2) : String(+x.toFixed(4))));
 const mpShare = (x) => `${+x.toFixed(4)}×`;
@@ -11063,6 +11145,11 @@ function agentAttention(a) {
   // A loop Hatchabot's watcher found (tokenWatch.ts): what repeats, since when, and the fix.
   if ((a.stuck || []).length) out.push({ key: 'stuck:' + a.stuck.map(x => x.id).sort().join(','), icon: '🔁', stuck: true,
     why: a.stuck.map(x => x.text + (x.fix ? `. Fix: ${x.fix}` : '')).join(' · ') });
+  // Budgets (budgets.ts): from 80%, and a pause; keyed on the month, level and
+  // amount, so a cleared line comes back at 100% or with a new budget.
+  if (a.budget?.line) out.push({ key: `budget:${a.budget.month}:${a.budget.level}:${a.budget.usd}${a.budget.paused ? ':p' : ''}`, icon: a.budget.paused ? '⏸' : '💵', why: a.budget.line + ' (Usage → Monthly budget)' });
+  if (a.budgetPaused && !a.budget?.paused) out.push({ key: 'mbudget-pause:' + a.budgetPaused.at, icon: '⏸', why: "paused by this Hatchabot's monthly budget — it starts again on the 1st, when the machine's budget is raised, or when you start it" });
+  if (a.machineBudget?.line) out.push({ key: `mbudget:${a.machineBudget.month}:${a.machineBudget.level}:${a.machineBudget.usd}`, icon: '💵', why: 'This Hatchabot (every agent): ' + a.machineBudget.line.replace(/^Over /, 'over ').replace(/^Used /, 'used ') + ' (⚙ Settings → AI sources → Budgets)' });
   if (a.selfRestarts) out.push({ key: 'restart:' + a.selfRestarts, icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Status → Resources shows its memory against the cap` });
   return out;
 }
@@ -11494,6 +11581,7 @@ function v2Status(a) {
   else if ((a.stuck || []).length && v2Mine(a) && a.state === 'RUNNING' && !attentionCleared(a)) st = { cls: 'blocked', glyph: '🔁', label: 'Stuck in a loop — using tokens' };
   else if (limited) st = { cls: 'blocked', glyph: '⏳', label: 'AI source rate-limited' };
   else if (a.state === 'STOPPED' && a.hibernatedAt) st = { cls: 'stopped', glyph: '💤', label: 'Asleep — wakes when someone writes to it, or when you open it' };
+  else if (a.state === 'STOPPED' && (a.budget?.paused || a.budgetPaused)) st = { cls: 'stopped', glyph: '⏸', label: `Paused — ${a.budget?.paused ? 'its' : "this Hatchabot's"} monthly budget is used up` };
   else if (a.state === 'STOPPED') st = { cls: 'stopped', glyph: '⏸', label: 'Stopped' };
   else if (a.hostUnreachable) st = { cls: 'stopped', glyph: '⚠', label: `Its machine${a.hostName ? ` (${a.hostName})` : ''} isn't answering — asleep or offline` };
   else if (why.length && v2Mine(a) && !attentionCleared(a)) st = { cls: 'note', glyph: '⚑', label: 'Worth a look' };
@@ -11767,7 +11855,8 @@ function v2CostLine(a) {
   if (c.local) return 'Runs on a local model: no API cost';
   if (!c.priced) return 'Cost: no price known for its model';
   return `≈&nbsp;${v2Money(c.cost)} in the last 7 days at API prices (≈&nbsp;${v2Money(c.monthly)}&nbsp;a&nbsp;month)`
-    + (c.plan ? `<br>on ${v2Mine(a) ? 'your' : 'its owner\'s'} Claude plan — counts against its limits` : '');
+    + (c.plan ? `<br>on ${v2Mine(a) ? 'your' : 'its owner\'s'} Claude plan — counts against its limits` : '')
+    + (a.budget ? `<br>Budget: ${v2Money(a.budget.spent)} of ${v2Money(a.budget.usd)} this month (${a.budget.pct}%)` : '');
 }
 /** View by → Cost: the dearest band first, then no price known, then no use. */
 function v2CostBin(a) {
@@ -12207,6 +12296,7 @@ function v2RenderSheet() {
   if ($('editClass')) void renderClassPicker(a);
   if ($('v2Chans')) void v2LoadChans(a.id);
   if ($('v2UsageBody')) void v2LoadUsage(a.id);
+  if ($('v2BudgetRow')) void v2LoadBudgetRow(a.id);
 }
 /** The Usage tab: the same page as ⋯ → Usage, inline. A read runs node in the
  *  container, so a sheet re-render within a minute reuses the last one. */
@@ -12498,8 +12588,9 @@ function v2Pane(a, tab) {
         ${a.parentAgentId ? B('💡 Propose to master', `distillToMaster('${id}','${n}')`) : ''}`) : ''}
       ${slot('paneEditPeers')}`;
     }
-    case 'usage': return run ? `<div id="v2UsageBody" style="padding:4px 2px">Loading…</div>`
-      : row('Usage', `<span>${v2NotRunning(a, 'its figures')} They are read from its container; Status → Usage still counts what it used while running.</span>`);
+    case 'usage': return (v2Mine(a) && a.state !== 'ARCHIVED' ? row('Monthly budget', `<div id="v2BudgetRow" data-agent="${esc(a.id)}" style="flex-basis:100%"><div class="sub">Loading…</div></div>`) : '')
+      + (run ? `<div id="v2UsageBody" style="padding:4px 2px">Loading…</div>`
+      : row('Usage', `<span>${v2NotRunning(a, 'its figures')} They are read from its container; Status → Usage still counts what it used while running.</span>`));
     case 'schedule': return run ? slot('cronBody') : row('Scheduled tasks', `<span>${v2NotRunning(a, 'its tasks')}</span>`);
     case 'files': return built ? `<div id="v2Files" data-agent="${id}"><div class="sub">Loading…</div></div>`
       : row('Files', '<span>Nothing is built yet.</span>');

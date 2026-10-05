@@ -352,6 +352,39 @@ export const REST_TOOLS: RestTool[] = [
     done: (r) => (r && typeof r === 'object' && 'message' in r ? String((r as { message: string }).message) : undefined),
   },
 
+  {
+    name: 'get_budgets', tier: 'read',
+    description:
+      "Monthly budgets: each of the owner's agents with what it spent this calendar month and last (US dollars at API list prices; on a Claude plan an equivalent, not a bill), "
+      + 'its monthly rate now (monthlyNow: the last 7 days × 30/7, so a recent cap or model change shows), a suggested budget (about 1.25× that, rounded), and its budget if it has one: usd, atLimit (warn | pause), '
+      + 'spent, pct, onPace (the month at this pace), level (80 = warned, 100 = reached), paused. For the machine owner also the whole machine\'s budget. '
+      + 'Read from what Hatchabot already recorded: cheap to call.',
+    input_schema: obj({}),
+    call: () => ({ method: 'GET', path: '/v1/budgets' }),
+  },
+  {
+    name: 'set_budget', tier: 'mutate', agentArg: true,
+    description:
+      "Set an agent's monthly budget in US dollars at API prices (the cost badges' figures). At 80% and 100% the owner gets a Needs-you line and one message. "
+      + 'at_limit "warn" (default) only tells; "pause" stops the agent at 100% until the 1st of next month — or until the budget is raised, or the owner starts it (it then runs on until the 1st). '
+      + 'Your own agent (the manager) can only warn. usd 0 removes the budget. Suggest from get_budgets: suggested, or what the owner asked. Requires the owner\'s confirm.',
+    input_schema: obj({
+      agent: agentRef,
+      usd: { type: 'number', minimum: 0, maximum: 100000, description: 'US dollars a month; 0 removes the budget' },
+      at_limit: { type: 'string', enum: ['warn', 'pause'] },
+    }, ['agent', 'usd']),
+    call: ({ agent, input }) => {
+      const usd = input.usd === 0 || input.usd === null ? null : input.usd;
+      if (usd !== null && (typeof usd !== 'number' || !Number.isFinite(usd) || usd < 1 || usd > 100_000)) throw new Error('usd: from 1 to 100000 US dollars a month, or 0 to remove the budget.');
+      if (input.at_limit !== undefined && input.at_limit !== 'warn' && input.at_limit !== 'pause') throw new Error('at_limit is "warn" or "pause".');
+      return { method: 'PUT', path: `/v1/agents/${agent!.id}/budget`, body: { usd, ...(input.at_limit ? { atLimit: input.at_limit } : {}) } };
+    },
+    card: ({ agent, input }) => typeof input.usd === 'number' && input.usd > 0
+      ? `💵 Give "${agent!.name}" a budget of $${input.usd} a month (at API prices): you hear at 80% and 100%${input.at_limit === 'pause' ? ', and at 100% it pauses until the 1st (raise the budget or start it to bring it back sooner)' : '; it keeps working past it'}.`
+      : `💵 Remove "${agent!.name}"'s monthly budget.`,
+    done: (r) => (r && typeof r === 'object' && 'message' in r ? String((r as { message: string }).message) : undefined),
+  },
+
   // ---- scheduled tasks -----------------------------------------------------
   {
     name: 'add_cron', tier: 'mutate', agentArg: true,

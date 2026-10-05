@@ -383,6 +383,33 @@ export class Store {
         detail TEXT, outcome TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS token_actions_owner ON token_actions (owner_id, at);
+      -- Budgets (budgets.ts, docs/features.md "Budgets"): a monthly limit in
+      -- US dollars at API prices, per agent (scope = its id) or for the whole
+      -- machine (scope = 'machine'), and what happens when it is reached.
+      CREATE TABLE IF NOT EXISTS budgets (
+        scope TEXT PRIMARY KEY, owner_id TEXT NOT NULL, usd REAL NOT NULL,
+        at_limit TEXT NOT NULL DEFAULT 'warn', set_at TEXT NOT NULL, set_by TEXT
+      );
+      -- What each agent cost per day (the machine's own calendar day), at API
+      -- prices, from the usage sampler's hour buckets: a month's spend needs
+      -- more than the 30 days those keep.
+      CREATE TABLE IF NOT EXISTS agent_cost_days (
+        agent_id TEXT NOT NULL, day TEXT NOT NULL, usd REAL NOT NULL,
+        PRIMARY KEY (agent_id, day)
+      );
+      -- A budget's 80% and 100% marks, once per month and amount: told once.
+      CREATE TABLE IF NOT EXISTS budget_marks (
+        scope TEXT NOT NULL, month TEXT NOT NULL, level INTEGER NOT NULL, usd REAL NOT NULL,
+        at TEXT NOT NULL, told_at TEXT,
+        PRIMARY KEY (scope, month, level, usd)
+      );
+      -- Agents a budget paused: started again on the 1st, when the budget is
+      -- raised, or by hand (resumed_by 'owner': not paused again that month).
+      CREATE TABLE IF NOT EXISTS budget_pauses (
+        agent_id TEXT NOT NULL, month TEXT NOT NULL, scope TEXT NOT NULL,
+        paused_at TEXT NOT NULL, resumed_at TEXT, resumed_by TEXT,
+        PRIMARY KEY (agent_id, month)
+      );
 
       -- Daily security-posture risk snapshots per owner: the set of active risk
       -- keys, so a run can be diffed against the previous one to flag what newly
@@ -3394,6 +3421,74 @@ export class Store {
   updateTokenAction(id: string, p: { detail: Record<string, unknown>; outcome: string }): void {
     this.db.prepare(`UPDATE token_actions SET detail = ?, outcome = ? WHERE id = ?`).run(JSON.stringify(p.detail), p.outcome, id);
   }
+  // ---- budgets (budgets.ts) ----
+  listBudgets(): BudgetRow[] {
+    return (this.db.prepare(`SELECT * FROM budgets`).all() as any[]).map((r) => ({
+      scope: r.scope, ownerId: r.owner_id, usd: r.usd, atLimit: r.at_limit === 'pause' ? 'pause' : 'warn', setAt: r.set_at, ...(r.set_by ? { setBy: r.set_by } : {}),
+    }));
+  }
+  getBudget(scope: string): BudgetRow | undefined {
+    return this.listBudgets().find((b) => b.scope === scope);
+  }
+  /** usd null removes it. */
+  setBudget(scope: string, ownerId: string, usd: number | null, atLimit: 'warn' | 'pause', at: string, by?: string): void {
+    if (usd === null) { this.db.prepare(`DELETE FROM budgets WHERE scope = ?`).run(scope); return; }
+    this.db.prepare(`INSERT INTO budgets (scope, owner_id, usd, at_limit, set_at, set_by) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(scope) DO UPDATE SET owner_id = excluded.owner_id, usd = excluded.usd, at_limit = excluded.at_limit, set_at = excluded.set_at, set_by = excluded.set_by`)
+      .run(scope, ownerId, usd, atLimit, at, by ?? null);
+  }
+  /**
+   * An agent's cost per day. `partialDay`: the day the read's window starts
+   * in, which it saw only part of: kept at the larger of the two.
+   */
+  setCostDays(agentId: string, days: Map<string, number>, partialDay?: string): void {
+    const put = this.db.prepare(`INSERT INTO agent_cost_days (agent_id, day, usd) VALUES (?, ?, ?) ON CONFLICT(agent_id, day) DO UPDATE SET usd = excluded.usd`);
+    const max = this.db.prepare(`INSERT INTO agent_cost_days (agent_id, day, usd) VALUES (?, ?, ?) ON CONFLICT(agent_id, day) DO UPDATE SET usd = MAX(usd, excluded.usd)`);
+    this.db.transaction(() => { for (const [day, usd] of days) (day === partialDay ? max : put).run(agentId, day, usd); })();
+  }
+  /** Each agent's spend over [fromDay, toDay] (inclusive "YYYY-MM-DD"); every agent when agentIds is omitted. */
+  costBetween(fromDay: string, toDay: string, agentIds?: string[]): Map<string, number> {
+    const rows = (agentIds
+      ? this.db.prepare(`SELECT agent_id, SUM(usd) AS usd FROM agent_cost_days WHERE day >= ? AND day <= ? AND agent_id IN (SELECT value FROM json_each(?)) GROUP BY agent_id`).all(fromDay, toDay, JSON.stringify(agentIds))
+      : this.db.prepare(`SELECT agent_id, SUM(usd) AS usd FROM agent_cost_days WHERE day >= ? AND day <= ? GROUP BY agent_id`).all(fromDay, toDay)) as Array<{ agent_id: string; usd: number }>;
+    return new Map(rows.map((r) => [r.agent_id, r.usd]));
+  }
+  pruneCostDays(beforeDay: string): number {
+    return this.db.prepare(`DELETE FROM agent_cost_days WHERE day < ?`).run(beforeDay).changes;
+  }
+  /** True when the mark is new. */
+  addBudgetMark(scope: string, month: string, level: number, usd: number, at: string): boolean {
+    return this.db.prepare(`INSERT OR IGNORE INTO budget_marks (scope, month, level, usd, at) VALUES (?, ?, ?, ?, ?)`).run(scope, month, level, usd, at).changes > 0;
+  }
+  markBudgetTold(scope: string, month: string, level: number, usd: number, at: string): void {
+    this.db.prepare(`UPDATE budget_marks SET told_at = ? WHERE scope = ? AND month = ? AND level = ? AND usd = ?`).run(at, scope, month, level, usd);
+  }
+  budgetMarks(month: string): Array<{ scope: string; level: number; usd: number; at: string; toldAt?: string }> {
+    return (this.db.prepare(`SELECT scope, level, usd, at, told_at FROM budget_marks WHERE month = ?`).all(month) as any[])
+      .map((r) => ({ scope: r.scope, level: r.level, usd: r.usd, at: r.at, ...(r.told_at ? { toldAt: r.told_at } : {}) }));
+  }
+  pruneBudgetMarks(beforeMonth: string): number {
+    return this.db.prepare(`DELETE FROM budget_marks WHERE month < ?`).run(beforeMonth).changes
+      + this.db.prepare(`DELETE FROM budget_pauses WHERE month < ? AND resumed_at IS NOT NULL`).run(beforeMonth).changes;
+  }
+  listBudgetPauses(opts: { open?: boolean; month?: string } = {}): BudgetPauseRow[] {
+    const where: string[] = []; const args: unknown[] = [];
+    if (opts.open) where.push('resumed_at IS NULL');
+    if (opts.month) { where.push('month = ?'); args.push(opts.month); }
+    return (this.db.prepare(`SELECT * FROM budget_pauses ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY paused_at`).all(...args) as any[])
+      .map((r) => ({ agentId: r.agent_id, month: r.month, scope: r.scope, pausedAt: r.paused_at, ...(r.resumed_at ? { resumedAt: r.resumed_at } : {}), ...(r.resumed_by ? { resumedBy: r.resumed_by } : {}) }));
+  }
+  getBudgetPause(agentId: string, month: string): BudgetPauseRow | undefined {
+    return this.listBudgetPauses({ month }).find((p) => p.agentId === agentId);
+  }
+  /** Paused (again) this month: an earlier resume that was not the owner's own is replaced. */
+  addBudgetPause(agentId: string, month: string, scope: string, at: string): void {
+    this.db.prepare(`INSERT INTO budget_pauses (agent_id, month, scope, paused_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(agent_id, month) DO UPDATE SET scope = excluded.scope, paused_at = excluded.paused_at, resumed_at = NULL, resumed_by = NULL`).run(agentId, month, scope, at);
+  }
+  resumeBudgetPause(agentId: string, month: string, at: string, by: string): void {
+    this.db.prepare(`UPDATE budget_pauses SET resumed_at = ?, resumed_by = ? WHERE agent_id = ? AND month = ? AND resumed_at IS NULL`).run(at, by, agentId, month);
+  }
   listTokenActions(opts: { ownerId?: string; agentId?: string; limit?: number } = {}): TokenActionRow[] {
     const where: string[] = []; const args: unknown[] = [];
     if (opts.ownerId) { where.push('owner_id = ?'); args.push(opts.ownerId); }
@@ -4858,12 +4953,31 @@ export interface TokenIncidentRow {
   fix?: string;
 }
 
+/** A monthly budget (budgets.ts): scope is an agent's id, or 'machine'. */
+export interface BudgetRow {
+  scope: string;
+  ownerId: string;
+  usd: number;
+  atLimit: 'warn' | 'pause';
+  setAt: string;
+  setBy?: string;
+}
+/** An agent a budget paused (budgets.ts). resumedBy: owner | new-month | budget-raised | gone. */
+export interface BudgetPauseRow {
+  agentId: string;
+  month: string;
+  scope: string;
+  pausedAt: string;
+  resumedAt?: string;
+  resumedBy?: string;
+}
+
 /** A compaction or a context cap, recorded like a model change (compaction.ts). */
 export interface TokenActionRow {
   id: string;
   agentId: string;
   ownerId: string;
-  kind: 'compaction' | 'context-cap';
+  kind: 'compaction' | 'context-cap' | 'budget';
   at: string;
   by: 'owner' | 'agent' | 'hatchabot';
   via: 'app' | 'api' | 'proposal' | 'guard' | 'backfill';

@@ -1804,6 +1804,49 @@ const SCENARIOS = String.raw`(() => {
         ok('back to normal', !tile('Stock Watcher').classList.contains('v2st-blocked'));
       } finally { await agentsCleanup(); }
     },
+    // Budgets (budgets.ts): a paused agent, an 80% line, the Usage tab's row and Settings → Budgets (made-up figures).
+    budgets: async () => {
+      const month = new Date().toISOString().slice(0, 7);
+      try {
+        await withAgents((a) => a.name === 'Stock Watcher' ? { ...a, state: 'STOPPED', budget: { scope: a.id, usd: 20, atLimit: 'pause', month, spent: 23.5, pct: 118, level: 100, resetsOn: 'next 1st', paused: { at: new Date().toISOString() }, line: 'Paused: it used its $20 budget for this month ($23.50). It starts again on the 1st — or raise the budget, or start it now' } }
+          : a.name === 'Meal Planner' ? { ...a, budget: { scope: a.id, usd: 50, atLimit: 'warn', month, spent: 41.1, pct: 82, level: 80, resetsOn: 'next 1st', line: 'Used 82% of its $50 budget for this month ($41.10)' } } : undefined);
+        const t = tile('Stock Watcher');
+        ok('the paused tile says why: ' + t.getAttribute('aria-label'), t.getAttribute('aria-label').includes('monthly budget is used up'));
+        ok('its tooltip has the line', tipText('Stock Watcher').includes('Paused: it used its $20 budget'));
+        ok('the 80% line is in the tooltip', tipText('Meal Planner').includes('Used 82% of its $50 budget'));
+        byText('.v2viewbar button', 'Needs you').click(); await sleep(50);
+        const sec = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Needs you'));
+        const names = [...sec.querySelectorAll('.v2agent .v2name')].map((n) => n.textContent);
+        ok('both are under Needs you: ' + names, names.includes('Stock Watcher') && names.includes('Meal Planner'));
+        const meal = agents.find((x) => x.name === 'Meal Planner');
+        ok('the clear key names month, level and amount', attentionFingerprint(meal).includes('budget:' + month + ':80:50'));
+        // The Usage tab: its budget, set in place.
+        window.__override['/v1/budgets'] = { month, tz: 'UTC', agents: [
+          { id: meal.id, name: 'Meal Planner', state: 'RUNNING', billing: 'api', spent: 41.1, lastMonth: 38, monthlyNow: 52, suggested: 75, budget: meal.budget },
+          { id: 'zz', name: 'Errand Runner', state: 'RUNNING', billing: 'plan', spent: 3, lastMonth: 4, monthlyNow: 4, suggested: 5 },
+        ], machine: { spent: 240, lastMonth: 310 } };
+        openV2Agent(meal.id, 'usage');
+        const input = await until(() => document.getElementById('bgUsd_' + meal.id));
+        eq('the row shows its budget', input.value, '50');
+        input.value = '60'; document.getElementById('bgAt_' + meal.id).value = 'pause';
+        const mark = window.__calls.length;
+        byText('#v2BudgetRow button', 'Save').click();
+        const put = await until(() => window.__calls.slice(mark).find((c) => c.method === 'PUT' && c.path === '/v1/agents/' + meal.id + '/budget'));
+        eq('saved as asked', put.body, { usd: 60, atLimit: 'pause' });
+        v2Close();
+        // Settings → AI sources → Budgets: every agent, and the machine's own row for its owner.
+        openBudgets();
+        const body = await until(() => document.querySelector('#budgetsBody table') && document.getElementById('budgetsBody'));
+        ok('the machine row', body.textContent.includes('This whole Hatchabot') && document.getElementById('bgUsd_machine'));
+        ok('a plan agent is marked', body.textContent.includes('Errand Runner (plan)'));
+        ok('a suggestion as the placeholder', document.getElementById('bgUsd_zz').placeholder === 'e.g. 5');
+        document.getElementById('bgUsd_zz').value = '';
+        const mark2 = window.__calls.length;
+        byText('#budgetsBody button', 'Save').click(); // the first row's Save: the machine's
+        await until(() => window.__calls.slice(mark2).some((c) => c.method === 'PUT' && c.path === '/v1/budgets/machine'));
+        aiDlg.close();
+      } finally { if (typeof aiDlg !== 'undefined' && aiDlg.open) aiDlg.close(); delete window.__override['/v1/budgets']; await agentsCleanup(); }
+    },
   });
   (async () => {
     for (const [name, run] of Object.entries(T)) {
