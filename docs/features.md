@@ -1680,6 +1680,17 @@ and the background passes move on. It is never read as "the container is
 gone": a call skipped this way answers like a timeout, so no agent is marked
 failed. When it comes back, the next probe lets calls through.
 
+**At API prices** (v2.128.0) heads Usage and an agent's Usage tab: an
+**agent picker** (Usage only — *All agents*, or any you tick; remembered per
+browser), the range (24 hours, 7 days, 30 days), the total with a month at
+that pace, a **pie** of what it went on (cache writes, cache reads, output,
+new input) with each part's amount and share beside it, the cost by model,
+and the chart below. Under it, **By agent**: the period's (Hour … Week) table
+of requests, tokens, the cost at API prices and the model, with a total row —
+it replaced the requests bars and the per-agent bars. **Right-size** in Usage
+is what switching agents to cheaper models saved this month: tokens used on
+the new model since each switch × the price difference.
+
 **Spend over time** (v2.127.0): one chart, the same for all your agents (in
 Usage) and for one agent (its Usage tab): what each slice cost at API prices
 as a stacked bar — cache writes, cache reads, output, new input — on the left

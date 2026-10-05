@@ -277,6 +277,12 @@ export interface SpendSeries {
   totals: CostParts & { cost: number; tokens: number };
   /** Share of the cost on Claude plans (an equivalent, not a bill), 0–1. */
   planShare: number;
+  /** The range's cost as a month at that pace (× 720 h / the range's hours). */
+  monthly: number;
+  /** Per model, dearest first. */
+  models: Array<{ model: string; cost: number }>;
+  /** Every agent that could be picked (the owner's, not local), with its cost in the range: the chart's agent picker. */
+  choices: Array<{ id: string; name: string; cost: number }>;
 }
 
 /**
@@ -284,19 +290,21 @@ export interface SpendSeries {
  * — new input, cache writes, cache reads, output — and the tokens behind it,
  * from the sampler's hour buckets. The last bucket ends with the current hour.
  */
-export function spendSeries(store: Store, viewer: string, range: SpendRange, opts: { agentId?: string; now?: number } = {}): SpendSeries {
+export function spendSeries(store: Store, viewer: string, range: SpendRange, opts: { agentId?: string; agentIds?: string[]; now?: number } = {}): SpendSeries {
   const now = opts.now ?? Date.now();
   const { buckets: n, bucketHours } = SPEND_RANGES[range];
   const size = bucketHours * HOUR;
   const end = Math.floor(now / HOUR) * HOUR + HOUR; // the end of the current hour
   const start = end - n * size;
   const out: SpendBucket[] = Array.from({ length: n }, (_, i) => ({ at: new Date(start + i * size).toISOString(), ...noParts(), tokens: 0 }));
-  const agents = store.listAgents(viewer).filter((a) => a.state !== 'DELETED' && a.state !== 'DELETING' && (!opts.agentId || a.id === opts.agentId));
-  const profiles = store.modelProfiles(agents.map((a) => a.id)) as Map<string, { profile: StoredProfile; at: string }>;
+  const mine = store.listAgents(viewer).filter((a) => a.state !== 'DELETED' && a.state !== 'DELETING' && store.getAIProfile(a.aiProfileId)?.vendor !== 'local');
+  const picked = opts.agentId ? new Set([opts.agentId]) : opts.agentIds?.length ? new Set(opts.agentIds) : undefined;
+  const profiles = store.modelProfiles(mine.map((a) => a.id)) as Map<string, { profile: StoredProfile; at: string }>;
   let plan = 0, all = 0;
-  for (const a of agents) {
+  const byModel = new Map<string, number>(), perAgent = new Map<string, number>();
+  for (const a of mine) {
     const src = store.getAIProfile(a.aiProfileId);
-    if (src?.vendor === 'local') continue;
+    const into = !picked || picked.has(a.id);
     for (const [model, st] of Object.entries(profiles.get(a.id)?.profile.models ?? {})) {
       for (const [h, v] of Object.entries(st.h ?? {})) {
         const at = Date.parse(`${h}:00:00Z`);
@@ -304,11 +312,15 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
         const b = out[Math.floor((at - start) / size)]!;
         const mix: TokenMix = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
         HOUR_FIELDS.forEach((f, i) => { if (f in mix) mix[f as keyof TokenMix] += Number(v[i]) || 0; });
-        b.tokens += mix.input + mix.output + mix.cacheRead + mix.cacheWrite;
         const pp = priceParts(model, mix);
+        const c = pp ? pp.input + pp.cacheWrite + pp.cacheRead + pp.output : 0;
+        perAgent.set(a.id, (perAgent.get(a.id) ?? 0) + c);
+        if (!into) continue;
+        b.tokens += mix.input + mix.output + mix.cacheRead + mix.cacheWrite;
         if (!pp) continue;
         (Object.keys(pp) as Array<keyof CostParts>).forEach((k) => { b[k] += pp[k]; });
-        const c = pp.input + pp.cacheWrite + pp.cacheRead + pp.output;
+        const bare = model.replace(/^.*\//, '');
+        byModel.set(bare, (byModel.get(bare) ?? 0) + c);
         all += c;
         if (src?.kind === 'subscription') plan += c;
       }
@@ -325,5 +337,8 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
     range, bucketHours, buckets: out,
     totals: { input: r2(totals.input), cacheWrite: r2(totals.cacheWrite), cacheRead: r2(totals.cacheRead), output: r2(totals.output), cost: r2(totals.cost), tokens: Math.round(totals.tokens) },
     planShare: all > 0 ? Math.round((plan / all) * 1000) / 1000 : 0,
+    monthly: r2((totals.cost * 720) / (n * bucketHours)),
+    models: [...byModel].map(([model, cost]) => ({ model, cost: r2(cost) })).filter((m) => m.cost > 0).sort((x, y) => y.cost - x.cost),
+    choices: (opts.agentId ? [] : mine.map((a) => ({ id: a.id, name: a.name, cost: r2(perAgent.get(a.id) ?? 0) })).sort((x, y) => y.cost - x.cost || x.name.localeCompare(y.name))),
   };
 }

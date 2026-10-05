@@ -221,6 +221,16 @@ describe('spend over time (the Usage chart)', () => {
     expect(r.statusCode).toBe(400);
     expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=day&agent=c-big', headers: as(STRANGER) })).statusCode).toBe(404);
     expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=month', headers: as(OWNER) })).json().buckets).toHaveLength(30);
+    // A combination of agents; the picker's choices with each one's cost; by model; a month at the pace.
+    const pick = spendSeries(w.store, OWNER, 'day', { now, agentIds: ['c-plan'] });
+    expect(pick.totals.cost).toBe(5);
+    expect(pick.choices.map((c) => c.id).slice(0, 2)).toEqual(['c-big', 'c-plan']);
+    expect(pick.choices.find((c) => c.id === 'c-big')!.cost).toBe(15);
+    expect(day.models).toEqual([{ model: 'claude-opus-4-8', cost: 15 }, { model: 'claude-sonnet-5', cost: 5 }]);
+    expect(day.monthly).toBe(600);
+    expect(one.choices).toEqual([]);
+    const sel = (await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=day&agents=c-plan,c-elsewhere', headers: as(OWNER) })).json();
+    expect(sel.totals.cost).toBeGreaterThanOrEqual(0); // an id that is not theirs is dropped, not an error
   });
 });
 

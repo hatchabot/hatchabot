@@ -736,6 +736,14 @@
   .mp-note { margin:8px 0 0; line-height:1.5 }
   /* Settings → AI sources → Budgets, and the agent's Usage tab. */
   .bg-tbl td input { width:84px; text-align:right }
+  /* The Usage chart's agent picker. */
+  .spendpick { position:relative }
+  .spendpick > summary { list-style:none; cursor:pointer; font-size:12px; padding:2px 10px; border:1px solid var(--line); border-radius:999px; color:var(--text); background:var(--panel) }
+  .spendpick > summary::-webkit-details-marker { display:none }
+  .spendpick-list { position:absolute; z-index:5; top:calc(100% + 4px); left:0; min-width:230px; max-height:300px; overflow:auto; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:6px 8px; box-shadow:0 6px 20px rgba(0,0,0,.12); display:grid; gap:2px }
+  .spendpick-list label { display:flex; gap:6px; align-items:center; margin:0; font-weight:400; font-size:13px; cursor:pointer; white-space:nowrap }
+  .spendpick-list label .sub { margin-left:auto; padding-left:10px }
+  .spendpick-list input { width:auto; flex:none; margin:0 }
   .bg-tbl td select { width:auto }
   .bg-tbl td.bg-l { text-align:left; white-space:normal }
   .bg-hi { color:var(--warn, #b7791f); font-weight:600 }
@@ -8550,8 +8558,9 @@ async function loadSpendCharts(root) { for (const el of (root || document).query
 async function loadSpendChart(el) {
   const agent = el.dataset.agent;
   try {
-    const d = await api(`/v1/usage/spend?range=${spendRange}${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`);
-    if (el.isConnected) el.innerHTML = spendChartHTML(d) + (agent && d.planShare > 0 ? '<div class="sub" style="margin-top:2px">* Claude plan use priced at API rates — not money you pay.</div>' : '');
+    const sel = !agent && spendAgents.length ? `&agents=${encodeURIComponent(spendAgents.join(','))}` : '';
+    const d = await api(`/v1/usage/spend?range=${spendRange}${agent ? `&agent=${encodeURIComponent(agent)}` : sel}`);
+    if (el.isConnected) el.innerHTML = spendChartHTML(d, { fleet: !agent }) + (agent && d.planShare > 0 ? '<div class="sub" style="margin-top:2px">* Claude plan use priced at API rates — not money you pay.</div>' : '');
   } catch (e) { if (el.isConnected) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 /** A round axis top at or above x: 1, 2, 2.5 or 5 × a power of ten. */
@@ -8560,19 +8569,51 @@ function niceTop(x) {
   const p = 10 ** Math.floor(Math.log10(x));
   return [1, 2, 2.5, 5, 10].map((m) => m * p).find((v) => v >= x);
 }
-function spendChartHTML(d) {
+function spendChartHTML(d, opts = {}) {
   const b = d.buckets || [];
   const cost = (x) => SPEND_PARTS.reduce((t, [k]) => t + (x[k] || 0), 0);
-  const W = 640, H = 210, L = 46, R = 50, T = 10, B = 24, iw = W - L - R, ih = H - T - B;
+  const t = d.totals || {};
+  const star = d.planShare > 0 ? '*' : '';
+  const rangeName = { day: 'the last 24 hours', week: 'the last 7 days', month: 'the last 30 days' }[d.range] || '';
+  // Header: which agents (all of yours, or the ones you tick), and the range.
+  const choices = d.choices || [];
+  const picked = (spendAgents || []).filter((id) => choices.some((c) => c.id === id));
+  const label = !picked.length ? 'All agents' : picked.length === 1 ? choices.find((c) => c.id === picked[0]).name : `${picked.length} agents`;
+  const picker = opts.fleet && choices.length > 1 ? `<details class="spendpick"${spendPickOpen ? ' open' : ''} ontoggle="spendPickOpen = this.open"><summary>${esc(label)} ▾</summary>
+      <div class="spendpick-list">
+        <label><input type="checkbox" ${picked.length ? '' : 'checked'} onchange="spendPickAll(this)"> All agents</label>
+        ${choices.map((c) => `<label><input type="checkbox" value="${esc(c.id)}" ${picked.includes(c.id) ? 'checked' : ''} onchange="spendPickOne(this)"> ${esc(c.name)} <span class="sub">${c.cost ? v2Money(c.cost) : '—'}</span></label>`).join('')}
+      </div></details>` : '';
+  const pills = SPEND_RANGE_LABELS.map(([k, l]) => `<button class="su-period${k === d.range ? ' on' : ''}" aria-pressed="${k === d.range}" onclick="setSpendRange('${k}', this)">${l}</button>`).join('');
+  const head = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:2px 0 6px">${picker}<span class="su-periods" style="margin:0">${pills}</span></div>
+    <div style="margin:0 0 8px"><b style="font-size:16px">≈ ${v2Money(t.cost || 0)}</b>${star} <span class="sub">in ${rangeName} · ≈ ${v2Money(d.monthly || 0)} a month at this pace · ${fmtTokens(t.tokens || 0)} tokens</span></div>`;
+  // The pie: what it went on, with the amounts and shares beside it.
+  const R = 54, SW = 22, C = 2 * Math.PI * R, total = t.cost || 0;
+  let at = 0;
+  const live = SPEND_PARTS.filter(([k]) => (t[k] || 0) > 0);
+  const arcs = total > 0 ? live.map(([k, l, c]) => {
+    const len = (t[k] / total) * C, gap = live.length > 1 ? Math.min(2, len / 3) : 0;
+    const seg = `<circle r="${R}" cx="70" cy="70" fill="none" stroke="${c}" stroke-width="${SW}" stroke-dasharray="${Math.max(0, len - gap)} ${C}" stroke-dashoffset="${-at}" transform="rotate(-90 70 70)"><title>${l}: ${v2Money(t[k])} (${Math.round(t[k] / total * 100)}%)</title></circle>`;
+    at += len; return seg;
+  }).join('') : `<circle r="${R}" cx="70" cy="70" fill="none" style="stroke:var(--line)" stroke-width="${SW}"/>`;
+  const pie = `<svg viewBox="0 0 140 140" width="140" height="140" role="img" aria-label="What it went on" style="flex:none">${arcs}
+      <text x="70" y="68" text-anchor="middle" font-size="17" font-weight="700" style="fill:var(--text)">${v2Money(total)}${star}</text>
+      <text x="70" y="86" text-anchor="middle" font-size="11" style="fill:var(--dim)">${{ day: '24 hours', week: '7 days', month: '30 days' }[d.range] || ''}</text></svg>`;
+  const parts = `<div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:4px 10px;align-items:center;font-size:13px;min-width:200px">${SPEND_PARTS.map(([k, l, c]) =>
+      `<span style="width:10px;height:10px;border-radius:2px;background:${c}"></span><span>${l}</span><span style="text-align:right;font-variant-numeric:tabular-nums">${v2Money(t[k] || 0)}</span><span class="sub" style="text-align:right;font-variant-numeric:tabular-nums">${total ? Math.round((t[k] || 0) / total * 100) : 0}%</span>`).join('')}</div>`;
+  const models = (d.models || []).length ? `<div class="sub" style="margin-top:6px">By model: ${d.models.slice(0, 6).map((m) => `${esc(m.model)} ${v2Money(m.cost)}`).join(' · ')}</div>` : '';
+  const summary = `<div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin-bottom:6px">${pie}<div>${parts}${models}</div></div>`;
+  // Over time: stacked bars (left axis, dollars), tokens as a line (right axis).
+  const W = 640, H = 210, L = 46, R2 = 50, T = 10, B = 24, iw = W - L - R2, ih = H - T - B;
   const topC = niceTop(Math.max(0, ...b.map(cost))), topT = niceTop(Math.max(0, ...b.map((x) => x.tokens)));
   const n = Math.max(1, b.length), slot = iw / n, bw = Math.max(1.5, slot * 0.72);
   const yC = (v) => T + ih - (v / topC) * ih, yT = (v) => T + ih - (v / topT) * ih;
   // Axis ticks sit on round values (0, half, top of 1/2/2.5/5 × 10^k): say them as they are — $12.5, not $13; $0, not $0.00.
   const money = (v) => v === 0 ? '$0' : `$${+v.toPrecision(3)}`;
-  const grid = [0, 0.5, 1].map((f) => `<line x1="${L}" x2="${W - R}" y1="${yC(topC * f)}" y2="${yC(topC * f)}" style="stroke:var(--line)" stroke-width="1"${f ? ' stroke-dasharray="3 3"' : ''}/>
-    <text x="${L - 6}" y="${yC(topC * f) + 4}" text-anchor="end" font-size="11" style="fill:var(--dim)">${money(topC * f)}</text>
-    <text x="${W - R + 6}" y="${yC(topC * f) + 4}" font-size="11" style="fill:var(--dim)">${fmtTokens(topT * f)}</text>`).join('');
-  const when = (iso) => { const t = new Date(iso); return d.range === 'day' ? t.toLocaleTimeString([], { hour: 'numeric' }) : d.range === 'week' ? t.toLocaleDateString([], { weekday: 'short' }) : t.toLocaleDateString([], { month: 'short', day: 'numeric' }); };
+  const grid = [0, 0.5, 1].map((fr) => `<line x1="${L}" x2="${W - R2}" y1="${yC(topC * fr)}" y2="${yC(topC * fr)}" style="stroke:var(--line)" stroke-width="1"${fr ? ' stroke-dasharray="3 3"' : ''}/>
+    <text x="${L - 6}" y="${yC(topC * fr) + 4}" text-anchor="end" font-size="11" style="fill:var(--dim)">${money(topC * fr)}</text>
+    <text x="${W - R2 + 6}" y="${yC(topC * fr) + 4}" font-size="11" style="fill:var(--dim)">${fmtTokens(topT * fr)}</text>`).join('');
+  const when = (iso) => { const x = new Date(iso); return d.range === 'day' ? x.toLocaleTimeString([], { hour: 'numeric' }) : d.range === 'week' ? x.toLocaleDateString([], { weekday: 'short' }) : x.toLocaleDateString([], { month: 'short', day: 'numeric' }); };
   const every = Math.max(1, Math.round(n / 6));
   const xl = b.map((x, i) => (i % every === 0 && i < n - every / 2) ? `<text x="${L + i * slot + slot / 2}" y="${H - 6}" text-anchor="middle" font-size="11" style="fill:var(--dim)">${esc(when(x.at))}</text>` : '').join('');
   const bars = b.map((x, i) => {
@@ -8583,16 +8624,22 @@ function spendChartHTML(d) {
   }).join('');
   const pts = b.map((x, i) => `${(L + i * slot + slot / 2).toFixed(1)},${yT(x.tokens).toFixed(1)}`).join(' ');
   const line = b.length ? `<polyline points="${pts}" fill="none" style="stroke:var(--text)" stroke-opacity=".75" stroke-width="1.6" stroke-linejoin="round" pointer-events="none"/>` : '';
-  const t = d.totals || {};
-  const star = d.planShare > 0 ? '*' : '';
-  const pills = SPEND_RANGE_LABELS.map(([k, l]) => `<button class="su-period${k === d.range ? ' on' : ''}" aria-pressed="${k === d.range}" onclick="setSpendRange('${k}', this)">${l}</button>`).join('');
-  const legend = SPEND_PARTS.map(([k, l, c]) => `<span class="sub" style="display:inline-flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:${c};display:inline-block"></span>${l} ${v2Money(t[k] || 0)}</span>`).join('')
-    + `<span class="sub" style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis)</span>`;
-  return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin:2px 0 4px">
-      <span class="su-periods" style="margin:0">${pills}</span>
-      <span class="sub">≈ <b>${v2Money(t.cost || 0)}</b>${star} · ${fmtTokens(t.tokens || 0)} tokens</span></div>
-    <div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;display:block" role="img" aria-label="Spend at API prices per ${d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : d.bucketHours + ' hours'}, by part, with tokens as a line">${grid}${bars}${line}${xl}</svg></div>
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:2px 0 4px">${legend}</div>`;
+  const chart = `<div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;display:block" role="img" aria-label="Spend at API prices per ${d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : d.bucketHours + ' hours'}, by part, with tokens as a line">${grid}${bars}${line}${xl}</svg></div>
+    <div class="sub" style="display:flex;gap:6px;align-items:center;margin:2px 0 4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis); bars are what each ${d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : `${d.bucketHours} hours`} cost (left axis)</div>`;
+  return head + summary + chart;
+}
+// The fleet chart's agents: all (empty) or the ones ticked; remembered per browser.
+let spendAgents = (() => { try { const v = JSON.parse(localStorage.getItem('hb-spend-agents') || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } })();
+let spendPickOpen = false;
+function spendSaveAgents(el) {
+  try { localStorage.setItem('hb-spend-agents', JSON.stringify(spendAgents)); } catch {}
+  const box = el.closest('.spendchart'); if (box) void loadSpendChart(box);
+}
+function spendPickAll(cb) { spendAgents = []; spendSaveAgents(cb); }
+function spendPickOne(cb) {
+  const ids = [...cb.closest('.spendpick-list').querySelectorAll('input[value]:checked')].map((x) => x.value);
+  spendAgents = ids;
+  spendSaveAgents(cb);
 }
 function renderUsage(u) { $('usageBody').innerHTML = usageHTML(u, usageAgentId); void loadSpendCharts($('usageBody')); }
 function usageHTML(u, agentId) {
@@ -8619,7 +8666,7 @@ function usageHTML(u, agentId) {
   return `<div style="font-size:22px;font-weight:700">${fmtTokens(u.totalTokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">in all</span></div>
      <div class="sub" style="margin:2px 0 8px">${fmtN(n(u.calls))} call${u.calls === 1 ? '' : 's'} · ${u.sessions} session${u.sessions > 1 ? 's' : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(agentId, models)}</div>
      ${alerts ? `<div style="margin:0 0 8px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
-     ${agentId ? `<h4 class="v2sec" style="margin-top:6px">Spend over time</h4>${spendChartBox(agentId)}` : ''}
+     ${agentId ? `<h4 class="v2sec" style="margin-top:6px">At API prices</h4>${spendChartBox(agentId)}` : ''}
      ${day}${ctx}${split}
      ${rows}`;
 }
@@ -8653,91 +8700,44 @@ async function loadFleetUsage() {
     $('fleetUsageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`;
   }
 }
-/** Small bar chart of one series over the period's buckets; refusals stack in red. */
-function fleetUsageBars(buckets, key, unitLabel, period) {
-  const max = Math.max(1, ...buckets.map(b => b[key]));
-  // The same drawing width (about 528) whatever the period; a week's bars stay thin.
-  const W = period === 'week' ? 6 : Math.max(6, Math.round(528 / Math.max(1, buckets.length))), H = 40, top = 1, w = buckets.length * W;
-  const label = (b) => period === 'week'
-    ? new Date(b.at).toLocaleString([], { weekday: 'short', hour: 'numeric' })
-    : new Date(b.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  const bars = buckets.map((b, i) => {
-    const v = b[key], h = v ? Math.max(2, Math.round((v / max) * H)) : 0;
-    if (!h) return '';
-    const lh = key === 'requests' && b.limited ? Math.min(h, Math.max(2, Math.round((b.limited / max) * H))) : 0;
-    const tip = `${label(b)}: ${key === 'tokens' ? fmtTokens(v) + ' tokens' : `${v} request${v === 1 ? '' : 's'}${b.limited ? ` — ${b.limited} rate-limited` : ''}`}`;
-    return `<g><title>${esc(tip)}</title><rect class="bar" x="${i * W}" y="${top + H - h}" width="${W - 1.5}" height="${h - lh}"/>${lh ? `<rect class="lim" x="${i * W}" y="${top + H - h}" width="${W - 1.5}" height="${lh}"/>` : ''}</g>`;
-  }).join('');
-  const ax = usageAxis(buckets, period, W);
-  return `<div class="su-cap"><span>${esc(unitLabel)}</span><span>peak ${key === 'tokens' ? fmtTokens(max) : fmtN(max)}</span></div>
-    <svg class="su-chart" viewBox="0 0 ${w} ${top + H + 1}" role="img" aria-label="${esc(unitLabel)} over the last ${period}">
-    ${ax.ticks}<line class="peak" x1="0" x2="${w}" y1="${top + 0.5}" y2="${top + 0.5}"/>${bars}<line class="base" x1="0" x2="${w}" y1="${top + H + 0.5}" y2="${top + H + 0.5}"/></svg>${ax.axis}`;
-}
 function renderFleetUsage(f) {
   const period = f.period || fleetUsagePeriod;
   const span = period === 'hour' ? 'last hour' : period === 'day' ? 'last 24 hours' : period === 'week' ? 'last 7 days' : `last ${parseInt(period)} hours`;
-  const bm = f.bucketMinutes || 60;
-  const per = bm < 60 ? `per ${bm} minutes` : bm === 60 ? 'per hour' : `per ${bm / 60} hours`;
   const btn = (p, l) => `<button class="su-period${period === p ? ' on' : ''}" onclick="setFleetUsagePeriod('${p}')" aria-pressed="${period === p}">${l}</button>`;
   const partial = f.countingSince && Date.parse(f.countingSince) > Date.parse(f.from)
     ? `<div class="sub" style="margin:4px 0 8px">Counting began ${esc(ago(f.countingSince))} for the newest agent, so this window is partial for it.</div>` : '';
-  const max = f.agents[0]?.tokens || f.agents[0]?.requests || 1;
-  const rows = f.agents.map((a, i) => {
-    const pct = Math.max(2, Math.round(((a.tokens || a.requests) / max) * 100));
-    const cost = usageCost(a);
+  // The period's table (Chris, 2026-10-05: a table, not bars): requests, tokens, the cost at API prices, the model.
+  const num = 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap';
+  const rows = f.agents.map((a) => {
     const ap = f.pricing?.agents?.[a.id];
-    return `<div class="pair" style="padding:6px 0;align-items:flex-start">
-      <span class="grow">
-        <span class="sub" style="display:inline-block;width:1.4em">${i + 1}.</span> <b>${esc(a.name)}</b>
-        <span class="sub"> · ${fmtN(a.requests)} request${a.requests === 1 ? '' : 's'}${a.limited ? ` · <b style="color:var(--bad)">${a.limited}</b> refused` : ''}${a.model ? ` · ${esc(a.model)}` : ''}${a.state !== 'RUNNING' ? ` · ${esc(a.state.toLowerCase())}` : ''} · <a href="#" onclick="event.preventDefault(); fleetUsageDlg.close(); openEdit('${a.id}','${jsq(a.name)}')">open</a></span>
-        <div style="height:5px;border-radius:3px;background:var(--accent);opacity:.85;width:${pct}%;margin-top:5px;min-width:6px"></div>
-      </span>
-      <span style="text-align:right;margin-left:10px;white-space:nowrap">
-        <b>${fmtTokens(a.tokens)}</b> <span class="sub">tokens</span>
-        ${ap ? `<div class="sub" title="At API prices: cache writes ${v2Money(ap.parts.cacheWrite)}, output ${v2Money(ap.parts.output)}, cache reads ${v2Money(ap.parts.cacheRead)}, new input ${v2Money(ap.parts.input)}">≈ ${v2Money(ap.cost)} at API prices${a.billing === 'included' ? ' · on a plan' : ''}</div>` : cost.text ? `<div class="sub"${cost.dim ? '' : ' style="color:var(--warn)"'}>${cost.text}</div>` : ''}
-      </span>
-    </div>`;
+    const cost = ap ? `<span title="Cache writes ${v2Money(ap.parts.cacheWrite)}, cache reads ${v2Money(ap.parts.cacheRead)}, output ${v2Money(ap.parts.output)}, new input ${v2Money(ap.parts.input)}">${v2Money(ap.cost)}${a.billing === 'included' ? '*' : ''}</span>`
+      : (() => { const c = usageCost(a); return c.text ? `<span class="sub">${c.text}</span>` : '<span class="sub">—</span>'; })();
+    return `<tr><td><a href="#" onclick="event.preventDefault(); fleetUsageDlg.close(); openEdit('${a.id}','${jsq(a.name)}')">${esc(a.name)}</a>${a.state !== 'RUNNING' ? ` <span class="sub">${esc(a.state.toLowerCase())}</span>` : ''}</td>
+      <td style="${num}">${fmtN(a.requests)}${a.limited ? ` <b style="color:var(--bad)" title="refused">(${a.limited})</b>` : ''}</td><td style="${num}">${fmtTokens(a.tokens)}</td><td style="${num}">${cost}</td>
+      <td class="sub" style="white-space:nowrap;text-align:left">${esc((a.model || '').replace(/^.*\//, ''))}</td></tr>`;
   }).join('');
-  const bb = f.byBilling || {};
-  const bTot = (bb.included || 0) + (bb.api || 0) + (bb.local || 0) || 1;
-  const seg = (key, label, color) => (bb[key] > 0)
-    ? `<span title="${label}: ${fmtTokens(bb[key])} (${Math.round(bb[key] / bTot * 100)}%)" style="background:${color};height:100%;width:${bb[key] / bTot * 100}%;display:inline-block"></span>` : '';
-  const legend = (key, label, color) => (bb[key] > 0)
-    ? `<span class="sub" style="display:inline-flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:${color};display:inline-block"></span>${label} ${Math.round(bb[key] / bTot * 100)}%</span>` : '';
-  // The billing split says something only when there is more than one kind.
-  const breakdown = [bb.included, bb.api, bb.local].filter((x) => x > 0).length > 1 ? `
-    <div style="display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--panel-2);margin:2px 0 6px">${seg('included', 'Subscription', 'var(--ok)')}${seg('api', 'API', 'var(--warn)')}${seg('local', 'Local', '#6b8fb5')}</div>
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">${legend('included', 'subscription', 'var(--ok)')}${legend('api', 'API', 'var(--warn)')}${legend('local', 'local', '#6b8fb5')}</div>` : '';
-  const totalCost = (f.cost ? `<span class="sub">· <b style="color:var(--warn)">est. ${fmtCostRange(f.cost)}</b> API cost</span>` : '')
-    + ` <a href="#" class="sub" id="fleetUsagePrices" style="font-size:13px;font-weight:400" onclick="event.preventDefault(); openModelPrices()">model prices</a>`;
+  const sumCost = Object.values(f.pricing?.agents || {}).reduce((t, x) => t + x.cost, 0);
+  const table = f.agents.length ? `<div class="mp-wrap"><table class="mp-tbl" style="margin-top:4px"><thead><tr><th style="text-align:left">Agent</th><th>Requests</th><th>Tokens</th><th>At API prices</th><th style="text-align:left">Model</th></tr></thead>
+    <tbody>${rows}</tbody>
+    <tfoot><tr><td><b>All</b></td><td style="${num}"><b>${fmtN(f.totals.requests)}</b></td><td style="${num}"><b>${fmtTokens(f.totals.tokens)}</b></td><td style="${num}"><b>${sumCost ? v2Money(sumCost) + (f.pricing?.billing?.plan > 0 ? '*' : '') : ''}</b></td><td></td></tr></tfoot></table></div>`
+    : `<div class="sub" style="margin:8px 0">Nothing used in the ${span}.</div>`;
+  const planStar = (f.pricing?.billing?.plan > 0) || (f.rightSize?.planUSD > 0);
   // Spike warnings of the last week (sent to Telegram when they happened); ✕ clears one, "Clear all" every one.
   const alerts = (f.alerts || []).map((x) => `<div class="sub" style="margin:2px 0;display:flex;gap:6px;align-items:baseline"><span class="grow">⚠️ <b>${esc(x.name)}</b> used ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}${x.told ? '' : ' · not sent (no Telegram)'}</span>`
     + `<button class="hbtn" style="padding:0 6px;font-size:12px" title="Clear this warning" aria-label="Clear this warning" onclick="dismissSpike('${jsq(x.agentId)}','${jsq(x.at)}')">✕</button></div>`).join('')
     + ((f.alerts || []).length > 1 ? `<div style="text-align:right;margin-top:2px"><button class="hbtn" style="font-size:12px" onclick="dismissSpike()">Clear all</button></div>` : '');
-  // At API prices, part by part (agentCosts.ts windowPricing): every agent, plan ones as an equivalent.
-  const pr = f.pricing;
-  const PART = SPEND_PARTS;
-  const planStar = (pr && pr.billing.plan > 0) || (f.rightSize?.planUSD > 0);
-  const pricing = pr && pr.total > 0 ? `<h4 class="v2sec" style="margin-top:12px">At API prices</h4>
-    <div style="margin:2px 0 6px"><b style="font-size:16px">≈ ${v2Money(pr.total)}</b>${pr.billing.plan > 0 ? '*' : ''} <span class="sub">in the ${span} · ≈ ${v2Money(pr.monthly)} a month at this pace${pr.unpriced ? ' · some models have no price and are left out' : ''}</span></div>
-    <div style="display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--panel-2)" role="img" aria-label="What it went on">${PART.map(([k, l, c]) => pr.parts[k] > 0 ? `<span title="${l}: ${v2Money(pr.parts[k])}" style="background:${c};width:${pr.parts[k] / pr.total * 100}%"></span>` : '').join('')}</div>
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 6px">${PART.map(([k, l, c]) => pr.parts[k] > 0 ? `<span class="sub" style="display:inline-flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:${c};display:inline-block"></span>${l} ${v2Money(pr.parts[k])} (${Math.round(pr.parts[k] / pr.total * 100)}%)</span>` : '').join('')}</div>
-    ${pr.models.length ? `<div class="sub" style="margin:2px 0">By model: ${pr.models.slice(0, 6).map((m) => `${esc(m.model)} ${v2Money(m.cost)}`).join(' · ')}</div>` : ''}
-    ${pr.billing.plan > 0 && pr.billing.api > 0 ? `<div class="sub" style="margin:2px 0 8px">${v2Money(pr.billing.api)} on API keys, ${v2Money(pr.billing.plan)}* on Claude plans</div>` : ''}
-    <h4 class="v2sec" style="margin-top:10px">Spend over time</h4>${spendChartBox('')}` : `<h4 class="v2sec" style="margin-top:10px">Spend over time</h4>${spendChartBox('')}`;
   $('fleetUsageBody').innerHTML = `
+    ${f.rightSize?.line ? `<div class="sub" id="rightSizeLine" style="margin:0 0 8px" title="What switching agents to cheaper models saved this month: tokens used on the new model since the switch × the price difference, at API list prices">✂️ Right-size: ≈ $${Number(f.rightSize.savingUSD).toFixed(2)} this month${f.rightSize.planUSD > 0 ? '*' : ''}</div>` : ''}
+    ${alerts ? `<div style="margin:0 0 10px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
+    <h4 class="v2sec" style="margin-top:4px">At API prices</h4>
+    ${spendChartBox('')}
+    <h4 class="v2sec" style="margin-top:14px">By agent</h4>
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
       <span class="su-periods" style="margin:0;flex-wrap:wrap">${FLEET_USAGE_PERIODS.map(([k, l]) => btn(k, l)).join('')}</span>
+      <span class="sub">${fmtTokens(f.totals.tokens)} tokens · ${fmtN(f.totals.requests)} request${f.totals.requests === 1 ? '' : 's'}${f.totals.limited ? ` · <b style="color:var(--bad)">${f.totals.limited}</b> refused` : ''} · ${span} · <a href="#" id="fleetUsagePrices" onclick="event.preventDefault(); openModelPrices()">model prices</a></span>
     </div>
-    <div style="font-size:20px;font-weight:700;margin-top:8px">${fmtTokens(f.totals.tokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">· ${fmtN(f.totals.requests)} request${f.totals.requests === 1 ? '' : 's'}${f.totals.limited ? ` · <b style="color:var(--bad)">${f.totals.limited}</b> refused` : ''} · ${span}</span> ${totalCost}</div>
     ${partial}
-    ${f.rightSize?.line ? `<div class="sub" id="rightSizeLine" style="margin:4px 0 8px" title="What switching agents to cheaper models saved this month: tokens used on the new model × the price difference, at API list prices">✂️ Right-size: ≈ $${Number(f.rightSize.savingUSD).toFixed(2)} this month${f.rightSize.planUSD > 0 ? '*' : ''}</div>` : ''}
-    ${alerts ? `<div style="margin:6px 0 8px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
-    ${pricing}
-    ${breakdown}
-    ${f.totals.requests ? fleetUsageBars(f.buckets, 'requests', `Requests ${per}`, period) : ''}
-
-    ${rows || `<div class="sub" style="margin:8px 0">Nothing used in the ${span}.</div>`}
+    ${table}
     ${planStar ? `<div class="sub" style="margin-top:12px">* Claude plan use priced at API rates — not money you pay.</div>` : ''}`;
   void loadSpendCharts($('fleetUsageBody'));
 }

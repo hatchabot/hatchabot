@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.128.0] — 2026-10-05
+
+### Added
+- **Usage → At API prices: an agent picker and a pie.** Pick *All agents* or any combination (remembered per browser); the total, a month at that pace, a pie of what it went on (cache writes, cache reads, output, new input) with amounts and shares, the cost by model, and the spend chart all follow it. An agent's Usage tab shows the same block for that agent. `GET /v1/usage/spend` takes `agents=id,id` and returns `choices` (each agent's cost in the range), `models` and `monthly`.
+
+### Changed
+- **By agent is a table** — requests, tokens, the cost at API prices, the model, and a total row — instead of the requests bars and per-agent bars.
+
 ## [2.127.0] — 2026-10-05
 
 ### Added

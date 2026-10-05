@@ -7783,7 +7783,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * of the caller's agents, or one of them (?agent=id). From the sampler's hour
    * buckets: nothing is read from a container.
    */
-  app.get<{ Querystring: { range?: string; agent?: string } }>('/v1/usage/spend', async (req, reply) => {
+  app.get<{ Querystring: { range?: string; agent?: string; agents?: string } }>('/v1/usage/spend', async (req, reply) => {
     const range = (req.query?.range ?? 'week') as SpendRange;
     if (!(range in SPEND_RANGES)) return reply.code(400).send({ error: `range is one of ${Object.keys(SPEND_RANGES).join(', ')}.` });
     let agentId: string | undefined;
@@ -7792,7 +7792,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!a) return reply.code(404).send({ error: 'Not found' });
       agentId = a.id;
     }
-    return spendSeries(store, ownerIdOf(req), range, { agentId });
+    // ?agents=id,id: a combination of the caller's own agents (the chart's picker); none of theirs = all.
+    const agentIds = req.query?.agents ? String(req.query.agents).split(',').map((x) => x.trim()).filter((id) => ownedAgent(req, id)) : undefined;
+    return spendSeries(store, ownerIdOf(req), range, { agentId, agentIds });
   });
 
   /** The fleet's use in the last hour, 3/6/9/12 hours, day or week, from what the sampler recorded — answers at once. */
