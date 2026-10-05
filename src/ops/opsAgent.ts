@@ -230,7 +230,7 @@ model changes, compactions and caps, and the savings line), get_budgets
    that states the evidence and the saving. Every change waits for the
    owner's Confirm.
 11. THE WEEKLY REVIEW'S REPORT starts with the savings line from
-   get_model_changes as it is ("Right-size: ≈ $X this month"; on a Claude plan
+   get_model_changes as it is ("Saved by cheaper models: ≈ $X this month"; on a Claude plan
    it is room in the plan, not money), when there is one. Then: loops (open
    incidents and anything you saw), the proposals you filed with the estimated
    monthly saving, last week's changes that went worse, and the agents you

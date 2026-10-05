@@ -433,6 +433,9 @@ export interface SavingRow {
   source?: string;
   /** Tokens used on the new model in the month (millions). */
   tokensM: number;
+  /** This month on the new model at API prices, and what the same tokens would have cost on the old one. */
+  isUSD: number;
+  wasUSD: number;
   savingUSD: number;
   /** Plan sources: the saving as a share of the source's use this month at API prices. */
   sourceShare?: number;
@@ -448,7 +451,7 @@ export interface RightSize {
   rows: SavingRow[];
   /** Earlier months the stored 30 days still reach (partial: the hours before the window are gone). */
   earlier: Array<{ month: string; savingUSD: number; partial: true }>;
-  /** "Right-size: ≈ $12.40 this month", or undefined when there is nothing to say. */
+  /** "Saved by cheaper models: ≈ $12.40 this month", or undefined when there is nothing to say. */
   line?: string;
   notes: string[];
 }
@@ -523,7 +526,7 @@ export function rightSizeSavings(store: Store, ownerId: string, now = Date.now()
         from: c.from, to: c.to, since: c.at, ...(next ? { until: next.at } : {}),
         billing, ...(profile ? { source: profile.name } : {}),
         tokensM: r2((mix.input + mix.output + mix.cacheRead + mix.cacheWrite) / 1e6),
-        savingUSD: r2(saving), ...(sourceShare !== undefined ? { sourceShare } : {}),
+        isUSD: r2(is), wasUSD: r2(was), savingUSD: r2(saving), ...(sourceShare !== undefined ? { sourceShare } : {}),
       });
     }
   }
@@ -533,7 +536,7 @@ export function rightSizeSavings(store: Store, ownerId: string, now = Date.now()
   const savingUSD = r2(apiUSD + planUSD);
   const shares = rows.filter((r) => r.sourceShare !== undefined);
   const line = savingUSD >= 0.01
-    ? `Right-size: ≈ $${savingUSD.toFixed(2)} this month`
+    ? `Saved by cheaper models: ≈ $${savingUSD.toFixed(2)} this month`
       + (planUSD && !apiUSD ? ` at API prices${shares.length === 1 ? ` (${pct(shares[0]!.sourceShare!)} of ${shares[0]!.source}'s use)` : ''}: on a Claude plan that is room in the plan, not money`
         : planUSD ? ` ($${apiUSD.toFixed(2)} on API keys, ≈ $${planUSD.toFixed(2)} at API prices on Claude plans)` : '')
     : undefined;

@@ -203,15 +203,24 @@ describe('spend over time (the Usage chart)', () => {
     w.store.setModelProfile('c-big', profile({ 'claude-opus-4-8': model({ [now - 2 * HOUR]: { cacheWrite: 1.6e6, output: 0.2e6 }, [now - 30 * HOUR]: { input: 1e6 } }) }), iso(now));
     w.store.setModelProfile('c-plan', profile({ 'claude-sonnet-5': model({ [now - 2 * HOUR]: { input: 2.5e6 } }) }), iso(now));
     const day = spendSeries(w.store, OWNER, 'day', { now });
-    expect(day.buckets).toHaveLength(24);
+    // The last 24 hours to the minute (12:30 back to 12:30): 25 hourly bars, the first and last partial.
+    expect(day.buckets).toHaveLength(25);
     expect(day.bucketHours).toBe(1);
+    expect(day.buckets[0]!.at).toBe('2026-10-04T12:00:00.000Z');
     expect(day.buckets.at(-1)!.at).toBe('2026-10-05T12:00:00.000Z');
     const b = day.buckets.find((x) => x.at === '2026-10-05T10:00:00.000Z')!;
     expect(b).toMatchObject({ cacheWrite: 10, output: 5, input: 5, cacheRead: 0, tokens: 4.3e6 });
     expect(day.totals.cost).toBe(20); // the hour 30 h ago is outside; tokens on a model with no price count, at no cost
     expect(day.planShare).toBe(0.25);
     const week = spendSeries(w.store, OWNER, 'week', { now });
-    expect(week.buckets).toHaveLength(56);
+    expect(week.buckets).toHaveLength(57);
+    // The last hour, to the minute: the current hour so far and half of the one before; the 10:00 hour is outside.
+    const hour = spendSeries(w.store, OWNER, '1h', { now });
+    expect(hour.buckets.map((x) => x.at)).toEqual(['2026-10-05T11:00:00.000Z', '2026-10-05T12:00:00.000Z']);
+    expect(hour.totals.cost).toBe(0);
+    const six = spendSeries(w.store, OWNER, '6h', { now });
+    expect(six.totals.cost).toBe(20);
+    expect(six.monthly).toBe(2400);
     expect(week.totals.cost).toBe(25); // now with the $5 of input 30 hours ago
     const one = spendSeries(w.store, OWNER, 'day', { now, agentId: 'c-plan' });
     expect(one.totals).toMatchObject({ cost: 5, input: 5 });
@@ -220,7 +229,8 @@ describe('spend over time (the Usage chart)', () => {
     const r = await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=year', headers: as(OWNER) });
     expect(r.statusCode).toBe(400);
     expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=day&agent=c-big', headers: as(STRANGER) })).statusCode).toBe(404);
-    expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=month', headers: as(OWNER) })).json().buckets).toHaveLength(30);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=month', headers: as(OWNER) })).json().buckets.length).toBeGreaterThanOrEqual(30);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=12h', headers: as(OWNER) })).statusCode).toBe(200);
     // A combination of agents; the picker's choices with each one's cost; by model; a month at the pace.
     const pick = spendSeries(w.store, OWNER, 'day', { now, agentIds: ['c-plan'] });
     expect(pick.totals.cost).toBe(5);

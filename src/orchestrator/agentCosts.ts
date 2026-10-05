@@ -263,11 +263,15 @@ export function windowPricing(store: Store, viewer: string, hours: number, now =
 
 // ---- spend over time, part by part (the Usage chart, fleet and agent alike) ----
 
-export type SpendRange = 'day' | 'week' | 'month';
-export const SPEND_RANGES: Record<SpendRange, { buckets: number; bucketHours: number }> = {
-  day: { buckets: 24, bucketHours: 1 },
-  week: { buckets: 56, bucketHours: 3 },
-  month: { buckets: 30, bucketHours: 24 },
+export type SpendRange = '1h' | '6h' | '12h' | 'day' | 'week' | 'month';
+/** The chart's ranges: the window, and the slice its bars are cut in (an hour at the finest: the sampler keeps hours). */
+export const SPEND_RANGES: Record<SpendRange, { hours: number; bucketHours: number }> = {
+  '1h': { hours: 1, bucketHours: 1 },
+  '6h': { hours: 6, bucketHours: 1 },
+  '12h': { hours: 12, bucketHours: 1 },
+  day: { hours: 24, bucketHours: 1 },
+  week: { hours: 168, bucketHours: 3 },
+  month: { hours: 720, bucketHours: 24 },
 };
 export interface SpendBucket extends CostParts { at: string; tokens: number }
 export interface SpendSeries {
@@ -292,10 +296,14 @@ export interface SpendSeries {
  */
 export function spendSeries(store: Store, viewer: string, range: SpendRange, opts: { agentId?: string; agentIds?: string[]; now?: number } = {}): SpendSeries {
   const now = opts.now ?? Date.now();
-  const { buckets: n, bucketHours } = SPEND_RANGES[range];
+  // The window is exact — the last `hours` to the minute; an hour bucket it
+  // only partly covers counts for that part — and the bars are cut on clock
+  // boundaries, so the first and last slices may be partial.
+  const { hours, bucketHours } = SPEND_RANGES[range];
   const size = bucketHours * HOUR;
-  const end = Math.floor(now / HOUR) * HOUR + HOUR; // the end of the current hour
-  const start = end - n * size;
+  const from = now - hours * HOUR;
+  const start = Math.floor(from / size) * size;
+  const n = Math.max(1, Math.ceil((now - start) / size));
   const out: SpendBucket[] = Array.from({ length: n }, (_, i) => ({ at: new Date(start + i * size).toISOString(), ...noParts(), tokens: 0 }));
   const mine = store.listAgents(viewer).filter((a) => a.state !== 'DELETED' && a.state !== 'DELETING' && store.getAIProfile(a.aiProfileId)?.vendor !== 'local');
   const picked = opts.agentId ? new Set([opts.agentId]) : opts.agentIds?.length ? new Set(opts.agentIds) : undefined;
@@ -308,10 +316,12 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
     for (const [model, st] of Object.entries(profiles.get(a.id)?.profile.models ?? {})) {
       for (const [h, v] of Object.entries(st.h ?? {})) {
         const at = Date.parse(`${h}:00:00Z`);
-        if (!(at >= start && at < end)) continue;
-        const b = out[Math.floor((at - start) / size)]!;
+        if (!(at + HOUR > from) || at > now) continue;
+        const span = Math.max(1, Math.min(HOUR, now - at));
+        const w = at >= from ? 1 : Math.max(0, Math.min(1, (at + span - from) / span));
+        const b = out[Math.min(n - 1, Math.max(0, Math.floor((at - start) / size)))]!;
         const mix: TokenMix = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-        HOUR_FIELDS.forEach((f, i) => { if (f in mix) mix[f as keyof TokenMix] += Number(v[i]) || 0; });
+        HOUR_FIELDS.forEach((f, i) => { if (f in mix) mix[f as keyof TokenMix] += (Number(v[i]) || 0) * w; });
         const pp = priceParts(model, mix);
         const c = pp ? pp.input + pp.cacheWrite + pp.cacheRead + pp.output : 0;
         perAgent.set(a.id, (perAgent.get(a.id) ?? 0) + c);
@@ -337,7 +347,7 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
     range, bucketHours, buckets: out,
     totals: { input: r2(totals.input), cacheWrite: r2(totals.cacheWrite), cacheRead: r2(totals.cacheRead), output: r2(totals.output), cost: r2(totals.cost), tokens: Math.round(totals.tokens) },
     planShare: all > 0 ? Math.round((plan / all) * 1000) / 1000 : 0,
-    monthly: r2((totals.cost * 720) / (n * bucketHours)),
+    monthly: r2((totals.cost * 720) / hours),
     models: [...byModel].map(([model, cost]) => ({ model, cost: r2(cost) })).filter((m) => m.cost > 0).sort((x, y) => y.cost - x.cost),
     choices: (opts.agentId ? [] : mine.map((a) => ({ id: a.id, name: a.name, cost: r2(perAgent.get(a.id) ?? 0) })).sort((x, y) => y.cost - x.cost || x.name.localeCompare(y.name))),
   };

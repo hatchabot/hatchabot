@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.129.0] — 2026-10-05
+
+### Changed
+- **"Right-size" is now "Saved by cheaper models"**: in Usage a table of each switch to a cheaper model — agent, old → new model, since when, this month on the new model, what the same use would have cost on the old one, the saving — with the total in its heading; the Hatchabot agent's weekly report line reads "Saved by cheaper models: ≈ $X this month".
+- **Usage → At API prices: 1, 6 and 12 hours** beside 24 hours, 7 and 30 days. Every range is exact to the minute (an hour bucket the window only partly covers counts for that part); bars stay hourly at the finest.
+
+### Fixed
+- The agent picker stayed open: it now closes on **Done**, a click elsewhere, or Escape.
+
 ## [2.128.0] — 2026-10-05
 
 ### Added

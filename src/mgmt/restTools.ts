@@ -142,7 +142,7 @@ export const REST_TOOLS: RestTool[] = [
     description:
       "The owner's model-change ledger, newest first: each change of an agent's model (who made it — owner, agent or hatchabot — how, and why), "
       + "the old model's figures at the change (turns per day, tools per turn, error rates, monthly cost at API prices), the new model's figures a week on, "
-      + 'and the verdict (pending, kept-ok, worse, not-enough-data). Also savings: what switches to cheaper models saved this month (line = "Right-size: ≈ $X this month"; '
+      + 'and the verdict (pending, kept-ok, worse, not-enough-data). Also savings: what switches to cheaper models saved this month (line = "Saved by cheaper models: ≈ $X this month"; '
       + 'on a Claude plan that is room in the plan, priced at API rates). Stored data only: cheap, wakes nothing.',
     input_schema: obj({
       agent: { type: 'string', minLength: 1, maxLength: 128, description: 'only this agent (id or name)' },

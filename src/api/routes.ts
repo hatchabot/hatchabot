@@ -7806,10 +7806,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const alerts = store.usageAlertsSince(new Date(Date.now() - 7 * 86_400_000).toISOString(), { ownerId })
       .map((x) => ({ ...x, name: store.getAgent(x.agentId)?.name ?? 'an agent' }));
     // Right-size: what the cheaper switches saved this month (modelLedger.ts); one line on the page.
-    let rightSize: { line: string; savingUSD: number; apiUSD: number; planUSD: number; month: string } | undefined;
+    let rightSize: { line: string; savingUSD: number; apiUSD: number; planUSD: number; month: string; rows: Array<Record<string, unknown>> } | undefined;
     try {
       const rs = rightSizeSavings(store, ownerId);
-      if (rs.line) rightSize = { line: rs.line, savingUSD: rs.savingUSD, apiUSD: rs.apiUSD, planUSD: rs.planUSD, month: rs.month };
+      // Each switch: Usage shows them as "Saved by cheaper models" (2026-10-05).
+      if (rs.line) rightSize = { line: rs.line, savingUSD: rs.savingUSD, apiUSD: rs.apiUSD, planUSD: rs.planUSD, month: rs.month,
+        rows: rs.rows.map((r) => ({ agentId: r.agentId, agent: r.agent, from: r.from, to: r.to, since: r.since, ...(r.until ? { until: r.until } : {}), billing: r.billing, isUSD: r.isUSD, wasUSD: r.wasUSD, savingUSD: r.savingUSD })) };
     } catch (err) { app.log.warn({ err: String(err) }, 'model.savings_failed'); }
     // At API prices, part by part, for every agent of theirs (plan agents as an equivalent): agentCosts.ts windowPricing.
     const PERIOD_HOURS: Record<string, number> = { hour: 1, '3h': 3, '6h': 6, '9h': 9, '12h': 12, day: 24, week: 168 };

@@ -551,7 +551,7 @@ describe('Right-size: what the cheaper switches saved', () => {
     expect(plan.sourceShare).toBeCloseTo(2 / (2 + 12 + 2), 3);
     expect(rs.rows.find((r) => r.agentId === 'up')).toBeUndefined();
     expect(rs).toMatchObject({ savingUSD: 8, apiUSD: 6, planUSD: 2 });
-    expect(rs.line).toBe('Right-size: ≈ $8.00 this month ($6.00 on API keys, ≈ $2.00 at API prices on Claude plans)');
+    expect(rs.line).toBe('Saved by cheaper models: ≈ $8.00 this month ($6.00 on API keys, ≈ $2.00 at API prices on Claude plans)');
     // The member's own view has none of the owner's.
     expect(rightSizeSavings(w.store, MEMBER, now).rows).toEqual([]);
   });
@@ -567,7 +567,7 @@ describe('Right-size: what the cheaper switches saved', () => {
     // Only the 1M before the switch back counts: $1.
     expect(rs.savingUSD).toBe(1);
     // The plan carried 10M on haiku this month ($10): the $1 is 1/11 of what it would have been.
-    expect(rs.line).toBe("Right-size: ≈ $1.00 this month at API prices (9.1% of Max plan's use): on a Claude plan that is room in the plan, not money");
+    expect(rs.line).toBe("Saved by cheaper models: ≈ $1.00 this month at API prices (9.1% of Max plan's use): on a Claude plan that is room in the plan, not money");
     expect(priceMix('claude-sonnet-5', { input: 1e6, output: 0, cacheRead: 0, cacheWrite: 0 })).toBe(2);
   });
 

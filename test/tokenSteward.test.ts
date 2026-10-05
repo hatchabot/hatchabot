@@ -703,7 +703,7 @@ describe('the management agent as token steward', () => {
     expect(OPS_SOUL).toMatch(/## Token steward\n[\s\S]*supervise how your owner's agents use AI[\s\S]*LOOPS/);
     const s = opsSection('## Token stewardship')!;
     for (const must of ['get_token_health', 'get_incidents', 'compact_agent', 'set_context_cap', 'channel-retry', 'compaction-failing', 'task-failing', 'consult-ping-pong',
-      'tool-loop', 'model-failing', 'no supported way to cancel a retry', 'BUDGETS. get_budgets', 'Right-size: ≈ $X this month', 'Never wake a sleeping agent', 'tokenActions']) {
+      'tool-loop', 'model-failing', 'no supported way to cancel a retry', 'BUDGETS. get_budgets', 'Saved by cheaper models: ≈ $X this month', 'Never wake a sleeping agent', 'tokenActions']) {
       expect(s, must).toContain(must);
     }
     expect(s.indexOf('LOOPS FIRST')).toBeLessThan(s.indexOf('CONVERSATION SIZE'));

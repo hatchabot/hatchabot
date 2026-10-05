@@ -15,7 +15,7 @@ See [Your Hatchabot agent](#your-hatchabot-agent-the-manager).
 the least capable model that does its job well, in both directions, from a
 scorecard of evidence it reviews every week; every model change is recorded,
 a quality guard proposes switching back if errors rise after a switch, and the
-realised saving is shown as one line ("Right-size: ≈ $12.40 this month"). Each
+realised saving is shown as one line ("Saved by cheaper models: ≈ $12.40 this month"). Each
 agent's tile carries its cost for the last week ("$4/wk"), with a Cost view and
 the model price list in the app. You confirm every change. Dollar figures are
 estimates from measured tokens at Anthropic's list API prices. It also watches
@@ -520,7 +520,7 @@ the saving is room in the plan, not money.
 review" ("Weekly model review" until v2.120, renamed in place), Mondays 09:00, made when the agent is built and listed with its other
 tasks. Its short report goes where the agent already reaches you (its Telegram
 chat if it has one, else its conversation in the app): the Right-size line
-("Right-size: ≈ $X this month", below) when there is a saving, the proposals
+("Saved by cheaper models: ≈ $X this month", below) when there is a saving, the proposals
 it filed, the estimated monthly saving, changes that went worse, and the agents
 it left alone and why. (A task made before this release keeps its message; its
 notes, which ask for the line, reach it at its next build.)
@@ -581,7 +581,7 @@ the price difference at API list prices, summed for the calendar month. On a
 Claude plan nothing is billed per token, so it is "≈ $X at API prices" with
 its share of what the source carried that month: room in the plan, not money.
 Upgrades are not netted off. It shows as one line on Usage
-("Right-size: ≈ $12.40 this month"), opens the weekly review's report, and is
+("Saved by cheaper models: ≈ $12.40 this month"), opens the weekly review's report, and is
 in `get_model_changes` (`savings`).
 
 **Where the figures come from.** The usage reader keeps each model's counts
@@ -1687,9 +1687,14 @@ that pace, a **pie** of what it went on (cache writes, cache reads, output,
 new input) with each part's amount and share beside it, the cost by model,
 and the chart below. Under it, **By agent**: the period's (Hour … Week) table
 of requests, tokens, the cost at API prices and the model, with a total row —
-it replaced the requests bars and the per-agent bars. **Right-size** in Usage
-is what switching agents to cheaper models saved this month: tokens used on
-the new model since each switch × the price difference.
+it replaced the requests bars and the per-agent bars. **Saved by cheaper
+models** (v2.129.0; it was the "Right-size" line) lists each switch to a
+cheaper model still saving this month — agent, old → new model, since when,
+this month on the new model, what the same use would have cost on the old
+one, and the saving — with the total in its heading. The ranges are 1, 6, 12
+and 24 hours, 7 and 30 days, each exact to the minute (the bars are hourly at
+the finest: the sampler keeps hours). The agent picker closes on Done, a
+click elsewhere, or Escape.
 
 **Spend over time** (v2.127.0): one chart, the same for all your agents (in
 Usage) and for one agent (its Usage tab): what each slice cost at API prices

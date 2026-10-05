@@ -8544,7 +8544,8 @@ async function loadUsage() {
 // reads, output, new input (left axis, dollars) — and the tokens behind it as
 // a line on the right axis (Chris asked for the second axis, 2026-10-05).
 const SPEND_PARTS = [['cacheWrite', 'Cache writes', '#c9822b'], ['cacheRead', 'Cache reads', '#4f9a8f'], ['output', 'Output', '#7a6fd6'], ['input', 'New input', '#8a8f98']];
-const SPEND_RANGE_LABELS = [['day', '24 hours'], ['week', '7 days'], ['month', '30 days']];
+const SPEND_RANGE_LABELS = [['1h', '1 hr'], ['6h', '6 hr'], ['12h', '12 hr'], ['day', '24 hr'], ['week', '7 days'], ['month', '30 days']];
+const SPEND_RANGE_WORDS = { '1h': ['the last hour', '1 hour'], '6h': ['the last 6 hours', '6 hours'], '12h': ['the last 12 hours', '12 hours'], day: ['the last 24 hours', '24 hours'], week: ['the last 7 days', '7 days'], month: ['the last 30 days', '30 days'] };
 let spendRange = (() => { try { const v = localStorage.getItem('hb-spend-range'); return SPEND_RANGE_LABELS.some(([k]) => k === v) ? v : 'week'; } catch { return 'week'; } })();
 /** A box the loader fills; agentId '' = every agent of yours. */
 const spendChartBox = (agentId) => `<div class="spendchart" data-agent="${esc(agentId || '')}"><div class="sub">Loading…</div></div>`;
@@ -8574,7 +8575,7 @@ function spendChartHTML(d, opts = {}) {
   const cost = (x) => SPEND_PARTS.reduce((t, [k]) => t + (x[k] || 0), 0);
   const t = d.totals || {};
   const star = d.planShare > 0 ? '*' : '';
-  const rangeName = { day: 'the last 24 hours', week: 'the last 7 days', month: 'the last 30 days' }[d.range] || '';
+  const rangeName = SPEND_RANGE_WORDS[d.range]?.[0] || '';
   // Header: which agents (all of yours, or the ones you tick), and the range.
   const choices = d.choices || [];
   const picked = (spendAgents || []).filter((id) => choices.some((c) => c.id === id));
@@ -8583,6 +8584,7 @@ function spendChartHTML(d, opts = {}) {
       <div class="spendpick-list">
         <label><input type="checkbox" ${picked.length ? '' : 'checked'} onchange="spendPickAll(this)"> All agents</label>
         ${choices.map((c) => `<label><input type="checkbox" value="${esc(c.id)}" ${picked.includes(c.id) ? 'checked' : ''} onchange="spendPickOne(this)"> ${esc(c.name)} <span class="sub">${c.cost ? v2Money(c.cost) : '—'}</span></label>`).join('')}
+        <div style="text-align:right;margin-top:4px"><button class="hbtn" onclick="spendPickClose()">Done</button></div>
       </div></details>` : '';
   const pills = SPEND_RANGE_LABELS.map(([k, l]) => `<button class="su-period${k === d.range ? ' on' : ''}" aria-pressed="${k === d.range}" onclick="setSpendRange('${k}', this)">${l}</button>`).join('');
   const head = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:2px 0 6px">${picker}<span class="su-periods" style="margin:0">${pills}</span></div>
@@ -8598,7 +8600,7 @@ function spendChartHTML(d, opts = {}) {
   }).join('') : `<circle r="${R}" cx="70" cy="70" fill="none" style="stroke:var(--line)" stroke-width="${SW}"/>`;
   const pie = `<svg viewBox="0 0 140 140" width="140" height="140" role="img" aria-label="What it went on" style="flex:none">${arcs}
       <text x="70" y="68" text-anchor="middle" font-size="17" font-weight="700" style="fill:var(--text)">${v2Money(total)}${star}</text>
-      <text x="70" y="86" text-anchor="middle" font-size="11" style="fill:var(--dim)">${{ day: '24 hours', week: '7 days', month: '30 days' }[d.range] || ''}</text></svg>`;
+      <text x="70" y="86" text-anchor="middle" font-size="11" style="fill:var(--dim)">${SPEND_RANGE_WORDS[d.range]?.[1] || ''}</text></svg>`;
   const parts = `<div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:4px 10px;align-items:center;font-size:13px;min-width:200px">${SPEND_PARTS.map(([k, l, c]) =>
       `<span style="width:10px;height:10px;border-radius:2px;background:${c}"></span><span>${l}</span><span style="text-align:right;font-variant-numeric:tabular-nums">${v2Money(t[k] || 0)}</span><span class="sub" style="text-align:right;font-variant-numeric:tabular-nums">${total ? Math.round((t[k] || 0) / total * 100) : 0}%</span>`).join('')}</div>`;
   const models = (d.models || []).length ? `<div class="sub" style="margin-top:6px">By model: ${d.models.slice(0, 6).map((m) => `${esc(m.model)} ${v2Money(m.cost)}`).join(' · ')}</div>` : '';
@@ -8613,7 +8615,7 @@ function spendChartHTML(d, opts = {}) {
   const grid = [0, 0.5, 1].map((fr) => `<line x1="${L}" x2="${W - R2}" y1="${yC(topC * fr)}" y2="${yC(topC * fr)}" style="stroke:var(--line)" stroke-width="1"${fr ? ' stroke-dasharray="3 3"' : ''}/>
     <text x="${L - 6}" y="${yC(topC * fr) + 4}" text-anchor="end" font-size="11" style="fill:var(--dim)">${money(topC * fr)}</text>
     <text x="${W - R2 + 6}" y="${yC(topC * fr) + 4}" font-size="11" style="fill:var(--dim)">${fmtTokens(topT * fr)}</text>`).join('');
-  const when = (iso) => { const x = new Date(iso); return d.range === 'day' ? x.toLocaleTimeString([], { hour: 'numeric' }) : d.range === 'week' ? x.toLocaleDateString([], { weekday: 'short' }) : x.toLocaleDateString([], { month: 'short', day: 'numeric' }); };
+  const when = (iso) => { const x = new Date(iso); return d.bucketHours === 1 ? x.toLocaleTimeString([], { hour: 'numeric' }) : d.range === 'week' ? x.toLocaleDateString([], { weekday: 'short' }) : x.toLocaleDateString([], { month: 'short', day: 'numeric' }); };
   const every = Math.max(1, Math.round(n / 6));
   const xl = b.map((x, i) => (i % every === 0 && i < n - every / 2) ? `<text x="${L + i * slot + slot / 2}" y="${H - 6}" text-anchor="middle" font-size="11" style="fill:var(--dim)">${esc(when(x.at))}</text>` : '').join('');
   const bars = b.map((x, i) => {
@@ -8636,6 +8638,13 @@ function spendSaveAgents(el) {
   const box = el.closest('.spendchart'); if (box) void loadSpendChart(box);
 }
 function spendPickAll(cb) { spendAgents = []; spendSaveAgents(cb); }
+/** Close the picker: Done, a click anywhere else, or Escape (it stayed open, 2026-10-05). */
+function spendPickClose() {
+  spendPickOpen = false;
+  for (const d of document.querySelectorAll('.spendpick[open]')) d.open = false;
+}
+document.addEventListener('click', (e) => { if (document.querySelector('.spendpick[open]') && !e.target.closest?.('.spendpick')) spendPickClose(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.querySelector('.spendpick[open]')) spendPickClose(); });
 function spendPickOne(cb) {
   const ids = [...cb.closest('.spendpick-list').querySelectorAll('input[value]:checked')].map((x) => x.value);
   spendAgents = ids;
@@ -8700,6 +8709,25 @@ async function loadFleetUsage() {
     $('fleetUsageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`;
   }
 }
+/**
+ * "Saved by cheaper models" (was the Right-size line, 2026-10-05): each switch
+ * to a cheaper model still in force this month — the agent, from → to, since
+ * when, what this month cost on the new model, what the same use would have
+ * cost on the old one, and the difference. At API prices.
+ */
+function savedByModels(rs) {
+  const rows = (rs?.rows || []).filter((r) => r.savingUSD > 0);
+  if (!rows.length) return '';
+  const num = 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap';
+  const bare = (m) => esc(String(m).replace(/^.*\//, ''));
+  const star = (r) => (r.billing === 'plan' ? '*' : '');
+  return `<h4 class="v2sec" id="savedByModels" style="margin-top:14px">Saved by cheaper models · ≈ ${v2Money(rs.savingUSD)}${rs.planUSD > 0 ? '*' : ''} this month</h4>
+    <div class="mp-wrap"><table class="mp-tbl"><thead><tr><th style="text-align:left">Agent</th><th style="text-align:left">Switched</th><th>Since</th><th>This month</th><th>On the old model</th><th>Saved</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td>${esc(r.agent)}</td><td style="text-align:left;white-space:nowrap" class="sub">${bare(r.from)} → ${bare(r.to)}</td>
+      <td style="${num}" class="sub">${esc(new Date(r.since).toLocaleDateString([], { month: 'short', day: 'numeric' }))}</td>
+      <td style="${num}">${v2Money(r.isUSD)}${star(r)}</td><td style="${num}" class="sub">${v2Money(r.wasUSD)}${star(r)}</td><td style="${num}"><b>${v2Money(r.savingUSD)}${star(r)}</b></td></tr>`).join('')}
+    </tbody></table></div>`;
+}
 function renderFleetUsage(f) {
   const period = f.period || fleetUsagePeriod;
   const span = period === 'hour' ? 'last hour' : period === 'day' ? 'last 24 hours' : period === 'week' ? 'last 7 days' : `last ${parseInt(period)} hours`;
@@ -8727,10 +8755,10 @@ function renderFleetUsage(f) {
     + `<button class="hbtn" style="padding:0 6px;font-size:12px" title="Clear this warning" aria-label="Clear this warning" onclick="dismissSpike('${jsq(x.agentId)}','${jsq(x.at)}')">✕</button></div>`).join('')
     + ((f.alerts || []).length > 1 ? `<div style="text-align:right;margin-top:2px"><button class="hbtn" style="font-size:12px" onclick="dismissSpike()">Clear all</button></div>` : '');
   $('fleetUsageBody').innerHTML = `
-    ${f.rightSize?.line ? `<div class="sub" id="rightSizeLine" style="margin:0 0 8px" title="What switching agents to cheaper models saved this month: tokens used on the new model since the switch × the price difference, at API list prices">✂️ Right-size: ≈ $${Number(f.rightSize.savingUSD).toFixed(2)} this month${f.rightSize.planUSD > 0 ? '*' : ''}</div>` : ''}
     ${alerts ? `<div style="margin:0 0 10px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
     <h4 class="v2sec" style="margin-top:4px">At API prices</h4>
     ${spendChartBox('')}
+    ${savedByModels(f.rightSize)}
     <h4 class="v2sec" style="margin-top:14px">By agent</h4>
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
       <span class="su-periods" style="margin:0;flex-wrap:wrap">${FLEET_USAGE_PERIODS.map(([k, l]) => btn(k, l)).join('')}</span>

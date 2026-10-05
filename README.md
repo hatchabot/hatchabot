@@ -29,7 +29,7 @@ an agent that struggles. A weekly review reads a scorecard of evidence per agent
 (what it is for, tool use, errors, and its cost on each model its source
 offers); every model change is recorded, and if failed turns or tool errors rise
 after a switch, a quality guard proposes switching back. You confirm every
-change. The realised saving is shown ("Right-size: ≈ $12.40 this month"), each
+change. The realised saving is shown ("Saved by cheaper models: ≈ $12.40 this month"), each
 agent's tile carries its weekly cost ("$4/wk"), and a Cost view and the price
 list behind every figure are in the app. Dollar figures are estimates: measured
 tokens at Anthropic's list API prices (on a Claude plan, room in its limits

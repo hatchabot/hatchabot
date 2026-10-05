@@ -567,12 +567,25 @@ const SCENARIOS = String.raw`(() => {
       ok('stacked: four parts in a bar', bars.querySelectorAll('g')[0].querySelectorAll('rect').length === 5);
       // The agent picker: all, or a combination.
       ok('picker says All agents', box.querySelector('.spendpick summary').textContent.includes('All agents'));
+      box.querySelector('.spendpick summary').click();
+      await sleep(20);
       const mark0 = window.__calls.length;
       box.querySelector('.spendpick input[value="a2"]').click();
       await until(() => window.__calls.slice(mark0).some((c) => c.url.includes('agents=a2')));
       await until(() => box.querySelector('.spendpick summary')?.textContent.includes('Soccer Schedule'));
       box.querySelector('.spendpick input:not([value])').click(); // All agents again
       await until(() => box.querySelector('.spendpick summary')?.textContent.includes('All agents'));
+      ok('still open while picking', box.querySelector('.spendpick').open);
+      document.body.click();
+      ok('a click elsewhere closes it', !box.querySelector('.spendpick').open);
+      box.querySelector('.spendpick summary').click();
+      ok('it opens again', box.querySelector('.spendpick').open);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      ok('Escape closes it', !box.querySelector('.spendpick').open);
+      box.querySelector('.spendpick summary').click();
+      byText('.spendpick button', 'Done').click();
+      ok('Done closes it', !box.querySelector('.spendpick').open);
+      ok('six ranges', [...box.querySelectorAll('.su-period')].map((b) => b.textContent).join('|') === '1 hr|6 hr|12 hr|24 hr|7 days|30 days');
       const svg2 = [...box.querySelectorAll('svg')].pop();
       ok('a token line', !!svg2.querySelector('polyline'));
       ok('a dollar axis and a token axis', svg2.textContent.includes('$') && /M/.test(svg2.textContent));
@@ -589,21 +602,25 @@ const SCENARIOS = String.raw`(() => {
       delete window.__override['/v1/usage/spend']; try { localStorage.removeItem('hb-spend-range'); localStorage.removeItem('hb-spend-agents'); } catch {} spendRange = 'week'; spendAgents = [];
     },
     rightSizeLine: async () => {
-      // Usage: one line with what the cheaper switches saved this month (Right-size).
+      // Usage: "Saved by cheaper models" — each switch, what it cost and would have cost (was the Right-size line).
       const now = Date.now();
       const base = { period: 'day', from: new Date(now - 864e5).toISOString(), to: new Date(now).toISOString(), bucketMinutes: 60, buckets: [],
         agents: [], totals: { tokens: 0, requests: 0, limited: 0 }, byBilling: {}, cost: null };
-      window.__override['/v1/usage/periods'] = { ...base, rightSize: { line: 'Right-size: ≈ $12.40 this month', savingUSD: 12.4, apiUSD: 12.4, planUSD: 0, month: '2026-10' } };
+      window.__override['/v1/usage/periods'] = { ...base, rightSize: { line: 'Right-size: ≈ $12.40 this month', savingUSD: 12.4, apiUSD: 0, planUSD: 12.4, month: '2026-10',
+        rows: [{ agentId: 'a1', agent: 'Homework Helper', from: 'claude-opus-4-8', to: 'claude-sonnet-5', since: new Date(now - 4 * 864e5).toISOString(), billing: 'plan', isUSD: 8.2, wasUSD: 20.6, savingUSD: 12.4 }] } };
       openFleetUsage();
-      const line = await until(() => document.getElementById('rightSizeLine'));
-      ok('the savings line shows', line.textContent.includes('Right-size: ≈ $12.40 this month'));
+      const head = await until(() => document.getElementById('savedByModels'));
+      ok('a section, its total in the heading: ' + head.textContent, head.textContent.includes('Saved by cheaper models') && head.textContent.includes('$12') && head.textContent.includes('*'));
+      const tbl = head.nextElementSibling;
+      ok('each switch: from → to, cost now, on the old model, saved', tbl.textContent.includes('claude-opus-4-8 → claude-sonnet-5') && tbl.textContent.includes('$8.20*') && tbl.textContent.includes('$21*') && tbl.textContent.includes('$12*'));
+      ok('no "Right-size" jargon on the page', !document.getElementById('fleetUsageBody').textContent.includes('Right-size'));
       fleetUsageDlg.close();
       window.__override['/v1/usage/periods'] = base;
       const asked = calls('GET', /\/v1\/usage\/periods$/).length;
       openFleetUsage();
       await until(() => calls('GET', /\/v1\/usage\/periods$/).length > asked && document.getElementById('fleetUsageBody').textContent.includes('Nothing used'));
       await sleep(50);
-      ok('no line when nothing was saved', !document.getElementById('rightSizeLine'));
+      ok('no section when nothing was saved', !document.getElementById('savedByModels'));
       fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
     },
     sheetPollKeepsTabs: async () => {
