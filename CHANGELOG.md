@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.122.2] — 2026-10-05
+
+### Changed
+- **View by → Cost's section headings are shorter**, written like the chips: "<$10/wk", "$1.50–7.50/day", ">$15/day", with the total beside the count — "($1.79 total)" — instead of "Under $1.5 in the last day … ≈ $1.79 in the last day". The empty one is just "No usage". Band edges keep their cents ("$1.50", not "$1.5").
+
 ## [2.122.1] — 2026-10-05
 
 ### Changed

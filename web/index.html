@@ -11829,11 +11829,12 @@ const V2_COST_GOLD_FROM_USD = 100;
 /** View by → Cost's section for a band: the edges come with the costs (COST_BANDS in agentCosts.ts, $10 / $50 / $100). */
 function v2CostBandLabel(tier) {
   const b = Array.isArray(v2Costs?.bands) && v2Costs.bands.length ? v2Costs.bands : [10, 50, 100];
-  const n = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: x < 1 && x > 0 ? 2 : 0 });
-  const per = v2Costs?.period && v2Costs.period !== '1w' ? `in ${v2CostWindow()}` : 'a week';
-  if (tier <= 1) return `Under $${n(b[0])} ${per}`;
-  if (tier > b.length) return `Over $${n(b[b.length - 1])} ${per}`;
-  return `$${n(b[tier - 2])}–${n(b[tier - 1])} ${per}`;
+  // Written like the chips (Chris, 2026-10-05): "<$10/wk", "$1.50–7.50/day", ">$15/day".
+  const n = (x) => Number(x).toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: Number.isInteger(x) ? 0 : 2 });
+  const per = v2Costs?.period && v2Costs.period !== '1w' ? (v2Costs.suffix || '') : '/wk';
+  if (tier <= 1) return `<$${n(b[0])}${per}`;
+  if (tier > b.length) return `>$${n(b[b.length - 1])}${per}`;
+  return `$${n(b[tier - 2])}–${n(b[tier - 1])}${per}`;
 }
 async function v2LoadCosts(force = false) {
   if (v2CostsBusy || (!force && Date.now() - v2CostsAt < V2_COSTS_EVERY_MS)) return;
@@ -11890,7 +11891,7 @@ function v2CostBin(a) {
   if (!v2Costs) return ['$:d', 'Cost not read yet'];
   const c = v2CostOf(a);
   if (!c) return ['$:c', 'No cost shown'];
-  if (!c.tier) return ['$:b', v2Costs.period && v2Costs.period !== '1w' ? `No usage in ${v2CostWindow()}` : 'No usage this week'];
+  if (!c.tier) return ['$:b', 'No usage']; // the pill above says which window
   if (!c.priced) return ['$:a', 'No price known'];
   const t = c.local ? 1 : c.tier;
   return ['$:' + (100 - t), v2CostBandLabel(t)];
@@ -11953,7 +11954,7 @@ function renderV2() {
   if (v2View === 'cost') for (const s of sections) {
     const week = !v2Costs?.period || v2Costs.period === '1w';
     const sum = s.items.reduce((t, { a }) => { const c = v2CostOf(a); return t + (c && c.priced && !c.local ? (week ? c.weekly : c.cost) : 0); }, 0);
-    if (sum > 0 && s.key.startsWith('$:')) s.note = `≈ ${v2Money(sum)} ${week ? 'this week' : 'in ' + v2CostWindow()}`;
+    if (sum > 0 && s.key.startsWith('$:')) s.note = `(${v2Money(sum)} total)`;
   }
   const sortBar = `<span class="v2binsort">${[...(v2View === 'cost' ? [['cost', 'Cost']] : []), ['age', 'Age'], ['name', 'Name'], ['activity', 'Activity']].map(([k, l]) => {
     const on = v2SortKey() === k;

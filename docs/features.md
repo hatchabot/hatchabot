@@ -246,10 +246,11 @@ web/index.html.
 - *The tooltip*, in every view: "≈ $18 in the last 7 days at API prices (≈ $77
   a month)" and, on a Claude plan, "on your Claude plan — counts against its
   limits" (a plan is not billed per token, but this is the room it takes).
-- *View by → Cost*: bands of a week's cost — **Over $100 a week**, **$50–100
-  a week**, **$10–50 a week**, **Under $10 a week** — then *No price known*
-  and *No usage this week*. Each band's header shows its total for the week
-  ("≈ $1,600 this week"). Inside a band the most expensive comes first: the
+- *View by → Cost*: bands of a week's cost, written like the chips —
+  **>$100/wk**, **$50–100/wk**, **$10–50/wk**, **<$10/wk** — then *No price
+  known* and *No usage*. Each band's header shows its count and its total
+  ("($1,600 total)"); in another window the bands follow it ("<$1.50/day").
+  Inside a band the most expensive comes first: the
   Sort control there has a **Cost** choice (first, and the default for this
   view; again for cheapest first) beside Age · Name · Activity, which work as
   everywhere. The Cost view remembers its own sort; the other views keep
