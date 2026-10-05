@@ -195,19 +195,19 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
 <section class="slide dark">
   <p class="eyebrow">The Hatchabot supervisor</p>
   <h2 style="margin-bottom:6pt">A supervisor for every agent's AI use</h2>
-  <p class="lead" style="margin-bottom:11pt;font-size:15pt">Your Hatchabot agent — the first tile, with the gold star — keeps each agent on the <b>least capable model that does its job well</b>, watches how agents spend tokens, and proposes the fix. You confirm every change.</p>
+  <p class="lead" style="margin-bottom:8pt;font-size:15pt">Your Hatchabot agent — the first tile, with the gold star — keeps each agent on the <b>least capable model that does its job well</b>, watches how agents spend tokens, and proposes the fix. You confirm every change.</p>
   <div class="row compact" style="gap:0.22in">
     <div class="card"><h3>Right model, on evidence</h3><p>A weekly scorecard per agent: purpose, tool use, failures, cost on each model its source offers. Thin evidence or a small saving: no change.</p></div>
     <div class="card"><h3>A quality guard</h3><p>Every model change is recorded. If failed turns or tool errors rise on the new model, Hatchabot proposes switching back.</p></div>
-    <div class="card"><h3>The savings, shown</h3><p>“Right-size: ≈ $12.40 this month” on Usage and atop the weekly report; “$4/wk” on each tile, and a Cost view.</p></div>
+    <div class="card"><h3>Cost and savings, shown</h3><p>Every tile shows its week's cost — “$4/wk” — and a Cost view ranks the fleet. “Right-size: ≈ $12.40 this month” on Usage and atop the weekly report.</p></div>
   </div>
-  <div class="row compact" style="gap:0.22in;margin-top:0.14in">
-    <div class="card"><h3>Loops, caught as they happen</h3><p>A chat message retried again and again, a task failing run after run, two agents consulting in circles: flagged under Needs you, with one Telegram message.</p></div>
+  <div class="row compact" style="gap:0.22in;margin-top:0.12in">
+    <div class="card"><h3>Loops, caught as they happen</h3><p>A message retried again and again, a task failing run after run, agents consulting in circles: flagged in Needs you and on Telegram. A failing task: a card to pause it.</p></div>
     <div class="card"><h3>Conversations kept in size</h3><p>Every message re-sends the whole conversation. When one grows large, it proposes a compaction now, or a cap so the agent compacts on its own.</p></div>
-    <div class="card"><h3>A weekly token review</h3><p>Checks the prompt cache, what scheduled tasks cost, instruction-file size and thinking — and opens with the savings line.</p></div>
+    <div class="card"><h3>A weekly token review</h3><p>Checks the prompt cache, what scheduled tasks cost, instruction-file size and thinking — and opens with the savings line.<br><b style="color:#e8a33d">Coming next, not shipped yet:</b> budgets.</p></div>
   </div>
-  <p style="margin-top:8pt;font-size:11pt;color:#c9c2b5"><b style="color:#e8a33d">Coming next, not shipped yet:</b> budgets.</p>
-  <div class="takeaway" style="bottom:0.9in;padding:9pt 16pt;font-size:13pt">ChatGPT's Auto picks a model per message, inside OpenAI's app, by its own rules; Claude's apps have you choose. Here it's per agent, under your control, with the savings shown.</div>
+  <p style="margin-top:8pt;margin-bottom:0;font-size:12pt"><b style="color:#e8a33d">Ask it in its chat:</b> “Which agents cost the most, and why?” · “Is anything on Opus that doesn't need to be?” · “Is anything stuck in a loop?”</p>
+  <div class="takeaway" style="bottom:0.86in;padding:9pt 16pt;font-size:13pt">ChatGPT's Auto picks a model per message, inside OpenAI's app, by its own rules; Claude's apps have you choose. Here it's per agent, under your control, with the savings shown.</div>
   <p style="position:absolute;left:0.9in;right:0.9in;bottom:0.6in;margin:0;font-size:9.5pt;color:#7b8190">Dollar figures are estimates: measured tokens at Anthropic's list API prices (on a Claude plan, room in its limits rather than money). The figures in quotes are examples.</p>
   <div class="foot"><span>hatchabot.com</span><span>8</span></div>
 </section>
