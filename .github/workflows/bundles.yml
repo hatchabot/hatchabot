@@ -33,13 +33,15 @@ jobs:
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ env.TAG }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
+          # A release bundle is built from the registry, never from a cache.
+          package-manager-cache: false
       - name: build
         run: scripts/build-bundle.sh "$TAG" "${{ matrix.platform }}" dist-bundles
       - name: attach to the release
