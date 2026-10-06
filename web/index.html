@@ -8576,8 +8576,8 @@ function spendChartHTML(d, opts = {}) {
         <div style="text-align:right;margin-top:4px"><button class="hbtn" onclick="spendPickClose()">Done</button></div>
       </div></details>` : '';
   const pills = SPEND_RANGE_LABELS.map(([k, l]) => `<button class="su-period${k === d.range ? ' on' : ''}" aria-pressed="${k === d.range}" onclick="setSpendRange('${k}', this)">${l}</button>`).join('');
-  const head = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:2px 0 6px">${picker}<span class="su-periods" style="margin:0">${pills}</span></div>
-    <div style="margin:0 0 8px"><b style="font-size:16px">≈ ${v2Money(t.cost || 0)}</b>${star} <span class="sub">in ${rangeName} · ≈ ${v2Money(d.monthly || 0)} a month at this pace · ${fmtTokens(t.tokens || 0)} tokens</span></div>`;
+  // No summary line (Chris, 2026-10-05): the total is in the pies, the tokens in the chart, the monthly pace under it.
+  const head = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:2px 0 8px">${picker}<span class="su-periods" style="margin:0">${pills}</span></div>`;
   // Two pies (2026-10-05): what it went on, and by model — each with its amounts and shares beside it.
   const total = t.cost || 0;
   const range = SPEND_RANGE_WORDS[d.range]?.[1] || '';
@@ -8588,7 +8588,7 @@ function spendChartHTML(d, opts = {}) {
       <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">${donutHTML(slices, total, `${v2Money(total)}${star}`, range, title)}${pieLegend(slices, total)}</div></div>`;
   const summary = `<div style="display:flex;gap:18px 34px;flex-wrap:wrap;margin-bottom:8px">${block('What it went on', partSlices)}${modelSlices.length ? block('By model', modelSlices) : ''}</div>`;
   // Over time: stacked bars (left axis, dollars), tokens as a line (right axis).
-  const W = 640, H = 210, L = 46, R2 = 50, T = 10, B = 24, iw = W - L - R2, ih = H - T - B;
+  const W = 640, H = 224, L = 46, R2 = 50, T = 24, B = 24, iw = W - L - R2, ih = H - T - B;
   const topC = niceTop(Math.max(0, ...b.map(cost))), topT = niceTop(Math.max(0, ...b.map((x) => x.tokens)));
   const n = Math.max(1, b.length), slot = iw / n, bw = Math.max(1.5, slot * 0.72);
   const yC = (v) => T + ih - (v / topC) * ih, yT = (v) => T + ih - (v / topT) * ih;
@@ -8608,8 +8608,11 @@ function spendChartHTML(d, opts = {}) {
   }).join('');
   const pts = b.map((x, i) => `${(L + i * slot + slot / 2).toFixed(1)},${yT(x.tokens).toFixed(1)}`).join(' ');
   const line = b.length ? `<polyline points="${pts}" fill="none" style="stroke:var(--text)" stroke-opacity=".75" stroke-width="1.6" stroke-linejoin="round" pointer-events="none"/>` : '';
-  const chart = `<div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;display:block" role="img" aria-label="Spend at API prices per ${d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : d.bucketHours + ' hours'}, by part, with tokens as a line">${grid}${bars}${line}${xl}</svg></div>
-    <div class="sub" style="display:flex;gap:6px;align-items:center;margin:2px 0 4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis); bars are what each ${d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : `${d.bucketHours} hours`} cost (left axis)</div>`;
+  // The range's tokens in all, over the token axis, inside the chart.
+  const tokTotal = `<text x="${W - R2}" y="12" text-anchor="end" font-size="12" style="fill:var(--text)"><tspan font-weight="700">${fmtTokens(t.tokens || 0)}</tspan> tokens in ${esc(rangeName)}</text>`;
+  const slice = d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : `${d.bucketHours} hours`;
+  const chart = `<div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;display:block" role="img" aria-label="Spend at API prices per ${slice}, by part, with tokens as a line">${tokTotal}${grid}${bars}${line}${xl}</svg></div>
+    <div class="sub" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:2px 0 4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis); bars are what each ${slice} cost (left axis)${d.range !== 'month' && d.monthly ? ` · ≈ ${v2Money(d.monthly)}${star} a month at this pace` : ''}</div>`;
   return head + summary + chart;
 }
 /** A donut of slices ({ label, value, color }), the total in the middle; a hover tip per slice. */

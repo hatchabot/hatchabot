@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.131.1] — 2026-10-05
+
+### Changed
+- Usage → At API prices drops its summary line ("≈ $5,210* in the last 30 days · …"): the total is in the pies, the range's tokens in all now sit inside the chart over the token axis, and the monthly pace is under the chart (not for 30 days, where it is the total).
+
 ## [2.131.0] — 2026-10-05
 
 ### Added

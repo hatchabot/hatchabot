@@ -560,7 +560,9 @@ const SCENARIOS = String.raw`(() => {
       const box = document.createElement('div'); box.innerHTML = spendChartBox(''); document.body.append(box);
       await loadSpendCharts(box);
       const svg = await until(() => box.querySelector('svg'));
-      ok('the total and the pace', box.textContent.includes('≈ $192') && box.textContent.includes('≈ $823 a month at this pace'));
+      ok('no summary line: the total sits in the pies', !box.textContent.includes('in the last 7 days ·') && box.querySelector('svg[aria-label="What it went on"]').textContent.includes('$192'));
+      ok('the tokens in all, inside the chart', [...box.querySelectorAll('svg')].pop().textContent.includes('504M tokens in the last 7 days'));
+      ok('the monthly pace under the chart', box.textContent.includes('≈ $823* a month at this pace'));
       const pie = box.querySelector('svg[aria-label="What it went on"]');
       ok('a pie of what it went on', !!pie && pie.querySelectorAll('circle').length === 4 && pie.textContent.includes('$192'));
       ok('its parts with amounts and shares', box.textContent.includes('Cache writes') && box.textContent.includes('$136') && box.textContent.includes('71%'));
