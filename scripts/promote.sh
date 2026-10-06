@@ -33,6 +33,30 @@ if [ -n "$CURRENT" ] && [ "$NEWER" = "$CURRENT" ]; then
   [ "$ok" = "y" ] || die "Nothing changed."
 fi
 
+# CI must have passed on the commit the tag names. It failed for eight days
+# unseen (2026-09-28 → 10-06: tests that passed here broke on GitHub's
+# runner), and promote is where a release reaches strangers. Still running:
+# wait for it. A rollback is not held to it — an older tag may predate a fix.
+ci_gate() {
+  if [ "${HATCHABOT_PROMOTE_IGNORE_CI:-}" = 1 ]; then echo "⚠ CI not checked (HATCHABOT_PROMOTE_IGNORE_CI=1)."; return 0; fi
+  local how="HATCHABOT_PROMOTE_IGNORE_CI=1 promotes without the check"
+  command -v gh >/dev/null 2>&1 || die "Can't check CI: the gh command is not installed ($how)."
+  local slug="${HATCHABOT_SLUG:-hatchabot/hatchabot}" sha runs id st
+  sha="$(git rev-list -n 1 "$TAG")"
+  runs="$(gh run list --repo "$slug" --workflow ci.yml --commit "$sha" --limit 1 --json databaseId,status,conclusion -q '.[] | "\(.databaseId) \(.status) \(.conclusion)"')" \
+    || die "Could not ask GitHub about CI for $TAG ($how)."
+  [ -n "$runs" ] || die "No CI run for $TAG (${sha:0:9}) — was it pushed to main? ($how)"
+  id="${runs%% *}"; st="${runs#* }"
+  if [ "${st%% *}" != completed ]; then
+    echo "CI for $TAG is still running — waiting for it…"
+    gh run watch "$id" --repo "$slug" --exit-status >/dev/null 2>&1 || die "CI failed on $TAG: https://github.com/$slug/actions/runs/$id — nothing changed."
+  elif [ "$st" != "completed success" ]; then
+    die "CI failed on $TAG (${st#completed }): https://github.com/$slug/actions/runs/$id — nothing changed."
+  fi
+  echo "✓ CI passed on $TAG"
+}
+if [ -z "$CURRENT" ] || [ "$NEWER" != "$CURRENT" ]; then ci_gate; fi
+
 sed -i.bak -E "s/(\"$CH\"[[:space:]]*:[[:space:]]*\")v[^\"]*(\")/\1$TAG\2/" channels.json && rm -f channels.json.bak
 grep -q "\"$CH\": \"$TAG\"" channels.json || die "Could not update channels.json."
 git add channels.json

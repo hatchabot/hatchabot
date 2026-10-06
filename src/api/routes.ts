@@ -223,6 +223,8 @@ export interface ApiDeps {
   secrets: SecretStore;
   /** Keyed by Host.provider — 'mock', 'local-docker', later 'gce'. */
   providers: Map<string, RuntimeProvider>;
+  /** Runner providers by host (resolveProvider's cache), shared with the health sweep; a fresh one when absent. */
+  remoteProviders?: Map<string, RuntimeProvider>;
   channel: CompositeTelegramProvisioner;
   /** Absolute path to the single-page app. */
   webIndexPath?: string;
@@ -897,7 +899,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   // Remote runner providers (Cluster mode) are built per host from its stored
   // Docker endpoint and kept for the process — this cache is that store.
-  const remoteProviderCache = new Map<string, RuntimeProvider>();
+  const remoteProviderCache = deps.remoteProviders ?? new Map<string, RuntimeProvider>();
   const providerFor = (hostId: string): RuntimeProvider => {
     const host = store.getHost(hostId);
     if (!host) throw new Error(`No such host: ${hostId}`);

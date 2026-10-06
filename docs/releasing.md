@@ -34,6 +34,11 @@ New installs take **`stable`**, which names a release in `channels.json` on
 ./scripts/channels.sh                  # where every channel points, and the releases
 ```
 
+Promoting forward asks GitHub first: it refuses a release whose CI run failed
+(naming the run), waits for one still running, and stops when there is no run
+or no `gh` — `HATCHABOT_PROMOTE_IGNORE_CI=1` goes on without the check. Moving
+a channel back (a rollback) is not held to it.
+
 On the development machine the CLI has the release verbs too — set
 `HATCHABOT_DEV_DIR=<your checkout>` in `~/.config/hatchabot/env` once:
 

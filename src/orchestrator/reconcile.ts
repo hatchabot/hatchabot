@@ -1,5 +1,6 @@
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
+import type { Host } from '../domain/types.js';
 import { isBusy } from './busy.js';
 
 /**
@@ -19,7 +20,7 @@ import { isBusy } from './busy.js';
  */
 export function startReconcileLoop(
   store: Store,
-  providers: Map<string, RuntimeProvider>,
+  providers: Providers,
   log: (event: string, detail: Record<string, unknown>) => void,
   intervalMs = Number(process.env.HATCHABOT_RECONCILE_MS ?? 120_000),
   /** A sweep already under way (the boot one, whose wait is time-boxed but not the sweep): counted as in flight until it settles (night review). */
@@ -43,9 +44,17 @@ export function startReconcileLoop(
   return timer;
 }
 
+/**
+ * The providers by name, or a resolver per host. A runner's provider is built
+ * from its stored Docker endpoint (resolveProvider), not registered by name —
+ * so with the map alone every agent on a runner was skipped: never marked
+ * stopped, failed or running again (2026-10-06).
+ */
+export type Providers = Map<string, RuntimeProvider> | ((host: Host) => RuntimeProvider | undefined);
+
 export async function reconcileAgents(
   store: Store,
-  providers: Map<string, RuntimeProvider>,
+  providers: Providers,
   log: (event: string, detail: Record<string, unknown>) => void,
 ): Promise<void> {
   for (const listed of store.listAllActiveAgents()) {
@@ -68,7 +77,7 @@ export async function reconcileAgents(
     if (agent.state === 'ARCHIVED') continue;
     try {
       const host = store.getHost(agent.hostId);
-      const provider = host && providers.get(host.provider);
+      const provider = host && (typeof providers === 'function' ? providers(host) : providers.get(host.provider));
       if (!provider) continue;
 
       if (!agent.runtimeRef) {

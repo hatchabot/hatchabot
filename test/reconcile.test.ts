@@ -229,3 +229,42 @@ describe('a sweep judges the row as it is NOW, not as it was listed', () => {
     expect(store.getAgent('new')!.stateReason).toMatch(/interrupted/i);
   });
 });
+
+describe('agents on a runner are checked too (2026-10-06)', () => {
+  async function runnerWorld(phase: 'running' | 'stopped' | 'unknown') {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'r1', ownerId: 'o', kind: 'cloud', provider: 'remote-docker', name: 'Laptop runner', settings: { dockerHost: 'ssh://laptop.test' }, createdAt: 'now' });
+    const runner = new MockProvider();
+    const { runtimeRef } = await runner.provision({ agentId: 'b1', slug: 'b1', workspace: { files: {}, configPatch: { agentId: 'b1', authMode: 'api-key' } }, env: {} });
+    if (phase === 'running') await runner.start(runtimeRef);
+    const provider: RuntimeProvider = phase === 'unknown'
+      ? Object.assign(Object.create(runner), { status: async () => ({ phase: 'unknown', healthy: false }) })
+      : runner;
+    store.insertAgent({ id: 'b1', ownerId: 'o', name: 'B', slug: 'b1', state: 'PROVISIONING', aiProfileId: 'p', hostId: 'r1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+    store.setAgentRuntimeRef('b1', runtimeRef);
+    store.setAgentState('b1', 'RUNNING');
+    return { store, provider };
+  }
+
+  it('by name alone a runner had no provider, so its agent was never looked at', async () => {
+    const { store } = await runnerWorld('stopped');
+    await reconcileAgents(store, new Map(), () => {});
+    expect(store.getAgent('b1')!.state).toBe('RUNNING');
+  });
+
+  it('through the per-host resolver, a stopped container on the runner is marked stopped', async () => {
+    const { store, provider } = await runnerWorld('stopped');
+    const asked: string[] = [];
+    await reconcileAgents(store, (host) => { asked.push(host.id); return host.id === 'r1' ? provider : undefined; }, () => {});
+    expect(asked).toEqual(['r1']);
+    expect(store.getAgent('b1')!.state).toBe('STOPPED');
+  });
+
+  it('a runner that does not answer leaves its agent exactly as it was', async () => {
+    const { store, provider } = await runnerWorld('unknown');
+    const events: string[] = [];
+    await reconcileAgents(store, () => provider, (e) => events.push(e));
+    expect(store.getAgent('b1')!.state).toBe('RUNNING');
+    expect(events).toContain('reconcile.host_unreachable');
+  });
+});

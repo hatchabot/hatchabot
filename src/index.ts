@@ -14,6 +14,8 @@ import { Store } from './store/store.js';
 import { LocalSecretStore } from './secrets/localSecretStore.js';
 import { MockProvider } from './providers/mockProvider.js';
 import { LocalDockerProvider } from './providers/localDockerProvider.js';
+import { resolveProvider } from './providers/resolveProvider.js';
+import type { Host } from './domain/types.js';
 import { TelegramPoolProvisioner } from './channels/telegramPool.js';
 import { TelegramManualProvisioner, verifyBotToken } from './channels/telegramManual.js';
 import { CompositeTelegramProvisioner } from './channels/composite.js';
@@ -125,7 +127,16 @@ installErrorHandler(app);
 // containers auto-restart with the box, the DB doesn't know that.
 // Time-boxed: a stalled daemon must not keep the API (and /healthz) down for
 // the whole sweep — the periodic loop below finishes whatever this didn't.
-const bootReconcile = reconcileAgents(store, providers, (e, d) => app.log.info(d, e));
+// Runner providers, built per host from its Docker endpoint: one cache for the
+// whole process, shared with the routes, so the health sweep and the API talk
+// to a runner through the same provider (and its reachability check).
+const remoteProviders = new Map<string, RuntimeProvider>();
+const providerForHost = (host: Host): RuntimeProvider | undefined => {
+  try {
+    return resolveProvider(host, providers, remoteProviders, { image: process.env.HATCHABOT_IMAGE, prefix: process.env.HATCHABOT_PREFIX });
+  } catch { return undefined; }
+};
+const bootReconcile = reconcileAgents(store, providerForHost, (e, d) => app.log.info(d, e));
 await Promise.race([
   bootReconcile.catch(() => {}),
   new Promise<void>((r) => setTimeout(r, Number(process.env.HATCHABOT_BOOT_RECONCILE_MS ?? 30_000)).unref()),
@@ -183,6 +194,7 @@ await registerRoutes(app, {
   store,
   secrets,
   providers,
+  remoteProviders,
   channel,
   webIndexPath: resolve(import.meta.dirname, '../web/index.html'),
   webJoinPath: resolve(import.meta.dirname, '../web/join.html'),
@@ -243,7 +255,7 @@ if (bindHost !== '127.0.0.1' && !tls) {
 }
 // Keep mending state after boot: a container that wedges at 3am should not
 // stay green until someone notices.
-startReconcileLoop(store, providers, (e, d) => app.log.info(d, e), undefined, bootReconcile);
+startReconcileLoop(store, providerForHost, (e, d) => app.log.info(d, e), undefined, bootReconcile);
 
 // Finish any bot rename that didn't land. Renaming happens at the worst moment
 // for network calls — mid-provision, while the box is churning docker — and a

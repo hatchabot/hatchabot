@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.134.0] — 2026-10-06
+
+### Fixed
+- **Agents on a runner were never health-checked.** The sweep that keeps each agent's status true (every two minutes, and at boot) found providers by name, and a runner's is built from its Docker endpoint instead — so a runner agent whose container stopped or vanished still showed Ready. The sweep now resolves each host the way the rest of the app does, through the same per-runner connection (one cache, shared), and a runner that does not answer leaves its agents as they are.
+
+### Added
+- **Promoting asks CI first.** `scripts/promote.sh` (and `hbt promote`) refuses a release whose GitHub CI run failed, naming the run; waits for one still running; and stops when there is no run or no `gh` (`HATCHABOT_PROMOTE_IGNORE_CI=1` goes on without it). A rollback is not held to it. CI had failed for eight days without anyone seeing it.
+
 ## [2.133.0] — 2026-10-06
 
 ### Added
