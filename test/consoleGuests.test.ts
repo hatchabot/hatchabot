@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
@@ -506,5 +507,33 @@ describe('the state read and the sync (pure)', () => {
       { path: 'gateway.trustedProxies', value: ['172.18.0.1'] },
     ]);
     expect(consoleSyncBatch({ ...s, trustedProxies: ['172.18.0.1'] }, ['g1', 'o'])).toBeUndefined();
+  });
+});
+
+describe('gatewayCallAs when the gateway cannot be reached', () => {
+  it('fails once, without closing itself in a loop (a stack overflow in CI, 2026-10-06)', async () => {
+    const { gatewayCallAs } = await import('../src/orchestrator/consoleAccess.js');
+    const srv = createServer((_q, s) => { s.writeHead(403); s.end(); });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+    const port = (srv.address() as AddressInfo).port;
+    // Count the closes: the loop usually ran out of stack inside a try and was
+    // swallowed, so only sometimes did it surface as an uncaught exception.
+    const Real = globalThis.WebSocket;
+    let closes = 0;
+    (globalThis as any).WebSocket = class extends Real { close(...a: any[]) { closes++; return super.close(...a); } };
+    const uncaught: unknown[] = [];
+    const onUncaught = (e: unknown) => uncaught.push(e);
+    process.on('uncaughtException', onUncaught);
+    try {
+      await expect(gatewayCallAs({ host: '127.0.0.1', port } as any, 'test-guest', [], 2000)).rejects.toThrow(/could not reach|closed the connection/);
+      await expect(gatewayCallAs({ host: '127.0.0.1', port: 1 } as any, 'test-guest', [], 2000)).rejects.toThrow(/could not reach|closed the connection/);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(uncaught).toEqual([]);
+      expect(closes).toBeLessThanOrEqual(2);
+    } finally {
+      (globalThis as any).WebSocket = Real;
+      process.off('uncaughtException', onUncaught);
+      srv.close();
+    }
   });
 });

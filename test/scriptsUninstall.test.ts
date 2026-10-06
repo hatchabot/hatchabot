@@ -31,6 +31,10 @@ function world() {
   for (const tool of ['systemctl', 'docker', 'npm', 'launchctl']) {
     writeFileSync(join(bin, tool), `#!/usr/bin/env bash\necho "${tool} $*" >> ${JSON.stringify(log)}\nexit 0\n`, { mode: 0o755 });
   }
+  // The script reads the database with node. Only node itself joins the shims —
+  // not its directory, which can hold a real `hbt` (see the PATH note below);
+  // on GitHub's runner node is not in /usr/bin at all.
+  symlinkSync(process.execPath, join(bin, 'node'));
   return { home, repo, bin, log };
 }
 const run = (w: ReturnType<typeof world>, args: string[]) =>

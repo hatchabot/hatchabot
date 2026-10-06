@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.132.3] — 2026-10-06
+
+### Fixed
+- **A gateway that could not be reached could stop the control plane.** When a call to an agent's gateway failed to connect (the agent stopped, restarting, or on a machine that is down), the error handler closed the socket, which fired the close handler right there, which closed it again — about 1,200 times, until the stack ran out. Usually that overflow landed inside a `try` and the call simply failed; sometimes it surfaced as an uncaught exception, which ends the process. It now settles once and detaches its handlers before closing. A test counts the closes.
+- **CI on GitHub had been red since 2026-09-28** (the tests passed on this machine): two tests assumed the machine runs as uid 1000 and that `node` is in `/usr/bin`. GitHub's runner is neither. Both now set up what they need; the CI helper steps moved to their Node 24 versions.
+
 ## [2.132.2] — 2026-10-06
 
 ### Fixed

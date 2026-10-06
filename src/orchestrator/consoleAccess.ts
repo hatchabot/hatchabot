@@ -109,7 +109,7 @@ export async function gatewayCallAs(
   if (typeof WS !== 'function') throw new Error('this Node has no WebSocket client');
   return await new Promise((resolve, reject) => {
     const ws = new WS(`ws://${gw.host}:${gw.port}/`, { headers: { [CONSOLE_USER_HEADER]: identity, 'x-forwarded-for': '198.51.100.1' } });
-    const timer = setTimeout(() => { try { ws.close(); } catch { /* */ } reject(new Error('the gateway did not answer in time')); }, timeoutMs);
+    const timer = setTimeout(() => done(() => reject(new Error('the gateway did not answer in time'))), timeoutMs);
     const pending = new Map<string, (f: any) => void>();
     let n = 0;
     const call = (method: string, params: unknown) => new Promise<any>((res) => {
@@ -117,7 +117,19 @@ export async function gatewayCallAs(
       pending.set(id, res);
       ws.send(JSON.stringify({ type: 'req', id, method, params }));
     });
-    const done = (fn: () => void) => { clearTimeout(timer); try { ws.close(); } catch { /* */ } fn(); };
+    // Once only, and the handlers off before the close: closing a socket that
+    // never opened fires its close event right there, which called done, which
+    // closed again — until the stack ran out, an uncaught exception that can
+    // stop the control plane (every Node 22; seen in CI, 2026-10-06).
+    let settled = false;
+    const done = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.onerror = ws.onclose = ws.onmessage = null;
+      try { ws.close(); } catch { /* */ }
+      fn();
+    };
     ws.onerror = () => done(() => reject(new Error('could not reach the gateway')));
     ws.onclose = (e: { code?: number; reason?: string }) => done(() => reject(new Error(`the gateway closed the connection (${e?.code ?? ''} ${e?.reason ?? ''})`)));
     ws.onmessage = async (ev: { data: unknown }) => {

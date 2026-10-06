@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -35,6 +35,10 @@ exit 0
 );
 chmodSync(stub, 0o755);
 
+// These tests read the bind-mounted seed. A process that is not uid 1000 (the
+// image's `node`) streams the seed over stdin instead — covered by the remote
+// tests below — and GitHub's runner is uid 1001: red CI from 2026-09-28 on.
+vi.spyOn(process, 'getuid').mockReturnValue(1000);
 const provider = new LocalDockerProvider({ docker: stub, image: 'test-image:latest' });
 const argv = () => (existsSync(LOG) ? readFileSync(LOG, 'utf8') : '');
 const seed = () => (existsSync(SEED_COPY) ? readFileSync(SEED_COPY, 'utf8') : '');
