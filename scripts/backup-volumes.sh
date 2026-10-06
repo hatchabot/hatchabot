@@ -52,11 +52,12 @@ count=0
 failed=0
 failed_list=""
 orphan_list=""
+skipped_list=""
 started="$(date -u +%FT%TZ)"
 json_list() { local out="" x; for x in $1; do out="$out${out:+,}\"$x\""; done; printf '[%s]' "$out"; }
 write_status() {
-  printf '{"state":"%s","startedAt":"%s","finishedAt":"%s","volumes":%d,"failed":%d,"failedVolumes":%s,"orphans":%s}\n' \
-    "$1" "$started" "$(date -u +%FT%TZ)" "$count" "$failed" "$(json_list "$failed_list")" "$(json_list "$orphan_list")" \
+  printf '{"state":"%s","startedAt":"%s","finishedAt":"%s","volumes":%d,"failed":%d,"failedVolumes":%s,"orphans":%s,"skipped":%s}\n' \
+    "$1" "$started" "$(date -u +%FT%TZ)" "$count" "$failed" "$(json_list "$failed_list")" "$(json_list "$orphan_list")" "$(json_list "$skipped_list")" \
     > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
 }
 # The record starts only once the run can really begin (below): a run that
@@ -186,6 +187,56 @@ while IFS= read -r vol; do
 done <<EOF
 $vols
 EOF
+
+# Agents on a runner (another machine's Docker, `docker -H ssh://…`): their
+# volumes are not in `docker volume ls` here, so they were in no set at all —
+# and since 2026-09-29 the app said so, every night (2026-10-06). Each is read
+# over the same connection a Move uses, read-only, by alpine's tar (busybox:
+# the excludes match at the volume root only, like --anchored), into the same
+# <volume>.tgz a restore reads. A runner that does not answer (a laptop
+# asleep) is SKIPPED, not failed: it must not stop the pruning of this
+# machine's sets, and its agents stay "not covered" in the app.
+remote="$(node -e '
+  const D = require("better-sqlite3"); const db = new D(process.argv[1], { readonly: true });
+  const q = "SELECT a.runtime_ref ref, h.settings s FROM agents a JOIN hosts h ON h.id = a.host_id" +
+    " WHERE a.state != ? AND a.runtime_ref IS NOT NULL AND h.kind != ?";
+  for (const r of db.prepare(q).all("DELETED", "local")) {
+    let host; try { host = JSON.parse(r.s || "{}").dockerHost; } catch {}
+    if (host) console.log(host + "\t" + String(r.ref).replace(/^\w+:\/\//, "") + "-vol");
+  }' "$DEST/hatchabot.sqlite" 2>/dev/null || true)"
+if [ -n "$remote" ]; then
+  T=""; command -v timeout >/dev/null 2>&1 && T="timeout"
+  down_hosts=" "
+  while IFS=$'\t' read -r rhost vol; do
+    [ -n "$vol" ] || continue
+    if [[ "$down_hosts" == *" $rhost "* ]] || ! ${T:+$T 30} docker -H "$rhost" version </dev/null >/dev/null 2>&1; then
+      if [[ "$down_hosts" != *" $rhost "* ]]; then
+        echo "  • ${rhost#*://}: not answering (asleep or offline?) — its agents are not in this set" >&2
+        down_hosts="$down_hosts$rhost "
+      fi
+      skipped_list="$skipped_list $vol"
+      continue
+    fi
+    rc=0
+    # </dev/null: over ssh, docker would read the rest of this loop's list.
+    # shellcheck disable=SC2086  # the excludes are separate words
+    ${T:+$T 3600} docker -H "$rhost" run --rm --network none -v "$vol:/vol:ro" alpine \
+      tar cz ${TAR_EXCLUDES#--anchored } -C /vol . </dev/null > "$DEST/$vol.tgz.part" || rc=$?
+    # busybox tar has no "changed as we read it" exit 1: anything but 0 failed.
+    if [ "$rc" -ne 0 ] || ! gzip -t "$DEST/$vol.tgz.part" 2>/dev/null; then
+      rm -f "$DEST/$vol.tgz.part"
+      echo "  ✗ $vol on ${rhost#*://} failed (exit $rc) — not in this set" >&2
+      skipped_list="$skipped_list $vol"
+      continue
+    fi
+    mv -f "$DEST/$vol.tgz.part" "$DEST/$vol.tgz"
+    chmod 600 "$DEST/$vol.tgz"
+    echo "  ✓ $vol (on ${rhost#*://}) → $DEST/$vol.tgz"
+    count=$((count + 1))
+  done <<REMOTE
+$remote
+REMOTE
+fi
 
 # Prune ONLY after confirming this backup is complete — a failing/partial run
 # must never delete the last good snapshots. Restricted to our own date-named

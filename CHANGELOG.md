@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.133.0] — 2026-10-06
+
+### Added
+- **Agents on a runner are in the nightly backup.** They never were: the backup read only this machine's Docker volumes, and since 2026-09-29 the manager's tile said "1 agent not covered" every day. Each runner agent's volume is now copied over the runner's connection (the one a Move uses), read-only, without network, leaving out the same rebuildable caches, into the set under the name a Restore already reads. A runner that does not answer is skipped and named (`skipped` in the set's record); the set still counts as complete, so a laptop asleep never stops old sets from being pruned.
+
+### Changed
+- **The backup alert names who is left out** ("Garden Planner (on Laptop runner) not in it", up to three), and **Clear holds across nights**: it was keyed on the set's date, so every new night brought it back. It returns when a different agent is left out, or a set is late, incomplete or without its key.
+
 ## [2.132.3] — 2026-10-06
 
 ### Fixed

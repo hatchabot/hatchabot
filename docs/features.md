@@ -1832,6 +1832,11 @@ Three layers, smallest to largest:
   **entire volume** from the chosen set — you type the agent's name to
   confirm, a safety copy guards against a broken archive. The API serves
   only metadata, never the backup files themselves.
+  Agents on a **runner** are in the set too (since v2.133.0): their volumes
+  are copied over the runner's connection, read-only. A runner that is asleep
+  or offline is skipped that night — the set still counts as complete, and
+  the manager's tile names the agents left out. Clearing that alert holds
+  until a different agent is left out.
 - **Download copy** — a portable single-file copy you keep off the machine.
 
 Full-machine restore steps and the restore drill are in the README's

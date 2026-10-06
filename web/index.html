@@ -8260,9 +8260,19 @@ async function v2LoadMachine(force = false) {
       if (!latest) backup = { warn: 'none yet — the nightly job runs at 03:30' };
       else {
         const ageDays = Math.floor((Date.now() - Date.parse(latest.date + 'T00:00:00')) / 86400000);
-        const why = [ageDays > 2 ? `the latest is ${ageDays} days old` : '', latest.complete === false ? 'the latest is incomplete' : '', !latest.hasKey ? 'no key' : '',
-          (b.missing ?? []).length ? `${b.missing.length} agent${b.missing.length === 1 ? '' : 's'} not covered` : ''].filter(Boolean).join(', ');
-        backup = { date: latest.date, ageDays, ...(why ? { warn: why } : {}) };
+        // Named when few: "1 agent not covered" sent people hunting (2026-10-06).
+        const miss = b.missing ?? [];
+        const missing = !miss.length ? '' : miss.length <= 3
+          ? `${miss.map(m => m.name + (m.host ? ` (on ${m.host})` : '')).join(', ')} not in it`
+          : `${miss.length} agents not in it`;
+        const dated = [latest.complete === false ? 'the latest is incomplete' : '', !latest.hasKey ? 'no key' : ''].filter(Boolean);
+        const why = [ageDays > 2 ? `the latest is ${ageDays} days old` : '', ...dated, missing].filter(Boolean).join(', ');
+        // What "Clear from Alerts" remembers. Not the date alone: every night's
+        // set is new, so a cleared "not covered" came back each morning. The
+        // same agents left out stay cleared; a new one, a stale or broken set
+        // brings it back.
+        const key = [dated.length ? latest.date : '', ageDays > 2 ? 'stale:' + latest.date : '', miss.map(m => m.agentId).sort().join(',')].join('|');
+        backup = { date: latest.date, ageDays, ...(why ? { warn: why, key } : {}) };
       }
     }
     v2Machine = { hosts: Array.isArray(hs) ? hs : [], backup, runtime: rt };
@@ -8294,7 +8304,7 @@ function v2MachineAlerts() {
     out.push({ key: 'runner-down:' + h.id, icon: '💻', why: `${h.name} isn't answering (asleep or offline?) — its ${h.agentCount} agent${h.agentCount === 1 ? '' : 's'} can't be reached until it is back` });
   }
   const bk = v2Machine.backup;
-  if (bk?.warn) out.push({ key: `backup:${bk.date || 'none'}:${bk.warn}`, icon: '💾', why: `backups: ${bk.warn} (⚙ Settings → Backups)` });
+  if (bk?.warn) out.push({ key: `backup:${bk.key ?? bk.date ?? 'none'}`, icon: '💾', why: `backups: ${bk.warn} (⚙ Settings → Backups)` });
   return out;
 }
 

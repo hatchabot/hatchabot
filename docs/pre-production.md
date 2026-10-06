@@ -94,8 +94,8 @@ capabilities by default.
   reports success for agents that were silently dropped mid-move/mid-restore.
 - No reconcile rule for `DELETING`, and the web UI hides Delete in that state —
   a crash mid-delete strands the agent with its secrets un-scrubbed.
-- Reconcile and `scripts/backup-volumes.sh` both skip runner-host agents
-  entirely: agents on a runner are never health-mended and never backed up.
+- Reconcile skips runner-host agents entirely: agents on a runner are never
+  health-mended. (`scripts/backup-volumes.sh` backs them up since v2.133.0.)
 - Backup restore proceeds after its own safety snapshot fails (`exportState`
   rejects past ~1 GB on `maxBuffer`), then runs a destructive replace.
 - `openclawImport` rewrites the user's live `openclaw.json` non-atomically.

@@ -86,6 +86,19 @@ function scriptWorld(volumes: string[], agentRefs: string[]) {
   db.close();
   const bin = join(root, 'bin'); mkdirSync(bin);
   writeFileSync(join(bin, 'docker'), `#!/usr/bin/env bash
+# A runner: \`docker -H <host> …\`. A host with "asleep" in its name does not
+# answer. Anything on stdin is logged: over ssh it would be the script's list.
+if [ "$1" = -H ]; then
+  host="$2"; shift 2
+  if read -r -t 0.2 leak; then echo "STDIN: $leak" >> "${root}/remote.log"; fi
+  case "$host" in *asleep*) exit 255;; esac
+  echo "$host $*" >> "${root}/remote.log"
+  case "$1" in
+    version) exit 0 ;;
+    run) case "$*" in *broken*) exit 1;; esac; printf 'runner data' | gzip ;;
+  esac
+  exit 0
+fi
 case "$1 $2" in
   "volume ls") printf '%s\\n' ${volumes.map((v) => `'${v}'`).join(' ')} ;;
   "image inspect") exit 0 ;;
@@ -118,7 +131,19 @@ esac
   const fillVolume = (vol: string, files: string[]) => {
     for (const f of files) { mkdirSync(dirname(join(root, 'vols', vol, f)), { recursive: true }); writeFileSync(join(root, 'vols', vol, f), 'x'); }
   };
-  return { run, setDir, fillVolume, repo };
+  /** Put agents on runners: [dockerHost, runtime ref] pairs, each runner a host row. */
+  const onRunners = (pairs: Array<[string, string]>) => {
+    const db = new Database(join(repo, 'data', 'hatchabot.sqlite'));
+    db.exec(`ALTER TABLE agents ADD COLUMN host_id TEXT DEFAULT 'host-local-default'; CREATE TABLE hosts (id TEXT, kind TEXT, settings TEXT)`);
+    db.prepare(`INSERT INTO hosts VALUES ('host-local-default', 'local', '{}')`).run();
+    pairs.forEach(([host, ref], i) => {
+      db.prepare(`INSERT OR IGNORE INTO hosts SELECT ?, 'cloud', ? WHERE NOT EXISTS (SELECT 1 FROM hosts WHERE id = ?)`).run(host, JSON.stringify({ dockerHost: host }), host);
+      db.prepare(`INSERT INTO agents (id, state, runtime_ref, host_id) VALUES (?, 'RUNNING', ?, ?)`).run(`r${i}`, ref, host);
+    });
+    db.close();
+  };
+  const remoteLog = () => (existsSync(join(root, 'remote.log')) ? readFileSync(join(root, 'remote.log'), 'utf8') : '');
+  return { run, setDir, fillVolume, repo, onRunners, remoteLog };
 }
 
 describe('scripts/backup-volumes.sh records how the run ended', () => {
@@ -149,6 +174,34 @@ describe('scripts/backup-volumes.sh records how the run ended', () => {
     expect(r.status).toBe(1);
     expect(readSetStatus(w.setDir())).toMatchObject({ complete: false, failedVolumes: ['hatchabot-broken-2-vol'] });
     expect(listBackups(dirname(w.setDir()))[0]!.complete).toBe(false);
+  });
+
+  it('agents on a runner are archived over its connection; a runner asleep is skipped, not failed (2026-10-06)', () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    w.onRunners([
+      ['ssh://laptop.test', 'docker://agentclaw-book-2'],
+      ['ssh://laptop.test', 'docker://hatchabot-notes-3'],
+      ['ssh://asleep.test', 'docker://hatchabot-garden-4'],
+    ]);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    for (const v of ['agentclaw-book-2-vol', 'hatchabot-notes-3-vol']) {
+      expect(spawnSync('gzip', ['-dc', join(w.setDir(), `${v}.tgz`)], { encoding: 'utf8' }).stdout).toBe('runner data');
+    }
+    expect(existsSync(join(w.setDir(), 'hatchabot-garden-4-vol.tgz'))).toBe(false);
+    expect(r.stderr).toMatch(/asleep\.test: not answering/);
+    // Read-only, no network, the root caches left out, and nothing read from stdin.
+    expect(w.remoteLog()).toContain('ssh://laptop.test run --rm --network none -v agentclaw-book-2-vol:/vol:ro alpine tar cz --exclude=./.openclaw/cache/control-ui-assets');
+    expect(w.remoteLog()).not.toContain('STDIN');
+    expect(w.remoteLog()).not.toContain('--anchored');
+    // A sleeping laptop must not stop the pruning of this machine's sets: complete, with it named.
+    expect(readSetStatus(w.setDir())).toMatchObject({ complete: true, failedVolumes: [] });
+    expect(JSON.parse(readFileSync(join(w.setDir(), 'backup-status.json'), 'utf8')).skipped).toEqual(['hatchabot-garden-4-vol']);
+    // …and the app still counts that one as not covered, and only that one.
+    const set = listBackups(dirname(w.setDir()))[0]!;
+    const agents = [['r0', 'docker://agentclaw-book-2'], ['r1', 'docker://hatchabot-notes-3'], ['r2', 'docker://hatchabot-garden-4']]
+      .map(([id, ref]) => ({ id: id!, name: id!, runtimeRef: ref, createdAt: '2026-09-01T00:00:00Z', hostId: 'runner' }));
+    expect(agentsMissingFromSet(set, agents, () => 'Laptop').map((m) => m.agentId)).toEqual(['r2']);
   });
 
   it('with no registry agents to match (unreadable or empty), every volume is taken', () => {

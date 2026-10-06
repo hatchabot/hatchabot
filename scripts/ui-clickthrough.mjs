@@ -121,6 +121,33 @@ const SCENARIOS = String.raw`(() => {
         v2Machine = null; v2PaintMachine(); await refresh(false);
       }
     },
+    backupNotCovered: async () => {
+      // An agent left out of the nightly set (made-up data): named on the manager's
+      // tile, and a Clear holds across nights while the same agents are left out
+      // (it came back every morning, 2026-10-06).
+      const day = (d) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 10);
+      const garden = { agentId: 'b1', name: 'Garden Planner', host: 'Laptop runner' };
+      window.__override['/v1/hosts'] = [{ id: 'h1', name: 'This machine', kind: 'local', hostname: 'home-box', agentCount: 12 }];
+      window.__override['/v1/runtime'] = { imageVersion: '2026.9.6', upgradeAvailable: false };
+      const set = (date, missing) => { window.__override['/v1/backups'] = { backups: [{ date, hasKey: true, complete: true }], keepDays: 14, missing }; };
+      const owner = myAccount.hostOwner; myAccount.hostOwner = true;
+      const mgr = agents.find((a) => a.ops);
+      try {
+        set(day(1), [garden]); await v2LoadMachine(true); renderV2();
+        const tip = tipText(mgr.name);
+        ok('the left-out agent is named: ' + tip.slice(0, 160), tip.includes('backups: Garden Planner (on Laptop runner) not in it'));
+        ok('flagged Worth a look', v2Status(mgr).label === 'Worth a look');
+        mgr.attentionAck = attentionFingerprint(mgr);
+        set(day(0), [garden]); await v2LoadMachine(true);
+        ok('cleared stays cleared the next night', attentionCleared(mgr) && v2Status(mgr).label !== 'Worth a look');
+        set(day(0), [garden, { agentId: 'b2', name: 'Recipe Box', host: 'Laptop runner' }]); await v2LoadMachine(true);
+        ok('a newly left-out agent brings it back', !attentionCleared(mgr));
+      } finally {
+        mgr.attentionAck = undefined; myAccount.hostOwner = owner;
+        for (const k of ['/v1/hosts', '/v1/backups', '/v1/runtime']) delete window.__override[k];
+        v2Machine = null; v2PaintMachine(); await refresh(false);
+      }
+    },
     viewBy: async () => {
       const btn = byText('button', 'Alerts');
       ok('a "Alerts" view button', !!btn);
