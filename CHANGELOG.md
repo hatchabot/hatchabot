@@ -2,6 +2,21 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [Unreleased]
+
+### Added
+- **An installer with one prerequisite** (docs/install-bundle.md). On Ubuntu 22.04+/Debian 12+ (x64, arm64) and Apple-silicon Macs, `curl -fsSL https://hatchabot.com/install.sh | bash` downloads the release's **prebuilt bundle** — Hatchabot with its own Node and its database driver compiled on Ubuntu 22.04 — checks its hash and runs its self-check: no git, no Node, no compiler on the machine. Anywhere else, or if a bundle is missing or fails its check, it falls back to the native install. Bundles are built for each release by `.github/workflows/bundles.yml` (`scripts/build-bundle.sh`).
+- **Docker without logging out**: after adding you to the docker group the installer carries on (`sg docker`), and the service and nightly backup start through `scripts/with-docker.sh`, which takes the group the same way — one run instead of two. On a Mac without Docker it offers Docker Desktop through Homebrew.
+- **The install ends with the link to open, and a QR code** (`scripts/first-run-link.sh`): this machine's address on the home network, with the first-run setup code carried after a `#` (never sent to a server) — the first-run page fills it in and wipes it from the address bar.
+- **Bundle upgrades**: `hatchabot upgrade` and the channel timer swap in the next release's bundle — hash and self-check first, only the bundle's own files replaced (`.env`, `data/` untouched), rolled back if the new release does not start. No dependency on the npm registry. Channels resolve without git (`scripts/release-target.sh`).
+- `scripts/clean-install-test.sh --image ubuntu:22.04 --installer-url … --bundle-base … --upgrade-to …` tests a branch's installer and bundles in a fresh VM, and checks the install took one run, added no Node, git or compiler, and ended with the link.
+
+### Fixed
+- **Hatchabot could not open its database on Ubuntu 22.04 or Debian 12** (glibc older than 2.38): the database driver loads its shipped binary when there is one, and that binary needs glibc 2.38. `scripts/ensure-deps.sh` now runs `scripts/sqlite-driver.sh`, which compiles the driver for the machine when the shipped one does not load.
+- `hatchabot doctor` names a bundle install's release (from BUNDLE.json).
+
+### Changed
+- The installer no longer offers `sudo systemctl restart user@…` (it failed in a clean VM and took the user's bus with it); the docker-group wrapper makes it unneeded.
 ## [2.131.2] — 2026-10-06
 
 ### Changed

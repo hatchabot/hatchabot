@@ -431,7 +431,10 @@ function serviceDockerDenied(): boolean | undefined {
     if (!user.includes('docker')) return undefined; // not in the group at all: the docker check reports that
     const status = readFileSync(`/proc/${pid}/status`, 'utf8');
     const groups = (/^Groups:\s*(.*)$/m.exec(status)?.[1] ?? '').trim().split(/\s+/);
-    return !groups.includes(gid);
+    // Started through scripts/with-docker.sh (`sg docker`), the group is the
+    // process's own group id rather than an extra one: that reaches Docker too.
+    const gids = (/^Gid:\s*(.*)$/m.exec(status)?.[1] ?? '').trim().split(/\s+/);
+    return !groups.includes(gid) && !gids.includes(gid);
   } catch {
     return undefined;
   }

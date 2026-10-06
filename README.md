@@ -150,7 +150,7 @@ adopting, backing up, and operating a fleet of agents.
 
 ## Requirements
 
-- **Linux or macOS** with **Docker** (Docker Desktop is fine) and **Node.js 22+**
+- **Linux or macOS** with **Docker** (Docker Desktop is fine) — the installer offers to install it. On Ubuntu 22.04+/Debian 12+ (x64, arm64) and Apple-silicon Macs that is all: Hatchabot comes as a prebuilt bundle with its own Node. Elsewhere the installer also needs git and **Node.js 22+** (and offers them) — see [docs/install-bundle.md](docs/install-bundle.md).
 - (optional) **A Telegram account** (to create bots via [@BotFather](https://t.me/botfather) —
   about 60 seconds per agent, or pre-stock a pool so it's zero). Slack, Discord
   and the app's own chat work too.
@@ -164,14 +164,14 @@ adopting, backing up, and operating a fleet of agents.
 > New here? **[docs/quickstart.md](docs/quickstart.md)** is the 15-minute path to a first agent (Telegram + Claude included). **[docs/why-hatchabot.md](docs/why-hatchabot.md)** explains the philosophy and how this differs from a chat app; **[docs/pitch.md](docs/pitch.md)** is the short pitch. **[docs/deck/hatchabot-deck.pdf](docs/deck/hatchabot-deck.pdf)** is the slide deck.
 
 ```sh
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main/install.sh)"
+curl -fsSL https://hatchabot.com/install.sh | bash
 ```
 
 (or by hand: `git clone https://github.com/hatchabot/hatchabot.git hatchabot && cd hatchabot && git checkout "$(git describe --tags "$(git rev-list --tags --max-count=1)")" && ./scripts/setup-host.sh`)
 
-The script checks prerequisites, installs dependencies, generates a `.env`
+The script makes sure Docker is there (and adds you to its group without a log-out), downloads the release's prebuilt bundle where one fits — Hatchabot with its own Node and database driver, nothing to compile ([docs/install-bundle.md](docs/install-bundle.md)) — or else clones it and installs dependencies, generates a `.env`
 (asking how people will sign in — an account for each person is the default, a single shared password the other choice), pulls the pre-built agent runtime image (or builds it if the pull fails),
-installs a background service, and links the `hatchabot` CLI (also `hbt`, when that name is free). `hatchabot doctor` checks the result. It's safe to
+installs a background service, links the `hatchabot` CLI (also `hbt`, when that name is free), and ends with the link to open — and a QR code for your phone. `hatchabot doctor` checks the result. It's safe to
 re-run. To **upgrade** later: `hatchabot upgrade` (the newest release on your channel; `hatchabot upgrade v2.31.3` rolls back). When a release moves to a newer OpenClaw, the upgrade also fetches that runtime image and agents move to it on their next rebuild (`HATCHABOT_UPGRADE_IMAGE=0` to skip; Settings → Images does the same on demand).
 
 **Release channels.** The installer takes the **`stable`** release unless told
