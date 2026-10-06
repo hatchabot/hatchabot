@@ -290,6 +290,7 @@ has no rule.
 | signed-in | Command-line tokens: list and revoke |
 | signed-in | An agent's OpenClaw console (the owner, or a web-chat guest in their own conversation) |
 | signed-in | Web chat |
+| signed-in | Report a problem: your drafts, the diagnostics, the installed source and docs |
 | signed-in | Your agents: list, create, settings, files, schedules, members, start and stop |
 | signed-in | Reading lists and settings (no credential is shown) |
 | signed-in | Removing a Google connection |

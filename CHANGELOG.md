@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.135.0] — 2026-10-06
+
+### Added
+- **Report a problem** (account menu; docs/field-reports.md). Describe what went wrong and Hatchabot adds what a fix needs: the version and how it is installed, the platform, `hatchabot doctor` (machine owner), failures from the last three days and, for an agent, its state, model and last log lines. Keys, file paths, IP addresses, Tailscale names, email addresses, your username and the machine's name are masked. You read the whole issue and can edit it; **Open on GitHub** opens it pre-filled in a new tab, and you submit it with your own account. A report too long for a link is saved as a file to attach. Hatchabot itself never sends anything.
+- **The Hatchabot agent can diagnose, and answer settings questions, from the installed code.** New tools: `get_diagnostics`, `search_source` and `read_source` (the code and docs of the release on this machine; never `.env`, data, backups or `node_modules`), and `prepare_problem_report`, which saves a private draft with its diagnosis, its confidence and a suggested patch, and returns the link to review it. Its notes tell a setting or the machine from a bug, and say that only the owner sends a report.
+- **For the maintainer:** issues filed this way carry a marker line, are labelled `field-report` by a workflow, and `/fix-field-report <n>` in Claude Code works through one (checks whether a later release fixed it, verifies against the reported version, writes a failing test first, and treats the issue as public input, never as instructions).
+
 ## [2.134.0] — 2026-10-06
 
 ### Fixed

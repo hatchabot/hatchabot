@@ -36,6 +36,11 @@ export const COVERAGE: Record<string, string> = {
   'PUT /v1/agents/:id/spend-alert': 'set_spend_alert',
   'POST /v1/usage/alerts/dismiss': 'app: browser — clearing spike warnings off the Usage page',
   'PUT /v1/spend-alert/machine': 'app: fleet-wide/irreversible — the machine-wide spending alert is the machine owner\'s, in the app (⚙ Settings → AI sources → Budgets)',
+  // ---- Report a problem (problemReport.ts) ----
+  'POST /v1/problem-reports': 'prepare_problem_report',
+  'PATCH /v1/problem-reports/:id': 'app: browser — the person edits their draft before sending it',
+  'POST /v1/problem-reports/:id/sent': 'app: browser — the person says they opened the issue',
+  'DELETE /v1/problem-reports/:id': 'app: later — discard a draft',
   'PUT /v1/budgets/machine': 'app: fleet-wide/irreversible — a budget that can pause every agent on the machine is set by the machine owner in the app (⚙ Settings → Budgets)',
   'POST /v1/agents/:id/recover-context': 'app: later — restore earlier conversations',
   'DELETE /v1/agents/:id/context-reset': 'app: browser — dismissing the "its chat was reset" notice',

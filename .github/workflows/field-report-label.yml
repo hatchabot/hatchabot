@@ -1,0 +1,24 @@
+name: Label field reports
+
+# Issues filed from Hatchabot's "Report a problem" (docs/field-reports.md)
+# start with a marker comment. GitHub applies a link's labels only for people
+# with rights on the repo, so a stranger's report is labelled here instead.
+# The body is only tested in `if:` — never checked out, run or interpolated.
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  label:
+    if: contains(github.event.issue.body, '<!-- hatchabot-report v1')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: add the field-report label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.issue.number }}
+        run: gh issue edit "$NUMBER" --repo "$GITHUB_REPOSITORY" --add-label field-report

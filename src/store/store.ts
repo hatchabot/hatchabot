@@ -403,6 +403,12 @@ export class Store {
         at TEXT NOT NULL, told_at TEXT,
         PRIMARY KEY (scope, month, level, usd)
       );
+      -- "Report a problem" drafts (problemReport.ts): private until the person
+      -- opens the GitHub issue themselves; sent_at when they say they did.
+      CREATE TABLE IF NOT EXISTS problem_reports (
+        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, created_at TEXT NOT NULL, by TEXT NOT NULL,
+        title TEXT NOT NULL, body TEXT NOT NULL, agent_id TEXT, sent_at TEXT
+      );
       -- "Tell me every $X" (budgets.ts): a message each time a month's spend
       -- passes the next multiple of the step, per agent or for the machine.
       CREATE TABLE IF NOT EXISTS spend_alerts (
@@ -3512,6 +3518,29 @@ export class Store {
   listSpendAlerts(): SpendAlertRow[] {
     return (this.db.prepare(`SELECT * FROM spend_alerts`).all() as any[]).map((r) => ({ scope: r.scope, ownerId: r.owner_id, stepUsd: r.step_usd, setAt: r.set_at, ...(r.set_by ? { setBy: r.set_by } : {}) }));
   }
+  addProblemReport(r: ProblemReportRow): void {
+    this.db.prepare(`INSERT INTO problem_reports (id, owner_id, created_at, by, title, body, agent_id, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`)
+      .run(r.id, r.ownerId, r.createdAt, r.by, r.title, r.body, r.agentId ?? null);
+    // Drafts are notes, not an archive: the newest 30 per person.
+    this.db.prepare(`DELETE FROM problem_reports WHERE owner_id = ? AND id NOT IN (SELECT id FROM problem_reports WHERE owner_id = ? ORDER BY created_at DESC LIMIT 30)`).run(r.ownerId, r.ownerId);
+  }
+  listProblemReports(ownerId: string): ProblemReportRow[] {
+    return (this.db.prepare(`SELECT * FROM problem_reports WHERE owner_id = ? ORDER BY created_at DESC`).all(ownerId) as any[]).map(problemRow);
+  }
+  getProblemReport(ownerId: string, id: string): ProblemReportRow | undefined {
+    const r = this.db.prepare(`SELECT * FROM problem_reports WHERE owner_id = ? AND id = ?`).get(ownerId, id) as any;
+    return r ? problemRow(r) : undefined;
+  }
+  updateProblemReport(ownerId: string, id: string, patch: { title?: string; body?: string; sentAt?: string | null }): boolean {
+    const cur = this.getProblemReport(ownerId, id);
+    if (!cur) return false;
+    this.db.prepare(`UPDATE problem_reports SET title = ?, body = ?, sent_at = ? WHERE id = ? AND owner_id = ?`)
+      .run(patch.title ?? cur.title, patch.body ?? cur.body, patch.sentAt === undefined ? cur.sentAt ?? null : patch.sentAt, id, ownerId);
+    return true;
+  }
+  deleteProblemReport(ownerId: string, id: string): boolean {
+    return this.db.prepare(`DELETE FROM problem_reports WHERE owner_id = ? AND id = ?`).run(ownerId, id).changes > 0;
+  }
   getSpendAlert(scope: string): SpendAlertRow | undefined {
     return this.listSpendAlerts().find((a) => a.scope === scope);
   }
@@ -5189,4 +5218,13 @@ function rowToAIProfile(r: any): AIProfile {
     defaultSource: !!r.default_source,
     createdAt: r.created_at,
   };
+}
+
+export interface ProblemReportRow {
+  id: string; ownerId: string; createdAt: string; by: 'person' | 'agent';
+  title: string; body: string; agentId?: string; sentAt?: string;
+}
+function problemRow(r: any): ProblemReportRow {
+  return { id: r.id, ownerId: r.owner_id, createdAt: r.created_at, by: r.by === 'agent' ? 'agent' : 'person', title: r.title, body: r.body,
+    ...(r.agent_id ? { agentId: r.agent_id } : {}), ...(r.sent_at ? { sentAt: r.sent_at } : {}) };
 }

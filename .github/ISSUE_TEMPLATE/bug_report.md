@@ -4,6 +4,8 @@ about: Something doesn't work the way the docs say
 labels: bug
 ---
 
+<!-- Easiest: in Hatchabot, open your account menu → Report a problem. It gathers the details below for you (and your Hatchabot agent can diagnose it first). -->
+
 **What happened**
 
 

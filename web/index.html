@@ -973,6 +973,7 @@
         <button role="menuitem" onclick="v2CloseAccount(); openFleetResources()">Resources</button>
         <button role="menuitem" onclick="v2CloseAccount(); openSetupGuide()">Setup guide</button>
         <button role="menuitem" onclick="v2CloseAccount(); helpDlg.showModal()">Help</button>
+        <button role="menuitem" onclick="v2CloseAccount(); openReport()">Report a problem</button>
         <button role="menuitem" onclick="location.search = '?ui=classic'">Classic look</button>
         <div class="v2popsep"></div>
         <button role="menuitem" class="v2signout" onclick="signOut()">Sign out or switch account</button>
@@ -2362,6 +2363,32 @@
     <button onclick="loadUsage()">Refresh</button>
     <button class="primary" onclick="usageDlg.close()">Close</button>
   </div>
+</dialog>
+
+<dialog id="reportDlg" style="width:min(720px,96vw)">
+  <h3 style="margin:0 0 4px">Report a problem</h3>
+  <div class="sub" id="reportIntro">Something in Hatchabot not working the way it should? Describe it, and Hatchabot adds the details a fix needs. Or ask your Hatchabot agent to look into it first: it can read the code, tell a setting from a bug, and suggest a fix. Nothing is sent until you open the GitHub issue yourself.</div>
+  <div id="reportDrafts" style="margin-top:10px"></div>
+  <div id="reportForm" style="display:grid;gap:10px;margin-top:12px">
+    <label>What went wrong, in one line<input id="reportTitle" maxlength="120" placeholder="e.g. Rebuild fails on the laptop runner"></label>
+    <label>What happened<textarea id="reportWhat" rows="4" maxlength="4000" placeholder="What you did, what you expected, what you saw instead"></textarea></label>
+    <label>Which agent, if it is about one<select id="reportAgent"></select></label>
+    <div class="actions" style="justify-content:flex-end;margin:0"><button class="primary" id="reportGatherBtn" onclick="reportCreate()">Gather the details</button></div>
+  </div>
+  <div id="reportReview" hidden style="margin-top:12px;display:grid;gap:10px">
+    <div class="sub" id="reportReviewNote"></div>
+    <label>Title<input id="reportRTitle" maxlength="200"></label>
+    <label>The issue, as it will be posted<textarea id="reportBody" rows="16" spellcheck="false" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px"></textarea></label>
+    <div class="sub" id="reportLinkNote" hidden></div>
+    <div class="actions" style="margin:0;flex-wrap:wrap">
+      <button onclick="reportDiscard()">Discard</button>
+      <span style="flex:1"></span>
+      <button onclick="reportSaveFile()">Save file</button>
+      <button onclick="reportCopy()">Copy</button>
+      <button class="primary" onclick="reportOpenIssue()">Open on GitHub</button>
+    </div>
+  </div>
+  <div class="actions" style="justify-content:flex-end"><button class="primary" onclick="reportDlg.close()">Close</button></div>
 </dialog>
 
 <dialog id="galleryDlg" style="width:min(720px,96vw)">
@@ -11683,6 +11710,7 @@ async function refresh(withMeta) {
     }).catch(() => {});
     agents = await api('/v1/agents');
     agentsLoaded = true;
+    if (location.hash.includes('report=')) reportFromHash();
     if (UI_V2) void v2LoadRecent(); // each agent's last line, for its tooltip (at most every 30 s)
     if (UI_V2) void v2LoadCosts(); // the cost badges (at most every 5 minutes)
     $('offlineBanner').hidden = true; // reached the server: any earlier warning is stale
@@ -13385,6 +13413,99 @@ function v2SetTheme(t) {
  * button does still runs.
  */
 const V2_BACK_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>';
+// ---- Report a problem (docs/field-reports.md) ---------------------------------------------
+// A private draft per person, written by them here or by the Hatchabot agent
+// (prepare_problem_report). The server adds the facts and masks what must not
+// be public; the person reads it all, then opens the GitHub issue themselves.
+let reportCur = null;
+async function openReport(id) {
+  reportCur = null;
+  $('reportReview').hidden = true; $('reportForm').hidden = false;
+  $('reportAgent').innerHTML = '<option value="">— none —</option>' + (agents ?? []).filter(a => a.state !== 'DELETED' && !a.ops)
+    .map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('');
+  if (!reportDlg.open) reportDlg.showModal();
+  await reportLoadDrafts();
+  if (id) await reportShow(id);
+}
+async function reportLoadDrafts() {
+  let list = [];
+  try { list = await api('/v1/problem-reports'); } catch { /* none */ }
+  const open = list.filter(r => !r.sentAt).slice(0, 5);
+  $('reportDrafts').innerHTML = !open.length ? '' : '<div class="sub" style="margin-bottom:4px">Drafts</div>' + open.map(r =>
+    `<button type="button" class="reportdraft" data-id="${esc(r.id)}" onclick="reportShow(this.dataset.id)" style="display:flex;gap:8px;width:100%;text-align:left">
+      <span class="grow">${esc(r.title)}</span><span class="sub">${r.by === 'agent' ? 'by your Hatchabot agent · ' : ''}${esc(ago(r.createdAt))}</span></button>`).join('');
+}
+function reportPaint(r) {
+  reportCur = r;
+  $('reportForm').hidden = true; $('reportReview').hidden = false;
+  $('reportRTitle').value = r.title; $('reportBody').value = r.body;
+  $('reportReviewNote').innerHTML = `${r.by === 'agent' ? '<b>Your Hatchabot agent wrote this.</b> Check its diagnosis reads right. ' : ''}`
+    + 'Read it through: it becomes a <b>public</b> issue on GitHub. Keys, file paths, addresses and this machine\'s name are masked; anything else you or the agent wrote is not — edit it here.';
+  $('reportLinkNote').hidden = !r.trimmed;
+  $('reportLinkNote').textContent = r.trimmed ? `It is too long for a GitHub link: Open on GitHub also saves ${r.fileName} — drag that file into the issue to attach the rest.` : '';
+}
+async function reportShow(id) {
+  try { reportPaint(await api(`/v1/problem-reports/${encodeURIComponent(id)}`)); }
+  catch (e) { toast(e.message); }
+}
+async function reportCreate() {
+  const title = $('reportTitle').value.trim(), whatHappened = $('reportWhat').value.trim();
+  if (!title || !whatHappened) { toast('Say what went wrong in a line, and what happened.'); return; }
+  const btn = $('reportGatherBtn'); btn.disabled = true; btn.textContent = 'Gathering…';
+  try {
+    reportPaint(await api('/v1/problem-reports', { method: 'POST', body: { title, whatHappened, ...($('reportAgent').value ? { agent: $('reportAgent').value } : {}) } }));
+    $('reportTitle').value = ''; $('reportWhat').value = '';
+    void reportLoadDrafts();
+  } catch (e) { toast(e.message); }
+  finally { btn.disabled = false; btn.textContent = 'Gather the details'; }
+}
+/** Keep the person's edits before anything leaves the page. */
+async function reportSaveEdits() {
+  if (!reportCur) return null;
+  const title = $('reportRTitle').value.trim() || reportCur.title, body = $('reportBody').value;
+  if (title === reportCur.title && body === reportCur.body) return reportCur;
+  reportCur = await api(`/v1/problem-reports/${encodeURIComponent(reportCur.id)}`, { method: 'PATCH', body: { title, body } });
+  return reportCur;
+}
+function reportFile(r) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([`# ${r.title}\n\n${r.body}\n`], { type: 'text/markdown' }));
+  a.download = r.fileName;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+async function reportSaveFile() { try { const r = await reportSaveEdits(); if (r) reportFile(r); } catch (e) { toast(e.message); } }
+async function reportCopy() {
+  try { const r = await reportSaveEdits(); if (!r) return; await navigator.clipboard.writeText(`# ${r.title}\n\n${r.body}\n`); toast('Copied.'); }
+  catch (e) { toast(e.message || 'Could not copy.'); }
+}
+async function reportOpenIssue() {
+  // Opened first, from the click itself: a window opened after an await is a popup browsers block.
+  const win = window.open('about:blank', '_blank');
+  try {
+    const r = await reportSaveEdits(); if (!r) { win?.close(); return; }
+    if (r.trimmed) reportFile(r);
+    if (win) { win.opener = null; win.location.href = r.issueUrl; } else location.href = r.issueUrl;
+    await api(`/v1/problem-reports/${encodeURIComponent(r.id)}/sent`, { method: 'POST' }).catch(() => {});
+    toast(r.trimmed ? 'GitHub opened in a new tab — attach the saved file there, then press Submit.' : 'GitHub opened in a new tab: check it there and press Submit.', 8000);
+    void reportLoadDrafts();
+  } catch (e) { win?.close(); toast(e.message); }
+}
+async function reportDiscard() {
+  if (!reportCur) return;
+  try { await api(`/v1/problem-reports/${encodeURIComponent(reportCur.id)}`, { method: 'DELETE' }); } catch { /* gone already */ }
+  reportCur = null; $('reportReview').hidden = true; $('reportForm').hidden = false;
+  void reportLoadDrafts();
+}
+/** The agent's link (…/#report=<id>): open that draft once signed in, and take it out of the address bar. */
+function reportFromHash() {
+  const id = /(?:^#|&)report=([0-9a-f-]{8,40})(?:&|$)/i.exec(location.hash)?.[1];
+  if (!id) return;
+  try { history.replaceState(null, '', location.pathname + location.search); } catch { /* keep going */ }
+  void openReport(id);
+}
+addEventListener('hashchange', reportFromHash);
+
 function v2ConvertPanels() {
   // recoveryDlg: a secret shown once stays until it is saved — no Back arrow.
   const skip = new Set(['loginDlg', 'consoleDlg', 'v2AgentDlg', 'recoveryDlg', 'sfDlg', 'backupDlg']);

@@ -206,6 +206,8 @@ import {
   stripClientIdentity, withConsoleIdentity, withGuestView,
 } from './consoleProxy.js';
 import { ConsoleAccess } from '../orchestrator/consoleAccess.js';
+import { redactSecrets } from '../domain/redact.js';
+import { buildReport, issueUrl, readSource, searchSource, type ReportFacts, type ReportInput } from '../orchestrator/problemReport.js';
 import { consoleIdentity, type ConsoleRole } from '../openclaw/consoleIdentity.js';
 import type { IdentityVerifier } from './identity.js';
 import {
@@ -223,6 +225,8 @@ export interface ApiDeps {
   secrets: SecretStore;
   /** Keyed by Host.provider — 'mock', 'local-docker', later 'gce'. */
   providers: Map<string, RuntimeProvider>;
+  /** `hatchabot doctor --json` lines for a problem report; tests pass their own (the real one spawns the CLI). */
+  reportDoctor?: () => Promise<Array<{ level: string; text: string; fix?: string }> | undefined>;
   /** Runner providers by host (resolveProvider's cache), shared with the health sweep; a fresh one when absent. */
   remoteProviders?: Map<string, RuntimeProvider>;
   channel: CompositeTelegramProvisioner;
@@ -7648,6 +7652,110 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * one; the machine's budget for the machine owner. At API prices (on a
    * Claude plan an equivalent); stored figures only — nothing is woken.
    */
+  // ---- Report a problem (problemReport.ts, docs/field-reports.md) -------------
+  // The facts a report carries, a private draft per person, and the installed
+  // source read-only. Nothing here sends anything: the person opens the GitHub
+  // issue themselves from the draft.
+  const appDir = resolve(import.meta.dirname, '..', '..');
+  const installKind = (): string => {
+    try { const b = JSON.parse(readFileSync(join(appDir, 'BUNDLE.json'), 'utf8')) as { platform?: string }; return `bundle ${b.platform ?? ''}`.trim(); } catch { /* not a bundle */ }
+    return existsSync(join(appDir, '.git')) ? 'git checkout' : 'files';
+  };
+  const FAILURE_EVENT = /fail|error|crash|unreachable|interrupt|kill|timed?_?out|missing|refused|stuck/i;
+  const reportFacts = async (req: FastifyRequest, agentRef?: string): Promise<ReportFacts> => {
+    const owner = ownsLocalHost(req);
+    const facts: ReportFacts = {
+      version: `v${String(deps.appVersion ?? APP_VERSION).replace(/^v/, '')}`,
+      install: installKind(), platform: `${process.platform}-${process.arch}`, node: process.version,
+    };
+    const local = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
+    if (local) { try { facts.openclaw = (await providerFor(local.id).currentImageInfo()).openclawVersion; } catch { /* unknown */ } }
+    if (owner && deps.reportDoctor) facts.doctor = await deps.reportDoctor().catch(() => undefined);
+    else if (owner) {
+      // `hatchabot doctor --json`, as the person would run it here: exit 1 on a ✗ still prints the report.
+      const out = await new Promise<string>((done) => {
+        const child = spawn(process.execPath, [join(appDir, 'bin', 'hatchabot.mjs'), 'doctor', '--json'], { cwd: appDir, env: process.env, stdio: ['ignore', 'pipe', 'ignore'] });
+        let buf = '';
+        const timer = setTimeout(() => child.kill('SIGKILL'), 30_000);
+        child.stdout.on('data', (d: Buffer) => { if (buf.length < 200_000) buf += d.toString(); });
+        child.on('close', () => { clearTimeout(timer); done(buf); });
+        child.on('error', () => { clearTimeout(timer); done(''); });
+      });
+      try { facts.doctor = (JSON.parse(out) as { lines?: ReportFacts['doctor'] }).lines; } catch { /* doctor did not answer */ }
+    }
+    const agents = owner ? store.listAllActiveAgents() : store.listAgents(ownerIdOf(req));
+    const names = new Map(agents.map((a) => [a.id, a.name]));
+    const since = Date.now() - 3 * 86_400_000;
+    facts.failures = store.listEvents(agents.map((a) => a.id), 400)
+      .filter((e) => FAILURE_EVENT.test(e.event) && Date.parse(e.at) >= since)
+      .slice(0, 15)
+      .map((e) => ({ at: e.at, event: e.event, agent: names.get(e.agentId), ...(e.detail ? { detail: redactSecrets(JSON.stringify(e.detail)).slice(0, 300) } : {}) }));
+    if (agentRef) {
+      const a = ownedAgent(req, agentRef) ?? (owner ? store.getAgent(agentRef) : undefined);
+      if (a && a.state !== 'DELETED') {
+        const host = store.getHost(a.hostId);
+        let logs: string | undefined;
+        if (a.runtimeRef && a.state !== 'ARCHIVED') {
+          try { logs = await Promise.race([providerFor(a.hostId).logs(a.runtimeRef, 60), new Promise<string>((_r, no) => setTimeout(() => no(new Error('slow')), 15_000))]); } catch { /* no logs */ }
+        }
+        facts.agent = { name: a.name, state: a.state, ...(a.stateReason ? { reason: a.stateReason } : {}), ...(a.model ? { model: a.model } : {}),
+          ...(a.image ? { image: a.image } : {}), ...(host && host.kind !== 'local' ? { onRunner: true } : {}), ...(logs ? { logs: redactSecrets(logs) } : {}) };
+      }
+    }
+    return facts;
+  };
+  const reportView = (r: { id: string; title: string; body: string; createdAt: string; by: string; agentId?: string; sentAt?: string }) => {
+    const fileName = `hatchabot-report-${r.createdAt.slice(0, 10)}-${r.id.slice(0, 6)}.md`;
+    const link = issueUrl(r.title, r.body, { file: fileName });
+    return { ...r, issueUrl: link.url, trimmed: link.trimmed, fileName, reviewPath: `/#report=${r.id}` };
+  };
+
+  app.get<{ Querystring: { agent?: string } }>('/v1/diagnostics', async (req) => reportFacts(req, req.query.agent));
+
+  app.get<{ Querystring: { path?: string; from?: string; to?: string } }>('/v1/source', async (req, reply) => {
+    try { return readSource(appDir, String(req.query.path ?? ''), Number(req.query.from ?? 1), req.query.to ? Number(req.query.to) : undefined); }
+    catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+  });
+  app.get<{ Querystring: { q?: string; under?: string } }>('/v1/source/search', async (req, reply) => {
+    try { return searchSource(appDir, String(req.query.q ?? ''), req.query.under || undefined); }
+    catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+  });
+
+  app.get('/v1/problem-reports', async (req) =>
+    store.listProblemReports(ownerIdOf(req)).map(({ body: _b, ...r }) => r));
+  app.get<{ Params: { id: string } }>('/v1/problem-reports/:id', async (req, reply) => {
+    const r = store.getProblemReport(ownerIdOf(req), req.params.id);
+    return r ? reportView(r) : reply.code(404).send({ error: 'Not found' });
+  });
+  app.post<{ Body: Partial<ReportInput> & { agent?: string } }>('/v1/problem-reports', async (req, reply) => {
+    const b = (req.body ?? {}) as Partial<ReportInput> & { agent?: string };
+    const str = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.slice(0, max) : undefined);
+    const title = str(b.title, 200), whatHappened = str(b.whatHappened, 8000);
+    if (!title || !whatHappened) return reply.code(400).send({ error: 'A title and what happened, in a sentence or two.' });
+    const confidence = b.confidence === 'low' || b.confidence === 'medium' || b.confidence === 'high' ? b.confidence : undefined;
+    const agentId = typeof b.agent === 'string' && b.agent ? b.agent : undefined;
+    const input: ReportInput = {
+      title, whatHappened, steps: str(b.steps, 4000), diagnosis: str(b.diagnosis, 10_000), confidence,
+      suggestedPatch: str(b.suggestedPatch, 24_000), by: b.by === 'agent' ? 'agent' : 'person',
+    };
+    const built = buildReport(input, await reportFacts(req, agentId));
+    const row = { id: randomUUID(), ownerId: ownerIdOf(req), createdAt: new Date().toISOString(), by: input.by, title: built.title, body: built.body, ...(agentId ? { agentId } : {}) };
+    store.addProblemReport(row);
+    return reportView(row);
+  });
+  app.patch<{ Params: { id: string }; Body: { title?: string; body?: string } }>('/v1/problem-reports/:id', async (req, reply) => {
+    const b = (req.body ?? {}) as { title?: string; body?: string };
+    const patch = { ...(typeof b.title === 'string' && b.title.trim() ? { title: b.title.slice(0, 200) } : {}), ...(typeof b.body === 'string' ? { body: b.body.slice(0, 60_000) } : {}) };
+    if (!store.updateProblemReport(ownerIdOf(req), req.params.id, patch)) return reply.code(404).send({ error: 'Not found' });
+    return reportView(store.getProblemReport(ownerIdOf(req), req.params.id)!);
+  });
+  app.post<{ Params: { id: string } }>('/v1/problem-reports/:id/sent', async (req, reply) => {
+    if (!store.updateProblemReport(ownerIdOf(req), req.params.id, { sentAt: new Date().toISOString() })) return reply.code(404).send({ error: 'Not found' });
+    return { ok: true };
+  });
+  app.delete<{ Params: { id: string } }>('/v1/problem-reports/:id', async (req, reply) =>
+    store.deleteProblemReport(ownerIdOf(req), req.params.id) ? { ok: true } : reply.code(404).send({ error: 'Not found' }));
+
   app.get('/v1/budgets', async (req) => {
     const me = ownerIdOf(req);
     const now = Date.now(), tz = machineTz(), month = monthKey(now, tz);

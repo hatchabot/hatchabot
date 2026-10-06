@@ -121,6 +121,48 @@ const SCENARIOS = String.raw`(() => {
         v2Machine = null; v2PaintMachine(); await refresh(false);
       }
     },
+    reportProblem: async () => {
+      // Report a problem (made-up data): from the account menu, a person's draft, read through,
+      // edited, then GitHub opened in a new tab; and the agent's link opens its draft.
+      const id = '0f9e8d7c-1111-4222-8333-444455556666', draftId = 'aa11bb22-3333-4444-8555-666677778888';
+      const view = (o) => ({ id, title: 'Rebuild fails', body: '<!-- hatchabot-report v1 version=v9.9.9 install=git -->\n\n### What happened\nIt failed.', createdAt: new Date().toISOString(), by: 'person',
+        issueUrl: 'https://github.com/hatchabot/hatchabot/issues/new?labels=field-report&title=Rebuild%20fails&body=x', trimmed: false, fileName: 'hatchabot-report-x.md', reviewPath: '/#report=' + id, ...o });
+      window.__override['/v1/problem-reports'] = [{ id: draftId, title: 'Telegram replies stop', createdAt: new Date().toISOString(), by: 'agent' }];
+      const opened = []; const realOpen = window.open;
+      window.open = () => { const w = { opener: 1, location: { href: 'about:blank' }, close() {} }; opened.push(w); return w; };
+      try {
+        v2ToggleAccount();
+        byText('#v2AcctPop button', 'Report a problem').click();
+        await until(() => reportDlg.open);
+        await until(() => byText('#reportDrafts button', 'Telegram replies stop'));
+        ok("the agent's draft is listed as its", byText('#reportDrafts button', 'Telegram replies stop').textContent.includes('by your Hatchabot agent'));
+        byText('#reportForm button', 'Gather the details').click();
+        ok('nothing is sent without a title and what happened', !calls('POST', /^\/v1\/problem-reports$/).length);
+        $('reportTitle').value = 'Rebuild fails'; $('reportWhat').value = 'It failed.';
+        window.__answer = { 'POST /v1/problem-reports': [{ body: view({}) }], ['PATCH /v1/problem-reports/' + id]: [{ body: view({ body: 'edited' }) }] };
+        byText('#reportForm button', 'Gather the details').click();
+        await until(() => !$('reportReview').hidden);
+        eq('what was asked for', calls('POST', /^\/v1\/problem-reports$/).at(-1).body, { title: 'Rebuild fails', whatHappened: 'It failed.' });
+        ok('the whole issue is shown to read', $('reportBody').value.includes('### What happened'));
+        ok('it says it will be public', $('reportReviewNote').textContent.includes('public'));
+        $('reportBody').value = 'edited';
+        byText('#reportReview button', 'Open on GitHub').click();
+        await until(() => calls('POST', /\/sent$/).length);
+        eq('the edit is saved before anything leaves', calls('PATCH', /^\/v1\/problem-reports\//).at(-1).body, { title: 'Rebuild fails', body: 'edited' });
+        ok('GitHub opened in a new tab, without a way back to this page', opened.length === 1 && opened[0].location.href.startsWith('https://github.com/hatchabot/hatchabot/issues/new') && opened[0].opener === null);
+        reportDlg.close();
+        // The agent's link: …/#report=<id> opens that draft and leaves the address bar.
+        window.__override['/v1/problem-reports/' + draftId] = view({ id: draftId, title: 'Telegram replies stop', by: 'agent' });
+        location.hash = '#report=' + draftId;
+        await until(() => reportDlg.open && !$('reportReview').hidden);
+        ok("the agent's draft opens, marked as the agent's", $('reportRTitle').value === 'Telegram replies stop' && $('reportReviewNote').textContent.includes('Your Hatchabot agent wrote this'));
+        ok('the link is gone from the address bar', !location.hash.includes('report='));
+      } finally {
+        window.open = realOpen; window.__answer = {};
+        delete window.__override['/v1/problem-reports']; delete window.__override['/v1/problem-reports/' + draftId];
+        if (reportDlg.open) reportDlg.close();
+      }
+    },
     backupNotCovered: async () => {
       // An agent left out of the nightly set (made-up data): named on the manager's
       // tile, and a Clear holds across nights while the same agents are left out

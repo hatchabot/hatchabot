@@ -352,6 +352,66 @@ export const REST_TOOLS: RestTool[] = [
     done: (r) => (r && typeof r === 'object' && 'message' in r ? String((r as { message: string }).message) : undefined),
   },
 
+  // ---- Report a problem, and help with settings (problemReport.ts) ----
+  {
+    name: 'get_diagnostics', tier: 'read',
+    description:
+      'What a problem report carries, for you to diagnose from: the Hatchabot version and how it is installed, the platform, OpenClaw, '
+      + '`hatchabot doctor` (machine owner: each check ✓/⚠/✗ with its fix), failures in the last 3 days (event, agent, detail), and — with agent — '
+      + "that agent's state, failure reason, model, image and its last 60 log lines. Secrets are masked. Takes a few seconds (doctor runs).",
+    input_schema: obj({ agent: { ...agentRef, description: 'Optional: the agent the problem is about.' } }),
+    call: async ({ input, resolve }) => {
+      const a = input.agent ? await resolve(input.agent) : undefined;
+      return { method: 'GET', path: `/v1/diagnostics${a ? `?agent=${encodeURIComponent(a.id)}` : ''}` };
+    },
+  },
+  {
+    name: 'search_source', tier: 'read',
+    description:
+      'Search the Hatchabot source and docs INSTALLED on this machine (the exact release that runs here): src/, web/, scripts/, docs/, bin/, docker/, deploy/, test/, '
+      + 'README.md, CHANGELOG.md, .env.example. A regular expression, case-insensitive; up to 40 matching lines with path:line. '
+      + 'Use it to find the code behind an error message, and the docs behind a settings question (docs/ and README.md explain every setting).',
+    input_schema: obj({
+      query: { type: 'string', maxLength: 300, description: 'A regular expression, e.g. "probe the runtime image" or "sleep timer"' },
+      under: { type: 'string', maxLength: 200, description: 'Optional: only under this folder or file, e.g. docs/ or src/orchestrator/' },
+    }, ['query']),
+    call: ({ input }) => ({ method: 'GET', path: `/v1/source/search?q=${encodeURIComponent(String(input.query ?? ''))}${input.under ? `&under=${encodeURIComponent(String(input.under))}` : ''}` }),
+  },
+  {
+    name: 'read_source', tier: 'read',
+    description:
+      'Read a file of the installed Hatchabot source or docs (same places as search_source), with line numbers: up to 400 lines from `from`. '
+      + 'A folder lists its files. Read the code around what search_source found before you diagnose, and quote exact lines.',
+    input_schema: obj({
+      path: { type: 'string', maxLength: 300, description: 'e.g. src/providers/localDockerProvider.ts or docs/' },
+      from: { type: 'integer', minimum: 1 },
+      to: { type: 'integer', minimum: 1 },
+    }, ['path']),
+    call: ({ input }) => ({ method: 'GET', path: `/v1/source?path=${encodeURIComponent(String(input.path ?? ''))}${input.from ? `&from=${Number(input.from)}` : ''}${input.to ? `&to=${Number(input.to)}` : ''}` }),
+  },
+  {
+    name: 'prepare_problem_report', tier: 'read',
+    description:
+      "Write up a Hatchabot bug as a PRIVATE DRAFT for the owner to review and send. Nothing is sent: the owner opens it in the app (⚙ Settings → Report a problem, or the link this returns) "
+      + 'and files a public GitHub issue on hatchabot/hatchabot themselves. Hatchabot adds the facts itself (version, doctor, recent failures, the agent\'s state and log) and masks secrets, '
+      + 'paths, addresses and names of the machine. Give: title (one line); whatHappened (what the owner saw); steps (how to make it happen again); diagnosis (what is wrong, citing file:line '
+      + 'from read_source); confidence; suggestedPatch — a unified diff against the INSTALLED source (paths from the repo root, e.g. --- a/src/x.ts +++ b/src/x.ts), only when you read the code and are '
+      + 'reasonably sure; and agent when it is about one. Only for a defect in Hatchabot itself — a setting the owner can change is not a bug: help them change it instead.',
+    input_schema: obj({
+      title: { type: 'string', maxLength: 120 },
+      whatHappened: { type: 'string', maxLength: 4000 },
+      steps: { type: 'string', maxLength: 2000 },
+      diagnosis: { type: 'string', maxLength: 5000 },
+      confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+      suggestedPatch: { type: 'string', maxLength: 12000 },
+      agent: { ...agentRef, description: 'Optional: the agent the problem is about (its state and log go in).' },
+    }, ['title', 'whatHappened']),
+    call: async ({ input, resolve }) => {
+      const a = input.agent ? await resolve(input.agent) : undefined;
+      const { agent: _a, ...rest } = input;
+      return { method: 'POST', path: '/v1/problem-reports', body: { ...rest, by: 'agent', ...(a ? { agent: a.id } : {}) } };
+    },
+  },
   {
     name: 'get_budgets', tier: 'read',
     description:
