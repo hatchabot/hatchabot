@@ -74,7 +74,11 @@ if ! have docker; then
       die "Install Docker Desktop for Mac (https://docs.docker.com/desktop/setup/install/mac-install/), start it, then re-run."
     fi
   elif ask "Docker is missing. Install Docker Engine with the official script (get.docker.com)?"; then
-    curl -fsSL https://get.docker.com | sh
+    # Docker's script has been seen to end non-zero after installing Docker
+    # fine; under pipefail that ended this installer with no word (clean VM,
+    # 2026-10-06). What counts is whether docker is there afterwards.
+    curl -fsSL https://get.docker.com | sh || have docker || die "Docker's installer failed (see above) — install Docker (https://docs.docker.com/engine/install/), then re-run."
+    sudo systemctl enable --now docker >/dev/null 2>&1 || true
     sudo usermod -aG docker "$ME" || true
   else die "Install Docker (https://docs.docker.com/engine/install/), then re-run."; fi
 fi
