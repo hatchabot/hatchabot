@@ -15,6 +15,12 @@
 # Re-running is safe: it upgrades along the same channel. HATCHABOT_DIR installs
 # elsewhere (default ~/hatchabot).
 set -euo pipefail
+# Everything is inside main(), called on the last line: run as `curl … | bash`,
+# bash reads this script from the pipe as it goes, and the `exec </dev/tty`
+# below (so questions reach the terminal) then made it read the REST OF THE
+# SCRIPT from the terminal — it sat waiting, silently (over ssh, 2026-10-06).
+# A function is read whole before any of it runs.
+main() {
 DIR="${HATCHABOT_DIR:-$HOME/hatchabot}"
 # Which release to install — a channel, or an exact version:
 #   stable  (the default) what new users get; moved deliberately, after a soak
@@ -261,3 +267,5 @@ cd "$DIR"
 if [ -x scripts/with-docker.sh ]; then exec ./scripts/with-docker.sh ./scripts/setup-host.sh; fi
 if [ "$VIA_SG" = 1 ]; then exec sg docker -c "PATH=$(printf '%q' "$PATH") ./scripts/setup-host.sh"; fi
 exec ./scripts/setup-host.sh
+}
+main "$@"

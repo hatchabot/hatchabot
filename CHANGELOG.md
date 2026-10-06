@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.132.1] — 2026-10-06
+
+### Fixed
+- **`curl -fsSL …/install.sh | bash` hung** before doing anything: bash reads a piped script as it runs, and the installer's switch of its input to the terminal (so its questions can be answered) made bash read the rest of the script from the terminal. The installer is now one function, called on its last line, so it is read whole first. The hatchabot.com link, which runs the downloaded script with `bash -c`, was not affected. A test runs it piped, in a pseudo-terminal.
+
 ## [2.132.0] — 2026-10-06
 
 ### Added
