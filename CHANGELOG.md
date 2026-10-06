@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.135.1] — 2026-10-06
+
+### Fixed
+- **Report a problem, from the first live report:** a Telegram bot's username in an agent's log is masked (it is public: anyone could write to it); the private-address mask matches whole addresses only (it cut a log line's timestamp); and "Recent failures" leaves out a guest the console refused by design, folds repeats into one line with a count, and drops user ids.
+
 ## [2.135.0] — 2026-10-06
 
 ### Added

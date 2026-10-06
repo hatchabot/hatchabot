@@ -29,6 +29,11 @@ describe('redactForPublic', () => {
     expect(out).toContain('<user> on <host>');
   });
 
+  it('masks a Telegram bot username, but not Hatchabot; a timestamp is not an address', () => {
+    expect(redactForPublic('[telegram] [kitchenhelperbot] starting provider (@KitchenHelperBot) for Hatchabot', ctx)).toBe('[telegram] [<bot>] starting provider (<bot>) for Hatchabot');
+    expect(redactForPublic('2026-10-01T00:23:10.123+00:00 ok; peer 10.1.2.3', ctx)).toBe('2026-10-01T00:23:10.123+00:00 ok; peer <private-ip>');
+  });
+
   it('leaves public addresses and ordinary words alone', () => {
     expect(redactForPublic('pulled ghcr.io/hatchabot/runtime:2026.9.6 from 140.82.112.3; patience', ctx)).toBe('pulled ghcr.io/hatchabot/runtime:2026.9.6 from 140.82.112.3; patience');
   });

@@ -25,6 +25,8 @@ export function localContext(): PublicRedactContext {
 }
 
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const isPrivateV4 = (a: number, b: number) =>
+  a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254);
 
 /**
  * Blunt on purpose, like redactSecrets: an issue is public and permanent, so a
@@ -37,7 +39,10 @@ export function redactForPublic(text: string, ctx: PublicRedactContext = localCo
   out = out
     .replace(/\b[\w.+-]+@[\w-]+(\.[\w-]+)+\b/g, '<email>')                                          // addresses, incl. ssh user@host
     .replace(/\b[\w-]+(\.[\w-]+)*\.ts\.net\b/g, '<tailnet-host>')                                   // Tailscale names
-    .replace(/\b(10|127|192\.168|172\.(1[6-9]|2\d|3[01])|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7]))(\.\d{1,3}){1,3}\b/g, '<private-ip>');
+    // Whole addresses only ("00:23:10.123" in a timestamp is not one), and only private ones.
+    .replace(/\b(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}\b/g, (m, a: string, b: string) => (isPrivateV4(+a, +b) ? '<private-ip>' : m))
+    // A Telegram bot's username (they all end in "bot"): public, so anyone could write to it. Not our own name.
+    .replace(/@?\b(?!hatchabot\b)[A-Za-z][A-Za-z0-9_]{2,}bot\b/gi, '<bot>');
   if (ctx.user && ctx.user.length >= 3) out = out.replace(new RegExp(`\\b${esc(ctx.user)}\\b`, 'g'), '<user>');
   if (ctx.host && ctx.host.length >= 3 && ctx.host !== 'localhost') out = out.replace(new RegExp(`\\b${esc(ctx.host)}\\b`, 'g'), '<host>');
   return out;

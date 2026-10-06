@@ -7661,7 +7661,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     try { const b = JSON.parse(readFileSync(join(appDir, 'BUNDLE.json'), 'utf8')) as { platform?: string }; return `bundle ${b.platform ?? ''}`.trim(); } catch { /* not a bundle */ }
     return existsSync(join(appDir, '.git')) ? 'git checkout' : 'files';
   };
-  const FAILURE_EVENT = /fail|error|crash|unreachable|interrupt|kill|timed?_?out|missing|refused|stuck/i;
+  // What went wrong — not a guest refused by design (console.guest_refused), which is the guard working.
+  const FAILURE_EVENT = /fail|error|crash|unreachable|interrupt|kill|timed?_?out|missing|stuck/i;
+  const PERSON_KEYS = new Set(['userId', 'user', 'email', 'by', 'from', 'fromUserId', 'chatId']);
   const reportFacts = async (req: FastifyRequest, agentRef?: string): Promise<ReportFacts> => {
     const owner = ownsLocalHost(req);
     const facts: ReportFacts = {
@@ -7686,10 +7688,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agents = owner ? store.listAllActiveAgents() : store.listAgents(ownerIdOf(req));
     const names = new Map(agents.map((a) => [a.id, a.name]));
     const since = Date.now() - 3 * 86_400_000;
-    facts.failures = store.listEvents(agents.map((a) => a.id), 400)
-      .filter((e) => FAILURE_EVENT.test(e.event) && Date.parse(e.at) >= since)
-      .slice(0, 15)
-      .map((e) => ({ at: e.at, event: e.event, agent: names.get(e.agentId), ...(e.detail ? { detail: redactSecrets(JSON.stringify(e.detail)).slice(0, 300) } : {}) }));
+    // The same failure again and again is one line with a count, not fifteen.
+    const seen = new Map<string, NonNullable<ReportFacts['failures']>[number] & { n: number }>();
+    for (const e of store.listEvents(agents.map((a) => a.id), 400)) {
+      if (!FAILURE_EVENT.test(e.event) || Date.parse(e.at) < since) continue;
+      const detail = e.detail ? Object.fromEntries(Object.entries(e.detail).filter(([k]) => !PERSON_KEYS.has(k))) : undefined;
+      const text = detail && Object.keys(detail).length ? redactSecrets(JSON.stringify(detail)).slice(0, 300) : undefined;
+      const key = `${e.agentId} ${e.event} ${text ?? ''}`;
+      const had = seen.get(key);
+      if (had) { had.n++; continue; }
+      if (seen.size >= 15) continue;
+      seen.set(key, { at: e.at, event: e.event, agent: names.get(e.agentId), ...(text ? { detail: text } : {}), n: 1 });
+    }
+    facts.failures = [...seen.values()].map(({ n, ...f }) => (n > 1 ? { ...f, event: `${f.event} ×${n}` } : f));
     if (agentRef) {
       const a = ownedAgent(req, agentRef) ?? (owner ? store.getAgent(agentRef) : undefined);
       if (a && a.state !== 'DELETED') {
