@@ -429,12 +429,18 @@ function serviceDockerDenied(): boolean | undefined {
     if (!pid || pid === '0' || !gid) return undefined;
     const user = (sh('id', ['-nG']) ?? '').split(/\s+/);
     if (!user.includes('docker')) return undefined; // not in the group at all: the docker check reports that
-    const status = readFileSync(`/proc/${pid}/status`, 'utf8');
-    const groups = (/^Groups:\s*(.*)$/m.exec(status)?.[1] ?? '').trim().split(/\s+/);
-    // Started through scripts/with-docker.sh (`sg docker`), the group is the
-    // process's own group id rather than an extra one: that reaches Docker too.
-    const gids = (/^Gid:\s*(.*)$/m.exec(status)?.[1] ?? '').trim().split(/\s+/);
-    return !groups.includes(gid) && !gids.includes(gid);
+    const hasDocker = (p: string): boolean => {
+      const status = readFileSync(`/proc/${p}/status`, 'utf8');
+      const groups = (/^Groups:\s*(.*)$/m.exec(status)?.[1] ?? '').trim().split(/\s+/);
+      // Started through scripts/with-docker.sh (`sg docker`), the group is the
+      // process's own group id rather than an extra one: that reaches Docker too.
+      const gids = (/^Gid:\s*(.*)$/m.exec(status)?.[1] ?? '').trim().split(/\s+/);
+      return groups.includes(gid) || gids.includes(gid);
+    };
+    // `sg` starts the command as its child (it stays the service's main
+    // process), so Hatchabot itself is one level down (clean-VM install, 2026-10-06).
+    const kids = (sh('pgrep', ['-P', pid]) ?? '').split(/\s+/).filter(Boolean);
+    return !hasDocker(pid) && !kids.some((k) => { try { return hasDocker(k); } catch { return false; } });
   } catch {
     return undefined;
   }
