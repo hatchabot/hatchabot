@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.136.0] — 2026-10-06
+
+### Added
+- **A knowledge pack for the Hatchabot agent**, shipped with every release: `docs/troubleshooting.md` (59 known problems — the symptom as you see it, how to check, the cause, the fix, the release that fixed it, and the code) and `docs/architecture-map.md` (where each feature's code is). The manager searches the playbook first and uses the map to go straight to the right code, instead of rediscovering both. A test keeps them true: every file and function they name must still exist, every "fixed in" must be a release, and neither may hold an address.
+- **Report a problem is easier to find:** a line at the foot of the home screen, as well as the account menu (the round button with your initial, top right).
+- **Design:** `docs/embedded-agents.md` — how another tool (first: a command-line tax calculator) ships its own agent pack (a manifest, instructions, knowledge, declared tools with data tiers) that runs in Hatchabot or in any MCP client.
+
 ## [2.135.1] — 2026-10-06
 
 ### Fixed

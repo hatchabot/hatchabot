@@ -131,6 +131,11 @@ const SCENARIOS = String.raw`(() => {
       const opened = []; const realOpen = window.open;
       window.open = () => { const w = { opener: 1, location: { href: 'about:blank' }, close() {} }; opened.push(w); return w; };
       try {
+        // Found from the foot of the home screen too (the account menu alone was not found, 2026-10-06).
+        $('v2ReportLink').click();
+        await until(() => reportDlg.open);
+        ok('the home screen link opens it', reportDlg.open);
+        reportDlg.close();
         v2ToggleAccount();
         byText('#v2AcctPop button', 'Report a problem').click();
         await until(() => reportDlg.open);
