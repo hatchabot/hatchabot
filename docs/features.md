@@ -1684,8 +1684,10 @@ failed. When it comes back, the next probe lets calls through.
 **agent picker** (Usage only — *All agents*, or any you tick; remembered per
 browser), the range (24 hours, 7 days, 30 days), the total with a month at
 that pace, a **pie** of what it went on (cache writes, cache reads, output,
-new input) with each part's amount and share beside it, the cost by model,
-and the chart below. (A *By agent* table under it went in v2.130.0, less to
+new input) with each part's amount and share beside it, a second pie **by
+model** (v2.131.0; the top seven, the rest as "others"; each model keeps its
+colour from one view to the next — the validated categorical palette, a slot
+per model), and the chart below. (A *By agent* table under it went in v2.130.0, less to
 read: the picker narrows to any agents, and each agent's Usage tab has its
 own.) Requests that did not go through in the last 24 hours are **one line**
 at the top, only when there were any: "⛔ Last 24 hours: 12 refused (rate

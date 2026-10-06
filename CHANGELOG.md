@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.131.0] — 2026-10-05
+
+### Added
+- **Usage → At API prices: a pie by model** beside "What it went on", with each model's amount and share (the top seven; the rest as "others"). A model keeps its colour from one view to the next. It follows the agent picker and the range, and an agent's Usage tab has it too.
+
 ## [2.130.0] — 2026-10-05
 
 ### Changed

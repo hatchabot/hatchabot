@@ -564,7 +564,12 @@ const SCENARIOS = String.raw`(() => {
       const pie = box.querySelector('svg[aria-label="What it went on"]');
       ok('a pie of what it went on', !!pie && pie.querySelectorAll('circle').length === 4 && pie.textContent.includes('$192'));
       ok('its parts with amounts and shares', box.textContent.includes('Cache writes') && box.textContent.includes('$136') && box.textContent.includes('71%'));
-      ok('by model', box.textContent.includes('By model: claude-opus-4-8 $150 · claude-sonnet-5 $42'));
+      const mpie = box.querySelector('svg[aria-label="By model"]');
+      ok('a second pie, by model', !!mpie && mpie.querySelectorAll('circle').length === 2);
+      ok('its legend: each model, amount and share', box.textContent.includes('opus-4-8') && box.textContent.includes('$150') && box.textContent.includes('78%') && box.textContent.includes('sonnet-5'));
+      ok('a model keeps its colour', mpie.querySelector('circle').getAttribute('stroke') === '#2a78d6');
+      const many = modelPieSlices(Array.from({ length: 9 }, (_, i) => ({ model: 'claude-x-' + i, cost: 9 - i })));
+      ok('past seven, the rest are "others"', many.length === 8 && many[7].label === '2 others' && new Set(many.slice(0, 7).map((x) => x.color)).size === 7);
       const svgs = box.querySelectorAll('svg');
       const bars = svgs[svgs.length - 1];
       ok('stacked: four parts in a bar', bars.querySelectorAll('g')[0].querySelectorAll('rect').length === 5);

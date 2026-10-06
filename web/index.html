@@ -8578,22 +8578,15 @@ function spendChartHTML(d, opts = {}) {
   const pills = SPEND_RANGE_LABELS.map(([k, l]) => `<button class="su-period${k === d.range ? ' on' : ''}" aria-pressed="${k === d.range}" onclick="setSpendRange('${k}', this)">${l}</button>`).join('');
   const head = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:2px 0 6px">${picker}<span class="su-periods" style="margin:0">${pills}</span></div>
     <div style="margin:0 0 8px"><b style="font-size:16px">≈ ${v2Money(t.cost || 0)}</b>${star} <span class="sub">in ${rangeName} · ≈ ${v2Money(d.monthly || 0)} a month at this pace · ${fmtTokens(t.tokens || 0)} tokens</span></div>`;
-  // The pie: what it went on, with the amounts and shares beside it.
-  const R = 54, SW = 22, C = 2 * Math.PI * R, total = t.cost || 0;
-  let at = 0;
-  const live = SPEND_PARTS.filter(([k]) => (t[k] || 0) > 0);
-  const arcs = total > 0 ? live.map(([k, l, c]) => {
-    const len = (t[k] / total) * C, gap = live.length > 1 ? Math.min(2, len / 3) : 0;
-    const seg = `<circle r="${R}" cx="70" cy="70" fill="none" stroke="${c}" stroke-width="${SW}" stroke-dasharray="${Math.max(0, len - gap)} ${C}" stroke-dashoffset="${-at}" transform="rotate(-90 70 70)"><title>${l}: ${v2Money(t[k])} (${Math.round(t[k] / total * 100)}%)</title></circle>`;
-    at += len; return seg;
-  }).join('') : `<circle r="${R}" cx="70" cy="70" fill="none" style="stroke:var(--line)" stroke-width="${SW}"/>`;
-  const pie = `<svg viewBox="0 0 140 140" width="140" height="140" role="img" aria-label="What it went on" style="flex:none">${arcs}
-      <text x="70" y="68" text-anchor="middle" font-size="17" font-weight="700" style="fill:var(--text)">${v2Money(total)}${star}</text>
-      <text x="70" y="86" text-anchor="middle" font-size="11" style="fill:var(--dim)">${SPEND_RANGE_WORDS[d.range]?.[1] || ''}</text></svg>`;
-  const parts = `<div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:4px 10px;align-items:center;font-size:13px;min-width:200px">${SPEND_PARTS.map(([k, l, c]) =>
-      `<span style="width:10px;height:10px;border-radius:2px;background:${c}"></span><span>${l}</span><span style="text-align:right;font-variant-numeric:tabular-nums">${v2Money(t[k] || 0)}</span><span class="sub" style="text-align:right;font-variant-numeric:tabular-nums">${total ? Math.round((t[k] || 0) / total * 100) : 0}%</span>`).join('')}</div>`;
-  const models = (d.models || []).length ? `<div class="sub" style="margin-top:6px">By model: ${d.models.slice(0, 6).map((m) => `${esc(m.model)} ${v2Money(m.cost)}`).join(' · ')}</div>` : '';
-  const summary = `<div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin-bottom:6px">${pie}<div>${parts}${models}</div></div>`;
+  // Two pies (2026-10-05): what it went on, and by model — each with its amounts and shares beside it.
+  const total = t.cost || 0;
+  const range = SPEND_RANGE_WORDS[d.range]?.[1] || '';
+  const partSlices = SPEND_PARTS.map(([k, l, c]) => ({ label: l, value: t[k] || 0, color: c }));
+  const modelSlices = modelPieSlices(d.models || []);
+  const block = (title, slices) => `<div style="display:flex;flex-direction:column;gap:4px;min-width:0">
+      <div class="sub" style="font-size:12px">${title}</div>
+      <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">${donutHTML(slices, total, `${v2Money(total)}${star}`, range, title)}${pieLegend(slices, total)}</div></div>`;
+  const summary = `<div style="display:flex;gap:18px 34px;flex-wrap:wrap;margin-bottom:8px">${block('What it went on', partSlices)}${modelSlices.length ? block('By model', modelSlices) : ''}</div>`;
   // Over time: stacked bars (left axis, dollars), tokens as a line (right axis).
   const W = 640, H = 210, L = 46, R2 = 50, T = 10, B = 24, iw = W - L - R2, ih = H - T - B;
   const topC = niceTop(Math.max(0, ...b.map(cost))), topT = niceTop(Math.max(0, ...b.map((x) => x.tokens)));
@@ -8618,6 +8611,44 @@ function spendChartHTML(d, opts = {}) {
   const chart = `<div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;display:block" role="img" aria-label="Spend at API prices per ${d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : d.bucketHours + ' hours'}, by part, with tokens as a line">${grid}${bars}${line}${xl}</svg></div>
     <div class="sub" style="display:flex;gap:6px;align-items:center;margin:2px 0 4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis); bars are what each ${d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : `${d.bucketHours} hours`} cost (left axis)</div>`;
   return head + summary + chart;
+}
+/** A donut of slices ({ label, value, color }), the total in the middle; a hover tip per slice. */
+function donutHTML(slices, total, big, small, label) {
+  const R = 54, SW = 22, C = 2 * Math.PI * R;
+  const live = slices.filter((x) => x.value > 0);
+  let at = 0;
+  const arcs = total > 0 && live.length ? live.map((x) => {
+    const len = (x.value / total) * C, gap = live.length > 1 ? Math.min(2, len / 3) : 0;
+    const seg = `<circle r="${R}" cx="70" cy="70" fill="none" stroke="${x.color}" stroke-width="${SW}" stroke-dasharray="${Math.max(0, len - gap)} ${C}" stroke-dashoffset="${-at}" transform="rotate(-90 70 70)"><title>${esc(x.label)}: ${v2Money(x.value)} (${Math.round(x.value / total * 100)}%)</title></circle>`;
+    at += len; return seg;
+  }).join('') : `<circle r="${R}" cx="70" cy="70" fill="none" style="stroke:var(--line)" stroke-width="${SW}"/>`;
+  return `<svg viewBox="0 0 140 140" width="140" height="140" role="img" aria-label="${esc(label)}" style="flex:none">${arcs}
+    <text x="70" y="68" text-anchor="middle" font-size="17" font-weight="700" style="fill:var(--text)">${big}</text>
+    <text x="70" y="86" text-anchor="middle" font-size="11" style="fill:var(--dim)">${esc(small)}</text></svg>`;
+}
+/** The rows beside a donut: colour, name, amount, share. */
+function pieLegend(slices, total) {
+  return `<div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:4px 10px;align-items:center;font-size:13px;min-width:190px">${slices.map((x) =>
+    `<span style="width:10px;height:10px;border-radius:2px;background:${x.color}"></span><span style="overflow-wrap:anywhere">${esc(x.label)}</span><span style="text-align:right;font-variant-numeric:tabular-nums">${v2Money(x.value)}</span><span class="sub" style="text-align:right;font-variant-numeric:tabular-nums">${total ? (x.value / total < 0.01 && x.value > 0 ? '<1' : Math.round(x.value / total * 100)) : 0}%</span>`).join('')}</div>`;
+}
+// By model: the validated categorical palette (dataviz reference, slots 1–8),
+// each model pinned to a slot so its colour follows it from one view to the
+// next; two in one chart on the same slot: the later takes the next free one.
+const MODEL_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
+const MODEL_SLOT = { 'claude-opus-4-8': 0, 'claude-sonnet-5': 1, 'claude-fable-5': 2, 'claude-haiku-4-5': 3, 'claude-opus-4-7': 4, 'claude-opus-5': 5, 'claude-sonnet-4-6': 6, 'claude-opus-5-5': 7,
+  'claude-sonnet-5-5': 5, 'claude-fable-5-1': 2, 'claude-opus-4-6': 4 };
+function modelPieSlices(models) {
+  const top = models.slice(0, 7), rest = models.slice(7);
+  const used = new Set();
+  const out = top.map((m) => {
+    let slot = MODEL_SLOT[m.model];
+    if (slot === undefined) { let h = 0; for (const ch of m.model) h = (h * 31 + ch.charCodeAt(0)) >>> 0; slot = h % MODEL_COLORS.length; }
+    while (used.has(slot)) slot = (slot + 1) % MODEL_COLORS.length;
+    used.add(slot);
+    return { label: m.model.replace(/^claude-/, ''), value: m.cost, color: MODEL_COLORS[slot] };
+  });
+  if (rest.length) out.push({ label: `${rest.length} other${rest.length === 1 ? '' : 's'}`, value: rest.reduce((t, m) => t + m.cost, 0), color: '#9aa0a6' });
+  return out;
 }
 // The fleet chart's agents: all (empty) or the ones ticked; remembered per browser.
 let spendAgents = (() => { try { const v = JSON.parse(localStorage.getItem('hb-spend-agents') || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } })();
