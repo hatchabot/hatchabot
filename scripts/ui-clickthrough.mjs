@@ -595,14 +595,14 @@ const SCENARIOS = String.raw`(() => {
       box.querySelector('.spendpick summary').click();
       byText('.spendpick button', 'Done').click();
       ok('Done closes it', !box.querySelector('.spendpick').open);
-      ok('six ranges', [...box.querySelectorAll('.su-period')].map((b) => b.textContent).join('|') === '1 hr|6 hr|12 hr|24 hr|7 days|30 days');
+      ok('the Cost view\'s windows', [...box.querySelectorAll('.su-period')].map((b) => b.textContent).join('|') === V2_COST_PERIODS.map(([, l]) => l).join('|'));
       const svg2 = [...box.querySelectorAll('svg')].pop();
       ok('a token line', !!svg2.querySelector('polyline'));
       ok('a dollar axis and a token axis', svg2.textContent.includes('$') && /M/.test(svg2.textContent));
       ok('the legend names the right axis', box.textContent.includes('Tokens (right axis)'));
       ok('a hover tip per slice', svg2.querySelector('title').textContent.includes('cache writes'));
       const mark = window.__calls.length;
-      byText('.spendchart button', '30 days').click();
+      byText('.spendchart button', '1 mo').click();
       await until(() => window.__calls.slice(mark).some((c) => c.url.includes('/v1/usage/spend?range=month')));
       box.remove();
       // An agent's Usage tab carries the same chart, for it alone.

@@ -263,11 +263,13 @@ export function windowPricing(store: Store, viewer: string, hours: number, now =
 
 // ---- spend over time, part by part (the Usage chart, fleet and agent alike) ----
 
-export type SpendRange = '1h' | '6h' | '12h' | 'day' | 'week' | 'month';
+export type SpendRange = '1h' | '3h' | '6h' | '9h' | '12h' | 'day' | 'week' | 'month';
 /** The chart's ranges: the window, and the slice its bars are cut in (an hour at the finest: the sampler keeps hours). */
 export const SPEND_RANGES: Record<SpendRange, { hours: number; bucketHours: number }> = {
   '1h': { hours: 1, bucketHours: 1 },
+  '3h': { hours: 3, bucketHours: 1 },
   '6h': { hours: 6, bucketHours: 1 },
+  '9h': { hours: 9, bucketHours: 1 },
   '12h': { hours: 12, bucketHours: 1 },
   day: { hours: 24, bucketHours: 1 },
   week: { hours: 168, bucketHours: 3 },

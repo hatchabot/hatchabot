@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.131.2] — 2026-10-06
+
+### Changed
+- Usage → At API prices offers the same windows, with the same names, as View by → Cost: 1 hr, 3 hr, 6 hr, 9 hr, 12 hr, 1 day, 1 wk, 1 mo (3 and 9 hours added; "24 hr", "7 days", "30 days" renamed). A test keeps the two lists the same.
+
 ## [2.131.1] — 2026-10-05
 
 ### Changed

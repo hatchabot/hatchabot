@@ -6,7 +6,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { HOUR_FIELDS, type HourField, type WindowModelStats } from '../src/orchestrator/usage.js';
 import type { StoredProfile } from '../src/orchestrator/modelScorecard.js';
-import { agentCost, COST_BANDS, COST_PERIODS, costsFor, priceParts, spendSeries, tierOf, TtlCache, windowPricing } from '../src/orchestrator/agentCosts.js';
+import { agentCost, COST_BANDS, COST_PERIODS, costsFor, priceParts, SPEND_RANGES, spendSeries, tierOf, TtlCache, windowPricing } from '../src/orchestrator/agentCosts.js';
 import { priceMix } from '../src/orchestrator/modelOptions.js';
 import { publicClassFor } from '../src/api/publicRoutes.js';
 
@@ -144,6 +144,8 @@ describe('agentCost: the last 7 days at API prices', () => {
 describe('cost windows (View by → Cost\'s pills)', () => {
   it('eight windows, a week the default; each with bands about the week\'s scaled, rising, and a chip floor below its first band', () => {
     expect(Object.keys(COST_PERIODS)).toEqual(['1h', '3h', '6h', '9h', '12h', '1d', '1w', '1m']);
+    // Usage's ranges are the same windows (Chris, 2026-10-06).
+    expect(Object.values(SPEND_RANGES).map((r) => r.hours)).toEqual(Object.values(COST_PERIODS).map((p) => p.hours));
     expect(COST_PERIODS['1w']).toMatchObject({ hours: 168, bands: COST_BANDS, chipMin: 1, suffix: '/wk' });
     expect(COST_PERIODS['1m']!.hours).toBe(720); // the sampler keeps 30 days of hour buckets
     for (const [k, p] of Object.entries(COST_PERIODS)) {

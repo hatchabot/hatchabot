@@ -8533,8 +8533,9 @@ async function loadUsage() {
 // reads, output, new input (left axis, dollars) — and the tokens behind it as
 // a line on the right axis (Chris asked for the second axis, 2026-10-05).
 const SPEND_PARTS = [['cacheWrite', 'Cache writes', '#c9822b'], ['cacheRead', 'Cache reads', '#4f9a8f'], ['output', 'Output', '#7a6fd6'], ['input', 'New input', '#8a8f98']];
-const SPEND_RANGE_LABELS = [['1h', '1 hr'], ['6h', '6 hr'], ['12h', '12 hr'], ['day', '24 hr'], ['week', '7 days'], ['month', '30 days']];
-const SPEND_RANGE_WORDS = { '1h': ['the last hour', '1 hour'], '6h': ['the last 6 hours', '6 hours'], '12h': ['the last 12 hours', '12 hours'], day: ['the last 24 hours', '24 hours'], week: ['the last 7 days', '7 days'], month: ['the last 30 days', '30 days'] };
+// The same windows, and words, as View by → Cost's pills (V2_COST_PERIODS; Chris, 2026-10-06).
+const SPEND_RANGE_LABELS = [['1h', '1 hr'], ['3h', '3 hr'], ['6h', '6 hr'], ['9h', '9 hr'], ['12h', '12 hr'], ['day', '1 day'], ['week', '1 wk'], ['month', '1 mo']];
+const SPEND_RANGE_WORDS = { '1h': ['the last hour', '1 hour'], '3h': ['the last 3 hours', '3 hours'], '6h': ['the last 6 hours', '6 hours'], '9h': ['the last 9 hours', '9 hours'], '12h': ['the last 12 hours', '12 hours'], day: ['the last 24 hours', '24 hours'], week: ['the last 7 days', '7 days'], month: ['the last 30 days', '30 days'] };
 let spendRange = (() => { try { const v = localStorage.getItem('hb-spend-range'); return SPEND_RANGE_LABELS.some(([k]) => k === v) ? v : 'week'; } catch { return 'week'; } })();
 /** A box the loader fills; agentId '' = every agent of yours. */
 const spendChartBox = (agentId) => `<div class="spendchart" data-agent="${esc(agentId || '')}"><div class="sub">Loading…</div></div>`;
