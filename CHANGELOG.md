@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.136.1] — 2026-10-06
+
+### Added
+- **`AGENTS.md`** at the repo root, and in every install: where the knowledge pack is and how to use it, for Codex, Claude Code, Gemini CLI, Cursor and Copilot, which all read it. Point any of them at a Hatchabot folder and it starts from the playbook. Measured on ten real problems, the pack took both Claude Code and Codex from 18/20 to 20/20, with half to a third of the tokens. It also says how to change the code: the gates, releasing, and the lists a test enforces.
+
 ## [2.136.0] — 2026-10-06
 
 ### Added
