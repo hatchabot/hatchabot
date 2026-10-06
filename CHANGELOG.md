@@ -2,7 +2,7 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [Unreleased]
+## [2.132.0] — 2026-10-06
 
 ### Added
 - **An installer with one prerequisite** (docs/install-bundle.md). On Ubuntu 22.04+/Debian 12+ (x64, arm64) and Apple-silicon Macs, `curl -fsSL https://hatchabot.com/install.sh | bash` downloads the release's **prebuilt bundle** — Hatchabot with its own Node and its database driver compiled on Ubuntu 22.04 — checks its hash and runs its self-check: no git, no Node, no compiler on the machine. Anywhere else, or if a bundle is missing or fails its check, it falls back to the native install. Bundles are built for each release by `.github/workflows/bundles.yml` (`scripts/build-bundle.sh`).
