@@ -15,6 +15,7 @@
 # a canary on beta. (The development machine, which serves from a separate
 # checkout, has follow-latest.sh.)
 set -euo pipefail
+[ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
 DIR="$PWD"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/hatchabot"
@@ -69,17 +70,13 @@ valid "$CHANNEL" || { echo "Usage: $0 stable|beta|latest   (or --install <channe
 
 # What the channel names now — the same resolution as upgrade.sh, needed here
 # only to remember a failure and not retry it every ten minutes.
-git fetch --tags --force --quiet origin
-newest() { git tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | sed -n 1p; }
-case "$CHANNEL" in
-  latest) TARGET="$(newest)" ;;
-  *) TARGET="$(git show origin/main:channels.json 2>/dev/null | sed -nE "s/.*\"$CHANNEL\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | sed -n 1p)"
-     [ -n "$TARGET" ] || TARGET="$(newest)" ;;
-esac
+# (A bundle install has no clone: release-target.sh asks GitHub instead.)
+TARGET="$("$DIR/scripts/release-target.sh" "$CHANNEL" 2>/dev/null)" || exit 0
 [ -n "$TARGET" ] || exit 0
 # Pinned by hand to a version (hatchabot upgrade vX.Y.Z): leave it there.
 case "$(tr -d '[:space:]' < "$HOME/.config/hatchabot/channel" 2>/dev/null)" in v[0-9]*) exit 0 ;; esac
-CUR="$(git describe --tags --exact-match 2>/dev/null || true)"
+if [ -f BUNDLE.json ] && [ ! -d .git ]; then CUR="$(sed -nE 's/.*"tag":"([^"]+)".*/\1/p' BUNDLE.json)"
+else CUR="$(git describe --tags --exact-match 2>/dev/null || true)"; fi
 [ "$CUR" = "$TARGET" ] && exit 0
 mkdir -p "$STATE"
 FAILED="$STATE/follow-channel-failed"

@@ -10,6 +10,7 @@
 # version is how to go back. If the new release does not come up, the previous
 # one is restored.
 set -euo pipefail
+[ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
 DIR="$PWD"
 
@@ -27,19 +28,14 @@ CHANNEL="$ARG"
 [ -z "$CHANNEL" ] && [ -f "$CHANNEL_FILE" ] && CHANNEL="$(tr -d '[:space:]' < "$CHANNEL_FILE")"
 CHANNEL="${CHANNEL:-stable}"
 
-git fetch --tags --force --quiet origin
+# A bundle install (install.sh) has no clone: it upgrades by swapping in the
+# next release's bundle (below), and resolves channels without git.
+BUNDLED=0; [ -f BUNDLE.json ] && [ ! -d .git ] && BUNDLED=1
 # The newer of two versions. `sort -V` alone ranks v2.35.0-beta.1 ABOVE v2.35.0,
 # which stranded a beta tester on the prerelease; "~" sorts below everything.
 vernewer() { printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/'; }
-newest() { git tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | sed -n 1p; }  # sed, not head: head closes the pipe early and pipefail makes that exit 141
-case "$CHANNEL" in
-  latest) TARGET="$(newest)" ;;
-  stable|beta) TARGET="$(git show origin/main:channels.json 2>/dev/null | sed -nE "s/.*\"$CHANNEL\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | sed -n 1p)"
-    [ -n "$TARGET" ] || TARGET="$(newest)" ;;
-  v[0-9]*) git rev-parse -q --verify "refs/tags/$CHANNEL" >/dev/null || { echo "There is no release $CHANNEL."; exit 1; }
-    TARGET="$CHANNEL" ;;
-  *) echo "Unknown channel '$CHANNEL' — use stable, beta, latest, or a version like v2.31.3."; exit 1 ;;
-esac
+TARGET="$("$DIR/scripts/release-target.sh" "$CHANNEL")" || exit 1
+[ -n "$TARGET" ] || { echo "Could not find which release $CHANNEL names (no network to github.com?)."; exit 3; }
 
 # A channel asked for by name is remembered, so the next plain upgrade follows it
 # — even when there is nothing to install today.
@@ -50,7 +46,8 @@ case "$ARG" in stable|beta|latest) mkdir -p "$(dirname "$CHANNEL_FILE")"; echo "
 case "$ARG" in v[0-9]*) mkdir -p "$(dirname "$CHANNEL_FILE")"; echo "$ARG" > "$CHANNEL_FILE"
   echo "Pinned to $ARG — automatic upgrades pause here. Follow a channel again with: hatchabot upgrade stable" ;; esac
 
-CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
+if [ "$BUNDLED" = 1 ]; then CUR="$(sed -nE 's/.*"tag":"([^"]+)".*/\1/p' BUNDLE.json)"
+else CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"; fi
 if [ "$CUR" = "$TARGET" ]; then echo "Already on $TARGET ($CHANNEL)."; exit 0; fi
 case "$CHANNEL" in v[0-9]*) ;; *)
   # A channel never takes a machine backwards (this one may run ahead of it).
@@ -58,7 +55,7 @@ case "$CHANNEL" in v[0-9]*) ;; *)
     echo "On $CUR, which is newer than $CHANNEL ($TARGET). Nothing to do — name a version to go back."; exit 0
   fi ;;
 esac
-if [ -n "$(git status --porcelain)" ]; then
+if [ "$BUNDLED" = 0 ] && [ -n "$(git status --porcelain)" ]; then
   echo "$DIR has local changes — an upgrade would overwrite them. Refusing:"; git status --porcelain | sed 's/^/    /'; exit 2
 fi
 
@@ -78,6 +75,44 @@ RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tes
 # that second run failed (and blacklisted) a good release (night review).
 INSTALL="${HATCHABOT_INSTALL_CMD:-./scripts/ensure-deps.sh --quiet}"   # (likewise)
 echo "Upgrading $CUR → $TARGET ($CHANNEL)…"
+if [ "$BUNDLED" = 1 ]; then
+  # The next release's bundle beside this install: downloaded, its hash checked,
+  # unpacked and self-checked before anything here moves. Then the code is
+  # swapped — only the bundle's own top-level files (its .bundle-files), so
+  # .env, data/ and backups stay — with the old ones kept until the new
+  # release is up; if it does not come up, they go back.
+  PLATFORM="$(sed -nE 's/.*"platform":"([^"]+)".*/\1/p' BUNDLE.json)"
+  NAME="hatchabot-$TARGET-$PLATFORM.tar.gz"
+  BASE="${HATCHABOT_BUNDLE_BASE:-https://github.com/${HATCHABOT_SLUG:-hatchabot/hatchabot}/releases/download}"
+  STAGE="$(mktemp -d "$(dirname "$DIR")/.hatchabot-next-XXXXXX")"
+  trap 'rmdir "$LOCK" 2>/dev/null; rm -f "$HATCHABOT_UPGRADE_COPY"; rm -rf "$STAGE"' EXIT
+  sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+  curl -fsSL --retry 3 -o "$STAGE/$NAME" "$BASE/$TARGET/$NAME" || { echo "No bundle for $TARGET on $PLATFORM yet — try again later."; exit 3; }
+  WANT="$(curl -fsSL --retry 3 "$BASE/$TARGET/$NAME.sha256" 2>/dev/null | cut -d' ' -f1)"
+  [ -n "$WANT" ] && [ "$WANT" = "$(sha "$STAGE/$NAME")" ] || { echo "The $TARGET bundle's checksum does not match — not installing it."; exit 3; }
+  tar -xzf "$STAGE/$NAME" -C "$STAGE" || { echo "Could not unpack the $TARGET bundle."; exit 3; }
+  NEW="$STAGE/hatchabot"
+  ( cd "$NEW" && ./.node/bin/node -e 'new (require("better-sqlite3"))(":memory:").exec("SELECT 1")' ) >/dev/null 2>&1 || { echo "The $TARGET bundle does not run on this machine — staying on $CUR."; exit 3; }
+  # A bundle from before the file list: what it holds is what it has.
+  [ -f "$NEW/.bundle-files" ] || ( cd "$NEW" && ls -A > .bundle-files )
+  [ -f .bundle-files ] || ls -A "$NEW" > .bundle-files.guess
+  OLDLIST="$( [ -f .bundle-files ] && cat .bundle-files || cat .bundle-files.guess )"; rm -f .bundle-files.guess
+  PREV="$DIR/.prev-release"
+  rm -rf "$PREV"; mkdir -p "$PREV"
+  while IFS= read -r f; do [ -n "$f" ] && [ -e "$DIR/$f" ] && mv "$DIR/$f" "$PREV/"; done <<< "$OLDLIST"
+  while IFS= read -r f; do [ -n "$f" ] && [ -e "$NEW/$f" ] && mv "$NEW/$f" "$DIR/"; done < "$NEW/.bundle-files"
+  rollback_bundle() {
+    echo "Rolling back to $CUR…"
+    while IFS= read -r f; do [ -n "$f" ] && rm -rf "${DIR:?}/$f"; done < "$DIR/.bundle-files"
+    for f in "$PREV"/* "$PREV"/.[!.]*; do [ -e "$f" ] && mv "$f" "$DIR/"; done
+    rm -rf "$PREV"
+    # The old release's restart, on its own Node.
+    PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh"
+  }
+  PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh" || { rollback_bundle; exit 1; }
+  rm -rf "$PREV"
+  echo "Now on $TARGET."
+else
 # `npm ci` deletes node_modules before installing, so a registry outage or a
 # full disk used to leave the machine with NO dependencies (and the rollback's
 # own npm ci failing under the same fault). Keep the working tree aside until
@@ -91,6 +126,7 @@ $INSTALL || { rollback; exit 3; }
 $RESTART || { rollback; exit 1; }
 rm -rf node_modules.prev
 echo "Now on $TARGET."
+fi
 
 # The runtime image this release defaults to (OpenClaw X in the Dockerfile),
 # if the machine does not have it yet. Until 2026-09-25 an upgrade left the

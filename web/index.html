@@ -3262,6 +3262,13 @@ async function loadConfig() {
     $('setupCodeBox').open = true;
     $('setupCodeBox').querySelector('summary').textContent = 'The setup code (needed on this machine too)';
   }
+  // The installer's link carries the setup code after a "#" (scripts/first-run-link.sh):
+  // fill it in, open the box, and take it out of the address bar at once.
+  const fromLink = /(?:^#|&)setup=([0-9a-f]{4,32})(?:&|$)/i.exec(location.hash)?.[1];
+  if (fromLink) {
+    try { history.replaceState(null, '', location.pathname + location.search); } catch { /* keep going */ }
+    if (setup && $('setupCode')) { $('setupCode').value = fromLink; if ($('setupCodeBox')) $('setupCodeBox').open = true; }
+  }
   $('acctClaim').style.display = claim ? '' : 'none';
   // With both, Google is the owner's door and the form is everyone else's.
   $('acctLoginNote').textContent = identity

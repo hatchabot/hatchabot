@@ -8,6 +8,7 @@
 #   docker tag hatchabot-runtime:X hatchabot-runtime:latest          # promote
 #   → app shows "update available" per agent; Rebuild upgrades it, memory kept.
 set -euo pipefail
+[ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
 
 # Default = the version the fleet is proven on (candidate/promote flow above

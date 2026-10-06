@@ -13,6 +13,7 @@
 # The clone you are standing in is never deleted — the last line tells you how.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+[ -x .node/bin/node ] && PATH="$PWD/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 REPO="$(pwd)"
 
 PURGE=0; BACKUPS=0; ASSUME_YES=0

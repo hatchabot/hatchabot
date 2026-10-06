@@ -1,0 +1,48 @@
+name: Release bundles
+
+# The prebuilt bundles the installer downloads (docs/install-bundle.md): one per
+# platform, attached to the release. Built on an OLD Ubuntu so the compiled
+# database driver loads on any glibc from 2.35 up (Debian 12, Ubuntu 22.04+);
+# anything older falls back to the native install.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build bundles for (e.g. v2.132.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x64
+          - os: ubuntu-22.04-arm
+            platform: linux-arm64
+          - os: macos-14
+            platform: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: build
+        run: scripts/build-bundle.sh "$TAG" "${{ matrix.platform }}" dist-bundles
+      - name: attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist-bundles/* --clobber

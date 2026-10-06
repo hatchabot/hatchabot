@@ -20,7 +20,10 @@ EnvironmentFile=__HATCHABOT_DIR__/.env
 # live outside it, so install-service.sh bakes their real locations in here.
 Environment=PATH=__HATCHABOT_PATH__
 # Quoted: systemd splits ExecStart on spaces, so a clone path with one broke it.
-ExecStart="__HATCHABOT_DIR__/node_modules/.bin/tsx" src/index.ts
+# with-docker.sh: right after the installer added you to the docker group this
+# user manager does not have it yet — the wrapper starts it through `sg docker`
+# so no log-out is needed (2026-10-06).
+ExecStart="__HATCHABOT_DIR__/scripts/with-docker.sh" "__HATCHABOT_DIR__/node_modules/.bin/tsx" src/index.ts
 Restart=always
 RestartSec=3
 # tsx exits 143 on SIGTERM; that's a clean shutdown, not a failure.

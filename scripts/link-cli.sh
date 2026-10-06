@@ -8,7 +8,35 @@
 # moving to a new laptop with Migration Assistant, a fresh shell profile, or an
 # `npm link` that failed during setup. Safe to re-run.
 set -euo pipefail
+[ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
+# A bundle install has its own Node and no npm: the commands are two small
+# launchers in ~/.local/bin that run this install's CLI with its Node.
+if [ -f BUNDLE.json ] && [ -x .node/bin/node ]; then
+  BIN="$HOME/.local/bin"
+  mkdir -p "$BIN"
+  for name in hatchabot hbt; do
+    if [ "$name" = hbt ] && OTHER="$(command -v hbt 2>/dev/null)" && [ "$OTHER" != "$BIN/hbt" ]; then
+      echo "note: another program here is already called hbt ($OTHER), so use the full name: hatchabot."; continue
+    fi
+    printf '#!/usr/bin/env bash\n# Hatchabot (%s) — written by scripts/link-cli.sh\nexec "%s/.node/bin/node" "%s/bin/hatchabot.mjs" "$@"\n' "$name" "$PWD" "$PWD" > "$BIN/$name"
+    chmod 755 "$BIN/$name"
+  done
+  echo "linked: $BIN/hatchabot$([ -x "$BIN/hbt" ] && echo ", $BIN/hbt")"
+  case ":$PATH:" in
+    *":$BIN:"*) ;;
+    *)
+      LINE="export PATH=\"$BIN:\$PATH\""
+      for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+        [ -f "$rc" ] || [ "$rc" = "$HOME/.$(basename "${SHELL:-bash}")rc" ] || continue
+        grep -qF "$BIN" "$rc" 2>/dev/null || { printf '\n# hatchabot CLI\n%s\n' "$LINE" >> "$rc"; echo "added to $rc: $LINE"; }
+      done
+      echo "Open a new terminal (or run: $LINE) for the change to take effect there." ;;
+  esac
+  [ "${1:-}" = --no-doctor ] && exit 0
+  echo; "$BIN/hatchabot" doctor || true
+  exit 0
+fi
 command -v npm >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 command -v npm >/dev/null 2>&1 || { echo "npm is not installed — install Node 22 first (https://nodejs.org), then re-run."; exit 1; }
 [ -d node_modules ] || { echo "Installing dependencies…"; npm ci --silent; }

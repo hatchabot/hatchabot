@@ -12,6 +12,7 @@
 # dependency added upstream crashes the service on import with nothing on
 # screen but a dead port).
 set -euo pipefail
+[ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
 
 # npm may live off the non-interactive PATH (macOS launchd/ssh quirk).
@@ -28,4 +29,6 @@ fi
 
 echo "Installing dependencies (the lockfile changed since the last install)…"
 npm ci --no-audit --no-fund
+# The driver's prebuilt binary needs glibc 2.38: compile it here when it does not load.
+./scripts/sqlite-driver.sh
 echo "$LOCK_HASH" > "$STAMP"

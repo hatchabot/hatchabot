@@ -315,7 +315,14 @@ export async function publicAccessFacts(env: Record<string, string>, dbPath: str
  *  so "behind" means "behind what this machine has seen". */
 export function checkoutFacts(dir = process.cwd()): DoctorFacts['checkout'] {
   const git = (...args: string[]) => sh('git', ['-C', dir, ...args]);
-  if (!git('rev-parse', '--git-dir')) return undefined;
+  if (!git('rev-parse', '--git-dir')) {
+    // A bundle install (install.sh) has no clone: its release is in BUNDLE.json, and it cannot be "dirty".
+    try {
+      const b = JSON.parse(readFileSync(join(dir, 'BUNDLE.json'), 'utf8')) as { tag?: unknown };
+      if (typeof b.tag === 'string' && /^v\d/.test(b.tag)) return { tag: b.tag, dirty: [] };
+    } catch { /* not a bundle either */ }
+    return undefined;
+  }
   const tag = git('describe', '--tags', '--exact-match')?.trim() || undefined;
   const latestTag = git('tag', '-l', 'v[0-9]*', '--sort=-v:refname')?.split('\n')[0]?.trim() || undefined;
   // Porcelain lines are "XY path", but the captured output is trimmed, so the

@@ -7,6 +7,7 @@
 # After install: systemctl --user {status|restart|stop} hatchabot
 #                journalctl --user -u hatchabot -f
 set -euo pipefail
+[ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
 
 if [ ! -f .env ]; then

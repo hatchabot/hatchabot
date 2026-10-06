@@ -8,6 +8,9 @@
 #   scripts/clean-install-test.sh --ai-source "Claude Max Setup Token"
 #                                                      # …plus the full agent regression
 #   scripts/clean-install-test.sh --channel latest --no-upgrade --keep
+#   scripts/clean-install-test.sh --image ubuntu:22.04 --installer-url http://<this box>:8077/install.sh \
+#       --bundle-base http://<this box>:8077 --channel v2.132.0-test --no-upgrade
+#                                                      # a bundle built from a branch, served from here
 #
 # What it does, in a fresh Ubuntu 24.04 VM (LXD, on this machine):
 #   1. the public one-liner from hatchabot.com on --channel (default stable),
@@ -26,7 +29,7 @@
 # On a machine that also runs Docker, the VM has no internet until Docker's
 # firewall lets LXD's bridge through; the script checks and says how.
 set -uo pipefail
-CHANNEL=stable; UPGRADE=1; KEEP=0; AI_SOURCE=""
+CHANNEL=stable; UPGRADE=1; KEEP=0; AI_SOURCE=""; IMAGE=ubuntu:24.04; BUNDLE_BASE=""; UPGRADE_TO=latest
 INSTALLER_URL="https://hatchabot.com/install.sh"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -36,6 +39,9 @@ while [ $# -gt 0 ]; do
     --keep-running) KEEP=1; KEEP_RUNNING=1; shift ;;   # leave the VM up afterwards (stop it by hand when done)
     --ai-source) AI_SOURCE="$2"; shift 2 ;;
     --installer-url) INSTALLER_URL="$2"; shift 2 ;;
+    --image) IMAGE="$2"; shift 2 ;;               # e.g. ubuntu:22.04 (glibc 2.35: the oldest the bundle supports)
+    --bundle-base) BUNDLE_BASE="$2"; shift 2 ;;   # where the installer takes bundles from (HATCHABOT_BUNDLE_BASE)
+    --upgrade-to) UPGRADE_TO="$2"; shift 2 ;;     # what `hbt upgrade` is asked for (default latest)
     -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option $1 (see --help)"; exit 2 ;;
   esac
@@ -68,10 +74,10 @@ echo "Clean install test — $VM, channel $CHANNEL, logs in $OUT"
 echo
 # No input and a time limit: run from a background job, the lxc client once sat
 # for 15 minutes after the VM was already up.
-timeout 600 bash -c "$(declare -f L); L launch ubuntu:24.04 $VM --vm -c limits.cpu=4 -c limits.memory=8GiB -d root,size=40GiB" </dev/null >"$OUT/launch.log" 2>&1 \
-  || { bad "launch a fresh Ubuntu 24.04 VM ($(tail -1 "$OUT/launch.log"))"; exit 1; }
+timeout 600 bash -c "$(declare -f L); L launch $IMAGE $VM --vm -c limits.cpu=4 -c limits.memory=8GiB -d root,size=40GiB" </dev/null >"$OUT/launch.log" 2>&1 \
+  || { bad "launch a fresh $IMAGE VM ($(tail -1 "$OUT/launch.log"))"; exit 1; }
 for _ in $(seq 1 60); do L exec "$VM" -- cloud-init status 2>/dev/null | grep -q done && break; sleep 5; done
-ok "fresh Ubuntu 24.04 VM ($(L exec "$VM" -- uname -m))"
+ok "fresh $IMAGE VM ($(L exec "$VM" -- uname -m), $(L exec "$VM" -- getconf GNU_LIBC_VERSION))"
 
 if ! L exec "$VM" -- sh -c 'timeout 8 ping -c1 -W5 1.1.1.1 >/dev/null 2>&1'; then
   bad "the VM has no internet"
@@ -87,7 +93,7 @@ L exec "$VM" -- sh -c 'DEBIAN_FRONTEND=noninteractive apt-get -qq update && DEBI
 cat >"$OUT/install.exp" <<EOF
 # yes to each offer, Enter for the default sign-in
 set timeout 1800
-spawn bash -lc {HATCHABOT_CHANNEL=$CHANNEL bash -c "\$(curl -fsSL $INSTALLER_URL)"}
+spawn bash -lc {HATCHABOT_CHANNEL=$CHANNEL ${BUNDLE_BASE:+HATCHABOT_BUNDLE_BASE=$BUNDLE_BASE} bash -c "\$(curl -fsSL $INSTALLER_URL)"}
 expect {
   -re {\[y/N\] \$}      { send "y\r"; exp_continue }
   -re {Choose \[1\]: \$} { send "\r"; exp_continue }
@@ -109,7 +115,13 @@ if [ "$INSTALLED" = 0 ]; then
   sed 's/\r//g' "$OUT"/install-*.log | grep -E '✗|ERR!|error' | tail -5 | sed 's/^/    /'
   exit 1
 fi
-ok "installed from the public one-liner ($INSTALLED run$([ "$INSTALLED" = 1 ] || echo s), the questions answered as a person would)"
+ok "installed from $INSTALLER_URL ($INSTALLED run$([ "$INSTALLED" = 1 ] || echo s), the questions answered as a person would)"
+# One prerequisite: a bundle install brings its own Node — none from the system.
+if vm 'test -f ~/hatchabot/BUNDLE.json'; then
+  ok "bundle install: $(vm 'cat ~/hatchabot/BUNDLE.json' | grep -oE '"platform":"[^"]+"|"node":"[^"]+"' | tr '\n' ' ')"
+  vm 'command -v node || command -v git || command -v gcc' >/dev/null 2>&1 && bad "the system gained node, git or gcc" || ok "no Node, git or compiler on the system"
+fi
+grep -q "Open Hatchabot:" "$OUT/install-$INSTALLED.log" && ok "it ends with the link: $(sed 's/\r//g' "$OUT/install-$INSTALLED.log" | grep -oE 'Open Hatchabot: +[^ ]+' | sed -n 1p | sed 's/#setup=.*/#setup=…/')" || bad "no link at the end of the install"
 QS=$(sed 's/\r//g' "$OUT"/install-*.log | grep -c '\[y/N\] y')
 [ "$QS" -ge 1 ] && ok "its questions were visible ($QS answered)" || bad "no question was visible to answer"
 
@@ -124,6 +136,8 @@ REL=$(ver <"$OUT/doctor.log")
 cat >"$OUT/firstrun.sh" <<'EOF'
 #!/usr/bin/env bash
 B=http://localhost:8080
+# A bundle install has no system Node: use its own.
+command -v node >/dev/null || PATH="$HOME/hatchabot/.node/bin:$PATH"
 j() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const v=JSON.parse(s);console.log(String(($1)(v)??''))}catch(e){console.log('')}})"; }
 t() { [ "$2" = "$3" ] && echo "PASS $1" || echo "FAIL $1 (got '$2', want '$3')"; }
 t "sign-in defaults to per-person accounts, first account not made yet" "$(curl -s $B/v1/config | j 'v=>v.authMode+"/"+v.needsSetup')" "accounts/true"
@@ -145,12 +159,12 @@ done < <(vm ./firstrun.sh 2>&1)
 
 # ---- 3. the upgrade every user will run -----------------------------------------
 if [ "$UPGRADE" = 1 ]; then
-  vmi 'hbt upgrade latest' >"$OUT/upgrade.log"
+  vmi "${BUNDLE_BASE:+HATCHABOT_BUNDLE_BASE=$BUNDLE_BASE }hbt upgrade $UPGRADE_TO" >"$OUT/upgrade.log"
   NOW=$(vmi 'hatchabot doctor' | ver)
   if grep -qE "Now on|Already on" "$OUT/upgrade.log" && vm 'systemctl --user is-active hatchabot' | grep -q '^active'; then
-    ok "hbt upgrade latest: $REL → $NOW"; REL="$NOW"
+    ok "hbt upgrade $UPGRADE_TO: $REL → $NOW"; REL="$NOW"
   else
-    bad "hbt upgrade latest — $(tail -2 "$OUT/upgrade.log" | tr '\n' ' ')"
+    bad "hbt upgrade $UPGRADE_TO — $(tail -2 "$OUT/upgrade.log" | tr '\n' ' ')"
   fi
 fi
 

@@ -2,6 +2,7 @@
 # Restart the Hatchabot control plane, whichever service manager runs it.
 #   ./scripts/restart.sh
 set -euo pipefail
+[ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
 
 # npm may live off the non-interactive PATH (macOS launchd/ssh quirk).

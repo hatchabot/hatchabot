@@ -36,8 +36,8 @@ describe('deploy and upgrade', () => {
     expect(s).not.toMatch(/^\s*"\$\{[A-Z_]+_ARG\[@\]\}"/m);
   });
   it('the unit files quote the install path in ExecStart', () => {
-    expect(src('deploy/hatchabot.service')).toMatch(/^ExecStart="__HATCHABOT_DIR__\/node_modules\/\.bin\/tsx" src\/index\.ts$/m);
-    expect(src('deploy/hatchabot-backup.service')).toMatch(/^ExecStart="__HATCHABOT_DIR__\/scripts\/backup-volumes\.sh"$/m);
+    expect(src('deploy/hatchabot.service')).toMatch(/^ExecStart="__HATCHABOT_DIR__\/scripts\/with-docker\.sh" "__HATCHABOT_DIR__\/node_modules\/\.bin\/tsx" src\/index\.ts$/m);
+    expect(src('deploy/hatchabot-backup.service')).toMatch(/^ExecStart="__HATCHABOT_DIR__\/scripts\/with-docker\.sh" "__HATCHABOT_DIR__\/scripts\/backup-volumes\.sh"$/m);
   });
   it('the installer reads a Mac install out of its launchd plist too', () => {
     expect(src('install.sh')).toMatch(/Library\/LaunchAgents\/\$p\.plist/);

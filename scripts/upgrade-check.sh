@@ -13,6 +13,7 @@
 # So: build a database with the OLD code, open it with the NEW code, and diff
 # the schema. Real upgrade, not a simulation of one.
 set -euo pipefail
+[ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
 TMP="$(mktemp -d)"

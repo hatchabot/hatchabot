@@ -9,6 +9,7 @@
 # (random secret key + how people sign in), pulls the runtime image (builds only if that fails),
 # installs the systemd user service, and links the `hatchabot` CLI.
 set -euo pipefail
+[ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 umask 077   # .env and ~/.config/hatchabot/env hold secrets: never created wider than 0600
 cd "$(dirname "$0")/.."
 
@@ -193,10 +194,13 @@ if docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; t
 fi
 # The port the install actually has (.env, read above), not the first-run
 # default: a re-run on a PORT=8101 install said "open :8080" (night review).
+# Where to open it — a link and a QR code, with the setup code inside when it is needed.
+./scripts/first-run-link.sh "${P:-${HATCHABOT_SETUP_PORT:-8080}}" || true
+echo
 cat <<EOF | sed "s|__PORT__|${P:-${HATCHABOT_SETUP_PORT:-8080}}|"
-  1. Open http://localhost:__PORT__ on THIS machine. With family accounts you
-     create your own account there (you become its owner); with a shared
-     password you unlock with it.
+  1. Open the link above (or http://localhost:__PORT__ on this machine). With
+     family accounts you create your own account there (you become its owner);
+     with a shared password you unlock with it.
   2. Connect an AI source (⚙ AI). Three options:
        - a Claude Pro/Max login already on this machine (one tap),
        - an API key,

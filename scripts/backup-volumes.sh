@@ -22,6 +22,7 @@
 # The tarballs leave out caches the agent rebuilds on start (TAR_EXCLUDES
 # below), so a restored volume without them is complete.
 set -euo pipefail
+[ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
 
 # The server namespaces its volumes under HATCHABOT_PREFIX — back up whatever
