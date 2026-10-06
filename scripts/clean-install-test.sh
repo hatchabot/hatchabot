@@ -87,6 +87,8 @@ if ! L exec "$VM" -- sh -c 'timeout 8 ping -c1 -W5 1.1.1.1 >/dev/null 2>&1'; the
   echo "    sudo iptables -I DOCKER-USER -o lxdbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
   exit 1
 fi
+# What the image already has (Ubuntu's cloud image ships git), so "gained" means gained.
+BEFORE="$(L exec "$VM" -- sh -c 'for t in node git gcc; do command -v $t >/dev/null && echo $t; done' 2>/dev/null | tr '\n' ' ')"
 L exec "$VM" -- sh -c 'DEBIAN_FRONTEND=noninteractive apt-get -qq update && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y expect' >"$OUT/expect.log" 2>&1
 
 # ---- 1. the installer, answered like a person ----------------------------------
@@ -119,7 +121,8 @@ ok "installed from $INSTALLER_URL ($INSTALLED run$([ "$INSTALLED" = 1 ] || echo 
 # One prerequisite: a bundle install brings its own Node — none from the system.
 if vm 'test -f ~/hatchabot/BUNDLE.json'; then
   ok "bundle install: $(vm 'cat ~/hatchabot/BUNDLE.json' | grep -oE '"platform":"[^"]+"|"node":"[^"]+"' | tr '\n' ' ')"
-  vm 'command -v node || command -v git || command -v gcc' >/dev/null 2>&1 && bad "the system gained node, git or gcc" || ok "no Node, git or compiler on the system"
+  GAINED=""; for t in node git gcc; do case " $BEFORE " in *" $t "*) ;; *) vm "command -v $t" >/dev/null 2>&1 && GAINED="$GAINED $t" ;; esac; done
+  [ -z "$GAINED" ] && ok "the system gained no Node, git or compiler (had: ${BEFORE:-none})" || bad "the system gained:$GAINED"
 fi
 grep -q "Open Hatchabot:" "$OUT/install-$INSTALLED.log" && ok "it ends with the link: $(sed 's/\r//g' "$OUT/install-$INSTALLED.log" | grep -oE 'Open Hatchabot: +[^ ]+' | sed -n 1p | sed 's/#setup=.*/#setup=…/')" || bad "no link at the end of the install"
 QS=$(sed 's/\r//g' "$OUT"/install-*.log | grep -c '\[y/N\] y')
