@@ -74,7 +74,11 @@ fi
 # 2026-09-23). Restarting the manager fixes it; a login session is not touched.
 DOCKER_GID="$(getent group docker 2>/dev/null | cut -d: -f3)"
 MANAGER="$(pgrep -u "$USER" -x systemd 2>/dev/null | sed -n 1p)"
-if [ -n "$DOCKER_GID" ] && [ -n "$MANAGER" ] && id -nG "$USER" | tr ' ' '\n' | grep -qx docker \
+# Since 2026-10-06 the units start through scripts/with-docker.sh, which takes
+# the group with `sg docker` when the manager lacks it — so no restart is
+# offered (in a clean VM `systemctl restart user@` failed and took the user's
+# bus down with it). Kept for an install whose units predate the wrapper.
+if [ ! -x scripts/with-docker.sh ] && [ -n "$DOCKER_GID" ] && [ -n "$MANAGER" ] && id -nG "$USER" | tr ' ' '\n' | grep -qx docker \
    && ! grep '^Groups:' "/proc/$MANAGER/status" 2>/dev/null | tr ' \t' '\n\n' | grep -qx "$DOCKER_GID"; then
   echo
   echo "⚠ Your background services started before you joined the docker group, so"

@@ -24,6 +24,7 @@ function world() {
   git(src, 'config', 'user.email', 'test@example.com'); git(src, 'config', 'user.name', 'Test');
   mkdirSync(join(src, 'scripts'));
   writeFileSync(join(src, 'scripts', 'upgrade.sh'), readFileSync('scripts/upgrade.sh'), { mode: 0o755 });
+  writeFileSync(join(src, 'scripts', 'release-target.sh'), readFileSync('scripts/release-target.sh'), { mode: 0o755 });
   writeFileSync(join(src, '.gitignore'), 'node_modules/\nnode_modules.prev/\n');
   writeFileSync(join(src, 'package.json'), '{"name":"x","version":"1.0.0"}\n');
   writeFileSync(join(src, 'channels.json'), '{"stable":"v1.0.0","beta":"v1.0.0"}\n');
