@@ -47,7 +47,7 @@ echo "Deploying $TAG to $PROD (currently $CUR)…"
 # the old release is back untouched).
 rm -rf node_modules.prev; [ -d node_modules ] && mv node_modules node_modules.prev
 restore_deps() { rm -rf node_modules; [ -d node_modules.prev ] && mv node_modules.prev node_modules; return 0; }
-rollback() { echo "Rolling back to $CUR…"; git checkout --quiet "$CUR" && restore_deps && systemctl --user restart "$SVC"; }
+rollback() { echo "Rolling back to ${CUR}…"; git checkout --quiet "$CUR" && restore_deps && systemctl --user restart "$SVC"; }
 git checkout --quiet "$TAG"
 # A failed install must not leave prod checked out at a tag it can't run.
 npm ci --silent || { rollback; exit 3; }

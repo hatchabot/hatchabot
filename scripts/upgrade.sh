@@ -102,7 +102,7 @@ if [ "$BUNDLED" = 1 ]; then
   while IFS= read -r f; do [ -n "$f" ] && [ -e "$DIR/$f" ] && mv "$DIR/$f" "$PREV/"; done <<< "$OLDLIST"
   while IFS= read -r f; do [ -n "$f" ] && [ -e "$NEW/$f" ] && mv "$NEW/$f" "$DIR/"; done < "$NEW/.bundle-files"
   rollback_bundle() {
-    echo "Rolling back to $CUR…"
+    echo "Rolling back to ${CUR}…"
     while IFS= read -r f; do [ -n "$f" ] && rm -rf "${DIR:?}/$f"; done < "$DIR/.bundle-files"
     for f in "$PREV"/* "$PREV"/.[!.]*; do [ -e "$f" ] && mv "$f" "$DIR/"; done
     rm -rf "$PREV"
@@ -119,7 +119,7 @@ else
 # the new one is in.
 rm -rf node_modules.prev; [ -d node_modules ] && mv node_modules node_modules.prev
 restore_deps() { rm -rf node_modules; [ -d node_modules.prev ] && mv node_modules.prev node_modules; return 0; }
-rollback() { echo "Rolling back to $CUR…"; git checkout --quiet "$CUR" && restore_deps && $RESTART; }
+rollback() { echo "Rolling back to ${CUR}…"; git checkout --quiet "$CUR" && restore_deps && $RESTART; }
 git checkout --quiet "$TARGET"
 # Exit 3: the install step failed (usually transient) and the old release is back untouched.
 $INSTALL || { rollback; exit 3; }

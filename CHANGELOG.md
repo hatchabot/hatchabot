@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.132.2] — 2026-10-06
+
+### Fixed
+- **The installer stopped on a Mac** at "2/3 Hatchabot" with `name�: unbound variable`: macOS's bash 3.2 read the "…" right after `$name` as part of the variable's name. Written `${name}…` now, and the same in upgrade.sh's rollback message; a test refuses a `$variable` followed by a non-ASCII character in any script.
+
 ## [2.132.1] — 2026-10-06
 
 ### Fixed

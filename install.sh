@@ -184,7 +184,7 @@ sha256() { if have sha256sum; then sha256sum "$1" | cut -d' ' -f1; else shasum -
 install_bundle() {
   local name="hatchabot-$TAG-$PLATFORM.tar.gz" tmp want
   tmp="$(mktemp -d)"
-  echo "   downloading $name…"
+  echo "   downloading ${name}…"
   curl -fsSL --retry 3 -o "$tmp/$name" "$BUNDLES/$TAG/$name" || { echo "   (no bundle for $TAG on $PLATFORM)"; rm -rf "$tmp"; return 1; }
   want="$(curl -fsSL --retry 3 "$BUNDLES/$TAG/$name.sha256" 2>/dev/null | cut -d' ' -f1)"
   [ -n "$want" ] && [ "$want" = "$(sha256 "$tmp/$name")" ] || { echo "   (the bundle's checksum does not match — not using it)"; rm -rf "$tmp"; return 1; }
