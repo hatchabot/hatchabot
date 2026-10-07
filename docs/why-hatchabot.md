@@ -205,10 +205,10 @@ as possible, only where it is needed. The agent gives the program a home: a
 container, the owner's connections, an AI source, Telegram for notices, and a
 chat that can run the program's commands.
 
-**In progress:** deploying such a program into an agent from its repository
+**New in 2.144.0:** such a program deploys into an agent from its repository
 (`hatchabot app install`, `update`, `rollback`), with its own tests run
-inside the agent before anything switches. It is being built now and is not
-in a release yet.
+inside the agent before anything switches (docs/apps-in-agents.md). The web
+app's side of it (From a repo, an Update button) comes next.
 
 ## Who it's for
 

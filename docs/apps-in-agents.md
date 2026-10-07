@@ -6,8 +6,8 @@ sharing (a template that carries the manifest).*
 
 Some agents are mostly a program: a loop that reads mail, keeps records and
 sends replies, with a model only where judgement on free-form input is needed.
-Meeting Scheduler is the first: rewritten from an AI agent that cost thousands
-of dollars a month at API prices into a Python program that costs cents, it runs
+Meeting Scheduler is the first: rewritten from an AI agent that ran at about $1,700
+a month at API prices (about $2,700 with its QA agent) into a Python program that costs cents, it runs
 inside an ordinary Hatchabot agent as a scheduled command. This is how any such
 codebase gets deployed, updated and rolled back from Hatchabot.
 

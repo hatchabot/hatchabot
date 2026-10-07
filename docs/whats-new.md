@@ -1,6 +1,15 @@
-# What's new — 2026-10-07 (v2.112 → v2.143)
+# What's new — 2026-10-07 (v2.112 → v2.144)
 
 For people who use Hatchabot, not the change log (that is CHANGELOG.md).
+
+**Programs in agents, with the model used as little as possible**
+- **Deploy a codebase into an agent** (v2.144.0): a repo with a
+  `hatchabot.json` is installed as a release inside an agent, with its config,
+  its own tests run in the agent before anything switches, and its scheduled
+  commands, which run with no AI turn. `hatchabot app install`, `update` and
+  `rollback`; docs/apps-in-agents.md has the method. The first: an email
+  meeting scheduler and board-voting agent that ran at about $1,700 a month at
+  API prices as an always-on AI agent now costs cents.
 
 **What each agent costs, and a say in it**
 - **A cost on every tile** (v2.119.0): "$4/wk" at API prices, and View by →

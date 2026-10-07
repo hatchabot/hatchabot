@@ -58,9 +58,10 @@ free-form email is needed, through the agent's own AI source. It now costs
 cents a month, gives the same answer to the same email, and is tested: 117
 unit tests (the old QA agent's 49 cases among them), a prompt check against
 the real model, and a scripted live test against the real mailbox and
-calendar. Decisions in code; the model only where it is needed. Deploying
-such a program into an agent from its repository, with update and rollback,
-is being built now.
+calendar. Decisions in code; the model only where it is needed. Since 2.144.0 such a
+program deploys into an agent from its repository, with its tests run inside
+the agent first, and updates or rolls back with one command
+(docs/apps-in-agents.md).
 
 ## Who it's for
 
