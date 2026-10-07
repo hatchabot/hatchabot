@@ -70,8 +70,40 @@ export const STUB = `(() => {
     a1: c(6), a2: c(2), a3: c(0.5), a4: c(9), a5: c(4), a6: c(0.3), a7: c(12),
     a8: c(18), a9: { ...c(0), tier: 1, local: true }, a10: { ...c(0), tier: 0 }, a11: c(3), a12: c(0.4), a13: c(1.5), a14: c(5),
   } };
+  // Usage (GET /v1/usage/periods and /v1/usage/spend): a week in 3-hour slices at
+  // API prices, a day of requests, by part, by model and by agent. Made-up figures.
+  const named = AGENTS.filter((a) => !a.ops);
+  const weekly = { a1: 6, a2: 2, a3: 0.5, a4: 9, a5: 4, a6: 0.3, a7: 12, a8: 18, a10: 0, a11: 3, a12: 0.4, a13: 1.5 };
+  const wave = (i) => 0.35 + 0.65 * Math.max(0, Math.sin(((i % 8) - 1.5) / 8 * Math.PI * 2)) * (1 + ((i * 5) % 7) / 14);
+  const slices = Array.from({ length: 56 }, (_, i) => {
+    const k = wave(i) * 1.02;
+    return { at: new Date(Date.now() - (55 - i) * 3 * 3600000).toISOString(), input: Math.round(k * 0.031 * 1e4) / 1e4,
+      cacheWrite: Math.round(k * 0.24 * 1e4) / 1e4, cacheRead: Math.round(k * 0.52 * 1e4) / 1e4, output: Math.round(k * 0.34 * 1e4) / 1e4,
+      tokens: Math.round(k * 410000), ...(i === 38 ? { refused: 3 } : {}) };
+  });
+  const sum = (k) => Math.round(slices.reduce((t, b) => t + b[k], 0) * 100) / 100;
+  const SPEND = { range: 'week', bucketHours: 3, buckets: slices,
+    totals: { input: sum('input'), cacheWrite: sum('cacheWrite'), cacheRead: sum('cacheRead'), output: sum('output'),
+      cost: Math.round((sum('input') + sum('cacheWrite') + sum('cacheRead') + sum('output')) * 100) / 100, tokens: slices.reduce((t, b) => t + b.tokens, 0) },
+    planShare: 0, refused: 3, monthly: 0, models: [],
+    choices: named.map((a) => ({ id: a.id, name: a.name, cost: weekly[a.id] ?? 0 })).sort((x, y) => y.cost - x.cost) };
+  SPEND.monthly = Math.round(SPEND.totals.cost * 720 / 168 * 100) / 100;
+  // By model: shares of the same total, so the pie adds up.
+  SPEND.models = [['claude-sonnet-5', 0.71], ['claude-haiku-4-5', 0.17], ['claude-opus-4-8', 0.12]]
+    .map(([model, f]) => ({ model, cost: Math.round(SPEND.totals.cost * f * 100) / 100 }));
+  const dayHours = Array.from({ length: 24 }, (_, i) => ({ at: new Date(Date.now() - (23 - i) * 3600000).toISOString(),
+    tokens: Math.round(wave(i) * 140000), requests: Math.round(wave(i) * 12), limited: 0 }));
+  const PERIODS = { period: 'day', from: ago(1440), to: now, bucketMinutes: 60, buckets: dayHours,
+    agents: named.map((a) => ({ id: a.id, name: a.name, state: a.state, tokens: Math.round((weekly[a.id] ?? 0) * 60000), requests: Math.round((weekly[a.id] ?? 0) * 6),
+      limited: 0, failed: 0, billing: 'api', profileName: PROFILE.name, model: a.model, cost: null })),
+    totals: { tokens: dayHours.reduce((t, b) => t + b.tokens, 0), requests: dayHours.reduce((t, b) => t + b.requests, 0), limited: 0, failed: 0 },
+    byBilling: { included: 0, api: dayHours.reduce((t, b) => t + b.tokens, 0), local: 0 }, cost: null, sampledAt: now, alerts: [],
+    rightSize: { line: 'Saved by cheaper models this month: about $11 at API prices', savingUSD: 11.2, apiUSD: 11.2, planUSD: 0, month: now.slice(0, 7), rows: [] },
+    pricing: { hours: 24, total: 8.1, monthly: 243, parts: { input: 0.25, cacheWrite: 1.9, cacheRead: 4.1, output: 1.85 }, billing: { api: 8.1, plan: 0 },
+      models: SPEND.models.map((m) => ({ model: m.model, cost: Math.round(m.cost / 7 * 100) / 100 })),
+      agents: Object.fromEntries(named.map((a) => [a.id, { cost: Math.round((weekly[a.id] ?? 0) / 7 * 100) / 100, parts: {} }])) } };
   const R = {
-    ...(SHOT ? { '/v1/costs': COSTS } : {}),
+    ...(SHOT ? { '/v1/costs': COSTS, '/v1/usage/spend': SPEND, '/v1/usage/periods': PERIODS } : {}),
     '/v1/config': { authMode: 'identity', localAccounts: false, maxAgentsPerAccount: 50 },
     '/v1/agents': AGENTS,
     '/v1/ai-profiles': [PROFILE],
@@ -115,7 +147,7 @@ export const STUB = `(() => {
 /** One entry per image: where it goes, the viewport, and what to open. */
 export const SHOTS = [
   { file: 'screenshot.png', width: 1500, height: 900, open: null },
-  { file: 'screenshot-usage.png', width: 1400, height: 620, open: "openAiDlg('ai')" },
+  { file: 'screenshot-usage.png', width: 900, height: 860, open: "openFleetUsage()" },
   { file: 'screenshot-agent.png', width: 1400, height: 800, open: "openV2Agent('a2','overview')" },
   { file: 'screenshot-cost.png', width: 1500, height: 900, open: "v2SetView('cost')" },
 ];

@@ -39,7 +39,7 @@ docker run --rm -v "$PWD/docs/deck":/work -w /work hatchabot-runtime:latest \
 
 Edit the HTML, re-run, look at every page, commit both files.
 
-`screenshot.png` (the fleet), `screenshot-usage.png` (one AI source's usage),
+`screenshot.png` (the fleet), `screenshot-usage.png` (Usage: what agents cost, over time and by part, model and agent),
 `screenshot-agent.png` (one agent's settings) and `screenshot-cost.png` (View by → Cost) are rendered from the real `web/index.html`
 driven by a stubbed `window.fetch` — invented household agents, no real names, tokens or
 usage. Regenerate them all with `node scripts/screenshots.mjs` (needs docker); the fleet,
