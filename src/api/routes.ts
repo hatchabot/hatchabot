@@ -1,3 +1,4 @@
+import { AppError, fieldsToAsk, hostGit, installRelease, parseSource, removeTasks, repoFor, resolveRelease, switchTo, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
 import { agentTimeZone } from '../orchestrator/timezone.js';
 import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
 import { claudePlanAllowed, CLAUDE_PLAN_HOSTED } from '../config/claudePlan.js';
@@ -228,6 +229,8 @@ export interface ApiDeps {
   providers: Map<string, RuntimeProvider>;
   /** `hatchabot doctor --json` lines for a problem report; tests pass their own (the real one spawns the CLI). */
   reportDoctor?: () => Promise<Array<{ level: string; text: string; fix?: string }> | undefined>;
+  /** Git for reading app sources on the host (orchestrator/apps.ts); tests inject one. */
+  appGit?: import('../orchestrator/apps.js').Git;
   /** Runner providers by host (resolveProvider's cache), shared with the health sweep; a fresh one when absent. */
   remoteProviders?: Map<string, RuntimeProvider>;
   channel: CompositeTelegramProvisioner;
@@ -6518,6 +6521,124 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     up.on('error', deny);
     // An owner's early bytes went with the request as before; a guest's went through the filter above.
     up.end(!guest && head?.length ? head : undefined);
+  });
+
+  // ---- apps in agents (docs/apps-in-agents.md) --------------------------------------
+  // A codebase with a hatchabot.json, installed into an agent as a release with
+  // its config, tests and scheduled commands. The source is read on the host, so
+  // only the machine's owner may install or update (host paths, host git login).
+  const appCacheDir = join(dirname(process.env.HATCHABOT_DB ?? defaultDbPath()), 'app-sources');
+  const appGit: AppsGit = deps.appGit ?? hostGit;
+  const appFacts = (a: Agent): AgentFacts => ({
+    slug: a.slug, name: a.name, timezone: agentTimeZone(),
+    telegramAccount: store.getChannelForAgent(a.id, 'telegram')?.accountId,
+    ownerTelegram: store.accountTelegram(a.ownerId), ownerEmail: store.emailForOwner(a.ownerId),
+  });
+  const appDeps = (a: Agent): InstallDeps => ({
+    provider: providerFor(a.hostId), runtimeRef: a.runtimeRef!, facts: appFacts(a),
+    log: (step, detail) => trace(a.id)(step, detail ?? {}),
+  });
+  const appFail = (reply: FastifyReply, e: unknown) => {
+    if (e instanceof AppError) return reply.code(400).send({ error: e.message, test: (e as AppError & { test?: unknown }).test });
+    return reply.code(502).send({ error: `The install did not finish: ${(e as Error)?.message ?? e}` });
+  };
+  const appView = (a: Agent) => {
+    const r = store.getAgentApp(a.id);
+    if (!r) return null;
+    const m = r.manifest as AppManifest;
+    return { app: r.app, name: m.name, source: r.source, ref: r.ref, sha: r.sha, previousSha: r.previousSha ?? null,
+      installedAt: r.installedAt, testOk: r.testOk ?? null, tasks: m.tasks.map((t) => `${m.app}-${t.name}`) };
+  };
+  const appTarget = (req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    if (!ownsLocalHost(req)) { reply.code(403).send({ error: "Only this machine's owner can install or change an app (it reads this machine's folders and git login)." }); return undefined; }
+    const a = ownedAgent(req, req.params.id);
+    if (!a) { reply.code(404).send({ error: 'Not found' }); return undefined; }
+    if (a.state !== 'RUNNING' || !a.runtimeRef) { reply.code(409).send({ error: `${a.name} is ${a.state.toLowerCase()}; start it first.` }); return undefined; }
+    if (busyNow(a, reply)) return undefined;
+    return a;
+  };
+
+  /** What a repo's manifest says, and what it will ask for. */
+  app.post<{ Body: { source?: string; ref?: string } }>('/v1/apps/inspect', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: "Only this machine's owner can read a repo from it." });
+    try {
+      const src = parseSource(req.body?.source ?? '');
+      const repo = await repoFor(appGit, src, appCacheDir);
+      const rel = await resolveRelease(appGit, repo, req.body?.ref || 'HEAD');
+      return { sha: rel.sha, manifest: rel.manifest, ask: fieldsToAsk(rel.manifest), connections: rel.manifest.connections ?? [] };
+    } catch (e) { return appFail(reply, e); }
+  });
+
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/app', async (req, reply) => {
+    const a = ownedAgent(req, req.params.id);
+    if (!a) return reply.code(404).send({ error: 'Not found' });
+    return { app: appView(a) };
+  });
+
+  /** Install an app into this agent (or replace the one it has, from a new source). */
+  app.post<{ Params: { id: string }; Body: { source?: string; ref?: string; values?: Record<string, unknown> } }>('/v1/agents/:id/app', async (req, reply) => {
+    const a = appTarget(req, reply); if (!a) return reply;
+    try {
+      const src = parseSource(req.body?.source ?? '');
+      const label = src.kind === 'dir' ? src.path : src.url;
+      const repo = await repoFor(appGit, src, appCacheDir);
+      const ref = req.body?.ref || 'HEAD';
+      const rel = await resolveRelease(appGit, repo, ref);
+      const had = store.getAgentApp(a.id);
+      if (had && had.app !== rel.manifest.app) await removeTasks(appDeps(a), had.app);
+      const done = await whileBusy(a.id, () => installRelease(appDeps(a), rel, req.body?.values ?? {}));
+      store.setAgentApp({ agentId: a.id, app: done.app, source: label, ref, sha: done.sha, manifest: done.manifest,
+        previousSha: had?.app === done.app ? had.sha : undefined, previousManifest: had?.app === done.app ? had.manifest : undefined,
+        installedAt: new Date().toISOString(), testOk: done.test?.ok });
+      trace(a.id)('app.installed', { app: done.app, sha: done.sha.slice(0, 12), source: label });
+      return { app: appView(a), test: done.test ?? null };
+    } catch (e) { return appFail(reply, e); }
+  });
+
+  /** Install the newest commit (or a given ref) from where it came. */
+  app.post<{ Params: { id: string }; Body: { ref?: string; values?: Record<string, unknown> } }>('/v1/agents/:id/app/update', async (req, reply) => {
+    const a = appTarget(req, reply); if (!a) return reply;
+    const had = store.getAgentApp(a.id);
+    if (!had) return reply.code(404).send({ error: `${a.name} has no app installed.` });
+    try {
+      const repo = await repoFor(appGit, parseSource(had.source), appCacheDir);
+      const ref = req.body?.ref || had.ref;
+      const rel = await resolveRelease(appGit, repo, ref);
+      if (rel.sha === had.sha && !req.body?.values) return { app: appView(a), unchanged: true };
+      const done = await whileBusy(a.id, () => installRelease(appDeps(a), rel, req.body?.values ?? {}));
+      store.setAgentApp({ ...had, ref, sha: done.sha, manifest: done.manifest,
+        previousSha: rel.sha === had.sha ? had.previousSha : had.sha, previousManifest: rel.sha === had.sha ? had.previousManifest : had.manifest,
+        installedAt: new Date().toISOString(), testOk: done.test?.ok });
+      trace(a.id)('app.updated', { app: done.app, from: had.sha.slice(0, 12), to: done.sha.slice(0, 12) });
+      return { app: appView(a), test: done.test ?? null };
+    } catch (e) { return appFail(reply, e); }
+  });
+
+  /** Back to the release before the last install or update. */
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/app/rollback', async (req, reply) => {
+    const a = appTarget(req, reply); if (!a) return reply;
+    const had = store.getAgentApp(a.id);
+    if (!had?.previousSha || !had.previousManifest) return reply.code(409).send({ error: 'There is no earlier release to go back to.' });
+    try {
+      await whileBusy(a.id, () => switchTo(appDeps(a), had.previousManifest as AppManifest, had.previousSha!));
+      store.setAgentApp({ ...had, sha: had.previousSha!, manifest: had.previousManifest, previousSha: had.sha, previousManifest: had.manifest,
+        installedAt: new Date().toISOString(), testOk: undefined });
+      trace(a.id)('app.rolled_back', { app: had.app, from: had.sha.slice(0, 12), to: had.previousSha!.slice(0, 12) });
+      return { app: appView(a) };
+    } catch (e) { return appFail(reply, e); }
+  });
+
+  /** Stop running it: its scheduled commands go; the code and its data stay in the agent. */
+  app.delete<{ Params: { id: string } }>('/v1/agents/:id/app', async (req, reply) => {
+    const a = appTarget(req, reply); if (!a) return reply;
+    const had = store.getAgentApp(a.id);
+    if (!had) return reply.code(404).send({ error: `${a.name} has no app installed.` });
+    try {
+      const n = await whileBusy(a.id, () => removeTasks(appDeps(a), had.app));
+      store.deleteAgentApp(a.id);
+      trace(a.id)('app.removed', { app: had.app, tasks: n });
+      return { removed: true, tasks: n };
+    } catch (e) { return appFail(reply, e); }
   });
 
   // Add a data source. Folders are host mounts (ro/rw), gated to the machine

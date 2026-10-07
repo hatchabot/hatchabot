@@ -314,6 +314,8 @@ has no rule.
 | step-up | An agent's environment variables |
 | step-up | An agent's Files tab (its home holds its config and tokens) |
 | step-up | Folders of this machine given to an agent, and bringing in workspaces |
+| signed-in | Apps in agents: which app an agent runs |
+| step-up | Apps in agents: install, update, roll back or remove (reads this machine's folders and git login) |
 | step-up | Moving an agent to another machine |
 | step-up | Creating the management agent |
 | step-up | Bot pools (they hold bot tokens) |

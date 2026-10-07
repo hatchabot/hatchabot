@@ -168,6 +168,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.44.1`
 - **Code:** `src/cli.ts` — `skip-telegram`
 
+### `hatchabot app install` or `update` stops: "Its tests failed, so … was not switched on"
+- **Check:** the output printed with the error (the last lines of the app's own tests), and `app.test_failed` in the agent's Setup log.
+- **Cause:** the app's `test` command (in its `hatchabot.json`) failed inside the agent on the new commit. The running version is untouched: nothing switches until the tests pass.
+- **Fix:** fix the app (run its tests where you develop it), commit, and run `hatchabot app update <agent>` again; `hatchabot app status <agent>` shows what is running.
+- **Fixed in:** —
+- **Code:** `src/orchestrator/apps.ts` — `installRelease`
+
+### `hatchabot app install` says "Needs a value for: …"
+- **Check:** `hatchabot app inspect <dir|url>` lists what the app asks for.
+- **Cause:** a required setting in the app's manifest has no value yet (and none in its existing config).
+- **Fix:** pass it as `key=value` after the source, e.g. `hatchabot app install <agent> ~/myapp mailbox=<its address>`.
+- **Fixed in:** —
+- **Code:** `src/orchestrator/apps.ts` — `mergeConfig`
+
 ### An agent's times are hours off (it thinks it is in UTC)
 - **Check:** `openclaw config get agents.defaults.userTimezone` in the agent (unset before 2.143.0); `date` in its container says UTC.
 - **Cause:** OpenClaw falls back to the process's zone, and containers run on UTC.

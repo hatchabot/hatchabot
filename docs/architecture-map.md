@@ -172,6 +172,16 @@ per container.
 - `src/api/routes.ts` — `'/v1/hosts'`, `'/v1/runner-setup'`, `'/v1/hosts/:id/install-image'`, `'/v1/agents/:id/move-host'`, `'/v1/agents/:id/rehost'`, `'/v1/agents/:id/fs'`, `'/v1/resources'`: hosts, moves, files and resources.
 - `web/index.html` — `loadHosts`, `addHost`, `showRunnerSetup`, `moveHostAgent`, `rehostAgent`, `v2LoadFiles`, `openFleetResources`: the matching screens.
 
+## Apps in agents
+
+A codebase with a `hatchabot.json`, installed into an agent (docs/apps-in-agents.md).
+
+- `src/orchestrator/apps.ts` — `parseManifest`, `parseSource`, `repoFor`, `resolveRelease`: the manifest and the source, read on the host (a folder, or a git address mirrored beside the database).
+- `src/orchestrator/apps.ts` — `installRelease`, `mergeConfig`, `syncTasks`, `switchTo`, `removeTasks`: inside the agent (releases under `~/.openclaw/apps/<app>/`, its config, its tests before the switch, its scheduled commands).
+- `src/api/routes.ts` — `'/v1/apps/inspect'`, `'/v1/agents/:id/app'`, `'/v1/agents/:id/app/update'`, `'/v1/agents/:id/app/rollback'`, `appTarget`: the routes (machine owner only).
+- `src/store/store.ts` — `agent_apps`, `getAgentApp`, `setAgentApp`: which app, source, commit and previous commit.
+- `src/cli.ts` — `app inspect`, `app install`, `app create`: the `hatchabot app …` commands (also update, rollback, status, remove).
+
 ## Telegram and other chat apps
 
 Each agent may have a Telegram bot, from the shared bot pool or pasted by hand,

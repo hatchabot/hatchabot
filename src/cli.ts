@@ -203,6 +203,21 @@ Commands:
                                Turn an existing OpenClaw agent's workspace
                                into a managed Hatchabot agent (copies the
                                WHOLE folder; the original is only read)
+  app inspect <dir|url> [--ref <ref>]
+                               An app's manifest (hatchabot.json) and what it asks for.
+                               Apps: docs/apps-in-agents.md (machine owner only).
+  app install <agent> <dir|url> [--ref <ref>] [key=value …]
+                               Install an app into a running agent: its code, its
+                               config (key=value for what it asks), its tests run
+                               first, then its scheduled commands.
+  app create <name> <dir|url> [--profile <source>] [--no-telegram] [key=value …]
+                               A new agent with the app's name, chat and model,
+                               then the install.
+  app update <agent> [--ref <ref>] [key=value …]
+                               The newest commit from where it came (tested first).
+  app rollback <agent>         Back to the release before the last install or update.
+  app status <agent>           Which app, which commit, from where.
+  app remove <agent>           Stop it (its scheduled commands); code and data stay.
   folders <agent>              List everything an agent can access (folders and
                                git repos), each at /data/<name>
   folders <agent> add <path> [--rw]
@@ -443,7 +458,7 @@ function repoDir(): string {
 const userPath = (p: string): string => resolve(process.env.HATCHABOT_CWD || process.cwd(), p);
 
 const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
-const VALUE_FLAGS = new Set(['kind', 'at-once', 'agents', 'base', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
+const VALUE_FLAGS = new Set(['ref', 'kind', 'at-once', 'agents', 'base', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -1554,6 +1569,88 @@ async function main() {
       return;
     }
     case 'data':
+    case 'app': {
+      const sub = rest[0];
+      const kv = (args: string[]) => Object.fromEntries(args.filter((x) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(x)).map((x) => [x.slice(0, x.indexOf('=')), x.slice(x.indexOf('=') + 1)]));
+      const plain = (args: string[]) => args.filter((x) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(x));
+      const show = (r: any) => {
+        const a = r.app;
+        if (!a) { console.log('No app installed.'); return; }
+        console.log(`${a.name} (${a.app}) at ${String(a.sha).slice(0, 12)} from ${a.source} [${a.ref}]` +
+          (a.previousSha ? `; previous ${String(a.previousSha).slice(0, 12)}` : '') + `\n  tasks: ${a.tasks.join(', ') || 'none'}` +
+          (a.testOk === false ? '\n  its tests failed' : a.testOk ? '\n  its tests passed' : ''));
+      };
+      const install = async (agentId: string, source: string, values: Record<string, string>) => {
+        console.log('installing (copying, testing, scheduling)…');
+        try {
+          const r: any = await (await jsonPost(`/v1/agents/${agentId}/app`, { source, ref: flags.get('ref'), values })).json();
+          show(r);
+        } catch (e: any) {
+          if (e?.data?.test?.output) console.log(e.data.test.output);
+          throw e;
+        }
+      };
+      if (sub === 'inspect') {
+        const src = rest[1] ?? fail('usage: hatchabot app inspect <dir|url> [--ref <ref>]');
+        const r: any = await (await jsonPost('/v1/apps/inspect', { source: userPath(src.replace(/^~(?=\/|$)/, homedir())), ref: flags.get('ref') })).json();
+        console.log(`${r.manifest.name} (${r.manifest.app}) at ${String(r.sha).slice(0, 12)}`);
+        if (r.manifest.description) console.log(r.manifest.description);
+        console.log(`tasks: ${(r.manifest.tasks ?? []).map((t: any) => `${t.name} (${t.every ?? t.cron})`).join(', ') || 'none'}`);
+        if (r.ask.length) console.log('asks for:\n' + r.ask.map((f: any) => `  ${f.key}${f.required ? ' (required)' : ''}${f.default !== undefined ? ` [default ${JSON.stringify(f.default)}]` : ''}${f.label ? ` — ${f.label}` : ''}`).join('\n'));
+        for (const c of r.connections) console.log(`needs a ${c.kind} connection: ${c.purpose}`);
+        return;
+      }
+      if (sub === 'install') {
+        const [ref, src] = plain(rest.slice(1));
+        if (!ref || !src) fail('usage: hatchabot app install <agent> <dir|url> [--ref <ref>] [key=value …]');
+        const a = await resolveAgent(ctx, ref!);
+        await install(a.id, userPath(src!.replace(/^~(?=\/|$)/, homedir())), kv(rest.slice(1)));
+        return;
+      }
+      if (sub === 'create') {
+        const [name, src] = plain(rest.slice(1));
+        if (!name || !src) fail('usage: hatchabot app create <name> <dir|url> [--profile <source>] [--no-telegram] [key=value …]');
+        const source = userPath(src!.replace(/^~(?=\/|$)/, homedir()));
+        const look: any = await (await jsonPost('/v1/apps/inspect', { source, ref: flags.get('ref') })).json();
+        const missing = look.ask.filter((f: any) => f.required && !(f.key in kv(rest.slice(1)))).map((f: any) => f.key);
+        if (missing.length) fail(`${look.manifest.name} needs: ${missing.map((k: string) => `${k}=…`).join(' ')}`);
+        const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];
+        const hosts: any[] = await (await api(ctx, '/v1/hosts')).json() as any[];
+        const picked = pickProfile(profiles, flags.get('profile'));
+        const profile = picked.hit?.id ?? fail(picked.problem!);
+        const host = (hosts.find((h) => h.kind === 'local') ?? hosts[0])?.id ?? fail('no host configured');
+        const created: any = await (await jsonPost('/v1/agents', {
+          name, persona: look.manifest.chat || look.manifest.description || undefined, aiProfileId: profile, hostId: host,
+          telegram: flags.has('no-telegram') ? false : undefined,
+        })).json();
+        console.log(`creating "${name}"…`);
+        const a = await pollAgent(created.id);
+        if (a.state !== 'RUNNING') fail(`"${name}" is ${a.state}${a.pendingAction ? ' (it is waiting on you: see the app)' : ''}; install with: hatchabot app install "${name}" ${src}`);
+        if (look.manifest.model) {
+          try { await jsonPost(`/v1/agents/${a.id}/model`, { model: look.manifest.model }); } catch (e: any) { console.log(`note: model not set (${e.message})`); }
+        }
+        if (look.connections.length) console.log(look.connections.map((c: any) => `note: attach a ${c.kind} connection for ${c.purpose} (its settings → Connections)`).join('\n'));
+        await install(a.id, source, kv(rest.slice(1)));
+        if (a.deepLink) console.log(`Say hi to claim it: ${a.deepLink}`);
+        return;
+      }
+      const a = await resolveAgent(ctx, plain(rest.slice(1))[0] ?? fail(`usage: hatchabot app ${sub ?? '<inspect|install|create|update|rollback|status|remove>'} <agent>`));
+      if (sub === 'update') {
+        const r: any = await (await jsonPost(`/v1/agents/${a.id}/app/update`, { ref: flags.get('ref'), values: Object.keys(kv(rest)).length ? kv(rest) : undefined })).json();
+        if (r.unchanged) console.log('Already running the newest commit.');
+        show(r);
+        return;
+      }
+      if (sub === 'rollback') { show(await (await jsonPost(`/v1/agents/${a.id}/app/rollback`, {})).json()); return; }
+      if (sub === 'status') { show(await (await api(ctx, `/v1/agents/${a.id}/app`)).json()); return; }
+      if (sub === 'remove') {
+        const r: any = await (await api(ctx, `/v1/agents/${a.id}/app`, { method: 'DELETE' })).json();
+        console.log(`Stopped: ${r.tasks} scheduled command(s) removed; its code and data are still in the agent.`);
+        return;
+      }
+      fail('usage: hatchabot app <inspect|install|create|update|rollback|status|remove> …');
+      return;
+    }
     case 'folders': {
       await runFolders(
         {

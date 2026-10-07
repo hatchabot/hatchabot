@@ -93,6 +93,12 @@ export function tokenRise(prev: number, next: number): number {
   return next > prev ? next - prev : 0;
 }
 
+/** An app installed in an agent (orchestrator/apps.ts). */
+export interface AgentApp {
+  agentId: string; app: string; source: string; ref: string; sha: string; manifest: unknown;
+  previousSha?: string; previousManifest?: unknown; installedAt: string; testOk?: boolean;
+}
+
 export class Store {
   constructor(private readonly db: Database.Database) {
     this.#migrate();
@@ -454,6 +460,14 @@ export class Store {
         event TEXT NOT NULL, detail TEXT
       );
       CREATE INDEX IF NOT EXISTS agent_events_at ON agent_events (agent_id, id DESC);
+
+      -- The app installed in an agent (orchestrator/apps.ts): where it came from,
+      -- the commit running, and the one before it (rollback).
+      CREATE TABLE IF NOT EXISTS agent_apps (
+        agent_id TEXT PRIMARY KEY, app TEXT NOT NULL, source TEXT NOT NULL, ref TEXT NOT NULL,
+        sha TEXT NOT NULL, manifest TEXT NOT NULL, previous_sha TEXT, previous_manifest TEXT,
+        installed_at TEXT NOT NULL, test_ok INTEGER
+      );
 
       CREATE TABLE IF NOT EXISTS invites (
         id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, code TEXT NOT NULL UNIQUE,
@@ -2390,6 +2404,32 @@ export class Store {
   // ---- Events --------------------------------------------------------------
 
   /** Keep the newest `keep` events per agent; older ones are pruned on write. */
+  /** The app an agent runs (docs/apps-in-agents.md), or undefined. */
+  getAgentApp(agentId: string): AgentApp | undefined {
+    const r = this.db.prepare(`SELECT * FROM agent_apps WHERE agent_id = ?`).get(agentId) as Record<string, any> | undefined;
+    if (!r) return undefined;
+    return {
+      agentId: r.agent_id, app: r.app, source: r.source, ref: r.ref, sha: r.sha, manifest: JSON.parse(r.manifest),
+      previousSha: r.previous_sha ?? undefined, previousManifest: r.previous_manifest ? JSON.parse(r.previous_manifest) : undefined,
+      installedAt: r.installed_at, testOk: r.test_ok === null ? undefined : r.test_ok === 1,
+    };
+  }
+
+  setAgentApp(a: AgentApp): void {
+    this.db.prepare(
+      `INSERT INTO agent_apps (agent_id, app, source, ref, sha, manifest, previous_sha, previous_manifest, installed_at, test_ok)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET app=excluded.app, source=excluded.source, ref=excluded.ref, sha=excluded.sha,
+         manifest=excluded.manifest, previous_sha=excluded.previous_sha, previous_manifest=excluded.previous_manifest,
+         installed_at=excluded.installed_at, test_ok=excluded.test_ok`,
+    ).run(a.agentId, a.app, a.source, a.ref, a.sha, JSON.stringify(a.manifest), a.previousSha ?? null,
+      a.previousManifest ? JSON.stringify(a.previousManifest) : null, a.installedAt, a.testOk === undefined ? null : a.testOk ? 1 : 0);
+  }
+
+  deleteAgentApp(agentId: string): void {
+    this.db.prepare(`DELETE FROM agent_apps WHERE agent_id = ?`).run(agentId);
+  }
+
   recordEvent(agentId: string, event: string, detail?: Record<string, unknown>, keep = 200): void {
     // A timer firing after deletion (claim windows, notifiers) must not write
     // onto a tombstone — the residue class the v0.90 scrub cleaned up
