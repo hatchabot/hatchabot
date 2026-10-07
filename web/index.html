@@ -855,6 +855,8 @@
            max-width:260px; pointer-events:none; box-shadow:0 8px 24px rgba(0,0,0,.3); line-height:1.35 }
   .v2tip b { display:block }
   .v2tip ul { margin:4px 0 0; padding-left:16px }
+  /* Its parts (cost, runtime), each under a faint rule. */
+  .v2tipsec { display:block; margin-top:6px; padding-top:6px; border-top:1px solid color-mix(in srgb, var(--bg) 22%, transparent) }
   /* the agent sheet */
   .v2sheet { width:min(860px, 100vw); max-width:none; height:100%; max-height:none; margin:0 0 0 auto; border-radius:0; padding:0;
              border:0; border-left:1px solid var(--line); display:none; flex-direction:column }
@@ -12306,9 +12308,38 @@ function v2CostLine(a) {
   if (c.local) return 'Runs on a local model: no API cost';
   if (!c.priced) return 'Cost: no price known for its model';
   return `≈&nbsp;${v2Money(c.cost)} in ${v2CostWindow().replace(/ /g, '&nbsp;')} at API prices (≈&nbsp;${v2Money(c.monthly)}&nbsp;a&nbsp;month${['1w', '1m'].includes(v2Costs?.period || '1w') ? '' : ' at that pace'})`
-    + (c.plan ? `<br>on ${v2Mine(a) ? 'your' : 'its owner\'s'} Claude plan — counts against its limits` : '')
-    + (a.budget ? `<br>Budget: ${v2Money(a.budget.spent)} of ${v2Money(a.budget.usd)} this month (${a.budget.pct}%)` : '')
-    + (a.spendStep ? `<br>🔔 every ${v2Money(a.spendStep.every)} · next at ${v2Money(a.spendStep.next)}` : '');
+    + (c.plan ? `<br>on ${v2Mine(a) ? 'your' : 'its owner\'s'} Claude plan — counts against its limits` : '');
+}
+/** The tooltip's budget and spending alarm, shown even in a window with no use. */
+function v2SpendLines(a) {
+  return [
+    a.budget ? `Budget: ${v2Money(a.budget.spent)} of ${v2Money(a.budget.usd)} this month (${a.budget.pct}%)` : '',
+    a.spendStep ? `🔔 Alarm every ${v2Money(a.spendStep.every)} · next at ${v2Money(a.spendStep.next)}` : '',
+  ].filter(Boolean);
+}
+/** "8 min", "3 h 12 min", "4 days": how long its OpenClaw process has been up. */
+function v2Uptime(iso) {
+  const m = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
+  if (m < 1) return 'under a minute';
+  if (m < 60) return `${m} min`;
+  if (m < 48 * 60) return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`;
+  return `${Math.floor(m / 1440)} days`;
+}
+/** What an exit code means, for the restart line (docker's 128 + signal). */
+const V2_EXIT_WORDS = { 0: 'it quit by itself', 1: 'an error', 134: 'it aborted', 135: 'a memory fault', 137: 'killed, usually for memory', 139: 'a crash', 143: 'told to stop' };
+/** The tooltip's runtime lines: version and model, uptime, restarts, Telegram. */
+function v2RuntimeLines(a) {
+  const out = [];
+  const what = [a.openclawVersion ? `OpenClaw ${a.openclawVersion}` : '', a.model || '', a.updateAvailable ? 'update ready' : ''].filter(Boolean);
+  if (what.length) out.push(what.map(esc).join(' · '));
+  if (a.state === 'RUNNING' && a.startedAt) out.push(`Up ${v2Uptime(a.startedAt)}`);
+  if (a.restarts) {
+    const word = V2_EXIT_WORDS[a.lastExitCode];
+    out.push(`Restarted by itself ${a.restarts === 1 ? 'once' : `${a.restarts} times`} since its last rebuild`
+      + (a.lastExitCode !== undefined ? ` (last exit ${a.lastExitCode}${word ? ': ' + word : ''})` : ''));
+  }
+  if (a.botUsername) out.push(`On Telegram as @${esc(a.botUsername)}`); // an agent without Telegram says nothing about it (Chris, 2026-10-03)
+  return out;
 }
 /** View by → Cost: the dearest band first, then no price known, then no use. */
 function v2CostBin(a) {
@@ -12438,16 +12469,21 @@ function v2ShowTip(el) {
   const a = v2Find(el.dataset.v2id); if (!a) return;
   const st = v2Status(a);
   const tip = $('v2Tip');
-  tip.innerHTML = `<b>${esc(a.name)} · ${esc(st.label)}</b>${a.ops ? `<span class="v2tipops">★ ${esc(V2_OPS_TIP)}</span>` : ''}${a.persona ? esc(a.persona.slice(0, 140)) : ''}${!v2Mine(a) ? '<br>Shared with you.' : ''}`
-    + (a.botUsername ? `<br>On Telegram as @${esc(a.botUsername)}` : '') // an agent without Telegram says nothing about it (Chris, 2026-10-03)
+  // Three parts (Chris, 2026-10-07): what it's doing (status, alerts, last line),
+  // what it costs (cost, budget, spending alarm), and its runtime (OpenClaw
+  // version, uptime, restarts). The persona left: it's static, and on its page.
+  const sec = (lines, cls) => lines.length ? `<span class="v2tipsec ${cls}">${lines.join('<br>')}</span>` : '';
+  const cost = v2CostLine(a);
+  tip.innerHTML = `<b>${esc(a.name)} · ${esc(st.label)}</b>${a.ops ? `<span class="v2tipops">★ ${esc(V2_OPS_TIP)}</span>` : ''}${!v2Mine(a) ? 'Shared with you.' : ''}`
     + (st.why.length ? `<ul>${st.why.slice(0, 4).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : '')
-    + (() => { const line = v2CostLine(a); return line ? `<span class="v2tipcost">${line}</span>` : ''; })()
     + (() => {
       // A needs-you line is already in the list above: don't say it twice (2026-10-04).
       const prev = v2PreviewOf(a), at = v2Recent?.get(a.id)?.at;
       if (!prev || (prev.startsWith('alert: ') && st.why.some((w) => prev.slice(7) === w))) return '';
       return `<span class="v2tipprev">${at ? esc(ago(at)) + ' · ' : ''}${esc(prev)}</span>`;
-    })();
+    })()
+    + sec([cost, ...v2SpendLines(a)].filter(Boolean), 'v2tipcost')
+    + sec(v2RuntimeLines(a), 'v2tiprun');
   tip.hidden = false;
   const r = el.querySelector('.v2ic').getBoundingClientRect();
   const w = tip.offsetWidth;

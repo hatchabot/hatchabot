@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.141.0] — 2026-10-07
+
+### Changed
+- **The tile's tooltip has three parts:** what the agent is doing (status, alerts, last line), what it costs (cost, monthly budget, spending alarm), and its runtime (OpenClaw version, model, update ready, uptime, restarts, Telegram bot). The budget and the spending alarm ("🔔 Alarm every $50 · next at $50") now show even in a window with no use. The persona is no longer in it (it is on the agent's page).
+
+### Added
+- **Uptime and restarts in the tooltip:** "Up 3 h 12 min", and "Restarted by itself once since its last rebuild (last exit 135: a memory fault)" when Docker had to start it again. The agent list carries `startedAt`, `restarts` and `lastExitCode`.
+- A playbook entry for an agent that restarted with exit 135.
+
 ## [2.140.4] — 2026-10-07
 
 ### Changed

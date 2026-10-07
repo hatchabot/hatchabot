@@ -213,6 +213,16 @@ Alerts's own words. The same line is in the tooltip in every view (read
 with the list, at most every 30 seconds). Nothing is added under the tiles,
 and a click on a tile does what it always does.
 
+**The tile's tooltip** has three parts. First, what the agent is doing: its
+name and status, any alerts, and its last line. Then what it costs: the cost
+line, its monthly budget, and its spending alarm (both shown even in a window
+with no use). Last, its runtime: the OpenClaw version, its model and whether
+an update is ready, how long its OpenClaw process has been up ("Up 3 h 12
+min"), how often it restarted by itself since its last rebuild with how the
+last run ended ("last exit 135: a memory fault"; 137 is killed for memory),
+and its Telegram bot. The agent list carries `startedAt`, `restarts` and
+`lastExitCode` for this (read with the list, from Docker).
+
 - *Who sees which line*: what that person could already read in the agent's
   console. The owner's console reads every conversation, so the owner sees
   the newest of them (a member's Telegram line carries the member's name, a
@@ -337,8 +347,8 @@ and starts again on the 1st. Set it in the agent's Usage tab (Spending → Tell
 me every $…), in Settings → AI sources → 💵 Budgets (a column for every
 agent, and a row for the whole machine), by asking the Hatchabot agent
 (`set_spend_alert`, a card), or for every new agent (Settings → Hosts →
-Defaults for this machine, `HATCHABOT_NEW_AGENT_ALERT_EVERY`). The cost
-tooltip shows "🔔 every $100 · next at $300". `PUT /v1/agents/:id/spend-alert`
+Defaults for this machine, `HATCHABOT_NEW_AGENT_ALERT_EVERY`). The tile's
+tooltip shows "🔔 Alarm every $100 · next at $300". `PUT /v1/agents/:id/spend-alert`
 `{ every | null }`, `PUT /v1/spend-alert/machine`; `get_budgets` carries
 `alertEvery`. It is separate from the monthly limit below; an agent can have
 both.

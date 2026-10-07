@@ -2255,6 +2255,33 @@ const SCENARIOS = String.raw`(() => {
         aiDlg.close();
       } finally { if (typeof aiDlg !== 'undefined' && aiDlg.open) aiDlg.close(); delete window.__override['/v1/budgets']; await agentsCleanup(); }
     },
+    // The tooltip's three parts (2026-10-07): doing / cost and spending alarm / runtime (version, uptime, restarts).
+    tooltipParts: async () => {
+      const month = new Date().toISOString().slice(0, 7);
+      try {
+        await costFixture();
+        await withAgents((a) => a.name === 'Meal Planner' ? { ...a, state: 'RUNNING', persona: 'Plans the week of meals for a family of four', openclawVersion: '2026.9.6',
+            model: 'claude-sonnet-5', updateAvailable: true, startedAt: new Date(Date.now() - (3 * 60 + 12) * 60e3 - 20e3).toISOString(), restarts: 1, lastExitCode: 135,
+            spendStep: { every: 50, month, spent: 12, passed: 0, next: 50 } }
+          : a.name === 'Tax Filing' ? { ...a, state: 'RUNNING', openclawVersion: '2026.9.6', startedAt: new Date(Date.now() - 3 * 86400e3).toISOString(),
+            spendStep: { every: 20, month, spent: 0, passed: 0, next: 20 } } : undefined);
+        const tip = tipText('Meal Planner');
+        ok('its cost: ' + tip, tip.includes('at API prices'));
+        ok('its spending alarm', tip.includes('🔔 Alarm every $50 · next at $50'));
+        ok('OpenClaw version, model, update', tip.includes('OpenClaw 2026.9.6 · claude-sonnet-5 · update ready'));
+        ok('its uptime', tip.includes('Up 3 h 12 min'));
+        ok('the restart and how it ended', tip.includes('Restarted by itself once since its last rebuild (last exit 135: a memory fault)'));
+        ok('no persona any more', !tip.includes('Plans the week'));
+        v2ShowTip(tile('Meal Planner'));
+        const parts = [...document.querySelectorAll('#v2Tip .v2tipsec')].map((s) => s.classList.contains('v2tipcost') ? 'cost' : 'runtime');
+        document.getElementById('v2Tip').hidden = true;
+        eq('two parts, cost first', parts, ['cost', 'runtime']);
+        const tax = tipText('Tax Filing');
+        ok('the alarm shows without use in the window: ' + tax, tax.includes('🔔 Alarm every $20'));
+        ok('days of uptime', tax.includes('Up 3 days'));
+        ok('no restart line when it never restarted', !tax.includes('Restarted'));
+      } finally { await costCleanup(); await agentsCleanup(); }
+    },
   });
   (async () => {
     for (const [name, run] of Object.entries(T)) {

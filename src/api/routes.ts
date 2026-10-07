@@ -5102,6 +5102,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           rebuild: rebuild?.need,
           /** When its container was last built (docker's creation time). */
           rebuiltAt: rebuild?.running.containerCreatedAt,
+          /** While it runs: when its OpenClaw process last started (its uptime, in the tooltip). */
+          startedAt: a.state === 'RUNNING' ? rebuild?.running.startedAt : undefined,
+          /** Times its process quit on its own and Docker started it again since the last rebuild,
+           *  and how the last one ended (135 = a memory fault, 137 = killed for memory). */
+          restarts: rebuild?.running.restartCount || undefined,
+          lastExitCode: rebuild?.running.restartCount ? rebuild.running.lastExitCode : undefined,
           /** True when it runs the fleet default — unpinned, or pinned to a tag that IS the default's image. */
           imageIsDefault: !a.image || (await forHost(a.hostId, () => defaultAliasesFor(a.hostId), new Set<string>([a.image]))).has(a.image),
           /** While it is being set up or rebuilt: the step it is on, and since when. */
