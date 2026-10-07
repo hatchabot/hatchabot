@@ -283,7 +283,7 @@ export interface SpendSeries {
   totals: CostParts & { cost: number; tokens: number };
   /** Share of the cost on Claude plans (an equivalent, not a bill), 0–1. */
   planShare: number;
-  /** A source's chart: calls refused in the range, all told. */
+  /** Calls refused (rate limit) in the range: a source's everyone's, otherwise the charted agents'. */
   refused?: number;
   /** The range's cost as a month at that pace (× 720 h / the range's hours). */
   monthly: number;
@@ -343,11 +343,15 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
       }
     }
   }
-  // A source's chart: the calls it refused (rate-limited) in each slice — everyone's who draws on it, since they
-  // share its limit; counts only. They replaced the separate requests chart in Settings → AI (2026-10-07).
+  // The calls refused (rate-limited) in each slice. A source's chart: everyone's who draws on it, since they
+  // share its limit (counts only); it replaced the separate requests chart in Settings → AI (2026-10-07).
+  // Usage (2026-10-07): the same shading for the agents charted — the viewer's own, all of them or those picked.
   let refused = 0;
-  if (opts.sourceId) {
-    for (const r of store.modelCallHoursFor(opts.sourceId, new Date(from - HOUR).toISOString().slice(0, 13))) {
+  const fromHour = new Date(from - HOUR).toISOString().slice(0, 13);
+  const charted = new Set(mine.filter((a) => onSource(a) && (!picked || picked.has(a.id))).map((a) => a.id));
+  {
+    const rows = opts.sourceId ? store.modelCallHoursFor(opts.sourceId, fromHour) : store.modelCallHoursForAgents(charted, fromHour);
+    for (const r of rows) {
       const at = Date.parse(`${r.hour}:00:00Z`);
       if (!r.limited || !(at + HOUR > from) || at > now) continue;
       const b = out[Math.min(n - 1, Math.max(0, Math.floor((at - start) / size)))]!;
@@ -366,7 +370,7 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
     range, bucketHours, buckets: out,
     totals: { input: r2(totals.input), cacheWrite: r2(totals.cacheWrite), cacheRead: r2(totals.cacheRead), output: r2(totals.output), cost: r2(totals.cost), tokens: Math.round(totals.tokens) },
     planShare: all > 0 ? Math.round((plan / all) * 1000) / 1000 : 0,
-    ...(opts.sourceId ? { refused } : {}),
+    refused,
     monthly: r2((totals.cost * 720) / hours),
     models: [...byModel].map(([model, cost]) => ({ model, cost: r2(cost) })).filter((m) => m.cost > 0).sort((x, y) => y.cost - x.cost),
     choices: (opts.agentId ? [] : mine.filter(onSource).map((a) => ({ id: a.id, name: a.name, cost: r2(perAgent.get(a.id) ?? 0) })).sort((x, y) => y.cost - x.cost || x.name.localeCompare(y.name))),

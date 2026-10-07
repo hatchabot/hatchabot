@@ -236,7 +236,11 @@ describe('spend over time (the Usage chart)', () => {
     const withRefusals = spendSeries(w.store, OWNER, 'day', { now, sourceId: 'plan' });
     expect(withRefusals.refused).toBe(3);
     expect(withRefusals.buckets.find((x) => x.at === '2026-10-05T10:00:00.000Z')!.refused).toBe(3);
-    expect(spendSeries(w.store, OWNER, 'day', { now }).refused).toBeUndefined();
+    // Usage's charts shade them too (2026-10-07), for the agents charted: yours only, never another account's.
+    expect(spendSeries(w.store, OWNER, 'day', { now }).refused).toBe(2);
+    expect(spendSeries(w.store, OWNER, 'day', { now, agentId: 'c-plan' }).refused).toBe(2);
+    expect(spendSeries(w.store, OWNER, 'day', { now, agentId: 'c-big' }).refused).toBe(0);
+    expect(spendSeries(w.store, STRANGER, 'day', { now }).refused).toBe(0);
     expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=day&source=plan', headers: as(OWNER) })).json().totals.cost).toBeLessThanOrEqual(5);
     expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=day&source=plan', headers: as(STRANGER) })).json().totals.cost).toBe(0);
     const one = spendSeries(w.store, OWNER, 'day', { now, agentId: 'c-plan' });

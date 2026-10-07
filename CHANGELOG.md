@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.140.3] — 2026-10-07
+
+### Changed
+- **Usage shades refused calls too**, like a source's chart in Settings → AI: each slice in which calls were refused (rate limit) is greyed over, top to bottom, with the count in its tip and the total in the key — for the agents charted (all of yours, the ones picked, or one agent's own Usage). Another account's refusals never show here.
+
 ## [2.140.2] — 2026-10-07
 
 ### Changed

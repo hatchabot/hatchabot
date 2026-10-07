@@ -683,12 +683,13 @@ const SCENARIOS = String.raw`(() => {
       const now = Date.now(), H = 3600e3;
       const series = (agent) => ({ range: 'week', bucketHours: 3, planShare: 1, monthly: 823, models: [{ model: 'claude-opus-4-8', cost: 150 }, { model: 'claude-sonnet-5', cost: 42 }],
         choices: agent ? [] : [{ id: 'a1', name: 'Homework Helper', cost: 150 }, { id: 'a2', name: 'Soccer Schedule', cost: 42 }],
-        buckets: Array.from({ length: 56 }, (_, i) => ({ at: new Date(now - (56 - i) * 3 * H).toISOString(), cacheWrite: i % 7 ? 2 : 6, cacheRead: 0.5, output: 0.4, input: 0.1, tokens: (i % 5 + 1) * 3e6 })),
-        totals: { cacheWrite: 136, cacheRead: 28, output: 22.4, input: 5.6, cost: 192, tokens: 504e6 } });
+        buckets: Array.from({ length: 56 }, (_, i) => ({ at: new Date(now - (56 - i) * 3 * H).toISOString(), cacheWrite: i % 7 ? 2 : 6, cacheRead: 0.5, output: 0.4, input: 0.1, tokens: (i % 5 + 1) * 3e6, ...(i === 40 ? { refused: 3 } : {}) })),
+        totals: { cacheWrite: 136, cacheRead: 28, output: 22.4, input: 5.6, cost: 192, tokens: 504e6 }, refused: 3 });
       window.__override['/v1/usage/spend'] = series('');
       const box = document.createElement('div'); box.innerHTML = spendChartBox(''); document.body.append(box);
       await loadSpendCharts(box);
       const svg = await until(() => box.querySelector('svg'));
+      ok('Usage shades the slices with refused calls too (2026-10-07)', box.querySelectorAll('svg rect[fill-opacity=".22"]').length === 1 && box.textContent.includes('shaded: 3 calls refused'));
       ok('no summary line: the total sits in the pies', !box.textContent.includes('in the last 7 days ·') && box.querySelector('svg[aria-label="What it went on"]').textContent.includes('$192'));
       ok('the tokens in all, inside the chart', [...box.querySelectorAll('svg')].pop().textContent.includes('504M tokens in the last 7 days'));
       ok('the monthly pace under the chart', box.textContent.includes('≈ $823* a month at this pace'));
