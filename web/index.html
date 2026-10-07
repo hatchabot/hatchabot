@@ -158,10 +158,6 @@
   .su-status.limited { color:var(--bad) }
   .su-stats { display:flex; flex-wrap:wrap; gap:4px 18px; font-size:12.5px; color:var(--dim); margin:4px 0 6px; font-variant-numeric:tabular-nums }
   .su-stats b { color:var(--text); font-weight:600 }
-  .su-axis { position:relative; height:14px; font-size:10.5px; color:var(--dim); margin:2px 0 6px }
-  .su-axis span { position:absolute; top:0; transform:translateX(-50%); white-space:nowrap }
-  .su-axis span:first-child { transform:none }
-  .su-axis span:last-child { transform:translateX(-100%) }
   .su-chart .tick { stroke:var(--line); stroke-width:1; stroke-dasharray:2 2 }
   .su-periods { display:inline-flex; gap:2px; margin-left:8px; vertical-align:middle }
   .su-period { font:inherit; font-size:11px; padding:1px 8px; border-radius:999px; border:1px solid var(--line); background:none; color:var(--dim); cursor:pointer }
@@ -5360,72 +5356,6 @@ function renderLimitBanner() {
   el.hidden = !limited.length;
   el.innerHTML = limited.map(s => `⛔ ${s.mine === false ? 'Shared source ' : ''}<b>${esc(s.name)}</b> is being rate-limited (since ${esc(clock(s.limitedSince))}) — ${who(s)} until it recovers. <a href="#" onclick="event.preventDefault();openAiDlg('ai')">See usage</a>`).join('<br>');
 }
-/**
- * Time markers for a bar chart over a period (Chris, 2026-09-25): which
- * buckets get a label, in local time — every 15 minutes over an hour, every
- * 6 hours over a day, each midnight over a week — plus the axis row and the
- * tick lines to draw at those bar positions.
- */
-function usageAxis(buckets, period, barW) {
-  const marks = [];
-  buckets.forEach((b, i) => {
-    const d = new Date(b.at);
-    if (period === 'hour') { if (d.getMinutes() % 15 === 0) marks.push([i, d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })]); }
-    else if (/^\d+h$/.test(period)) { if (d.getMinutes() === 0 && d.getHours() % (parseInt(period) > 6 ? 2 : 1) === 0) marks.push([i, d.toLocaleTimeString([], { hour: 'numeric' })]); }
-    else if (period === 'day') { if (d.getHours() % 6 === 0) marks.push([i, d.toLocaleTimeString([], { hour: 'numeric' })]); }
-    else if (d.getHours() === 0) marks.push([i, d.toLocaleDateString([], { weekday: 'short' })]);
-  });
-  const w = buckets.length * barW || 1;
-  const ticks = marks.map(([i]) => `<line class="tick" x1="${i * barW}" x2="${i * barW}" y1="0" y2="100%"/>`).join('');
-  const axis = `<div class="su-axis">${marks.map(([i, l]) => `<span style="left:${(i * barW / w * 100).toFixed(2)}%">${esc(l)}</span>`).join('')}<span style="left:100%">now</span></div>`;
-  return { ticks, axis };
-}
-// The usage chart's period: a week in two-hour bars, a day in hourly bars, or
-// the last hour in five-minute bars (Chris, 2026-09-24). Remembered per browser.
-let usagePeriod = (() => { try { return localStorage.getItem('hb-usage-period') || 'week'; } catch { return 'week'; } })();
-function setUsagePeriod(p) {
-  usagePeriod = ['week', 'day', 'hour'].includes(p) ? p : 'week';
-  try { localStorage.setItem('hb-usage-period', usagePeriod); } catch {}
-  if ($('aiList')?.childElementCount) renderAiList();
-}
-/** Requests as bars for the chosen period; buckets with a 429 in red. */
-function sourceUsageChart(u) {
-  const hourly = u.hourly || [], slots = u.slots || [];
-  let buckets, unit, span, W, label;
-  if (usagePeriod === 'hour') {
-    buckets = slots.slice(-12).map(x => ({ at: x.slot + ':00Z', ok: x.ok, limited: x.limited })); unit = 'per 5 minutes'; span = '1 hour ago'; W = 48;
-    label = (b) => new Date(b.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  } else if (usagePeriod === 'day') {
-    buckets = hourly.slice(-24).map(x => ({ at: x.hour + ':00:00Z', ok: x.ok, limited: x.limited })); unit = 'per hour'; span = '24 hours ago'; W = 24;
-    label = (b) => new Date(b.at).toLocaleString([], { weekday: 'short', hour: 'numeric' });
-  } else {
-    buckets = [];
-    for (let i = 0; i < hourly.length; i += 2) {
-      const a = hourly[i], b = hourly[i + 1] || { ok: 0, limited: 0 };
-      buckets.push({ at: a.hour + ':00:00Z', ok: a.ok + b.ok, limited: a.limited + b.limited });
-    }
-    unit = 'per 2 hours'; span = '7 days ago'; W = 7;
-    label = (b) => new Date(b.at).toLocaleString([], { weekday: 'short', hour: 'numeric' });
-  }
-  const max = Math.max(1, ...buckets.map(b => b.ok + b.limited));
-  // One bar per bucket; refusals stack in red on top of the answered calls.
-  const H = 44, top = 1, w = buckets.length * W;
-  const bars = buckets.map((b, i) => {
-    const total = b.ok + b.limited, h = total ? Math.max(2, Math.round((total / max) * H)) : 0;
-    if (!h) return '';
-    const lh = b.limited ? Math.min(h, Math.max(2, Math.round((b.limited / max) * H))) : 0;
-    const tip = `${label(b)}: ${total} request${total === 1 ? '' : 's'}${b.limited ? ` — ${b.limited} rate-limited` : ''}`;
-    return `<g><title>${esc(tip)}</title><rect class="bar" x="${i * W}" y="${top + H - h}" width="${W - 1.5}" height="${h - lh}"/>${lh ? `<rect class="lim" x="${i * W}" y="${top + H - h}" width="${W - 1.5}" height="${lh}"/>` : ''}</g>`;
-  }).join('');
-  const btn = (p, l) => `<button class="su-period${usagePeriod === p ? ' on' : ''}" onclick="setUsagePeriod('${p}')" aria-pressed="${usagePeriod === p}">${l}</button>`;
-  const ax = usageAxis(buckets, usagePeriod, W);
-  // Captions are HTML, not SVG text, so they stay readable when the chart scales down on a phone.
-  return `<div class="su-cap"><span>Requests ${unit} <span class="su-periods">${btn('week', 'Week')}${btn('day', 'Day')}${btn('hour', 'Hour')}</span></span><span>peak ${fmtN(max)}</span></div>
-    <svg class="su-chart" viewBox="0 0 ${w} ${top + H + 1}" role="img" aria-label="Requests over the last ${usagePeriod} (${span} to now), ${unit}; red marks rate-limit refusals">
-    ${ax.ticks}<line class="peak" x1="0" x2="${w}" y1="${top + 0.5}" y2="${top + 0.5}"/>
-    ${bars}<line class="base" x1="0" x2="${w}" y1="${top + H + 0.5}" y2="${top + H + 0.5}"/></svg>
-    ${ax.axis}`;
-}
 function sourceUsagePanel(p) {
   const u = sourceUsageOf(p.id);
   if (!u) return '';
@@ -5441,7 +5371,8 @@ function sourceUsagePanel(p) {
   const win = (label, x, hours) => `<span>${label}: <b>${fmtN(x.requests)}</b> requests · ${tokens(x, hours)}${x.limited ? ` · <b style="color:var(--bad)">${x.limited}</b> refused` : ''}</span>`;
   const top = u.topAgents.length ? `<div class="su-top">Most use (7 d): ${u.topAgents.map(a => `${esc(a.name)} ${fmtN(a.requests)}${a.limited ? ` <span style="color:var(--bad)">(${a.limited} refused)</span>` : ''}`).join(' · ')}</div>` : '';
   const others = u.others ? `<div class="su-top">+ ${u.others.agents} agent${u.others.agents === 1 ? '' : 's'} on other accounts: ${fmtN(u.others.requests5h)} requests in 5 h, ${fmtN(u.others.requests7d)} in 7 d — they draw on the same limit.</div>` : '';
-  return `<div class="su">${status}<div class="su-stats">${win('Last 5 h', u.window5h, 5)}${win('Last 7 d', u.window7d, 168)}</div>${u.status !== 'idle' ? sourceUsageChart(u) : ''}${top}${others}</div>`;
+  // No requests chart (Chris, 2026-10-07: too big for what it said): refusals are marked on the Costs chart below.
+  return `<div class="su">${status}<div class="su-stats">${win('Last 5 h', u.window5h, 5)}${win('Last 7 d', u.window7d, 168)}</div>${top}${others}</div>`;
 }
 async function refreshSourceUsage(btn) {
   if (btn) btn.disabled = true;
@@ -8713,7 +8644,10 @@ function spendChartHTML(d, opts = {}) {
     let y = T + ih;
     const segs = SPEND_PARTS.map(([k, , c]) => { const h = ((x[k] || 0) / topC) * ih; if (h <= 0) return ''; y -= h; return `<rect x="${L + i * slot + (slot - bw) / 2}" y="${y}" width="${bw}" height="${h}" fill="${c}"/>`; }).join('');
     const tip = `${new Date(x.at).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' })} — ≈ ${v2Money(cost(x))}: ${SPEND_PARTS.map(([k, l]) => `${l.toLowerCase()} ${v2Money(x[k] || 0)}`).join(', ')}; ${fmtTokens(x.tokens)} tokens`;
-    return `<g>${segs}<rect x="${L + i * slot}" y="${T}" width="${slot}" height="${ih}" fill="transparent"><title>${esc(tip)}</title></rect></g>`;
+    // A source's refusals (rate limit): a red tick over the slice, the count in its tip.
+    const no = x.refused ? `<rect x="${L + i * slot + (slot - bw) / 2}" y="${T - 7}" width="${bw}" height="4" rx="1" style="fill:var(--bad)"/>` : '';
+    const tip2 = x.refused ? `${tip} — ${x.refused} call${x.refused === 1 ? '' : 's'} refused (rate limit)` : tip;
+    return `<g>${segs}${no}<rect x="${L + i * slot}" y="${T}" width="${slot}" height="${ih}" fill="transparent"><title>${esc(tip2)}</title></rect></g>`;
   }).join('');
   const pts = b.map((x, i) => `${(L + i * slot + slot / 2).toFixed(1)},${yT(x.tokens).toFixed(1)}`).join(' ');
   const line = b.length ? `<polyline points="${pts}" fill="none" style="stroke:var(--text)" stroke-opacity=".75" stroke-width="1.6" stroke-linejoin="round" pointer-events="none"/>` : '';
@@ -8721,7 +8655,7 @@ function spendChartHTML(d, opts = {}) {
   const tokTotal = `<text x="${W - R2}" y="12" text-anchor="end" font-size="12" style="fill:var(--text)"><tspan font-weight="700">${fmtTokens(t.tokens || 0)}</tspan> tokens in ${esc(rangeName)}</text>`;
   const slice = d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : `${d.bucketHours} hours`;
   const chart = `<div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;display:block" role="img" aria-label="Spend at API prices per ${slice}, by part, with tokens as a line">${tokTotal}${grid}${bars}${line}${xl}</svg></div>
-    <div class="sub" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:2px 0 4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis); bars are what each ${slice} cost (left axis)${d.range !== 'month' && d.monthly ? ` · ≈ ${v2Money(d.monthly)}${star} a month at this pace` : ''}</div>`;
+    <div class="sub" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:2px 0 4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis); bars are what each ${slice} cost (left axis)${d.range !== 'month' && d.monthly ? ` · ≈ ${v2Money(d.monthly)}${star} a month at this pace` : ''}${d.refused ? ` · <span style="display:inline-block;width:10px;height:4px;border-radius:1px;background:var(--bad);vertical-align:middle"></span> <b style="color:var(--bad)">${fmtN(d.refused)}</b> call${d.refused === 1 ? '' : 's'} refused (rate limit)` : ''}</div>`;
   return head + summary + chart;
 }
 /** A donut of slices ({ label, value, color }), the total in the middle; a hover tip per slice. */

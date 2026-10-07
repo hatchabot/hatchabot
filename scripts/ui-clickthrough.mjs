@@ -126,8 +126,8 @@ const SCENARIOS = String.raw`(() => {
       const now = Date.now(), H = 3600e3;
       window.__override['/v1/usage/spend'] = { range: 'week', bucketHours: 3, planShare: 1, monthly: 400, models: [{ model: 'claude-sonnet-5', cost: 80 }],
         choices: [{ id: 'a1', name: 'Homework Helper', cost: 60 }, { id: 'a2', name: 'Soccer Schedule', cost: 20 }, { id: 'a3', name: 'Piano Practice', cost: 0 }],
-        buckets: Array.from({ length: 56 }, (_, i) => ({ at: new Date(now - (56 - i) * 3 * H).toISOString(), cacheWrite: 1, cacheRead: 0.2, output: 0.2, input: 0.03, tokens: 2e6 })),
-        totals: { cacheWrite: 56, cacheRead: 11, output: 11, input: 2, cost: 80, tokens: 112e6 } };
+        buckets: Array.from({ length: 56 }, (_, i) => ({ at: new Date(now - (56 - i) * 3 * H).toISOString(), cacheWrite: 1, cacheRead: 0.2, output: 0.2, input: 0.03, tokens: 2e6, ...(i === 50 ? { refused: 4 } : {}) })),
+        totals: { cacheWrite: 56, cacheRead: 11, output: 11, input: 2, cost: 80, tokens: 112e6 }, refused: 4 };
       try {
         openAiDlg('ai');
         const box = await until(() => document.querySelector('#aiList .srcspend .spendchart svg') && document.querySelector('#aiList .srcspend'));
@@ -139,6 +139,8 @@ const SCENARIOS = String.raw`(() => {
         ok('an agent that spent nothing is not a slice', !box.textContent.includes('Piano Practice'));
         ok('the plan footnote', box.textContent.includes('not money you pay'));
         ok('no agent picker on a source', !box.querySelector('.spendpick'));
+        ok('no separate requests chart any more (Chris, 2026-10-07)', !document.getElementById('aiList').textContent.includes('Requests per'));
+        ok('refusals are red ticks on the costs chart, counted in its key', box.querySelectorAll('svg rect[style*="--bad"]').length === 1 && box.textContent.includes('4 calls refused'));
         const local = profiles.find((x) => x.vendor === 'local');
         if (local) ok('a local model server has no costs box', ![...document.querySelectorAll('#aiList .srcspend .spendchart')].some((el) => el.dataset.source === local.id));
         box.open = false; box.dispatchEvent(new Event('toggle'));

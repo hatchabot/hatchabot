@@ -275,7 +275,7 @@ export const SPEND_RANGES: Record<SpendRange, { hours: number; bucketHours: numb
   week: { hours: 168, bucketHours: 3 },
   month: { hours: 720, bucketHours: 24 },
 };
-export interface SpendBucket extends CostParts { at: string; tokens: number }
+export interface SpendBucket extends CostParts { at: string; tokens: number; /** A source's chart: calls it refused in this slice (rate limit), everyone's. */ refused?: number }
 export interface SpendSeries {
   range: SpendRange;
   bucketHours: number;
@@ -283,6 +283,8 @@ export interface SpendSeries {
   totals: CostParts & { cost: number; tokens: number };
   /** Share of the cost on Claude plans (an equivalent, not a bill), 0–1. */
   planShare: number;
+  /** A source's chart: calls refused in the range, all told. */
+  refused?: number;
   /** The range's cost as a month at that pace (× 720 h / the range's hours). */
   monthly: number;
   /** Per model, dearest first. */
@@ -341,6 +343,18 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
       }
     }
   }
+  // A source's chart: the calls it refused (rate-limited) in each slice — everyone's who draws on it, since they
+  // share its limit; counts only. They replaced the separate requests chart in Settings → AI (2026-10-07).
+  let refused = 0;
+  if (opts.sourceId) {
+    for (const r of store.modelCallHoursFor(opts.sourceId, new Date(from - HOUR).toISOString().slice(0, 13))) {
+      const at = Date.parse(`${r.hour}:00:00Z`);
+      if (!r.limited || !(at + HOUR > from) || at > now) continue;
+      const b = out[Math.min(n - 1, Math.max(0, Math.floor((at - start) / size)))]!;
+      b.refused = (b.refused ?? 0) + r.limited;
+      refused += r.limited;
+    }
+  }
   const totals = { ...noParts(), cost: 0, tokens: 0 };
   for (const b of out) {
     (['input', 'cacheWrite', 'cacheRead', 'output'] as const).forEach((k) => { totals[k] += b[k]; b[k] = Math.round(b[k] * 10_000) / 10_000; });
@@ -352,6 +366,7 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
     range, bucketHours, buckets: out,
     totals: { input: r2(totals.input), cacheWrite: r2(totals.cacheWrite), cacheRead: r2(totals.cacheRead), output: r2(totals.output), cost: r2(totals.cost), tokens: Math.round(totals.tokens) },
     planShare: all > 0 ? Math.round((plan / all) * 1000) / 1000 : 0,
+    ...(opts.sourceId ? { refused } : {}),
     monthly: r2((totals.cost * 720) / hours),
     models: [...byModel].map(([model, cost]) => ({ model, cost: r2(cost) })).filter((m) => m.cost > 0).sort((x, y) => y.cost - x.cost),
     choices: (opts.agentId ? [] : mine.filter(onSource).map((a) => ({ id: a.id, name: a.name, cost: r2(perAgent.get(a.id) ?? 0) })).sort((x, y) => y.cost - x.cost || x.name.localeCompare(y.name))),

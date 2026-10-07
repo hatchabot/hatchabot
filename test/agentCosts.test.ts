@@ -229,6 +229,14 @@ describe('spend over time (the Usage chart)', () => {
     expect(plan.totals.cost).toBe(5);
     expect(plan.choices.every((c) => w.store.getAgent(c.id)!.aiProfileId === 'plan')).toBe(true);
     expect(plan.choices.find((c) => c.id === 'c-plan')!.cost).toBe(5);
+    // Its refusals (rate limit) ride on its chart's slices, everyone's who draws on it (2026-10-07).
+    const twoAgo = new Date(now - 2 * HOUR).toISOString().slice(0, 13);
+    w.store.addModelCallHours('c-plan', 'plan', new Map([[twoAgo, { ok: 3, limited: 2, failed: 0 }]]));
+    w.store.addModelCallHours('someone-elses', 'plan', new Map([[twoAgo, { ok: 1, limited: 1, failed: 0 }]]));
+    const withRefusals = spendSeries(w.store, OWNER, 'day', { now, sourceId: 'plan' });
+    expect(withRefusals.refused).toBe(3);
+    expect(withRefusals.buckets.find((x) => x.at === '2026-10-05T10:00:00.000Z')!.refused).toBe(3);
+    expect(spendSeries(w.store, OWNER, 'day', { now }).refused).toBeUndefined();
     expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=day&source=plan', headers: as(OWNER) })).json().totals.cost).toBeLessThanOrEqual(5);
     expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=day&source=plan', headers: as(STRANGER) })).json().totals.cost).toBe(0);
     const one = spendSeries(w.store, OWNER, 'day', { now, agentId: 'c-plan' });

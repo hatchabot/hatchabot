@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.140.1] — 2026-10-07
+
+### Changed
+- **Settings → AI: the requests chart is gone** — it took a lot of room for what it said. What it was good for, calls a source **refused** (rate limit), now rides on the source's Costs chart: a red tick over each slice that had any, the count in its tip, and the total in the key under it. Counted for everyone who draws on the source, since they share its limit (counts only). The request numbers (last 5 h, last 7 d, most use) stay.
+
 ## [2.140.0] — 2026-10-07
 
 ### Added
