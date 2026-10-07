@@ -55,10 +55,15 @@ Hatchabot can inject into every agent. So a household of always-on agents
 one flat fee instead of per-token metering from any lab. For this kind of
 fleet that's the difference between "affordable" and "a bill you watch".
 Usage limits still apply (a burst of simultaneous turns can hit them). Anthropic's
-rules for third-party use of a plan changed several times in 2026 — a May
-announcement of a separate, metered "Agent SDK credit" was paused on June 15,
-and as of September 2026 such use draws from the plan's normal limits — so check
-its current terms before relying on it. The
+rules for third-party use of a plan changed several times in 2026. In
+September 2026 such use drew from the plan's normal limits. On 7 October 2026
+Anthropic said the separate "Agent SDK credit" announced earlier is no longer
+available, and that Max and Team plans now include monthly API credits ($100
+or $200 a month on Max) for the Claude API and the Agent SDK, claimed into a
+Claude Console organization and used with an API key from it
+([support.claude.com](https://support.claude.com/en/articles/17154008-monthly-api-credits-for-max-and-team-plans)).
+Such a key is an ordinary API-key source here. Check the plan's current terms
+before relying on it. The
 setup-token is exactly what makes the credential portable: one token per
 account, injected per agent, revocable, never a shared login directory.
 
@@ -130,6 +135,80 @@ when there are several, they matter, and other people talk to them.
 | **Rebuild without fear** | Rebuilds keep memory; only a change of AI *source* resets a thread — and that offers to save memory first. |
 | **Multiple machines** | Add runners (a laptop, a second box) and place agents where they fit. |
 | **See what's going on** | Fleet health, usage per agent per day, audit timeline, security posture with daily diffs. |
+| **Know and cap what each agent costs** | Every agent's spend at API prices on its tile, by what it went on and by model; who spends on each AI source; a monthly budget per agent or for the machine, with a warning, a cheaper model or a pause at the limit, and "tell me every $X". |
+| **Many consoles, one window** | A tab per agent, ⌘K to switch, an address per console you can bookmark. |
+| **Fixes that start from its own code** | Your Hatchabot agent checks a playbook of known problems, then reads the code of the release you run. Any coding assistant opened in the Hatchabot folder reads the same playbook through `AGENTS.md`. Report a problem files a masked GitHub issue that you submit yourself. |
+
+## What it does that the chat apps don't (October 2026)
+
+Claude and ChatGPT are excellent and change every month, so each point here
+is narrow and dated. Checked 2026-10-07 against Anthropic's and OpenAI's own
+help pages, except where a point gives another date.
+
+- **The people you invite need no AI account.** Sharing a ChatGPT project
+  means each person has a ChatGPT account (a free one is enough, with up to
+  five collaborators on the free plan). Claude shares projects on Team and
+  Enterprise plans; on the other plans a chat can be shared with specific
+  people, view-only. Here a family member messages a Telegram contact, or
+  signs in to your machine for web chat, and needs no account with an AI
+  company.
+- **It runs on a machine you own, with your data on it.** Claude Cowork's
+  scheduled tasks run on Anthropic's side, or on your computer while its
+  desktop app is open when they need your files. A Hatchabot agent's memory,
+  files, credentials and history are on your disk, in plain files you can
+  read, back up and move.
+- **One AI source for a household's agents, with the cost of each.** Every
+  agent in the house runs on the source you connect, and you see what each
+  one spends and can cap it. A chat-app plan is per person, or per seat.
+- **A scheduled job does not have to be a model run.** A scheduled task in
+  the chat apps is the assistant doing the task again each time. Here a task
+  can be a plain command in the agent's container, with the model called
+  only where judgement is needed (see the case study below).
+- **Agents that consult each other, and a supervisor over all of them.**
+  Consultation between your own long-lived agents is not something an
+  ordinary subscriber could set up in either app when last checked
+  (September 2026), and the model per agent is chosen with the evidence
+  and the saving shown. ChatGPT's Auto picks a model per message inside
+  OpenAI's app; Claude's apps have you pick (checked early October 2026).
+
+If you are the only one using it, the chat app is the better deal. These
+points matter once there are several jobs, several people, and things you
+would rather keep at home.
+
+## Case study: use the model as little as possible
+
+A household's meeting-and-voting agent schedules meetings by email and runs
+board votes: people reply in their own words, it finds a time, sends the
+invitations and counts the votes.
+
+**Before.** It was an always-on AI agent: every check of its inbox, every
+reply read and every decision was a model turn. At API list prices it cost
+about **$1,700 a month**, and the QA agent that ran 49 regression cases
+against it about **$990** more. It ran on a Claude plan, so that was room in
+the plan's limits rather than a bill, but it was room the rest of the
+household's agents needed.
+
+**After.** It was rewritten as a small program that runs inside an ordinary
+Hatchabot agent. Python makes every decision: parsing, scheduling, counting,
+sending, keeping records. A small model (Claude Haiku) is asked only where
+judgement on free-form email is needed, through the agent's own AI source,
+so no API key was added. A scheduled command runs the program every minute;
+a quiet minute costs nothing, because no model turn is involved.
+
+**Result.** Cents a month instead of about $2,700 at API prices. The same
+email gets the same answer. And it is tested: 117 unit tests, including the
+49 cases the QA agent used to run, a check of its prompts against the real
+model, and a scripted live test against the real mailbox and calendar.
+
+**The principle:** decisions belong in code, and the model is used as little
+as possible, only where it is needed. The agent gives the program a home: a
+container, the owner's connections, an AI source, Telegram for notices, and a
+chat that can run the program's commands.
+
+**In progress:** deploying such a program into an agent from its repository
+(`hatchabot app install`, `update`, `rollback`), with its own tests run
+inside the agent before anything switches. It is being built now and is not
+in a release yet.
 
 ## Who it's for
 

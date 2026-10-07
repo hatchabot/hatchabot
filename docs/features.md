@@ -1,7 +1,8 @@
 # Hatchabot features — a tour
 
 What exists today, in one place. Each section says how to do the thing; where a
-deeper doc exists, it's linked instead of duplicated. Updated 2026-10-04.
+deeper doc exists, it's linked instead of duplicated. Updated 2026-10-07.
+What changed lately, in plain words: [whats-new.md](whats-new.md).
 
 **Start here: you don't have to do any of it yourself.** Hatchabot ships with a
 manager — *your Hatchabot agent* — that you talk to in plain words: "which
@@ -42,6 +43,22 @@ different: **ask your Hatchabot agent**, a manager that lives in the fleet it
 manages; the **web app** (installable as a phone PWA); or the **`hatchabot`
 CLI**.
 
+## Installing and upgrading
+
+One line installs it: `curl -fsSL https://hatchabot.com/install.sh | bash`.
+Since v2.132.0, on Ubuntu 22.04+ and Debian 12+ (x64, arm64) and on
+Apple-silicon Macs, Docker is the only prerequisite: the installer downloads
+the release's prebuilt bundle (Hatchabot with its own Node and database
+driver), checks its hash and runs its self-check, so the machine needs no
+git, Node or compiler. Anywhere else it falls back to the native install. It
+adds you to the docker group without a log-out (on a Mac without Docker it
+offers Docker Desktop through Homebrew), and it ends with the link to open
+and a QR code for your phone, the first-run code carried after a `#` so it
+never reaches a server. `hatchabot upgrade` and the channel timer swap in the
+next release's bundle the same way, leave `.env` and `data/` alone, and roll
+back if the new release does not start. Details:
+[install-bundle.md](install-bundle.md).
+
 ## The home screen
 
 Since 1.15.0 the app opens on the icon home screen. The older card view is
@@ -51,6 +68,10 @@ remembered in that browser; **✨ New look** in the classic header, or
 `?ui=v2`, switches back. Both views drive the same actions.
 
 The header holds:
+- **Consoles** (a speech bubble, first; v2.139.0): back to the agent you were
+  talking to, with its tabs. The first time, it opens your Hatchabot agent
+  with the switcher. **⌘K / Ctrl+K** on the home screen does the same. See
+  [Consoles](#consoles-tabs-a-switcher-and-an-address-per-agent).
 - **New agent**, whose panel also offers *start from a template* and *open a
   .hatchabot file*.
 - **Usage** (a bar chart) and **Resources** (a chip), each opening its own
@@ -63,7 +84,7 @@ The header holds:
   screen's last section.
 - **Bulk actions** (a bolt), shown once there are two agents to pick from;
   **Rebuild all** is at its foot.
-- The five are symbols only — chart, chip, bolt, gear, plus — with the name on
+- The buttons are symbols only — speech bubble, chart, chip, bolt, gear, plus — with the name on
   hover (Chris, 2026-09-27). On a phone they tighten, and under 400 px wide the
   wordmark gives way to the logo.
 - **Settings**: this machine's settings, opened directly.
@@ -237,6 +258,29 @@ and its Telegram bot. The agent list carries `startedAt`, `restarts` and
   The app asks for the lines (`GET /v1/recent?all=1`) only while the
   Activity view is shown; if that fails, the view is drawn without them.
   Message text is never written to the logs.
+
+### Consoles: tabs, a switcher and an address per agent
+
+Clicking an agent opens its OpenClaw console over the home screen. Since
+v2.138.0 each agent you open gets a **tab** in the console's top bar: gold on
+the active one, a dot when an agent in another tab has a new reply. Switching
+is instant and keeps your place, because each open console stays loaded
+behind the others, up to five (the one used longest ago unloads, and loads
+again when you pick it).
+
+- **The switcher**: **＋** in the tab bar, or **⌘K / Ctrl+K** (also from
+  inside a console). Type part of a name, press Enter. On a phone, the
+  agent's name in the top bar is the switcher.
+- **× closes a tab.** Closing the console window unloads every console, so no
+  connection outlives it; the tabs are remembered on that device and load
+  when picked.
+- **An address per console** (v2.140.0): `…/#console=<agent>` opens
+  Hatchabot on that agent's console, signing in first when needed. The
+  address bar shows it while the console is open, so a reload comes back to
+  it and it can be bookmarked; the browser tab takes the agent's name. The
+  console's **New tab** button opens that address, with Hatchabot's tabs
+  around it, rather than OpenClaw's bare page.
+- A web-chat guest's chat stays a single console.
 
 ### Resources
 
@@ -462,6 +506,22 @@ More about it:
 - **Tampered safety settings pause it.** If someone loosens its tool settings
   from the console, Hatchabot notices within minutes and pauses its access.
   **Rebuild** restores the settings.
+
+**It diagnoses from the code on this machine** (v2.135.0–v2.139.0). Describe
+what went wrong, quoting any error, and it starts with the known problems:
+`check_known_problem` matches the symptom against the playbook
+(docs/troubleshooting.md, shipped with every release) and answers with the
+entries it most likely is, in full: how to check, the cause, the fix, and the
+release that fixed it, said plainly when that release is newer than yours.
+It returns nothing rather than something wrong. Then it can read further:
+`get_diagnostics`, and `search_source` and `read_source` over the code and
+docs of the release installed here (never `.env`, data, backups or
+`node_modules`; the knowledge pack is searched first). It tells a setting or
+the machine from a bug. For a bug, `prepare_problem_report` saves a private
+draft with its diagnosis, its confidence and a suggested patch, and lists
+any playbook entries it may be; you review it under
+[Report a problem](#when-something-goes-wrong-report-a-problem-and-the-knowledge-pack).
+Only you send a report.
 
 It is also pinned to the OpenClaw version it was created on, so a bad upgrade
 can't take your manager down with the fleet. Secrets, deleting agents,
@@ -1121,6 +1181,22 @@ recovery code works even while an account is paused.
   `--json` answers for a program. As with reset-password, being able to open
   the machine's database is the credential.
 
+**Sign out on every device** (v2.104.0; the account menu) ends every session
+you have, on every phone, tablet and computer, including this one, and your
+command-line sign-ins too. Removing or disabling a person signs them out
+everywhere at once.
+
+**Reach it from anywhere: built, and off** (v2.114.0;
+[public-access.md](public-access.md)). The machine's owner can make the
+sign-in page reachable from the internet through Tailscale Funnel, so
+invited people need no Tailscale app. It can only be on while every
+safeguard holds: accounts or Google sign-in, a second factor (a passkey or an
+authenticator app, with backup codes) for everyone with owner rights and for
+everyone who signs in with a password there, "only invited people", its own
+listener, a class for every route, sign-in limits, a new-device notice, and
+a security record. It ships off, and has not yet been run against a real
+tailnet with its owner present; that trial comes before anyone turns it on.
+
 ## Members & invites
 
 To let someone in, tap **Invite…** on the card:
@@ -1711,7 +1787,10 @@ per model), and the chart below. (A *By agent* table under it went in v2.130.0, 
 read: the picker narrows to any agents, and each agent's Usage tab has its
 own.) Requests that did not go through in the last 24 hours are **one line**
 at the top, only when there were any: "⛔ Last 24 hours: 12 refused (rate
-limits) · 1 failed — Stock Advisor 9 · …". **Saved by cheaper
+limits) · 1 failed — Stock Advisor 9 · …". Since v2.140.3 each slice of the
+spend chart in which calls were refused is shaded too, with the count in its
+tip and the total in the key (for the agents charted; another account's
+refusals never show here). **Saved by cheaper
 models** (v2.129.0; it was the "Right-size" line) lists each switch to a
 cheaper model still saving this month — agent, old → new model, since when,
 this month on the new model, what the same use would have cost on the old
@@ -1896,6 +1975,25 @@ next rebuild), and every un-ticked agent is **pinned to the model it runs
 today** so it never drifts. Agents that already pin their own model start
 un-ticked and protected. (Local sources run one model for the whole GPU, so
 they set-and-rebuild without the picker.)
+
+**Costs per source** (v2.140.0): each paid source has the Usage chart for the
+agents on it, folded or open (remembered per source; a folded one is not
+loaded): the windows 1 hr … 1 mo, "What it went on", "By model", **By
+agent** (who spends on this source), and spend over time with tokens on the
+right axis. Calls the source **refused** (rate limits) shade their slice,
+counted for everyone who draws on the source, since they share its limit.
+Spend is kept per agent and model, so an agent that switched sources brings
+its earlier spend along (`GET /v1/usage/spend?source=`). Under each source
+one line stays, only while it is true: that it is being rate-limited now.
+Every model list here is alphabetical, with numbers read as numbers.
+
+**A model the subscription would refuse is refused here first** (v2.137.0).
+On a Claude subscription, OpenClaw up to 2026.9.6 presents itself as an
+older Claude Code, and Claude Opus 5.5 rejects that ("request format
+rejected (HTTP 400)"). Choosing Opus 5.5 for such an agent (its model
+picker, the Hatchabot agent's card, the CLI) is refused with the reason and
+the way out: a newer runtime image on that agent, or an API-key source.
+Measured on 2026.9.6, only Opus 5.5 is refused. The playbook has the entry.
 
 A profile's **Shared** toggle lets every account on this server use it for
 their agents. That is a credential hand-off, not a metered proxy — share only
@@ -2120,6 +2218,37 @@ registered peer server) uses: **in-use** (a running agent), **reclaimable**
 asks Telegram). A `⇄ also` marker flags a bot appearing in two places — a
 move or adopt leftover. Anything it can't see, check at @BotFather →
 `/mybots`.
+
+## When something goes wrong: Report a problem and the knowledge pack
+
+Four ways in, cheapest first (the README's "When something goes wrong" says
+the same):
+
+1. **`hatchabot doctor`** checks the install and prints a fix for each
+   problem.
+2. **Ask your Hatchabot agent.** It checks the playbook first, then reads the
+   code of the release installed here (see
+   [Your Hatchabot agent](#your-hatchabot-agent-the-manager)).
+3. **Use the coding assistant you already have.** Every install carries
+   `AGENTS.md` at its root (v2.136.1), which Claude Code, Codex, Gemini CLI,
+   Cursor and Copilot read on their own. It points them at the **knowledge
+   pack** (v2.136.0): `docs/troubleshooting.md`, one entry per known problem
+   (the symptom as you see it, how to check, the cause, the fix, the release
+   that fixed it, and the code), and `docs/architecture-map.md`, where each
+   feature's code is. Open the assistant in your Hatchabot folder and
+   describe the problem. Measured on ten real problems, the pack took both
+   Claude Code and Codex from 18 of 20 to 20 of 20, with a half to a third of
+   the tokens. A test keeps the pack true: every file and function it names
+   must still exist, and every "fixed in" must be a release.
+4. **Report a problem** (v2.135.0; the link at the foot of the home screen,
+   or the account menu): describe what went wrong and Hatchabot adds what a
+   fix needs (version, platform, `hatchabot doctor` for the machine owner,
+   the last three days' failures, an agent's state, model and last log
+   lines). Keys, file paths, IP addresses, Tailscale names, email addresses,
+   your username and the machine's name are masked. You read the whole issue
+   and can edit it; **Open on GitHub** opens it filled in, and you submit it
+   with your own account. Hatchabot itself never sends anything. Details:
+   [field-reports.md](field-reports.md).
 
 ## CLI + management bot
 

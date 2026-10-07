@@ -1,3 +1,66 @@
+# What's new — 2026-10-07 (v2.112 → v2.143)
+
+For people who use Hatchabot, not the change log (that is CHANGELOG.md).
+
+**What each agent costs, and a say in it**
+- **A cost on every tile** (v2.119.0): "$4/wk" at API prices, and View by →
+  Cost lists the fleet most expensive first, over a window you pick from an
+  hour to a month (v2.122.0).
+- **Usage at API prices** (v2.126.0–v2.131.0): the total and a month at that
+  pace, a pie of what it went on (cache writes, cache reads, output, new
+  input), a pie by model, and spend over time with the tokens on a second
+  axis, for all your agents or any you pick. Refused calls shade their slice
+  (v2.140.3).
+- **Costs per AI source** in Settings → AI (v2.140.0): who spends on each
+  source, by agent and by model.
+- **Budgets** (v2.121.0–v2.125.0): a monthly budget for an agent or the whole
+  machine, told at 80% and 100%; at the limit, warn, move to a cheaper model,
+  or pause until the 1st (a paused agent tells whoever writes to it when it
+  is back). **Tell me every $X**: a message each time an agent's spend this
+  month passes the next step.
+- **The token steward** (v2.120.0): your Hatchabot agent flags an agent stuck
+  in a loop under Alerts and says so once on Telegram, proposes compacting a
+  conversation grown large or capping it, and reviews token use weekly.
+- **Saved by cheaper models** (v2.118.0, renamed v2.129.0): every model change
+  is recorded, a quality guard proposes switching back if errors rise, and
+  the saving is counted from what agents actually used.
+
+**Talking to agents**
+- **Console tabs and a switcher** (v2.138.0): each agent you open gets a tab,
+  switching keeps your place, and ⌘K / Ctrl+K finds an agent by name. A
+  **Consoles** button in the header goes back to them (v2.139.0), and every
+  console has its own address you can bookmark (v2.140.0).
+- **The tile's tooltip** (v2.141.0): what the agent is doing, what it costs,
+  and its runtime, with how long it has been up and whether it restarted by
+  itself.
+- **Agents live in this machine's time zone** (v2.143.0), not UTC.
+- **Archiving shows at once** (v2.142.0), and an agent brought back with no
+  Telegram bot free comes back in the web app instead of waiting.
+
+**When something goes wrong**
+- **Report a problem** (v2.135.0): a GitHub issue with the details a fix
+  needs and your private details masked; you read it and submit it yourself.
+- **Your Hatchabot agent diagnoses from the installed code** (v2.135.0) and
+  checks the known problems first (v2.139.0).
+- **A knowledge pack and AGENTS.md** in every install (v2.136.0): any coding
+  assistant you open in your Hatchabot folder starts from the playbook of
+  known problems and the map of the code.
+- **Opus 5.5 on an older runtime is refused up front** (v2.137.0), with the
+  way out, instead of every message failing.
+- **A machine that is asleep no longer stalls the page** (v2.118.1–v2.123.0):
+  its agents say "Its machine isn't answering" at once.
+
+**Installing and keeping it safe**
+- **Docker is the only prerequisite** (v2.132.0) on Ubuntu, Debian and
+  Apple-silicon Macs: a prebuilt bundle with its own Node, no compiler, and
+  the install ends with a link and a QR code.
+- **Agents on a second machine are in the nightly backup** (v2.133.0), and
+  the backup alert names anyone left out.
+- **Agents on a second machine are health-checked** like the rest (v2.134.0).
+- **Public access, built and off** (v2.114.0): the sign-in page through
+  Tailscale Funnel, with passkeys or an authenticator app, only while every
+  safeguard holds. It stays off until a supervised trial.
+
 # What's new — 2026-09-28 (v2.89 → v2.98)
 
 For people who use Hatchabot, not the change log (that is CHANGELOG.md).

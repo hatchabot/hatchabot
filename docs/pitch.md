@@ -41,8 +41,26 @@ machine in one click. Back them up. Nothing about them belongs to a provider.
 - **Many people, one agent** — talk to it directly, share it with several people, or put it in a group room; it keeps one memory for everyone and one conversation for direct messages, and says so.
 - **Real capabilities, real limits** — a Google account whose mail tool has sending switched off (a tool setting, not a Google permission — don't rely on it against someone determined); a folder but read-only; a git repo where every change is a commit.
 - **Runs at home** — your data stays on your machine. Put one on a local model and your conversations never go to an AI company. The agent still uses the internet for search and tools, and chat apps carry messages through their own servers.
-- **Operator-grade tooling** — rebuilds that keep memory, snapshots before every edit, one-click recovery of lost context, usage per agent per day, a daily security posture check, an audit trail of everything.
-- **Open source, one command to install** — one line fetches the current stable release and runs the setup; then open the app.
+- **What each agent costs, and a cap if you want one** — a weekly cost on every tile at API prices, what it went on and which model, and a monthly budget per agent or for the whole machine: warned at 80% and 100%, and at the limit a cheaper model or a pause until the 1st.
+- **A supervisor for the models** — your Hatchabot agent keeps each agent on the least capable model that does its job, catches loops and oversized conversations, and shows what the switches saved. You confirm every change.
+- **Operator-grade tooling** — rebuilds that keep memory, snapshots before every edit, one-click recovery of lost context, a tab per agent's console, a daily security posture check, an audit trail of everything.
+- **Help from its own code** — your Hatchabot agent checks a playbook of known problems and reads the code of the release you run; Report a problem files a GitHub issue with your private details masked, and you submit it.
+- **Open source, one command to install** — Docker is the only prerequisite on Ubuntu, Debian and Apple-silicon Macs; one line fetches the current stable release, and the install ends with a link and a QR code for your phone.
+
+## Use the model as little as possible
+
+A household's meeting-and-voting agent, which schedules meetings and runs
+board votes by email, cost about $1,700 a month at API prices as an always-on
+AI agent, plus about $990 for the QA agent that tested it. It was rewritten as
+a small program running inside a Hatchabot agent: Python makes every
+decision, and a small model (Claude Haiku) is asked only where judgement on
+free-form email is needed, through the agent's own AI source. It now costs
+cents a month, gives the same answer to the same email, and is tested: 117
+unit tests (the old QA agent's 49 cases among them), a prompt check against
+the real model, and a scripted live test against the real mailbox and
+calendar. Decisions in code; the model only where it is needed. Deploying
+such a program into an agent from its repository, with update and rollback,
+is being built now.
 
 ## Who it's for
 

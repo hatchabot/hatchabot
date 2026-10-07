@@ -100,15 +100,21 @@ adopting, backing up, and operating a fleet of agents.
 - **Give an agent its own secrets.** Set per-agent environment variables (an API
   key a script needs) in ⚙ Settings — stored encrypted, write-only, and injected on
   the next rebuild. Hatchabot's own AI credentials always take precedence.
-- **See what each agent is using.** A per-agent **📊 Usage** view shows
-  cumulative tokens by model and session count, with honest billing context —
-  *included* for a subscription, *no API cost* for a local model, or the model's
-  price for an API-key agent. Usage, not a fabricated bill.
-- **See what your AI plan is spending.** Each AI source reports requests and
-  tokens for the last 5 hours and 7 days, a 7-day chart, and which agents are
-  heaviest — measured from the agents' own model calls. When a provider starts
-  refusing calls, a banner names the source and the affected agents, so a quiet
-  fleet has an explanation instead of a mystery.
+- **See what each agent costs.** Tokens are summed call by call from each
+  agent's own transcripts and priced at the model's list API price: a chip on
+  every tile ("$4/wk"), **Usage** for all your agents or any you pick (what
+  it went on, by model, spend over time with the tokens beside it), the same
+  for each agent, and each AI source's costs by agent in Settings → AI. On a
+  Claude plan the figure is room in the plan's limits, not a bill; a local
+  model is $0. When a provider starts refusing calls, the chart shades those
+  slices and a line names the source, so a quiet fleet has an explanation
+  instead of a mystery.
+- **Tell it what you are willing to spend.** A monthly budget per agent or for
+  the whole machine (warned at 80% and 100%; at the limit, keep going, move
+  to a cheaper model, or pause until the 1st), and "tell me every $X".
+- **Many conversations, one window.** Each agent you open gets a tab in the
+  console; ⌘K / Ctrl+K finds one by name, and every console has an address
+  you can bookmark.
 - **Know it's really answering.** A per-agent **❤️ Health** check checks its
   gateway and chat connection, and when its AI source last answered — event
   loop, Telegram connection (with last error), plugin errors, and whether the
