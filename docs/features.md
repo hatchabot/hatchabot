@@ -1378,6 +1378,16 @@ since it started and how many times it **hit its cap** (the kernel had to
 reclaim; a process killed for memory is counted separately), and warns when
 every container's peak at once would want more than 80% of the machine.
 
+## Time zone
+
+Every agent lives in this machine's time zone (or `HATCHABOT_TIMEZONE`, an
+IANA name like `America/Toronto`): OpenClaw's `agents.defaults.userTimezone`,
+which sets its message timestamps, its schedules, dated files and what it is
+told the time is, and the container's `TZ`, its shell's clock. Before 2.143.0
+neither was set and agents ran on UTC. New agents and rebuilds get both;
+running agents get OpenClaw's setting within a day (a few minutes after
+Hatchabot restarts), and the shell clock at their next rebuild.
+
 ## Memory cap: per agent, per class, or the fleet default
 
 A container's memory cap is a ceiling, not a reservation, so one agent can

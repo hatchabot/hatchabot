@@ -83,6 +83,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('limits', 'HATCHABOT_MAX_AGENTS_PER_ACCOUNT', '0', 'Most agents one account may have (the host owner included).'),
   s('limits', 'HATCHABOT_MAX_AGENTS_PER_MEMBER', '0', 'A lower cap for accounts that are not the host owner.'),
   s('limits', 'HATCHABOT_MAX_AGENTS_TOTAL', '0', 'Most live agents on this machine, all accounts together.'),
+  s('agents', 'HATCHABOT_TIMEZONE', null, 'The time zone agents live in (an IANA name like America/Toronto): their message timestamps, schedules, dated files and what they are told the time is, and their shell clock. Unset: this machine\'s own zone. Running agents take it within a day (at once after a restart of Hatchabot); the shell clock at the next rebuild.'),
   s('limits', 'HATCHABOT_AGENT_MEMORY', '3g', 'Each agent\'s memory limit (also Settings → Hosts → Defaults).'),
   s('limits', 'HATCHABOT_AGENT_MEMORY_MAX', '8g', 'The most a member may give one agent; the machine owner is not bound by it.'),
   s('limits', 'HATCHABOT_AGENT_SWAP', 'off', 'Compressed swap each agent may use on top of its memory limit, like 2g (docker gets memory + swap as --memory-swap). Given only where this machine compresses swap (zswap or zram: scripts/enable-compressed-swap.sh); never plain disk swap. Also Settings → Hosts → Defaults.'),

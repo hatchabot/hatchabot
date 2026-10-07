@@ -241,6 +241,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'reconcile.runtime_missing': 'its container is gone',
   'reconcile.unhealthy': 'its gateway is not answering',
   'restore.restart_failed': 'did not restart after the restore',
+  'timezone.set': (d) => `its time zone set to ${String(d.now ?? '')}`,
   'owner.command_owner_set': 'you were set as the agent\'s owner in OpenClaw',
   'cron.retargeted': 'scheduled tasks pointed at the owner\'s chat (they reached no one)',
   'restore.access_read_failed': "could not read who the backup let in",

@@ -1,3 +1,4 @@
+import { agentTimeZone } from '../orchestrator/timezone.js';
 import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
 import { claudePlanAllowed, CLAUDE_PLAN_HOSTED } from '../config/claudePlan.js';
 export { claudePlanAllowed };
@@ -2746,6 +2747,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (read.code === 0 && read.stdout.trim() !== want) {
           const set = await providerFor(a.hostId).exec(a.runtimeRef, ['config', 'set', 'commands.ownerAllowFrom', want, '--strict-json']);
           trace(a.id)('owner.command_owner_set', { ok: set.code === 0, had: (JSON.parse(read.stdout || '[]') as unknown[]).length });
+        }
+      } catch { /* next time */ }
+      // Its time zone, live (timezone.ts): agents built before it, or after the
+      // setting changed, ran on the container's UTC (2026-10-07).
+      try {
+        const want = agentTimeZone();
+        const read = await providerFor(a.hostId).execShell(a.runtimeRef,
+          `node -e 'const c=JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json","utf8"));process.stdout.write(String(((c.agents||{}).defaults||{}).userTimezone||""))'`);
+        if (read.code === 0 && read.stdout.trim() !== want) {
+          const set = await providerFor(a.hostId).exec(a.runtimeRef, ['config', 'set', 'agents.defaults.userTimezone', want]);
+          trace(a.id)('timezone.set', { ok: set.code === 0, was: read.stdout.trim() || null, now: want });
         }
       } catch { /* next time */ }
       // The per-app file ceiling reached OpenClaw only at a build or when

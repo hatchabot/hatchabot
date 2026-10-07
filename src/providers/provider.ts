@@ -140,6 +140,8 @@ export interface OpenClawConfigPatch {
   console?: { trustedProxies: string[]; ownerIdentity: string; guestIdentities: string[] };
   /** cron.triggers.enabled — see Agent.cronTriggers. Written convergently. */
   cronTriggers?: boolean;
+  /** OpenClaw's agents.defaults.userTimezone (IANA): timestamps, schedules and "now" in the prompt. Undefined = leave it. */
+  userTimezone?: string;
   /**
    * Semantic memory search through the machine's embedding service instead of
    * the engine baked into the image (src/embedder). Absent = baked, as today.

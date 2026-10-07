@@ -595,6 +595,8 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // Event-triggered tasks: convergent like richMessages — an explicit opt-in
   // writes true, everything else re-asserts false on every provision/rebuild.
   cmds.push({ argv: ['config', 'set', 'cron.triggers.enabled', patch.cronTriggers === true ? 'true' : 'false'] });
+  // Its time zone (timezone.ts): unset, OpenClaw falls back to the container's UTC.
+  if (patch.userTimezone) cmds.push({ argv: ['config', 'set', 'agents.defaults.userTimezone', patch.userTimezone] });
 
   // The management agent: only Hatchabot's tools (an HTTP MCP server, reached
   // with its propose-only key), its memory, and its own workspace files. No

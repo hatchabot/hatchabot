@@ -350,6 +350,7 @@ describe('buildRuntimeSpec', () => {
     // Nothing credential-like to inject — only orientation (host name) and
     // the volume-resident gog home (a PATH, not a credential).
     expect(spec.env).toEqual({
+      TZ: expect.any(String),
       HATCHABOT_HOST_NAME: expect.any(String),
       HATCHABOT_MEMORY_CAP: '3g',
       GOG_HOME: '/home/node/.openclaw/connections/gog',

@@ -168,6 +168,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.44.1`
 - **Code:** `src/cli.ts` — `skip-telegram`
 
+### An agent's times are hours off (it thinks it is in UTC)
+- **Check:** `openclaw config get agents.defaults.userTimezone` in the agent (unset before 2.143.0); `date` in its container says UTC.
+- **Cause:** OpenClaw falls back to the process's zone, and containers run on UTC.
+- **Fix:** update to 2.143.0: every agent gets this machine's zone (or `HATCHABOT_TIMEZONE`); running agents take it within a day, or at once after a restart of Hatchabot; `TZ` at the next rebuild.
+- **Fixed in:** `v2.143.0`
+- **Code:** `src/orchestrator/timezone.ts` — `agentTimeZone`; `src/api/routes.ts` — `retargetCronSweep`
+
 ### An agent I just archived came back ("restoring", or waiting for a bot token)
 - **Check:** its Setup log: "archived", then minutes later a restore; Hatchabot's log shows `POST /v1/agents/<id>/restore` from a browser (nothing restores on its own).
 - **Cause:** a Restore click. Before 2.142.0 an archived agent's page put 📤 Restore where 💬 Chat sits on a running one, and closing its console after archiving landed on that page.

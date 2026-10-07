@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.143.0] — 2026-10-07
+
+### Fixed
+- **Agents ran on UTC.** OpenClaw's time zone (`agents.defaults.userTimezone`: message timestamps, schedules, dated files, and what an agent is told the time is) was never set and containers run on UTC, so an owner in Toronto saw every agent four hours off. Every agent now lives in this machine's zone, or `HATCHABOT_TIMEZONE` (an IANA name): new agents and rebuilds get it and the container's `TZ`; running agents get OpenClaw's setting from the daily settings pass (a few minutes after Hatchabot starts), noted in the Setup log.
+
 ## [2.142.0] — 2026-10-07
 
 ### Fixed

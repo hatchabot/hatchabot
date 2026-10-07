@@ -17,6 +17,7 @@ import { sampleAgentUsage } from './sourceUsage.js';
 import type { ChannelProvisioner, ProvisionedChannel } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { DOORMAN_EMBED_PORT } from '../ops/doorman.js';
+import { agentTimeZone } from './timezone.js';
 import { whileBusy } from './busy.js';
 import { notifyAgentChat } from '../channels/notify.js';
 import { autoSnapshot, workspacePath, writeFileInAgent } from './snapshots.js';
@@ -800,6 +801,7 @@ export async function buildRuntimeSpec(
         models: profile.models,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',
         cronTriggers: agent.cronTriggers === true,
+        userTimezone: agentTimeZone(),
         embed,
         openclawVersion,
         bakedPlugins,
@@ -857,6 +859,8 @@ export async function buildRuntimeSpec(
       // retries it: 30 minutes, not OpenClaw's 5, so a long /compact is not
       // retried every 5 minutes for a day (channelTimeout.ts, 2026-10-04).
       // Before perAgentEnv: the agent's own Environment value wins.
+      // The shell's clock in the agent's zone (an agent's own TZ, below, wins).
+      TZ: agentTimeZone(),
       ...channelTimeoutEnv(),
       ...perAgentEnv,
       // Orientation, not configuration: the human name of the machine this
