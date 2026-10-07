@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.139.1] — 2026-10-07
+
+### Fixed
+- **CI:** the test that the gateway call no longer closes itself in a loop allowed exactly two closes for two calls; on GitHub's runner Node's own WebSocket sometimes closes once more inside, so v2.137.0 and v2.139.0 failed CI (the promote check refused v2.139.0, as designed). It now allows a few — the loop it guards against was 1,248.
+
 ## [2.139.0] — 2026-10-07
 
 ### Added

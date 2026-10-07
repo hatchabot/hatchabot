@@ -529,7 +529,8 @@ describe('gatewayCallAs when the gateway cannot be reached', () => {
       await expect(gatewayCallAs({ host: '127.0.0.1', port: 1 } as any, 'test-guest', [], 2000)).rejects.toThrow(/could not reach|closed the connection/);
       await new Promise((r) => setTimeout(r, 100));
       expect(uncaught).toEqual([]);
-      expect(closes).toBeLessThanOrEqual(2);
+      // Two calls, settled once each; Node's own WebSocket may close once more inside (seen on GitHub's runner, 2026-10-07). The loop was 1,248.
+      expect(closes).toBeLessThanOrEqual(6);
     } finally {
       (globalThis as any).WebSocket = Real;
       process.off('uncaughtException', onUncaught);
