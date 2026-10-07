@@ -12915,7 +12915,7 @@ async function v2AppRetry(id, btn) {
 }
 
 // ---- Run an app from a repo: a new agent, or into an existing one -----------------------------
-let appDlgMode = 'create', appDlgAgent = null, appInspected = null;
+let appDlgMode = 'create', appDlgAgent = null, appInspected = null, appConns = [];
 function openAppDlg(mode, agentId) {
   appDlgMode = mode; appDlgAgent = agentId || null; appInspected = null;
   const a = agentId ? v2Find(agentId) : null;
@@ -12937,7 +12937,7 @@ async function appRead() {
     $('appInfo').innerHTML = `<div style="margin-top:10px"><b>${esc(m.name)}</b> <code>${esc(String(r.sha).slice(0, 12))}</code>
       ${m.description ? `<div class="sub">${esc(m.description)}</div>` : ''}
       <div class="sub">Runs on a schedule: ${(m.tasks || []).map(t => `${esc(t.name)} (every ${esc(t.every || t.cron)})`).join(', ') || 'nothing'}${m.test ? ' · its tests run in the agent before it goes live' : ''}${m.model ? ` · chat model ${esc(m.model)}` : ''}</div>
-      ${(r.connections || []).map(c => `<div class="sub" style="color:var(--warn)">Needs a ${esc(c.kind === 'google' ? 'Google' : c.kind)} connection for ${esc(c.purpose)}: attach it in the agent's settings (Knowledge → Connections).</div>`).join('')}</div>`;
+      ${(r.connections || []).filter(c => c.kind !== 'google').map(c => `<div class="sub" style="color:var(--warn)">Needs a ${esc(c.kind)} connection for ${esc(c.purpose)}: attach it in the agent's settings (Knowledge → Connections).</div>`).join('')}</div>`;
     const field = (f) => {
       const id = 'appF_' + f.key;
       const label = `<label for="${id}">${esc(f.key)}${f.required ? ' <span style="color:var(--warn)">*</span>' : ''}${f.label ? ` <span class="sub">— ${esc(f.label)}</span>` : ''}</label>`;
@@ -12946,13 +12946,51 @@ async function appRead() {
       return label + `<input type="${f.type === 'number' ? 'number' : f.type === 'email' ? 'email' : 'text'}" id="${id}" value="${esc(String(v))}">`;
     };
     const local = hosts.find(h => h.kind === 'local') || hosts[0];
-    $('appForm').innerHTML = (appDlgMode === 'create' ? `<label for="appName">Name</label><input type="text" id="appName" maxlength="64" value="${esc(m.name)}">
+    const needGoogle = (r.connections || []).find(c => c.kind === 'google');
+    appConns = [];
+    if (needGoogle) { try { appConns = ((await api('/v1/connections')).connections || []).filter(c => c.kind === 'google'); } catch { appConns = []; } }
+    const connPicker = needGoogle ? `<label for="appConn">Google account <span class="sub">— ${esc(needGoogle.purpose)}</span></label>
+      <select id="appConn" onchange="appConnPicked()"><option value="">None yet (attach one later in its settings)</option>
+        ${appConns.map(c => `<option value="${esc(c.id)}">${esc(c.email)}</option>`).join('')}</select>
+      ${appConns.length ? '' : '<div class="sub">No Google account is connected yet: add one in ⚙ Settings → Connections, then come back.</div>'}
+      <div id="appConnWarn" class="sub" hidden></div>` : '';
+    $('appForm').innerHTML = connPicker + (appDlgMode === 'create' ? `<label for="appName">Name</label><input type="text" id="appName" maxlength="64" value="${esc(m.name)}">
       ${profiles.length > 1 ? `<label for="appProfile">AI source</label><select id="appProfile">${profiles.map(p => `<option value="${p.id}">${sourceOptionLabel(p)}</option>`).join('')}</select>` : ''}
       <label style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="appNoTelegram" style="width:auto"> No Telegram — reach it here in Hatchabot only</label>
       ${local ? '' : '<div class="err">No host is configured.</div>'}` : '') + (r.ask || []).map(field).join('');
     $('appGoBtn').disabled = false;
+    // A field that names the account (e.g. the mailbox) picks it, and the other way round.
+    const linked = needGoogle?.field && $('appF_' + needGoogle.field);
+    if (linked) {
+      const hit = appConns.find(c => c.email.toLowerCase() === linked.value.trim().toLowerCase());
+      if (hit) $('appConn').value = hit.id;
+      linked.addEventListener('change', () => { const h = appConns.find(c => c.email.toLowerCase() === linked.value.trim().toLowerCase()); if (h) { $('appConn').value = h.id; appConnPicked(); } });
+    }
+    if (needGoogle) appConnPicked();
   } catch (e) { $('appInfo').innerHTML = ''; $('appErr').textContent = e.message; }
   finally { $('appReadBtn').disabled = false; }
+}
+/** The account picked: fill the field that names it, and say who else runs this app on it. */
+function appConnPicked() {
+  const c = appConns.find(x => x.id === $('appConn')?.value);
+  const g = (appInspected?.connections || []).find(x => x.kind === 'google');
+  const f = g?.field && $('appF_' + g.field);
+  if (c && f && !f.value.trim()) f.value = c.email;
+  const others = c ? (c.attachedTo || []).filter(x => x.id !== appDlgAgent && x.state !== 'ARCHIVED' && x.state !== 'DELETED') : [];
+  const same = others.filter(x => x.app && x.app === appInspected?.manifest?.app);
+  const el = $('appConnWarn'); if (!el) return;
+  el.hidden = !others.length;
+  el.style.color = same.length ? 'var(--warn)' : '';
+  el.innerHTML = same.length
+    ? `⚠ ${same.map(x => esc(x.name)).join(' and ')} already run${same.length > 1 ? '' : 's'} ${esc(appInspected.manifest.name)} on this account. Two copies both answer every email: stop the app there first (its page → App → Stop app), or pick another account.`
+    : others.length ? `Also used by ${others.map(x => esc(x.name)).join(', ')}.` : '';
+}
+/** Two copies of this app on the account picked? Asked once, before anything is made. */
+function appSharedOk() {
+  const c = appConns.find(x => x.id === $('appConn')?.value);
+  const same = c ? (c.attachedTo || []).filter(x => x.id !== appDlgAgent && x.state !== 'ARCHIVED' && x.state !== 'DELETED' && x.app === appInspected?.manifest?.app) : [];
+  if (!same.length) return { ok: true, allowShared: false };
+  return { ok: confirm(`${same.map(x => x.name).join(' and ')} already run${same.length > 1 ? '' : 's'} ${appInspected.manifest.name} on ${c.email}. Both would answer every email. Install it here anyway?`), allowShared: true };
 }
 function appValues() {
   const out = {};
@@ -12968,6 +13006,8 @@ async function appGo() {
   const missing = (appInspected.ask || []).filter(f => f.required && !values[f.key]).map(f => f.key);
   if (missing.length) { $('appErr').textContent = `Fill in: ${missing.join(', ')}.`; return; }
   const m = appInspected.manifest;
+  const shared = appSharedOk(); if (!shared.ok) return;
+  const connId = $('appConn')?.value || '';
   $('appGoBtn').disabled = true; $('appErr').textContent = ''; $('appOut').hidden = true;
   try {
     if (appDlgMode === 'create') {
@@ -12977,13 +13017,16 @@ async function appGo() {
         aiProfileId: ($('appProfile') && $('appProfile').value) || profiles[0]?.id, hostId: local?.id,
         telegram: $('appNoTelegram').checked ? false : undefined } });
       if (m.model) { try { await api(`/v1/agents/${a.id}/model`, { method: 'POST', body: { model: m.model } }); } catch { /* the source's default stays */ } }
-      await api(`/v1/agents/${a.id}/app/pending`, { method: 'POST', body: { source: appInspected.source, values } });
+      // Its account goes on before it first runs (it is materialized as the agent comes up).
+      if (connId) await api(`/v1/agents/${a.id}/connections/attach`, { method: 'POST', body: { connectionId: connId } });
+      await api(`/v1/agents/${a.id}/app/pending`, { method: 'POST', body: { source: appInspected.source, values, ...(shared.allowShared ? { allowShared: true } : {}) } });
       appDlg.close();
       toast(`Creating "${name}" — ${m.name} installs as soon as it is running (its tests run first).`, 12000);
       await refresh(false);
     } else {
       toast(`Installing ${m.name}: copying it in, running its tests, scheduling it…`, 120000, 'progress');
-      await api(`/v1/agents/${appDlgAgent}/app`, { method: 'POST', body: { source: appInspected.source, values } });
+      if (connId) await api(`/v1/agents/${appDlgAgent}/connections/attach`, { method: 'POST', body: { connectionId: connId } });
+      await api(`/v1/agents/${appDlgAgent}/app`, { method: 'POST', body: { source: appInspected.source, values, ...(shared.allowShared ? { allowShared: true } : {}) } });
       appDlg.close();
       toast(`${m.name} is installed and running.`);
       if (v2AgentId === appDlgAgent) void v2LoadApp(appDlgAgent, true);

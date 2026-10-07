@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.146.0] — 2026-10-07
+
+### Added
+- **"Run an app from a repo" picks and attaches the Google account the app needs.** The mailbox field follows the account picked (and the other way round), and the account is attached before the agent first runs. Before, the dialog only said to attach one later, so an app made this way failed every run on a missing login and was flagged as a loop.
+- **One copy of an app per account.** Installing an app is refused (409) when another live agent already runs the same app on the account its settings name, since both would answer every email; the dialog warns as soon as the account is picked and asks before going on (`allowShared`). Settings → Connections data now says which app each attached agent runs.
+- A failing app task's suggested fix points at the app's own status.
+
 ## [2.145.0] — 2026-10-07
 
 ### Added

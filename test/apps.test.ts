@@ -25,6 +25,7 @@ const MANIFEST = {
   test: ['python3', '-m', 'unittest'],
   env: { DEMO_HOME: '{data_dir}' },
   tasks: [{ name: 'tick', every: '1m', command: ['python3', '-m', 'demo', 'tick'] }],
+  connections: [{ kind: 'google', purpose: 'its mailbox', field: 'mailbox' }],
   config: { fields: [
     { key: 'mailbox', label: 'its address', type: 'email', required: true },
     { key: 'mode', default: 'shadow' },
@@ -230,6 +231,29 @@ describe('the app routes', () => {
     await f.inject({ method: 'POST', url: '/v1/agents/a1/app/pending', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } });
     for (let i = 0; i < 50 && !store.getAppPending('a1')?.error; i++) await new Promise((r) => setTimeout(r, 20));
     expect(store.getAppPending('a1')?.error).toMatch(/tests failed/);
+  });
+
+  it('two copies of one app on one account: refused unless confirmed, and the connection list says who runs what', async () => {
+    const { f, store } = await app();
+    const dir = repo();
+    store.insertAgent({ id: 'a2', ownerId: OWNER, name: 'Demo Two', slug: 'demo-two', state: 'RUNNING', runtimeRef: 'mock://a2', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    store.insertConnection({ id: 'c1', ownerId: OWNER, kind: 'google', email: 'demo@example.org', services: ['gmail'], secretRef: 's/c1' });
+    store.attachConnection('a1', 'c1', false);
+    store.attachConnection('a2', 'c1', false);
+    const values = { mailbox: 'demo@example.org' };
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: dir, values } })).statusCode).toBe(200);
+    const conns = (await f.inject({ method: 'GET', url: '/v1/connections', headers: as })).json().connections;
+    expect(conns[0].attachedTo.find((x: { id: string }) => x.id === 'a1')).toMatchObject({ app: 'demoapp', state: 'RUNNING' });
+    const twice = await f.inject({ method: 'POST', url: '/v1/agents/a2/app', headers: as, payload: { source: dir, values } });
+    expect(twice.statusCode).toBe(409);
+    expect(twice.json()).toMatchObject({ conflict: ['Demo'] });
+    expect(twice.json().error).toMatch(/already runs Demo App on the same account/);
+    const pend = await f.inject({ method: 'POST', url: '/v1/agents/a2/app/pending', headers: as, payload: { source: dir, values } });
+    expect(pend.statusCode).toBe(409);
+    expect(store.getAppPending('a2')).toBeUndefined();
+    // Another account, or a confirmation, is fine.
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a2/app', headers: as, payload: { source: dir, values: { mailbox: 'other@example.org' } } })).statusCode).toBe(200);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a2/app', headers: as, payload: { source: dir, values, allowShared: true } })).statusCode).toBe(200);
   });
 
   it('only the machine owner, and only a running agent', async () => {

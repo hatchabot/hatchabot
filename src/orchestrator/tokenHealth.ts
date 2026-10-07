@@ -292,7 +292,8 @@ export function incidentWords(s: LoopSignal, ctx: { conversationK?: number; agen
         text: Number(d.reruns) >= T.taskRerunLoop
           ? `Scheduled task "${String(d.task)}" re-ran ${String(d.reruns)} times after errors in a day`
           : `Scheduled task "${String(d.task)}" failed ${String(d.streak)} runs in a row (last ${clockOf(s.last, now)})`,
-        fix: 'Look at the task and its last error (its Schedules tab, or ask Hatchabot); turn it off until it is fixed.',
+        fix: 'Look at the task and its last error (its Schedules tab, or ask Hatchabot); turn it off until it is fixed. '
+          + 'If it is an app\'s task (its page → App), the app says why: often an account it needs is not attached.',
       };
     case 'consult-ping-pong': {
       // One incident for the pair: both named, in a stable order.

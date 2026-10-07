@@ -91,6 +91,11 @@ codebase gets deployed, updated and rolled back from Hatchabot.
 5. It points `current` at the new release (atomically), and re-syncs the tasks.
 6. It records the app, source, commit and previous commit for the agent.
 
+**One copy per account.** An install is refused (409) when another live agent
+already runs the same app on the account its values name (the mailbox): two
+copies would both answer every email. The dialog warns first; `allowShared`
+(the dialog's confirmation) overrides it.
+
 **Update** is the same from step 1 with a newer commit; **rollback** points
 `current` back at the previous release and re-syncs its tasks.
 
@@ -111,7 +116,9 @@ API: `POST /v1/apps/inspect`, `GET|POST|DELETE /v1/agents/:id/app`,
 ## In the web app
 
 - **New agent → "run an app from a repo"** (the machine's owner): give the
-  folder or git address, read it, fill in what it asks for, Create. The agent
+  folder or git address, read it, pick the Google account it needs (the
+  mailbox follows the account), fill in what it asks for, Create. The account
+  is attached before the agent first runs. The agent
   is made with the app's name, chat and model, and Hatchabot installs the app
   as soon as the agent is running (`POST /v1/agents/:id/app/pending`, run when
   provisioning finishes), so closing the browser does not lose it.

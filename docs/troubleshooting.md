@@ -175,6 +175,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/orchestrator/apps.ts` — `installRelease`
 
+### An app's task fails every run, flagged as a loop: "OAuth client credentials missing"
+- **Check:** the agent's Alerts ("Scheduled task \"<app>-tick\" failed 3 runs in a row") and the app's own status (`python3 -m <app> status` in the agent, or its page → App): the error names the missing login.
+- **Cause:** the app needs a Google account and none is attached to this agent (made before 2.146.0, the dialog only said to attach one).
+- **Fix:** first make sure no other agent runs the same app on that account (two copies both answer every email), then attach it: the agent's settings → Knowledge → Connections. From 2.146.0 the "run an app from a repo" dialog picks and attaches it.
+- **Fixed in:** `v2.146.0`
+- **Code:** `web/index.html` — `appConnPicked`, `appGo`
+
+### Installing an app is refused: "… already runs … on the same account"
+- **Check:** the message names the other agent; its page → App shows the app.
+- **Cause:** the same app on one account (one mailbox) in two live agents would answer every email twice.
+- **Fix:** stop the app on the other agent (its page → App → Stop app) or use another account; or confirm in the dialog (`allowShared`) if you really want both.
+- **Fixed in:** —
+- **Code:** `src/api/routes.ts` — `sharedAppConflicts`
+
 ### A new agent's page says "Its app could not be installed"
 - **Check:** the message under it on the agent's page (App), and `app.install_failed` in its Setup log.
 - **Cause:** the app made for it from a repo failed to install once the agent was running: its tests failed, a value it needs was missing, or the repo could not be read.

@@ -6543,6 +6543,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     log: (step, detail) => trace(a.id)(step, detail ?? {}),
   });
   const appFail = (reply: FastifyReply, e: unknown) => {
+    const conflict = (e as { conflict?: string[] })?.conflict;
+    if (e instanceof AppError && conflict) return reply.code(409).send({ error: e.message, conflict });
     if (e instanceof AppError) return reply.code(400).send({ error: e.message, test: (e as AppError & { test?: unknown }).test });
     return reply.code(502).send({ error: `The install did not finish: ${(e as Error)?.message ?? e}` });
   };
@@ -6582,11 +6584,33 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   /** Install from a source into a running agent and record it (the route and a pending install share it). */
-  const installFromSource = async (a: Agent, source: string, ref: string, values: Record<string, unknown>) => {
+  /** Other live agents already running this app on the account the values name (e.g. the same mailbox). */
+  const sharedAppConflicts = (a: Agent, m: AppManifest, values: Record<string, unknown>): string[] => {
+    const out: string[] = [];
+    for (const c of m.connections ?? []) {
+      const email = c.field ? String(values[c.field] ?? '').trim().toLowerCase() : '';
+      if (!email) continue;
+      const conn = store.listConnections(a.ownerId).find((x) => x.kind === c.kind && x.email.toLowerCase() === email);
+      if (!conn) continue;
+      for (const at of store.listConnectionAttachments(conn.id)) {
+        const other = store.getAgent(at.agentId);
+        if (!other || other.id === a.id || other.state === 'ARCHIVED' || other.state === 'DELETED') continue;
+        if (store.getAgentApp(other.id)?.app === m.app) out.push(other.name);
+      }
+    }
+    return [...new Set(out)];
+  };
+  const sharedRefusal = (names: string[], m: AppManifest) => Object.assign(new AppError(
+    `${names.join(' and ')} already ${names.length > 1 ? 'run' : 'runs'} ${m.name} on the same account. Two copies would both answer every email. ` +
+    'Stop the app there first, or use another account; or confirm you want both (allowShared).'), { conflict: names });
+
+  const installFromSource = async (a: Agent, source: string, ref: string, values: Record<string, unknown>, allowShared = false) => {
     const src = parseSource(source);
     const label = src.kind === 'dir' ? src.path : src.url;
     const repo = await repoFor(appGit, src, appCacheDir);
     const rel = await resolveRelease(appGit, repo, ref);
+    const clash = allowShared ? [] : sharedAppConflicts(a, rel.manifest, values);
+    if (clash.length) throw sharedRefusal(clash, rel.manifest);
     const had = store.getAgentApp(a.id);
     if (had && had.app !== rel.manifest.app) await removeTasks(appDeps(a), had.app);
     const done = await whileBusy(a.id, () => installRelease(appDeps(a), rel, values));
@@ -6602,7 +6626,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const a = store.getAgent(agentId);
     if (!p || !a || a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) return;
     try {
-      await installFromSource(a, p.source, p.ref, p.values);
+      const { __allowShared, ...values } = p.values as Record<string, unknown> & { __allowShared?: boolean };
+      await installFromSource(a, p.source, p.ref, values, __allowShared === true);
       store.deleteAppPending(agentId);
     } catch (e) {
       const msg = (e as Error)?.message ?? String(e);
@@ -6612,16 +6637,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
 
   /** Install an app into this agent (or replace the one it has, from a new source). */
-  app.post<{ Params: { id: string }; Body: { source?: string; ref?: string; values?: Record<string, unknown> } }>('/v1/agents/:id/app', async (req, reply) => {
+  app.post<{ Params: { id: string }; Body: { source?: string; ref?: string; values?: Record<string, unknown>; allowShared?: boolean } }>('/v1/agents/:id/app', async (req, reply) => {
     const a = appTarget(req, reply); if (!a) return reply;
     try {
-      const done = await installFromSource(a, req.body?.source ?? '', req.body?.ref || 'HEAD', req.body?.values ?? {});
+      const done = await installFromSource(a, req.body?.source ?? '', req.body?.ref || 'HEAD', req.body?.values ?? {}, req.body?.allowShared === true);
       return { app: appView(a), test: done.test ?? null };
     } catch (e) { return appFail(reply, e); }
   });
 
   /** Install it when the agent is ready (a new agent from a repo): checked now, run after setup. */
-  app.post<{ Params: { id: string }; Body: { source?: string; ref?: string; values?: Record<string, unknown> } }>('/v1/agents/:id/app/pending', async (req, reply) => {
+  app.post<{ Params: { id: string }; Body: { source?: string; ref?: string; values?: Record<string, unknown>; allowShared?: boolean } }>('/v1/agents/:id/app/pending', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: "Only this machine's owner can install an app (it reads this machine's folders and git login)." });
     const a = ownedAgent(req, req.params.id);
     if (!a || a.state === 'DELETED' || a.state === 'ARCHIVED') return reply.code(404).send({ error: 'Not found' });
@@ -6637,7 +6662,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const rel = await resolveRelease(appGit, await repoFor(appGit, parseSource(req.body?.source ?? ''), appCacheDir), ref);
       const missing = fieldsToAsk(rel.manifest).filter((f) => f.required && f.default === undefined && !String((req.body?.values ?? {})[f.key] ?? '').trim()).map((f) => f.key);
       if (missing.length) return reply.code(400).send({ error: `Needs a value for: ${missing.join(', ')}.` });
-      store.setAppPending(a.id, { source: req.body!.source!, ref, values: req.body?.values ?? {} });
+      const clash = req.body?.allowShared ? [] : sharedAppConflicts(a, rel.manifest, req.body?.values ?? {});
+      if (clash.length) throw sharedRefusal(clash, rel.manifest);
+      store.setAppPending(a.id, { source: req.body!.source!, ref, values: { ...(req.body?.values ?? {}), ...(req.body?.allowShared ? { __allowShared: true } : {}) } });
       trace(a.id)('app.pending', { app: rel.manifest.app });
       if (a.state === 'RUNNING') void runPendingApp(a.id);
       return { pending: true, app: rel.manifest.app, name: rel.manifest.name };
@@ -9515,6 +9542,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           .map(({ at, a }) => ({
             id: a!.id,
             name: a!.name,
+            state: a!.state,
+            // The app it runs (apps in agents): two copies of one app on one account both answer every email.
+            app: store.getAgentApp(a!.id)?.app ?? null,
             attachedAt: at.attachedAt,
             materializedAt: at.materializedAt,
             // Stale = the agent's materialized token predates the connection's

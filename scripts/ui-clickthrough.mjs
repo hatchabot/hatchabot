@@ -2429,6 +2429,9 @@ const SCENARIOS = String.raw`(() => {
         window.__answer['POST /v1/agents'] = [{ status: 200, body: { id: 'newapp1', name: 'Demo App', state: 'PROVISIONING' } }];
         window.__answer['POST /v1/agents/newapp1/model'] = [{ status: 200, body: { model: 'claude-haiku-4-5' } }];
         window.__answer['POST /v1/agents/newapp1/app/pending'] = [{ status: 200, body: { pending: true, app: 'demoapp', name: 'Demo App' } }];
+        window.__override['/v1/connections'] = { connections: [
+          { id: 'c1', kind: 'google', email: 'demo@example.org', attachedTo: [{ id: 'old1', name: 'Old Demo', state: 'RUNNING', app: 'demoapp' }] },
+          { id: 'c2', kind: 'google', email: 'other@example.org', attachedTo: [] }] };
         document.getElementById('fabBtn').onclick();
         await until(() => createDlg.open);
         ok('the machine owner sees "run an app from a repo"', !document.getElementById('createFromRepo').hidden);
@@ -2436,21 +2439,31 @@ const SCENARIOS = String.raw`(() => {
         openAppDlg('create');
         document.getElementById('appSource').value = '~/demoapp';
         await appRead();
-        ok('it shows the app and what it needs', document.getElementById('appInfo').textContent.includes('Demo App') && document.getElementById('appInfo').textContent.includes('Google connection'));
+        ok('it shows the app', document.getElementById('appInfo').textContent.includes('Demo App'));
+        ok('and asks which Google account', !!document.getElementById('appConn') && document.getElementById('appConn').options.length === 3);
         eq('the name is the app\'s', document.getElementById('appName').value, 'Demo App');
         eq('a field has its default', document.getElementById('appF_mode').value, 'shadow');
         const mark = window.__calls.length;
         await appGo();
         ok('a required field stops it', document.getElementById('appErr').textContent.includes('mailbox') && window.__calls.length === mark);
-        document.getElementById('appF_mailbox').value = 'demo@example.org';
+        // Picking the account fills the mailbox, and says another agent already runs this app on it.
+        document.getElementById('appConn').value = 'c1';
+        appConnPicked();
+        eq('the mailbox follows the account', document.getElementById('appF_mailbox').value, 'demo@example.org');
+        const warn = document.getElementById('appConnWarn');
+        ok('a warning names the other copy: ' + warn.textContent, !warn.hidden && warn.textContent.includes('Old Demo already runs Demo App'));
+        window.__confirms.length = 0;
         await appGo();
+        ok('it asked before going on', window.__confirms.some((t) => t.includes('Both would answer every email')));
         const posts = window.__calls.slice(mark).filter((c) => c.method === 'POST').map((c) => c.path);
-        eq('create, its model, then the install when ready', posts, ['/v1/agents', '/v1/agents/newapp1/model', '/v1/agents/newapp1/app/pending']);
+        eq('create, its model, its account, then the install when ready', posts, ['/v1/agents', '/v1/agents/newapp1/model', '/v1/agents/newapp1/connections/attach', '/v1/agents/newapp1/app/pending']);
+        eq('the account attached', window.__calls.slice(mark).find((c) => c.path === '/v1/agents/newapp1/connections/attach').body, { connectionId: 'c1' });
         const pend = window.__calls.slice(mark).find((c) => c.path === '/v1/agents/newapp1/app/pending');
-        eq('with the source and the values', pend.body, { source: '~/demoapp', values: { mailbox: 'demo@example.org', mode: 'shadow' } });
+        eq('with the source, the values and the confirmation', pend.body, { source: '~/demoapp', values: { mailbox: 'demo@example.org', mode: 'shadow' }, allowShared: true });
         ok('and the dialog closed', !appDlg.open);
       } finally {
         for (const k of ['POST /v1/apps/inspect', 'POST /v1/agents', 'POST /v1/agents/newapp1/model', 'POST /v1/agents/newapp1/app/pending']) if (window.__answer) delete window.__answer[k];
+        delete window.__override['/v1/connections'];
         if (appDlg.open) appDlg.close();
         if (createDlg.open) createDlg.close();
         await refresh(false);
