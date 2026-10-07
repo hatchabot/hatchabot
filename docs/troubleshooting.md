@@ -168,6 +168,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.44.1`
 - **Code:** `src/cli.ts` — `skip-telegram`
 
+### An agent I just archived came back ("restoring", or waiting for a bot token)
+- **Check:** its Setup log: "archived", then minutes later a restore; Hatchabot's log shows `POST /v1/agents/<id>/restore` from a browser (nothing restores on its own).
+- **Cause:** a Restore click. Before 2.142.0 an archived agent's page put 📤 Restore where 💬 Chat sits on a running one, and closing its console after archiving landed on that page.
+- **Fix:** archive it again (if it is waiting for a bot token, `hatchabot skip-telegram <agent>` first, then archive). From 2.142.0 archiving closes its console and page, and Restore… is not the main button.
+- **Fixed in:** `v2.142.0`
+- **Code:** `web/index.html` — `confirmArchive`, `restoreAgent`
+
 ### An unarchived agent hangs in PROVISIONING: "waiting for a bot token"
 - **Check:** after Restore (`hatchabot unarchive`), the Setup log ends with "waiting for a bot token" and Settings → Telegram shows no spare bot. From 2.142.0 the same situation shows instead as an Alerts line on a running agent: "No Telegram bot was free — it is running in the web app; attach a bot later".
 - **Cause:** coming back means leasing a new bot, and none was free. Before 2.142.0 unarchive, clone, derive and template import then parked on the paste-a-token step, though nobody had been asked about Telegram.

@@ -10756,6 +10756,11 @@ async function confirmArchive() {
   try {
     const r = await api(`/v1/agents/${id}/archive`, { method: 'POST', body: { checkpoint } });
     archivingHere.delete(id);
+    // Nothing of it stays open: its console tab closes, and its page with it, so
+    // the next click can't land on the Restore that replaces Chat there
+    // (2026-10-07: an agent was restored 12 minutes after being archived that way).
+    if (consoleTabs.some(t => t.id === id)) closeConsoleTab(id);
+    if (v2AgentId === id) v2Close();
     if (r.checkpointWarning) toast(`"${name}" archived. ⚠ ${r.checkpointWarning}`, 12000);
     else toast(`"${name}" archived — its bot is back in the pool.`);
   } catch (e) {
@@ -12794,7 +12799,7 @@ function v2RenderSheetBar() {
     ${a.state === 'STOPPED' && !a.hibernatedAt ? `<button onclick="act('${jsq(a.id)}','start')">Start</button>` : ''}
     ${a.state === 'RUNNING' && v2Mine(a) && !a.ops && !v2ChannelKinds(a).some(k => k !== 'telegram') ? `<button onclick="act('${jsq(a.id)}','hibernate')" title="Stop it with its volume kept; it wakes on a Telegram message, its console or an ask">💤 Sleep</button>` : ''}
     ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${jsq(a.id)}','provision')">Retry</button>` : ''}
-    ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="v2Close();restoreAgent('${jsq(a.id)}','${jsq(a.name)}')">📤 Restore</button><button onclick="openInspect('${jsq(a.id)}','${jsq(a.name)}')">🔍 Inspect</button>` : ''}
+    ${a.state === 'ARCHIVED' ? `<button onclick="openInspect('${jsq(a.id)}','${jsq(a.name)}')">🔍 Inspect</button><button onclick="v2Close();restoreAgent('${jsq(a.id)}','${jsq(a.name)}')" title="Bring it back from the archive">📤 Restore…</button>` : ''}
     ${chat ? `<button class="primary" onclick="v2Close();openGateway('${jsq(a.id)}','${jsq(a.slug)}')" title="Talk to it here">💬 Chat</button>` : ''}
     ${!v2Mine(a) && a.webChat && a.state !== 'ARCHIVED' ? `<button class="primary" onclick="v2Close();openWebChat('${jsq(a.id)}')" title="Talk to it here — no chat app needed">💬 Chat</button>` : ''}
     <button onclick="v2Close()" aria-label="Close">✕</button>`;

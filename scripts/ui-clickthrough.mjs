@@ -313,6 +313,38 @@ const SCENARIOS = String.raw`(() => {
       delete window.__override['/v1/agents'];
       await refresh(false);
     },
+    // Archiving from its page with its console open: both close, so the next click
+    // can't land on Restore where Chat was (2026-10-07: restored 12 min after archiving).
+    archiveClosesItsConsole: async () => {
+      const list = await (await fetch('/v1/agents')).json();
+      const hw = list.find((a) => a.id === 'a1');
+      try {
+        consoleTabs.push({ id: 'a1', slug: hw.slug, frame: null, url: null });
+        openV2Agent('a1', 'advanced');
+        await until(() => document.getElementById('v2AgentDlg').open);
+        window.__answer = window.__answer || {};
+        window.__answer['POST /v1/agents/a1/archive'] = [{ status: 200, body: { ...hw, state: 'ARCHIVED' } }];
+        archiveAgent('a1', hw.name, 'RUNNING');
+        await until(() => archiveDlg.open);
+        window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, state: 'ARCHIVED' } : a);
+        document.getElementById('archiveBtn').click();
+        await until(() => calls('POST', /\/v1\/agents\/a1\/archive$/).length > 0);
+        await until(() => !consoleTabs.some((t) => t.id === 'a1'));
+        ok('its console tab closed', !consoleTabs.some((t) => t.id === 'a1'));
+        await until(() => !document.getElementById('v2AgentDlg').open);
+        ok('its page closed', !document.getElementById('v2AgentDlg').open);
+        openV2Agent('a1');
+        await until(() => byText('#v2AgentBar button', 'Restore'));
+        const restore = byText('#v2AgentBar button', 'Restore');
+        ok('on an archived page Restore is an ordinary button, not the gold one', !restore.classList.contains('primary'));
+        ok('and nothing gold sits where Chat was', !document.querySelector('#v2AgentBar button.primary'));
+        v2Close();
+      } finally {
+        if (window.__answer) delete window.__answer['POST /v1/agents/a1/archive'];
+        delete window.__override['/v1/agents'];
+        await refresh(false);
+      }
+    },
     archiveShowsAtOnce: async () => {
       // The checkpoint turn takes ~20 s before the state changes; the tile used
       // to look untouched, as if the click had failed (2026-10-07). The POST is
