@@ -140,7 +140,8 @@ const SCENARIOS = String.raw`(() => {
         ok('the plan footnote', box.textContent.includes('not money you pay'));
         ok('no agent picker on a source', !box.querySelector('.spendpick'));
         ok('no separate requests chart any more (Chris, 2026-10-07)', !document.getElementById('aiList').textContent.includes('Requests per'));
-        ok('refusals are red ticks on the costs chart, counted in its key', box.querySelectorAll('svg rect[style*="--bad"]').length === 1 && box.textContent.includes('4 calls refused'));
+        ok('refusals shade their slice of the costs chart, counted in its key', box.querySelectorAll('svg rect[fill-opacity=".22"]').length === 1 && box.textContent.includes('shaded: 4 calls refused'));
+        ok('the request counts are gone too (2026-10-07)', !document.getElementById('aiList').textContent.includes('Most use') && !document.getElementById('aiList').textContent.includes('Last 5 h'));
         const local = profiles.find((x) => x.vendor === 'local');
         if (local) ok('a local model server has no costs box', ![...document.querySelectorAll('#aiList .srcspend .spendchart')].some((el) => el.dataset.source === local.id));
         box.open = false; box.dispatchEvent(new Event('toggle'));

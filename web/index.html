@@ -5357,35 +5357,16 @@ function renderLimitBanner() {
   el.innerHTML = limited.map(s => `⛔ ${s.mine === false ? 'Shared source ' : ''}<b>${esc(s.name)}</b> is being rate-limited (since ${esc(clock(s.limitedSince))}) — ${who(s)} until it recovers. <a href="#" onclick="event.preventDefault();openAiDlg('ai')">See usage</a>`).join('<br>');
 }
 function sourceUsagePanel(p) {
+  // The request counts, most-use and other-accounts lines are gone (Chris, 2026-10-07): the Costs chart below
+  // carries spend, tokens and refusals. Left: a source being refused RIGHT NOW, when its agents are failing.
   const u = sourceUsageOf(p.id);
-  if (!u) return '';
-  const status = u.status === 'limited'
-    ? `<div class="su-status limited">⛔ Rate-limited since ${esc(clock(u.limitedSince))} — calls through this source are being refused</div>`
-    : u.status === 'idle'
-      ? `<div class="su-status" style="color:var(--dim)">No calls measured yet in the last 7 days</div>`
-      : `<div class="su-status" style="color:var(--ok)">● Answering${u.lastOkAt ? ` — last call ${esc(ago(u.lastOkAt))}` : ''}${u.lastLimitAt ? ` <span class="sub" style="font-weight:400">· last rate-limited ${esc(clock(u.lastLimitAt))}</span>` : ''}</div>`;
-  // Tokens come from counter samples, so a window that started before counting began is partial.
-  const tokens = (x, hours) => !u.tokensSince || Date.parse(u.tokensSince) >= Date.now() - 15 * 60_000
-    ? `<span title="Token counts start after the next usage update">tokens: counting…</span>`
-    : `<b>${fmtN(x.tokens)}</b> tokens${Date.parse(u.tokensSince) > Date.now() - hours * 3_600_000 ? ` <span title="Token counting began then">(since ${esc(clock(u.tokensSince))})</span>` : ''}`;
-  const win = (label, x, hours) => `<span>${label}: <b>${fmtN(x.requests)}</b> requests · ${tokens(x, hours)}${x.limited ? ` · <b style="color:var(--bad)">${x.limited}</b> refused` : ''}</span>`;
-  const top = u.topAgents.length ? `<div class="su-top">Most use (7 d): ${u.topAgents.map(a => `${esc(a.name)} ${fmtN(a.requests)}${a.limited ? ` <span style="color:var(--bad)">(${a.limited} refused)</span>` : ''}`).join(' · ')}</div>` : '';
-  const others = u.others ? `<div class="su-top">+ ${u.others.agents} agent${u.others.agents === 1 ? '' : 's'} on other accounts: ${fmtN(u.others.requests5h)} requests in 5 h, ${fmtN(u.others.requests7d)} in 7 d — they draw on the same limit.</div>` : '';
-  // No requests chart (Chris, 2026-10-07: too big for what it said): refusals are marked on the Costs chart below.
-  return `<div class="su">${status}<div class="su-stats">${win('Last 5 h', u.window5h, 5)}${win('Last 7 d', u.window7d, 168)}</div>${top}${others}</div>`;
-}
-async function refreshSourceUsage(btn) {
-  if (btn) btn.disabled = true;
-  try { await api('/v1/ai-profiles/usage/sample', { method: 'POST', body: {} }); await loadSourceUsage(); toast('Usage refreshed'); }
-  catch (e) { toast(e.message); }
-  finally { if (btn) btn.disabled = false; }
+  if (u?.status !== 'limited') return '';
+  return `<div class="su"><div class="su-status limited">⛔ Rate-limited since ${esc(clock(u.limitedSince))} — calls through this source are being refused</div></div>`;
 }
 
 function renderAiList() {
-  $('aiList').innerHTML = (sourceUsageData ? `<div class="sub" style="margin-bottom:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <span class="grow">Counted from your agents' own calls${sourceUsageData.sampledAt ? `, updated ${esc(ago(sourceUsageData.sampledAt))}` : ''}.
-        <span title="Claude plans limit use per 5-hour window and per week. The exact share left is not available to a setup token — the Claude app's /usage shows it for the account.">How much of a Claude plan is left ⓘ</span></span>
-      ${myAccount.hostOwner ? `<button onclick="refreshSourceUsage(this)">Refresh usage</button>` : ''}</div>` : '') + profiles.map((p, i) => p.mine === false ? `
+  // The intro to the request counts went with them (2026-10-07).
+  $('aiList').innerHTML = profiles.map((p, i) => p.mine === false ? `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
       <b>${p.defaultSource ? '⭐ ' : ''}${esc(p.name)}</b>
       <span class="chip">${vendorChip(p)}</span>
@@ -8644,8 +8625,8 @@ function spendChartHTML(d, opts = {}) {
     let y = T + ih;
     const segs = SPEND_PARTS.map(([k, , c]) => { const h = ((x[k] || 0) / topC) * ih; if (h <= 0) return ''; y -= h; return `<rect x="${L + i * slot + (slot - bw) / 2}" y="${y}" width="${bw}" height="${h}" fill="${c}"/>`; }).join('');
     const tip = `${new Date(x.at).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' })} — ≈ ${v2Money(cost(x))}: ${SPEND_PARTS.map(([k, l]) => `${l.toLowerCase()} ${v2Money(x[k] || 0)}`).join(', ')}; ${fmtTokens(x.tokens)} tokens`;
-    // A source's refusals (rate limit): a red tick over the slice, the count in its tip.
-    const no = x.refused ? `<rect x="${L + i * slot + (slot - bw) / 2}" y="${T - 7}" width="${bw}" height="4" rx="1" style="fill:var(--bad)"/>` : '';
+    // A source's refusals (rate limit): the slice greyed over, top to bottom, the count in its tip (Chris, 2026-10-07).
+    const no = x.refused ? `<rect x="${L + i * slot}" y="${T}" width="${slot}" height="${ih}" style="fill:var(--dim)" fill-opacity=".22" pointer-events="none"/>` : '';
     const tip2 = x.refused ? `${tip} — ${x.refused} call${x.refused === 1 ? '' : 's'} refused (rate limit)` : tip;
     return `<g>${segs}${no}<rect x="${L + i * slot}" y="${T}" width="${slot}" height="${ih}" fill="transparent"><title>${esc(tip2)}</title></rect></g>`;
   }).join('');
@@ -8655,7 +8636,7 @@ function spendChartHTML(d, opts = {}) {
   const tokTotal = `<text x="${W - R2}" y="12" text-anchor="end" font-size="12" style="fill:var(--text)"><tspan font-weight="700">${fmtTokens(t.tokens || 0)}</tspan> tokens in ${esc(rangeName)}</text>`;
   const slice = d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : `${d.bucketHours} hours`;
   const chart = `<div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;display:block" role="img" aria-label="Spend at API prices per ${slice}, by part, with tokens as a line">${tokTotal}${grid}${bars}${line}${xl}</svg></div>
-    <div class="sub" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:2px 0 4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis); bars are what each ${slice} cost (left axis)${d.range !== 'month' && d.monthly ? ` · ≈ ${v2Money(d.monthly)}${star} a month at this pace` : ''}${d.refused ? ` · <span style="display:inline-block;width:10px;height:4px;border-radius:1px;background:var(--bad);vertical-align:middle"></span> <b style="color:var(--bad)">${fmtN(d.refused)}</b> call${d.refused === 1 ? '' : 's'} refused (rate limit)` : ''}</div>`;
+    <div class="sub" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:2px 0 4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis); bars are what each ${slice} cost (left axis)${d.range !== 'month' && d.monthly ? ` · ≈ ${v2Money(d.monthly)}${star} a month at this pace` : ''}${d.refused ? ` · <span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:var(--dim);opacity:.35;vertical-align:middle"></span> shaded: <b>${fmtN(d.refused)}</b> call${d.refused === 1 ? '' : 's'} refused (rate limit)` : ''}</div>`;
   return head + summary + chart;
 }
 /** A donut of slices ({ label, value, color }), the total in the middle; a hover tip per slice. */

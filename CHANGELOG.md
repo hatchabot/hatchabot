@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.140.2] — 2026-10-07
+
+### Changed
+- **Settings → AI is down to what matters per source:** the status line, the request counts (last 5 h, last 7 d), "Most use" and the other-accounts line are gone, with their intro line and "Refresh usage" — the Costs chart carries spend, tokens and refusals. One line stays, only while it is true: a source being rate-limited right now.
+- **Refusals shade their slice** of the Costs chart, top to bottom, instead of a red tick ("shaded: N calls refused" in the key).
+
 ## [2.140.1] — 2026-10-07
 
 ### Changed
