@@ -207,6 +207,31 @@ describe('the app routes', () => {
     expect(store.getAgentApp('a1')).toBeUndefined();
   });
 
+  it('a new agent from a repo: checked at once, installed when it runs, a failure kept for its page', async () => {
+    const { f, store, provider } = await app();
+    const dir = repo();
+    store.setAgentState('a1', 'STOPPED'); // not up yet
+    const bad = await f.inject({ method: 'POST', url: '/v1/agents/a1/app/pending', headers: as, payload: { source: dir } });
+    expect(bad.statusCode).toBe(400); // the required mailbox is missing: said before the agent is even up
+    const ok = await f.inject({ method: 'POST', url: '/v1/agents/a1/app/pending', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } });
+    expect(ok.json()).toMatchObject({ pending: true, app: 'demoapp' });
+    let got = (await f.inject({ method: 'GET', url: '/v1/agents/a1/app', headers: as })).json();
+    expect(got).toMatchObject({ app: null, pending: { source: dir, error: null }, canChange: true });
+    // It comes up: asking again while running installs it straight away.
+    store.setAgentState('a1', 'RUNNING');
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/app/pending', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } });
+    for (let i = 0; i < 50 && !store.getAgentApp('a1'); i++) await new Promise((r) => setTimeout(r, 20));
+    got = (await f.inject({ method: 'GET', url: '/v1/agents/a1/app', headers: as })).json();
+    expect(got.app).toMatchObject({ app: 'demoapp' });
+    expect(got.pending).toBeNull();
+    // A failing install stays on the record.
+    provider.testCode = 1;
+    store.deleteAgentApp('a1');
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/app/pending', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } });
+    for (let i = 0; i < 50 && !store.getAppPending('a1')?.error; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(store.getAppPending('a1')?.error).toMatch(/tests failed/);
+  });
+
   it('only the machine owner, and only a running agent', async () => {
     const { f, store } = await app();
     const other = await f.inject({ method: 'POST', url: '/v1/apps/inspect', headers: { 'x-hatchabot-owner': 'someone-else' }, payload: { source: repo() } });

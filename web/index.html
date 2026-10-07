@@ -1294,7 +1294,8 @@
   <h3 style="margin:0 0 4px">New agent</h3>
   <div class="sub">It runs on this machine; talk to it here, or on Telegram.
     Or <a href="#" onclick="event.preventDefault(); createDlg.close(); openGallery()">start from a template</a>,
-    or <a href="#" onclick="event.preventDefault(); createDlg.close(); $('importFile').click()">open a .hatchabot file</a>.</div>
+    or <a href="#" onclick="event.preventDefault(); createDlg.close(); $('importFile').click()">open a .hatchabot file</a><span id="createFromRepo">,
+    or <a href="#" onclick="event.preventDefault(); createDlg.close(); openAppDlg('create')">run an app from a repo</a></span>.</div>
   <div class="sub" style="margin-top:6px">Not sure what to make?
     <a href="#" onclick="event.preventDefault(); createDlg.close(); askOpsSuggest(this)">Ask Hatchabot what you're missing</a>
     — it reads your fleet, asks a couple of questions, and proposes agents you confirm.</div>
@@ -1334,6 +1335,24 @@
       <button onclick="createDlg.close()">Cancel</button>
       <button class="primary" id="createBtn" onclick="createAgent()">Create</button>
     </div>
+  </div>
+</dialog>
+
+<dialog id="appDlg" style="width:min(620px,94vw)">
+  <h3 style="margin:0 0 4px" id="appDlgTitle">New agent from a repo</h3>
+  <div class="sub">A program with a <code>hatchabot.json</code> runs inside an agent on a schedule, and uses the AI only where it has to.
+    Its tests run in the agent before it goes live; later, its page has Update and Roll back.</div>
+  <label for="appSource">Repo</label>
+  <div style="display:flex;gap:8px"><input type="text" id="appSource" placeholder="~/myapp  or  https://github.com/you/myapp.git" onkeydown="if(event.key==='Enter')appRead()">
+    <button id="appReadBtn" onclick="appRead()">Read it</button></div>
+  <div class="sub">A folder on this machine, or a git address it can fetch with its own login.</div>
+  <div id="appInfo"></div>
+  <div id="appForm"></div>
+  <div class="err" id="appErr"></div>
+  <pre id="appOut" hidden class="sub" style="white-space:pre-wrap;max-height:240px;overflow:auto"></pre>
+  <div class="actions">
+    <button onclick="appDlg.close()">Cancel</button>
+    <button class="primary" id="appGoBtn" disabled onclick="appGo()">Create</button>
   </div>
 </dialog>
 
@@ -6688,6 +6707,8 @@ $('fabBtn').onclick = () => {
   // made web-only with a spare bot ready.
   $('agentNoTelegram').checked = poolAvail === 0;
   $('agentPoolRow').hidden = poolAvail === 0;
+  // An app from a repo reads this machine's folders and git login: its owner only.
+  $('createFromRepo').hidden = !myAccount?.hostOwner;
   createDlg.showModal();
   if (pendingTodoName) { $('agentName').value = pendingTodoName; pendingTodoName = null; }
   $('agentName').focus();
@@ -12820,6 +12841,159 @@ function v2RenderSheet() {
   if ($('v2Chans')) void v2LoadChans(a.id);
   if ($('v2UsageBody')) void v2LoadUsage(a.id);
   if ($('v2BudgetRow')) void v2LoadBudgetRow(a.id);
+  if ($('v2AppRow')) void v2LoadApp(a.id);
+}
+
+// ---- Apps in agents (docs/apps-in-agents.md): the agent page's App row ----------------
+/** Which app it runs and from where, with Update, Roll back and Stop app (the machine's owner only). */
+// The page redraws on every refresh; what the app is changes only when someone acts, so a
+// reading is reused for 30 s (an action below reloads it).
+let v2AppCache = null;
+async function v2LoadApp(id, fresh = false) {
+  let r = !fresh && v2AppCache && v2AppCache.id === id && Date.now() - v2AppCache.at < 30_000 ? v2AppCache.r : null;
+  if (!r) {
+    try { r = await api(`/v1/agents/${id}/app`); } catch { return; }
+    v2AppCache = { id, at: Date.now(), r };
+  }
+  const el = $('v2AppRow'); if (!el || v2AgentId !== id) return;
+  const a = v2Find(id); if (!a) return;
+  const run = a.state === 'RUNNING', can = !!r.canChange;
+  const B = (label, call, extra = '') => `<button onclick="${call}" ${extra}>${label}</button>`;
+  const row = (v) => `<div class="v2row"><div class="v2k">App</div><div class="v2v">${v}<div id="v2AppOut" hidden style="flex-basis:100%"></div></div></div>`;
+  const q = jsq(id);
+  if (r.app) {
+    const p = r.app;
+    const test = p.testOk === true ? 'its tests passed' : p.testOk === false ? 'its tests failed' : '';
+    el.innerHTML = row(`<span><b>${esc(p.name)}</b> · <code>${esc(String(p.sha).slice(0, 12))}</code>
+        <span class="sub">from ${esc(p.source)}${p.ref && p.ref !== 'HEAD' ? ` (${esc(p.ref)})` : ''}${test ? ` · ${test}` : ''} · installed ${esc(ago(p.installedAt))}</span></span>
+      ${can && run ? B('⬆ Update', `v2AppUpdate('${q}', this)`, 'class="primary" id="v2AppUpdateBtn" title="Install the newest commit from where it came; its tests run first, and the running version stays if they fail"') : ''}
+      ${can && run && p.previousSha ? B('↩ Roll back', `v2AppRollback('${q}', this)`, `title="Back to ${esc(String(p.previousSha).slice(0, 12))}"`) : ''}
+      ${can && run ? B('Stop app', `v2AppRemove('${q}','${jsq(p.name)}', this)`, 'title="Remove its scheduled commands; its code and data stay in the agent"') : ''}
+      <span class="sub">Runs on a schedule inside this agent: ${p.tasks.map(esc).join(', ') || 'no tasks'}.</span>`);
+  } else if (r.pending) {
+    el.innerHTML = row(r.pending.error
+      ? `<span>⚠ Its app could not be installed.</span>${can ? B('Try again', `v2AppRetry('${q}', this)`) : ''}<pre class="sub" style="white-space:pre-wrap;flex-basis:100%;max-height:220px;overflow:auto;margin:6px 0 0">${esc(r.pending.error)}</pre>`
+      : `<span>Installing its app from ${esc(r.pending.source)} once it is running…</span>`);
+  } else if (can && run && !a.ops) {
+    el.innerHTML = row(`<span class="sub">None. A program from a repo can run in it on a schedule, using the AI only where it has to.</span>${B('Run an app from a repo…', `openAppDlg('install','${q}')`)}`);
+  } else el.innerHTML = '';
+}
+function v2AppShow(text) { const o = $('v2AppOut'); if (o) { o.hidden = false; o.innerHTML = `<pre class="sub" style="white-space:pre-wrap;max-height:260px;overflow:auto;margin:6px 0 0">${esc(text)}</pre>`; } }
+async function v2AppUpdate(id, btn) {
+  btn.disabled = true; btn.textContent = 'Updating… (tests first)';
+  toast('Updating its app: fetching the newest commit and running its tests…', 60000, 'progress');
+  try {
+    const r = await api(`/v1/agents/${id}/app/update`, { method: 'POST', body: {} });
+    toast(r.unchanged ? 'Already running the newest commit.' : `Updated to ${String(r.app.sha).slice(0, 12)} — its tests passed.`);
+  } catch (e) {
+    toast('Not updated — the running version is unchanged.', 8000);
+    v2AppShow(e.message + (e.data?.test?.output && !e.message.includes(e.data.test.output.slice(-200)) ? '\n\n' + e.data.test.output : ''));
+    btn.disabled = false; btn.textContent = '⬆ Update';
+    return;
+  }
+  void v2LoadApp(id, true);
+}
+async function v2AppRollback(id, btn) {
+  if (!confirm('Go back to the release before the last install or update?')) return;
+  btn.disabled = true;
+  try { const r = await api(`/v1/agents/${id}/app/rollback`, { method: 'POST', body: {} }); toast(`Back on ${String(r.app.sha).slice(0, 12)}.`); }
+  catch (e) { toast(e.message, 10000); }
+  void v2LoadApp(id, true);
+}
+async function v2AppRemove(id, name, btn) {
+  if (!confirm(`Stop ${name}? Its scheduled commands are removed; its code and data stay in the agent, and Run an app from a repo brings it back.`)) return;
+  btn.disabled = true;
+  try { const r = await api(`/v1/agents/${id}/app`, { method: 'DELETE' }); toast(`${name} stopped (${r.tasks} scheduled command${r.tasks === 1 ? '' : 's'} removed).`); }
+  catch (e) { toast(e.message, 10000); }
+  void v2LoadApp(id, true);
+}
+async function v2AppRetry(id, btn) {
+  btn.disabled = true;
+  try { await api(`/v1/agents/${id}/app/pending`, { method: 'POST', body: {} }); toast('Trying the install again — its tests run first.', 8000); }
+  catch (e) { toast(e.message, 10000); }
+  setTimeout(() => void v2LoadApp(id, true), 1500);
+}
+
+// ---- Run an app from a repo: a new agent, or into an existing one -----------------------------
+let appDlgMode = 'create', appDlgAgent = null, appInspected = null;
+function openAppDlg(mode, agentId) {
+  appDlgMode = mode; appDlgAgent = agentId || null; appInspected = null;
+  const a = agentId ? v2Find(agentId) : null;
+  $('appDlgTitle').textContent = mode === 'create' ? 'New agent from a repo' : `Run an app in ${a?.name || 'this agent'}`;
+  $('appSource').value = ''; $('appInfo').innerHTML = ''; $('appForm').innerHTML = ''; $('appErr').textContent = '';
+  $('appOut').hidden = true; $('appGoBtn').disabled = true;
+  $('appGoBtn').textContent = mode === 'create' ? 'Create' : 'Install';
+  appDlg.showModal();
+  $('appSource').focus();
+}
+async function appRead() {
+  const source = $('appSource').value.trim();
+  if (!source) { $('appErr').textContent = 'Give a folder on this machine (~/myapp) or a git address.'; return; }
+  $('appErr').textContent = ''; $('appReadBtn').disabled = true; $('appInfo').innerHTML = '<div class="sub">Reading it…</div>';
+  try {
+    const r = await api('/v1/apps/inspect', { method: 'POST', body: { source } });
+    appInspected = { ...r, source };
+    const m = r.manifest;
+    $('appInfo').innerHTML = `<div style="margin-top:10px"><b>${esc(m.name)}</b> <code>${esc(String(r.sha).slice(0, 12))}</code>
+      ${m.description ? `<div class="sub">${esc(m.description)}</div>` : ''}
+      <div class="sub">Runs on a schedule: ${(m.tasks || []).map(t => `${esc(t.name)} (every ${esc(t.every || t.cron)})`).join(', ') || 'nothing'}${m.test ? ' · its tests run in the agent before it goes live' : ''}${m.model ? ` · chat model ${esc(m.model)}` : ''}</div>
+      ${(r.connections || []).map(c => `<div class="sub" style="color:var(--warn)">Needs a ${esc(c.kind === 'google' ? 'Google' : c.kind)} connection for ${esc(c.purpose)}: attach it in the agent's settings (Knowledge → Connections).</div>`).join('')}</div>`;
+    const field = (f) => {
+      const id = 'appF_' + f.key;
+      const label = `<label for="${id}">${esc(f.key)}${f.required ? ' <span style="color:var(--warn)">*</span>' : ''}${f.label ? ` <span class="sub">— ${esc(f.label)}</span>` : ''}</label>`;
+      if (f.type === 'bool') return `<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="${id}" style="width:auto" ${f.default ? 'checked' : ''}> ${esc(f.key)}${f.label ? ` <span class="sub">— ${esc(f.label)}</span>` : ''}</label>`;
+      const v = Array.isArray(f.default) ? f.default.join(', ') : f.default ?? '';
+      return label + `<input type="${f.type === 'number' ? 'number' : f.type === 'email' ? 'email' : 'text'}" id="${id}" value="${esc(String(v))}">`;
+    };
+    const local = hosts.find(h => h.kind === 'local') || hosts[0];
+    $('appForm').innerHTML = (appDlgMode === 'create' ? `<label for="appName">Name</label><input type="text" id="appName" maxlength="64" value="${esc(m.name)}">
+      ${profiles.length > 1 ? `<label for="appProfile">AI source</label><select id="appProfile">${profiles.map(p => `<option value="${p.id}">${sourceOptionLabel(p)}</option>`).join('')}</select>` : ''}
+      <label style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="appNoTelegram" style="width:auto"> No Telegram — reach it here in Hatchabot only</label>
+      ${local ? '' : '<div class="err">No host is configured.</div>'}` : '') + (r.ask || []).map(field).join('');
+    $('appGoBtn').disabled = false;
+  } catch (e) { $('appInfo').innerHTML = ''; $('appErr').textContent = e.message; }
+  finally { $('appReadBtn').disabled = false; }
+}
+function appValues() {
+  const out = {};
+  for (const f of appInspected?.ask || []) {
+    const el = $('appF_' + f.key); if (!el) continue;
+    out[f.key] = f.type === 'bool' ? (el.checked ? 'true' : 'false') : el.value.trim();
+  }
+  return out;
+}
+async function appGo() {
+  if (!appInspected) return;
+  const values = appValues();
+  const missing = (appInspected.ask || []).filter(f => f.required && !values[f.key]).map(f => f.key);
+  if (missing.length) { $('appErr').textContent = `Fill in: ${missing.join(', ')}.`; return; }
+  const m = appInspected.manifest;
+  $('appGoBtn').disabled = true; $('appErr').textContent = ''; $('appOut').hidden = true;
+  try {
+    if (appDlgMode === 'create') {
+      const name = $('appName').value.trim() || m.name;
+      const local = hosts.find(h => h.kind === 'local') || hosts[0];
+      const a = await api('/v1/agents', { method: 'POST', body: { name, persona: m.chat || m.description || undefined,
+        aiProfileId: ($('appProfile') && $('appProfile').value) || profiles[0]?.id, hostId: local?.id,
+        telegram: $('appNoTelegram').checked ? false : undefined } });
+      if (m.model) { try { await api(`/v1/agents/${a.id}/model`, { method: 'POST', body: { model: m.model } }); } catch { /* the source's default stays */ } }
+      await api(`/v1/agents/${a.id}/app/pending`, { method: 'POST', body: { source: appInspected.source, values } });
+      appDlg.close();
+      toast(`Creating "${name}" — ${m.name} installs as soon as it is running (its tests run first).`, 12000);
+      await refresh(false);
+    } else {
+      toast(`Installing ${m.name}: copying it in, running its tests, scheduling it…`, 120000, 'progress');
+      await api(`/v1/agents/${appDlgAgent}/app`, { method: 'POST', body: { source: appInspected.source, values } });
+      appDlg.close();
+      toast(`${m.name} is installed and running.`);
+      if (v2AgentId === appDlgAgent) void v2LoadApp(appDlgAgent, true);
+    }
+  } catch (e) {
+    toast('Not installed.', 6000);
+    $('appErr').textContent = e.message.split('\n')[0];
+    if (e.data?.test?.output) { $('appOut').hidden = false; $('appOut').textContent = e.data.test.output; }
+    else if (e.message.includes('\n')) { $('appOut').hidden = false; $('appOut').textContent = e.message; }
+  } finally { $('appGoBtn').disabled = false; }
 }
 /** The Usage tab: the same page as ⋯ → Usage, inline. A read runs node in the
  *  container, so a sheet re-render within a minute reuses the last one. */
@@ -13068,6 +13242,7 @@ function v2Pane(a, tab) {
       ${row('Name &amp; icon', `<span>${esc(a.name)}</span>${B('Change icon', `openV2Icon('${id}')`)}${a.state !== 'ARCHIVED' ? B('Rename…', goto('personality')) : ''}
         ${a.persona ? `<span class="sub">${esc(a.persona)}</span>` : ''}`)}
       ${a.state !== 'ARCHIVED' ? row('AI', `<span>${esc(src?.name || 'unknown')}${a.model ? ' · ' + esc(a.model) : ''}</span>${B('Change…', goto('ai'))}`) : ''}
+      ${a.state !== 'ARCHIVED' && built ? '<div id="v2AppRow"></div>' : ''}
       ${a.state !== 'ARCHIVED' ? row('Group', `<select id="v2GroupSel" onchange="v2SetGroup('${id}', this.value)" style="width:auto">
           <option value="">${groups.length ? 'Default' : 'No group'}</option>${groups.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
           <option value="${V2_NEW_GROUP}">＋ New group…</option></select><span class="sub">Or drag its icon on the home screen.</span>`) : ''}

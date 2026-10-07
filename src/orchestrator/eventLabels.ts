@@ -248,6 +248,8 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'app.installed': (d) => `app ${String(d.app ?? '')} installed (${String(d.sha ?? '')})`,
   'app.updated': (d) => `app ${String(d.app ?? '')} updated ${String(d.from ?? '')} → ${String(d.to ?? '')}`,
   'app.rolled_back': (d) => `app ${String(d.app ?? '')} rolled back ${String(d.from ?? '')} → ${String(d.to ?? '')}`,
+  'app.pending': (d) => `app ${String(d.app ?? '')} will be installed once it is running`,
+  'app.install_failed': (d) => `its app could not be installed: ${String(d.error ?? '')}`,
   'app.removed': (d) => `app ${String(d.app ?? '')} stopped (its scheduled commands removed)`,
   'timezone.set': (d) => `its time zone set to ${String(d.now ?? '')}`,
   'owner.command_owner_set': 'you were set as the agent\'s owner in OpenClaw',

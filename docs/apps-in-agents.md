@@ -1,6 +1,6 @@
 # Apps in agents: deploy a codebase into a Hatchabot agent
 
-*Status: phase 1 (server + CLI) shipped in 2.144.0, 2026-10-07. Phase 2: the web app's
+*Status: phase 1 (server + CLI) shipped in 2.144.0 and phase 2 (the web app) in 2.145.0, 2026-10-07. Phase 2: the web app's
 "New agent → From a repo" and an agent's App section with Update. Phase 3:
 sharing (a template that carries the manifest).*
 
@@ -107,6 +107,19 @@ hatchabot app status <agent>
 
 API: `POST /v1/apps/inspect`, `GET|POST|DELETE /v1/agents/:id/app`,
 `POST /v1/agents/:id/app/update`, `POST /v1/agents/:id/app/rollback`.
+
+## In the web app
+
+- **New agent → "run an app from a repo"** (the machine's owner): give the
+  folder or git address, read it, fill in what it asks for, Create. The agent
+  is made with the app's name, chat and model, and Hatchabot installs the app
+  as soon as the agent is running (`POST /v1/agents/:id/app/pending`, run when
+  provisioning finishes), so closing the browser does not lose it.
+- **The agent's page → App**: which app, which commit, from where, and whether
+  its tests passed, with **⬆ Update** (the newest commit; its tests run first
+  and the running version stays if they fail, with their output shown),
+  **↩ Roll back** and **Stop app**. An agent without one offers "Run an app
+  from a repo…". A failed install from a new agent shows why, with Try again.
 
 ## Writing an app for this (what to tell Claude Code)
 

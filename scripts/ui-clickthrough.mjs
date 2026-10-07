@@ -375,7 +375,7 @@ const SCENARIOS = String.raw`(() => {
         // A poll whose list does not know yet keeps it.
         await refresh(false);
         ok('still archiving after a poll', tile(hw.name).classList.contains('v2st-working'));
-        openV2Agent('a1');
+        openV2Agent('a1', 'overview');
         await until(() => byText('#v2AgentDlg .v2row', 'Working on'));
         openV2Agent('a1', 'advanced');
         await until(() => byText('#v2AgentDlg .v2danger', 'Archiving'));
@@ -412,7 +412,7 @@ const SCENARIOS = String.raw`(() => {
       try {
         await refresh(false);
         await until(() => tile(hw.name) && tile(hw.name).classList.contains('v2st-note'));
-        openV2Agent('a1');
+        openV2Agent('a1', 'overview');
         const why = await until(() => byText('#v2AgentDlg .v2why li', 'No Telegram bot was free'));
         ok('it names where to attach one: ' + why.textContent, why.textContent.includes('Messaging → Telegram'));
         v2Close();
@@ -2368,6 +2368,93 @@ const SCENARIOS = String.raw`(() => {
         ok('the machine has a step too', !!document.getElementById('bgStep_machine'));
         aiDlg.close();
       } finally { if (typeof aiDlg !== 'undefined' && aiDlg.open) aiDlg.close(); delete window.__override['/v1/budgets']; await agentsCleanup(); }
+    },
+    // Apps in agents (docs/apps-in-agents.md): the agent page's App row, and New agent from a repo.
+    appRow: async () => {
+      const SHA = 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0', NEW = 'f00dfeed1234f00dfeed1234f00dfeed1234f00d';
+      const APP = { app: 'demoapp', name: 'Demo App', source: '/home/tester/demoapp', ref: 'HEAD', sha: SHA, previousSha: null,
+        installedAt: new Date(Date.now() - 3600e3).toISOString(), testOk: true, tasks: ['demoapp-tick'] };
+      try {
+        window.__override['/v1/agents/a1/app'] = { app: APP, pending: null, canChange: true };
+        v2AppCache = null; // an earlier scenario's opening may have read "no app"
+        openV2Agent('a1', 'overview');
+        await until(() => byText('#v2AppRow', 'Demo App'));
+        const rowText = document.getElementById('v2AppRow').textContent;
+        ok('the row says which app, which commit, from where: ' + rowText.replace(/\s+/g, ' ').slice(0, 120), rowText.includes('a1b2c3d4e5f6') && rowText.includes('/home/tester/demoapp') && rowText.includes('its tests passed'));
+        ok('Update is the main button', document.getElementById('v2AppUpdateBtn').classList.contains('primary'));
+        ok('no Roll back without an earlier release', !byText('#v2AppRow button', 'Roll back'));
+        // A failing update: the output shows, the button comes back, nothing changed.
+        window.__answer = window.__answer || {};
+        window.__answer['POST /v1/agents/a1/app/update'] = [{ status: 400, body: { error: 'Its tests failed, so f00dfeed1234 was not switched on:\nFAILED (failures=1)', test: { ok: false, output: 'FAILED (failures=1)' } } }];
+        document.getElementById('v2AppUpdateBtn').click();
+        await until(() => !document.getElementById('v2AppOut').hidden);
+        ok('the test output is on the page', document.getElementById('v2AppOut').textContent.includes('FAILED (failures=1)'));
+        ok('and Update can be pressed again', !document.getElementById('v2AppUpdateBtn').disabled);
+        // A good one.
+        window.__answer['POST /v1/agents/a1/app/update'] = [{ status: 200, body: { app: { ...APP, sha: NEW, previousSha: SHA } } }];
+        window.__override['/v1/agents/a1/app'] = { app: { ...APP, sha: NEW, previousSha: SHA }, pending: null, canChange: true };
+        document.getElementById('v2AppUpdateBtn').click();
+        await until(() => document.getElementById('toast').textContent.includes('Updated to f00dfeed1234'));
+        await until(() => byText('#v2AppRow button', 'Roll back'));
+        ok('now Roll back is offered', !!byText('#v2AppRow button', 'Roll back'));
+        // A new agent whose install failed: said, with Try again.
+        window.__override['/v1/agents/a1/app'] = { app: null, pending: { source: '/home/tester/demoapp', since: new Date().toISOString(), error: 'Needs a value for: mailbox' }, canChange: true };
+        v2Close(); v2AppCache = null; openV2Agent('a1', 'overview');
+        await until(() => byText('#v2AppRow button', 'Try again'));
+        ok('a failed install says why', document.getElementById('v2AppRow').textContent.includes('Needs a value for: mailbox'));
+        // No app: the way to add one.
+        window.__override['/v1/agents/a1/app'] = { app: null, pending: null, canChange: true };
+        v2Close(); v2AppCache = null; openV2Agent('a1', 'overview');
+        await until(() => byText('#v2AppRow button', 'Run an app from a repo'));
+        // Someone who isn't the machine's owner sees what runs but can't change it.
+        window.__override['/v1/agents/a1/app'] = { app: APP, pending: null, canChange: false };
+        v2Close(); v2AppCache = null; openV2Agent('a1', 'overview');
+        await until(() => byText('#v2AppRow', 'Demo App'));
+        ok('no buttons for someone else', !document.querySelector('#v2AppRow button'));
+        v2Close();
+      } finally {
+        delete window.__override['/v1/agents/a1/app'];
+        if (window.__answer) delete window.__answer['POST /v1/agents/a1/app/update'];
+        if (typeof v2AgentId !== 'undefined' && v2AgentId) v2Close();
+      }
+    },
+    appFromRepo: async () => {
+      const MAN = { app: 'demoapp', name: 'Demo App', description: 'A made-up app.', model: 'claude-haiku-4-5', chat: 'Run the demo commands.',
+        tasks: [{ name: 'tick', every: '1m', command: ['python3', '-m', 'demo', 'tick'] }], test: ['python3', '-m', 'unittest'],
+        config: { fields: [] }, connections: [{ kind: 'google', purpose: 'its mailbox', field: 'mailbox' }] };
+      try {
+        window.__answer = window.__answer || {};
+        window.__answer['POST /v1/apps/inspect'] = [{ status: 200, body: { sha: 'c0ffee0123456789c0ffee0123456789c0ffee01', manifest: MAN,
+          ask: [{ key: 'mailbox', label: 'its address', type: 'email', required: true }, { key: 'mode', default: 'shadow' }], connections: MAN.connections } }];
+        window.__answer['POST /v1/agents'] = [{ status: 200, body: { id: 'newapp1', name: 'Demo App', state: 'PROVISIONING' } }];
+        window.__answer['POST /v1/agents/newapp1/model'] = [{ status: 200, body: { model: 'claude-haiku-4-5' } }];
+        window.__answer['POST /v1/agents/newapp1/app/pending'] = [{ status: 200, body: { pending: true, app: 'demoapp', name: 'Demo App' } }];
+        document.getElementById('fabBtn').onclick();
+        await until(() => createDlg.open);
+        ok('the machine owner sees "run an app from a repo"', !document.getElementById('createFromRepo').hidden);
+        createDlg.close();
+        openAppDlg('create');
+        document.getElementById('appSource').value = '~/demoapp';
+        await appRead();
+        ok('it shows the app and what it needs', document.getElementById('appInfo').textContent.includes('Demo App') && document.getElementById('appInfo').textContent.includes('Google connection'));
+        eq('the name is the app\'s', document.getElementById('appName').value, 'Demo App');
+        eq('a field has its default', document.getElementById('appF_mode').value, 'shadow');
+        const mark = window.__calls.length;
+        await appGo();
+        ok('a required field stops it', document.getElementById('appErr').textContent.includes('mailbox') && window.__calls.length === mark);
+        document.getElementById('appF_mailbox').value = 'demo@example.org';
+        await appGo();
+        const posts = window.__calls.slice(mark).filter((c) => c.method === 'POST').map((c) => c.path);
+        eq('create, its model, then the install when ready', posts, ['/v1/agents', '/v1/agents/newapp1/model', '/v1/agents/newapp1/app/pending']);
+        const pend = window.__calls.slice(mark).find((c) => c.path === '/v1/agents/newapp1/app/pending');
+        eq('with the source and the values', pend.body, { source: '~/demoapp', values: { mailbox: 'demo@example.org', mode: 'shadow' } });
+        ok('and the dialog closed', !appDlg.open);
+      } finally {
+        for (const k of ['POST /v1/apps/inspect', 'POST /v1/agents', 'POST /v1/agents/newapp1/model', 'POST /v1/agents/newapp1/app/pending']) if (window.__answer) delete window.__answer[k];
+        if (appDlg.open) appDlg.close();
+        if (createDlg.open) createDlg.close();
+        await refresh(false);
+      }
     },
     // The tooltip's three parts (2026-10-07): doing / cost and spending alarm / runtime (version, uptime, restarts).
     tooltipParts: async () => {

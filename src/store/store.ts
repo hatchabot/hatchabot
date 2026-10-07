@@ -463,6 +463,11 @@ export class Store {
 
       -- The app installed in an agent (orchestrator/apps.ts): where it came from,
       -- the commit running, and the one before it (rollback).
+      -- An app to install once the agent is up (a new agent "from a repo").
+      CREATE TABLE IF NOT EXISTS agent_app_pending (
+        agent_id TEXT PRIMARY KEY, source TEXT NOT NULL, ref TEXT NOT NULL, vals TEXT NOT NULL,
+        created_at TEXT NOT NULL, error TEXT
+      );
       CREATE TABLE IF NOT EXISTS agent_apps (
         agent_id TEXT PRIMARY KEY, app TEXT NOT NULL, source TEXT NOT NULL, ref TEXT NOT NULL,
         sha TEXT NOT NULL, manifest TEXT NOT NULL, previous_sha TEXT, previous_manifest TEXT,
@@ -2424,6 +2429,25 @@ export class Store {
          installed_at=excluded.installed_at, test_ok=excluded.test_ok`,
     ).run(a.agentId, a.app, a.source, a.ref, a.sha, JSON.stringify(a.manifest), a.previousSha ?? null,
       a.previousManifest ? JSON.stringify(a.previousManifest) : null, a.installedAt, a.testOk === undefined ? null : a.testOk ? 1 : 0);
+  }
+
+  getAppPending(agentId: string): { source: string; ref: string; values: Record<string, unknown>; createdAt: string; error?: string } | undefined {
+    const r = this.db.prepare(`SELECT * FROM agent_app_pending WHERE agent_id = ?`).get(agentId) as Record<string, any> | undefined;
+    return r ? { source: r.source, ref: r.ref, values: JSON.parse(r.vals), createdAt: r.created_at, error: r.error ?? undefined } : undefined;
+  }
+
+  setAppPending(agentId: string, p: { source: string; ref: string; values: Record<string, unknown> }): void {
+    this.db.prepare(`INSERT INTO agent_app_pending (agent_id, source, ref, vals, created_at, error) VALUES (?, ?, ?, ?, ?, NULL)
+       ON CONFLICT(agent_id) DO UPDATE SET source=excluded.source, ref=excluded.ref, vals=excluded.vals, created_at=excluded.created_at, error=NULL`)
+      .run(agentId, p.source, p.ref, JSON.stringify(p.values), new Date().toISOString());
+  }
+
+  setAppPendingError(agentId: string, error: string | null): void {
+    this.db.prepare(`UPDATE agent_app_pending SET error = ? WHERE agent_id = ?`).run(error, agentId);
+  }
+
+  deleteAppPending(agentId: string): void {
+    this.db.prepare(`DELETE FROM agent_app_pending WHERE agent_id = ?`).run(agentId);
   }
 
   deleteAgentApp(agentId: string): void {

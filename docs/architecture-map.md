@@ -180,6 +180,8 @@ A codebase with a `hatchabot.json`, installed into an agent (docs/apps-in-agents
 - `src/orchestrator/apps.ts` — `installRelease`, `mergeConfig`, `syncTasks`, `switchTo`, `removeTasks`: inside the agent (releases under `~/.openclaw/apps/<app>/`, its config, its tests before the switch, its scheduled commands).
 - `src/api/routes.ts` — `'/v1/apps/inspect'`, `'/v1/agents/:id/app'`, `'/v1/agents/:id/app/update'`, `'/v1/agents/:id/app/rollback'`, `appTarget`: the routes (machine owner only).
 - `src/store/store.ts` — `agent_apps`, `getAgentApp`, `setAgentApp`: which app, source, commit and previous commit.
+- `src/api/routes.ts` — `'/v1/agents/:id/app/pending'`, `runPendingApp`, `installFromSource`: a new agent from a repo installs its app when provisioning finishes.
+- `web/index.html` — `v2LoadApp`, `v2AppUpdate`, `v2AppRollback`, `openAppDlg`, `appRead`, `appGo`: the agent page's App row and the "run an app from a repo" dialog.
 - `src/cli.ts` — `app inspect`, `app install`, `app create`: the `hatchabot app …` commands (also update, rollback, status, remove).
 
 ## Telegram and other chat apps

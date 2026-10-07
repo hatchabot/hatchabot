@@ -23,6 +23,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/:id/archive': 'archive_agent',
   'POST /v1/apps/inspect': 'app: later — apps in agents (hatchabot app inspect)',
   'POST /v1/agents/:id/app': 'app: later — install an app from a repo (hatchabot app install; reads host folders and git login)',
+  'POST /v1/agents/:id/app/pending': 'app: later — a new agent from a repo installs its app when ready (the web app\'s From a repo)',
   'POST /v1/agents/:id/app/update': 'app: later — update an agent\'s app (hatchabot app update)',
   'POST /v1/agents/:id/app/rollback': 'app: later — roll an agent\'s app back (hatchabot app rollback)',
   'DELETE /v1/agents/:id/app': 'app: later — stop an agent\'s app (hatchabot app remove)',

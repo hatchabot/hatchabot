@@ -175,6 +175,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/orchestrator/apps.ts` — `installRelease`
 
+### A new agent's page says "Its app could not be installed"
+- **Check:** the message under it on the agent's page (App), and `app.install_failed` in its Setup log.
+- **Cause:** the app made for it from a repo failed to install once the agent was running: its tests failed, a value it needs was missing, or the repo could not be read.
+- **Fix:** fix the cause (the message says which), then press **Try again** on the agent's page; or install it by hand with `hatchabot app install <agent> <dir|url>`.
+- **Fixed in:** —
+- **Code:** `src/api/routes.ts` — `runPendingApp`; `web/index.html` — `v2LoadApp`
+
 ### `hatchabot app install` says "Needs a value for: …"
 - **Check:** `hatchabot app inspect <dir|url>` lists what the app asks for.
 - **Cause:** a required setting in the app's manifest has no value yet (and none in its existing config).

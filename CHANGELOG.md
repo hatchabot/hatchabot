@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.145.0] — 2026-10-07
+
+### Added
+- **Apps in agents, in the web app.** New agent → "run an app from a repo" (the machine's owner): read a folder or git address, fill in what the app asks for, Create; Hatchabot installs the app as soon as the agent is running, even if the browser has closed. An agent's page has an **App** row: which app and commit, from where, whether its tests passed, with **⬆ Update** (its tests run first; if they fail the running version stays and their output is shown), **↩ Roll back** and **Stop app**; an agent without one offers "Run an app from a repo…". A failed install shows why, with Try again.
+
 ## [2.144.0] — 2026-10-07
 
 ### Added

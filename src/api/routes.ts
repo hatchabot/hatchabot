@@ -968,6 +968,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return true;
   };
   /** `webOnlyIfNoBot`: a dry pool means web-only, not a parked token prompt (ProvisionDeps). */
+  // Set where the app routes are defined (below); provisioning calls it when an agent comes up.
+  let runPendingApp: (agentId: string) => Promise<void> = async () => {};
   const kickProvision = (agentId: string, opts: { webOnlyIfNoBot?: boolean } = {}): void => {
     if (inflight.has(agentId)) return;
     const task = (async () => {
@@ -987,6 +989,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Skipped entirely when the owner's Telegram identity was carried over
       // from an earlier agent (createAgentRecord): they're in allowFrom
       // already, so there is no pairing request to watch for.
+      // A new agent "from a repo": its app goes in now that it runs.
+      if (result.agent.state === 'RUNNING') void runPendingApp(agentId);
       const channelRow = store.getChannelForAgent(agentId);
       const ownerBound = store
         .listMemberships(agentId)
@@ -6572,26 +6576,71 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/app', async (req, reply) => {
     const a = ownedAgent(req, req.params.id);
     if (!a) return reply.code(404).send({ error: 'Not found' });
-    return { app: appView(a) };
+    const p = store.getAppPending(a.id);
+    return { app: appView(a), pending: p ? { source: p.source, since: p.createdAt, error: p.error ?? null } : null,
+      canChange: ownsLocalHost(req) };
   });
+
+  /** Install from a source into a running agent and record it (the route and a pending install share it). */
+  const installFromSource = async (a: Agent, source: string, ref: string, values: Record<string, unknown>) => {
+    const src = parseSource(source);
+    const label = src.kind === 'dir' ? src.path : src.url;
+    const repo = await repoFor(appGit, src, appCacheDir);
+    const rel = await resolveRelease(appGit, repo, ref);
+    const had = store.getAgentApp(a.id);
+    if (had && had.app !== rel.manifest.app) await removeTasks(appDeps(a), had.app);
+    const done = await whileBusy(a.id, () => installRelease(appDeps(a), rel, values));
+    store.setAgentApp({ agentId: a.id, app: done.app, source: label, ref, sha: done.sha, manifest: done.manifest,
+      previousSha: had?.app === done.app ? had.sha : undefined, previousManifest: had?.app === done.app ? had.manifest : undefined,
+      installedAt: new Date().toISOString(), testOk: done.test?.ok });
+    trace(a.id)('app.installed', { app: done.app, sha: done.sha.slice(0, 12), source: label });
+    return done;
+  };
+  /** A new agent "from a repo": install once it runs; a failure stays on the record for its page. */
+  runPendingApp = async (agentId: string) => {
+    const p = store.getAppPending(agentId);
+    const a = store.getAgent(agentId);
+    if (!p || !a || a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) return;
+    try {
+      await installFromSource(a, p.source, p.ref, p.values);
+      store.deleteAppPending(agentId);
+    } catch (e) {
+      const msg = (e as Error)?.message ?? String(e);
+      store.setAppPendingError(agentId, msg.slice(0, 2000));
+      trace(agentId)('app.install_failed', { error: msg.slice(0, 300) });
+    }
+  };
 
   /** Install an app into this agent (or replace the one it has, from a new source). */
   app.post<{ Params: { id: string }; Body: { source?: string; ref?: string; values?: Record<string, unknown> } }>('/v1/agents/:id/app', async (req, reply) => {
     const a = appTarget(req, reply); if (!a) return reply;
     try {
-      const src = parseSource(req.body?.source ?? '');
-      const label = src.kind === 'dir' ? src.path : src.url;
-      const repo = await repoFor(appGit, src, appCacheDir);
-      const ref = req.body?.ref || 'HEAD';
-      const rel = await resolveRelease(appGit, repo, ref);
-      const had = store.getAgentApp(a.id);
-      if (had && had.app !== rel.manifest.app) await removeTasks(appDeps(a), had.app);
-      const done = await whileBusy(a.id, () => installRelease(appDeps(a), rel, req.body?.values ?? {}));
-      store.setAgentApp({ agentId: a.id, app: done.app, source: label, ref, sha: done.sha, manifest: done.manifest,
-        previousSha: had?.app === done.app ? had.sha : undefined, previousManifest: had?.app === done.app ? had.manifest : undefined,
-        installedAt: new Date().toISOString(), testOk: done.test?.ok });
-      trace(a.id)('app.installed', { app: done.app, sha: done.sha.slice(0, 12), source: label });
+      const done = await installFromSource(a, req.body?.source ?? '', req.body?.ref || 'HEAD', req.body?.values ?? {});
       return { app: appView(a), test: done.test ?? null };
+    } catch (e) { return appFail(reply, e); }
+  });
+
+  /** Install it when the agent is ready (a new agent from a repo): checked now, run after setup. */
+  app.post<{ Params: { id: string }; Body: { source?: string; ref?: string; values?: Record<string, unknown> } }>('/v1/agents/:id/app/pending', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: "Only this machine's owner can install an app (it reads this machine's folders and git login)." });
+    const a = ownedAgent(req, req.params.id);
+    if (!a || a.state === 'DELETED' || a.state === 'ARCHIVED') return reply.code(404).send({ error: 'Not found' });
+    // No source: try the waiting one again (its page's "Try again").
+    const waiting = store.getAppPending(a.id);
+    if (!req.body?.source && waiting) {
+      store.setAppPendingError(a.id, null);
+      if (a.state === 'RUNNING') void runPendingApp(a.id);
+      return { pending: true, retried: true };
+    }
+    try {
+      const ref = req.body?.ref || 'HEAD';
+      const rel = await resolveRelease(appGit, await repoFor(appGit, parseSource(req.body?.source ?? ''), appCacheDir), ref);
+      const missing = fieldsToAsk(rel.manifest).filter((f) => f.required && f.default === undefined && !String((req.body?.values ?? {})[f.key] ?? '').trim()).map((f) => f.key);
+      if (missing.length) return reply.code(400).send({ error: `Needs a value for: ${missing.join(', ')}.` });
+      store.setAppPending(a.id, { source: req.body!.source!, ref, values: req.body?.values ?? {} });
+      trace(a.id)('app.pending', { app: rel.manifest.app });
+      if (a.state === 'RUNNING') void runPendingApp(a.id);
+      return { pending: true, app: rel.manifest.app, name: rel.manifest.name };
     } catch (e) { return appFail(reply, e); }
   });
 
