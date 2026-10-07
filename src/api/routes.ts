@@ -207,7 +207,7 @@ import {
 } from './consoleProxy.js';
 import { ConsoleAccess } from '../orchestrator/consoleAccess.js';
 import { redactSecrets } from '../domain/redact.js';
-import { buildReport, issueUrl, readSource, searchSource, type ReportFacts, type ReportInput } from '../orchestrator/problemReport.js';
+import { buildReport, issueUrl, knownProblems, readSource, searchSource, type ReportFacts, type ReportInput } from '../orchestrator/problemReport.js';
 import { consoleIdentity, type ConsoleRole } from '../openclaw/consoleIdentity.js';
 import type { IdentityVerifier } from './identity.js';
 import {
@@ -7726,7 +7726,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const reportView = (r: { id: string; title: string; body: string; createdAt: string; by: string; agentId?: string; sentAt?: string }) => {
     const fileName = `hatchabot-report-${r.createdAt.slice(0, 10)}-${r.id.slice(0, 6)}.md`;
     const link = issueUrl(r.title, r.body, { file: fileName });
-    return { ...r, issueUrl: link.url, trimmed: link.trimmed, fileName, reviewPath: `/#report=${r.id}` };
+    // What the person (or agent) wrote, not the facts below it: doctor's lines would match entries by accident.
+    const words = `${r.title}\n${r.body.split('\n### Environment')[0]}`;
+    return { ...r, issueUrl: link.url, trimmed: link.trimmed, fileName, reviewPath: `/#report=${r.id}`, known: knownProblems(appDir, words) };
   };
 
   app.get<{ Querystring: { agent?: string } }>('/v1/diagnostics', async (req) => reportFacts(req, req.query.agent));

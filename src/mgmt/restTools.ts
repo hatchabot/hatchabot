@@ -370,6 +370,8 @@ export const REST_TOOLS: RestTool[] = [
     description:
       'Search the Hatchabot source and docs INSTALLED on this machine (the exact release that runs here): src/, web/, scripts/, docs/, bin/, docker/, deploy/, test/, '
       + 'README.md, CHANGELOG.md, .env.example. A regular expression, case-insensitive; up to 40 matching lines with path:line. '
+      + 'The knowledge pack is searched first, with its own room: playbook lines (docs/troubleshooting.md) carry their entry\'s title in `entry`. '
+      + 'Search the EXACT error text first; a broad term (a status code, a model id) matches a great deal of code. '
       + 'Use it to find the code behind an error message, and the docs behind a settings question (docs/ and README.md explain every setting).',
     input_schema: obj({
       query: { type: 'string', maxLength: 300, description: 'A regular expression, e.g. "probe the runtime image" or "sleep timer"' },
@@ -396,7 +398,8 @@ export const REST_TOOLS: RestTool[] = [
       + 'and files a public GitHub issue on hatchabot/hatchabot themselves. Hatchabot adds the facts itself (version, doctor, recent failures, the agent\'s state and log) and masks secrets, '
       + 'paths, addresses and names of the machine. Give: title (one line); whatHappened (what the owner saw); steps (how to make it happen again); diagnosis (what is wrong, citing file:line '
       + 'from read_source); confidence; suggestedPatch — a unified diff against the INSTALLED source (paths from the repo root, e.g. --- a/src/x.ts +++ b/src/x.ts), only when you read the code and are '
-      + 'reasonably sure; and agent when it is about one. Only for a defect in Hatchabot itself — a setting the owner can change is not a bug: help them change it instead.',
+      + 'reasonably sure; and agent when it is about one. Only for a defect in Hatchabot itself — a setting the owner can change is not a bug: help them change it instead. '
+      + 'The answer lists `known`: playbook entries this may be. When there are any, read them before you say anything: if it is that problem, tell the owner its fix and that the draft is not needed.',
     input_schema: obj({
       title: { type: 'string', maxLength: 120 },
       whatHappened: { type: 'string', maxLength: 4000 },

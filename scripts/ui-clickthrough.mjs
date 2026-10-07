@@ -180,11 +180,12 @@ const SCENARIOS = String.raw`(() => {
         ok('GitHub opened in a new tab, without a way back to this page', opened.length === 1 && opened[0].location.href.startsWith('https://github.com/hatchabot/hatchabot/issues/new') && opened[0].opener === null);
         reportDlg.close();
         // The agent's link: …/#report=<id> opens that draft and leaves the address bar.
-        window.__override['/v1/problem-reports/' + draftId] = view({ id: draftId, title: 'Telegram replies stop', by: 'agent' });
+        window.__override['/v1/problem-reports/' + draftId] = view({ id: draftId, title: 'Telegram replies stop', by: 'agent', known: [{ title: 'Telegram replies stop after a long turn', fixedIn: 'v9.9.0' }] });
         location.hash = '#report=' + draftId;
         await until(() => reportDlg.open && !$('reportReview').hidden);
         ok("the agent's draft opens, marked as the agent's", $('reportRTitle').value === 'Telegram replies stop' && $('reportReviewNote').textContent.includes('Your Hatchabot agent wrote this'));
         ok('the link is gone from the address bar', !location.hash.includes('report='));
+        ok('a known problem is flagged before anything is filed', !$('reportKnown').hidden && $('reportKnown').textContent.includes('Telegram replies stop after a long turn') && $('reportKnown').textContent.includes('v9.9.0'));
       } finally {
         window.open = realOpen; window.__answer = {};
         delete window.__override['/v1/problem-reports']; delete window.__override['/v1/problem-reports/' + draftId];

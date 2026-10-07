@@ -2379,6 +2379,7 @@
   </div>
   <div id="reportReview" hidden style="margin-top:12px;display:grid;gap:10px">
     <div class="sub" id="reportReviewNote"></div>
+    <div id="reportKnown" hidden style="border:1px solid var(--warn);border-radius:10px;padding:8px 10px;font-size:13px"></div>
     <label>Title<input id="reportRTitle" maxlength="200"></label>
     <label>The issue, as it will be posted<textarea id="reportBody" rows="16" spellcheck="false" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px"></textarea></label>
     <div class="sub" id="reportLinkNote" hidden></div>
@@ -13447,6 +13448,12 @@ function reportPaint(r) {
   $('reportRTitle').value = r.title; $('reportBody').value = r.body;
   $('reportReviewNote').innerHTML = `${r.by === 'agent' ? '<b>Your Hatchabot agent wrote this.</b> Check its diagnosis reads right. ' : ''}`
     + 'Read it through: it becomes a <b>public</b> issue on GitHub. Keys, file paths, addresses and this machine\'s name are masked; anything else you or the agent wrote is not — edit it here.';
+  // The playbook may already explain it: say so before anything is filed (2026-10-07).
+  const known = r.known || [];
+  $('reportKnown').hidden = !known.length;
+  $('reportKnown').innerHTML = !known.length ? '' : '<b>⚠ This may be a known problem.</b> The troubleshooting playbook (docs/troubleshooting.md) has:'
+    + '<ul style="margin:4px 0 0;padding-left:18px">' + known.map(k => `<li>${esc(k.title)}${k.fixedIn ? ` <span class="sub">— fixed in ${esc(k.fixedIn)}</span>` : ''}</li>`).join('') + '</ul>'
+    + '<div class="sub" style="margin-top:4px">Check it first: if it is that problem, its fix applies and there is nothing to report.</div>';
   $('reportLinkNote').hidden = !r.trimmed;
   $('reportLinkNote').textContent = r.trimmed ? `It is too long for a GitHub link: Open on GitHub also saves ${r.fileName} — drag that file into the issue to attach the rest.` : '';
 }

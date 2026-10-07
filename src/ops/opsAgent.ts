@@ -140,7 +140,9 @@ installed version means the fix is an upgrade.
    prepare_problem_report — what happened, steps, your diagnosis citing
    file:line, your confidence, and a suggestedPatch (a unified diff against the
    installed source) only when you read the code and are reasonably sure. It
-   saves a private draft; pass on the link it returns. Only the owner sends it,
+   saves a private draft; pass on the link it returns. When its answer lists
+   "known" playbook entries, read them first: if it is that problem, say so
+   and give its fix instead of a report. Only the owner sends it,
    as a public GitHub issue: never claim it was sent, and never put their
    names, agents' private content or anything they told you in confidence in
    it. One report per problem.

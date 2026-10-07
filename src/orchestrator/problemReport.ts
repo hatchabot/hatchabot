@@ -169,16 +169,44 @@ export function readSource(appDir: string, path: string, from = 1, to?: number):
   return { path, from: a, to: b, lines: all.length, text: all.slice(a - 1, b).map((l, i) => `${a + i}\t${l}`).join('\n') };
 }
 
-/** Lines matching a regular expression (case-insensitive), across the readable set or under one folder. */
-export function searchSource(appDir: string, query: string, under?: string, limit = 40): { matches: Array<{ path: string; line: number; text: string }>; more: boolean } {
+/** The knowledge pack: searched before anything else (AGENTS.md). */
+export const PLAYBOOK = 'docs/troubleshooting.md';
+const PACK = [PLAYBOOK, 'docs/architecture-map.md'];
+
+/**
+ * Lines matching a regular expression (case-insensitive), across the readable
+ * set or under one folder. The knowledge pack comes first, with its own room
+ * (`packLimit`): a broad search ("400", a model id) filled the 40 lines with
+ * code before it reached docs/, and the Hatchabot agent never saw the playbook
+ * entry that answered the question (2026-10-07). A playbook line carries the
+ * entry it belongs to.
+ */
+export function searchSource(appDir: string, query: string, under?: string, limit = 40, packLimit = 15): {
+  matches: Array<{ path: string; line: number; text: string; entry?: string }>; more: boolean;
+} {
   let re: RegExp;
   try { re = new RegExp(String(query ?? ''), 'i'); } catch { re = new RegExp(esc(String(query ?? '')), 'i'); }
   if (!String(query ?? '').trim()) throw new Error('Say what to look for.');
-  const starts = under ? [sourcePath(appDir, under)] : [...SOURCE_ROOTS, ...SOURCE_FILES].map((p) => join(appDir, p));
-  const matches: Array<{ path: string; line: number; text: string }> = [];
+  const rest = under ? [sourcePath(appDir, under)] : ['docs', 'README.md', ...SOURCE_ROOTS.filter((r) => r !== 'docs'), ...SOURCE_FILES.filter((f) => f !== 'README.md')].map((p) => join(appDir, p));
+  const pack = PACK.map((p) => join(appDir, p)).filter((abs) => !under || abs === rest[0] || abs.startsWith(rest[0] + sep));
+  const matches: Array<{ path: string; line: number; text: string; entry?: string }> = [];
+  const seen = new Set<string>();
   let more = false;
+  const scan = (abs: string, cap: () => boolean): void => {
+    seen.add(abs);
+    const lines = readFileSync(abs, 'utf8').split('\n');
+    let entry: string | undefined;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i]!.startsWith('### ')) entry = lines[i]!.slice(4).trim();
+      if (!re.test(lines[i]!)) continue;
+      if (cap()) { more = true; return; }
+      matches.push({ path: relative(appDir, abs), line: i + 1, text: clip(lines[i]!.trim(), 200), ...(entry && abs.endsWith(PLAYBOOK) ? { entry: clip(entry, 160) } : {}) });
+    }
+  };
+  for (const abs of pack) if (statSync(abs, { throwIfNoEntry: false })?.isFile()) { let n = 0; scan(abs, () => n++ >= packLimit); more = false; }
+  const fromPack = matches.length;
   const visit = (abs: string): void => {
-    if (more) return;
+    if (more || seen.has(abs)) return;
     const st = statSync(abs, { throwIfNoEntry: false });
     if (!st) return;
     if (st.isDirectory()) {
@@ -186,13 +214,36 @@ export function searchSource(appDir: string, query: string, under?: string, limi
       return;
     }
     if (st.size > MAX_FILE || !/\.(ts|mjs|cjs|js|sh|md|html|json|yml|yaml|txt|example|service|timer|plist|conf)$|\/[A-Za-z]+file[^/]*$|\.runtime$/.test(abs) && !SOURCE_FILES.some((f) => abs.endsWith(f))) return;
-    const lines = readFileSync(abs, 'utf8').split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      if (!re.test(lines[i]!)) continue;
-      if (matches.length >= limit) { more = true; return; }
-      matches.push({ path: relative(appDir, abs), line: i + 1, text: clip(lines[i]!.trim(), 200) });
-    }
+    scan(abs, () => matches.length - fromPack >= limit);
   };
-  for (const s of starts) visit(s);
+  for (const s of rest) visit(s);
   return { matches, more };
 }
+
+/**
+ * Known problems this report may be: playbook entries sharing a quoted phrase
+ * (an error message, a log line) with the report, either way round. The
+ * Hatchabot agent drafted a public bug report — with a wrong diagnosis — for a
+ * problem the playbook already explained (2026-10-07); now the draft says so,
+ * to the agent and in the review panel.
+ */
+export function knownProblems(appDir: string, text: string, max = 3): Array<{ title: string; fixedIn?: string }> {
+  let doc = '';
+  try { doc = readFileSync(join(appDir, PLAYBOOK), 'utf8'); } catch { return []; }
+  const norm = (v: string) => v.toLowerCase().replace(/[“”‘’]/g, "'").replace(/\s+/g, ' ').replace(/^[\s.,;:]+|[\s.,;:]+$/g, '');
+  const quoted = (v: string) => [...v.matchAll(/"([^"\n]{10,240})"|'([^'\n]{10,240})'|`([^`\n]{10,240})`|“([^”\n]{10,240})”/g)]
+    .map((m) => norm(m[1] ?? m[2] ?? m[3] ?? m[4] ?? '')).filter((q) => q.length >= 10);
+  const mine = norm(text), myPhrases = quoted(text);
+  const out: Array<{ title: string; fixedIn?: string }> = [];
+  for (const block of doc.split(/^### /m).slice(1)) {
+    const title = block.split('\n')[0]!.trim();
+    const body = norm(block);
+    const hit = quoted(title).some((q) => mine.includes(q)) || myPhrases.some((q) => body.includes(q));
+    if (!hit) continue;
+    const fixed = /^- \*\*Fixed in:\*\*\s*`?(v[\d.]+)`?/m.exec(block)?.[1];
+    out.push({ title, ...(fixed ? { fixedIn: fixed } : {}) });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+

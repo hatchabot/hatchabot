@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { buildReport, issueUrl, readSource, redactForPublic, searchSource, sourcePath, type ReportFacts } from '../src/orchestrator/problemReport.js';
+import { buildReport, issueUrl, knownProblems, readSource, redactForPublic, searchSource, sourcePath, type ReportFacts } from '../src/orchestrator/problemReport.js';
 
 /**
  * "Report a problem" (docs/field-reports.md): a public GitHub issue made from
@@ -99,6 +99,20 @@ describe('the installed source, read-only', () => {
     expect(r.text.split('\n')[0]).toMatch(/^1\t/);
     expect(readSource(process.cwd(), 'docs').text).toContain('field-reports.md');
     expect(() => readSource(process.cwd(), 'docs/no-such-file.md')).toThrow(/No file/);
+  });
+
+  it('the knowledge pack comes first and is never crowded out by code (a broad "400" missed the playbook, 2026-10-07)', () => {
+    const hit = searchSource(process.cwd(), '400');
+    expect(hit.matches[0]!.path).toBe('docs/troubleshooting.md');
+    const entry = hit.matches.find((m) => m.path === 'docs/troubleshooting.md' && /request format rejected/.test(m.text));
+    expect(entry?.entry).toMatch(/^Every message fails with "LLM request failed/);
+    expect(hit.matches.filter((m) => !m.path.startsWith('docs/troubleshooting.md') && !m.path.startsWith('docs/architecture-map.md')).length).toBeLessThanOrEqual(40);
+  });
+
+  it('a draft that quotes a known error names the playbook entry (the real draft, 2026-10-07)', () => {
+    const real = "HTTP 400 'request format rejected' on every request when model = claude-opus-5-5\n### What happened\nWhen the chat was switched to claude-opus-5-5, every message failed with 'LLM request failed (request format rejected, HTTP 400).'";
+    expect(knownProblems(process.cwd(), real).map((k) => k.title)[0]).toMatch(/request format rejected, HTTP 400/);
+    expect(knownProblems(process.cwd(), 'The garden agent planted tomatoes in "the wrong raised bed again" today.')).toEqual([]);
   });
 
   it('searches the code and docs, capped', () => {

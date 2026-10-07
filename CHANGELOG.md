@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.137.1] — 2026-10-07
+
+### Fixed
+- **The Hatchabot agent missed a playbook entry and drafted a bug report with a wrong diagnosis.** Asked about an HTTP 400 on Opus 5.5, it searched broadly ("400", a model id): the search filled its 40 lines with code before reaching docs/, so it never saw the entry that explained it, and it blamed Hatchabot's requests. Now:
+  - `search_source` searches the knowledge pack first, with its own room, and each playbook line names its entry;
+  - a draft report lists the playbook entries it may be (`known`), shown in the review panel as "This may be a known problem", and the agent is told to check them and give the fix instead of a report;
+  - the playbook entry names the model id as well.
+
 ## [2.137.0] — 2026-10-07
 
 ### Added
