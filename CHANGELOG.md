@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.137.0] — 2026-10-07
+
+### Added
+- **Hatchabot refuses a model the subscription would refuse.** On a Claude subscription, OpenClaw up to 2026.9.6 presents itself to Anthropic as Claude Code 2.1.278, and Claude Opus 5.5 rejects that: every message failed with "request format rejected (HTTP 400)". Choosing Opus 5.5 for such an agent (its model picker, the Hatchabot agent's card, the CLI) is now refused with the reason and the way out (a newer runtime image on that agent, or an API-key source). Measured on 2026.9.6: only Opus 5.5 is refused; Sonnet 5.5, Fable 5.1 and Sonnet 5 answer. On OpenClaw 2026.9.7 or later, and on API-key sources, nothing changes.
+- **"When something goes wrong"** in the README: `hatchabot doctor`, your Hatchabot agent, the coding assistant you already have (open it in your Hatchabot folder: `AGENTS.md` points it at the playbook and the code map), and Report a problem. The Report a problem panel says the same.
+- **The architecture map covers data sources**: where a git repo is cloned in the agent (`/home/node/.openclaw/<name>`, on its own volume, updated by `git pull`), and the code behind it.
+
 ## [2.136.2] — 2026-10-07
 
 ### Changed

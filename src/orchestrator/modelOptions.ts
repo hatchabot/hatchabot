@@ -51,6 +51,34 @@ export const MODEL_CATALOG: ModelOption[] = [
 const BY_ID = new Map(MODEL_CATALOG.map((m) => [m.id, m]));
 
 /** "anthropic/claude-haiku-4-5-20251001" → "claude-haiku-4-5": the catalog's key. */
+/**
+ * Models Anthropic refuses on a Claude SUBSCRIPTION unless OpenClaw presents a
+ * newer Claude Code: OpenClaw says 2.1.278 up to 2026.9.6 and 2.1.280 from
+ * 2026.9.7, and the refusal reads "request format rejected (HTTP 400)"
+ * (`claude_code_version_too_old`). Measured on 2026.9.6 with a Max setup token
+ * (2026-10-07): Opus 5.5 refused; Sonnet 5.5, Fable 5.1 and Sonnet 5 answer.
+ * An API-key source is not affected.
+ */
+export const SUBSCRIPTION_MIN_OPENCLAW: Record<string, string> = { 'claude-opus-5-5': '2026.9.7' };
+
+/** OpenClaw versions as numbers: "2026.9.6" < "2026.9.7" < "2026.10.1-beta.1" (a suffix is ignored). */
+export function openclawAtLeast(version: string, min: string): boolean {
+  const parts = (v: string) => (/^(\d+)\.(\d+)\.(\d+)/.exec(v) ?? []).slice(1).map(Number);
+  const a = parts(version), b = parts(min);
+  if (a.length < 3 || b.length < 3) return true; // unknown: never refuse on a guess
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i]! > b[i]!;
+  return true;
+}
+
+/** Why this model will fail on a subscription agent running this OpenClaw, or undefined. */
+export function subscriptionModelProblem(model: string, openclawVersion: string | undefined): string | undefined {
+  const min = SUBSCRIPTION_MIN_OPENCLAW[model];
+  if (!min || !openclawVersion || openclawAtLeast(openclawVersion, min)) return undefined;
+  return `${model} needs OpenClaw ${min} or newer on a Claude subscription, and this agent runs ${openclawVersion}: `
+    + 'Anthropic would refuse every message ("request format rejected, HTTP 400"). Try a newer runtime image on this agent '
+    + '(Settings → Images), or use an API-key source.';
+}
+
 export function modelKey(model: string): string {
   return model.replace(/^[a-z-]+\//, '').replace(/-\d{8}$/, '');
 }

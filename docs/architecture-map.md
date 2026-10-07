@@ -127,6 +127,25 @@ the step that failed.
 - `src/store/store.ts` — `agents`, `agent_classes`, `agent_env`, `data_sources`, `agent_seed`: agent records, classes, per-agent secrets, data sources, and template files to seed at first provision.
 - `web/index.html` — `createAgent`, `rebuild`, `rebuildAll`, `openFleetActions`, `faApply`, `openSetupLog`, `openAdoptDlg`, `archiveAgent`, `restoreAgent`: the create dialog, rebuild buttons, bulk actions and the Setup log.
 
+## Data sources: git repos and folders
+
+An agent's data sources are listed under "## Data sources" in its AGENTS.md, by
+exact path. A **git repo** is never a mount of your disk: it is cloned onto the
+agent's own volume at `/home/node/.openclaw/<name>` (`<name>` is the repo's
+name by default). A public repo is cloned over https with no credentials and
+pushing is disabled; a private or writable one uses a deploy key Hatchabot
+generates, which you add to the repo. The clone is made at provision and
+rebuild, and only when it is missing: after that, the agent updates it with
+`git pull`. A **folder** is a live, read-only (or writable) view of a path on
+the host.
+
+- `src/orchestrator/gitSource.ts` — `normalizeGitUrl`, `buildGitSyncScript`, `buildPublicGitSyncScript`: the accepted URL shapes, and the idempotent clone scripts for the private (deploy key) and public (https) cases.
+- `src/orchestrator/provision.ts` — `syncGitDataSources`, `datasource.git_synced`: where each repo is cloned during provisioning, and the event it logs (`datasource.git_sync_failed` carries git's own error).
+- `src/openclaw/workspace.ts` — `dataSourcesSection`, `DATA_SOURCES_HEADING`: the AGENTS.md section that tells the agent each path.
+- `src/api/routes.ts` — `'/v1/agents/:id/data-sources'`, `'/v1/agents/:id/data-sources/:dsId'`: add, change and remove a source.
+- `web/index.html` — `addGitSource`: the agent sheet's "add a repo" form.
+- `docs/data-sources.md`: the design.
+
 ## The runtime provider and Docker (local and runners)
 
 Every agent is a Docker container plus one named volume holding its OpenClaw

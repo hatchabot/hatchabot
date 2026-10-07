@@ -107,7 +107,7 @@ import { OPS_DIGEST_MESSAGE, OPS_SUGGEST_MESSAGE } from '../ops/opsAgent.js';
 import { buildScorecard } from '../orchestrator/modelScorecard.js';
 import { assessModelChange, backfillModelLedger, evaluateModelChanges, fileGuardProposals, recordChanges, rightSizeSavings, snapshotModels, EARLY_TURNS as EARLY_TURNS_N, VERDICT_AFTER_DAYS as VERDICT_DAYS, type ChangeMeta, type ModelFigures } from '../orchestrator/modelLedger.js';
 import type { PendingConfirm } from '../mgmt/pendingStore.js';
-import { modelOption, modelOptionsFor } from '../orchestrator/modelOptions.js';
+import { modelOption, modelOptionsFor, SUBSCRIPTION_MIN_OPENCLAW, subscriptionModelProblem } from '../orchestrator/modelOptions.js';
 import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
 import { createOpsPush, unannounced } from '../ops/push.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
@@ -7136,6 +7136,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const model = ((req.body as { model?: string | null } | undefined)?.model ?? null) || null;
       const problem = modelOverrideProblem(profile, model);
       if (problem) return reply.code(400).send({ error: problem });
+      // A model Anthropic refuses for the Claude Code version this agent's
+      // OpenClaw presents on a subscription (modelOptions.ts): every message
+      // would fail with an opaque HTTP 400 (2026-10-07).
+      if (model && profile.kind === 'subscription' && SUBSCRIPTION_MIN_OPENCLAW[model] && agent.runtimeRef) {
+        const running = await providerFor(agent.hostId).info(agent.runtimeRef).catch(() => undefined);
+        const tooOld = subscriptionModelProblem(model, running?.openclawVersion);
+        if (tooOld) return reply.code(409).send({ error: tooOld });
+      }
       const classDetached = await ledgered(req, 'model', [agent.id], () => { store.setAgentModel(agent.id, model); return detachClassIfDrifted(agent.id); });
       const applied = effectiveModel(store.getAgent(agent.id)!, profile);
       const how = await applyModelToRuntime(agent.id);

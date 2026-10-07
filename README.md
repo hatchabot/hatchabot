@@ -404,6 +404,21 @@ Design decisions worth knowing before you read the code:
   boot; a Claude subscription reaches an agent as its setup
   token, never as a mount of your `~/.claude`.
 
+## When something goes wrong
+
+1. **`hatchabot doctor`** checks the install and prints a fix for each problem.
+2. **Ask your Hatchabot agent.** It reads the install's own code and docs, can
+   tell a setting from a bug, and helps you fix either.
+3. **Or use the coding assistant you already have.** Open Claude Code, Codex,
+   Gemini CLI or Cursor in your Hatchabot folder (`~/hatchabot`) and describe
+   the problem. `AGENTS.md` points it at the playbook of known problems
+   (`docs/troubleshooting.md`) and the map of the code
+   (`docs/architecture-map.md`).
+4. **A bug in Hatchabot itself:** **Report a problem** (the link at the foot of
+   the home screen) turns it into a GitHub issue, with your private details
+   masked and nothing sent until you press Submit
+   ([docs/field-reports.md](docs/field-reports.md)).
+
 ## Operations
 
 ```sh
