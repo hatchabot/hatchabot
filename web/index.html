@@ -201,6 +201,34 @@
     .cbtn .lbl-short { display:inline }
   }
   .console-dlg iframe { flex:1; width:100%; border:0; background:var(--bg) }
+  /* Console tabs (Chris, 2026-10-07): one per open agent, the gold only on the active one. */
+  .cframes { flex:1; position:relative; min-height:0 }
+  .cframes iframe { position:absolute; inset:0; height:100% }
+  #consoleTitle { background:none; border:0; padding:0; color:var(--text); font-weight:700; text-align:left; cursor:pointer }
+  .console-bar:has(#consoleAddTab:not([hidden])) #consoleTitle::after { content:' ▾'; color:var(--dim); font-weight:400 }
+  .ctabs { flex:1; min-width:0; display:flex; gap:4px; overflow-x:auto; scrollbar-width:none }
+  .ctabs::-webkit-scrollbar { display:none }
+  .ctab { display:flex; align-items:center; flex:none; max-width:190px; border-radius:9px; color:var(--dim) }
+  .ctab.on { background:color-mix(in srgb, var(--accent) 17%, transparent); color:var(--text) }
+  .ctab.cold .ctabgo span { font-style:italic }
+  .ctabgo { display:flex; align-items:center; gap:6px; min-width:0; background:none; border:0; color:inherit; padding:6px 4px 6px 10px; font-size:13.5px; cursor:pointer }
+  .ctabgo span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .ctabx { background:none; border:0; color:var(--dim); font-size:15px; line-height:1; padding:4px 8px 4px 2px; cursor:pointer; opacity:.7 }
+  .ctabx:hover, .ctabgo:hover { color:var(--text) }
+  .cdot { width:7px; height:7px; border-radius:50%; background:var(--accent); flex:none }
+  .ctabadd { padding:0 10px; font-size:16px }
+  .ctabs:not([hidden]) ~ #consoleTitle, .console-bar:has(.ctabs:not([hidden])) #consoleTitle { display:none }
+  .cswitch { position:absolute; top:52px; left:12px; z-index:3; width:min(360px, calc(100% - 24px)); background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:8px; box-shadow:0 10px 30px rgba(0,0,0,.25) }
+  .cswitch input { width:100%; box-sizing:border-box }
+  #cswList { display:flex; flex-direction:column; margin-top:6px; max-height:50vh; overflow-y:auto }
+  #cswList button { display:flex; justify-content:space-between; gap:8px; text-align:left; background:none; border:0; border-radius:8px; padding:7px 9px; color:var(--text); cursor:pointer; font-size:14px }
+  #cswList button.sel { background:color-mix(in srgb, var(--accent) 17%, transparent) }
+  #cswList .sub { font-size:12px }
+  /* A phone has no room for tabs: the title is the switcher. */
+  @media (max-width:560px) {
+    .ctabs, .ctabadd { display:none !important }
+    .console-bar:has(.ctabs) #consoleTitle { display:block !important; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  }
   #consoleCover { position:absolute; left:0; right:0; bottom:0; top:51px; z-index:2; background:var(--bg); display:flex; align-items:center; justify-content:center; gap:12px; color:var(--dim); font-size:15px }
   .console-spin { width:18px; height:18px; border-radius:50%; border:2px solid var(--line); border-top-color:var(--accent); animation:v2spin .8s linear infinite }
   @media (prefers-reduced-motion: reduce) { .console-spin { animation:none } }
@@ -1118,7 +1146,9 @@
 
 <dialog id="consoleDlg" class="console-dlg" aria-label="Agent console">
   <div class="console-bar">
-    <b id="consoleTitle">Agent</b>
+    <button id="consoleTitle" type="button" onclick="openConsoleSwitcher()" title="Switch to another agent (⌘K / Ctrl+K)">Agent</button>
+    <div id="consoleTabs" class="ctabs" role="tablist" aria-label="Open consoles" hidden></div>
+    <button id="consoleAddTab" class="cbtn ctabadd" type="button" onclick="openConsoleSwitcher()" title="Open another agent (⌘K / Ctrl+K)" aria-label="Open another agent">＋</button>
     <button id="consoleGearBtn" class="cbtn" hidden title="This agent's settings"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">Settings</span></button>
     <button id="consoleApproveBtn" class="cbtn primary" hidden onclick="approveConsoleBrowser(this)"
             title="OpenClaw asks each new browser to be approved once. Hatchabot can do it for you — you're signed in as this agent's owner."><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span class="lbl-long">Approve this browser</span><span class="lbl-short">Approve</span></button>
@@ -1128,7 +1158,11 @@
   </div>
   <div id="consoleProps" hidden></div>
   <div id="consoleCover" hidden><span class="console-spin" aria-hidden="true"></span><span>Connecting this browser…</span></div>
-  <iframe id="consoleFrame" title="Agent console" src="about:blank"></iframe>
+  <div id="consoleSwitcher" class="cswitch" hidden>
+    <input id="cswInput" type="text" placeholder="Open an agent — type part of its name" autocomplete="off" aria-label="Agent to open">
+    <div id="cswList" role="listbox"></div>
+  </div>
+  <div id="consoleFrames" class="cframes"><iframe id="consoleFrame" title="Agent console" src="about:blank"></iframe></div>
 </dialog>
 
 <dialog id="loginDlg" closedby="none">
@@ -9903,6 +9937,15 @@ async function openGateway(id, slug) {
     );
     return;
   }
+  // Already open in a tab: switch to it, no reload.
+  if (consoleSwitchTo(id)) return;
+  consoleOpening++;
+  consoleTabFor(id, slug);
+  // A newer pick (another tab, the switcher) or closing this tab supersedes
+  // this open while it waits on the network: it then stops, rather than take
+  // the panel back when its answer lands.
+  const ticket = ++consoleTicket;
+  const current = () => ticket === consoleTicket && consoleTabs.some(t => t.id === id && t.frame);
   try {
     // A sleeping agent is woken first, with the cover saying so — the proxy's
     // own wake used to time out before the gateway answered (2026-09-26).
@@ -9911,7 +9954,7 @@ async function openGateway(id, slug) {
       $('consoleTitle').textContent = sleeper.name;
       $('consoleCover').hidden = false; $('consoleCover').lastElementChild.textContent = 'Waking it up — about a minute…';
       $('consoleFrame').src = 'about:blank';
-      $('consoleDlg').showModal();
+      if (!$('consoleDlg').open) $('consoleDlg').showModal();
       try { await api(`/v1/agents/${id}/wake`, { method: 'POST', body: {} }); }
       catch (e) { $('consoleCover').lastElementChild.textContent = `Could not wake it: ${e.message}`; return; }
       for (let i = 0; i < 150; i++) {
@@ -9940,6 +9983,7 @@ async function openGateway(id, slug) {
     // workspace — and the console's bare address lands there, which looked
     // like the agent had forgotten everything said on Telegram. Telegram DMs
     // live in `agent:<slug>:main` (OpenClaw's agent id is always the slug).
+    if (!current()) return;
     const session = encodeURIComponent(`agent:${slug}:main`);
     const url = `/v1/agents/${id}/ui/chat?session=${session}${g ? `#token=${encodeURIComponent(g.token)}` : ''}`;
     // In the app, not a new tab: the proxy now permits framing by this origin
@@ -9951,21 +9995,178 @@ async function openGateway(id, slug) {
     renderConsoleChannels(a);
     $('consoleNewTab').onclick = () => window.open(url, '_blank', 'noopener');
     $('consoleFrame').src = url;
+    const tab = consoleTabs.find(t => t.id === id); if (tab) tab.url = url;
     $('consoleApproveBtn').hidden = true;
-    $('consoleDlg').showModal();
+    if (!$('consoleDlg').open) $('consoleDlg').showModal();
     // A new browser has to be approved once. OpenClaw's own instruction ("run
     // this on the Gateway host") means a shell inside the container, which is
     // no use from a laptop — so look for the request and offer to approve it.
     consoleAgentId = id;
     consoleUrl = url;
+    renderConsoleTabs();
     markConsoleSeen(id);
     void autoApproveConsole(id);
   } catch (e) { toast(e.message); }
+  finally { consoleOpening--; }
 }
+
+// ---- Console tabs and the quick switcher (Chris, 2026-10-07) ------------------
+// One frame per open agent, so switching is instant and keeps its place. At
+// most CONSOLE_LIVE frames stay loaded; the least recently used unloads (its
+// tab stays, and loads again when picked). Closing the console window still
+// unloads them all, so no WebSocket or token outlives the panel; the tab list
+// itself is remembered on this device.
+const CONSOLE_TABS_KEY = 'hb-console-tabs', CONSOLE_LIVE = 5;
+let consoleTicket = 0, consoleOpening = 0;
+let consoleTabs = []; // { id, slug, frame?, url?, used }
+function consoleSaveTabs() { try { localStorage.setItem(CONSOLE_TABS_KEY, JSON.stringify(consoleTabs.map(t => t.id))); } catch {} }
+const consoleOpenable = (a) => a && a.state !== 'ARCHIVED' && a.state !== 'DELETED' && a.state !== 'DELETING' && (a.role ? a.role === 'owner' : true);
+/** This agent's tab and frame, made if needed, and shown. The frame shown is the one with id consoleFrame. */
+function consoleTabFor(id, slug) {
+  if (consoleGuest || !$('consoleDlg').open) consoleUnloadAll();
+  if (!$('consoleDlg').open && !consoleTabs.length) {
+    // Bring back the tabs this device had open (they load when picked).
+    let ids = []; try { ids = JSON.parse(localStorage.getItem(CONSOLE_TABS_KEY) || '[]'); } catch {}
+    consoleTabs = ids.map(x => (agents || []).find(a => a.id === x)).filter(consoleOpenable).map(a => ({ id: a.id, slug: a.slug, used: 0 }));
+  }
+  let t = consoleTabs.find(x => x.id === id);
+  if (!t) { t = { id, slug, used: 0 }; consoleTabs.push(t); }
+  if (!t.frame) {
+    const f = document.createElement('iframe');
+    f.title = 'Agent console'; f.src = 'about:blank';
+    f.addEventListener('load', () => { try { f.contentWindow.addEventListener('keydown', consoleKeys); } catch { /* not ours to listen to */ } });
+    $('consoleFrames').append(f);
+    t.frame = f;
+  }
+  consoleShow(id);
+  // Too many loaded: unload the one used longest ago (never the one just picked).
+  const live = consoleTabs.filter(x => x.frame && x.id !== id).sort((x, y) => x.used - y.used);
+  while (live.length >= CONSOLE_LIVE) consoleUnload(live.shift());
+  consoleSaveTabs();
+  return t;
+}
+function consoleShow(id) {
+  // The old lone frame, before any tab owned it.
+  for (const f of $('consoleFrames').querySelectorAll('iframe')) if (!consoleTabs.some(t => t.frame === f)) f.remove();
+  for (const t of consoleTabs) {
+    if (!t.frame) continue;
+    const on = t.id === id;
+    t.frame.hidden = !on;
+    if (on) { t.frame.id = 'consoleFrame'; t.used = Date.now(); } else t.frame.removeAttribute('id');
+  }
+  $('consoleCover').hidden = true;
+}
+function consoleUnload(t) { if (!t?.frame) return; t.frame.src = 'about:blank'; t.frame.remove(); t.frame = null; t.url = null; }
+function consoleUnloadAll() {
+  for (const t of consoleTabs) consoleUnload(t);
+  // One empty frame keeps $('consoleFrame') valid for whoever opens next (a guest's single console).
+  if (!$('consoleFrame')) $('consoleFrames').insertAdjacentHTML('afterbegin', '<iframe id="consoleFrame" title="Agent console" src="about:blank"></iframe>');
+  else $('consoleFrame').src = 'about:blank';
+}
+/** Switch to an agent already loaded in a tab. False when it has to be opened. */
+function consoleSwitchTo(id) {
+  const t = consoleTabs.find(x => x.id === id);
+  if (!$('consoleDlg').open || consoleGuest || !t?.frame || !t.url) return false;
+  consoleTicket++; // an open still waiting on the network is no longer wanted
+  consoleShow(id);
+  const a = (agents || []).find(x => x.id === id);
+  consoleAgentId = id; consoleUrl = t.url;
+  $('consoleTitle').textContent = a?.name || t.slug;
+  $('consoleGearBtn').style.display = '';
+  $('consoleApproveBtn').hidden = true;
+  $('consoleProps').hidden = true;
+  renderConsoleChannels(a);
+  $('consoleNewTab').onclick = () => window.open(t.url, '_blank', 'noopener');
+  renderConsoleTabs();
+  markConsoleSeen(id);
+  return true;
+}
+function closeConsoleTab(id) {
+  const i = consoleTabs.findIndex(t => t.id === id);
+  if (i < 0) return;
+  if (consoleAgentId !== id && consoleTabs[i].frame && !consoleTabs[i].url) consoleAgentId = id; // still opening: it is the one showing
+  consoleUnload(consoleTabs[i]);
+  consoleTabs.splice(i, 1);
+  consoleSaveTabs();
+  if (consoleAgentId !== id) { renderConsoleTabs(); return; }
+  const next = consoleTabs.filter(t => t.frame && t.url).sort((x, y) => y.used - x.used)[0] ?? consoleTabs[Math.min(i, consoleTabs.length - 1)];
+  if (!next) { closeConsole(); return; }
+  void openGateway(next.id, next.slug);
+}
+function renderConsoleTabs() {
+  const box = $('consoleTabs');
+  box.hidden = consoleGuest || !consoleTabs.length;
+  $('consoleAddTab').hidden = consoleGuest;
+  box.innerHTML = consoleTabs.map(t => {
+    const a = (agents || []).find(x => x.id === t.id);
+    const name = a?.name || t.slug, on = t.id === consoleAgentId;
+    return `<div class="ctab${on ? ' on' : ''}${t.frame ? '' : ' cold'}" role="tab" aria-selected="${on}">`
+      + `<button type="button" class="ctabgo" data-id="${esc(t.id)}" title="${esc(name)}${t.frame ? '' : ' — loads when opened'}"><span>${esc(name)}</span>${a?.unread && !on ? '<i class="cdot" aria-label="new reply"></i>' : ''}</button>`
+      + `<button type="button" class="ctabx" data-x="${esc(t.id)}" aria-label="Close ${esc(name)}">×</button></div>`;
+  }).join('');
+  box.querySelector('.ctab.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+$('consoleTabs')?.addEventListener('click', (e) => {
+  const x = e.target.closest('[data-x]'); if (x) { closeConsoleTab(x.dataset.x); return; }
+  const go = e.target.closest('[data-id]'); if (!go) return;
+  const t = consoleTabs.find(y => y.id === go.dataset.id); if (t) void openGateway(t.id, t.slug);
+});
+
+let cswSel = 0;
+function openConsoleSwitcher() {
+  if (consoleGuest) return;
+  $('consoleSwitcher').hidden = false;
+  $('cswInput').value = ''; cswSel = 0;
+  renderConsoleSwitcher();
+  $('cswInput').focus();
+}
+function closeConsoleSwitcher() { $('consoleSwitcher').hidden = true; }
+function consoleSwitcherItems() {
+  const q = $('cswInput').value.trim().toLowerCase();
+  const open = new Set(consoleTabs.map(t => t.id));
+  return (agents || []).filter(a => consoleOpenable(a) && (!q || a.name.toLowerCase().includes(q)))
+    .sort((x, y) => (open.has(y.id) - open.has(x.id)) || x.name.localeCompare(y.name, 'en', { numeric: true }))
+    .slice(0, 14);
+}
+function renderConsoleSwitcher() {
+  const items = consoleSwitcherItems();
+  cswSel = Math.max(0, Math.min(cswSel, items.length - 1));
+  const open = new Set(consoleTabs.map(t => t.id));
+  $('cswList').innerHTML = items.length ? items.map((a, i) =>
+    `<button type="button" role="option" data-id="${esc(a.id)}" class="${i === cswSel ? 'sel' : ''}"><span>${esc(a.name)}</span><span class="sub">${a.id === consoleAgentId ? 'open here' : open.has(a.id) ? 'in a tab' : a.hibernatedAt && a.state === 'STOPPED' ? 'asleep' : ''}</span></button>`).join('')
+    : '<div class="sub" style="padding:6px 9px">No agent by that name.</div>';
+}
+function consoleSwitcherPick(id) {
+  const a = (agents || []).find(x => x.id === id); if (!a) return;
+  closeConsoleSwitcher();
+  void openGateway(a.id, a.slug);
+}
+$('cswInput')?.addEventListener('input', () => { cswSel = 0; renderConsoleSwitcher(); });
+$('cswInput')?.addEventListener('keydown', (e) => {
+  const items = consoleSwitcherItems();
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); cswSel = (cswSel + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % Math.max(items.length, 1); renderConsoleSwitcher(); }
+  else if (e.key === 'Enter') { e.preventDefault(); if (items[cswSel]) consoleSwitcherPick(items[cswSel].id); }
+  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeConsoleSwitcher(); }
+});
+$('cswList')?.addEventListener('click', (e) => { const b = e.target.closest('[data-id]'); if (b) consoleSwitcherPick(b.dataset.id); });
+$('consoleDlg')?.addEventListener('click', (e) => { if (!$('consoleSwitcher').hidden && !e.target.closest('#consoleSwitcher, #consoleTitle, #consoleAddTab')) closeConsoleSwitcher(); });
+/** ⌘K / Ctrl+K opens the switcher — from the panel, and from inside a console frame (same origin). */
+function consoleKeys(e) {
+  if (!$('consoleDlg').open || consoleGuest || !(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'k') return;
+  e.preventDefault(); openConsoleSwitcher();
+}
+document.addEventListener('keydown', consoleKeys);
 
 // Esc closes a dialog without calling closeConsole(): blank the frame either
 // way, or the console's WebSocket and token outlive the panel.
-$('consoleDlg')?.addEventListener('close', () => { markConsoleSeen(consoleAgentId); $('consoleFrame').src = 'about:blank'; $('consoleProps').hidden = true; $('consoleCover').hidden = true; });
+// The close event arrives a moment after close(): a console reopened in that
+// gap (or still opening) keeps its frame — closeConsole() already unloaded the old ones.
+$('consoleDlg')?.addEventListener('close', () => {
+  markConsoleSeen(consoleAgentId);
+  closeConsoleSwitcher(); $('consoleProps').hidden = true;
+  if ($('consoleDlg').open || consoleOpening) return;
+  consoleUnloadAll(); $('consoleCover').hidden = true;
+});
 
 let consoleAgentId = null, consoleUrl = null, consoleGuest = false;
 // What you can see in an open console is read: on open, on close, and every
@@ -10011,8 +10212,9 @@ async function autoApproveConsole(id) {
       await api(`/v1/agents/${id}/console/approve`, { method: 'POST', body: {} });
       if (!stillOurs()) return;
       remember();
-      $('consoleFrame').src = 'about:blank';
-      setTimeout(() => { if (stillOurs()) $('consoleFrame').src = consoleUrl; }, 50);
+      const fr = consoleTabs.find(t => t.id === id)?.frame ?? $('consoleFrame'), again = consoleTabs.find(t => t.id === id)?.url ?? consoleUrl;
+      fr.src = 'about:blank';
+      setTimeout(() => { if (stillOurs()) fr.src = again; }, 50);
       setTimeout(uncover, 1500); // let the console connect before showing it
     } catch {
       // Couldn't do it for them — fall back to the button, which says why.
@@ -10038,8 +10240,8 @@ async function approveConsoleBrowser(btn) {
 }
 
 function closeConsole() {
-  // Drop the frame so its WebSocket closes and the token leaves the DOM.
-  $('consoleFrame').src = 'about:blank';
+  // Drop the frames so their WebSockets close and the tokens leave the DOM.
+  consoleUnloadAll();
   $('consoleDlg').close();
 }
 
@@ -11717,6 +11919,7 @@ async function refresh(withMeta) {
     }).catch(() => {});
     agents = await api('/v1/agents');
     agentsLoaded = true;
+    if ($('consoleDlg')?.open && !consoleGuest) renderConsoleTabs(); // the new-reply dots
     if (location.hash.includes('report=')) reportFromHash();
     if (UI_V2) void v2LoadRecent(); // each agent's last line, for its tooltip (at most every 30 s)
     if (UI_V2) void v2LoadCosts(); // the cost badges (at most every 5 minutes)
@@ -12698,6 +12901,7 @@ async function openWebChat(id) {
 }
 function openGuestConsole(a, sessionKey) {
   const url = `/v1/agents/${a.id}/ui/chat?session=${encodeURIComponent(sessionKey)}`;
+  consoleUnloadAll(); consoleTabs = [];
   consoleGuest = true;
   consoleAgentId = null; // nothing of the owner's (unread, settings) follows a guest's console
   consoleUrl = url;
@@ -12709,6 +12913,7 @@ function openGuestConsole(a, sessionKey) {
   $('consoleCover').hidden = true;
   $('consoleNewTab').onclick = () => window.open(url, '_blank', 'noopener');
   $('consoleFrame').src = url;
+  renderConsoleTabs();
   $('consoleDlg').showModal();
 }
 async function openWebChatPanel(id, note = '') {

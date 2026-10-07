@@ -992,6 +992,62 @@ const SCENARIOS = String.raw`(() => {
         await refresh(false);
       }
     },
+    // Console tabs and the quick switcher (Chris, 2026-10-07): one frame per open agent, switching never reloads.
+    consoleTabs: async () => {
+      const list = await (await fetch('/v1/agents')).json();
+      const mine = list.filter((x) => (x.role ? x.role === 'owner' : true) && x.state !== 'ARCHIVED' && !x.ops).slice(0, 3);
+      ok('the stub has three agents of mine', mine.length === 3);
+      const [A, B, C] = mine;
+      for (const x of mine) window.__override['/v1/agents/' + (x.id) + '/console/access'] = { role: 'owner', console: 'identity' };
+      // Nothing to approve: an approval reloads a frame, which is not what this checks.
+      for (const x of mine) window.__override['/v1/agents/' + (x.id) + '/console/pending'] = { pending: 0 };
+      try { localStorage.removeItem('hb-console-tabs'); } catch {}
+      const frames = () => [...document.querySelectorAll('#consoleFrames iframe')];
+      const tabNames = () => [...document.querySelectorAll('#consoleTabs .ctabgo span')].map((e) => e.textContent);
+      try {
+        await openGateway(A.id, A.slug);
+        await until(() => consoleDlg.open);
+        const aFrame = document.getElementById('consoleFrame');
+        const aSrc = aFrame.getAttribute('src');
+        ok('one tab, for the first agent', eq('tabs', tabNames(), [A.name]) ?? true);
+        await openGateway(B.id, B.slug);
+        eq('two tabs, in the order opened', tabNames(), [A.name, B.name]);
+        ok('the second is shown, the first kept loaded behind it: ' + JSON.stringify({ same: document.getElementById('consoleFrame') === aFrame, hidden: aFrame.hidden, src: aFrame.getAttribute('src'), aSrc, n: frames().length }), document.getElementById('consoleFrame') !== aFrame && aFrame.hidden && aFrame.getAttribute('src') === aSrc);
+        ok('the gold is on the active tab only', document.querySelectorAll('#consoleTabs .ctab.on').length === 1 && document.querySelector('#consoleTabs .ctab.on').textContent.includes(B.name));
+        const accessCalls = calls('GET', new RegExp('/v1/agents/' + (A.id) + '/console/access$')).length;
+        document.querySelector('#consoleTabs [data-id="' + (A.id) + '"]').click();
+        await until(() => document.getElementById('consoleFrame') === aFrame);
+        ok('switching back shows the same frame: no reload', !aFrame.hidden && aFrame.getAttribute('src') === aSrc && calls('GET', new RegExp('/v1/agents/' + (A.id) + '/console/access$')).length === accessCalls);
+        eq('the title follows', document.getElementById('consoleTitle').textContent, A.name);
+        // ⌘K / Ctrl+K: type part of a name, Enter.
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+        ok('Ctrl+K opens the switcher', !document.getElementById('consoleSwitcher').hidden && document.activeElement === document.getElementById('cswInput'));
+        const inp = document.getElementById('cswInput');
+        inp.value = C.name.slice(0, Math.max(3, Math.ceil(C.name.length / 2))); inp.dispatchEvent(new Event('input'));
+        ok('it narrows to the name typed', [...document.querySelectorAll('#cswList [data-id]')].some((b) => b.dataset.id === C.id));
+        while (document.querySelector('#cswList .sel')?.dataset.id !== C.id) inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+        inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await until(() => tabNames().length === 3 && consoleAgentId === C.id);
+        ok('Enter opened it in a third tab, and closed the switcher', document.getElementById('consoleSwitcher').hidden && consoleAgentId === C.id);
+        // × on the active tab: it goes, and the most recently used one comes back.
+        document.querySelector('#consoleTabs [data-x="' + (C.id) + '"]').click();
+        await until(() => consoleAgentId === A.id);
+        eq('closing a tab', tabNames(), [A.name, B.name]);
+        eq('its frame went with it', frames().length, 2);
+        // Closing the console unloads everything; the tabs come back, cold, next time.
+        closeConsole();
+        ok('every frame is unloaded when the console closes', frames().every((f) => f.getAttribute('src') === 'about:blank') && frames().length === 1);
+        await openGateway(B.id, B.slug);
+        await until(() => consoleDlg.open);
+        eq('the tabs are remembered', tabNames(), [A.name, B.name]);
+        ok('the other loads only when picked', document.querySelector('#consoleTabs [data-id="' + (A.id) + '"]').closest('.ctab').classList.contains('cold') && frames().length === 1);
+      } finally {
+        if (consoleDlg.open) closeConsole();
+        for (const x of mine) delete window.__override['/v1/agents/' + (x.id) + '/console/access'];
+        for (const x of mine) delete window.__override['/v1/agents/' + (x.id) + '/console/pending'];
+        consoleTabs = []; try { localStorage.removeItem('hb-console-tabs'); } catch {}
+      }
+    },
     // The owner's console on a rebuilt agent: no token in the address (Hatchabot names them); on one not rebuilt, the token as before.
     ownerConsoleIdentity: async () => {
       try {

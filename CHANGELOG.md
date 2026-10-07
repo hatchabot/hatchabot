@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.138.0] — 2026-10-07
+
+### Added
+- **Tabs for agents' consoles.** Each agent you open gets a tab in the console's top bar (the gold on the active one, a dot when an agent in another tab has a new reply). Switching is instant and keeps your place: each open console stays loaded behind the others, up to five (the one used longest ago unloads, and loads again when picked). **＋** or **⌘K / Ctrl+K** (also from inside a console) opens a quick switcher: type part of a name, Enter. × closes a tab. On a phone the agent's name in the top bar is the switcher. Closing the console window still unloads every console, so no connection outlives it; the tabs are remembered on that device and load when picked. A guest's chat stays a single console.
+
+### Fixed
+- Two races the tabs exposed: a console still connecting could take the panel back after you had moved on or closed its tab, and the console window's late "close" could unload a console reopened right after.
+
 ## [2.137.1] — 2026-10-07
 
 ### Fixed
