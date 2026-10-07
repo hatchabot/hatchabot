@@ -5192,28 +5192,16 @@ function defaultModelControl(p) {
 /** A source's fleet: how many agents, split by the model they run now, with an
  *  expandable list. Answers "which agents on which source, which models" where
  *  you manage sources. */
+/**
+ * A source's agents: the summary line ("14 agents · 14× claude-sonnet-5") is gone (Chris, 2026-10-07) — the
+ * Costs chart's By agent pie says who uses it. Left: agents on OTHER accounts, the reason it can't be deleted.
+ */
 function sourceUsage(p) {
-  const ags = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.aiProfileId === p.id);
   const others = p.inUse?.others || 0;
   const othersNote = others
     ? `<div class="sub" style="width:100%;color:var(--warn)">Also used by <b>${others} agent${others === 1 ? '' : 's'} on other accounts</b> — it can't be deleted until they move${myAccount.hostOwner ? ' (↪ Migrate all off… below does that)' : ''}.</div>`
     : '';
-  if (!ags.length) return `<div class="sub" style="width:100%">${others ? 'None of your agents are on this source.' : 'No agents on this source.'}</div>` + othersNote;
-  const byModel = {};
-  for (const a of ags) { const m = a.model || '(no model)'; (byModel[m] = byModel[m] || []).push(a); }
-  const breakdown = Object.entries(byModel).sort((x, y) => y[1].length - x[1].length)
-    .map(([m, list]) => `${list.length}× ${esc(m)}`).join(' · ');
-  const rows = ags.slice().sort((a, b) => a.name.localeCompare(b.name)).map(a => {
-    const pin = a.modelOverride ? ' <span class="sub">(pinned)</span>' : '';
-    const soon = a.pendingModel && a.pendingModel !== a.model
-      ? ` <span class="sub">→ ${esc(a.pendingModel)} on rebuild</span>` : '';
-    return `<div style="padding:2px 0"><span class="grow">${esc(a.name)}</span>
-      <span class="sub">${esc(a.model || '(no model)')}</span>${pin}${soon}</div>`;
-  }).join('');
-  return othersNote + `<details style="width:100%">
-    <summary class="sub" style="cursor:pointer">${ags.length} agent${ags.length === 1 ? '' : 's'} · ${breakdown}</summary>
-    <div style="padding:4px 0 4px 14px">${rows}</div>
-  </details>`;
+  return othersNote;
 }
 
 // ---- agent classes (model/source tiers) -----------------------------------

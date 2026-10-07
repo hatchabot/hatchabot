@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.140.4] — 2026-10-07
+
+### Changed
+- **Settings → AI: the agents-by-model summary line under each source is gone** ("14 agents · 14× claude-sonnet-5", with its list) — the Costs chart's By agent pie says who uses a source. The note that agents on other accounts use it (why it cannot be deleted) stays.
+
 ## [2.140.3] — 2026-10-07
 
 ### Changed
