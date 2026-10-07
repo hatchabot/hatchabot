@@ -89,6 +89,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.86.1`
 - **Code:** `src/orchestrator/runtimePins.ts` — `clearStaleRuntimePins`; `src/orchestrator/eventLabels.ts` — `runtime.pins_cleared`
 
+### Every message fails with "LLM request failed (request format rejected, HTTP 400)" after switching to a newer Claude model
+- **Check:** the agent's gateway log (`docker logs <container>`) has `claude_code_version_too_old` and "Claude Code 2.1.278 does not support this model; version 2.1.280 or newer is required"; the agent runs on a Claude subscription source.
+- **Cause:** on a subscription, OpenClaw presents itself to Anthropic as a fixed Claude Code version, and the newest models (Claude Opus 5.5 at least) refuse an old one. OpenClaw 2026.9.6 says 2.1.278; 2026.9.7 and later say 2.1.280. An API-key source is not affected.
+- **Fix:** switch the conversation back to a model the source accepts (Sonnet 5 or Opus 4.8) in the chat's model menu, or set the agent's model in Hatchabot. To use the newer model: an agent on OpenClaw 2026.9.7 or later (Settings → Images: try a newer image on that agent), or an API-key source.
+- **Fixed in:** —
+- **Code:** `docker/Dockerfile.runtime` — `OPENCLAW_VERSION`; `src/orchestrator/modelOptions.ts` — `claude-opus-5-5`
+
 ### An AI source shows "rate-limited" hours after the plan's limit reset
 - **Check:** Settings → AI sources shows the source limited with no refused call since.
 - **Cause:** a refusal counted as current until some agent called again.

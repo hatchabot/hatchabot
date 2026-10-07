@@ -5149,7 +5149,7 @@ function defaultModelControl(p) {
   const avail = availableModels[p.id];
   const box = 'flex:1;min-width:0;padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);color:var(--text);font-size:13px';
   if (Array.isArray(avail) && avail.length) {
-    const opts = [p.model, ...avail].filter((m, i, a) => m && a.indexOf(m) === i);
+    const opts = [p.model, ...avail].filter((m, i, a) => m && a.indexOf(m) === i).sort(byModelName);
     return `<select id="aiModel-${p.id}" onchange="renderExtras('${p.id}')" style="${box}">
       ${opts.map(m => `<option value="${esc(m)}" ${m === p.model ? 'selected' : ''}>${esc(m)}</option>`).join('')}
     </select>`;
@@ -5201,7 +5201,7 @@ function classSwapOptions(selected, cap) {
 function classModelOptions(selected) {
   // Union of models across the owner's sources; the server validates a chosen
   // model against the agent's actual source when a class is applied.
-  const models = [...new Set(profiles.flatMap(p => [p.model, ...(p.models || [])]).filter(Boolean))].sort();
+  const models = [...new Set(profiles.flatMap(p => [p.model, ...(p.models || [])]).filter(Boolean))].sort(byModelName);
   if (selected && !models.includes(selected)) models.unshift(selected);
   return `<option value="">— model: leave as-is —</option>` +
     models.map(m => `<option value="${esc(m)}"${m === selected ? ' selected' : ''}>${esc(m)}</option>`).join('');
@@ -5498,7 +5498,7 @@ function renderExtras(id) {
   const dflt = dfltEl ? dfltEl.value.trim() : '';
   const avail = Array.isArray(availableModels[id]) ? availableModels[id] : [];
   // Extras never include the default (it's already the default).
-  const chosen = field.value.split(',').map(s => s.trim()).filter(Boolean).filter(m => m !== dflt);
+  const chosen = field.value.split(',').map(s => s.trim()).filter(Boolean).filter(m => m !== dflt).sort(byModelName);
   field.value = chosen.join(',');
 
   const tags = chosen.map(m =>
@@ -5508,7 +5508,7 @@ function renderExtras(id) {
         style="border:none;background:none;cursor:pointer;color:var(--dim);font-size:16px;line-height:1;padding:0 3px">×</button>
     </span>`).join('');
 
-  const opts = avail.filter(m => m !== dflt && !chosen.includes(m));
+  const opts = avail.filter(m => m !== dflt && !chosen.includes(m)).sort(byModelName);
   const ctrlStyle = 'font-size:12px;padding:4px 7px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);color:var(--text)';
   let adder;
   if (opts.length) {
@@ -6554,8 +6554,12 @@ async function rehostAgent(id, name) {
 // CURATED_ANTHROPIC_MODELS in src/api/routes.ts. NO claude-opus-5: the
 // claude-cli (Max) runtime has no catalog entry for it — it once became a fleet
 // default and every conversation broke on compaction (see runtimeModels.ts).
-const CLAUDE_MODELS = ['claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5', 'claude-fable-5',
-  'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6'];
+/** Model lists read alphabetically, numbers as numbers (opus-4-8 before opus-4-10) (Chris, 2026-10-07). */
+function byModelName(a, b) { return String(a).localeCompare(String(b), 'en', { numeric: true }); }
+// The fallback for a new source: covers the server's CURATED_ANTHROPIC_MODELS and never
+// claude-opus-5 (test/driftGuards.test.ts). A saved source lists what its runtime really serves.
+const CLAUDE_MODELS = ['claude-fable-5', 'claude-haiku-4-5', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8',
+  'claude-sonnet-4-6', 'claude-sonnet-5'].sort(byModelName);
 /** Flip a password field to plaintext so the user can verify a pasted key,
  *  and back. Purely local — the value never leaves the field either way. */
 function toggleReveal(btn, inputId) {

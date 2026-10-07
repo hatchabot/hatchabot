@@ -121,6 +121,29 @@ const SCENARIOS = String.raw`(() => {
         v2Machine = null; v2PaintMachine(); await refresh(false);
       }
     },
+    modelListsSorted: async () => {
+      // Settings → AI: every model list reads alphabetically, numbers as numbers (Chris, 2026-10-07).
+      const sorted = (xs) => xs.every((x, i) => i === 0 || xs[i - 1].localeCompare(x, 'en', { numeric: true }) <= 0);
+      $('aiKind').value = 'subscription'; aiKindChanged();
+      const add = [...$('aiModelSelect').options].map((o) => o.value).filter((v) => v !== '__other');
+      ok('the new-source dropdown is sorted: ' + add.join(' '), add.length > 5 && sorted(add));
+      const p = profiles.find((x) => x.mine !== false);
+      ok('the stub has a source of mine to check', !!p);
+      {
+        const saved = { avail: availableModels[p.id], model: p.model, models: p.models };
+        availableModels[p.id] = ['claude-sonnet-5', 'claude-opus-4-10', 'claude-haiku-4-5', 'claude-opus-4-8', 'claude-fable-5-1'];
+        p.model = 'claude-sonnet-5'; p.models = ['claude-opus-4-10', 'claude-fable-5-1'];
+        try {
+          renderAiList();
+          const dflt = [...$('aiModel-' + p.id).options].map((o) => o.value);
+          ok('the default-model dropdown is sorted: ' + dflt.join(' '), sorted(dflt) && dflt.indexOf('claude-opus-4-8') < dflt.indexOf('claude-opus-4-10'));
+          const pills = [...$('aiExtras-' + p.id).querySelectorAll('[data-remove]')].map((b) => b.dataset.remove);
+          eq('the switchable pills are sorted', pills, ['claude-fable-5-1', 'claude-opus-4-10']);
+          const adder = [...$('aiExtras-' + p.id).querySelectorAll('select[data-add] option')].map((o) => o.value).filter(Boolean);
+          eq('and so is the add-a-model list', adder, ['claude-haiku-4-5', 'claude-opus-4-8']);
+        } finally { availableModels[p.id] = saved.avail; p.model = saved.model; p.models = saved.models; renderAiList(); }
+      }
+    },
     reportProblem: async () => {
       // Report a problem (made-up data): from the account menu, a person's draft, read through,
       // edited, then GitHub opened in a new tab; and the agent's link opens its draft.

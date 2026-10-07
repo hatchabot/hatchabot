@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.136.2] — 2026-10-07
+
+### Changed
+- **Settings → AI: every model list is alphabetical**, numbers read as numbers (opus-4-8 before opus-4-10): the new-source dropdown, each source's Default model, the "Also switchable" pills and their Add-a-model list, and a class's model picker.
+
+### Added
+- **Playbook:** "LLM request failed (request format rejected, HTTP 400)" after switching to a newer Claude model on a subscription: OpenClaw 2026.9.6 presents itself to Anthropic as Claude Code 2.1.278, which Opus 5.5 refuses; what to switch to, and how to get the newer model.
+
 ## [2.136.1] — 2026-10-06
 
 ### Added
