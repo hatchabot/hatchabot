@@ -1154,7 +1154,7 @@
     <button id="consoleApproveBtn" class="cbtn primary" hidden onclick="approveConsoleBrowser(this)"
             title="OpenClaw asks each new browser to be approved once. Hatchabot can do it for you — you're signed in as this agent's owner."><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span class="lbl-long">Approve this browser</span><span class="lbl-short">Approve</span></button>
     <span id="consoleChans" style="display:contents"></span>
-    <button id="consoleNewTab" class="cbtn" title="Open the same console in its own tab"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg><span class="lbl">New tab</span></button>
+    <button id="consoleNewTab" class="cbtn" title="Open this console in its own browser tab — its address opens it again, and can be bookmarked"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg><span class="lbl">New tab</span></button>
     <button class="cbtn" onclick="closeConsole()" aria-label="Close" title="Close"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
   </div>
   <div id="consoleProps" hidden></div>
@@ -5459,7 +5459,7 @@ function renderAiList() {
       <b>${p.defaultSource ? '⭐ ' : ''}${esc(p.name)}</b>
       <span class="chip">${vendorChip(p)}</span>
       <span class="sub">shared by the server owner — usable for your agents, managed by them${p.defaultSource ? '; the default for new agents' : ''}</span>
-      ${sourceUsagePanel(p)}
+      ${sourceUsagePanel(p)}${sourceSpendBox(p)}
     </div>` : `
     <div class="pair" style="flex-wrap:wrap;gap:8px;align-items:flex-start">
       <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;width:100%">
@@ -5481,7 +5481,7 @@ function renderAiList() {
         </label>
       </div>
       ${sourceUsage(p)}
-      ${sourceUsagePanel(p)}
+      ${sourceUsagePanel(p)}${sourceSpendBox(p)}
       ${p.credential === 'machine-login' || p.vendor === 'local' ? '' : `
       <details class="su" style="width:100%">
         <summary><b>🔑 Credential</b> <span class="sub">— reveal only to copy this source to another Hatchabot machine</span></summary>
@@ -5519,6 +5519,24 @@ function renderAiList() {
     </div>`).join('') || '<div class="sub">No AI sources yet.</div>';
   // Populate the switchable-model bubbles for each owned profile.
   profiles.filter(p => p.mine !== false).forEach(p => renderExtras(p.id));
+  void loadSpendCharts($('aiList'));
+}
+/**
+ * A source's costs (Chris, 2026-10-07): the same chart as Usage — what it went
+ * on, by model, by agent, and over time — for the agents on this source now.
+ * Folded state is remembered per source; a folded chart is not loaded.
+ */
+function sourceSpendBox(p) {
+  if (p.vendor === 'local') return ''; // a local model server costs nothing per token
+  let folded = false; try { folded = localStorage.getItem(`hb-src-spend-folded:${p.id}`) === '1'; } catch {}
+  return `<details class="su srcspend" style="width:100%"${folded ? '' : ' open'} ontoggle="sourceSpendToggle(this, '${esc(p.id)}')">
+    <summary><b>💲 Costs</b> <span class="sub">— at API prices, for the agents on this source now</span></summary>
+    <div class="spendchart" data-source="${esc(p.id)}"${folded ? ' data-lazy="1"' : ''} style="margin-top:8px"><div class="sub">Loading…</div></div></details>`;
+}
+function sourceSpendToggle(det, id) {
+  try { localStorage.setItem(`hb-src-spend-folded:${id}`, det.open ? '0' : '1'); } catch {}
+  const box = det.querySelector('.spendchart');
+  if (det.open && box) { delete box.dataset.lazy; void loadSpendChart(box); }
 }
 
 // The "also switchable" set: removable bubbles + an "add" dropdown of what's
@@ -8631,13 +8649,13 @@ function setSpendRange(r, btn) {
   const box = btn?.closest('.spendchart');
   if (box) void loadSpendChart(box);
 }
-async function loadSpendCharts(root) { for (const el of (root || document).querySelectorAll('.spendchart')) void loadSpendChart(el); }
+async function loadSpendCharts(root) { for (const el of (root || document).querySelectorAll('.spendchart:not([data-lazy])')) void loadSpendChart(el); }
 async function loadSpendChart(el) {
-  const agent = el.dataset.agent;
+  const agent = el.dataset.agent, source = el.dataset.source;
   try {
-    const sel = !agent && spendAgents.length ? `&agents=${encodeURIComponent(spendAgents.join(','))}` : '';
+    const sel = source ? `&source=${encodeURIComponent(source)}` : !agent && spendAgents.length ? `&agents=${encodeURIComponent(spendAgents.join(','))}` : '';
     const d = await api(`/v1/usage/spend?range=${spendRange}${agent ? `&agent=${encodeURIComponent(agent)}` : sel}`);
-    if (el.isConnected) el.innerHTML = spendChartHTML(d, { fleet: !agent }) + (agent && d.planShare > 0 ? '<div class="sub" style="margin-top:2px">* Claude plan use priced at API rates — not money you pay.</div>' : '');
+    if (el.isConnected) el.innerHTML = spendChartHTML(d, { fleet: !agent && !source, byAgent: !!source }) + ((agent || source) && d.planShare > 0 ? '<div class="sub" style="margin-top:2px">* Claude plan use priced at API rates — not money you pay.</div>' : '');
   } catch (e) { if (el.isConnected) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 /** A round axis top at or above x: 1, 2, 2.5 or 5 × a power of ten. */
@@ -8673,7 +8691,11 @@ function spendChartHTML(d, opts = {}) {
   const block = (title, slices) => `<div style="display:flex;flex-direction:column;gap:4px;min-width:0">
       <div class="sub" style="font-size:12px">${title}</div>
       <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">${donutHTML(slices, total, `${v2Money(total)}${star}`, range, title)}${pieLegend(slices, total)}</div></div>`;
-  const summary = `<div style="display:flex;gap:18px 34px;flex-wrap:wrap;margin-bottom:8px">${block('What it went on', partSlices)}${modelSlices.length ? block('By model', modelSlices) : ''}</div>`;
+  // A source with nothing spent in the range: say so, no empty pies (2026-10-07).
+  if (opts.byAgent && !(t.cost > 0) && !(t.tokens > 0)) return head + `<div class="sub">Nothing spent at API prices in ${esc(rangeName || 'this range')}.</div>`;
+  // By agent (an AI source's chart): who spends on this source, the biggest seven and the rest.
+  const agentSlices = opts.byAgent ? agentPieSlices(d.choices || []) : [];
+  const summary = `<div style="display:flex;gap:18px 34px;flex-wrap:wrap;margin-bottom:8px">${block('What it went on', partSlices)}${modelSlices.length ? block('By model', modelSlices) : ''}${agentSlices.length ? block('By agent', agentSlices) : ''}</div>`;
   // Over time: stacked bars (left axis, dollars), tokens as a line (right axis).
   const W = 640, H = 224, L = 46, R2 = 50, T = 24, B = 24, iw = W - L - R2, ih = H - T - B;
   const topC = niceTop(Math.max(0, ...b.map(cost))), topT = niceTop(Math.max(0, ...b.map((x) => x.tokens)));
@@ -8727,6 +8749,14 @@ function pieLegend(slices, total) {
 const MODEL_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
 const MODEL_SLOT = { 'claude-opus-4-8': 0, 'claude-sonnet-5': 1, 'claude-fable-5': 2, 'claude-haiku-4-5': 3, 'claude-opus-4-7': 4, 'claude-opus-5': 5, 'claude-sonnet-4-6': 6, 'claude-opus-5-5': 7,
   'claude-sonnet-5-5': 5, 'claude-fable-5-1': 2, 'claude-opus-4-6': 4 };
+/** By agent: the categorical palette in order of spend, the rest folded into one grey slice. */
+function agentPieSlices(choices) {
+  const spent = choices.filter((c) => c.cost > 0).sort((x, y) => y.cost - x.cost);
+  const top = spent.slice(0, 7), rest = spent.slice(7);
+  const out = top.map((c, i) => ({ label: c.name, value: c.cost, color: MODEL_COLORS[i] }));
+  if (rest.length) out.push({ label: `${rest.length} other${rest.length === 1 ? '' : 's'}`, value: rest.reduce((t, c) => t + c.cost, 0), color: '#9aa0a6' });
+  return out;
+}
 function modelPieSlices(models) {
   const top = models.slice(0, 7), rest = models.slice(7);
   const used = new Set();
@@ -10005,6 +10035,7 @@ async function openGateway(id, slug) {
     consoleAgentId = id;
     consoleUrl = url;
     renderConsoleTabs();
+    consoleMark(id);
     markConsoleSeen(id);
     void autoApproveConsole(id);
   } catch (e) { toast(e.message); }
@@ -10018,7 +10049,7 @@ async function openGateway(id, slug) {
 // unloads them all, so no WebSocket or token outlives the panel; the tab list
 // itself is remembered on this device.
 const CONSOLE_TABS_KEY = 'hb-console-tabs', CONSOLE_LIVE = 5;
-let consoleTicket = 0, consoleOpening = 0;
+let consoleTicket = 0, consoleOpening = 0, consoleHashTried = false;
 let consoleTabs = []; // { id, slug, frame?, url?, used }
 function consoleSaveTabs() { try { localStorage.setItem(CONSOLE_TABS_KEY, JSON.stringify(consoleTabs.map(t => t.id))); } catch {} }
 const consoleOpenable = (a) => a && a.state !== 'ARCHIVED' && a.state !== 'DELETED' && a.state !== 'DELETING' && (a.role ? a.role === 'owner' : true);
@@ -10046,6 +10077,37 @@ function consoleTabFor(id, slug) {
   consoleSaveTabs();
   return t;
 }
+/**
+ * A console's own address (Chris, 2026-10-07): …/#console=<slug> opens Hatchabot
+ * on that agent's console — bookmarkable, and what "New tab" opens. While a
+ * console is shown the address bar carries it (replaced, never a history
+ * entry), so a reload comes back to it; the browser tab is named after it.
+ */
+const consoleAddress = (slug) => `${location.origin}${location.pathname}${location.search}#console=${encodeURIComponent(slug)}`;
+let consolePageTitle = null;
+function consoleMark(id) {
+  const a = (agents || []).find(x => x.id === id);
+  if (!a || consoleGuest) return;
+  const key = a.slug || a.id;
+  try { history.replaceState(null, '', `${location.pathname}${location.search}#console=${encodeURIComponent(key)}`); } catch { /* keep going */ }
+  if (consolePageTitle === null) consolePageTitle = document.title;
+  document.title = `${a.name} · Hatchabot`;
+  $('consoleNewTab').onclick = () => window.open(consoleAddress(key), '_blank', 'noopener');
+}
+function consoleUnmark() {
+  if (/(?:^#|&)console=/.test(location.hash)) { try { history.replaceState(null, '', location.pathname + location.search); } catch {} }
+  if (consolePageTitle !== null) { document.title = consolePageTitle; consolePageTitle = null; }
+}
+/** The address's agent (by slug, or id), once signed in and the agents are loaded. */
+function consoleFromHash() {
+  const key = decodeURIComponent(/(?:^#|&)console=([^&]+)/.exec(location.hash)?.[1] || '');
+  if (!key || !UI_V2) return;
+  const a = (agents || []).find(x => (x.slug === key || x.id === key) && consoleOpenable(x));
+  if (!a) { consoleUnmark(); toast(`No agent of yours called "${key}" to open.`); return; }
+  if ($('consoleDlg').open && consoleAgentId === a.id) return;
+  void openGateway(a.id, a.slug);
+}
+addEventListener('hashchange', consoleFromHash);
 function consoleShow(id) {
   // The old lone frame, before any tab owned it.
   for (const f of $('consoleFrames').querySelectorAll('iframe')) if (!consoleTabs.some(t => t.frame === f)) f.remove();
@@ -10077,8 +10139,8 @@ function consoleSwitchTo(id) {
   $('consoleApproveBtn').hidden = true;
   $('consoleProps').hidden = true;
   renderConsoleChannels(a);
-  $('consoleNewTab').onclick = () => window.open(t.url, '_blank', 'noopener');
   renderConsoleTabs();
+  consoleMark(id);
   markConsoleSeen(id);
   return true;
 }
@@ -10181,6 +10243,7 @@ document.addEventListener('keydown', consoleKeys);
 $('consoleDlg')?.addEventListener('close', () => {
   markConsoleSeen(consoleAgentId);
   if ($('consoleDlg').open || consoleOpening) return;
+  consoleUnmark();
   closeConsoleSwitcher(); $('consoleProps').hidden = true;
   consoleUnloadAll(); $('consoleCover').hidden = true;
 });
@@ -10260,6 +10323,7 @@ function closeConsole() {
   // Drop the frames so their WebSockets close and the tokens leave the DOM.
   consoleUnloadAll();
   closeConsoleSwitcher();
+  consoleUnmark(); // now, not from the late close event (which skips while another console opens)
   $('consoleDlg').close();
 }
 
@@ -11939,6 +12003,7 @@ async function refresh(withMeta) {
     agentsLoaded = true;
     if ($('consoleDlg')?.open && !consoleGuest) renderConsoleTabs(); // the new-reply dots
     if (location.hash.includes('report=')) reportFromHash();
+    if (location.hash.includes('console=') && !consoleHashTried) { consoleHashTried = true; consoleFromHash(); }
     if (UI_V2) void v2LoadRecent(); // each agent's last line, for its tooltip (at most every 30 s)
     if (UI_V2) void v2LoadCosts(); // the cost badges (at most every 5 minutes)
     $('offlineBanner').hidden = true; // reached the server: any earlier warning is stale

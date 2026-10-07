@@ -224,6 +224,13 @@ describe('spend over time (the Usage chart)', () => {
     expect(six.totals.cost).toBe(20);
     expect(six.monthly).toBe(2400);
     expect(week.totals.cost).toBe(25); // now with the $5 of input 30 hours ago
+    // One AI source (Settings → AI, 2026-10-07): only the agents on it, and its choices are those agents.
+    const plan = spendSeries(w.store, OWNER, 'day', { now, sourceId: 'plan' });
+    expect(plan.totals.cost).toBe(5);
+    expect(plan.choices.every((c) => w.store.getAgent(c.id)!.aiProfileId === 'plan')).toBe(true);
+    expect(plan.choices.find((c) => c.id === 'c-plan')!.cost).toBe(5);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=day&source=plan', headers: as(OWNER) })).json().totals.cost).toBeLessThanOrEqual(5);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=day&source=plan', headers: as(STRANGER) })).json().totals.cost).toBe(0);
     const one = spendSeries(w.store, OWNER, 'day', { now, agentId: 'c-plan' });
     expect(one.totals).toMatchObject({ cost: 5, input: 5 });
     expect(one.planShare).toBe(1);

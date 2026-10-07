@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.140.0] — 2026-10-07
+
+### Added
+- **Costs in Settings → AI.** Each paid AI source has the Usage chart for the agents on it now: the same windows (1 hr … 1 mo), "What it went on", "By model", and **By agent** — who spends on this source — then the stacked spend over time with tokens on the right axis. Folded or open is remembered per source (a folded one is not loaded); a source with nothing spent says so; plan use carries the "not money you pay" note. Spend is kept per agent and model, not per source, so an agent that switched sources brings its earlier spend along (`GET /v1/usage/spend?source=`).
+- **Every console has its own address**, `…/#console=<agent>`: it opens Hatchabot on that agent's console (signing in first when needed), the address bar shows it while the console is open (a reload comes back to it; bookmark it), and the browser tab takes the agent's name. The console's **New tab** button opens that address — Hatchabot with its tabs and the browser approval — rather than OpenClaw's bare page.
+
+### Fixed
+- Closing a console while another was still opening left its address behind, which could reopen it later on its own (and mark its reply read).
+
 ## [2.139.1] — 2026-10-07
 
 ### Fixed

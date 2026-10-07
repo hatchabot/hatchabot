@@ -121,6 +121,34 @@ const SCENARIOS = String.raw`(() => {
         v2Machine = null; v2PaintMachine(); await refresh(false);
       }
     },
+    sourceCosts: async () => {
+      // Settings → AI (Chris, 2026-10-07): each paid source has Usage's chart for the agents on it, with a By agent pie (made-up figures).
+      const now = Date.now(), H = 3600e3;
+      window.__override['/v1/usage/spend'] = { range: 'week', bucketHours: 3, planShare: 1, monthly: 400, models: [{ model: 'claude-sonnet-5', cost: 80 }],
+        choices: [{ id: 'a1', name: 'Homework Helper', cost: 60 }, { id: 'a2', name: 'Soccer Schedule', cost: 20 }, { id: 'a3', name: 'Piano Practice', cost: 0 }],
+        buckets: Array.from({ length: 56 }, (_, i) => ({ at: new Date(now - (56 - i) * 3 * H).toISOString(), cacheWrite: 1, cacheRead: 0.2, output: 0.2, input: 0.03, tokens: 2e6 })),
+        totals: { cacheWrite: 56, cacheRead: 11, output: 11, input: 2, cost: 80, tokens: 112e6 } };
+      try {
+        openAiDlg('ai');
+        const box = await until(() => document.querySelector('#aiList .srcspend .spendchart svg') && document.querySelector('#aiList .srcspend'));
+        const p = profiles.find((x) => x.vendor !== 'local');
+        ok('a paid source has its costs, open', !!box.open && box.textContent.includes('agents on this source now'));
+        const call = window.__calls.filter((c) => c.path === '/v1/usage/spend').at(-1);
+        ok('asked for that source: ' + call.url, call.url.includes('source='));
+        ok('the pies, By agent among them, and the chart', box.textContent.includes('What it went on') && box.textContent.includes('By model') && box.textContent.includes('By agent'));
+        ok('an agent that spent nothing is not a slice', !box.textContent.includes('Piano Practice'));
+        ok('the plan footnote', box.textContent.includes('not money you pay'));
+        ok('no agent picker on a source', !box.querySelector('.spendpick'));
+        const local = profiles.find((x) => x.vendor === 'local');
+        if (local) ok('a local model server has no costs box', ![...document.querySelectorAll('#aiList .srcspend .spendchart')].some((el) => el.dataset.source === local.id));
+        box.open = false; box.dispatchEvent(new Event('toggle'));
+        ok('folding is remembered', localStorage.getItem('hb-src-spend-folded:' + box.querySelector('.spendchart').dataset.source) === '1');
+      } finally {
+        delete window.__override['/v1/usage/spend'];
+        for (const k of Object.keys(localStorage)) if (k.startsWith('hb-src-spend-folded:')) localStorage.removeItem(k);
+        aiDlg.close();
+      }
+    },
     modelListsSorted: async () => {
       // Settings → AI: every model list reads alphabetically, numbers as numbers (Chris, 2026-10-07).
       const sorted = (xs) => xs.every((x, i) => i === 0 || xs[i - 1].localeCompare(x, 'en', { numeric: true }) <= 0);
@@ -1076,6 +1104,38 @@ const SCENARIOS = String.raw`(() => {
         if (consoleDlg.open) closeConsole();
         for (const x of [mgr, other]) { delete window.__override['/v1/agents/' + x.id + '/console/access']; delete window.__override['/v1/agents/' + x.id + '/console/pending']; }
         consoleTabs = []; try { localStorage.removeItem('hb-console-tabs'); localStorage.removeItem('hb-console-last'); } catch {}
+      }
+    },
+    // A console's own address (Chris, 2026-10-07): #console=<slug> opens it, the bar shows it, the tab is named after it.
+    consoleAddress: async () => {
+      const list = await (await fetch('/v1/agents')).json();
+      const A = list.find((x) => !x.ops && (x.role ? x.role === 'owner' : true) && x.state !== 'ARCHIVED');
+      const key = A.slug || A.id;
+      window.__override['/v1/agents/' + A.id + '/console/access'] = { role: 'owner', console: 'identity' };
+      window.__override['/v1/agents/' + A.id + '/console/pending'] = { pending: 0 };
+      const title = document.title, opened = []; const realOpen = window.open;
+      window.open = (u) => { opened.push(u); return null; };
+      try {
+        location.hash = '#console=' + key;
+        await until(() => consoleDlg.open && consoleAgentId === A.id);
+        ok('the address opened its console', true);
+        ok('the browser tab is named after it: ' + document.title, document.title.startsWith(A.name));
+        document.getElementById('consoleNewTab').click();
+        ok('New tab opens the console\'s own address: ' + opened[0], opened[0] === location.origin + location.pathname + location.search + '#console=' + encodeURIComponent(key));
+        closeConsole();
+        await until(() => !location.hash.includes('console='));
+        eq('closing gives the page its title back', document.title, title);
+        await openGateway(A.id, A.slug);
+        await until(() => location.hash === '#console=' + encodeURIComponent(key));
+        ok('opening one any other way puts its address in the bar', true);
+        location.hash = '#console=no-such-agent-here';
+        await until(() => !location.hash.includes('no-such'));
+        ok('an unknown name is said, not opened', consoleAgentId === A.id);
+      } finally {
+        window.open = realOpen;
+        if (consoleDlg.open) closeConsole();
+        delete window.__override['/v1/agents/' + A.id + '/console/access']; delete window.__override['/v1/agents/' + A.id + '/console/pending'];
+        consoleTabs = []; try { localStorage.removeItem('hb-console-tabs'); localStorage.removeItem('hb-console-last'); history.replaceState(null, '', location.pathname + location.search); } catch {}
       }
     },
     // The owner's console on a rebuilt agent: no token in the address (Hatchabot names them); on one not rebuilt, the token as before.

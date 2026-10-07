@@ -296,7 +296,7 @@ export interface SpendSeries {
  * — new input, cache writes, cache reads, output — and the tokens behind it,
  * from the sampler's hour buckets. The last bucket ends with the current hour.
  */
-export function spendSeries(store: Store, viewer: string, range: SpendRange, opts: { agentId?: string; agentIds?: string[]; now?: number } = {}): SpendSeries {
+export function spendSeries(store: Store, viewer: string, range: SpendRange, opts: { agentId?: string; agentIds?: string[]; sourceId?: string; now?: number } = {}): SpendSeries {
   const now = opts.now ?? Date.now();
   // The window is exact — the last `hours` to the minute; an hour bucket it
   // only partly covers counts for that part — and the bars are cut on clock
@@ -309,12 +309,15 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
   const out: SpendBucket[] = Array.from({ length: n }, (_, i) => ({ at: new Date(start + i * size).toISOString(), ...noParts(), tokens: 0 }));
   const mine = store.listAgents(viewer).filter((a) => a.state !== 'DELETED' && a.state !== 'DELETING' && store.getAIProfile(a.aiProfileId)?.vendor !== 'local');
   const picked = opts.agentId ? new Set([opts.agentId]) : opts.agentIds?.length ? new Set(opts.agentIds) : undefined;
+  // One AI source (Settings → AI): the agents on it NOW. Spend is kept per agent and model, not per source,
+  // so an agent that switched sources brings its earlier spend with it (rare; the panel says "agents on it now").
+  const onSource = (a: { aiProfileId: string }) => !opts.sourceId || a.aiProfileId === opts.sourceId;
   const profiles = store.modelProfiles(mine.map((a) => a.id)) as Map<string, { profile: StoredProfile; at: string }>;
   let plan = 0, all = 0;
   const byModel = new Map<string, number>(), perAgent = new Map<string, number>();
   for (const a of mine) {
     const src = store.getAIProfile(a.aiProfileId);
-    const into = !picked || picked.has(a.id);
+    const into = onSource(a) && (!picked || picked.has(a.id));
     for (const [model, st] of Object.entries(profiles.get(a.id)?.profile.models ?? {})) {
       for (const [h, v] of Object.entries(st.h ?? {})) {
         const at = Date.parse(`${h}:00:00Z`);
@@ -351,6 +354,6 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
     planShare: all > 0 ? Math.round((plan / all) * 1000) / 1000 : 0,
     monthly: r2((totals.cost * 720) / hours),
     models: [...byModel].map(([model, cost]) => ({ model, cost: r2(cost) })).filter((m) => m.cost > 0).sort((x, y) => y.cost - x.cost),
-    choices: (opts.agentId ? [] : mine.map((a) => ({ id: a.id, name: a.name, cost: r2(perAgent.get(a.id) ?? 0) })).sort((x, y) => y.cost - x.cost || x.name.localeCompare(y.name))),
+    choices: (opts.agentId ? [] : mine.filter(onSource).map((a) => ({ id: a.id, name: a.name, cost: r2(perAgent.get(a.id) ?? 0) })).sort((x, y) => y.cost - x.cost || x.name.localeCompare(y.name))),
   };
 }
