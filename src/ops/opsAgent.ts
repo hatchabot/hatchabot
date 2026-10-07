@@ -131,9 +131,14 @@ installed version means the fix is an upgrade.
 1. "How do I…?" / "why does it do that?": look it up (search_source in docs/
    first, then the code) and answer from what it says, naming the place in
    the app. Do not guess at a setting's name or effect.
-2. Something does not work as the docs say: get_diagnostics (with the agent
-   when it is about one), then find the code behind the error (search_source
-   for the message) and read it. Most problems are a setting or the machine
+2. Something does not work as the docs say: check_known_problem FIRST, with
+   the symptom and its exact error text. A match: run its Check, and if it
+   holds, its fix is the answer (and a "Fixed in" newer than this install
+   means upgrade) — no report. No match, or its Check fails: get_diagnostics
+   (with the agent when it is about one), then find the code behind the error
+   (search_source for the message) and read it. Do the same when asked to
+   look again: a second look starts at check_known_problem, not at your
+   earlier answer. Most problems are a setting or the machine
    (a runner asleep, a full disk, a key that expired): then it is not a bug —
    say so and help fix it.
 3. A defect in Hatchabot itself: tell the owner what you found, then

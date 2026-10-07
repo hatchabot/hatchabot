@@ -81,7 +81,7 @@ const SCENARIOS = String.raw`(() => {
       ok('no hub box with a manager', document.querySelector('.v2hub').hidden);
       const header = document.querySelector('#v2Header .v2hubactions');
       ok('the actions sit in the header', !!header);
-      eq('header buttons', [...header.querySelectorAll('button:not([hidden])')].map((b) => b.getAttribute('aria-label')), ['Usage', 'Resources', 'Bulk actions', 'Settings', 'New agent']);
+      eq('header buttons', [...header.querySelectorAll('button:not([hidden])')].map((b) => b.getAttribute('aria-label')), ['Consoles', 'Usage', 'Resources', 'Bulk actions', 'Settings', 'New agent']);
       ok('symbol only: the label is hidden', getComputedStyle(header.querySelector('.lbl')).display === 'none');
     },
     homeFoot: async () => {
@@ -1046,6 +1046,36 @@ const SCENARIOS = String.raw`(() => {
         for (const x of mine) delete window.__override['/v1/agents/' + (x.id) + '/console/access'];
         for (const x of mine) delete window.__override['/v1/agents/' + (x.id) + '/console/pending'];
         consoleTabs = []; try { localStorage.removeItem('hb-console-tabs'); } catch {}
+      }
+    },
+    // The header's Consoles button (Chris, 2026-10-07): the first time, the Hatchabot agent with the switcher open; after that, the one you used last.
+    consolesButton: async () => {
+      const list = await (await fetch('/v1/agents')).json();
+      const mgr = list.find((x) => x.ops), other = list.find((x) => !x.ops && (x.role ? x.role === 'owner' : true) && x.state !== 'ARCHIVED');
+      ok('the stub has a manager and another agent', !!mgr && !!other);
+      for (const x of [mgr, other]) { window.__override['/v1/agents/' + x.id + '/console/access'] = { role: 'owner', console: 'identity' }; window.__override['/v1/agents/' + x.id + '/console/pending'] = { pending: 0 }; }
+      try { localStorage.removeItem('hb-console-tabs'); localStorage.removeItem('hb-console-last'); } catch {}
+      try {
+        ok('a Consoles button in the header', !!document.querySelector('#v2HubActions #v2ConsoleBtn'));
+        document.getElementById('v2ConsoleBtn').click();
+        await until(() => consoleDlg.open && consoleAgentId === mgr.id);
+        ok('the first time: the Hatchabot agent, with the switcher open', !document.getElementById('consoleSwitcher').hidden);
+        consoleSwitcherPick(other.id);
+        await until(() => consoleAgentId === other.id);
+        closeConsole();
+        document.getElementById('v2ConsoleBtn').click();
+        await until(() => consoleDlg.open && consoleAgentId === other.id);
+        ok('after that: back to the one used last, no switcher', document.getElementById('consoleSwitcher').hidden);
+        closeConsole();
+        await sleep(50);
+        ok('no other panel in front: ' + [...document.querySelectorAll('dialog[open]')].map((d) => d.id).join(','), !document.querySelector('dialog[open]'));
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+        await until(() => consoleDlg.open && !document.getElementById('consoleSwitcher').hidden);
+        ok('Ctrl+K on the home screen opens the console with the switcher', consoleAgentId === other.id);
+      } finally {
+        if (consoleDlg.open) closeConsole();
+        for (const x of [mgr, other]) { delete window.__override['/v1/agents/' + x.id + '/console/access']; delete window.__override['/v1/agents/' + x.id + '/console/pending']; }
+        consoleTabs = []; try { localStorage.removeItem('hb-console-tabs'); localStorage.removeItem('hb-console-last'); } catch {}
       }
     },
     // The owner's console on a rebuilt agent: no token in the address (Hatchabot names them); on one not rebuilt, the token as before.

@@ -366,6 +366,16 @@ export const REST_TOOLS: RestTool[] = [
     },
   },
   {
+    name: 'check_known_problem', tier: 'read',
+    description:
+      'FIRST, for anything that is not working: the known problems (docs/troubleshooting.md, written for this release) this symptom most likely is, best first, '
+      + 'each in full — how to check it is that one, the cause, the fix, the release that fixed it (fixedInNewerRelease: the fix starts with upgrading) and the code. '
+      + 'Give the symptom as the person or the log shows it, quoting the exact error text. Run each match\'s Check before you trust it. '
+      + 'No match means it is not a known problem — then diagnose (get_diagnostics, search_source). A match you confirmed is the answer: never draft a report for it.',
+    input_schema: obj({ symptom: { type: 'string', minLength: 8, maxLength: 4000, description: 'What is wrong, with the exact error message in quotes' } }, ['symptom']),
+    call: ({ input }) => ({ method: 'GET', path: `/v1/known-problems?symptom=${encodeURIComponent(String(input.symptom ?? ''))}` }),
+  },
+  {
     name: 'search_source', tier: 'read',
     description:
       'Search the Hatchabot source and docs INSTALLED on this machine (the exact release that runs here): src/, web/, scripts/, docs/, bin/, docker/, deploy/, test/, '

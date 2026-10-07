@@ -207,7 +207,7 @@ import {
 } from './consoleProxy.js';
 import { ConsoleAccess } from '../orchestrator/consoleAccess.js';
 import { redactSecrets } from '../domain/redact.js';
-import { buildReport, issueUrl, knownProblems, readSource, searchSource, type ReportFacts, type ReportInput } from '../orchestrator/problemReport.js';
+import { buildReport, issueUrl, knownProblems, matchKnownProblems, readSource, searchSource, type ReportFacts, type ReportInput } from '../orchestrator/problemReport.js';
 import { consoleIdentity, type ConsoleRole } from '../openclaw/consoleIdentity.js';
 import type { IdentityVerifier } from './identity.js';
 import {
@@ -7732,6 +7732,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
 
   app.get<{ Querystring: { agent?: string } }>('/v1/diagnostics', async (req) => reportFacts(req, req.query.agent));
+  // The playbook entries a symptom most likely is, in full (check_known_problem).
+  app.get<{ Querystring: { symptom?: string } }>('/v1/known-problems', async (req, reply) => {
+    const symptom = String(req.query.symptom ?? '').slice(0, 4000);
+    if (symptom.trim().length < 8) return reply.code(400).send({ error: 'Describe the symptom: the exact error text when there is one.' });
+    return matchKnownProblems(appDir, symptom, `v${String(deps.appVersion ?? APP_VERSION).replace(/^v/, '')}`);
+  });
 
   app.get<{ Querystring: { path?: string; from?: string; to?: string } }>('/v1/source', async (req, reply) => {
     try { return readSource(appDir, String(req.query.path ?? ''), Number(req.query.from ?? 1), req.query.to ? Number(req.query.to) : undefined); }

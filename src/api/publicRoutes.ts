@@ -143,7 +143,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(['DELETE'], /^\/v1\/cli-tokens\/:id$/, 'signed-in', 'Command-line tokens: list and revoke'),
   r('*', /^\/v1\/agents\/:id\/ui(\/.*)?$/, 'signed-in', 'An agent\'s OpenClaw console (the owner, or a web-chat guest in their own conversation)'),
   r('*', /^\/v1\/agents\/:id\/chat$/, 'signed-in', 'Web chat'),
-  r('*', /^\/v1\/(problem-reports(\/:id(\/sent)?)?|diagnostics|source(\/search)?)$/, 'signed-in', 'Report a problem: your drafts, the diagnostics, the installed source and docs'),
+  r('*', /^\/v1\/(problem-reports(\/:id(\/sent)?)?|diagnostics|known-problems|source(\/search)?)$/, 'signed-in', 'Report a problem: your drafts, the diagnostics, the installed source and docs'),
   r('*', /^\/v1\/agents(\/.*)?$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),
   r(READ, /^\/v1\/(recent|costs)$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),
   r('*', /^\/v1\/(agent-classes|agent-todos|agent-peers|groups|inbox|proposals|pending|events|resources|usage|operator-profile)(\/.*)?$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),

@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { buildReport, issueUrl, knownProblems, readSource, redactForPublic, searchSource, sourcePath, type ReportFacts } from '../src/orchestrator/problemReport.js';
+import { buildReport, issueUrl, knownProblems, matchKnownProblems, newerRelease, readSource, redactForPublic, searchSource, sourcePath, type ReportFacts } from '../src/orchestrator/problemReport.js';
 
 /**
  * "Report a problem" (docs/field-reports.md): a public GitHub issue made from
@@ -125,6 +126,30 @@ describe('the installed source, read-only', () => {
   });
 });
 
+describe('check_known_problem (matchKnownProblems)', () => {
+  const titles = readFileSync('docs/troubleshooting.md', 'utf8').split(/^### /m).slice(1).map((b) => b.split('\n')[0]!.trim());
+  it('every playbook entry is found first from its own symptom line', () => {
+    const missed = titles.filter((t) => matchKnownProblems(process.cwd(), t, 'v2.138.0').matches[0]?.title !== t);
+    expect(missed).toEqual([]);
+  });
+  it('the incident the Hatchabot agent got wrong is found from how it was described (2026-10-07), with the whole entry', () => {
+    const r = matchKnownProblems(process.cwd(), "taxjson QA: every message failed with 'LLM request failed (request format rejected, HTTP 400)' when the chat was switched to Claude Opus 5.5", 'v2.138.0');
+    expect(r.matches[0]!.title).toMatch(/request format rejected, HTTP 400/);
+    expect(r.matches[0]!.text).toMatch(/\*\*Check:\*\*[\s\S]*\*\*Cause:\*\*[\s\S]*\*\*Fix:\*\*/);
+  });
+  it('says nothing rather than something wrong', () => {
+    for (const q of ['how do I invite my partner to an agent', 'the agent is slow to answer', 'can I rename an agent', 'my agent gives wrong answers about recipes']) {
+      expect(matchKnownProblems(process.cwd(), q, 'v2.138.0').matches, q).toEqual([]);
+    }
+  });
+  it('a fix in a newer release than the one installed says so', () => {
+    const stale = matchKnownProblems(process.cwd(), 'A runner agent shows as running although its container stopped or is gone', 'v2.133.0').matches[0]!;
+    expect(stale).toMatchObject({ fixedIn: 'v2.134.0', fixedInNewerRelease: true });
+    expect(matchKnownProblems(process.cwd(), 'A runner agent shows as running although its container stopped or is gone', 'v2.138.0').matches[0]!.fixedInNewerRelease).toBe(false);
+    expect(newerRelease('v2.10.0', 'v2.9.9')).toBe(true);
+  });
+});
+
 describe('the routes', () => {
   const as = (who: string) => ({ 'x-hatchabot-owner': who });
   async function app() {
@@ -160,6 +185,15 @@ describe('the routes', () => {
     const { f } = await app();
     const d = (await f.inject({ method: 'POST', url: '/v1/problem-reports', headers: as('member-2'), payload: { title: 't', whatHappened: 'w' } })).json() as { body: string };
     expect(d.body).not.toContain('### hatchabot doctor');
+  });
+
+  it('GET /v1/known-problems answers with the installed version and the matches', async () => {
+    const { f } = await app();
+    expect((await f.inject({ method: 'GET', url: '/v1/known-problems?symptom=x', headers: as('owner-1') })).statusCode).toBe(400);
+    const r = await f.inject({ method: 'GET', url: '/v1/known-problems?symptom=' + encodeURIComponent('every message fails: "LLM request failed (request format rejected, HTTP 400)"'), headers: as('owner-1') });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().installed).toMatch(/^v\d+\.\d+\.\d+/);
+    expect(r.json().matches[0].title).toMatch(/request format rejected/);
   });
 
   it('the source routes read the code and refuse .env', async () => {

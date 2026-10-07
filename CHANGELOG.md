@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.139.0] — 2026-10-07
+
+### Added
+- **The Hatchabot agent checks the known problems first** (`check_known_problem`, `GET /v1/known-problems`): give it a symptom, quoting the error, and it answers with the playbook entries it most likely is, best first and in full — how to check, the cause, the fix, the release that fixed it and whether that is newer than this install. It scores shared error messages, runs of words and the entry's own words, and returns nothing rather than something wrong (every entry finds itself from its own symptom line; unrelated questions match nothing). Its notes put it first, before any diagnosis, and again when it is asked to look a second time — it had defended a wrong draft instead of rechecking.
+- **A Consoles button in the header** (first, a speech bubble): back to the agent you were talking to, with its tabs. The first time, your Hatchabot agent with the switcher open. **⌘K / Ctrl+K** on the home screen does the same, with the switcher.
+
+### Fixed
+- The console window's late "close" event could also close the switcher of a console opened right after it.
+
 ## [2.138.0] — 2026-10-07
 
 ### Added

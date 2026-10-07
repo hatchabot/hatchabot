@@ -247,3 +247,50 @@ export function knownProblems(appDir: string, text: string, max = 3): Array<{ ti
   return out;
 }
 
+const STOP = new Set(('about after again agent agents also because before being could every from have into just more most only other over same some such than that their them then there these they this those through when where which while with would your yours what does still after hatchabot').split(' '));
+const versionParts = (v: string) => (/(\d+)\.(\d+)\.(\d+)/.exec(v) ?? []).slice(1).map(Number);
+/** a > b, as release versions. */
+export function newerRelease(a: string, b: string): boolean {
+  const x = versionParts(a), y = versionParts(b);
+  if (x.length < 3 || y.length < 3) return false;
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i]! > y[i]!;
+  return false;
+}
+
+/**
+ * The playbook entries a symptom most likely is, best first, each in full (the
+ * Hatchabot agent's check_known_problem). Scored on what a person or a log
+ * actually shows: a quoted message shared either way (strongest), runs of
+ * three words in common, then the distinctive words of the entry's title. A
+ * weak overlap is not returned: no entry is better than a wrong one.
+ */
+export function matchKnownProblems(appDir: string, symptom: string, installed: string, max = 3): {
+  installed: string;
+  matches: Array<{ title: string; score: number; fixedIn?: string; fixedInNewerRelease?: boolean; text: string }>;
+} {
+  let doc = '';
+  try { doc = readFileSync(join(appDir, PLAYBOOK), 'utf8'); } catch { return { installed, matches: [] }; }
+  const norm = (v: string) => v.toLowerCase().replace(/[“”‘’]/g, "'").replace(/[^a-z0-9.'"`/:_ -]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const quoted = (v: string) => [...v.matchAll(/"([^"\n]{8,240})"|'([^'\n]{8,240})'|`([^`\n]{8,240})`|“([^”\n]{8,240})”/g)]
+    .map((m) => norm(m[1] ?? m[2] ?? m[3] ?? m[4] ?? '')).filter((q) => q.length >= 8);
+  const words = (v: string) => norm(v).replace(/['"`]/g, ' ').split(' ').filter(Boolean);
+  const sym = norm(symptom), symWords = words(symptom), symQuoted = quoted(symptom);
+  const shingles = new Set(symWords.slice(0, -2).map((_, i) => symWords.slice(i, i + 3).join(' ')).filter((g) => g.replace(/ /g, '').length >= 9));
+  const symKeys = new Set(symWords.filter((w) => w.length >= 4 && !STOP.has(w)));
+  const scored: Array<{ title: string; score: number; fixedIn?: string; fixedInNewerRelease?: boolean; text: string }> = [];
+  for (const block of doc.split(/^### /m).slice(1)) {
+    const title = block.split('\n')[0]!.trim();
+    const body = norm(block), bodyPlain = words(block).join(' ');
+    let score = 0;
+    for (const q of quoted(title)) if (sym.includes(q)) score += 12;
+    for (const q of symQuoted) if (body.includes(q)) score += 12;
+    for (const g of shingles) if (bodyPlain.includes(g)) score += 2;
+    for (const w of new Set(words(title).filter((x) => x.length >= 4 && !STOP.has(x)))) if (symKeys.has(w)) score += 1;
+    if (score < 5) continue;
+    const fixedIn = /^- \*\*Fixed in:\*\*\s*`?(v[\d.]+)`?/m.exec(block)?.[1];
+    scored.push({ title, score, ...(fixedIn ? { fixedIn, fixedInNewerRelease: newerRelease(fixedIn, installed) } : {}), text: `### ${block.trim()}` });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return { installed, matches: scored.slice(0, max) };
+}
+
