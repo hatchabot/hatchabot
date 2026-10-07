@@ -1972,7 +1972,7 @@ async function main() {
       const res = await api(ctx, `/v1/agents${all ? '?all=1' : ''}`);
       const list = (await res.json()) as any[];
       if (flags.has('json')) return console.log(JSON.stringify(list.map((a) => ({
-        id: a.id, name: a.name, slug: a.slug, state: a.state, asleep: !!a.hibernatedAt, model: a.model ?? null,
+        id: a.id, name: a.name, slug: a.slug, state: a.state, asleep: !!a.hibernatedAt, archiving: !!a.archiving, model: a.model ?? null,
         webOnly: !!a.webOnly, lastActiveAt: a.lastActiveAt ?? null, ...(all ? { ownerId: a.ownerId } : {}),
       })), null, 2));
       if (!list.length) return console.log('no agents');
@@ -1980,7 +1980,8 @@ async function main() {
       for (const a of list) {
         const owner = all ? `  ${String(a.ownerId ?? '-').padEnd(34)}` : '';
         console.log(
-          `${a.name.padEnd(w)}  ${String(a.hibernatedAt ? 'ASLEEP' : a.state).padEnd(12)} ${(a.model ?? '-').padEnd(20)}${owner} active ${ago(a.lastActiveAt)}`,
+          // ARCHIVING: saving its conversation, then stopping — the state flips only at the end.
+          `${a.name.padEnd(w)}  ${String(a.archiving ? 'ARCHIVING' : a.hibernatedAt ? 'ASLEEP' : a.state).padEnd(12)} ${(a.model ?? '-').padEnd(20)}${owner} active ${ago(a.lastActiveAt)}`,
         );
       }
       return;
@@ -2138,7 +2139,8 @@ async function main() {
       await jsonPost(`/v1/agents/${a.id}/restore`, {});
       console.log(
         `restoring "${a.name}" — watch with: hatchabot list\n` +
-          `It comes back on a NEW bot; send members the new link (hatchabot invite).`,
+          `It comes back on a NEW bot; send members the new link (hatchabot invite).\n` +
+          `If no pool bot is free it comes back without Telegram (web app only): attach a bot later in the app (its settings → Messaging).`,
       );
       return;
     }

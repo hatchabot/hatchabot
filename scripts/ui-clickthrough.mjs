@@ -313,6 +313,88 @@ const SCENARIOS = String.raw`(() => {
       delete window.__override['/v1/agents'];
       await refresh(false);
     },
+    archiveShowsAtOnce: async () => {
+      // The checkpoint turn takes ~20 s before the state changes; the tile used
+      // to look untouched, as if the click had failed (2026-10-07). The POST is
+      // held open here so the check runs while the server is still "saving".
+      const list = await (await fetch('/v1/agents')).json();
+      const hw = list.find((a) => a.id === 'a1');
+      let release; const held = new Promise((r) => { release = r; });
+      const realFetch = window.fetch;
+      window.fetch = async (input, init = {}) => {
+        const path = String(typeof input === 'string' ? input : input.url).split('?')[0];
+        if ((init.method || '').toUpperCase() === 'POST' && path === '/v1/agents/a1/archive') {
+          window.__calls.push({ method: 'POST', path, body: JSON.parse(init.body) });
+          await held;
+          return new Response(JSON.stringify({ ...hw, state: 'ARCHIVED' }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        return realFetch(input, init);
+      };
+      try {
+        archiveAgent('a1', hw.name, 'RUNNING');
+        await until(() => archiveDlg.open);
+        ok('the checkpoint is offered and ticked', document.getElementById('archiveCheckpoint').checked);
+        document.getElementById('archiveBtn').click();
+        await until(() => !archiveDlg.open);
+        await until(() => tile(hw.name) && tile(hw.name).classList.contains('v2st-working'));
+        ok('its label says what is happening: ' + tile(hw.name).getAttribute('aria-label'), /Archiving — saving its conversation to memory/.test(tile(hw.name).getAttribute('aria-label')));
+        ok('a progress toast', document.getElementById('toast').textContent.includes('saving its conversation to memory first'));
+        eq('the checkpoint was asked for', calls('POST', /\/v1\/agents\/a1\/archive$/)[0].body, { checkpoint: true });
+        // A poll whose list does not know yet keeps it.
+        await refresh(false);
+        ok('still archiving after a poll', tile(hw.name).classList.contains('v2st-working'));
+        openV2Agent('a1');
+        await until(() => byText('#v2AgentDlg .v2row', 'Working on'));
+        openV2Agent('a1', 'advanced');
+        await until(() => byText('#v2AgentDlg .v2danger', 'Archiving'));
+        ok('no second Archive button meanwhile', !byText('#v2AgentDlg button', 'Archive'));
+        v2Close();
+        window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, state: 'ARCHIVED' } : a);
+        release();
+        await until(() => document.getElementById('toast').textContent.includes('archived — its bot is back in the pool'));
+        await until(() => !tile(hw.name) || !tile(hw.name).classList.contains('v2st-working'));
+      } finally {
+        window.fetch = realFetch;
+        delete window.__override['/v1/agents'];
+        await refresh(false);
+      }
+    },
+    archiveFailsVisibly: async () => {
+      const list = await (await fetch('/v1/agents')).json();
+      const hw = list.find((a) => a.id === 'a1');
+      window.__answer = { 'POST /v1/agents/a1/archive': [{ status: 502, body: { error: "Couldn't archive the agent — try again in a moment." } }] };
+      try {
+        archiveAgent('a1', hw.name, 'RUNNING');
+        await until(() => archiveDlg.open);
+        document.getElementById('archiveBtn').click();
+        await until(() => document.getElementById('toast').textContent.includes('was not archived'));
+        await until(() => tile(hw.name) && !tile(hw.name).classList.contains('v2st-working'));
+      } finally { window.__answer = {}; await refresh(false); }
+    },
+    noBotFreeAlert: async () => {
+      // Unarchived with an empty pool: it runs web-only, and Alerts say so (2026-10-07).
+      const list = await (await fetch('/v1/agents')).json();
+      const hw = list.find((a) => a.id === 'a1');
+      window.__override['/v1/agents'] = list.map((a) => a.id === 'a1'
+        ? { ...a, webOnly: true, botUsername: undefined, deepLink: undefined, telegramSkipped: { at: new Date().toISOString() } } : a);
+      try {
+        await refresh(false);
+        await until(() => tile(hw.name) && tile(hw.name).classList.contains('v2st-note'));
+        openV2Agent('a1');
+        const why = await until(() => byText('#v2AgentDlg .v2why li', 'No Telegram bot was free'));
+        ok('it names where to attach one: ' + why.textContent, why.textContent.includes('Messaging → Telegram'));
+        v2Close();
+        // The restore question no longer promises a BotFather prompt.
+        window.__confirmAnswer = false;
+        restoreAgent('a1', hw.name);
+        const asked = window.__confirms[window.__confirms.length - 1];
+        ok('restore says it comes back web-only: ' + asked.slice(0, 200), asked.includes('comes back without Telegram') && !asked.includes("you'll be asked for a token"));
+      } finally {
+        window.__confirmAnswer = true;
+        delete window.__override['/v1/agents'];
+        await refresh(false);
+      }
+    },
     scheduleEdit: async () => {
       window.__crons = [{ id: 'c1', name: 'Morning brief', scheduleExpr: '0 8 * * *', scheduleTz: 'America/Toronto', message: 'Good morning', enabled: true, payloadKind: 'message' }];
       openV2Agent('a1', 'schedule');

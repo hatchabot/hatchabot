@@ -687,6 +687,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     }
     return out;
   };
+  /**
+   * Archives under way, from the click to the state flip: the checkpoint turn
+   * alone is ~20 s, and the tile used to look untouched all that time, as if
+   * the button had done nothing (2026-10-07). The list, the agent's own GET and
+   * the CLI read it (`archiving`, `progress`).
+   */
+  const archiving = new Map<string, { at: string; step: string }>();
   const publicAgent = (agent: Agent, extra: Record<string, unknown> = {}) => {
     const desired = store.getAIProfile(agent.aiProfileId);
     // What this agent WILL run: its own override if any, else the profile
@@ -734,6 +741,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
        *  as a lie — a move shows STOPPED for a minute — so the app can show
        *  "working" instead of leaving the owner to think nothing is happening. */
       busy: isBusy(agent.id),
+      /** Being archived right now (saving its conversation, then stopping): the step and since when. */
+      archiving: archiving.get(agent.id),
       /** Asleep (hibernate.ts): stopped by the idle rule; a message, its console or an ask wakes it. */
       hibernatedAt: agent.hibernatedAt,
       hibernate: agent.hibernate,
@@ -815,7 +824,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * a mid-migration Start ends with two runtimes polling one bot token.
    */
   const busyNow = (agent: Agent, reply: any): boolean => {
-    if (!isBusy(agent.id)) return false;
+    // An archive's checkpoint turn runs before the busy flag is taken: a
+    // Rebuild or a move started under it would be cut off by the stop.
+    if (!isBusy(agent.id) && !archiving.has(agent.id)) return false;
     reply.code(409).send({ error: 'Another operation is already running on this agent.' });
     return true;
   };
@@ -952,7 +963,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     store.addRateHit(bucket, now);
     return true;
   };
-  const kickProvision = (agentId: string): void => {
+  /** `webOnlyIfNoBot`: a dry pool means web-only, not a parked token prompt (ProvisionDeps). */
+  const kickProvision = (agentId: string, opts: { webOnlyIfNoBot?: boolean } = {}): void => {
     if (inflight.has(agentId)) return;
     const task = (async () => {
       const agent = store.getAgent(agentId);
@@ -960,7 +972,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const provider = providerFor(agent.hostId);
       const log = trace(agentId);
       const result = await runProvisionSteps(
-        { store, secrets, provider, channel: deps.channel, log, embedder: embedderForProvision },
+        { store, secrets, provider, channel: deps.channel, log, embedder: embedderForProvision, webOnlyIfNoBot: opts.webOnlyIfNoBot },
         agentId,
       );
       // Fresh agent went live in pairing mode → watch for the owner's first
@@ -4924,6 +4936,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   /** For a busy agent: its newest event, as a plain step ("re-indexing memory") with its time. */
   const progressOf = (a: Agent): { at: string; step: string } | undefined => {
+    const arch = archiving.get(a.id);
+    if (arch) return arch;
     if (a.state !== 'PROVISIONING' && a.state !== 'REBUILDING') return undefined;
     const last = store.listEvents([a.id], 1)[0];
     if (!last || !IN_PROGRESS.has(last.event)) return undefined;
@@ -5021,6 +5035,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // Its machine missed a question in the last minute (asleep or offline):
         // the tile says so instead of looking ready (2026-10-04).
         const unreachable = a.state === 'RUNNING' && (slowHostUntil.get(a.hostId) ?? 0) > Date.now();
+        const noBotSince = role === 'owner' && a.webOnly && !chan && a.state !== 'ARCHIVED' ? store.telegramSkippedForNoBot(a.id) : undefined;
         return publicAgent(a, {
           // The machine owner's --all view of someone else's agent: metadata, not where their files live.
           foreign: a.ownerId !== ownerIdOf(req) && !role,
@@ -5054,6 +5069,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           ...(role === 'owner' ? {} : { paramValues: undefined }),
           deepLink: chan?.deepLink,
           botUsername: chan?.accountId,
+          /** It came back (or was made) with no Telegram bot free, so it runs
+           *  web-only until one is attached (owner only): Alerts. */
+          ...(noBotSince ? { telegramSkipped: { at: noBotSince } } : {}),
           /** Its chat lost its context (after a rebuild, or an idle reset) and
            *  the owner has not dealt with it yet — the app offers Recover. */
           contextReset: store.getContextReset(a.id),
@@ -10338,7 +10356,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (share.sourceAgentId && store.getAgent(share.sourceAgentId)?.state !== 'DELETED' && store.getAgent(share.sourceAgentId)) {
           store.setAgentParent(agent.id, share.sourceAgentId);
         }
-        kickProvision(agent.id);
+        kickProvision(agent.id, { webOnlyIfNoBot: true });
         return reply.code(201).send({ ...publicAgent(agent), needs });
       } catch (err) {
         store.reopenShare(req.params.id);
@@ -10446,7 +10464,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // rest, before the first build; what could not come is named.
         const carried = await readCloneMemory(deps.provider, agent.runtimeRef!, agent.slug);
         if (Object.keys(carried.files).length) store.setAgentSeed(clone.id, carried.files);
-        kickProvision(clone.id);
+        kickProvision(clone.id, { webOnlyIfNoBot: true });
         return reply.code(201).send({
           ...publicAgent(clone), notCopied,
           memoryNotCopied: carried.skipped,
@@ -10492,7 +10510,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         await materializeImportEffects(child, envValues, dataSourceValues);
         store.setAgentParent(child.id, agent.id);
         trace(child.id)('agent.derived', { parentAgentId: agent.id, parentName: agent.name });
-        kickProvision(child.id);
+        kickProvision(child.id, { webOnlyIfNoBot: true });
         return reply.code(201).send(publicAgent(store.getAgent(child.id)!));
       } catch (err) {
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
@@ -10801,8 +10819,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, name: req.query.name, values },
           );
           await materializeImportEffects(agent, envValues, dataSourceValues);
-          // Fresh agent → provision its own bot the normal way (pool or paste).
-          kickProvision(agent.id);
+          // Fresh agent → its own bot from the pool; none free → web-only, told in Alerts.
+          kickProvision(agent.id, { webOnlyIfNoBot: true });
           return reply.code(201).send({ ...publicAgent(agent), kind: 'template', needs });
         }
         const agent = await importAgent(
@@ -11916,52 +11934,67 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     if (movedAway(agent, reply)) return reply;
+    // A second tap while the first is still saving its conversation.
+    if (archiving.has(agent.id)) return reply.code(409).send({ error: 'It is already being archived.' });
     if (busyNow(agent, reply)) return reply;
     if (!canTransition(agent.state, 'ARCHIVED')) {
       return reply.code(409).send({ error: `Cannot archive while ${agent.state.toLowerCase()}.` });
     }
-    // Wait out an in-flight provision/rebuild: releasing the bot underneath one
-    // would leave the finishing container polling a token that is back in the
-    // pool and possibly already leased to somebody else.
-    // A rebuild still waiting for a slot is called off, not waited through.
-    if (rebuildQueued.has(agent.id)) rebuildCancelled.add(agent.id);
-    const running = inflight.get(agent.id);
-    if (running) await running.catch(() => {});
-    // Optionally distil the live conversation into MEMORY.md BEFORE we stop it —
-    // a long archive may later restore into a fresh session that leans on
-    // MEMORY.md rather than the old transcript. Must run while still RUNNING.
-    // The checkpoint is an agent turn, so it can fail if the AI source is out of
-    // credits — never block the archive on it, but surface a warning so the user
-    // knows the summary wasn't saved.
-    let checkpointWarning: string | undefined;
-    if ((req.body as { checkpoint?: boolean } | undefined)?.checkpoint === true && agent.state === 'RUNNING' && agent.runtimeRef) {
-      const r = await checkpointMemory(providerFor(agent.hostId), agent.runtimeRef, agent.slug, trace(agent.id)).catch(() => ({ ok: false, detail: 'error' }));
-      if (!r.ok) checkpointWarning = "Archived, but couldn't save the conversation to memory first — the AI source didn't complete (out of credits, expired, or unreachable?).";
-    }
+    const checkpoint = req.body?.checkpoint === true && agent.state === 'RUNNING' && !!agent.runtimeRef;
+    // Shown at once — on the tile, in the CLI, in every open browser — before
+    // the waits below: the checkpoint alone is a whole agent turn (~20 s), and
+    // until the state flipped the tile looked as if nothing had happened.
+    const step = (what: string) => archiving.set(agent.id, { at: new Date().toISOString(), step: what });
+    step(checkpoint ? 'archiving — saving its conversation to memory first' : 'archiving — stopping it and handing its bot back');
+    trace(agent.id)('agent.archiving', { checkpoint });
     try {
-      await archiveAgent(
-        { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id) },
-        agent.id,
-      );
-      // Discord, like Telegram: the bot is parked (kept for this agent, so a
-      // restore takes it back unless somebody used it meanwhile) and the
-      // people on it are told. Slack's tokens are the owner's app: left as is.
-      for (const kind of ['discord', 'slack'] as const) {
-        const dc = store.getChannelForAgent(agent.id, kind);
-        if (!dc) continue;
-        const told = await dmChannelPeople(agent, kind, dc.secretRef, `📥 ${agent.name} has been archived by its owner. This bot does not answer for it while it is archived.`);
-        try { await parkDiscordBot({ store, secrets }, agent.ownerId, dc, { archivedFor: agent.id }); }
-        catch (err) { trace(agent.id)('channel.park_failed', { kind, error: String(err).slice(0, 200) }); await secrets.delete(dc.secretRef).catch(() => {}); }
-        store.deleteChannelForAgent(agent.id, kind);
-        trace(agent.id)('channel.detached', { kind, accountId: dc.accountId, parked: true, told, archived: true });
+      // Wait out an in-flight provision/rebuild: releasing the bot underneath one
+      // would leave the finishing container polling a token that is back in the
+      // pool and possibly already leased to somebody else.
+      // A rebuild still waiting for a slot is called off, not waited through.
+      if (rebuildQueued.has(agent.id)) rebuildCancelled.add(agent.id);
+      const running = inflight.get(agent.id);
+      if (running) await running.catch(() => {});
+      // Optionally distil the live conversation into MEMORY.md BEFORE we stop it —
+      // a long archive may later restore into a fresh session that leans on
+      // MEMORY.md rather than the old transcript. Must run while still RUNNING.
+      // The checkpoint is an agent turn, so it can fail if the AI source is out of
+      // credits — never block the archive on it, but surface a warning so the user
+      // knows the summary wasn't saved.
+      let checkpointWarning: string | undefined;
+      if (checkpoint) {
+        const r = await checkpointMemory(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, trace(agent.id)).catch(() => ({ ok: false, detail: 'error' }));
+        if (!r.ok) checkpointWarning = "Archived, but couldn't save the conversation to memory first — the AI source didn't complete (out of credits, expired, or unreachable?).";
       }
-    } catch (err) {
-      if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
-      if (err instanceof ArchiveError) return reply.code(409).send({ error: err.userMessage });
-      app.log.error({ agentId: agent.id, err: String(err) }, 'archive failed');
-      return reply.code(502).send({ error: "Couldn't archive the agent — try again in a moment." });
+      step('archiving — stopping it and handing its bot back');
+      try {
+        await archiveAgent(
+          { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id) },
+          agent.id,
+        );
+        // Discord, like Telegram: the bot is parked (kept for this agent, so a
+        // restore takes it back unless somebody used it meanwhile) and the
+        // people on it are told. Slack's tokens are the owner's app: left as is.
+        for (const kind of ['discord', 'slack'] as const) {
+          const dc = store.getChannelForAgent(agent.id, kind);
+          if (!dc) continue;
+          const told = await dmChannelPeople(agent, kind, dc.secretRef, `📥 ${agent.name} has been archived by its owner. This bot does not answer for it while it is archived.`);
+          try { await parkDiscordBot({ store, secrets }, agent.ownerId, dc, { archivedFor: agent.id }); }
+          catch (err) { trace(agent.id)('channel.park_failed', { kind, error: String(err).slice(0, 200) }); await secrets.delete(dc.secretRef).catch(() => {}); }
+          store.deleteChannelForAgent(agent.id, kind);
+          trace(agent.id)('channel.detached', { kind, accountId: dc.accountId, parked: true, told, archived: true });
+        }
+      } catch (err) {
+        if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+        if (err instanceof ArchiveError) return reply.code(409).send({ error: err.userMessage });
+        app.log.error({ agentId: agent.id, err: String(err) }, 'archive failed');
+        return reply.code(502).send({ error: "Couldn't archive the agent — try again in a moment." });
+      }
+      // Done: the marker (cleared below) is not part of the answer.
+      return { ...publicAgent(store.getAgent(agent.id)!), archiving: undefined, checkpointWarning };
+    } finally {
+      archiving.delete(agent.id);
     }
-    return { ...publicAgent(store.getAgent(agent.id)!), checkpointWarning };
   });
 
   /**
@@ -12007,7 +12040,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     }
     store.setAgentState(agent.id, 'PROVISIONING');
-    kickProvision(agent.id);
+    // Nobody was asked about Telegram here: with no pool bot free it comes
+    // back web-only and the owner is told (Alerts), rather than sitting in
+    // PROVISIONING until someone pastes a token (2026-10-07).
+    kickProvision(agent.id, { webOnlyIfNoBot: true });
     return reply.code(202).send(publicAgent(store.getAgent(agent.id)!));
   });
 

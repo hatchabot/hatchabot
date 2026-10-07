@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.142.0] — 2026-10-07
+
+### Fixed
+- **Archiving showed nothing for about 20 seconds.** With "save the conversation to memory first", the save is a whole agent turn before the state changes, and the tile looked untouched, as if the click had failed. The tile now spins with "Archiving — saving its conversation to memory" from the click (the dialog closes at once, with a progress note), every open browser and `hatchabot list` (ARCHIVING) see it, the Setup log says it began, and a second tap or a rebuild meanwhile is refused. A save that fails still archives and says so; an archive that fails says so and the tile goes back.
+- **An unarchived agent hung when no Telegram bot was free.** It sat in PROVISIONING on "waiting for a bot token". Unarchive — and clone, derive and template import, which never ask about Telegram either — now go on without one (web app only, as `hatchabot skip-telegram` does), and its owner gets an Alerts line: "No Telegram bot was free — it is running in the web app; attach a bot later". A new agent made with Telegram on still waits for the token its owner chose to paste.
+
 ## [2.141.1] — 2026-10-07
 
 ### Fixed
@@ -3389,7 +3395,7 @@ untouched.
 
 ### Upgrading
 - Re-render your systemd units from `deploy/` (`scripts/install-service.sh`, or copy the `EnvironmentFile=` line into `hatchabot-backup.service`): a backup unit without it cannot find a database that lives outside the checkout, and the nightly backup silently fails.
-- Optional: `HATCHABOT_ALLOWED_EMAILS="you@x.com, partner@y.org"` restricts identity-mode sign-in to listed accounts. Unset keeps today's behaviour (anyone the identity provider accepts).
+- Optional: `HATCHABOT_ALLOWED_EMAILS="you@x.com, partner@example.org"` restricts identity-mode sign-in to listed accounts. Unset keeps today's behaviour (anyone the identity provider accepts).
 
 ### Fixed
 - **Backups/upgrade safety.** Default DB and backup paths fall back to the pre-rename names when only those exist, so an in-place `git pull` upgrade of an AgentClaw install opens its real registry instead of an empty one. Bash scripts alias `AGENTCLAW_*` env themselves (systemd loads env files verbatim); backup and restore-drill accept both secret-key names and both DB filenames; restore-drill checks the current `` volume layout.

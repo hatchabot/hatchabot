@@ -2431,6 +2431,24 @@ export class Store {
     return { at: r.at, exitCode: typeof code === 'number' ? code : undefined };
   }
 
+  /**
+   * When provisioning carried on without Telegram because no bot was free
+   * (provision.ts, `telegram.skipped` with auto) — unless a Telegram bot was
+   * attached or detached since, which settles it. Undefined otherwise.
+   */
+  telegramSkippedForNoBot(agentId: string): string | undefined {
+    const rows = this.db
+      .prepare(`SELECT at, event, detail FROM agent_events WHERE agent_id = ? AND event IN ('telegram.skipped', 'channel.attached', 'channel.detached') ORDER BY id DESC LIMIT 20`)
+      .all(agentId) as Array<{ at: string; event: string; detail: string | null }>;
+    for (const r of rows) {
+      const d = r.detail ? safeParse(r.detail) : undefined;
+      // Discord and Slack name their kind; a Telegram attach/detach does not.
+      if (r.event !== 'telegram.skipped' && d?.kind && d.kind !== 'telegram') continue;
+      return r.event === 'telegram.skipped' && d?.auto === true ? r.at : undefined;
+    }
+    return undefined;
+  }
+
   /** Newest first, across every agent this owner can see. */
   listEvents(agentIds: string[], limit = 60): Array<{
     agentId: string;

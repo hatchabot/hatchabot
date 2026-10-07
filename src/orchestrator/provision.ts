@@ -14,7 +14,7 @@ import type { SecretStore } from '../secrets/secretStore.js';
 import type { ChannelRooms, OpenClawConfigPatch, RuntimeProvider, RuntimeSpec } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
 import { sampleAgentUsage } from './sourceUsage.js';
-import type { ChannelProvisioner } from '../channels/channel.js';
+import type { ChannelProvisioner, ProvisionedChannel } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { DOORMAN_EMBED_PORT } from '../ops/doorman.js';
 import { whileBusy } from './busy.js';
@@ -125,6 +125,15 @@ export interface ProvisionDeps {
   /** Post a line to the agent's chat (default: Telegram via notifyAgentChat).
    *  Injectable so tests stay off the network. */
   notify?: (agentId: string, text: string) => Promise<unknown>;
+  /**
+   * No pool bot free and no token pasted: carry on web-only (as `hbt
+   * skip-telegram` does) instead of parking on "paste a bot token". For the
+   * flows that never asked the owner about Telegram — an unarchive, a clone,
+   * a template import — where a dry pool is a surprise rather than a choice
+   * (2026-10-07: an unarchived agent sat in PROVISIONING for want of a bot).
+   * Create keeps parking: its form and the CLI ask, so a token is coming.
+   */
+  webOnlyIfNoBot?: boolean;
 }
 
 export interface ProvisionResult {
@@ -219,6 +228,39 @@ export const skipPoolOnce = new Set<string>();
  *  voice-note transcription for every agent. See buildRuntimeSpec. */
 export const MEDIA_KEY_REF = 'media/gemini-api-key';
 
+/**
+ * Step 3's lease: a pool bot, a pasted token, or — when the caller allows it
+ * (deps.webOnlyIfNoBot) and neither is there — no bot at all. Then the agent
+ * becomes web-only, exactly as `hbt skip-telegram` / the "go on without one"
+ * button make it, and undefined comes back. A pool skipped on purpose (the
+ * owner asked for a bespoke bot) still parks: that token is on its way.
+ */
+async function provisionChannelOrGoWebOnly(
+  deps: ProvisionDeps,
+  agent: Agent,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<ProvisionedChannel | undefined> {
+  // One-shot: consumed here so a later Retry (after the manual flow has
+  // parked the agent) follows the persisted pendingAction, not the flag.
+  const skipPool = skipPoolOnce.delete(agent.id) || undefined;
+  try {
+    return await deps.channel.provision({
+      agentId: agent.id,
+      agentName: agent.name,
+      slug: agent.slug,
+      ownerId: agent.ownerId,
+      skipPool,
+    });
+  } catch (err) {
+    if (!(err instanceof ChannelSetupRequired) || !deps.webOnlyIfNoBot || skipPool) throw err;
+    deps.store.setAgentWebOnly(agent.id, true);
+    deps.store.setAgentPendingAction(agent.id, null);
+    // `auto` is what the list reads to tell the owner (GET /v1/agents → telegramSkipped).
+    log('telegram.skipped', { agentId: agent.id, why: 'no bot free', auto: true });
+    return undefined;
+  }
+}
+
 export async function runProvisionSteps(
   deps: ProvisionDeps,
   agentId: string,
@@ -252,46 +294,43 @@ async function runProvisionStepsInner(
       // No Telegram: reached only through Hatchabot. Nothing to lease.
       log('channel.skipped', { agentId, reason: 'web-only' });
     } else if (!provisioned) {
-      const result = await channel.provision({
-        agentId,
-        agentName: agent.name,
-        slug: agent.slug,
-        ownerId: agent.ownerId,
-        // One-shot: consumed here so a later Retry (after the manual flow has
-        // parked the agent) follows the persisted pendingAction, not the flag.
-        skipPool: skipPoolOnce.delete(agentId) || undefined,
-      });
-      // A Telegram bot token may only ever be polled by ONE runtime: two
-      // copies flip-flop every message between them. The API checks this when
-      // a token is pasted, but a rejected token can still be sitting in the
-      // provisioner's pending map, so a later Retry would arrive here holding
-      // an identity that belongs to somebody else. This is the last gate
-      // before it becomes a real channel row, so check it here too.
-      const clash = store.findAgentUsingAccount(result.accountId);
-      if (clash && clash.id !== agentId) {
-        // Deliberately NOT released: release() deletes the stored token for
-        // this account, and that token is the OTHER agent's credential.
-        throw new ChannelConflictError(
-          `@${result.accountId} already belongs to "${clash.name}". Each agent needs its ` +
-            `own bot — create another with @BotFather and paste that token instead.`,
-        );
+      const result = await provisionChannelOrGoWebOnly(deps, agent, log);
+      if (!result) {
+        // No bot was free: it goes on without Telegram (provisionChannelOrGoWebOnly).
+        agent = store.getAgent(agentId) ?? agent;
+      } else {
+        // A Telegram bot token may only ever be polled by ONE runtime: two
+        // copies flip-flop every message between them. The API checks this when
+        // a token is pasted, but a rejected token can still be sitting in the
+        // provisioner's pending map, so a later Retry would arrive here holding
+        // an identity that belongs to somebody else. This is the last gate
+        // before it becomes a real channel row, so check it here too.
+        const clash = store.findAgentUsingAccount(result.accountId);
+        if (clash && clash.id !== agentId) {
+          // Deliberately NOT released: release() deletes the stored token for
+          // this account, and that token is the OTHER agent's credential.
+          throw new ChannelConflictError(
+            `@${result.accountId} already belongs to "${clash.name}". Each agent needs its ` +
+              `own bot — create another with @BotFather and paste that token instead.`,
+          );
+        }
+        rollback.push(async () => {
+          await channel.release(result.accountId);
+          store.deleteChannelForAgent(agentId);
+        });
+        provisioned = {
+          id: randomUUID(),
+          agentId,
+          kind: channel.kind,
+          accountId: result.accountId,
+          secretRef: result.secretRef,
+          deepLink: result.deepLink,
+          createdAt: new Date().toISOString(),
+        };
+        store.insertChannel(provisioned);
+        store.setAgentPendingAction(agentId, null); // any parked human step is done
+        log('channel.provisioned', { agentId, accountId: provisioned.accountId });
       }
-      rollback.push(async () => {
-        await channel.release(result.accountId);
-        store.deleteChannelForAgent(agentId);
-      });
-      provisioned = {
-        id: randomUUID(),
-        agentId,
-        kind: channel.kind,
-        accountId: result.accountId,
-        secretRef: result.secretRef,
-        deepLink: result.deepLink,
-        createdAt: new Date().toISOString(),
-      };
-      store.insertChannel(provisioned);
-      store.setAgentPendingAction(agentId, null); // any parked human step is done
-      log('channel.provisioned', { agentId, accountId: provisioned.accountId });
     } else {
       // Already has its identity — but the rename at lease time is best-effort
       // (Telegram limits how often a bot may be renamed), and one that lost

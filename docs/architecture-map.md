@@ -124,8 +124,10 @@ the step that failed.
 - `src/orchestrator/adopt.ts` — `inspectWorkspace`, `applyWorkspace`: adopting an existing OpenClaw workspace.
 - `src/orchestrator/openclawImport.ts` — `discoverOpenclawAgents`, `quiesceOpenclawBots`: finding OpenClaw agents already on the machine.
 - `src/orchestrator/archive.ts` — `archiveAgent`: archiving (stops the agent and gives its bot back).
+- `src/api/routes.ts` — `'/v1/agents/:id/archive'`, `'/v1/agents/:id/restore'`, `archiving`, `progressOf`: archive (the `archiving` marker the list shows while the conversation is saved first) and unarchive.
+- `src/orchestrator/provision.ts` — `provisionChannelOrGoWebOnly`, `webOnlyIfNoBot`: no pool bot free on an unarchive, clone, derive or template import → the agent goes on web-only instead of waiting for a token (create still asks).
 - `src/store/store.ts` — `agents`, `agent_classes`, `agent_env`, `data_sources`, `agent_seed`: agent records, classes, per-agent secrets, data sources, and template files to seed at first provision.
-- `web/index.html` — `createAgent`, `rebuild`, `rebuildAll`, `openFleetActions`, `faApply`, `openSetupLog`, `openAdoptDlg`, `archiveAgent`, `restoreAgent`: the create dialog, rebuild buttons, bulk actions and the Setup log.
+- `web/index.html` — `createAgent`, `rebuild`, `rebuildAll`, `openFleetActions`, `faApply`, `openSetupLog`, `openAdoptDlg`, `archiveAgent`, `confirmArchive`, `archivingHere`, `restoreAgent`: the create dialog, rebuild buttons, bulk actions, archiving (its tile shows "Archiving…" from the click) and the Setup log.
 
 ## Data sources: git repos and folders
 

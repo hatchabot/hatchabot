@@ -163,10 +163,17 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ### A new agent sits on "Waiting on you"
 - **Check:** the agent's sheet asks for a Telegram bot token; Settings → Telegram shows no spare bot.
-- **Cause:** the agent needs a bot and none is available in the pool.
+- **Cause:** the agent needs a bot and none is available in the pool. Only a new agent made with Telegram on asks this (the create form ticks "No Telegram" by itself when the pool is empty); an unarchived, cloned or imported one goes on web-only (next entry).
 - **Fix:** paste a token from @BotFather, or choose **Continue without Telegram** (`hatchabot skip-telegram <agent>`); a bot can be attached later.
 - **Fixed in:** `v2.44.1`
 - **Code:** `src/cli.ts` — `skip-telegram`
+
+### An unarchived agent hangs in PROVISIONING: "waiting for a bot token"
+- **Check:** after Restore (`hatchabot unarchive`), the Setup log ends with "waiting for a bot token" and Settings → Telegram shows no spare bot. From 2.142.0 the same situation shows instead as an Alerts line on a running agent: "No Telegram bot was free — it is running in the web app; attach a bot later".
+- **Cause:** coming back means leasing a new bot, and none was free. Before 2.142.0 unarchive, clone, derive and template import then parked on the paste-a-token step, though nobody had been asked about Telegram.
+- **Fix:** on an older install, `hatchabot skip-telegram <agent>` (or **Continue without Telegram** on its sheet) finishes it web-only, or paste a @BotFather token. From 2.142.0 it goes on web-only by itself; attach a bot when one is free under its settings → Messaging → Telegram (archive or detach another agent to free one, or paste a token).
+- **Fixed in:** `v2.142.0`
+- **Code:** `src/orchestrator/provision.ts` — `provisionChannelOrGoWebOnly`, `webOnlyIfNoBot`; `src/store/store.ts` — `telegramSkippedForNoBot`; `src/api/routes.ts` — `telegramSkipped`
 
 ### @BotFather will not create another bot
 - **Check:** count the bots on that Telegram account (@BotFather `/mybots`; Settings → Telegram lists the spares).
@@ -190,6 +197,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** read the named step's output; Retry/Rebuild after fixing its cause. A first Discord attach on OpenClaw 2026.9 failed this way before v2.72.3: upgrade.
 - **Fixed in:** `v2.72.3`
 - **Code:** `src/providers/localDockerProvider.ts` — `SEED_STEP_MARK`, `seedFailure`
+
+### Archive seems to do nothing: the tile stays "Ready" for about 20 seconds
+- **Check:** the archive dialog had "save the conversation to memory first" ticked, and the Setup log shows "conversation written to memory" (or "could not be written") and then "archived" some seconds after the click.
+- **Cause:** that save is a whole agent turn, run before the state changes; before 2.142.0 nothing marked the agent meanwhile, so the click looked lost.
+- **Fix:** wait: it archives, and says so if the save failed ("Archived, but couldn't save the conversation…"). Upgrade: from 2.142.0 the tile spins with "Archiving — saving its conversation to memory" from the click, `hatchabot list` says ARCHIVING, and a second tap is refused.
+- **Fixed in:** `v2.142.0`
+- **Code:** `src/api/routes.ts` — `archiving`, `progressOf`, `'/v1/agents/:id/archive'`; `web/index.html` — `archivingHere`, `confirmArchive`
 
 ### A working agent was left STOPPED and FAILED after a rebuild that could not start
 - **Check:** the Setup log says the rebuild was refused at render time (an engine-free image with the memory service off, an un-shared source, a missing secret).

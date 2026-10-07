@@ -7185,7 +7185,8 @@ function agentCard(a) {
              more than pausing one, and Stop keeps the bot anyway. Stop moved to
              the ⋯ menu. The SAME slot becomes Restore once archived, so the
              button that put an agent away is the button that brings it back. -->
-        ${a.state === 'RUNNING' || a.state === 'STOPPED' || a.state === 'FAILED'
+        ${a.archiving ? `<button disabled class="busy" title="${esc(a.archiving.step)}">📥 Archiving…</button>`
+          : a.state === 'RUNNING' || a.state === 'STOPPED' || a.state === 'FAILED'
           ? `<button onclick="archiveAgent('${a.id}', '${jsq(a.name)}', '${a.state}')" title="Keep the agent and its memory; hand its Telegram bot back for another agent to use">📥 Archive</button>` : ''}
         ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="restoreAgent('${a.id}', '${jsq(a.name)}')" title="Bring it back — it keeps its memory, but gets a NEW bot with a new link">📤 Restore</button>` : ''}
         ${a.state === 'ARCHIVED' ? `<button onclick="openInspect('${a.id}', '${jsq(a.name)}')" title="Read its memory, key files, and chat history — without restoring it or its bot">🔍 Inspect</button>` : ''}
@@ -10443,7 +10444,7 @@ async function loadInbox() {
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 async function acceptShare(id, name) {
-  const cn = prompt(`Import "${name}" as — name it (it becomes a fresh agent you own; you connect its Telegram bot next):`, name);
+  const cn = prompt(`Import "${name}" as — name it (it becomes a fresh agent you own, with a spare bot from your pool if there is one):`, name);
   if (cn === null) return;
   const body = { name: cn };
   // Templates with setup fields ask for their values before the accept.
@@ -10455,7 +10456,7 @@ async function acceptShare(id, name) {
   }
   try {
     const r = await api(`/v1/inbox/${id}/accept`, { method: 'POST', body });
-    toast(`Imported as "${r.name}" — connect its Telegram bot to finish`, 30000);
+    toast(`Imported as "${r.name}" — it takes a spare bot from your pool; with none free it starts in the web app and you attach one later.`, 30000);
     await loadInbox(); await refresh(true);
   } catch (e) { toast(e.message, 20000); }
 }
@@ -10571,7 +10572,7 @@ async function cloneAgent(id, name) {
     // Its daily notes come too (2026-09-30); say when some could not.
     if (res.memoryCopyFailed) left += " Its daily notes (memory/) and USER.md couldn't be read, so only MEMORY.md came along.";
     else if ((res.memoryNotCopied || []).length) left += ` Some memory files were too big or not text and stayed behind: ${res.memoryNotCopied.slice(0, 5).join(', ')}${res.memoryNotCopied.length > 5 ? '…' : ''}.`;
-    toast(`Cloned as "${res.name}" — connect its Telegram bot to finish.${left}`, 30000);
+    toast(`Cloned as "${res.name}" — it takes a spare bot from your pool; with none free it starts in the web app and you attach one later.${left}`, 30000);
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
 }
@@ -10730,20 +10731,40 @@ function archiveAgent(id, name, state) {
   $('archiveCheckpoint').checked = true; // shared control — reset to the safe default each open
   archiveDlg.showModal();
 }
+/** Archives this page started and the server has not finished: the tile says
+ *  "Archiving…" from the click, not from the first poll that sees it — the
+ *  checkpoint turn alone is ~20 s, and an unchanged tile read as a failed
+ *  click (2026-10-07). The list's own `archiving` takes over once it has it. */
+const archivingHere = new Map();
+function markArchiving(list) {
+  for (const a of list || []) {
+    const mine = archivingHere.get(a.id);
+    if (mine && !a.archiving && a.state !== 'ARCHIVED') a.archiving = mine;
+  }
+}
 async function confirmArchive() {
   if (!archivePending) return;
   const { id, name } = archivePending;
   const checkpoint = $('archiveCheckpointRow').style.display !== 'none' && $('archiveCheckpoint').checked;
-  $('archiveBtn').disabled = true;
+  // Closed at once: the tile carries the progress from here.
+  archivePending = null;
+  archiveDlg.close();
+  archivingHere.set(id, { at: new Date().toISOString(), step: checkpoint ? 'archiving — saving its conversation to memory first' : 'archiving — stopping it and handing its bot back' });
+  markArchiving(agents);
+  renderAgents();
+  toast(checkpoint ? `Archiving "${name}" — saving its conversation to memory first (about 20 seconds)…` : `Archiving "${name}"…`, 30000, 'progress');
   try {
-    if (checkpoint) toast(`Saving "${name}" to memory, then archiving…`, 8000);
     const r = await api(`/v1/agents/${id}/archive`, { method: 'POST', body: { checkpoint } });
-    archiveDlg.close();
+    archivingHere.delete(id);
     if (r.checkpointWarning) toast(`"${name}" archived. ⚠ ${r.checkpointWarning}`, 12000);
     else toast(`"${name}" archived — its bot is back in the pool.`);
-    await refresh(false);
-  } catch (e) { toast(e.message); }
-  finally { $('archiveBtn').disabled = false; }
+  } catch (e) {
+    archivingHere.delete(id);
+    const a = v2Find(id);
+    if (a) delete a.archiving;
+    toast(`"${name}" was not archived: ${e.message}`, 12000);
+  }
+  await refresh(false);
 }
 
 // ---- archived-agent inspector (read-only, from the volume) -----------------
@@ -10810,7 +10831,7 @@ async function restoreAgent(id, name) {
   // the agent's skills changed since you last talked to it (true of Rebuild
   // too). Promising "memory intact" and then losing the conversation is worse
   // than saying which is which.
-  if (!confirm(`Restore "${name}"?\n\nIt keeps everything it has learned, and comes back on a NEW Telegram bot — send members the new link from Invite once it's running. If no pool bot is free you'll be asked for a token from @BotFather.\n\nThe chat thread itself may start fresh if the agent gained or lost a skill while it was away.`)) return;
+  if (!confirm(`Restore "${name}"?\n\nIt keeps everything it has learned, and comes back on a NEW Telegram bot — send members the new link from Invite once it's running. If no pool bot is free it comes back without Telegram — you talk to it here, and attach a bot later from its settings (Messaging).\n\nThe chat thread itself may start fresh if the agent gained or lost a skill while it was away.`)) return;
   try {
     await api(`/v1/agents/${id}/restore`, { method: 'POST' });
     toast(`Restoring "${name}"…`);
@@ -11549,6 +11570,8 @@ function agentAttention(a) {
   // so a long explanation isn't repeated twice on the same screen.
   if (a.state === 'FAILED') out.push({ key: 'failed', icon: '❗', why: a.stateReason ? 'it failed — the reason is beside its status' : 'it failed', failure: true });
   if (a.pendingAction) out.push({ key: 'pending', icon: '✋', why: a.pendingAction.type === 'bot_token' ? 'waiting for a Telegram bot token' : 'a step is waiting on you' });
+  // No pool bot was free when it came back (or was cloned/imported): it went on web-only rather than wait.
+  if (a.telegramSkipped) out.push({ key: 'nobot:' + a.telegramSkipped.at, icon: '📵', why: 'No Telegram bot was free — it is running in the web app; attach a bot later (its settings → Messaging → Telegram)' });
   const rechecking = isRechecking(a);
   const unsynced = rechecking ? [] : (a.dataSources || []).filter(d => d.syncError);
   if (unsynced.length) out.push({ key: 'unsynced:' + unsynced.map(d => d.mountName).join(','), icon: '⚠', why: unsynced.map(d => `${d.mountName} didn't sync — ${d.syncError}`).join('; ') });
@@ -11905,6 +11928,7 @@ async function refresh(withMeta) {
       el.innerHTML = `<span class="pool-dot"${n > 0 ? '' : ' style="color:var(--off)"'}>●</span> ${n} instant bot${n === 1 ? '' : 's'} ready`;
     }).catch(() => {});
     agents = await api('/v1/agents');
+    markArchiving(agents); // an archive this page started, before the server's list shows it
     agentsLoaded = true;
     if ($('consoleDlg')?.open && !consoleGuest) renderConsoleTabs(); // the new-reply dots
     if (location.hash.includes('report=')) reportFromHash();
@@ -11946,7 +11970,7 @@ async function refresh(withMeta) {
     // spin forever over a 500 or a proxy page (27th audit).
     if (!agentsLoaded) for (const el of document.querySelectorAll('.hb-loading')) el.textContent = `Couldn't load your agents: ${e.message || e}. Retrying…`;
   }
-  const busy = agents.some(a => a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING' || a.state === 'DELETING');
+  const busy = agents.some(a => a.busy || a.archiving || a.state === 'PROVISIONING' || a.state === 'REBUILDING' || a.state === 'DELETING');
   clearTimeout(pollTimer);
   // A tab nobody is looking at does not poll: it catches up the moment it is
   // shown again (below). Each poll costs the server about a second.
@@ -12002,6 +12026,8 @@ function v2Status(a) {
   const limited = sourceUsageOf(a.aiProfileId)?.status === 'limited';
   let st;
   if (a.state === 'ARCHIVED') st = { cls: 'archived', glyph: '', label: 'Archived' };
+  // Before the state flips: saving its conversation, then stopping (archivingHere).
+  else if (a.archiving) st = { cls: 'working', glyph: '↻', label: /saving/.test(a.archiving.step || '') ? 'Archiving — saving its conversation to memory' : 'Archiving' };
   else if (a.state === 'DELETING') st = { cls: 'working', glyph: '↻', label: 'Deleting' };
   else if (a.queuedForRebuild) st = { cls: 'working', glyph: '⋯', label: 'Waiting its turn to rebuild' };
   else if (a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING') {
@@ -13029,6 +13055,7 @@ function v2Pane(a, tab) {
       <div class="v2notices">${agentNotices(a, { skipFailure: true, skipTokenForm: true }).trim()}</div>
       ${a.pendingAction?.type === 'bot_token' ? row('Telegram bot', `<div class="grow"><span class="sub">The bot pool is empty, so this agent is waiting for a bot of its own — or it can go on without one.</span>${tokenForm(a)}</div>`) : ''}
       ${a.state === 'FAILED' && a.stateReason ? `<p class="sub" style="margin:0 0 8px">${esc(a.stateReason)}</p>` : ''}
+      ${a.archiving ? row('Working on', `<span>${esc(a.archiving.step)}${a.archiving.at ? ` <span class="sub">· ${esc(ago(a.archiving.at))}</span>` : ''}</span>${B('Setup log', `openSetupLog('${id}','${n}')`)}`) : ''}
       ${(a.state === 'REBUILDING' || a.state === 'PROVISIONING') ? row('Working on', `<span>${esc(a.progress?.step || (a.state === 'REBUILDING' ? 'rebuilding' : 'setting up'))}${a.progress?.at ? ` <span class="sub">· ${esc(ago(a.progress.at))}</span>` : ''}</span>${B('Setup log', `openSetupLog('${id}','${n}')`)}
         <span class="sub">Moving onto a new OpenClaw line runs its migrations and rebuilds the memory index — minutes on an agent with a long history.</span>`) : ''}
       ${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).length
@@ -13105,7 +13132,8 @@ function v2Pane(a, tab) {
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
       <div class="v2danger"><h4>Careful</h4><div class="v2v">
-        ${['RUNNING', 'STOPPED', 'FAILED'].includes(a.state) ? B('📥 Archive', `v2Close();archiveAgent('${id}','${n}','${a.state}')`, 'title="Keep it and its memory; hand its Telegram bot back"') : ''}
+        ${a.archiving ? '<span class="sub">Archiving…</span>' : ''}
+        ${['RUNNING', 'STOPPED', 'FAILED'].includes(a.state) && !a.archiving ? B('📥 Archive', `v2Close();archiveAgent('${id}','${n}','${a.state}')`, 'title="Keep it and its memory; hand its Telegram bot back"') : ''}
         ${a.state !== 'DELETING' ? B('Delete…', `v2Close();del('${id}','${n}')`, 'class="danger"') : ''}
       </div></div>`;
   }

@@ -1912,7 +1912,15 @@ learned — SOUL/AGENTS/MEMORY and the rest of its workspace — intact. It is
 a re-provision rather than a start, because the identity has to be leased again;
 the new bot has a different `t.me` link, which you send from **Invite…**. Nobody
 has to pair again — Telegram user ids are global rather than per-bot, so the
-allowlist rebuilds itself.
+allowlist rebuilds itself. With no bot free in the pool it does not wait for
+one: it comes back web-only (you talk to it in the app), and Alerts says "No
+Telegram bot was free"; attach a bot later from its settings (Messaging →
+Telegram). A clone, a child or an imported template does the same.
+
+Archiving with "save the conversation to memory first" runs one agent turn
+(about 20 seconds) before the agent stops; its tile spins with "Archiving —
+saving its conversation to memory" from the click, and `hatchabot list` shows
+ARCHIVING.
 
 One caveat that is **not** specific to archiving: an agent's Telegram thread can
 end for reasons outside Hatchabot's control (a `/new` or `/reset` in the chat,

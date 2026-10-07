@@ -84,7 +84,9 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'channel.rooms': (d) => `${String(d.kind ?? 'channel')} group chats: ${d.mode === 'room' ? 'one room' : 'off'}`,
   'channel.skipped': 'a messaging channel was skipped (not on this image)',
   'channel.setup_required': 'waiting for a bot token',
-  'telegram.skipped': 'continuing without Telegram',
+  'telegram.skipped': (d) => d.auto
+    ? 'no Telegram bot was free, so it carried on without one (web app only) — attach a bot from its settings'
+    : 'continuing without Telegram',
   'console.device_approved': 'console device approved',
   'owner.ask': 'a message from its owner',
   'webchat.turn': 'a message on the web chat',
@@ -98,6 +100,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'console.unavailable': 'its console could not be opened with names (see the reason)',
   'invite.web_chat': 'a web chat invite was made',
   'agent.exported': 'exported',
+  'agent.archiving': (d) => d.checkpoint ? 'archiving — saving its conversation to memory first' : 'archiving',
   'agent.archived': 'archived',
   'ops.created': 'the manager was created',
   // ---- the rest of the trail (review 2026-09-25: every emitted event has words) ----
