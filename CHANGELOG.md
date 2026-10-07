@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.141.1] — 2026-10-07
+
+### Fixed
+- **The tooltip's restart line gave the wrong exit code** ("last exit 0") for an agent running again after a restart: Docker resets its exit code once the container runs. It now gives the code Hatchabot recorded when it saw the restart (e.g. 135), and none when it didn't see it for this container.
+
 ## [2.141.0] — 2026-10-07
 
 ### Changed

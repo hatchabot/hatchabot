@@ -2419,6 +2419,18 @@ export class Store {
       .run(agentId, agentId, keep);
   }
 
+  /** The agent's latest `runtime.self_restarted`: when, and the exit code caught then.
+   *  Docker resets its own exit code once the container runs again, so this is the
+   *  only place the code of the run that quit survives. */
+  lastSelfRestart(agentId: string): { at: string; exitCode?: number } | undefined {
+    const r = this.db
+      .prepare(`SELECT at, detail FROM agent_events WHERE agent_id = ? AND event = 'runtime.self_restarted' ORDER BY id DESC LIMIT 1`)
+      .get(agentId) as { at: string; detail: string | null } | undefined;
+    if (!r) return undefined;
+    const code = (r.detail ? safeParse(r.detail) : undefined)?.exitCode;
+    return { at: r.at, exitCode: typeof code === 'number' ? code : undefined };
+  }
+
   /** Newest first, across every agent this owner can see. */
   listEvents(agentIds: string[], limit = 60): Array<{
     agentId: string;

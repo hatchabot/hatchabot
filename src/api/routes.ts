@@ -5107,7 +5107,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           /** Times its process quit on its own and Docker started it again since the last rebuild,
            *  and how the last one ended (135 = a memory fault, 137 = killed for memory). */
           restarts: rebuild?.running.restartCount || undefined,
-          lastExitCode: rebuild?.running.restartCount ? rebuild.running.lastExitCode : undefined,
+          // Docker's own exit code reads 0 again once it is running, so the code
+          // comes from the restart Hatchabot saw happen — if it belongs to this container.
+          lastExitCode: rebuild?.running.restartCount ? (() => {
+            const seen = store.lastSelfRestart(a.id);
+            const built = rebuild!.running.containerCreatedAt;
+            return seen && (!built || seen.at >= built) ? seen.exitCode : undefined;
+          })() : undefined,
           /** True when it runs the fleet default — unpinned, or pinned to a tag that IS the default's image. */
           imageIsDefault: !a.image || (await forHost(a.hostId, () => defaultAliasesFor(a.hostId), new Set<string>([a.image]))).has(a.image),
           /** While it is being set up or rebuilt: the step it is on, and since when. */
