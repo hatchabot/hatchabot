@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.152.0] — 2026-10-08
+
+### Fixed
+- **Moving to another Hatchabot could leave the agent running on both machines (#1).** A gateway or server error (502, 503, 504) from the other Hatchabot's import was taken as proof it had rolled back, and the agent was restarted here while the import could still finish there and answer on the same bot. Now only a refusal from Hatchabot itself restarts it here; any other failure asks the other Hatchabot first. If the agent arrived, it stays stopped here and is marked moved; if that cannot be confirmed, it stays stopped and the owner is told to check.
+- **A backup could report complete and prune old sets while an agent's volume was missing (#2).** Every local agent's volume is now checked against what was captured. A missing one makes the set incomplete (named under `missing`), and nothing is pruned. An agent whose first start failed, and so has no volume, is noted rather than holding every set back.
+- **Backups stopped before backing up any runner when every agent ran on one (#3).** Only this machine's agents are expected among its volumes now, and runner agents are archived even when this machine has none.
+- **A failed app update could leave the running app on the rejected configuration (#4).** The new configuration is staged and the app's tests run against it. It replaces the live one only when the release switches on.
+- **A failed app install, update or rollback could leave the new code live with its scheduled commands missing (#5).** New commands are added before old ones come off. On any failure the release, its configuration and its commands are put back, and the agent's record stays matched.
+- **Development dependencies:** Vitest 4.1.11 and source-map-js 1.2.2, for GHSA-82fw-gwwq-j7x9 and GHSA-68fv-2mgg-jv7q (#6). Neither is in what installs run.
+
 ## [2.151.0] — 2026-10-08
 
 ### Added
