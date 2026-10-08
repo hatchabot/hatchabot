@@ -18,6 +18,20 @@ afterEach(() => vi.restoreAllMocks());
 // ---------------------------------------------------------------- Clone ------
 
 describe('Clone — POST /v1/agents/:id/clone', () => {
+  it('telegram: false keeps the copy web-only even with a pool bot free (a live test took the last one, 2026-10-08)', async () => {
+    const w = await makeWorld(OWNER, 1);
+    await seedRunningAgent(w);
+    const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/clone', headers: as(), payload: { name: 'Web Copy', telegram: false } });
+    expect(res.statusCode).toBe(201);
+    expect(w.store.getAgent(res.json().id)!.webOnly).toBe(true);
+    // And a template imported with ?telegram=0 the same.
+    const tpl = await w.f.inject({ method: 'GET', url: '/v1/agents/a1/export', headers: as() });
+    expect(tpl.statusCode).toBe(200);
+    const imp = await w.f.inject({ method: 'POST', url: '/v1/agents/import?telegram=0&name=Web%20Import', headers: octet(), payload: tpl.rawPayload });
+    expect(imp.statusCode).toBe(201);
+    expect(w.store.getAgent(imp.json().id)!.webOnly).toBe(true);
+  });
+
   it('makes an independent copy: caller-owned, memory seeded, source untouched', async () => {
     const w = await makeWorld();
     await seedRunningAgent(w, { members: [{ userId: 'member-x', displayName: 'Gran', channelUserId: '222' }] });

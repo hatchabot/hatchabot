@@ -171,13 +171,15 @@ Commands:
                                members or conversations; MEMORY.md only with
                                --include-memory. Read it before you send it: it
                                lists the addresses and numbers it mentions
-  import <file> [--name <n>] [--profile <aiProfileId>] [--host <id>] [--values <json>]
+  import <file> [--name <n>] [--profile <aiProfileId>] [--host <id>] [--values <json>] [--no-telegram]
                                Import a template as a fresh agent (you give it
                                its own bot); prompts for the template's setup
                                fields ({{key}} placeholders) and prints what it
-                               still needs
-  clone <agent> [new name]     Duplicate an agent here — a faithful copy (MEMORY.md,
-                               its daily notes and USER.md) with its own bot and name
+                               still needs. --no-telegram: web-only, no bot
+  clone <agent> [new name] [--no-telegram]
+                               Duplicate an agent here — a faithful copy (MEMORY.md,
+                               its daily notes and USER.md) with its own bot and name.
+                               --no-telegram: web-only, no pool bot taken
   start|stop|rebuild <agent> [--wait]
                                Lifecycle controls; --wait returns once it is
                                RUNNING (or STOPPED)
@@ -2200,6 +2202,7 @@ async function main() {
         } catch { /* not gunzippable here (full backup?) — server sorts it out */ }
       }
       if (values && Object.keys(values).length) params.set('values', JSON.stringify(values));
+      if (flags.has('no-telegram')) params.set('telegram', '0');
       const j = await uploadAgentFile(ctx, '/v1/agents/import', params, data, flags, askLine);
       if (j.kind === 'agent') {
         console.log(`restored "${j.name}" (${j.state})`);
@@ -2218,8 +2221,8 @@ async function main() {
     case 'clone': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot clone <agent> [new name]'));
       const name = rest.slice(1).join(' ').trim() || `${a.name} (copy)`;
-      const res: any = await (await jsonPost(`/v1/agents/${a.id}/clone`, { name })).json();
-      console.log(`cloned "${a.name}" → "${res.name}" (${res.state}) — connect its Telegram bot to finish.`);
+      const res: any = await (await jsonPost(`/v1/agents/${a.id}/clone`, { name, ...(flags.has('no-telegram') ? { telegram: false } : {}) })).json();
+      console.log(`cloned "${a.name}" → "${res.name}" (${res.state})${flags.has('no-telegram') ? ' — no Telegram: talk to it in the web app.' : ' — connect its Telegram bot to finish.'}`);
       if (res.memoryCopyFailed) console.log("note: its daily notes (memory/) and USER.md couldn't be read — only MEMORY.md came along.");
       else if (res.memoryNotCopied?.length) console.log(`note: these memory files stayed behind (too big or not text): ${res.memoryNotCopied.join(', ')}`);
       if (res.notCopied?.length) console.log(`note: its data sources (${res.notCopied.join(', ')}) did not come along — add them again.`);

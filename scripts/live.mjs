@@ -36,6 +36,24 @@ export const LIVE_TESTS = [
     area: ['src/orchestrator/moveHost.ts', 'src/orchestrator/transfer.ts', 'src/orchestrator/runnerSetup.ts', 'src/orchestrator/provision.ts', 'src/embedder', 'src/providers', 'src/openclaw/configWriter.ts', 'scripts/runner-scenarios.mjs'],
   },
   {
+    name: 'transfer', cmd: ['node', 'scripts/transfer-scenarios.mjs'], against: 'install', minutes: '10–15', aiTurns: false,
+    needs: 'room for 3 agents under the account\'s agent limit; Hatchabot 2.150.0+ (web-only clones)',
+    proves: 'clone, a template shared with its memory and imported, and download → delete → restore: each copy runs web-only and still finds its notes by meaning',
+    area: ['src/orchestrator/transfer.ts', 'src/orchestrator/template.ts', 'src/orchestrator/provision.ts', 'scripts/transfer-scenarios.mjs'],
+  },
+  {
+    name: 'apps', cmd: ['node', 'scripts/app-scenarios.mjs'], against: 'install', minutes: '10–15', aiTurns: false,
+    needs: 'room for 1 agent under the account\'s agent limit',
+    proves: 'an app installs into an agent (its tests run there), its scheduled command runs by itself, updates keep its config, a release with failing tests is refused, rollback and stop work',
+    area: ['src/orchestrator/apps.ts', 'scripts/app-scenarios.mjs'],
+  },
+  {
+    name: 'console', cmd: ['node', 'scripts/console-scenarios.mjs'], against: 'install', minutes: '2–5', aiTurns: false,
+    needs: 'HATCHABOT_PUBLIC_URL (the HTTPS address other devices use); room for 1 agent',
+    proves: 'a real browser opens an agent\'s console at the public address: a secure context, its app starts, its live connection to the agent opens and carries messages',
+    area: ['src/api/consoleProxy.ts', 'src/api/consoleSockets.ts', 'src/orchestrator/consoleAccess.ts', 'src/openclaw/configWriter.ts', 'scripts/console-scenarios.mjs'],
+  },
+  {
     name: 'candidate-gate', cmd: ['bash', 'scripts/candidate-gate.sh'], defaultArgs: ['hatchabot-runtime:latest'], against: 'install', minutes: '5–10', aiTurns: 'one',
     needs: 'the image to check (default: this machine\'s default image)',
     proves: 'an agent on that image builds, answers, and keeps its memory search and tools',
@@ -69,6 +87,18 @@ export const LIVE_TESTS = [
     name: 'clean-install', cmd: ['bash', 'scripts/clean-install-test.sh'], against: 'checkout', minutes: '20–40', aiTurns: 'one',
     needs: 'LXD on this machine; pass -- --ai-source "<an AI source name>"; stop the VM afterwards',
     proves: 'a stranger\'s install on a brand-new Linux machine, and the first things a new owner does',
+    area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'package.json', 'package-lock.json'],
+  },
+  {
+    name: 'clean-install-ubuntu-2204', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'ubuntu:22.04'], against: 'checkout', minutes: '20–40', aiTurns: 'one',
+    needs: 'as clean-install; the oldest glibc the bundle supports (2.35)',
+    proves: 'the clean install on Ubuntu 22.04 (a glibc bug broke stable there once)',
+    area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'package.json', 'package-lock.json'],
+  },
+  {
+    name: 'clean-install-debian-12', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'images:debian/12/cloud'], against: 'checkout', minutes: '20–40', aiTurns: 'one',
+    needs: 'as clean-install',
+    proves: 'the clean install on Debian 12',
     area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'package.json', 'package-lock.json'],
   },
   {
@@ -195,11 +225,12 @@ async function main() {
     const note = ni >= 0 ? String(before[ni + 1] ?? '').replace(/\|/g, '/') : '';
     const release = t.against === 'install' ? (await installVersion()) : { version: checkoutVersion() };
     if (!release.version) { console.error('Could not ask the live install for its version (HATCHABOT_URL / HATCHABOT_TOKEN).'); process.exit(2); }
-    console.log(`▶ ${t.name} on ${release.version}${release.openclaw ? ` (OpenClaw ${release.openclaw})` : ''}: ${[...t.cmd, ...own].join(' ')}`);
+    const argv = [...t.cmd, ...(t.args ?? []), ...own];
+    console.log(`▶ ${t.name} on ${release.version}${release.openclaw ? ` (OpenClaw ${release.openclaw})` : ''}: ${argv.join(' ')}`);
     const t0 = Date.now();
     let tail = '';
     const code = await new Promise((resolve) => {
-      const child = spawn(t.cmd[0], [...t.cmd.slice(1), ...own], { cwd: ROOT, stdio: ['inherit', 'pipe', 'pipe'] });
+      const child = spawn(argv[0], argv.slice(1), { cwd: ROOT, stdio: ['inherit', 'pipe', 'pipe'] });
       const keep = (c) => { tail = (tail + c).slice(-20_000); };
       child.stdout.on('data', (c) => { process.stdout.write(c); keep(String(c)); });
       child.stderr.on('data', (c) => { process.stderr.write(c); keep(String(c)); });

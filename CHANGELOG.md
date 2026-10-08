@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.150.0] — 2026-10-08
+
+### Added
+- **Clone and import without Telegram.** `hatchabot clone <agent> [name] --no-telegram` and `hatchabot import <file> --no-telegram` (`telegram: false` and `?telegram=0` in the API) make a web-only copy that takes no bot from the pool. Before, a copy always took a free pool bot when there was one.
+- **Five more live tests** (docs/live-tests.md):
+  - `transfer`: clone, a shared template imported, and download → delete → restore. Each copy must run web-only and still find its notes by meaning.
+  - `apps`: an app installed into an agent with its tests run there; its scheduled command running by itself; update, a refused release with failing tests, rollback and stop.
+  - `console`: a real browser opening an agent's console at the public HTTPS address. It checks the page is a secure context, the console app starts, and its live connection to the agent carries messages.
+  - `clean-install-ubuntu-2204` and `clean-install-debian-12`: the clean install on those systems. The script now makes the installing user on images that have none.
+- **No live test uses a Telegram bot.** A test agent found with one is deleted at once, which hands the bot back, and its test fails. The transfer test refuses to run against a Hatchabot older than this release. On 2.149.0 its clone took the last free pool bot; the bot was returned within a minute.
+
 ## [2.149.0] — 2026-10-08
 
 ### Added

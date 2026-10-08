@@ -76,7 +76,13 @@ echo
 # for 15 minutes after the VM was already up.
 timeout 600 bash -c "$(declare -f L); L launch $IMAGE $VM --vm -c limits.cpu=4 -c limits.memory=8GiB -d root,size=40GiB" </dev/null >"$OUT/launch.log" 2>&1 \
   || { bad "launch a fresh $IMAGE VM ($(tail -1 "$OUT/launch.log"))"; exit 1; }
-for _ in $(seq 1 60); do L exec "$VM" -- cloud-init status 2>/dev/null | grep -q done && break; sleep 5; done
+# Wait for cloud-init where the image has it (Ubuntu's, debian/12/cloud); a
+# plain image has none and is ready once it answers.
+for _ in $(seq 1 60); do
+  if L exec "$VM" -- sh -c 'command -v cloud-init' >/dev/null 2>&1; then L exec "$VM" -- cloud-init status 2>/dev/null | grep -q done && break
+  else L exec "$VM" -- true >/dev/null 2>&1 && break; fi
+  sleep 5
+done
 ok "fresh $IMAGE VM ($(L exec "$VM" -- uname -m), $(L exec "$VM" -- getconf GNU_LIBC_VERSION))"
 
 if ! L exec "$VM" -- sh -c 'timeout 8 ping -c1 -W5 1.1.1.1 >/dev/null 2>&1'; then
@@ -89,7 +95,10 @@ if ! L exec "$VM" -- sh -c 'timeout 8 ping -c1 -W5 1.1.1.1 >/dev/null 2>&1'; the
 fi
 # What the image already has (Ubuntu's cloud image ships git), so "gained" means gained.
 BEFORE="$(L exec "$VM" -- sh -c 'for t in node git gcc; do command -v $t >/dev/null && echo $t; done' 2>/dev/null | tr '\n' ' ')"
-L exec "$VM" -- sh -c 'DEBIAN_FRONTEND=noninteractive apt-get -qq update && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y expect' >"$OUT/expect.log" 2>&1
+L exec "$VM" -- sh -c 'DEBIAN_FRONTEND=noninteractive apt-get -qq update && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y expect curl sudo' >"$OUT/expect.log" 2>&1
+# The person installing: Ubuntu's image has an "ubuntu" user with sudo; Debian's
+# has none, so make the same one (--image images:debian/12, 2026-10-08).
+L exec "$VM" -- sh -c 'id ubuntu >/dev/null 2>&1 || { useradd -m -s /bin/bash -G sudo ubuntu && echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-ubuntu && chmod 440 /etc/sudoers.d/90-ubuntu; }' >>"$OUT/expect.log" 2>&1
 
 # ---- 1. the installer, answered like a person ----------------------------------
 cat >"$OUT/install.exp" <<EOF

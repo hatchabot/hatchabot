@@ -25,13 +25,29 @@ passed on. A run that skipped (nothing to test with) or failed does not count.
 | Test | Proves | Needs | Time | AI turns |
 |---|---|---|---|---|
 | `runner-scenarios` | Moves and rebuilds between this machine and a runner, across OpenClaw versions; each machine's memory search; Install image ([runner-test-runs.md](runner-test-runs.md)) | A runner: `-- --runner "<name>"`, plus `--old-image <a pre-2026.8 image on it>` once it is current | 20–40 min | none |
+| `transfer` | Clone, a template shared with its memory and imported, and download → delete → restore: each copy runs web-only and still finds its notes by meaning | Room for 3 agents under the account's limit; Hatchabot 2.150.0+ | 10–15 min | none |
+| `apps` | An app installs into an agent (its tests run there), its scheduled command runs by itself, an update keeps its config, a release with failing tests is refused, rollback and stop work | Room for 1 agent | 10–15 min | none |
+| `console` | A real browser opens an agent's console at the public HTTPS address: a secure context, its app starts, its live connection opens and carries messages | `HATCHABOT_PUBLIC_URL`; room for 1 agent | 2–5 min | none |
 | `candidate-gate` | An agent on an image builds, answers, and keeps its memory search and tools | The image (default: this machine's default) | 5–10 min | one |
 | `regress-autonomous` | An agent made from the CLI answers, remembers, runs a task on demand and on its schedule, pauses, and keeps both across a restart | The live install | 10–15 min | about eight |
 | `restore-drill` | The newest nightly backup restores, every part of it, without touching the live system | A backup set | 5–15 min | none |
 | `upgrade-check` | Databases made by older releases open with this one | Nothing (temporary databases) | 2–5 min | none |
 | `smoke-adopt` | Switching to Hatchabot: an OpenClaw agent is found and adopted web-only on a throwaway control plane; its workspace and tasks arrive, its console answers, its data folder mounts | Nothing (its own ports); `-- --with-telegram` takes over a bot from `.env.smoke` instead | 2–5 min | none |
 | `clean-install` | A stranger's install on a brand-new Linux machine, and a new owner's first steps | LXD here; `-- --ai-source "<name>"`; stop the VM after | 20–40 min | one |
+| `clean-install-ubuntu-2204` | The clean install on Ubuntu 22.04, the oldest glibc the bundle supports (a glibc bug broke stable there once) | As `clean-install` | 20–40 min | one |
+| `clean-install-debian-12` | The clean install on Debian 12 | As `clean-install` | 20–40 min | one |
 | `shared-host` | Two tenants on one machine cannot reach each other | Test VMs. On hold with Hatchabot Cloud: never due | 30+ min | none |
+
+**No live test uses a Telegram bot.** Bots are scarce (about 20 per Telegram
+account), so every test agent is web-only. One found with a bot is deleted at
+once, which hands the bot back to the pool, and its test fails. Run the tests
+one at a time: several make agents at once, and an account near its agent
+limit (`HATCHABOT_MAX_AGENTS_PER_ACCOUNT`) has room for few.
+
+Not automated (check by hand before a release that touches them): Telegram
+end to end (only a person can message a bot), Google connections
+(`node scripts/connection-health.mjs` reads yours), a runner going to sleep
+mid-move, an install on a Mac.
 
 Each test's area (the files that make it due) is in `scripts/live.mjs`
 (`LIVE_TESTS`), with its command. The tests that make agents use names that

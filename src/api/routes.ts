@@ -10788,6 +10788,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // rest, before the first build; what could not come is named.
         const carried = await readCloneMemory(deps.provider, agent.runtimeRef!, agent.slug);
         if (Object.keys(carried.files).length) store.setAgentSeed(clone.id, carried.files);
+        // `telegram: false`: web-only, as create — no pool bot taken (2026-10-08).
+        if ((req.body as { telegram?: unknown } | null)?.telegram === false) store.setAgentWebOnly(clone.id, true);
         kickProvision(clone.id, { webOnlyIfNoBot: true });
         return reply.code(201).send({
           ...publicAgent(clone), notCopied,
@@ -11095,7 +11097,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // format and does the right thing — a template becomes a fresh agent, a full
   // copy (a Download) is restored as the same agent. The /restore route above
   // stays for the CLI's explicit `restore` verb.
-  app.post<{ Querystring: { aiProfileId?: string; hostId?: string; name?: string; values?: string; image?: string } }>(
+  app.post<{ Querystring: { aiProfileId?: string; hostId?: string; name?: string; values?: string; image?: string; telegram?: string } }>(
     '/v1/agents/import',
     async (req, reply) => {
       { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
@@ -11143,6 +11145,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, name: req.query.name, values },
           );
           await materializeImportEffects(agent, envValues, dataSourceValues);
+          // ?telegram=0: web-only, as create's telegram: false — no pool bot taken.
+          if (req.query.telegram === '0') store.setAgentWebOnly(agent.id, true);
           // Fresh agent → its own bot from the pool; none free → web-only, told in Alerts.
           kickProvision(agent.id, { webOnlyIfNoBot: true });
           return reply.code(201).send({ ...publicAgent(agent), kind: 'template', needs });
