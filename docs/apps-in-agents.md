@@ -56,8 +56,10 @@ codebase gets deployed, updated and rolled back from Hatchabot.
 ```
 
 - `app`: a short id (`[a-z0-9-]`), the folder name inside the agent.
-- `test`: run inside the agent against the new release before it goes live; a
-  failure stops the install or update and leaves the running version alone.
+- `test`: run inside the agent against the new release before it goes live,
+  with `{data_dir}` set to a staging folder that holds only the new config
+  (never the live data); a failure stops the install or update and leaves the
+  running version and its config alone.
 - `tasks`: OpenClaw command tasks, named `<app>-<name>`, re-synced on every
   install, update and rollback. `every` (`1m`, `15m`, `1h`) or `cron`.
 - `env`, `command`, `chat`: placeholders `{app_dir}` (the live release),
@@ -76,6 +78,7 @@ codebase gets deployed, updated and rolled back from Hatchabot.
   releases/<sha>/     one folder per installed commit (the last 3 are kept)
   current -> releases/<sha>
   data/               config.json, the app's database: never touched by updates
+  staging/<sha>/      the new config while its tests run (gone after)
 ```
 
 ## Install, update, roll back
@@ -86,10 +89,23 @@ codebase gets deployed, updated and rolled back from Hatchabot.
    `~/hatchabot-data/app-sources/`). It resolves the ref (default `HEAD`) to a
    commit and reads `hatchabot.json` from that commit.
 2. It copies `git archive <sha>` into `releases/<sha>` on the agent's volume.
-3. It writes `data/config.json` (asked + filled values, keeping existing ones).
-4. It runs `test` in the new release, with the app's env. Fails: stop here.
-5. It points `current` at the new release (atomically), and re-syncs the tasks.
-6. It records the app, source, commit and previous commit for the agent.
+3. It stages the new config (asked + filled values, keeping existing ones) in
+   `staging/<sha>/`; the live `data/config.json` is not touched yet.
+4. It runs `test` in the new release, with the app's env and `{data_dir}` at
+   the staging folder. Fails: stop here; nothing live has changed.
+5. It switches: the staged config into `data/` (the old file kept aside), then
+   `current` at the new release (atomically).
+6. It re-syncs the tasks: the new ones are added first, then the old ones
+   taken off.
+7. It records the app, source, commit and previous commit for the agent.
+
+A failure in step 5 or 6 puts everything back: `current` at the previous
+release, its config to the byte (or no config, on a first install), and its
+tasks (new ones taken off, old ones already removed re-added from the previous
+release's `hatchabot.json`). The record is only written after step 6, so the
+agent, its tasks and the record agree either way; the error says if anything
+could not be put back. Replacing one app with another takes the old app's tasks
+off first and puts them back if the new one fails.
 
 **One copy per account.** An install is refused (409) when another live agent
 already runs the same app on the account its values name (the mailbox): two
@@ -97,7 +113,8 @@ copies would both answer every email. The dialog warns first; `allowShared`
 (the dialog's confirmation) overrides it.
 
 **Update** is the same from step 1 with a newer commit; **rollback** points
-`current` back at the previous release and re-syncs its tasks.
+`current` back at the previous release and re-syncs its tasks (if they cannot
+be scheduled, it stays on the release it had).
 
 ## Commands
 

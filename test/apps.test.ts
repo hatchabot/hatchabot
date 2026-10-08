@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -38,10 +38,12 @@ const FACTS: AgentFacts = { slug: 'demo-agent', name: 'Demo', timezone: 'America
 const tmp: string[] = [];
 afterAll(() => { for (const d of tmp) rmSync(d, { recursive: true, force: true }); });
 
+const gitIn = (dir: string, ...a: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Test', '-c', 'user.email=test@example.org', '-C', dir, ...a]);
+
 function repo(manifest: unknown = MANIFEST): string {
   const dir = mkdtempSync(join(tmpdir(), 'hb-app-'));
   tmp.push(dir);
-  const git = (...a: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Test', '-c', 'user.email=test@example.org', '-C', dir, ...a]);
+  const git = (...a: string[]) => gitIn(dir, ...a);
   git('init', '-q', '-b', 'main');
   mkdirSync(join(dir, 'demo'));
   writeFileSync(join(dir, 'demo', '__init__.py'), '');
@@ -51,30 +53,92 @@ function repo(manifest: unknown = MANIFEST): string {
   return dir;
 }
 
-/** A fake agent: answers `cat config`, `readlink current`, `cron list`; records the rest. */
+/** A new commit, with another manifest when given. */
+let commits = 0;
+function commit(dir: string, manifest?: unknown) {
+  if (manifest) writeFileSync(join(dir, 'hatchabot.json'), JSON.stringify(manifest));
+  writeFileSync(join(dir, 'demo', `v${++commits}.py`), 'X = 1\n');
+  gitIn(dir, 'add', '-A');
+  gitIn(dir, 'commit', '-q', '-m', `change ${commits}`);
+}
+
+/**
+ * A fake agent. Its volume is a temp folder: the shell steps really run there
+ * (the agent's apps folder rewritten to it, a bare PATH, a temp HOME), so the
+ * config bytes and the `current` link are real. Its scheduled tasks are a list
+ * in memory; the app's tests are answered with `testCode`. Every call is
+ * recorded as sent.
+ */
+const APPS = '/home/node/.openclaw/apps';
 class FakeAgent extends MockProvider {
   calls: Array<{ kind: string; what: string; input?: string }> = [];
-  config = '';
-  current = '';
-  jobs: Array<{ id: string; name: string }> = [{ id: 'old1', name: 'demoapp-tick' }, { id: 'keep', name: 'daily-brief' }];
+  jobs: Array<{ id: string; name: string; argv?: string[] }> = [{ id: 'old1', name: 'demoapp-tick' }, { id: 'keep', name: 'daily-brief' }];
   testCode = 0;
+  /** The config file the app's tests found in their {data_dir}. */
+  testSaw: string[] = [];
+  failAdd: (name: string) => boolean = () => false;
+  failRm: (id: string) => boolean = () => false;
+  /** Change a shell step before it runs (to break it part way). */
+  breakScript: (script: string) => string = (s) => s;
+  #roots = new Map<string, string>();
+  #next = 1;
+  root(ref: string): string {
+    let r = this.#roots.get(ref);
+    if (!r) { r = mkdtempSync(join(tmpdir(), 'hb-agentvol-')); tmp.push(r); this.#roots.set(ref, r); }
+    return r;
+  }
+  #run(ref: string, script: string, input?: Buffer): ExecResult {
+    const s = this.breakScript(script).split(APPS).join(this.root(ref));
+    if (s.includes('/home/node')) throw new Error(`a step reaches outside the fake volume: ${s}`);
+    const r = spawnSync('sh', ['-c', s], { input, cwd: this.root(ref), env: { PATH: '/usr/bin:/bin', HOME: this.root(ref), LC_ALL: 'C' } });
+    return { code: r.status ?? 1, stdout: String(r.stdout ?? ''), stderr: String(r.stderr ?? '') };
+  }
   override async exec(_ref: string, argv: string[]): Promise<ExecResult> {
     this.calls.push({ kind: 'exec', what: JSON.stringify(argv) });
-    if (argv[0] === 'cron' && argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs: this.jobs }), stderr: '' };
+    if (argv[0] === 'cron' && argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs: this.jobs.map(({ id, name }) => ({ id, name })) }), stderr: '' };
+    if (argv[0] === 'cron' && argv[1] === 'add') {
+      const name = argv[argv.indexOf('--name') + 1]!;
+      if (this.failAdd(name)) return { code: 1, stdout: '', stderr: 'gateway refused the job' };
+      const id = `j${this.#next++}`;
+      this.jobs.push({ id, name, argv });
+      return { code: 0, stdout: JSON.stringify({ id }), stderr: '' };
+    }
+    if (argv[0] === 'cron' && argv[1] === 'rm') {
+      if (this.failRm(argv[2]!)) return { code: 1, stdout: '', stderr: 'gateway timed out' };
+      this.jobs = this.jobs.filter((j) => j.id !== argv[2]);
+    }
     return { code: 0, stdout: '{}', stderr: '' };
   }
-  override async execShell(_ref: string, script: string): Promise<ExecResult> {
+  override async execShell(ref: string, script: string): Promise<ExecResult> {
     this.calls.push({ kind: 'sh', what: script });
-    if (script.startsWith('cat ')) return { code: 0, stdout: this.config, stderr: '' };
-    if (script.startsWith('readlink ')) return { code: 0, stdout: this.current, stderr: '' };
-    if (script.includes('unittest')) return { code: this.testCode, stdout: this.testCode ? 'FAILED (failures=1)' : 'OK', stderr: '' };
-    return { code: 0, stdout: '', stderr: '' };
+    if (script.includes('unittest')) {
+      const home = /DEMO_HOME='([^']*)'/.exec(script)?.[1];
+      const f = home ? join(home.split(APPS).join(this.root(ref)), 'config.json') : '';
+      this.testSaw.push(f && existsSync(f) ? readFileSync(f, 'utf8') : '');
+      return { code: this.testCode, stdout: this.testCode ? 'FAILED (failures=1)' : 'OK', stderr: '' };
+    }
+    return this.#run(ref, script);
   }
-  override async writeToVolume(_ref: string, argv: string[], input: Buffer): Promise<ExecResult> {
+  override async writeToVolume(ref: string, argv: string[], input: Buffer): Promise<ExecResult> {
     const isConfig = argv.join(' ').includes('config.json');
-    if (isConfig) this.config = input.toString(); // the agent keeps it, as a real volume does
     this.calls.push({ kind: 'write', what: argv.join(' '), input: isConfig ? input.toString() : `${input.length} bytes` });
-    return { code: 0, stdout: '', stderr: '' };
+    return this.#run(ref, argv[2]!, input);
+  }
+  /** The live config file of demoapp, on the fake volume. */
+  configFile(ref = 'x') { return join(this.root(ref), 'demoapp/data/config.json'); }
+  /** What is live: the release `current` points at, the config bytes, the app's task ids, whether staging is gone. */
+  live(ref = 'x') {
+    let current: string | null = null;
+    try { current = readlinkSync(join(this.root(ref), 'demoapp/current')); } catch { /* not installed */ }
+    return {
+      current, config: existsSync(this.configFile(ref)) ? readFileSync(this.configFile(ref), 'utf8') : null,
+      tasks: this.jobs.filter((j) => j.name.startsWith('demoapp-')).map((j) => j.id).sort(),
+      staging: existsSync(join(this.root(ref), 'demoapp/staging')),
+    };
+  }
+  /** The schedule a task of demoapp was added with ('?' when it predates the test). */
+  every(name: string) {
+    return this.jobs.filter((j) => j.name === name).map((j) => (j.argv ? j.argv[j.argv.indexOf('--every') + 1] : '?'));
   }
 }
 
@@ -157,6 +221,112 @@ describe('installing into an agent', () => {
   });
 });
 
+/**
+ * A failed update changes nothing live (issues #4 and #5): the release, its
+ * config (to the byte) and its tasks stay as they were, whichever step fails.
+ */
+describe('a failed update leaves the running app as it was', () => {
+  const TWO_TASKS = { ...MANIFEST, tasks: [
+    { name: 'tick', every: '1m', command: ['python3', '-m', 'demo', 'tick'] },
+    { name: 'digest', every: '1h', command: ['python3', '-m', 'demo', 'digest'] },
+  ] };
+  /** The owner's own edit to the live config, in bytes no install would write. */
+  const OWN_BYTES = '{"mailbox":"first@example.org","mode":"live","note":"kept as typed"}';
+
+  /** v1 installed, its config edited by hand, and a v2 commit (with `next` as its manifest) ready. */
+  async function installed(next: unknown = MANIFEST, first: unknown = MANIFEST) {
+    const dir = repo(first);
+    const agent = new FakeAgent();
+    agent.jobs = [{ id: 'keep', name: 'daily-brief' }];
+    const d = { provider: agent, runtimeRef: 'x', facts: FACTS };
+    const v1 = await resolveRelease(hostGit, dir, 'HEAD');
+    await installRelease(d, v1, { mailbox: 'first@example.org' });
+    writeFileSync(agent.configFile(), OWN_BYTES);
+    commit(dir, next);
+    const v2 = await resolveRelease(hostGit, dir, 'HEAD');
+    return { agent, d, v1, v2, before: agent.live() };
+  }
+
+  it('failing tests: the live config keeps its bytes, and the tests saw the new values', async () => {
+    const { agent, d, v1, v2, before } = await installed();
+    expect(before.current).toBe(`releases/${v1.sha.slice(0, 12)}`);
+    agent.testCode = 1;
+    await expect(installRelease(d, v2, { mailbox: 'second@example.org' })).rejects.toThrow(/tests failed/);
+    expect(agent.live()).toEqual({ ...before, config: OWN_BYTES, staging: false });
+    expect(JSON.parse(agent.testSaw.at(-1)!)).toMatchObject({ mailbox: 'second@example.org', mode: 'live', note: 'kept as typed' });
+  });
+
+  it('a switch that fails part way puts the config back to the byte', async () => {
+    const { agent, d, v2, before } = await installed();
+    // The config is moved in, then the link cannot be made.
+    agent.breakScript = (s) => (s.includes('mv -f') ? s.replace('ln -sfn releases/', 'false && ln -sfn releases/') : s);
+    await expect(installRelease(d, v2, { mailbox: 'second@example.org' })).rejects.toThrow(/Could not switch to .* is running as before, with its configuration/);
+    expect(agent.live()).toEqual({ ...before, config: OWN_BYTES, staging: false });
+  });
+
+  it('a first install that cannot schedule its task leaves no config, no current, no task', async () => {
+    const agent = new FakeAgent();
+    agent.jobs = [{ id: 'keep', name: 'daily-brief' }];
+    agent.failAdd = () => true;
+    await expect(installRelease({ provider: agent, runtimeRef: 'x', facts: FACTS }, await resolveRelease(hostGit, repo(), 'HEAD'), { mailbox: 'demo@example.org' }))
+      .rejects.toThrow(/Could not schedule demoapp-tick.*Its tasks are as they were. Nothing was left switched on/s);
+    expect(agent.live()).toEqual({ current: null, config: null, tasks: [], staging: false });
+    expect(agent.jobs).toEqual([{ id: 'keep', name: 'daily-brief' }]);
+  });
+
+  it('a successful update applies the new values and keeps the rest', async () => {
+    const { agent, d, v2 } = await installed();
+    const done = await installRelease(d, v2, { mailbox: 'second@example.org' });
+    const now = agent.live();
+    expect(now.current).toBe(`releases/${v2.sha.slice(0, 12)}`);
+    expect(JSON.parse(now.config!)).toEqual({ mailbox: 'second@example.org', mode: 'live', note: 'kept as typed', openclaw_agent: 'demo-agent', timezone: 'America/Toronto' });
+    expect(now.staging).toBe(false);
+    expect(done.tasks).toEqual(['demoapp-tick']);
+    expect(agent.jobs.map((j) => j.name).sort()).toEqual(['daily-brief', 'demoapp-tick']);
+  });
+
+  it('the first new task cannot be scheduled: the old release, config and tasks stay', async () => {
+    const { agent, d, v2, before } = await installed({ ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['python3', '-m', 'demo', 'tick'] }] });
+    agent.failAdd = () => true;
+    await expect(installRelease(d, v2, { mailbox: 'second@example.org' }))
+      .rejects.toThrow(/Could not schedule demoapp-tick: gateway refused the job\. Its tasks are as they were\. [0-9a-f]{12} is running as before/);
+    expect(agent.live()).toEqual({ ...before, config: OWN_BYTES, staging: false });
+    expect(agent.every('demoapp-tick')).toEqual(['1m']);
+  });
+
+  it('a later task cannot be scheduled: the new ones already added come off again', async () => {
+    const { agent, d, v2, before } = await installed(TWO_TASKS);
+    agent.failAdd = (name) => name === 'demoapp-digest';
+    await expect(installRelease(d, v2, {})).rejects.toThrow(/Could not schedule demoapp-digest.*Its tasks are as they were/s);
+    expect(agent.live()).toEqual({ ...before, config: OWN_BYTES, staging: false });
+    expect(agent.jobs.map((j) => j.name).sort()).toEqual(['daily-brief', 'demoapp-tick']);
+  });
+
+  it('an old task cannot be taken off: the new set comes off and the old one is whole again, as it was defined', async () => {
+    const changed = { ...TWO_TASKS, tasks: TWO_TASKS.tasks.map((t) => ({ ...t, every: t.name === 'tick' ? '5m' : '2h' })) };
+    const { agent, d, v2, before } = await installed(changed, TWO_TASKS);
+    const oldDigest = agent.jobs.find((j) => j.name === 'demoapp-digest')!.id;
+    agent.failRm = (id) => id === oldDigest; // the old tick comes off, then the old digest will not
+    await expect(installRelease(d, v2, {})).rejects.toThrow(/Could not take off the old task demoapp-digest: gateway timed out\. Its tasks are as they were\..*running as before/s);
+    const now = agent.live();
+    expect(now.current).toBe(before.current);
+    expect(now.config).toBe(OWN_BYTES);
+    expect(agent.every('demoapp-tick')).toEqual(['1m']); // re-added from the old release's manifest
+    expect(agent.every('demoapp-digest')).toEqual(['1h']);
+    expect(now.tasks).toContain(oldDigest);
+  });
+
+  it('says what it could not put back', async () => {
+    const changed = { ...TWO_TASKS, tasks: TWO_TASKS.tasks.map((t) => ({ ...t, every: '5m' })) };
+    const { agent, d, v2 } = await installed(changed, TWO_TASKS);
+    const oldDigest = agent.jobs.find((j) => j.name === 'demoapp-digest')!.id;
+    let rmFailed = false;
+    agent.failRm = (id) => (id === oldDigest ? (rmFailed = true) : false);
+    agent.failAdd = (name) => rmFailed && name === 'demoapp-tick'; // the re-add of the old tick fails
+    await expect(installRelease(d, v2, {})).rejects.toThrow(/Could not put the tasks back as they were: not re-added: demoapp-tick/);
+  });
+});
+
 describe('the app routes', () => {
   const OWNER = 'owner-1';
   async function app() {
@@ -197,6 +367,58 @@ describe('the app routes', () => {
     expect(gone.json()).toMatchObject({ removed: true });
     expect(store.getAgentApp('a1')).toBeUndefined();
     expect(provider.calls.some((c) => c.what.startsWith('["cron","rm"'))).toBe(true);
+  });
+
+  /** The record and the agent agree: `current` is the recorded commit, the tasks are the recorded manifest's. */
+  const agrees = (store: Store, provider: FakeAgent) => {
+    const rec = store.getAgentApp('a1')!;
+    const m = rec.manifest as { tasks: Array<{ name: string }> };
+    expect(provider.live('mock://a1').current).toBe(`releases/${rec.sha.slice(0, 12)}`);
+    expect(provider.jobs.filter((j) => j.name.startsWith('demoapp-')).map((j) => j.name).sort())
+      .toEqual(m.tasks.map((t) => `demoapp-${t.name}`).sort());
+    return rec;
+  };
+
+  it('an update whose task cannot be scheduled: a 400, and the record, release, config and tasks stay together', async () => {
+    const { f, store, provider } = await app();
+    provider.jobs = [];
+    const dir = repo();
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } })).statusCode).toBe(200);
+    const first = agrees(store, provider);
+    const config = readFileSync(provider.configFile('mock://a1'), 'utf8');
+    commit(dir, { ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['python3', '-m', 'demo', 'tick'] }, { name: 'nightly', cron: '0 3 * * *', command: ['python3', '-m', 'demo', 'nightly'] }] });
+    provider.failAdd = (name) => name === 'demoapp-nightly';
+    const upd = await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: { values: { mailbox: 'other@example.org' } } });
+    expect(upd.statusCode).toBe(400);
+    expect(upd.json().error).toMatch(/Could not schedule demoapp-nightly.*Its tasks are as they were.*running as before/s);
+    expect(agrees(store, provider)).toEqual(first);
+    expect(readFileSync(provider.configFile('mock://a1'), 'utf8')).toBe(config);
+    expect(provider.every('demoapp-tick')).toEqual(['1m']);
+    // Fixed, it goes through and all three agree on the new release.
+    provider.failAdd = () => false;
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: { values: { mailbox: 'other@example.org' } } })).statusCode).toBe(200);
+    const now = agrees(store, provider);
+    expect(now.sha).not.toBe(first.sha);
+    expect(now.previousSha).toBe(first.sha);
+    expect(JSON.parse(readFileSync(provider.configFile('mock://a1'), 'utf8')).mailbox).toBe('other@example.org');
+    // A rollback whose tasks cannot be scheduled stays on the new release.
+    provider.failAdd = (name) => name === 'demoapp-tick';
+    const back = await f.inject({ method: 'POST', url: '/v1/agents/a1/app/rollback', headers: as });
+    expect(back.statusCode).toBe(400);
+    expect(back.json().error).toMatch(/Could not schedule demoapp-tick.*Still on/s);
+    expect(agrees(store, provider)).toEqual(now);
+  });
+
+  it('another app in its place that fails: the first app keeps its record and gets its tasks back', async () => {
+    const { f, store, provider } = await app();
+    provider.jobs = [];
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: repo(), values: { mailbox: 'demo@example.org' } } })).statusCode).toBe(200);
+    const first = agrees(store, provider);
+    provider.testCode = 1;
+    const other = await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: repo({ ...MANIFEST, app: 'otherapp' }), values: { mailbox: 'demo@example.org' } } });
+    expect(other.statusCode).toBe(400);
+    expect(agrees(store, provider)).toEqual(first);
+    expect(provider.jobs.some((j) => j.name.startsWith('otherapp-'))).toBe(false);
   });
 
   it('a failing test is a 400 with the output, and nothing is recorded', async () => {

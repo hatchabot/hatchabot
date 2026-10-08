@@ -175,6 +175,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/orchestrator/apps.ts` — `installRelease`
 
+### A failed app update changed the running app's settings (mailbox, mode)
+- **Check:** after an Update that failed (its tests failed, or "Could not switch to …"), `docker exec <agent> cat ~/.openclaw/apps/<app>/data/config.json` shows the values given to the failed update, while the App row still shows the old commit.
+- **Cause:** before v2.152.0 the new configuration was written to the live `data/config.json` before the new release's tests ran, and was not put back when the update failed.
+- **Fix:** upgrade. The new configuration is staged and the tests run against it; it replaces the live file only when the release switches on, and a failed switch restores the old file exactly. On an older version, edit `data/config.json` back by hand, or run Update again with the old values.
+- **Fixed in:** `v2.152.0`
+- **Code:** `src/orchestrator/apps.ts` — `installRelease`
+
+### An app's scheduled commands are missing or doubled after a failed update or rollback
+- **Check:** after an Update or Roll back that failed with "Could not schedule <app>-<task>", `openclaw cron list --json` in the agent lacks some `<app>-…` jobs or has two of one, or `readlink ~/.openclaw/apps/<app>/current` names another commit than the App row.
+- **Cause:** before v2.152.0 an install switched `current` first, then removed the app's old jobs before adding the new ones; a job that could not be added left the new code live, the old jobs gone, and the record describing the old release.
+- **Fix:** upgrade. New jobs are added before old ones come off, and any failure takes the new ones off, re-adds the old ones from the previous release's `hatchabot.json` and points `current` back. On an older version, run Update again; if it keeps failing, Roll back, or Stop app and install again.
+- **Fixed in:** `v2.152.0`
+- **Code:** `src/orchestrator/apps.ts` — `syncTasks`
+
 ### An app's task fails every run, flagged as a loop: "OAuth client credentials missing"
 - **Check:** the agent's Alerts ("Scheduled task \"<app>-tick\" failed 3 runs in a row") and the app's own status (`python3 -m <app> status` in the agent, or its page → App): the error names the missing login.
 - **Cause:** the app needs a Google account and none is attached to this agent (made before 2.146.0, the dialog only said to attach one).
@@ -428,6 +442,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.134.0`
 - **Code:** `src/orchestrator/reconcile.ts` — `Providers`
 
+### After "Move to another Hatchabot" failed with a gateway or server error (502, 503, 504), the agent runs on both machines, or two agents answer on one bot
+- **Check:** the move's error named an HTTP status such as "Gateway Timeout" and said "Your agent is unchanged", yet the other Hatchabot lists the agent RUNNING, and this one runs it too.
+- **Cause:** before v2.152.0 any error answer to the other Hatchabot's import was taken as proof it had rolled back, and the agent was restarted here at once. A proxy in front of it answers 502/503/504 when a long import outlasts its timeout, while the import goes on to finish and poll the same Telegram bot.
+- **Fix:** stop one of the two copies now (keep the one that is healthy there, then delete this one), and upgrade. Since v2.152.0 only a refusal from Hatchabot itself restarts the agent here; any other failure asks the other Hatchabot first: restarted only when the agent is confirmed absent there, left stopped and marked moved when it arrived, and left stopped with "couldn't confirm whether the agent arrived" otherwise.
+- **Fixed in:** `v2.152.0`
+- **Code:** `src/orchestrator/migrate.ts` — `isDefiniteRefusal`, `migrateAgent`
+
 ## Backups and restore
 
 ### `hatchabot doctor`: "No backup set in … yet", "Last backup set is N days old", or "… is incomplete"
@@ -450,6 +471,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: a restore now takes memory and files from the backup and puts back the current bot, members and model. To bring someone back, add them again.
 - **Fixed in:** `v2.105.0`
 - **Code:** `src/orchestrator/backups.ts` — `restoreAgentFromBackup`, `revokedScrubTargets`
+
+### A backup set says incomplete: an agent's volume is missing
+- **Check:** the newest set's `backup-status.json` lists the volume under `missing` (and in `failedVolumes`), and the run's log says an agent on this machine uses it but Docker has no volume by that name; `docker volume ls` does not show it.
+- **Cause:** an agent on this machine has no Docker volume under its expected name: removed by hand, or `HATCHABOT_PREFIX` differs from the one the volumes were made with. Before v2.152.0 such a run reported complete and pruned that agent's older backup sets.
+- **Fix:** find the volume (`docker volume ls`) and correct `HATCHABOT_PREFIX` in `.env`; if it is gone, restore the agent from its newest backup set (nothing prunes while the volume is missing) or delete the agent; then run `scripts/backup-volumes.sh` again. An agent whose first start failed (no volume) is noted, not counted.
+- **Fixed in:** `v2.152.0`
+- **Code:** `scripts/backup-volumes.sh` — `missing_list`
+
+### Backups stop with "no hatchabot-* volumes found" when every agent is on a runner
+- **Check:** all agents live on runners, this machine has no `hatchabot-*` volumes, and the nightly run stops with "HATCHABOT_PREFIX mismatch? — refusing to prune"; no runner archives are in the set.
+- **Cause:** before v2.152.0 the script counted every agent, runner agents included, when this machine had none of their volumes, and stopped before backing up the runners.
+- **Fix:** upgrade: runner agents are archived over their connections; a runner that is asleep is skipped and named in `skipped`.
+- **Fixed in:** `v2.152.0`
+- **Code:** `scripts/backup-volumes.sh` — `registry`
 
 ## Usage, costs and budgets
 
