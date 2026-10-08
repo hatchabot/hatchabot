@@ -77,6 +77,22 @@ describe('POST /v1/runtime/images/promote', () => {
     expect(provider.tagged).toEqual([['hatchabot-runtime:2026.9.4', 'hatchabot-runtime:latest']]);
     expect(res.json().followers.map((a: any) => a.name)).toEqual(['Kitchen']);
   });
+  it('upward across 2026.8 is the normal path; only an older default could strand migrated agents', async () => {
+    // 2026-10-07: the guard was inverted and refused promoting 2026.9.8 over agents still on 2026.7.
+    const { f, provider, store } = await world();
+    provider.tags.push({ tag: 'hatchabot-runtime:2026.9.8', imageId: 'img-D', openclawVersion: '2026.9.8' });
+    provider.tags.find((t) => t.tag === 'hatchabot-runtime:2026.7.1-2')!.openclawVersion = '2026.7.1-2';
+    const ref = (id: string) => store.getAgent(id)!.runtimeRef!;
+    provider.infoOverride.set(ref('a1'), { openclawVersion: '2026.7.1-2' });
+    provider.infoOverride.set(ref('a2'), { openclawVersion: '2026.9.6' });
+    const up = await f.inject({ method: 'POST', url: '/v1/runtime/images/promote', headers: as, payload: { tag: 'hatchabot-runtime:2026.9.8' } });
+    expect(up.statusCode).toBe(200);
+    // Back below 2026.8 with an agent already on 2026.9: refused, naming it.
+    const down = await f.inject({ method: 'POST', url: '/v1/runtime/images/promote', headers: as, payload: { tag: 'hatchabot-runtime:2026.7.1-2' } });
+    expect(down.statusCode).toBe(409);
+    expect(down.json().error).toMatch(/Garage/);
+    expect(down.json().error).not.toMatch(/Kitchen/);
+  });
   it('refuses the default itself, derived images, unknown tags and bad refs', async () => {
     const { f } = await world();
     const post = (tag: string) => f.inject({ method: 'POST', url: '/v1/runtime/images/promote', headers: as, payload: { tag } });

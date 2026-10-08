@@ -3079,12 +3079,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (target.embedEngine === 'none' && !embedder.enabled && !embedder.external) {
       return reply.code(409).send({ error: `${tag} has no memory search engine of its own and the shared service is off, so no agent could be built on it. Turn the service on first (Settings → Hosts).` });
     }
-    if (needsPortHeal(target.openclawVersion)) {
+    // Only a target BELOW 2026.8 can strand anyone (the same check as PATCH image): it
+    // cannot read a volume already migrated to 2026.8+. Upward is the normal path, and a
+    // 2026.7 volume is healed on its rebuild. (This was inverted, and refused promoting
+    // 2026.9.8 over agents still on 2026.7 — 2026-10-07.)
+    if (target.openclawVersion && !needsPortHeal(target.openclawVersion)) {
       const stuck: string[] = [];
       for (const a of followers) {
         if (!a.runtimeRef) continue;
         const running = await provider.info(a.runtimeRef).catch(() => ({} as { openclawVersion?: string }));
-        if (running.openclawVersion && !needsPortHeal(running.openclawVersion)) stuck.push(a.name);
+        if (running.openclawVersion && needsPortHeal(running.openclawVersion)) stuck.push(a.name);
       }
       if (stuck.length) {
         return reply.code(409).send({ error: `${tag} runs OpenClaw ${target.openclawVersion}, which cannot read the data of agents already on 2026.8 or newer (${stuck.slice(0, 5).join(', ')}${stuck.length > 5 ? ` and ${stuck.length - 5} more` : ''}). Pin those agents to their current image first, or keep the newer default.` });

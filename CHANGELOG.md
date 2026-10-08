@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.146.1] — 2026-10-07
+
+### Fixed
+- **Promoting a newer OpenClaw over agents still on 2026.7 was refused.** The check that stops a default *below* 2026.8 from stranding agents already migrated was inverted, so it refused the normal upward move ("cannot read the data of agents already on 2026.8 or newer", naming agents on 2026.7). It now refuses only a move down across 2026.8, like the per-agent image check.
+- **`hatchabot image promote 2026.9.8`** took a bare version for a derived image's name; it now means that OpenClaw version's base image (`hatchabot-runtime:2026.9.8`).
+
 ## [2.146.0] — 2026-10-07
 
 ### Added

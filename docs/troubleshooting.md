@@ -203,6 +203,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/orchestrator/apps.ts` — `mergeConfig`
 
+### Promoting a newer OpenClaw is refused: "… cannot read the data of agents already on 2026.8 or newer"
+- **Check:** the agents it names run OpenClaw 2026.7 (`hatchabot list`), not 2026.8 or newer.
+- **Cause:** before 2.146.1 the promote check was inverted: it refused moving the fleet UP across 2026.8 over agents still on 2026.7 (the normal path; their volume is healed on rebuild), instead of refusing a move DOWN below 2026.8 over agents already migrated.
+- **Fix:** update to 2.146.1. `hatchabot image promote 2026.9.8` (a bare version now means that base image, not a derived image's name).
+- **Fixed in:** `v2.146.1`
+- **Code:** `src/api/routes.ts` — `'/v1/runtime/images/promote'`; `src/openclaw/configWriter.ts` — `needsPortHeal`
+
 ### An agent's times are hours off (it thinks it is in UTC)
 - **Check:** `openclaw config get agents.defaults.userTimezone` in the agent (unset before 2.143.0); `date` in its container says UTC.
 - **Cause:** OpenClaw falls back to the process's zone, and containers run on UTC.

@@ -1734,7 +1734,8 @@ async function main() {
       // it). A bare name means the derived tag from deriveTag — imported, not
       // re-spelled, so the tag scheme has exactly one definition.
       const { deriveTag } = await import('./orchestrator/derivedImage.js');
-      const toTag = (ref: string) => (ref.includes(':') ? ref : deriveTag(ref));
+      // "2026.9.8" is the base image of that OpenClaw version; another bare name is a derived image's.
+      const toTag = (ref: string) => (ref.includes(':') ? ref : /^\d{4}\.\d+\.\d+(-[\w.-]+)?$/.test(ref) ? `hatchabot-runtime:${ref}` : deriveTag(ref));
       const sub = rest[0];
 
       if (!sub || sub === 'list') {
