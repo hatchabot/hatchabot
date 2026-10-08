@@ -182,6 +182,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'migrate.done': 'moved to the other server',
   'migrate.exported': 'exported for the move',
   'migrate.landed_despite_error': 'landed on the other server despite an error here',
+  'migrate.outcome_unknown': 'the move may or may not have landed on the other server — left stopped here to be safe',
   'migrate.pool_retire_failed': 'its bot could not be retired from the pool here',
   'migrate.preflight_ok': 'the other server is ready for it',
   'migrate.restart_failed': 'did not restart after the failed move',

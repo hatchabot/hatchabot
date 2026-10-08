@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { migrateAgent, MigrateError, preflight } from '../src/orchestrator/migrate.js';
+import { isDefiniteRefusal, migrateAgent, MigrateError, preflight } from '../src/orchestrator/migrate.js';
 import { isBusy } from '../src/orchestrator/busy.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
@@ -271,6 +271,179 @@ describe('migrateAgent', () => {
     const w = await world();
     w.store.setAgentState('a1', 'REBUILDING');
     await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/while it is REBUILDING/);
+  });
+});
+
+/**
+ * The import comes back as an HTTP error (`restore`), and the destination's
+ * agent list answers as `list` says: an array, or 'unreachable' (the list
+ * call throws), or a status number (the list call fails with it). Counts the
+ * list calls so a test can tell whether the destination was asked.
+ */
+function importFailsWith(
+  restore: { status: number; statusText?: string; body: string; contentType?: string },
+  list: Array<Array<{ slug: string; state: string }>> | 'unreachable' | number,
+) {
+  const calls = { list: 0 };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init?: any) => {
+    const u = String(url);
+    if (u.endsWith('/v1/agents/preflight')) {
+      return new Response(JSON.stringify({ ok: true, reasons: [] }), { status: 200 });
+    }
+    if (u.includes('/v1/agents/restore')) {
+      return new Response(restore.body, {
+        status: restore.status,
+        statusText: restore.statusText ?? '',
+        headers: { 'content-type': restore.contentType ?? 'text/html' },
+      });
+    }
+    if (u.endsWith('/v1/agents') && (init?.method ?? 'GET') === 'GET') {
+      calls.list++;
+      if (list === 'unreachable') throw new Error('ECONNREFUSED');
+      if (typeof list === 'number') return new Response('<html>proxy error</html>', { status: list });
+      // Successive answers; the last one repeats.
+      const answer = list[Math.min(calls.list - 1, list.length - 1)];
+      return new Response(JSON.stringify(answer), { status: 200 });
+    }
+    throw new Error(`unexpected fetch ${u}`);
+  });
+  return calls;
+}
+
+const GATEWAY_TIMEOUT = { status: 504, statusText: 'Gateway Timeout', body: '<html>504 Gateway Timeout</html>' };
+const BAD_GATEWAY = { status: 502, statusText: 'Bad Gateway', body: '<html>502 Bad Gateway</html>' };
+
+describe('issue #1: an HTTP error from the import is not proof it rolled back', () => {
+  it.each([
+    ['504', GATEWAY_TIMEOUT],
+    ['502', BAD_GATEWAY],
+  ])('%s with the agent RUNNING on the destination: source stays stopped and is marked moved', async (code, restore) => {
+    const w = await world();
+    const calls = importFailsWith(restore, [[{ slug: 'kitchen', state: 'RUNNING' }]]);
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(
+      new RegExp(`Desktop answered ${code} [A-Za-z ]+, but the agent DID arrive and is running there`),
+    );
+    expect(calls.list).toBeGreaterThan(0);
+    const src = w.store.getAgent('a1')!;
+    expect(src.state).toBe('STOPPED');
+    expect(src.migratedTo).toContain('Desktop');
+  });
+
+  it.each([
+    ['504', GATEWAY_TIMEOUT],
+    ['502', BAD_GATEWAY],
+  ])('%s with the agent still PROVISIONING there: source stays stopped, no tombstone, owner told to check', async (code, restore) => {
+    const w = await world();
+    const calls = importFailsWith(restore, [[{ slug: 'kitchen', state: 'PROVISIONING' }]]);
+    const err = await migrateAgent(w.deps as any, 'a1', PEER).catch((e) => e);
+    expect(err).toBeInstanceOf(MigrateError);
+    expect(err.message).toMatch(new RegExp(`failed \\(it answered ${code} [A-Za-z ]+\\) and we couldn't confirm`));
+    expect(err.message).toMatch(/left stopped to be safe — check Desktop/);
+    // It waited for the import over there to settle before giving up.
+    expect(calls.list).toBe(12);
+    const src = w.store.getAgent('a1')!;
+    expect(src.state).toBe('STOPPED');
+    expect(src.migratedTo).toBeUndefined();
+  });
+
+  it('504, then the PROVISIONING import finishes RUNNING: source stays stopped and is marked moved', async () => {
+    const w = await world();
+    importFailsWith(GATEWAY_TIMEOUT, [
+      [{ slug: 'kitchen', state: 'PROVISIONING' }],
+      [{ slug: 'kitchen', state: 'RUNNING' }],
+    ]);
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/DID arrive/);
+    expect(w.store.getAgent('a1')!.state).toBe('STOPPED');
+    expect(w.store.getAgent('a1')!.migratedTo).toContain('Desktop');
+  });
+
+  it.each([
+    ['504', GATEWAY_TIMEOUT],
+    ['502', BAD_GATEWAY],
+  ])('%s with the agent absent from the destination: source restarted, agent unchanged', async (code, restore) => {
+    const w = await world();
+    const calls = importFailsWith(restore, [[{ slug: 'other', state: 'RUNNING' }]]);
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(
+      new RegExp(`The transfer to Desktop failed \\(it answered ${code} [A-Za-z ]+\\)\\. Your agent is unchanged\\.`),
+    );
+    expect(calls.list).toBe(1);
+    const src = w.store.getAgent('a1')!;
+    expect(src.state).toBe('RUNNING');
+    expect(src.migratedTo).toBeUndefined();
+  });
+
+  it.each([
+    ['504, list unreachable', GATEWAY_TIMEOUT, 'unreachable' as const],
+    ['502, list unreachable', BAD_GATEWAY, 'unreachable' as const],
+    ['504, list also 504', GATEWAY_TIMEOUT, 504],
+    ['502, list also 502', BAD_GATEWAY, 502],
+  ])('%s: source never restarted, owner told it could not be confirmed', async (_name, restore, list) => {
+    const w = await world();
+    const calls = importFailsWith(restore, list);
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/couldn't confirm whether the agent arrived/);
+    expect(calls.list).toBe(12);
+    const src = w.store.getAgent('a1')!;
+    expect(src.state).toBe('STOPPED');
+    expect(src.migratedTo).toBeUndefined();
+  });
+
+  it('a 503 or a 500 from Hatchabot itself is checked too', async () => {
+    for (const restore of [
+      { status: 503, statusText: 'Service Unavailable', body: 'upstream unavailable' },
+      { status: 500, body: JSON.stringify({ error: 'Something went wrong on the server — its log has the details.' }), contentType: 'application/json' },
+    ]) {
+      const w = await world();
+      const calls = importFailsWith(restore, [[{ slug: 'kitchen', state: 'RUNNING' }]]);
+      await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/DID arrive/);
+      expect(calls.list).toBe(1);
+      expect(w.store.getAgent('a1')!.state).toBe('STOPPED');
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('a 4xx without a Hatchabot error body (a proxy\'s 408) is checked, not taken as a refusal', async () => {
+    const w = await world();
+    const calls = importFailsWith(
+      { status: 408, statusText: 'Request Timeout', body: '<html>408</html>' },
+      [[{ slug: 'kitchen', state: 'RUNNING' }]],
+    );
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/answered 408 Request Timeout, but the agent DID arrive/);
+    expect(calls.list).toBe(1);
+    expect(w.store.getAgent('a1')!.state).toBe('STOPPED');
+  });
+
+  it('a success status with no agent in the body is checked, not taken as an answer', async () => {
+    const w = await world();
+    const calls = importFailsWith(
+      { status: 200, body: '<html>maintenance page</html>' },
+      [[{ slug: 'kitchen', state: 'RUNNING' }]],
+    );
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/DID arrive/);
+    expect(calls.list).toBe(1);
+    expect(w.store.getAgent('a1')!.state).toBe('STOPPED');
+    expect(w.store.getAgent('a1')!.migratedTo).toContain('Desktop');
+  });
+
+  it('a definite 4xx refusal from Hatchabot still restarts the source without asking the destination', async () => {
+    const w = await world();
+    const calls = importFailsWith(
+      { status: 400, body: JSON.stringify({ error: 'disk full' }), contentType: 'application/json' },
+      [[{ slug: 'kitchen', state: 'RUNNING' }]],
+    );
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/Desktop couldn't import it: disk full\. Your agent is unchanged\./);
+    expect(calls.list).toBe(0);
+    expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
+  it('isDefiniteRefusal: only a 4xx with Hatchabot\'s JSON error body', () => {
+    expect(isDefiniteRefusal(400, { error: 'disk full' })).toBe(true);
+    expect(isDefiniteRefusal(409, { error: 'needs a build', code: 'image_decision' })).toBe(true);
+    expect(isDefiniteRefusal(429, { error: 'cap reached' })).toBe(true);
+    expect(isDefiniteRefusal(504, undefined)).toBe(false);
+    expect(isDefiniteRefusal(502, {})).toBe(false);
+    expect(isDefiniteRefusal(500, { error: 'Something went wrong on the server' })).toBe(false);
+    expect(isDefiniteRefusal(408, undefined)).toBe(false);
+    expect(isDefiniteRefusal(400, { message: 'not ours' })).toBe(false);
   });
 });
 

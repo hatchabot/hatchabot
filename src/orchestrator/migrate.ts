@@ -17,9 +17,12 @@ import { whileBusy } from './busy.js';
  *   3. import      — destination provisions and starts (now it is the only one)
  *   4. verify      — destination reports RUNNING, or we undo
  *
- * On any failure before step 4 succeeds, the source is restarted and the
- * destination has already rolled itself back — so a failed migration leaves
- * exactly the state you began with. The source is deliberately left STOPPED
+ * When the destination definitely refuses, or confirms nothing landed, the
+ * source is restarted and the destination has already rolled itself back —
+ * so a failed migration leaves exactly the state you began with. When the
+ * answer is lost (a dropped connection, a proxy's 502/503/504, any 5xx) and
+ * the destination can't confirm either way, the source stays STOPPED: a
+ * second live poller is the one outcome that can't be undone. The source is deliberately left STOPPED
  * rather than deleted: an automatic delete would make a wrong migration
  * unrecoverable, and the archive is not kept.
  */
@@ -212,6 +215,27 @@ async function destinationHasAgent(
   return 'unknown';
 }
 
+/**
+ * Is this failed import a definite "no" from Hatchabot itself? Only a 4xx
+ * carrying Hatchabot's own JSON error body is: the restore route sends those
+ * when it refuses, after its own rollback, so nothing is left over there.
+ * Anything else — a proxy's 502/503/504 page, any 5xx, a 408 or 499 from
+ * something in between — may come while (or after) the destination commits
+ * the agent, so the caller must ask before restarting the source.
+ */
+export function isDefiniteRefusal(
+  status: number,
+  body: unknown,
+): body is { error: string; code?: string; problem?: string } {
+  return (
+    status >= 400 &&
+    status < 500 &&
+    typeof body === 'object' &&
+    body !== null &&
+    typeof (body as { error?: unknown }).error === 'string'
+  );
+}
+
 export interface MigrateResult {
   movedTo: string;
   remoteAgentId: string;
@@ -315,62 +339,86 @@ async function migrateAgentInner(
     }
   };
 
-  // 3. Import on the destination. Its own rollback guarantees it leaves
-  //    nothing behind if this fails, so we only have to undo our side.
-  let remote: { id: string; state: string; name: string };
-  try {
-    const res = await peerFetch(deps, peer, `/v1/agents/restore${imageChoice ? `?image=${imageChoice}` : ''}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/octet-stream' },
-      body: new Uint8Array(data),
-    });
-    const body = (await res.json().catch(() => ({}))) as any;
-    if (!res.ok) {
-      // A real answer from the destination: it refused and rolled back.
-      await undo(`import rejected: ${body.error ?? res.status}`);
-      if (body.code === 'image_decision') {
-        throw new MigrateError(
-          `${peer.name} doesn't have the image ${agent.image} and won't build it for this move` +
-            `${body.problem ? ` (${body.problem})` : " (only that server's owner may build images there)"}. ` +
-            'Your agent is unchanged. Move it on that server\'s default image (CLI: --drop-pin), or Download a copy and import it there as its owner.',
-        );
-      }
-      throw new MigrateError(
-        `${peer.name} couldn't import it: ${body.error ?? res.status}. Your agent is unchanged.`,
-      );
-    }
-    remote = body;
-  } catch (err) {
-    if (err instanceof MigrateError) throw err;
-    // NO answer from the destination — which is not the same as "it failed".
-    // The import takes minutes (volume restore + health wait); a dropped
-    // connection or proxy timeout can lose the response AFTER the destination
-    // committed and started polling. Restarting the source on that guess is
-    // how a "failed" migration ends with two live pollers. Ask before undoing.
+  /**
+   * The import gave no definite answer. The import takes minutes (volume
+   * restore + health wait); a dropped connection or a proxy timeout can lose
+   * the response AFTER the destination committed and started polling.
+   * Restarting the source on that guess is how a "failed" migration ends
+   * with two live pollers. Ask the destination before undoing.
+   *
+   * `status` is the HTTP status the owner should see, when there was one;
+   * without it the wording is the lost-connection one.
+   */
+  const settleUnanswered = async (why: string, status?: string): Promise<never> => {
     const landed = await destinationHasAgent(deps, peer, agent.slug);
     if (landed === 'no') {
-      await undo(`transfer failed: ${String(err)}`);
-      throw new MigrateError(`The transfer to ${peer.name} failed. Your agent is unchanged.`);
+      await undo(`transfer failed: ${why}`);
+      throw new MigrateError(
+        `The transfer to ${peer.name} failed${status ? ` (it answered ${status})` : ''}. Your agent is unchanged.`,
+      );
     }
     if (landed === 'yes') {
-      log('migrate.landed_despite_error', { agentId, peer: peer.name, error: String(err) });
+      log('migrate.landed_despite_error', { agentId, peer: peer.name, error: why });
       store.setAgentMigratedTo(
         agentId,
         `${peer.name} (${new Date().toISOString().slice(0, 10)})`,
       );
       throw new MigrateError(
-        `The connection to ${peer.name} dropped, but the agent DID arrive and is running there. ` +
-          `This copy stays stopped and marked as moved.`,
+        `${status ? `${peer.name} answered ${status}` : `The connection to ${peer.name} dropped`}, but the ` +
+          `agent DID arrive and is running there. This copy stays stopped and marked as moved.`,
       );
     }
     // Can't tell. Leaving the source stopped is recoverable (the owner can
     // start it once they've looked); starting it next to a live copy is not.
+    log('migrate.outcome_unknown', { agentId, peer: peer.name, error: why });
     throw new MigrateError(
-      `The transfer to ${peer.name} failed and we couldn't confirm whether the agent arrived ` +
-        `there. This copy is left stopped to be safe — check ${peer.name}, then either delete ` +
-        `this copy (it arrived) or start it again (it didn't).`,
+      `The transfer to ${peer.name} failed${status ? ` (it answered ${status})` : ''} and we couldn't ` +
+        `confirm whether the agent arrived there. This copy is left stopped to be safe — check ` +
+        `${peer.name}, then either delete this copy (it arrived) or start it again (it didn't).`,
+    );
+  };
+
+  // 3. Import on the destination. Its own rollback guarantees it leaves
+  //    nothing behind when it REFUSES, so then we only have to undo our side.
+  let res: Response;
+  try {
+    res = await peerFetch(deps, peer, `/v1/agents/restore${imageChoice ? `?image=${imageChoice}` : ''}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: new Uint8Array(data),
+    });
+  } catch (err) {
+    // NO answer from the destination — which is not the same as "it failed".
+    return settleUnanswered(String(err));
+  }
+  const body = (await res.json().catch(() => undefined)) as any;
+  if (!res.ok) {
+    const status = `${res.status}${res.statusText ? ` ${res.statusText}` : ''}`;
+    if (!isDefiniteRefusal(res.status, body)) {
+      // A 502/503/504 is usually a proxy giving up while the destination is
+      // still importing, and a 5xx from Hatchabot itself may come after the
+      // agent was committed. Neither proves a rollback (issue #1).
+      return settleUnanswered(`HTTP ${status}`, status);
+    }
+    // A real answer from the destination: it refused and rolled back.
+    await undo(`import rejected: ${body.error}`);
+    if (body.code === 'image_decision') {
+      throw new MigrateError(
+        `${peer.name} doesn't have the image ${agent.image} and won't build it for this move` +
+          `${body.problem ? ` (${body.problem})` : " (only that server's owner may build images there)"}. ` +
+          'Your agent is unchanged. Move it on that server\'s default image (CLI: --drop-pin), or Download a copy and import it there as its owner.',
+      );
+    }
+    throw new MigrateError(
+      `${peer.name} couldn't import it: ${body.error}. Your agent is unchanged.`,
     );
   }
+  if (!body || typeof body.state !== 'string') {
+    // A success status with no agent in it (a proxy's page, a cut-off body):
+    // the import may have committed, so this is no answer either.
+    return settleUnanswered(`HTTP ${res.status} without an agent in the body`, `${res.status} with no agent in the reply`);
+  }
+  const remote = body as { id: string; state: string; name: string };
 
   // 4. Verify it actually came up there before we consider this done.
   if (remote.state !== 'RUNNING') {
