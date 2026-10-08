@@ -64,7 +64,10 @@ has come. Over a Tailscale link that relays instead of connecting directly
 
 To check that moves to and from a runner work on your machines, run
 `node scripts/runner-scenarios.mjs --runner "<name>"`. It takes 20–40
-minutes, uses no AI turns, and deletes its test agents at the end.
+minutes, uses no AI turns, and deletes its test agents at the end. On a
+runner already on the current image, add
+`--old-image ghcr.io/hatchabot/runtime:2026.7.1-2` (or any image older than
+2026.8 that is on the runner) to run the old-image cases too.
 
 ### Memory search on a runner
 

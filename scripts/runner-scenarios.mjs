@@ -9,6 +9,7 @@
  * it). No AI turns are used.
  *
  *   node scripts/runner-scenarios.mjs --runner "<name or id>" [--keep] [--no-image]
+ *                                     [--old-image <an image on the runner older than 2026.8>]
  *
  * Phase A runs only while the runner's image is older than 2026.8 (the
  * cases a laptop left on an old image meets): a current agent may not move
@@ -17,6 +18,11 @@
  * agent rebuilt in place on the runner, a current agent moved there and back,
  * each machine's door holding only its own agents' keys, and a plain rebuild
  * that does not re-index.
+ *
+ * --old-image runs phase A on a runner already on the current image: for
+ * those few minutes the runner's default (hatchabot-runtime:latest) points at
+ * the old image, and it is pointed back afterwards (always, even on failure).
+ * Running containers are not affected by a tag moving.
  *
  * It touches only agents it creates ("zz runner test …"), and deletes them at
  * the end unless --keep. Reads HATCHABOT_URL / HATCHABOT_TOKEN from the
@@ -148,6 +154,14 @@ const eventsOf = async (id) => (await api(`/v1/agents/${id}/events?limit=200`)).
 
 // ---- the run -------------------------------------------------------------------
 const made = [];
+/** The runner's default image to point back at, while --old-image borrows the tag. */
+let restoreLatest;
+function pointBack() {
+  if (!restoreLatest) return;
+  const r = docker(restoreLatest.hostId, ['tag', restoreLatest.id, 'hatchabot-runtime:latest']);
+  log(`${r.code === 0 ? '' : '✗ '}the runner's default image pointed back at ${restoreLatest.id.slice(7, 19)}${r.code === 0 ? '' : `: ${r.out.slice(-200)}`}`);
+  if (r.code === 0) restoreLatest = undefined;
+}
 async function main() {
   if (!TOKEN) throw new Error('No HATCHABOT_TOKEN (see ~/.config/hatchabot/env).');
   hosts = (await api('/v1/hosts')).json;
@@ -157,8 +171,18 @@ async function main() {
   if (!local || !runner) throw new Error(`No runner ${want ?? ''} (hosts: ${hosts.map((h) => h.name).join(', ')})`);
   const existing = (await api('/v1/agents')).json.filter((a) => a.name?.startsWith(PREFIX));
   if (existing.length) throw new Error(`Test agents from an earlier run are still there: ${existing.map((a) => a.name).join(', ')} — delete them first.`);
-  const ping = (await api(`/v1/hosts/${runner.id}/ping`)).json;
+  let ping = (await api(`/v1/hosts/${runner.id}/ping`)).json;
   if (!ping.reachable) throw new Error(`${runner.name} is not answering: ${ping.error ?? ''}`);
+  const old = opt('old-image');
+  if (old && !(ping.hasImage && below2026_8(ping.imageVersion))) {
+    const cur = docker(runner.id, ['image', 'inspect', 'hatchabot-runtime:latest', '--format', '{{.Id}}']);
+    const oldId = docker(runner.id, ['image', 'inspect', old, '--format', '{{.Id}}']);
+    if (cur.code !== 0 || oldId.code !== 0) throw new Error(`--old-image: ${cur.code ? 'the runner has no default image' : `the runner has no ${old}`}`);
+    restoreLatest = { hostId: runner.id, id: cur.out.trim() };
+    docker(runner.id, ['tag', old, 'hatchabot-runtime:latest']);
+    log(`for phase A, ${runner.name}'s default image points at ${old} (it will be pointed back)`);
+    ping = (await api(`/v1/hosts/${runner.id}/ping`)).json;
+  }
   log(`${runner.name}: ${ping.hasImage ? `OpenClaw ${ping.imageVersion} (this machine: ${ping.currentVersion})` : 'no runtime image (hatchabot-runtime:latest)'}`);
 
   const T = {};
@@ -202,7 +226,8 @@ async function main() {
   }
 
   // ---- the runner gets this machine's image -----------------------------------
-  if (!flag('no-image') && (!ping.hasImage || ping.imageVersion !== ping.currentVersion)) {
+  if (restoreLatest) pointBack();
+  else if (!flag('no-image') && (!ping.hasImage || ping.imageVersion !== ping.currentVersion)) {
     await scenario(`I  ${runner.name} gets this machine's image (Install image)`, async () => {
       // The copy runs on the server; it is followed, not waited on (a request held
       // open for many minutes is dropped while the copy goes on).
@@ -291,6 +316,7 @@ async function main() {
 main()
   .catch((err) => { results.push({ name: 'run', ok: false, checks: [[String(err.message || err), false]] }); log(`✗ ${err.message || err}`); })
   .finally(async () => {
+    pointBack();
     if (!flag('keep')) {
       for (const id of made) {
         const r = await api(`/v1/agents/${id}`, { method: 'DELETE' }).catch((e) => ({ status: String(e) }));
