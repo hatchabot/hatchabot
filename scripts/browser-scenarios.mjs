@@ -32,11 +32,20 @@ async function browserUp(agent, secs = 150) {
 }
 /** OpenClaw's browser tool, through the agent: open the page and read it back. */
 async function reads(agent) {
-  await inAgent(agent, ['openclaw', 'browser', 'open', PAGE], 120_000);
-  await sleep(3000);
-  const snap = await inAgent(agent, ['openclaw', 'browser', 'snapshot'], 120_000);
-  return { ok: /Example Domains/i.test(snap.out), out: snap.out.slice(0, 300) };
+  // Right after a start its OpenClaw may still be coming up: a few tries.
+  let last = '';
+  for (let i = 0; i < 4; i++) {
+    await inAgent(agent, ['openclaw', 'browser', 'open', PAGE], 120_000);
+    await sleep(3000);
+    const snap = await inAgent(agent, ['openclaw', 'browser', 'snapshot'], 120_000);
+    if (/Example Domains/i.test(snap.out)) return { ok: true, out: '' };
+    last = snap.out.slice(-300);
+    await sleep(10_000);
+  }
+  return { ok: false, out: last };
 }
+/** OpenClaw's browser tool is off: its status says so, or refuses with "browser.enabled=false". */
+const toolOff = (out) => /"enabled":\s*false|browser\.enabled=false/.test(out);
 /** Switch it, and wait for the rebuild that applies it. */
 async function setBrowser(agent, on) {
   const r = await api(`/v1/agents/${agent.id}`, { method: 'PATCH', body: { browser: on } });
@@ -52,7 +61,7 @@ async function main() {
   await scenario('B0 off by default: no browser, and the tool is off', async () => {
     const st = await inAgent(agent, ['openclaw', 'browser', 'status', '--json'], 120_000);
     const b = (await api(`/v1/agents/${agent.id}/browser`)).json;
-    return [['the agent has no browser', !b.on && !b.running], ['OpenClaw\'s browser tool is off', /"enabled":\s*false/.test(st.out), st.out.slice(0, 200)]];
+    return [['the agent has no browser', !b.on && !b.running], ['OpenClaw\'s browser tool is off', toolOff(st.out), st.out.slice(0, 200)]];
   });
   await scenario('B1 switched on: its browser starts, and the agent opens and reads a real page with it', async () => {
     agent = await setBrowser(agent, true);
@@ -65,11 +74,12 @@ async function main() {
     const files = docker('exec', name, 'ls', '/home/node/.openclaw');
     const mem = docker('inspect', name, '--format', '{{.HostConfig.Memory}}').out.trim();
     const net = docker('inspect', name, '--format', '{{.HostConfig.NetworkMode}}').out.trim();
+    const agentId = docker('inspect', containerOf(agent), '--format', '{{.Id}}').out.trim();
     const fromHost = spawnSync('curl', ['-s', '-m', '3', 'http://127.0.0.1:9222/json/version'], { encoding: 'utf8' });
     return [
       ['the agent\'s files are not in it', files.code !== 0],
       [`its memory limit (${mem} bytes)`, Number(mem) === 1024 ** 3],
-      [`it lives in the agent's network (${net})`, net === `container:${containerOf(agent)}`],
+      ['it lives in the agent\'s network', net === `container:${containerOf(agent)}` || net === `container:${agentId}`, net],
       ['the machine itself cannot reach it', !/webSocketDebuggerUrl/.test(fromHost.stdout ?? '')],
     ];
   });
@@ -91,7 +101,7 @@ async function main() {
     let gone = false;
     for (let i = 0; i < 30 && !gone; i++) { gone = docker('inspect', `${containerOf(agent)}-browser`).code !== 0; if (!gone) await sleep(5000); }
     const st = await inAgent(agent, ['openclaw', 'browser', 'status', '--json'], 120_000);
-    return [['its browser container is gone', gone], ['OpenClaw\'s browser tool is off', /"enabled":\s*false/.test(st.out), st.out.slice(0, 200)]];
+    return [['its browser container is gone', gone], ['OpenClaw\'s browser tool is off', toolOff(st.out), st.out.slice(0, 200)]];
   });
 }
 
