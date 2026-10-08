@@ -2369,6 +2369,40 @@ const SCENARIOS = String.raw`(() => {
         aiDlg.close();
       } finally { if (typeof aiDlg !== 'undefined' && aiDlg.open) aiDlg.close(); delete window.__override['/v1/budgets']; await agentsCleanup(); }
     },
+    // Adopting without Telegram (2.149): the console is how it is talked to. Made-up workspace.
+    adoptWithoutTelegram: async () => {
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-garden-helper';
+      window.__override['/v1/openclaw/agents'] = { agents: [{ id: 'garden', name: 'Garden Helper', workspace: WS, bot: null }] };
+      window.__override['/v1/agents/ad1'] = { id: 'ad1', name: 'Garden Helper', state: 'RUNNING' };
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      try {
+        openAdoptDlg(); await sleep(250);
+        const row = document.querySelector('#adoptDiscover input[data-oc]');
+        ok('an agent without a bot can be ticked in the list', !!row && !row.disabled);
+        ok('and says it comes in without Telegram: ' + $('adoptDiscover').textContent.trim().slice(0, 120), /without Telegram/.test($('adoptDiscover').textContent));
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md', 'AGENTS.md'], bytes: 2048, markdownFiles: ['SOUL.md', 'AGENTS.md'], existingBot: null } }];
+        $('adoptPath').value = WS;
+        await adoptInspect(); await sleep(50);
+        ok('a workspace with no bot: "No Telegram for now" is ticked', !!$('adoptWeb')?.checked);
+        ok('and the bot choice is out of the way', $('adoptBotChoice')?.hidden === true);
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad1', name: 'Garden Helper', state: 'PROVISIONING' } }];
+        window.__answer['POST /v1/agents/ad1/adopt-workspace'] = [{ status: 200, body: { files: 2, bytes: 2048, crons: { carried: 0 } } }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        const made = window.__calls.find((c) => c.method === 'POST' && c.path === '/v1/agents');
+        ok('the agent is created web-only (telegram: false)', made?.body?.telegram === false);
+        ok('no bot token is asked for or sent', !window.__calls.some((c) => /channel-token/.test(c.path)));
+        ok('its workspace is copied in', window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/agents/ad1/adopt-workspace'));
+      } finally {
+        hosts = hadHosts;
+        for (const k of ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'POST /v1/agents/ad1/adopt-workspace']) delete window.__answer[k];
+        for (const k of ['/v1/openclaw/agents', '/v1/agents/ad1']) delete window.__override[k];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
     // A runner's own memory search (2.147) and an old image on it (Settings → Hosts). Made-up machines.
     runnerMemorySearch: async () => {
       window.__override['/v1/hosts'] = [{ id: 'h1', name: 'This machine', kind: 'local', agentCount: 12 },

@@ -29,7 +29,7 @@ passed on. A run that skipped (nothing to test with) or failed does not count.
 | `regress-autonomous` | An agent made from the CLI answers, remembers, runs a task on demand and on its schedule, pauses, and keeps both across a restart | The live install | 10–15 min | about eight |
 | `restore-drill` | The newest nightly backup restores, every part of it, without touching the live system | A backup set | 5–15 min | none |
 | `upgrade-check` | Databases made by older releases open with this one | Nothing (temporary databases) | 2–5 min | none |
-| `smoke-adopt` | Adopting an agent end to end on a throwaway control plane, with real Docker and Telegram | A throwaway bot token in `.env.smoke`; without one it skips | 5–10 min | none |
+| `smoke-adopt` | Switching to Hatchabot: an OpenClaw agent is found and adopted web-only on a throwaway control plane; its workspace and tasks arrive, its console answers, its data folder mounts | Nothing (its own ports); `-- --with-telegram` takes over a bot from `.env.smoke` instead | 2–5 min | none |
 | `clean-install` | A stranger's install on a brand-new Linux machine, and a new owner's first steps | LXD here; `-- --ai-source "<name>"`; stop the VM after | 20–40 min | one |
 | `shared-host` | Two tenants on one machine cannot reach each other | Test VMs. On hold with Hatchabot Cloud: never due | 30+ min | none |
 

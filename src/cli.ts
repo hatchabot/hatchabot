@@ -199,10 +199,12 @@ Commands:
   ai [<agent>] [<profileId>] [--now]
                                Show AI sources, or point an agent at one (applies
                                at its next rebuild; --now rebuilds it at once)
-  adopt <workspace-dir> <name> [--reuse-bot] [--profile <id>]
+  adopt <workspace-dir> <name> [--reuse-bot | --no-telegram] [--profile <id>]
                                Turn an existing OpenClaw agent's workspace
                                into a managed Hatchabot agent (copies the
-                               WHOLE folder; the original is only read)
+                               WHOLE folder; the original is only read).
+                               --no-telegram: no bot; talk to it in the web
+                               console, and attach a bot later if you want one
   app inspect <dir|url> [--ref <ref>]
                                An app's manifest (hatchabot.json) and what it asks for.
                                Apps: docs/apps-in-agents.md (machine owner only).
@@ -1486,10 +1488,14 @@ async function main() {
       const bot = preview.existingBot;
       if (bot) {
         console.log(`  already has a bot: @${bot.accountId} (used by "${bot.sourceAgentId}" in your hand-built instance)`);
-        if (!flags.has('reuse-bot')) {
+        if (!flags.has('reuse-bot') && !flags.has('no-telegram')) {
           console.log(`  --reuse-bot takes it over: costs no new bot slot, and whoever already`);
           console.log(`  messages @${bot.accountId} keeps the same conversation.`);
+          console.log(`  --no-telegram brings it in without a bot: you talk to it in the web console.`);
         }
+      } else if (!flags.has('no-telegram')) {
+        console.log(`  no bot of its own: it gets one from your pool or asks for a token —`);
+        console.log(`  or add --no-telegram and talk to it in the web console.`);
       }
       if (flags.has('reuse-bot')) {
         if (!bot) fail(`no existing bot is bound to ${preview.path} — drop --reuse-bot and make one with @BotFather`);
@@ -1519,8 +1525,13 @@ async function main() {
       if (seedMembers.length) {
         console.log(`  keeping ${seedMembers.length} approved chat member(s) — no re-pairing`);
       }
+      // --no-telegram: web-only, as `create --no-telegram` — the console is how
+      // it is talked to, and adopting costs no bot slot (2026-10-08).
+      const webOnly = flags.has('no-telegram');
+      if (webOnly && flags.has('reuse-bot')) fail('--reuse-bot and --no-telegram contradict each other: pick one');
       const created: any = await (await jsonPost('/v1/agents', {
         name, aiProfileId: profile, hostId: host,
+        ...(webOnly ? { telegram: false } : {}),
         ...(seedMembers.length ? { seedMembers } : {}),
       })).json();
 
@@ -1565,7 +1576,9 @@ async function main() {
       }
       console.log(`adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into "${name}".`);
       console.log(`The original at ${preview.path} is untouched — retire it when you're happy,`);
-      console.log(`and do not point both at the same Telegram bot.`);
+      console.log(webOnly
+        ? `It has no Telegram bot: talk to it in the web app (click its icon). A bot can be attached later.`
+        : `and do not point both at the same Telegram bot.`);
       return;
     }
     case 'data':

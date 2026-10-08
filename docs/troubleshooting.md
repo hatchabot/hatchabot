@@ -363,6 +363,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.83.1`
 - **Code:** `src/api/routes.ts` — `The agent's gateway did not answer.`; `web/index.html` — `Waking it up`
 
+### Adopting an OpenClaw agent stops at "This agent needs a bot", or the agent is greyed out in the list
+- **Check:** the workspace has no Telegram bot of its own, and the bot pool is empty (or you would rather not use a bot slot).
+- **Cause:** before v2.149.0 adopting always gave the agent a Telegram bot: its own, one from the pool, or a pasted token. The web console was not offered as the way to talk to it.
+- **Fix:** upgrade, then adopt without Telegram: `hatchabot adopt <workspace> "<name>" --no-telegram`, or tick **No Telegram for now** in the web adopt flow. Talk to it from its icon; a bot can be attached later.
+- **Fixed in:** `v2.149.0`
+- **Code:** `src/cli.ts` — `--no-telegram`; `web/index.html` — `adoptWebChanged`
+
+### A build fails: "The memory search service's port … is taken", or "embed door failed … port is already allocated"
+- **Check:** `docker ps --format '{{.Names}} {{.Ports}}' | grep 8093` shows another Hatchabot's `…-embed-door` holding the port.
+- **Cause:** two Hatchabots on one Docker (a second install, a test server) each start a memory search service on the same port, 8093 by default. From OpenClaw 2026.8 every agent needs that service.
+- **Fix:** give the second one its own port: `HATCHABOT_EMBED_PORT=<another port>` in its `.env`, then restart it. Before v2.149.0 the message only said the door could not start.
+- **Fixed in:** `v2.149.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `port is already allocated`
+
 ## Runners
 
 ### A runner agent's tile: "Its machine isn't answering — it may be asleep or offline"

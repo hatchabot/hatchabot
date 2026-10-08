@@ -61,9 +61,9 @@ export const LIVE_TESTS = [
   },
   {
     name: 'smoke-adopt', cmd: ['bash', 'scripts/smoke.sh'], against: 'checkout', minutes: '5–10', aiTurns: false,
-    needs: 'a throwaway BotFather token in .env.smoke (HATCHABOT_SMOKE_BOT_TOKEN); without one it skips',
-    proves: 'adopting an agent end to end on a throwaway control plane, with real Docker and Telegram',
-    area: ['src/orchestrator/adopt.ts', 'scripts/smoke.sh', 'scripts/smoke-adopt-full.ts'],
+    needs: 'nothing (a throwaway control plane on its own ports); -- --with-telegram also takes over a bot from .env.smoke',
+    proves: 'switching to Hatchabot: an OpenClaw agent is found and adopted web-only, its workspace and tasks arrive, its console answers, its data folder mounts',
+    area: ['src/orchestrator/adopt.ts', 'src/orchestrator/cronImport.ts', 'scripts/smoke.sh', 'scripts/smoke-adopt-full.ts'],
   },
   {
     name: 'clean-install', cmd: ['bash', 'scripts/clean-install-test.sh'], against: 'checkout', minutes: '20–40', aiTurns: 'one',

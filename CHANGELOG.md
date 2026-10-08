@@ -2,6 +2,22 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.149.0] — 2026-10-08
+
+### Added
+- **Adopt an OpenClaw agent without Telegram.** `hatchabot adopt <workspace> "<name>" --no-telegram`, or **No Telegram for now** in the web adopt flow, brings it in web-only. You talk to it in its console, it costs no bot slot, and a bot can be attached later.
+  - In the web flow the box is ticked by default when the workspace has no bot of its own.
+  - Agents without a bot can now be ticked in the list of OpenClaw agents found on the machine. Before, adopting always needed a bot, and a bot-less agent was greyed out there.
+
+### Changed
+- **The adopt smoke test no longer needs Telegram.** It was written when Telegram was the only way to talk to an agent, and skipped without a throwaway bot token.
+  - It now adopts web-only on its throwaway control plane and checks that the workspace and scheduled tasks arrive, the console answers, and the data folder mounts.
+  - `--with-telegram` takes over a bot instead.
+
+### Fixed
+- **A second Hatchabot on the same Docker could not start memory search.** Its service tried the port the first one holds, and the error only said the service "could not start". It now names the port and the setting that moves it (`HATCHABOT_EMBED_PORT`).
+  - The smoke test's throwaway server, the first to meet this, uses its own port.
+
 ## [2.148.1] — 2026-10-08
 
 ### Fixed

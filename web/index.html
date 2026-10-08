@@ -6854,13 +6854,13 @@ function renderDiscovery() {
     return;
   }
   el.innerHTML = ocAgents.map((a, i) => {
-    const blocked = a.alreadyAdoptedAs || a.problem || !a.bot;
+    const blocked = a.alreadyAdoptedAs || a.problem;
     let status;
     if (a.alreadyAdoptedAs) status = `already in Hatchabot as “${esc(a.alreadyAdoptedAs)}”`;
     else if (a.problem) status = esc(a.problem);
     else if (a.bot && a.bot.enabledInSource) status = `takes over @${esc(a.bot.accountId)} — disabled in OpenClaw for you`;
     else if (a.bot) status = `@${esc(a.bot.accountId)} · already off in OpenClaw`;
-    else status = 'no bot of its own — bring in via the manual path with a token';
+    else status = 'no bot of its own — comes in without Telegram: talk to it in the web console';
     return `<label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-top:1px solid var(--line)${blocked ? ';opacity:.55' : ''}">
       <input type="checkbox" data-oc="${i}" ${blocked ? 'disabled' : ''} style="width:auto;margin-top:3px" onchange="updateSelCount()">
       <span style="flex:1"><b>${esc(a.name)}</b> <span class="sub">— ${status}</span>
@@ -6910,7 +6910,7 @@ async function bringInSelected() {
     const i = idxOf(a);
     if (a.bot && stillBusy.includes(a.bot.accountId)) { rowSay(i, '✗ bot still polled by OpenClaw — try again', 'var(--warn)'); continue; }
     try {
-      const { res, agentId } = await doAdopt({ path: a.workspace, name: a.name, reuse: !!a.bot, token: '', bot: a.bot, onStatus: m => rowSay(i, m) });
+      const { res, agentId } = await doAdopt({ path: a.workspace, name: a.name, reuse: !!a.bot, web: !a.bot, token: '', bot: a.bot, onStatus: m => rowSay(i, m) });
       const c = res.crons?.carried || 0;
       crons += c;
       rowSay(i, `✓ brought in${c ? ` · ${c} task${c > 1 ? 's' : ''} carried (disabled)` : ''}`, 'var(--ok)'); ok++;
@@ -6961,6 +6961,12 @@ async function adoptInspect() {
 
 function renderAdoptBot(bot) {
   const el = $('adoptBotArea');
+  // Without Telegram: the web console is how it is talked to, and adopting
+  // costs no bot slot (2026-10-08). The default when the workspace has no bot.
+  const web = (checked) => `<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;margin-top:8px">
+      <input type="checkbox" id="adoptWeb" ${checked ? 'checked' : ''} style="width:auto;margin-top:3px" onchange="adoptWebChanged()">
+      <span>No Telegram for now <span class="sub">— talk to it in the web console; a bot can be attached later</span></span>
+    </label>`;
   if (bot) {
     const busy = bot.enabledInSource || bot.polling === 'busy';
     if (busy) {
@@ -6973,22 +6979,28 @@ function renderAdoptBot(bot) {
           <div class="invite-link" style="margin-top:6px">openclaw config set channels.telegram.accounts.${esc(bot.accountId)}.enabled false
 systemctl --user restart openclaw-gateway</div>
         </div>
-        <div class="sub" style="margin-top:8px">Or give this agent a different bot below.</div>
-        ${adoptTokenField()}`;
+        <div id="adoptBotChoice"><div class="sub" style="margin-top:8px">Or give this agent a different bot below.</div>
+        ${adoptTokenField()}</div>${web(false)}`;
     } else {
       const n = (bot.allowFrom || []).length;
       el.innerHTML =
-        `<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+        `<div id="adoptBotChoice"><label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
           <input type="checkbox" id="adoptReuse" checked style="width:auto;margin-top:3px" onchange="$('adoptTokenRow').style.display=this.checked?'none':''">
           <span>Take over its bot <b>@${esc(bot.accountId)}</b> <span class="sub">(recommended — no new bot slot; ${n ? `${n} approved member${n === 1 ? '' : 's'} carried, no re-pairing` : 'same conversations kept'})</span></span>
         </label>
-        <div id="adoptTokenRow" style="display:none;margin-top:8px">${adoptTokenField(true)}</div>`;
+        <div id="adoptTokenRow" style="display:none;margin-top:8px">${adoptTokenField(true)}</div></div>${web(false)}`;
     }
   } else {
     el.innerHTML =
-      `<div class="sub">This workspace has no bot of its own. The new agent gets one from your pool, or paste a BotFather token:</div>
-       ${adoptTokenField()}`;
+      `<div id="adoptBotChoice" hidden><div class="sub">This workspace has no bot of its own. The new agent gets one from your pool, or paste a BotFather token:</div>
+       ${adoptTokenField()}</div>${web(true)}`;
   }
+  adoptWebChanged();
+}
+function adoptWebChanged() {
+  const web = !!$('adoptWeb')?.checked;
+  const choice = $('adoptBotChoice');
+  if (choice) choice.hidden = web;
 }
 
 function adoptTokenField(inner) {
@@ -7008,7 +7020,7 @@ async function pollAgent(id, tries = 40) {
 // Shared core: create the agent, resolve its bot (reuse / token / pool), copy
 // the workspace in, and clean up the half-made agent on any failure — exactly
 // as the CLI does. Used by both the single (manual) and batch flows.
-async function doAdopt({ path, name, reuse, token, bot, onStatus }) {
+async function doAdopt({ path, name, reuse, web, token, bot, onStatus }) {
   const say = onStatus || (() => {});
   const localHost = hosts.find(h => h.kind === 'local') ?? hosts[0];
   if (!localHost) throw new Error('No host is configured on this server.');
@@ -7020,7 +7032,8 @@ async function doAdopt({ path, name, reuse, token, bot, onStatus }) {
       name,
       aiProfileId: (profiles.length > 1 && $('adoptProfile').value) || profiles[0].id,
       hostId: localHost.id,
-      ...(reuse && bot?.allowFrom?.length ? { seedMembers: bot.allowFrom } : {}),
+      ...(web ? { telegram: false } : {}),
+      ...(reuse && !web && bot?.allowFrom?.length ? { seedMembers: bot.allowFrom } : {}),
     }});
     let a = await pollAgent(created.id);
     if (a.pendingAction?.type === 'bot_token') {
@@ -7041,7 +7054,7 @@ async function doAdopt({ path, name, reuse, token, bot, onStatus }) {
           `openclaw-gateway), then try again. Or paste a different BotFather token.`,
         );
       } else {
-        throw new Error('This agent needs a bot: paste a BotFather token, or set up a bot pool.');
+        throw new Error('This agent needs a bot: paste a BotFather token, set up a bot pool, or tick "No Telegram for now".');
       }
     }
     if (a.state === 'FAILED') throw new Error(`Could not start: ${a.stateReason ?? 'unknown'}`);
@@ -7089,17 +7102,19 @@ async function runAdopt() {
   $('adoptBtn').disabled = true;
   const set = m => { $('adoptErr').style.color = 'var(--dim)'; $('adoptErr').textContent = m; };
   try {
+    const web = !!$('adoptWeb')?.checked;
     const { res, agentId, workspace } = await doAdopt({
       path: adoptInspected.path,
       name,
-      reuse: !!$('adoptReuse')?.checked,
-      token: $('adoptToken')?.value.trim() || '',
+      web,
+      reuse: !web && !!$('adoptReuse')?.checked,
+      token: web ? '' : ($('adoptToken')?.value.trim() || ''),
       bot: adoptInspected.existingBot,
       onStatus: set,
     });
     adoptDlg.close();
     const cronNote = res.crons?.carried ? ` Carried ${res.crons.carried} scheduled task${res.crons.carried > 1 ? 's' : ''} (disabled — review and enable in its Tasks).` : '';
-    toast(`Adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into “${name}”.${cronNote} The original is untouched — retire it when you're happy.`, 45000);
+    toast(`Adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into “${name}”.${cronNote}${web ? ' No Telegram: talk to it in the web console (click its icon).' : ''} The original is untouched — retire it when you're happy.`, 45000);
     await refresh(true);
     await offerFolders([{ agentId, name, workspace }]);
   } catch (e) {

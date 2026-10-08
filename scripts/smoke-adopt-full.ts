@@ -6,17 +6,25 @@ import '../src/envCompat.js'; // first import: aliases AGENTCLAW_* env on load
  * its own `aclawsmoke` Docker namespace, and its own throwaway OpenClaw config +
  * state DB (pre-seeded with one agent, one cron, and an external-folder
  * reference) — then adopts that agent through the real HTTP API against real
- * Docker and a real Telegram bot, and asserts:
+ * Docker, the way someone switching to Hatchabot would, and asserts:
  *
  *   • the agent reaches RUNNING with a real backing Docker container,
+ *   • its workspace arrived in the container (its SOUL.md),
+ *   • its OpenClaw console answers (how a web-only agent is talked to),
  *   • the source agent's cron was carried in (disabled),
  *   • the external data folder is detected and mounts at its host path.
+ *
+ * By default it adopts WITHOUT Telegram (web-only, as `hatchabot adopt
+ * --no-telegram`), so it needs no bot. With --with-telegram (and
+ * HATCHABOT_SMOKE_BOT_TOKEN) it takes over that bot instead, as `--reuse-bot` does (2026-10-08: written when
+ * Telegram was the only way to talk to an agent; now the console is).
  *
  * Then it deletes the agent, kills the server, and removes every temp file and
  * every `aclawsmoke-*` container/volume. It never touches your real server,
  * config, gateway, or containers.
  *
- *   HATCHABOT_SMOKE_BOT_TOKEN=<throwaway BotFather token> npm run smoke:adopt:full
+ *   npm run smoke:adopt:full
+ *   HATCHABOT_SMOKE_BOT_TOKEN=<throwaway BotFather token> npm run smoke:adopt:full -- --with-telegram
  *
  * Optional: HATCHABOT_SMOKE_AI_KEY (a real Anthropic key makes the agent's
  * model usable; a dummy still boots the container), HATCHABOT_SMOKE_PORT.
@@ -42,7 +50,14 @@ if (existsSync('.env.smoke')) {
   }
 }
 
-const TOKEN = process.env.HATCHABOT_SMOKE_BOT_TOKEN;
+// The bot takeover only on request: a token left in .env.smoke (revoked since,
+// as on 2026-10-08) must not turn the default run into a Telegram test.
+const WITH_TELEGRAM = process.argv.includes('--with-telegram');
+const TOKEN = WITH_TELEGRAM ? process.env.HATCHABOT_SMOKE_BOT_TOKEN : undefined;
+if (WITH_TELEGRAM && !TOKEN) {
+  console.error('--with-telegram needs HATCHABOT_SMOKE_BOT_TOKEN (a throwaway BotFather token, e.g. in .env.smoke).');
+  process.exit(2);
+}
 const AI_KEY = process.env.HATCHABOT_SMOKE_AI_KEY || 'sk-smoke-dummy-key';
 const PORT = Number(process.env.HATCHABOT_SMOKE_PORT || 18099);
 const PREFIX = 'aclawsmoke';
@@ -59,10 +74,8 @@ class SmokeError extends Error {}
 const assert = (cond: unknown, msg: string) => { if (!cond) throw new SmokeError(msg); };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-if (!TOKEN) {
-  console.log('\x1b[33mSKIP\x1b[0m: set HATCHABOT_SMOKE_BOT_TOKEN to a throwaway BotFather token to run the live test.');
-  process.exit(0);
-}
+// No token: adopted web-only, talked to through the console.
+const WEB_ONLY = !TOKEN;
 
 // ---- temp layout ------------------------------------------------------------
 const work = mkdtempSync(join(tmpdir(), 'aclaw-smoke-'));
@@ -100,8 +113,10 @@ async function seed() {
   writeFileSync(join(ws, 'MEMORY.md'), '(smoke — no memory)');
   writeFileSync(ocConfig, JSON.stringify({
     agents: { list: [{ id: 'smoke', workspace: ws }] },
-    bindings: [{ agentId: 'smoke', match: { channel: 'telegram', accountId: 'smokebot' } }],
-    channels: { telegram: { accounts: { smokebot: { botToken: TOKEN, enabled: false, allowFrom: [] } } } },
+    ...(WEB_ONLY ? {} : {
+      bindings: [{ agentId: 'smoke', match: { channel: 'telegram', accountId: 'smokebot' } }],
+      channels: { telegram: { accounts: { smokebot: { botToken: TOKEN, enabled: false, allowFrom: [] } } } },
+    }),
   }));
   const db = new Database(ocStateDb);
   db.exec(`CREATE TABLE cron_jobs (agent_id TEXT, name TEXT, description TEXT, schedule_kind TEXT,
@@ -110,7 +125,7 @@ async function seed() {
   db.prepare(`INSERT INTO cron_jobs (agent_id,name,schedule_kind,schedule_expr,payload_kind,payload_message,sort_order,created_at_ms)
     VALUES ('smoke','Daily brief','cron','0 8 * * *','agentTurn',?,0,1)`).run(`Summarise notes in ${ws}/memory.`);
   db.close();
-  ok('workspace, OpenClaw config (bot disabled), and a cron are staged');
+  ok(`workspace, OpenClaw config (${WEB_ONLY ? 'no bot' : 'bot disabled'}), and a cron are staged`);
 }
 
 async function startServer() {
@@ -128,6 +143,9 @@ async function startServer() {
     // Offset gateway ports well clear of the real server's range (19100+), so a
     // throwaway container can't collide with a live agent's published port.
     HATCHABOT_GATEWAY_PORT_BASE: process.env.HATCHABOT_SMOKE_GATEWAY_BASE || '29100',
+    // Its own memory search service, on its own port: the real one holds 8093
+    // on this daemon, and engine-free images need the service (2026-10-08).
+    HATCHABOT_EMBED_PORT: process.env.HATCHABOT_SMOKE_EMBED_PORT || '28093',
     HATCHABOT_ALLOW_OWNER_HEADER: '1',
     OPENCLAW_CONFIG: ocConfig,
     OPENCLAW_STATE_DB: ocStateDb,
@@ -160,11 +178,18 @@ async function run() {
   const disc = await api('GET', '/v1/openclaw/agents');
   assert(disc.status === 200, `discovery failed: ${disc.status}`);
   const found = disc.json.agents.find((a: any) => a.id === 'smoke');
-  assert(found?.bot?.accountId === 'smokebot', 'discovery did not surface smokebot');
-  ok('discovery found the agent and its (disabled) bot');
+  assert(found, 'discovery did not surface the agent');
+  if (WEB_ONLY) {
+    assert(!found.bot, `discovery saw a bot where there is none: ${JSON.stringify(found.bot)}`);
+    assert(!found.problem, `discovery blocked an agent without a bot: ${found.problem}`);
+    ok('discovery found the agent (no bot of its own)');
+  } else {
+    assert(found.bot?.accountId === 'smokebot', 'discovery did not surface smokebot');
+    ok('discovery found the agent and its (disabled) bot');
+  }
 
-  step('Adopt it: create → take over its bot → boot the container');
-  const created = await api('POST', '/v1/agents', { name: 'aclaw-smoke', aiProfileId, hostId: 'host-local-default', sharedMemory: false });
+  step(WEB_ONLY ? 'Adopt it without Telegram: create web-only → boot the container' : 'Adopt it: create → take over its bot → boot the container');
+  const created = await api('POST', '/v1/agents', { name: 'aclaw-smoke', aiProfileId, hostId: 'host-local-default', sharedMemory: false, ...(WEB_ONLY ? { telegram: false } : {}) });
   // 202 Accepted: the record exists and provisioning runs in the background.
   assert(created.status === 201 || created.status === 202, `create failed: ${created.status} ${JSON.stringify(created.json)}`);
   agentId = created.json.id;
@@ -176,6 +201,7 @@ async function run() {
     } catch { return undefined; }
   });
   if (a.pendingAction?.type === 'bot_token') {
+    assert(!WEB_ONLY, 'a web-only adoption asked for a bot token');
     const tk = await api('POST', `/v1/agents/${agentId}/channel-token`, { fromWorkspace: ws });
     assert(tk.status < 400, `bot takeover failed: ${tk.status} ${JSON.stringify(tk.json)}`);
   }
@@ -203,6 +229,25 @@ async function run() {
   const crons = await api('GET', `/v1/agents/${agentId}/crons`);
   assert((crons.json.crons ?? []).length >= 1, 'cron not present in the container');
   ok('cron is present in the container');
+
+  step('Its workspace arrived, and its console answers');
+  const me = (await api('GET', `/v1/agents/${agentId}`)).json;
+  const slug = String(me.slug ?? '');
+  assert(slug, 'the agent has no slug');
+  const live = docker(['ps', '--format', '{{.Names}}', '--filter', `name=${PREFIX}-`]).split('\n').find(Boolean) ?? cname;
+  const soul = docker(['exec', live, 'cat', `/home/node/.openclaw/agents/${slug}/agent/SOUL.md`]);
+  assert(soul.includes('Smoke Agent'), `the adopted SOUL.md is not in the container (got: ${soul.slice(0, 120)})`);
+  ok('its SOUL.md is in the container');
+  // The console is how a web-only agent is talked to: its gateway serves it.
+  const code = await poll(async () => {
+    const c = docker(['exec', live, 'curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', `http://127.0.0.1:18789/?session=agent:${slug}:main`]);
+    return c === '200' ? c : undefined;
+  }, 30, 2000);
+  ok(`its console answers (HTTP ${code})`);
+  if (WEB_ONLY) {
+    assert(!me.deepLink, `a web-only agent has a Telegram link: ${me.deepLink}`);
+    ok('no Telegram bot: talked to in the console');
+  }
 
   step('Detect + share the external data folder (mounts at its host path)');
   const scan = await api('POST', '/v1/workspaces/scan-paths', { path: ws });
@@ -234,10 +279,12 @@ async function cleanup() {
   if (cs.length) docker(['rm', '-f', ...cs]);
   const vs = docker(['volume', 'ls', '-q', '--filter', `name=${PREFIX}-`]).split('\n').filter(Boolean);
   if (vs.length) docker(['volume', 'rm', ...vs]);
+  const ns = docker(['network', 'ls', '-q', '--filter', `name=${PREFIX}-`]).split('\n').filter(Boolean);
+  if (ns.length) docker(['network', 'rm', ...ns]);
   if (server) { server.kill('SIGTERM'); await sleep(1000); server.kill('SIGKILL'); }
   rmSync(work, { recursive: true, force: true });
   rmSync(extRoot, { recursive: true, force: true });
-  ok('deleted the agent, killed the server, removed all temp files and aclawsmoke-* containers/volumes');
+  ok('deleted the agent, killed the server, removed all temp files and aclawsmoke-* containers, volumes and networks');
 }
 
 // A Ctrl-C or kill mid-run must still tear everything down.

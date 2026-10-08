@@ -1613,7 +1613,14 @@ export class LocalDockerProvider implements RuntimeProvider {
       '-e', `EMBED_PER_MIN=${spec.perMin}`, '-e', 'EMBED_DOOR_PORT=8093',
       '--entrypoint', 'node', spec.doorImage, '-e', spec.doorScript,
     ]);
-    if (run.code !== 0) throw new ProviderError(`embed door failed: ${run.stderr.slice(-500)}`, "Could not start the embedding service's door.");
+    if (run.code !== 0) {
+      // Another Hatchabot on this Docker (a second install, a test server)
+      // already serves memory search on that port (2026-10-08).
+      const taken = /port is already allocated|address already in use/i.test(run.stderr);
+      throw new ProviderError(`embed door failed: ${run.stderr.slice(-500)}`, taken
+        ? `The memory search service's port ${spec.doorBind}:${spec.doorPort} is taken — likely by another Hatchabot on this Docker. Give this one its own port: HATCHABOT_EMBED_PORT in its .env, then restart it.`
+        : "Could not start the embedding service's door.");
+    }
     const joined = keepDoor ? { code: 0, stdout: '', stderr: '' } : await this.#docker(['network', 'connect', net, door]);
     if (joined.code !== 0) throw new ProviderError(`embed door network connect failed: ${joined.stderr.slice(-500)}`, "Could not connect the embedding service's door to its server.");
     // Loading the model takes a few seconds; the door's /health answers for the server.

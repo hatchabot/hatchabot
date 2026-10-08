@@ -44,6 +44,20 @@ belongs in a folder the agent *reads*, not in a copy the agent *owns*:
 hatchabot folders "Tech Advisor" add ~/condo-documents
 ```
 
+### Without Telegram
+
+An agent doesn't need a Telegram bot: its web console is a full chat.
+
+```sh
+hatchabot adopt ~/.openclaw/workspace-tech-advisor "Tech Advisor" --no-telegram
+```
+
+brings it in web-only. You talk to it from its icon in the web app, it costs
+no bot slot, and a bot can be attached later. In the web adopt flow this is
+**"No Telegram for now"**. It is ticked by default when the workspace has no
+bot of its own, and an agent without a bot can be ticked in the list of
+agents found on the machine.
+
 ### Reuse the bot it already has
 
 Telegram caps one account at about **20 bots**, which is the real limit on how
