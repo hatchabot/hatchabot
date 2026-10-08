@@ -18,3 +18,6 @@ tests that run on their own.
 | 2026-10-08 | smoke-adopt | fail | v2.148.0 | 1 | Telegram rejected the throwaway bot token (from 2026-08-23; likely revoked): needs a new one |
 | 2026-10-08 | clean-install | fail | v2.148.0 | 2 | install, accounts, recovery and upgrade passed; its agent check called a system node a bundle install does not have (fixed in v2.148.1) |
 | 2026-10-08 | runner-scenarios | pass | v2.148.0 | 11 | OpenClaw 2026.9.8 |
+| 2026-10-08 | clean-install | pass | v2.148.1 | 8 |  |
+| 2026-10-08 | candidate-gate | pass | v2.148.1 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-08 | regress-autonomous | pass | v2.148.1 | 7 | OpenClaw 2026.9.8 |
