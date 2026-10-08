@@ -5,10 +5,16 @@
 # registry uses (a leftover from before a rename) is reported, not archived
 # every night; when the registry can't be read, every volume is taken — a
 # backup tool trusts the disk before it trusts a database it could not read.
+# The other way round too: a volume an agent on this machine uses that docker
+# does not have is MISSING, and a set without it is incomplete — never
+# complete, and never a reason to prune (issue #2, 2026-10-08). Agents on a
+# runner are archived over its connection (below), also when this machine has
+# no agent volumes of its own (issue #3).
 #
 # Each set ends with backup-status.json (complete or not, how many volumes,
-# which failed or were left out), so the app can tell a finished set from a
-# partial one: the dated directory exists long before the last volume is in.
+# which failed, went missing or were left out), so the app can tell a finished
+# set from a partial one: the dated directory exists long before the last
+# volume is in.
 #
 #   ./scripts/backup-volumes.sh            # manual run
 #   HATCHABOT_BACKUP_DIR=/mnt/nas/claw …   # override destination
@@ -51,13 +57,15 @@ STATUS="$DEST/backup-status.json"
 count=0
 failed=0
 failed_list=""
+missing_list=""
+captured_list=""
 orphan_list=""
 skipped_list=""
 started="$(date -u +%FT%TZ)"
 json_list() { local out="" x; for x in $1; do out="$out${out:+,}\"$x\""; done; printf '[%s]' "$out"; }
 write_status() {
-  printf '{"state":"%s","startedAt":"%s","finishedAt":"%s","volumes":%d,"failed":%d,"failedVolumes":%s,"orphans":%s,"skipped":%s}\n' \
-    "$1" "$started" "$(date -u +%FT%TZ)" "$count" "$failed" "$(json_list "$failed_list")" "$(json_list "$orphan_list")" "$(json_list "$skipped_list")" \
+  printf '{"state":"%s","startedAt":"%s","finishedAt":"%s","volumes":%d,"failed":%d,"failedVolumes":%s,"missing":%s,"orphans":%s,"skipped":%s}\n' \
+    "$1" "$started" "$(date -u +%FT%TZ)" "$count" "$failed" "$(json_list "$failed_list")" "$(json_list "$missing_list")" "$(json_list "$orphan_list")" "$(json_list "$skipped_list")" \
     > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
 }
 # The record starts only once the run can really begin (below): a run that
@@ -115,24 +123,69 @@ if ! all_vols="$(docker volume ls -q)"; then
   exit 1
 fi
 vols="$(printf '%s\n' "$all_vols" | grep -E "^(${PREFIX}|agentclaw)-" || true)"
+
+# What the registry (the DB copy just made) says should be backed up, one
+# line per agent that has a runtime (`<runtime ref name>-vol`, the same rule
+# agentArchiveName follows):
+#   known  <vol>          every such agent — a volume no agent uses is an orphan
+#   local  <vol>          an agent on THIS machine: its volume must be in the set
+#   failed <vol>          one on this machine that never came up (FAILED): its
+#                         volume is taken when there, but a first start that
+#                         failed purged it, and that must not hold every set
+#                         incomplete (and unpruned) until someone deletes it
+#   remote <vol> <host>   an agent on a runner, read over `docker -H <host>`
+# and a last line "ok". No "ok": the DB copy could not be read — then every
+# volume is taken, as before, and none is expected. An install from before
+# runners (no hosts table) has local agents only.
+registry="$(node -e '
+  const D = require("better-sqlite3"); const db = new D(process.argv[1], { readonly: true });
+  const vol = (ref) => String(ref).replace(/^\w+:\/\//, "") + "-vol";
+  const runners = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?").get("table", "hosts")
+    && db.prepare("PRAGMA table_info(agents)").all().some((c) => c.name === "host_id");
+  const q = runners
+    ? "SELECT a.runtime_ref ref, a.state st, h.kind kind, h.settings s FROM agents a LEFT JOIN hosts h ON h.id = a.host_id" +
+      " WHERE a.state != ? AND a.runtime_ref IS NOT NULL"
+    : "SELECT runtime_ref ref, state st, NULL kind, NULL s FROM agents WHERE state != ? AND runtime_ref IS NOT NULL";
+  for (const r of db.prepare(q).all("DELETED")) {
+    const v = vol(r.ref);
+    console.log("known\t" + v);
+    // No host row (or kind local): this machine — the safe side, since an
+    // expected volume can only hold a set back from pruning.
+    if (r.kind == null || r.kind === "local") { console.log((r.st === "FAILED" ? "failed" : "local") + "\t" + v); continue; }
+    let host; try { host = JSON.parse(r.s || "{}").dockerHost; } catch {}
+    if (host) console.log("remote\t" + v + "\t" + host);
+  }
+  console.log("ok");' "$DEST/hatchabot.sqlite" 2>/dev/null || true)"
+registry_read=""
+known=""
+expected=""
+expected_failed=""
+remote=""
+while IFS=$'\t' read -r what rvol rhost; do
+  case "$what" in
+    known) known="$known$rvol"$'\n' ;;
+    local) expected="$expected $rvol" ;;
+    failed) expected_failed="$expected_failed $rvol" ;;
+    remote) remote="$remote$rhost"$'\t'"$rvol"$'\n' ;;
+    ok) registry_read=1 ;;
+  esac
+done <<<"$registry"
+
 if [ -z "$vols" ]; then
-  # No matching volumes — distinguish a genuinely fresh box (no agents yet,
-  # fine) from "agents exist but their volumes are missing or under a
-  # different HATCHABOT_PREFIX" (dangerous — must not prune good backups).
-  # The DB we just copied is the source of truth for how many agents exist.
-  agent_count="$(node -e 'const D=require("better-sqlite3");const db=new D(process.argv[1],{readonly:true});process.stdout.write(String(db.prepare("SELECT COUNT(*) c FROM agents WHERE state != \x27DELETED\x27").get().c))' "$DEST/hatchabot.sqlite" 2>/dev/null || echo unknown)"
-  if [ "$agent_count" = "0" ]; then
+  # No matching volumes. Only the agents on THIS machine are expected in
+  # `docker volume ls` here — a fleet that lives on runners has none, and its
+  # volumes are taken below (issue #3). Agents here without their volumes
+  # (removed, or a different HATCHABOT_PREFIX) are named as missing below,
+  # and the set is incomplete: nothing is pruned.
+  if [ -z "$registry_read" ]; then
+    echo "✗ No ${PREFIX}-* volumes found and the database copy could not be read — refusing to prune." >&2
+    exit 1
+  fi
+  if [ -z "$expected$expected_failed$remote" ]; then
     echo "No agents yet — database backed up, no volumes to capture."
     exit 0
   fi
-  echo "✗ $agent_count agent(s) in the DB but no ${PREFIX}-* volumes found (HATCHABOT_PREFIX mismatch?) — refusing to prune." >&2
-  exit 1
 fi
-
-# The volumes the registry's agents use (`<runtime ref name>-vol`, the same
-# rule agentArchiveName follows). Empty when the DB copy can't be read: then
-# every volume is taken, as before.
-known="$(node -e 'const D=require("better-sqlite3");const db=new D(process.argv[1],{readonly:true});for(const r of db.prepare("SELECT runtime_ref FROM agents WHERE state != \x27DELETED\x27 AND runtime_ref IS NOT NULL").all())console.log(String(r.runtime_ref).replace(/^\w+:\/\//,"")+"-vol")' "$DEST/hatchabot.sqlite" 2>/dev/null || true)"
 
 # What every agent rebuilds by itself, left out of the tarball — about a
 # third of the raw volume data (review, 2026-09-29). Each was checked against
@@ -184,9 +237,25 @@ while IFS= read -r vol; do
   chmod 600 "$DEST/$vol.tgz" 2>/dev/null || true
   echo "  ✓ $vol → $DEST/$vol.tgz"
   count=$((count + 1))
+  captured_list="$captured_list $vol"
 done <<EOF
 $vols
 EOF
+
+# Every agent on this machine must be in the set. One whose volume docker did
+# not list made a set that said complete and pruned that agent's older sets
+# (issue #2): now it is named, counted as failed, and nothing is pruned.
+for vol in $expected; do
+  case " $captured_list $failed_list " in *" $vol "*) continue ;; esac
+  echo "  ✗ $vol: an agent on this machine uses it, but docker has no ${PREFIX}-* volume by that name (removed, or HATCHABOT_PREFIX set wrong?) — not in this set" >&2
+  missing_list="$missing_list $vol"
+  failed=$((failed + 1))
+  failed_list="$failed_list $vol"
+done
+for vol in $expected_failed; do
+  case " $captured_list $failed_list " in *" $vol "*) continue ;; esac
+  echo "  • $vol: its agent failed to start and has no volume — nothing to back up"
+done
 
 # Agents on a runner (another machine's Docker, `docker -H ssh://…`): their
 # volumes are not in `docker volume ls` here, so they were in no set at all —
@@ -195,15 +264,8 @@ EOF
 # the excludes match at the volume root only, like --anchored), into the same
 # <volume>.tgz a restore reads. A runner that does not answer (a laptop
 # asleep) is SKIPPED, not failed: it must not stop the pruning of this
-# machine's sets, and its agents stay "not covered" in the app.
-remote="$(node -e '
-  const D = require("better-sqlite3"); const db = new D(process.argv[1], { readonly: true });
-  const q = "SELECT a.runtime_ref ref, h.settings s FROM agents a JOIN hosts h ON h.id = a.host_id" +
-    " WHERE a.state != ? AND a.runtime_ref IS NOT NULL AND h.kind != ?";
-  for (const r of db.prepare(q).all("DELETED", "local")) {
-    let host; try { host = JSON.parse(r.s || "{}").dockerHost; } catch {}
-    if (host) console.log(host + "\t" + String(r.ref).replace(/^\w+:\/\//, "") + "-vol");
-  }' "$DEST/hatchabot.sqlite" 2>/dev/null || true)"
+# machine's sets, and its agents stay "not covered" in the app. The list of them
+# ($remote) was read from the registry above, with the local ones.
 if [ -n "$remote" ]; then
   T=""; command -v timeout >/dev/null 2>&1 && T="timeout"
   down_hosts=" "
@@ -242,7 +304,11 @@ fi
 # must never delete the last good snapshots. Restricted to our own date-named
 # directories, since the destination may be a shared path (e.g. a NAS).
 if [ "$failed" -gt 0 ] || [ "$count" -eq 0 ]; then
-  echo "✗ $failed volume(s) failed, $count succeeded — incomplete backup, nothing pruned." >&2
+  if [ "$count" -eq 0 ] && [ "$failed" -eq 0 ] && [ -n "$skipped_list" ]; then
+    echo "✗ No volume captured: every runner was asleep or failed — incomplete backup, nothing pruned." >&2
+  else
+    echo "✗ $failed volume(s) failed or missing, $count succeeded — incomplete backup, nothing pruned." >&2
+  fi
   exit 1
 fi
 find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' -mtime "+$KEEP_DAYS" -exec rm -rf {} +

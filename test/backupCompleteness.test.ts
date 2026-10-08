@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -126,7 +126,8 @@ esac
       GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
     },
   });
-  const setDir = () => join(backups, readdirSync(backups).find((d) => /^20\d\d-/.test(d))!);
+  // This run's set: the newest dated directory (an older one may sit beside it).
+  const setDir = () => join(backups, readdirSync(backups).filter((d) => /^20\d\d-/.test(d)).sort().pop()!);
   /** Give a volume real files, so its tarball is made by the script's own tar. */
   const fillVolume = (vol: string, files: string[]) => {
     for (const f of files) { mkdirSync(dirname(join(root, 'vols', vol, f)), { recursive: true }); writeFileSync(join(root, 'vols', vol, f), 'x'); }
@@ -143,7 +144,22 @@ esac
     db.close();
   };
   const remoteLog = () => (existsSync(join(root, 'remote.log')) ? readFileSync(join(root, 'remote.log'), 'utf8') : '');
-  return { run, setDir, fillVolume, repo, onRunners, remoteLog };
+  /** A set from a month ago, old enough for the 14-day pruning to remove. */
+  const oldSet = (files: string[]) => {
+    const d = join(backups, '2026-01-02'); mkdirSync(d, { recursive: true });
+    for (const f of files) writeFileSync(join(d, f), 'old');
+    const then = new Date(Date.now() - 30 * 86_400_000);
+    utimesSync(d, then, then);
+    return d;
+  };
+  /** The run's own record, as written (every field, not only what the app reads). */
+  const record = () => JSON.parse(readFileSync(join(setDir(), 'backup-status.json'), 'utf8'));
+  const setState = (ref: string, state: string) => {
+    const db = new Database(join(repo, 'data', 'hatchabot.sqlite'));
+    db.prepare(`UPDATE agents SET state = ? WHERE runtime_ref = ?`).run(state, ref);
+    db.close();
+  };
+  return { run, setDir, fillVolume, repo, onRunners, remoteLog, oldSet, record, setState };
 }
 
 describe('scripts/backup-volumes.sh records how the run ended', () => {
@@ -210,6 +226,107 @@ describe('scripts/backup-volumes.sh records how the run ended', () => {
     const r = w.run();
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(existsSync(join(w.setDir(), 'agentclaw-old-sophie.tgz'))).toBe(true);
+  });
+});
+
+describe('scripts/backup-volumes.sh: every agent on this machine is in the set, or it is incomplete (issue #2)', () => {
+  it('a missing volume among present ones marks the set incomplete, names it, and prunes nothing', () => {
+    const w = scriptWorld(
+      ['hatchabot-present-1-vol', 'hatchabot-present-2-vol'],
+      ['docker://hatchabot-present-1', 'docker://hatchabot-missing-3', 'docker://hatchabot-present-2'],
+    );
+    const old = w.oldSet(['hatchabot.sqlite', 'hatchabot-missing-3-vol.tgz']);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    for (const v of ['hatchabot-present-1-vol', 'hatchabot-present-2-vol']) expect(existsSync(join(w.setDir(), `${v}.tgz`)), v).toBe(true);
+    expect(r.stderr).toMatch(/hatchabot-missing-3-vol: an agent on this machine uses it, but docker has no hatchabot-\* volume/);
+    expect(r.stderr).toMatch(/nothing pruned/);
+    expect(w.record()).toMatchObject({ state: 'incomplete', volumes: 2, failed: 1, failedVolumes: ['hatchabot-missing-3-vol'], missing: ['hatchabot-missing-3-vol'] });
+    expect(readSetStatus(w.setDir())).toMatchObject({ complete: false, failedVolumes: ['hatchabot-missing-3-vol'] });
+    // The missing agent's last good copy survives.
+    expect(existsSync(join(old, 'hatchabot-missing-3-vol.tgz'))).toBe(true);
+  });
+
+  it('with every volume there, the same old set is pruned (the check above is what held it)', () => {
+    const w = scriptWorld(['hatchabot-present-1-vol', 'hatchabot-present-2-vol'], ['docker://hatchabot-present-1', 'docker://hatchabot-present-2']);
+    const old = w.oldSet(['hatchabot.sqlite']);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(w.record()).toMatchObject({ state: 'complete', failedVolumes: [], missing: [] });
+    expect(existsSync(old)).toBe(false);
+  });
+
+  it('an agent whose first start failed (no volume) does not hold every set back', () => {
+    const w = scriptWorld(['hatchabot-present-1-vol'], ['docker://hatchabot-present-1', 'docker://hatchabot-never-2']);
+    w.setState('docker://hatchabot-never-2', 'FAILED');
+    const old = w.oldSet(['hatchabot.sqlite']);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/hatchabot-never-2-vol: its agent failed to start and has no volume/);
+    expect(w.record()).toMatchObject({ state: 'complete', missing: [] });
+    expect(existsSync(old)).toBe(false);
+  });
+
+  it('a local agent without its volume, the rest on runners: the runner is still archived, the set is incomplete', () => {
+    const w = scriptWorld([], ['docker://hatchabot-kitchen-1']);
+    w.onRunners([['ssh://laptop.test', 'docker://hatchabot-notes-3']]);
+    const old = w.oldSet(['hatchabot.sqlite']);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(existsSync(join(w.setDir(), 'hatchabot-notes-3-vol.tgz'))).toBe(true);
+    expect(w.record()).toMatchObject({ state: 'incomplete', volumes: 1, missing: ['hatchabot-kitchen-1-vol'] });
+    expect(existsSync(old)).toBe(true);
+  });
+});
+
+describe('scripts/backup-volumes.sh: a fleet that lives on runners only (issue #3)', () => {
+  it('no local volumes: the runners\' agents are archived; one asleep is skipped, not failed', () => {
+    const w = scriptWorld([], []);
+    w.onRunners([
+      ['ssh://laptop.test', 'docker://hatchabot-notes-3'],
+      ['ssh://asleep.test', 'docker://hatchabot-garden-4'],
+    ]);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stderr).not.toMatch(/HATCHABOT_PREFIX mismatch|refusing/);
+    expect(spawnSync('gzip', ['-dc', join(w.setDir(), 'hatchabot-notes-3-vol.tgz')], { encoding: 'utf8' }).stdout).toBe('runner data');
+    expect(existsSync(join(w.setDir(), 'hatchabot-garden-4-vol.tgz'))).toBe(false);
+    expect(r.stderr).toMatch(/asleep\.test: not answering/);
+    expect(w.record()).toMatchObject({ state: 'complete', volumes: 1, failedVolumes: [], missing: [], skipped: ['hatchabot-garden-4-vol'] });
+  });
+
+  it('no local volumes and every runner asleep: nothing captured, incomplete, nothing pruned', () => {
+    const w = scriptWorld([], []);
+    w.onRunners([['ssh://asleep.test', 'docker://hatchabot-garden-4']]);
+    const old = w.oldSet(['hatchabot.sqlite', 'hatchabot-garden-4-vol.tgz']);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stderr).toMatch(/No volume captured: every runner was asleep or failed/);
+    expect(w.record()).toMatchObject({ state: 'incomplete', volumes: 0, failedVolumes: [], skipped: ['hatchabot-garden-4-vol'] });
+    expect(existsSync(join(old, 'hatchabot-garden-4-vol.tgz'))).toBe(true);
+  });
+
+  it('a genuinely empty install still backs up the database and says so', () => {
+    const w = scriptWorld([], []);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/No agents yet — database backed up/);
+    expect(existsSync(join(w.setDir(), 'hatchabot.sqlite'))).toBe(true);
+    expect(w.record()).toMatchObject({ state: 'complete', volumes: 0 });
+  });
+
+  it('no volumes and a registry that cannot be read: refused, nothing pruned', () => {
+    const w = scriptWorld([], []);
+    // A database that copies fine but has no agents table to read.
+    const db = new Database(join(w.repo, 'data', 'hatchabot.sqlite'));
+    db.exec('DROP TABLE agents; CREATE TABLE other (x TEXT)');
+    db.close();
+    const old = w.oldSet(['hatchabot.sqlite']);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stderr).toMatch(/database copy could not be read — refusing to prune/);
+    expect(w.record()).toMatchObject({ state: 'incomplete' });
+    expect(existsSync(old)).toBe(true);
   });
 });
 
