@@ -41,3 +41,9 @@ tests that run on their own.
 | 2026-10-08 | runner-scenarios | pass | v2.151.0 | 11 | OpenClaw 2026.9.8 |
 | 2026-10-08 | clean-install | pass | v2.151.0 | 8 |  |
 | 2026-10-08 | clean-install-ubuntu-2204 | pass | v2.151.0 | 8 |  |
+| 2026-10-08 | apps | pass | v2.152.0 | 5 | OpenClaw 2026.9.8 |
+| 2026-10-08 | console | pass | v2.152.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-08 | browser | pass | v2.152.0 | 3 | OpenClaw 2026.9.8 |
+| 2026-10-08 | restore-drill | pass | v2.152.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-10-08 | clean-install | pass | v2.152.0 | 8 |  |
+| 2026-10-08 | clean-install-ubuntu-2204 | pass | v2.152.0 | 8 |  |
