@@ -86,6 +86,11 @@ if echo "$out" | grep -q "rebuilding"; then
     sleep 5
   done
   [ "$st" = RUNNING ] && ok || bad "state is '${st:-missing}' after the rebuild"
+elif echo "$out" | grep -q "already runs that image"; then
+  # Gating the image agents already run (the release check, scripts/live.mjs):
+  # the new agent was built on it, so there is nothing to switch. The next
+  # step checks the container does run it.
+  ok
 else
   bad "$(echo "$out" | tail -1)"
 fi

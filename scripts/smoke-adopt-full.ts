@@ -35,7 +35,10 @@ if (existsSync('.env.smoke')) {
     const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
     if (!m) continue;
     const [, k, v] = m;
-    if (k && process.env[k] === undefined) process.env[k] = (v ?? '').replace(/^["']|["']$/g, '');
+    // A file from before the rename (AgentClaw → Hatchabot) names its settings
+    // AGENTCLAW_SMOKE_*: read as the HATCHABOT_ ones (it skipped, unseen, 2026-10-08).
+    const key = k?.replace(/^AGENTCLAW_SMOKE_/, 'HATCHABOT_SMOKE_');
+    if (key && process.env[key] === undefined) process.env[key] = (v ?? '').replace(/^["']|["']$/g, '');
   }
 }
 

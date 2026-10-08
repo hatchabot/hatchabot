@@ -113,6 +113,16 @@ export function dueFor(tag, runs, tests = LIVE_TESTS, cwd = ROOT) {
   return out;
 }
 
+/**
+ * A run's result from its exit code and the end of its output. A test that had
+ * nothing to test exits 0 and says SKIP: not a pass. Colour codes are
+ * stripped first ("\x1b[33mSKIP" hid the word, 2026-10-08).
+ */
+export function resultOf(code, output) {
+  if (code !== 0) return 'fail';
+  return /(^|\W)SKIP\b/.test(output.replace(/\x1b\[[0-9;]*m/g, '')) ? 'skip' : 'pass';
+}
+
 // ---- the live install --------------------------------------------------------
 function loadEnv() {
   const f = join(homedir(), '.config', 'hatchabot', 'env');
@@ -185,7 +195,7 @@ async function main() {
     });
     const minutes = Math.max(1, Math.round((Date.now() - t0) / 60_000));
     // A test that had nothing to test (no token, no runner) says SKIP: that is not a pass.
-    const result = code !== 0 ? 'fail' : /\bSKIP/.test(tail) ? 'skip' : 'pass';
+    const result = resultOf(code, tail);
     const row = `| ${new Date().toISOString().slice(0, 10)} | ${t.name} | ${result} | ${release.version} | ${minutes} | ${[release.openclaw ? `OpenClaw ${release.openclaw}` : '', note].filter(Boolean).join('; ')} |\n`;
     appendFileSync(RECORD, row);
     console.log(`\n${result === 'pass' ? '✓' : result === 'skip' ? '–' : '✗'} ${t.name}: ${result} (${minutes} min). Recorded in docs/live-test-runs.md — commit it.`);

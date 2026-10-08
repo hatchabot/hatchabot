@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 // @ts-expect-error — a plain .mjs script, no types
-import { LIVE_TESTS, dueFor, readRuns } from '../scripts/live.mjs';
+import { LIVE_TESTS, dueFor, readRuns, resultOf } from '../scripts/live.mjs';
 
 /**
  * The live tests' register (scripts/live.mjs): every test names a script that
@@ -76,3 +76,14 @@ describe('when a live test is due', () => {
     expect(dueFor('v1', [], [{ ...T1[0], onHold: 'Cloud is on hold' }], repo())).toEqual([]);
   });
 });
+
+describe('a run\'s result', () => {
+  it('a test that had nothing to test is a skip, even in colour; a non-zero exit is a fail', () => {
+    expect(resultOf(0, '\x1b[33mSKIP\x1b[0m: set HATCHABOT_SMOKE_BOT_TOKEN')).toBe('skip');
+    expect(resultOf(0, 'SKIP: no runner')).toBe('skip');
+    expect(resultOf(0, '✓ 14 passed (SKIPPED none)')).toBe('pass');
+    expect(resultOf(0, 'all good')).toBe('pass');
+    expect(resultOf(1, 'SKIP')).toBe('fail');
+  });
+});
+

@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.148.1] — 2026-10-08
+
+### Fixed
+- **The first run of every live test found these:**
+  - **The clean-install test** never reached its agent check on a bundle install. Its setup and the autonomous-agent regression called `node`, which a bundle install deliberately leaves off the system. The request body and the CLI token came out empty, so the check failed with "open the app → Settings → Security → New token". Both now use Hatchabot's own Node.
+  - **The adopt smoke test** skipped with a token in place. Its `.env.smoke` came from before the rename and named its settings `AGENTCLAW_SMOKE_*`; those are read as the `HATCHABOT_SMOKE_*` ones now.
+  - **`scripts/live.mjs` recorded that skip as a pass.** The colour code in front of "SKIP" hid the word; colour codes are stripped before it looks.
+  - **The candidate gate** failed when run on the image agents already run, the release check's case: "already runs that image" is not a failed pin.
+
 ## [2.148.0] — 2026-10-08
 
 ### Added

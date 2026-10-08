@@ -27,7 +27,11 @@ t0=$(date +%s)
 step() { STEP="$1"; STEP_T=$(date +%s); printf '▸ %s … ' "$1"; }
 ok()   { PASS=$((PASS + 1)); RESULTS+=("✓ $STEP"); echo "ok ($(( $(date +%s) - STEP_T ))s)"; }
 bad()  { FAILED=$((FAILED + 1)); RESULTS+=("✗ $STEP — $1"); echo "FAILED — $1"; }
-json() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const v=JSON.parse(s);console.log(String(($1)(v)??''))}catch(e){console.log('')}})"; }
+# An install from the release bundle puts no Node on the system (its own is
+# in ~/hatchabot/.node): this ran inside a clean install's VM and every JSON
+# read came back empty (2026-10-08).
+NODE="$(command -v node || true)"; [ -n "$NODE" ] || NODE="$HOME/hatchabot/.node/bin/node"
+json() { "$NODE" -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const v=JSON.parse(s);console.log(String(($1)(v)??''))}catch(e){console.log('')}})"; }
 
 DONE=0
 cleanup() {

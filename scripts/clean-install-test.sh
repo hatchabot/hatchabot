@@ -185,11 +185,14 @@ if [ -n "$AI_SOURCE" ]; then
     cat >"$OUT/aisetup.sh" <<EOF
 #!/usr/bin/env bash
 B=http://localhost:8080
+# The bundle install puts no Node on the system (step 1 checks it): Hatchabot's own.
+NODE="\$HOME/hatchabot/.node/bin/node"; [ -x "\$NODE" ] || NODE=node
 curl -s -c /tmp/ck -o /dev/null -H 'content-type: application/json' -d '{"username":"owner","password":"second-password-here"}' \$B/v1/login
-node -e 'const fs=require("fs");const c=fs.readFileSync(process.env.HOME+"/.cred","utf8").trim();const sub="$KIND"==="subscription";process.stdout.write(JSON.stringify(Object.assign({kind:sub?"subscription":"api_key",name:"Test source",vendor:"$VENDOR",model:"$MODEL"},sub?{oauthToken:c}:{apiKey:c})))' > /tmp/body.json
+\$NODE -e 'const fs=require("fs");const c=fs.readFileSync(process.env.HOME+"/.cred","utf8").trim();const sub="$KIND"==="subscription";process.stdout.write(JSON.stringify(Object.assign({kind:sub?"subscription":"api_key",name:"Test source",vendor:"$VENDOR",model:"$MODEL"},sub?{oauthToken:c}:{apiKey:c})))' > /tmp/body.json
 curl -s -b /tmp/ck -H 'content-type: application/json' --data @/tmp/body.json \$B/v1/ai-profiles >/dev/null
 rm -f /tmp/body.json ~/.cred
-T=\$(curl -s -b /tmp/ck -H 'content-type: application/json' -d '{"label":"clean-install-test"}' \$B/v1/cli-tokens | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).token))")
+T=\$(curl -s -b /tmp/ck -H 'content-type: application/json' -d '{"label":"clean-install-test"}' \$B/v1/cli-tokens | \$NODE -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).token))")
+[ -n "\$T" ] || { echo "aisetup: no CLI token" >&2; exit 1; }
 bash -ic "hatchabot login --token \$T" >/dev/null 2>&1
 EOF
     L file push "$OUT/aisetup.sh" "$VM/home/ubuntu/aisetup.sh" --uid 1000 --gid 1000 --mode 0700 >/dev/null
