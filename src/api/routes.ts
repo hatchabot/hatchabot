@@ -1,4 +1,4 @@
-import { AppError, fieldsToAsk, hostGit, installRelease, parseSource, removeTasks, repoFor, resolveRelease, switchTo, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
+import { AppError, fieldsToAsk, hostGit, installRelease, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
 import { agentTimeZone } from '../orchestrator/timezone.js';
 import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
 import { claudePlanAllowed, CLAUDE_PLAN_HOSTED } from '../config/claudePlan.js';
@@ -6755,8 +6755,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const clash = allowShared ? [] : sharedAppConflicts(a, rel.manifest, values);
     if (clash.length) throw sharedRefusal(clash, rel.manifest);
     const had = store.getAgentApp(a.id);
-    if (had && had.app !== rel.manifest.app) await removeTasks(appDeps(a), had.app);
-    const done = await whileBusy(a.id, () => installRelease(appDeps(a), rel, values));
+    // Another app in its place: its tasks come off first (never two apps on one mailbox),
+    // and go back on if this install fails, so the agent still matches the record.
+    const replaced = had && had.app !== rel.manifest.app ? had : undefined;
+    const done = await whileBusy(a.id, async () => {
+      if (replaced) await removeTasks(appDeps(a), replaced.app);
+      try {
+        return await installRelease(appDeps(a), rel, values);
+      } catch (e) {
+        if (replaced) {
+          await syncTasks(appDeps(a), replaced.manifest as AppManifest).catch((err: unknown) => {
+            if (e instanceof Error) e.message += ` ${replaced.app}'s tasks could not be put back: ${(err as Error)?.message ?? err}`;
+          });
+        }
+        throw e;
+      }
+    });
     store.setAgentApp({ agentId: a.id, app: done.app, source: label, ref, sha: done.sha, manifest: done.manifest,
       previousSha: had?.app === done.app ? had.sha : undefined, previousManifest: had?.app === done.app ? had.manifest : undefined,
       installedAt: new Date().toISOString(), testOk: done.test?.ok });
@@ -6839,7 +6853,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const had = store.getAgentApp(a.id);
     if (!had?.previousSha || !had.previousManifest) return reply.code(409).send({ error: 'There is no earlier release to go back to.' });
     try {
-      await whileBusy(a.id, () => switchTo(appDeps(a), had.previousManifest as AppManifest, had.previousSha!));
+      await whileBusy(a.id, () => switchTo(appDeps(a), had.previousManifest as AppManifest, had.previousSha!, had.manifest as AppManifest));
       store.setAgentApp({ ...had, sha: had.previousSha!, manifest: had.previousManifest, previousSha: had.sha, previousManifest: had.manifest,
         installedAt: new Date().toISOString(), testOk: undefined });
       trace(a.id)('app.rolled_back', { app: had.app, from: had.sha.slice(0, 12), to: had.previousSha!.slice(0, 12) });

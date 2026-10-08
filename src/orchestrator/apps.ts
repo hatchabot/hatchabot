@@ -159,9 +159,10 @@ export function expand(t: string, vars: { [k: string]: unknown }): string {
   return t.replace(/\{(app_dir|data_dir|agent|name|env)\}/g, (_, k: string) => (typeof vars[k] === 'string' ? (vars[k] as string) : ''));
 }
 
-export function appVars(m: AppManifest, facts: AgentFacts) {
+/** The placeholders for a release. `at` points them elsewhere (its tests run in the candidate, against the staged data folder). */
+export function appVars(m: AppManifest, facts: AgentFacts, at: { app_dir?: string; data_dir?: string } = {}) {
   const p = appPaths(m.app);
-  const base = { app_dir: p.current, data_dir: p.data, agent: facts.slug, name: m.name, env: '' };
+  const base = { app_dir: at.app_dir ?? p.current, data_dir: at.data_dir ?? p.data, agent: facts.slug, name: m.name, env: '' };
   const env = Object.fromEntries(Object.entries(m.env ?? {}).map(([k, v]) => [k, expand(v, base)]));
   return { ...base, env: Object.entries(env).map(([k, v]) => `${k}=${sq(v)}`).join(' '), envMap: env };
 }
@@ -205,101 +206,212 @@ async function sh(d: InstallDeps, script: string, timeoutMs = 60_000) {
   return d.provider.execShell(d.runtimeRef, script, { timeoutMs });
 }
 
+/** Where `current` points now, as the link says it ('' when not installed). */
+async function currentLink(d: InstallDeps, app: string): Promise<string> {
+  const r = await sh(d, `readlink ${sq(appPaths(app).current)} 2>/dev/null || true`);
+  return r.stdout.trim();
+}
+const shaOf = (link: string) => /releases\/([0-9a-f]{12,40})$/.exec(link)?.[1];
+
 /** The commit `current` points at now (undefined: not installed). */
 export async function currentSha(d: InstallDeps, app: string): Promise<string | undefined> {
-  const r = await sh(d, `readlink ${sq(appPaths(app).current)} 2>/dev/null || true`);
-  const m = /releases\/([0-9a-f]{12,40})$/.exec(r.stdout.trim());
-  return m?.[1];
+  return shaOf(await currentLink(d, app));
 }
 
+/** Point `current` at `link` again, atomically ('' = there was none). */
+function pointBack(p: ReturnType<typeof appPaths>, link: string) {
+  return link ? `cd ${sq(p.root)} && ln -sfn ${sq(link)} current.new && mv -T current.new current` : `rm -f ${sq(p.current)}`;
+}
+
+/** The manifest a release on the volume was installed with (to put its tasks back). */
+async function releaseManifest(d: InstallDeps, dir: string): Promise<AppManifest | undefined> {
+  const r = await sh(d, `cat ${sq(`${dir}/${MANIFEST_FILE}`)} 2>/dev/null || true`);
+  try { return parseManifest(r.stdout); } catch { return undefined; }
+}
+
+const errText = (r: { stdout: string; stderr: string }) => (r.stderr || r.stdout).trim().slice(0, 300);
+
 /**
- * Install or update: unpack the release, write the config, run the tests, switch
- * `current`, re-sync the tasks. Fails before the switch leave the running
- * version as it was.
+ * Install or update: unpack the release, stage its config, run its tests
+ * against the staged config, then switch: the config and `current` together,
+ * then the tasks. Until the switch nothing live changes; a failure in the
+ * switch or the tasks puts back the previous release, its config (to the
+ * byte) and its tasks, so the agent, its jobs and the record agree.
  */
 export async function installRelease(d: InstallDeps, rel: Resolved, values: Record<string, unknown> = {}): Promise<Installed> {
   const m = rel.manifest;
   const p = appPaths(m.app);
   const short = rel.sha.slice(0, 12);
   const dir = `${p.releases}/${short}`;
+  const stage = `${p.root}/staging/${short}`;
   const log = d.log ?? (() => {});
   if (!d.provider.writeToVolume) throw new AppError('This machine cannot copy files into agents (no writeToVolume).');
-  const previousSha = await currentSha(d, m.app);
+  const previousLink = await currentLink(d, m.app);
+  const previousSha = shaOf(previousLink);
+  const name = m.config?.file ?? 'config.json';
+  const live = `${p.data}/${name}`;
+  const staged = `${stage}/${name}`;
+  let switching = false;
+  try {
+    // 1. the code, and an empty staging folder for its data while it is tested
+    log('app.unpack', { app: m.app, sha: short });
+    const un = await d.provider.writeToVolume(d.runtimeRef,
+      ['sh', '-c', `rm -rf ${sq(dir)}.tmp && mkdir -p ${sq(dir)}.tmp && tar -x -C ${sq(dir)}.tmp && rm -rf ${sq(dir)} && mv ${sq(dir)}.tmp ${sq(dir)}`
+        + ` && mkdir -p ${sq(p.data)} && rm -rf ${sq(stage)} && mkdir -p ${sq(stage)}`],
+      rel.tar);
+    if (un.code !== 0) throw new AppError(`Could not unpack the code: ${errText(un)}`);
 
-  // 1. the code
-  log('app.unpack', { app: m.app, sha: short });
-  const un = await d.provider.writeToVolume(d.runtimeRef,
-    ['sh', '-c', `rm -rf ${sq(dir)}.tmp && mkdir -p ${sq(dir)}.tmp && tar -x -C ${sq(dir)}.tmp && rm -rf ${sq(dir)} && mv ${sq(dir)}.tmp ${sq(dir)} && mkdir -p ${sq(p.data)}`],
-    rel.tar);
-  if (un.code !== 0) throw new AppError(`Could not unpack the code: ${(un.stderr || un.stdout).trim().slice(0, 300)}`);
-
-  // 2. the config
-  const file = `${p.data}/${m.config?.file ?? 'config.json'}`;
-  if (m.config) {
-    const read = await sh(d, `cat ${sq(file)} 2>/dev/null || true`);
-    let existing: Record<string, unknown> = {};
-    try { existing = read.stdout.trim() ? JSON.parse(read.stdout) : {}; } catch { throw new AppError(`${file} in the agent is not valid JSON; fix or remove it.`); }
-    const { config, missing } = mergeConfig(m, d.facts, existing, values);
-    if (missing.length) throw new AppError(`Needs a value for: ${missing.join(', ')} (give them as key=value).`);
-    const w = await d.provider.writeToVolume(d.runtimeRef,
-      ['sh', '-c', `umask 077 && cat > ${sq(file)}.tmp && mv ${sq(file)}.tmp ${sq(file)}`], Buffer.from(JSON.stringify(config, null, 2) + '\n'));
-    if (w.code !== 0) throw new AppError(`Could not write ${file}.`);
-  }
-
-  // 3. its tests, in the new release, with its env
-  const vars = appVars(m, d.facts);
-  let test: Installed['test'];
-  if (m.test?.length) {
-    log('app.test', { app: m.app, sha: short });
-    const envStr = Object.entries(vars.envMap).map(([k, v]) => `${k}=${sq(v.replace(p.current, dir))}`).join(' ');
-    const r = await sh(d, `cd ${sq(dir)} && env ${envStr} ${m.test.map((a) => sq(expand(a, { ...vars, app_dir: dir }))).join(' ')} 2>&1`, 15 * 60_000);
-    test = { ok: r.code === 0, output: (r.stdout + r.stderr).slice(-3000) };
-    if (!test.ok) {
-      log('app.test_failed', { app: m.app, sha: short });
-      throw Object.assign(new AppError(`Its tests failed, so ${short} was not switched on:\n${test.output.slice(-1500)}`), { test });
+    // 2. the config, staged: the live file is not touched until the switch
+    if (m.config) {
+      const read = await sh(d, `cat ${sq(live)} 2>/dev/null || true`);
+      let existing: Record<string, unknown> = {};
+      try { existing = read.stdout.trim() ? JSON.parse(read.stdout) : {}; } catch { throw new AppError(`${live} in the agent is not valid JSON; fix or remove it.`); }
+      const { config, missing } = mergeConfig(m, d.facts, existing, values);
+      if (missing.length) throw new AppError(`Needs a value for: ${missing.join(', ')} (give them as key=value).`);
+      const w = await d.provider.writeToVolume(d.runtimeRef,
+        ['sh', '-c', `umask 077 && cat > ${sq(staged)}`], Buffer.from(JSON.stringify(config, null, 2) + '\n'));
+      if (w.code !== 0) throw new AppError(`Could not write ${staged}.`);
     }
+
+    // 3. its tests: the new release, with its env, {data_dir} = the staged folder (the new config, none of the live data)
+    let test: Installed['test'];
+    if (m.test?.length) {
+      log('app.test', { app: m.app, sha: short });
+      const tv = appVars(m, d.facts, { app_dir: dir, data_dir: stage });
+      const envStr = Object.entries(tv.envMap).map(([k, v]) => `${k}=${sq(v)}`).join(' ');
+      const r = await sh(d, `cd ${sq(dir)} && env ${envStr} ${m.test.map((a) => sq(expand(a, tv))).join(' ')} 2>&1`, 15 * 60_000);
+      test = { ok: r.code === 0, output: (r.stdout + r.stderr).slice(-3000) };
+      if (!test.ok) {
+        log('app.test_failed', { app: m.app, sha: short });
+        throw Object.assign(new AppError(`Its tests failed, so ${short} was not switched on:\n${test.output.slice(-1500)}`), { test });
+      }
+    }
+
+    // 4. switch: the config (the old one kept aside, or a note there was none), then `current`, atomically
+    switching = true;
+    const cfg = m.config
+      ? `{ if [ -f ${sq(live)} ]; then cp -p ${sq(live)} ${sq(`${staged}.prev`)}; else : > ${sq(`${staged}.none`)}; fi; } && mv -f ${sq(staged)} ${sq(live)} && `
+      : '';
+    const sw = await sh(d, `cd ${sq(p.root)} && ${cfg}ln -sfn releases/${short} current.new && mv -T current.new current`);
+    if (sw.code !== 0) throw new AppError(`Could not switch to ${short}: ${errText(sw)}`);
+    log('app.switched', { app: m.app, sha: short, previous: previousSha ?? null });
+
+    // 5. its scheduled commands (syncTasks leaves the old set in place when it fails)
+    const before = previousSha ? await releaseManifest(d, `${p.releases}/${previousSha}`) : undefined;
+    const tasks = await syncTasks(d, m, before);
+
+    // 6. keep the newest releases (never the live one or the one before it)
+    const prune = await sh(d, `cd ${sq(p.root)} && ls -1t releases | tail -n +${KEEP_RELEASES + 1} | grep -v -x -e ${short} -e ${sq(previousSha ?? short)} | while read r; do rm -rf "releases/$r"; done`);
+    if (prune.code !== 0) log('app.prune_failed', { app: m.app, error: errText(prune) });
+    return { app: m.app, sha: rel.sha, previousSha, manifest: m, test, tasks };
+  } catch (e) {
+    if (!switching) throw e;
+    // Put the previous release back: its config (when this one was moved in) and `current`.
+    const cfgBack = m.config
+      ? `if [ ! -e ${sq(staged)} ]; then if [ -f ${sq(`${staged}.prev`)} ]; then mv -f ${sq(`${staged}.prev`)} ${sq(live)} || rc=1;`
+        + ` elif [ -f ${sq(`${staged}.none`)} ]; then rm -f ${sq(live)} || rc=1; fi; fi; `
+      : '';
+    const back = await sh(d, `rc=0; ${cfgBack}{ ${pointBack(p, previousLink)}; } || rc=1; exit $rc`)
+      .catch((err: unknown) => ({ code: 1, stdout: '', stderr: (err as Error)?.message ?? String(err) }));
+    log(back.code === 0 ? 'app.restored' : 'app.restore_failed', { app: m.app, sha: short, previous: previousSha ?? null });
+    const said = back.code === 0
+      ? (previousSha ? ` ${previousSha} is running as before, with its configuration.` : ' Nothing was left switched on.')
+      : ` Putting ${previousSha ?? 'the agent'} back failed too (${errText(back) || 'no output'}); use Roll back or Update again.`;
+    if (e instanceof Error) e.message += said;
+    throw e;
+  } finally {
+    await sh(d, `rm -rf ${sq(stage)}; rmdir ${sq(`${p.root}/staging`)} 2>/dev/null; true`).catch(() => undefined);
   }
-
-  // 4. switch, atomically; keep the newest releases
-  const sw = await sh(d, `cd ${sq(p.root)} && ln -sfn releases/${short} current.new && mv -T current.new current`
-    + ` && ls -1t releases | tail -n +${KEEP_RELEASES + 1} | grep -v -x -e ${short} -e ${sq(previousSha?.slice(0, 12) ?? short)} | while read r; do rm -rf "releases/$r"; done`);
-  if (sw.code !== 0) throw new AppError(`Could not switch to ${short}: ${(sw.stderr || sw.stdout).trim().slice(0, 300)}`);
-  log('app.switched', { app: m.app, sha: short, previous: previousSha?.slice(0, 12) ?? null });
-
-  // 5. its scheduled commands
-  const tasks = await syncTasks(d, m);
-  return { app: m.app, sha: rel.sha, previousSha, manifest: m, test, tasks };
 }
 
-/** Point `current` back at an earlier release that is still there. */
-export async function switchTo(d: InstallDeps, m: AppManifest, sha: string): Promise<void> {
+/**
+ * Point `current` back at an earlier release that is still there, and give it
+ * its tasks. `from` is the manifest of the release being left (its tasks are
+ * the ones put back if the new set cannot be scheduled; `current` goes back too).
+ */
+export async function switchTo(d: InstallDeps, m: AppManifest, sha: string, from?: AppManifest): Promise<void> {
   const p = appPaths(m.app);
   const short = sha.slice(0, 12);
+  const before = await currentLink(d, m.app);
   const r = await sh(d, `cd ${sq(p.root)} && test -d releases/${short} && ln -sfn releases/${short} current.new && mv -T current.new current`);
   if (r.code !== 0) throw new AppError(`Release ${short} is no longer in the agent.`);
-  await syncTasks(d, m);
+  try {
+    await syncTasks(d, m, from);
+  } catch (e) {
+    const back = await sh(d, pointBack(p, before)).catch(() => ({ code: 1, stdout: '', stderr: '' }));
+    if (e instanceof Error) e.message += back.code === 0 ? ` Still on ${shaOf(before) ?? 'the release it had'}.` : ' Pointing back at the release it had failed too.';
+    throw e;
+  }
 }
 
-/** OpenClaw command tasks named "<app>-<task>": the manifest's set, exactly. */
-export async function syncTasks(d: InstallDeps, m: AppManifest): Promise<string[]> {
-  const vars = appVars(m, d.facts);
+type Job = { id: string; name: string };
+
+/** The agent's jobs named "<app>-…"; throws when the list cannot be read (a sync must know what is there). */
+async function appJobs(d: InstallDeps, app: string): Promise<Job[]> {
   const list = await d.provider.exec(d.runtimeRef, ['cron', 'list', '--json'], { timeoutMs: 60_000 });
-  let jobs: Array<{ id: string; name: string }> = [];
-  try { jobs = (JSON.parse(list.stdout).jobs ?? []) as typeof jobs; } catch { /* none readable: add below */ }
-  for (const j of jobs.filter((x) => x.name?.startsWith(`${m.app}-`))) {
-    await d.provider.exec(d.runtimeRef, ['cron', 'rm', j.id], { timeoutMs: 60_000 });
-  }
+  if (list.code !== 0) throw new AppError(`Could not read the agent's scheduled tasks: ${errText(list)}`);
+  let jobs: unknown;
+  try { jobs = JSON.parse(list.stdout).jobs ?? []; } catch { throw new AppError("The agent's scheduled tasks did not read as JSON."); }
+  if (!Array.isArray(jobs)) return [];
+  return (jobs as Job[]).filter((x) => typeof x?.name === 'string' && x.name.startsWith(`${app}-`));
+}
+
+function addArgv(d: InstallDeps, m: AppManifest, t: AppManifest['tasks'][number]): string[] {
+  const vars = appVars(m, d.facts);
+  return ['cron', 'add', '--name', `${m.app}-${t.name}`, '--agent', d.facts.slug,
+    ...(t.every ? ['--every', t.every] : ['--cron', t.cron!, '--tz', d.facts.timezone]),
+    '--command-argv', JSON.stringify(t.command.map((a) => expand(a, vars))),
+    '--command-cwd', vars.app_dir,
+    ...Object.entries(vars.envMap).flatMap(([k, v]) => ['--command-env', `${k}=${v}`]),
+    '--timeout-seconds', String(t.timeoutSeconds ?? 300), '--no-deliver', '--json'];
+}
+
+/**
+ * OpenClaw command tasks named "<app>-<task>": the manifest's set, exactly.
+ * The new jobs go in first and the old ones come off after, so a failure part
+ * way leaves the old set: new jobs already added are taken off again, and old
+ * ones already removed are added back from `previous` (the manifest they were
+ * made from). The error says what could not be put back.
+ */
+export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppManifest): Promise<string[]> {
+  const run = (argv: string[]) => d.provider.exec(d.runtimeRef, argv, { timeoutMs: 60_000 });
+  const old = await appJobs(d, m.app);
+  const oldIds = new Set(old.map((j) => j.id));
+  /** Take off what this sync added; the names it could not. */
+  const takeOffNew = async (): Promise<string[]> => {
+    let now: Job[];
+    try { now = await appJobs(d, m.app); } catch { return ['(the new tasks: the list could not be read)']; }
+    const left: string[] = [];
+    for (const j of now.filter((x) => !oldIds.has(x.id))) if ((await run(['cron', 'rm', j.id])).code !== 0) left.push(j.name);
+    return left;
+  };
+  const fail = (what: string, problems: string[]) => new AppError(
+    `${what} ${problems.length ? `Could not put the tasks back as they were: ${problems.join('; ')}.` : 'Its tasks are as they were.'}`);
+
   const made: string[] = [];
   for (const t of m.tasks) {
-    const argv = ['cron', 'add', '--name', `${m.app}-${t.name}`, '--agent', d.facts.slug,
-      ...(t.every ? ['--every', t.every] : ['--cron', t.cron!, '--tz', d.facts.timezone]),
-      '--command-argv', JSON.stringify(t.command.map((a) => expand(a, vars))),
-      '--command-cwd', vars.app_dir,
-      ...Object.entries(vars.envMap).flatMap(([k, v]) => ['--command-env', `${k}=${v}`]),
-      '--timeout-seconds', String(t.timeoutSeconds ?? 300), '--no-deliver', '--json'];
-    const r = await d.provider.exec(d.runtimeRef, argv, { timeoutMs: 60_000 });
-    if (r.code !== 0) throw new AppError(`Could not schedule ${m.app}-${t.name}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
+    const r = await run(addArgv(d, m, t));
+    if (r.code !== 0) {
+      const left = await takeOffNew();
+      throw fail(`Could not schedule ${m.app}-${t.name}: ${errText(r)}.`, left.length ? [`still there: ${left.join(', ')}`] : []);
+    }
     made.push(`${m.app}-${t.name}`);
+  }
+
+  const removed: string[] = [];
+  for (const j of old) {
+    const r = await run(['cron', 'rm', j.id]);
+    if (r.code === 0) { removed.push(j.name); continue; }
+    const problems: string[] = [];
+    const left = await takeOffNew();
+    if (left.length) problems.push(`still there: ${left.join(', ')}`);
+    const missing: string[] = [];
+    for (const name of removed) {
+      const t = previous?.app === m.app ? previous.tasks.find((x) => `${m.app}-${x.name}` === name) : undefined;
+      if (!t || (await run(addArgv(d, previous!, t))).code !== 0) missing.push(name);
+    }
+    if (missing.length) problems.push(`not re-added: ${missing.join(', ')}`);
+    throw fail(`Could not take off the old task ${j.name}: ${errText(r)}.`, problems);
   }
   return made;
 }
