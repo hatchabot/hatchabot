@@ -126,6 +126,14 @@ export const EMBED_MODEL_PATH = '/opt/agentclaw/models/embeddinggemma-300m-qat-Q
 export function needsPortHeal(version: string | undefined): boolean {
   return memoryKeyPrefix(version) === 'memory.search';
 }
+/**
+ * Would running `to` strand data written by `from`? Only going DOWN across
+ * the 2026.8 line: 2026.7 cannot read a volume migrated to 2026.8+. Up is the
+ * normal path; unknown versions pass (the build is the judge).
+ */
+export function moveCrossesDown(from: string | undefined, to: string | undefined): boolean {
+  return !!from && !!to && needsPortHeal(from) && !needsPortHeal(to);
+}
 /** Where the image keeps a baked non-channel plugin (label org.hatchabot.plugins). */
 export const bakedPluginDir = (id: string, pkg: string) => `/opt/hatchabot/plugins/${id}/node_modules/${pkg}`;
 export const DUCKDUCKGO_PLUGIN_DIR = bakedPluginDir('duckduckgo', '@openclaw/duckduckgo-plugin');

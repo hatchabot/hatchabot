@@ -264,19 +264,20 @@ installed source and docs to diagnose problems.
 An agent's memory is its workspace files (SOUL.md, AGENTS.md, MEMORY.md and
 memory notes) on its volume, plus OpenClaw's session transcripts. Every edit
 from the app takes a snapshot first. Memory search uses embeddings, normally
-from one shared embedder container on the machine; switching embedder means a
-re-index.
+from one shared embedder container on each machine (this one, and each runner
+its own since 2.147); switching embedder, or moving machine, means a re-index.
 
 - `src/orchestrator/snapshots.ts` — `CORE_FILES`, `captureSnapshot`, `autoSnapshot`, `restoreSnapshot`, `writeCoreFile`: snapshots and safe edits of the core files.
 - `src/orchestrator/provision.ts` — `checkpointMemory`, `reindexMemoryIfSwitched`, `memoryIndexIncomplete`: saving memory before risky steps; re-indexing.
 - `src/orchestrator/transcript.ts` — `recoverContext`, `contextStats`, `exportTranscript`: recovering context after a reset; chat history download.
 - `src/orchestrator/inspect.ts` — `readInspectableFile`, `readTranscript`: reading an archived agent's files.
-- `src/embedder/embedder.ts` — `EmbedderService`, `bootStartEmbedder`, `embedDefault`, `EMBED_MODEL_ALIAS`: the shared embedding container.
+- `src/embedder/embedder.ts` — `EmbedderService`, `bootStartEmbedder`, `embedDefault`, `EMBED_MODEL_ALIAS`, `syncKeysNow`: the shared embedding container (a runner's keeps its state under `embed-hosts/<host id>` and copies its keys there).
+- `src/providers/localDockerProvider.ts` — `ensureEmbedder`, `pushEmbedKeys`: the containers; on a runner, the model and keys go into volumes there.
 - `src/embedder/door.ts` — `doorScript`: the keyed door agents use to reach the embedder.
 - `src/openclaw/configWriter.ts` — `EMBED_PLUGIN_DIR`, `memoryKeyPrefix`: memory-search settings written into each agent.
-- `src/api/routes.ts` — `'/v1/agents/:id/files/:name'`, `'/v1/agents/:id/snapshots'`, `'/v1/agents/:id/checkpoint'`, `'/v1/agents/:id/recover-context'`, `'/v1/embedder'`, `'/v1/embed-default'`, `'/v1/embed/move-all'`: memory files and the embedder.
+- `src/api/routes.ts` — `'/v1/agents/:id/files/:name'`, `'/v1/agents/:id/snapshots'`, `'/v1/agents/:id/checkpoint'`, `'/v1/agents/:id/recover-context'`, `'/v1/embedder'`, `embedderFor`, `'/v1/embed-default'`, `'/v1/embed/move-all'`: memory files and the embedder (`?host=` for a runner's).
 - `src/store/store.ts` — `snapshots`, `embed_tokens`, `agent_context_reset`: where it is stored.
-- `web/index.html` — `openEdit`, `loadEditFile`, `saveEditFile`, `loadSnapshots`, `revertSnapshot`, `loadEmbedder`, `embedderAction`, `recoverContext`: the Personality and Knowledge panes and the embedder panel.
+- `web/index.html` — `openEdit`, `loadEditFile`, `saveEditFile`, `loadSnapshots`, `revertSnapshot`, `loadEmbedder`, `loadHostEmbedder`, `embedderAction`, `recoverContext`: the Personality and Knowledge panes and the embedder panel.
 
 ## Backups and restore
 

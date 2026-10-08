@@ -332,6 +332,8 @@ export interface RuntimeProvider {
   /** The address a container reaches this machine on, if the host can bind it
    *  (Linux: the docker bridge's gateway; Docker Desktop: nothing bindable). */
   hostGatewayAddress?(): Promise<string | undefined>;
+  /** Docker Desktop (macOS, Windows): no bridge address can be bound on that machine, so a door binds loopback. */
+  desktop?(): Promise<boolean>;
   /** The address a container uses to reach services on this machine's
    *  loopback — the bridge gateway, or under rootless Docker the slirp4netns
    *  host address. Undefined when there is none (Docker Desktop). */
@@ -359,6 +361,8 @@ export interface RuntimeProvider {
   ensureEmbedder?(spec: import('../embedder/embedder.js').EmbedderSpec): Promise<import('../embedder/embedder.js').EmbedderStatus>;
   embedderStatus?(): Promise<import('../embedder/embedder.js').EmbedderStatus>;
   stopEmbedder?(): Promise<void>;
+  /** A runner's copy of the memory search key files, after they changed here (no-op on this machine). */
+  pushEmbedKeys?(files: import('../embedder/embedder.js').EmbedKeyFiles): Promise<void>;
   /** The engine container's live memory and CPU (from `docker stats`), for the health loop's memory guard. */
   embedderStats?(): Promise<ContainerStats | undefined>;
   /** Build `tag` from a Dockerfile on THIS host's daemon (a runner's, over its connection). */

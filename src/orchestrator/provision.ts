@@ -121,7 +121,8 @@ export interface ProvisionDeps {
   embedder?: {
     /** Bring the service up if need be and mint this agent's key — or, with an
      *  external server configured, that server's address, key and model. */
-    credentialsFor(agentId: string): Promise<{ baseUrl: string; token: string; model: string }>;
+    /** A key for the agent on the memory search service of the machine it is being built on (a runner has its own). */
+    credentialsFor(agentId: string, hostId?: string): Promise<{ baseUrl: string; token: string; model: string }>;
   };
   /** Post a line to the agent's chat (default: Telegram via notifyAgentChat).
    *  Injectable so tests stay off the network. */
@@ -602,9 +603,11 @@ export async function buildRuntimeSpec(
     engineless = info.embedEngine === 'none';
   } catch { /* no image info: no new channels this build */ }
 
-  // Memory search engine. `shared` needs the service on THIS machine; when
-  // it cannot be had (a runner, the service down), the agent is built on the
-  // baked engine — never left without one — and the reason is on its record.
+  // Memory search engine. `shared` is the service on the machine the agent is
+  // built on — this one's, or a runner's own (before 2.147 runners had none,
+  // and every 2026.9 agent was refused a runner). When it cannot be had (the
+  // service down), the agent is built on the baked engine — never left
+  // without one — and the reason is on its record.
   // An image with no engine of its own (label embed-engine=none: OpenClaw
   // 2026.8+, or a -lite build) has only the shared service: the agent is
   // built on it whatever its switch says, and the build refuses rather than
@@ -612,11 +615,10 @@ export async function buildRuntimeSpec(
   const wantShared = agent.embedMode === 'shared' || engineless;
   let embed: OpenClawConfigPatch['embed'];
   let bakedWhy: string | undefined;
-  if (wantShared && host.kind !== 'local') bakedWhy = 'it runs on a runner, and the service is on the main machine';
-  else if (wantShared && !deps.embedder) bakedWhy = 'no memory search service is available on this path';
+  if (wantShared && !deps.embedder) bakedWhy = 'no memory search service is available on this path';
   else if (wantShared) {
     try {
-      embed = await deps.embedder!.credentialsFor(agentId);
+      embed = await deps.embedder!.credentialsFor(agentId, host.id);
     } catch (err) {
       bakedWhy = (err instanceof Error ? err.message : String(err)).slice(0, 200);
     }

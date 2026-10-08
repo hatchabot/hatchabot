@@ -58,7 +58,12 @@ export interface EmbedderSpec {
   /** Run the door as this user so it can read the 0600 keys file. */
   uid: number;
   gid: number;
+  /** The model's checksum, so a runner's copy is compared without hashing this one again. */
+  modelSha256?: string;
 }
+
+/** What a runner's copy of the key files needs: the files, an image with a shell to write them, their owner. */
+export type EmbedKeyFiles = Pick<EmbedderSpec, 'keysFile' | 'serverKeyFile' | 'doorImage' | 'uid' | 'gid'>;
 
 export type ContainerState = 'running' | 'stopped' | 'absent';
 export interface EmbedderStatus {
@@ -69,8 +74,16 @@ export interface EmbedderStatus {
 }
 
 export interface EmbedderServiceOpts {
-  /** The local host's provider (lazily: hosts are resolved per request). */
+  /** The host's provider (lazily: hosts are resolved per request). */
   provider: () => RuntimeProvider;
+  /**
+   * A runner's service: its own state directory, only its own agents' keys,
+   * and the key files copied over to it whenever they change. Absent: this
+   * machine's service (guests and an external server are this machine's only).
+   */
+  hostId?: string;
+  /** This machine's host id: its service also holds keys minted before keys named a host. */
+  localHostId?: () => string | undefined;
   secrets: SecretStore;
   store: Store;
   dataDir: string;
@@ -105,7 +118,8 @@ export class EmbedderService {
   #busy: Promise<unknown> = Promise.resolve();
   constructor(opts: EmbedderServiceOpts) { this.#o = opts; }
 
-  get dir(): string { return join(this.#o.dataDir, 'embed'); }
+  get hostId(): string | undefined { return this.#o.hostId; }
+  get dir(): string { return this.#o.hostId ? join(this.#o.dataDir, 'embed-hosts', this.#o.hostId) : join(this.#o.dataDir, 'embed'); }
   get enabledFile(): string { return join(this.dir, 'enabled'); }
   get keysFile(): string { return join(this.dir, 'keys.json'); }
   /**
@@ -149,7 +163,7 @@ export class EmbedderService {
   /** The server's key: a file, never an argument (argv is world-readable in /proc). */
   get serverKeyFile(): string { return join(this.dir, 'server-key'); }
   get modelPath(): string { return join(this.#o.dataDir, 'models', EMBED_MODEL_FILE); }
-  get external(): string | undefined { return process.env.HATCHABOT_EMBED_URL?.trim() || undefined; }
+  get external(): string | undefined { return this.#o.hostId ? undefined : process.env.HATCHABOT_EMBED_URL?.trim() || undefined; }
   get enabled(): boolean { return existsSync(this.enabledFile); }
   /** Written by Stop: the machine owner turned the service off on purpose,
    *  as opposed to a fresh install where nobody has touched it yet. */
@@ -200,19 +214,52 @@ export class EmbedderService {
     // its key valid when started again without a rebuild (27th audit). Only
     // archive and delete retire a key (setAgentState drops the row).
     const gone = new Set(['ARCHIVED', 'DELETING', 'DELETED']);
+    // Only this machine's agents: a key is minted for the host the build is
+    // for, and a runner's door must not open for an agent elsewhere.
+    const local = this.#o.hostId ? undefined : this.#o.localHostId?.();
+    const mine = (h: string | null | undefined) => (this.#o.hostId ? h === this.#o.hostId : !h || h === local);
     const keys: Record<string, string> = {};
-    for (const t of this.#o.store.listEmbedTokens()) if (!gone.has(t.state)) keys[t.tokenHash] = t.agentId;
-    for (const [name, g] of Object.entries(this.#guests())) keys[g.hash] = `guest:${name}`;
+    for (const t of this.#o.store.listEmbedTokens()) if (!gone.has(t.state) && mine(t.hostId)) keys[t.tokenHash] = t.agentId;
+    if (!this.#o.hostId) for (const [name, g] of Object.entries(this.#guests())) keys[g.hash] = `guest:${name}`;
+    const body = JSON.stringify(keys);
     const tmp = `${this.keysFile}.tmp`;
-    writeFileSync(tmp, JSON.stringify(keys), { mode: 0o600 });
+    writeFileSync(tmp, body, { mode: 0o600 });
     chmodSync(tmp, 0o600);
     renameSync(tmp, this.keysFile); // atomic: the door never reads a half-written file
+    if (this.#o.hostId && this.enabled && body !== this.#pushed) this.#pushLater = this.#pushKeys(body);
+  }
+
+  /** A runner's door reads its own copy: what was last copied there, and the copy under way. */
+  #pushed: string | undefined;
+  #pushLater: Promise<void> = Promise.resolve();
+  #pushKeys(body: string): Promise<void> {
+    const next = this.#pushLater.catch(() => {}).then(async () => {
+      if (body === this.#pushed) return;
+      await this.#o.provider().pushEmbedKeys?.(this.#keyFiles());
+      this.#pushed = body;
+    });
+    next.catch((err) => this.#o.log?.('embedder.keys_push_failed', { host: this.#o.hostId, error: String(err).slice(0, 200) }));
+    return next;
+  }
+  /** The keys file written, and on a runner copied there: a build waits for its key to work. */
+  async syncKeysNow(): Promise<void> {
+    this.syncKeys();
+    await this.#pushLater;
+  }
+  #keyFiles(): EmbedKeyFiles {
+    return {
+      keysFile: this.keysFile, serverKeyFile: this.serverKeyFile, doorImage: this.#o.runtimeImage,
+      uid: typeof process.getuid === 'function' ? process.getuid() : 1000,
+      gid: typeof process.getgid === 'function' ? process.getgid() : 1000,
+    };
   }
 
   async #key(): Promise<string> {
-    try { return await this.#o.secrets.get(EMBEDDER_KEY_REF); } catch { /* first start */ }
+    // A runner's engine has its own key: one machine's key opens no other's engine.
+    const ref = this.#o.hostId ? `${EMBEDDER_KEY_REF}/${this.#o.hostId}` : EMBEDDER_KEY_REF;
+    try { return await this.#o.secrets.get(ref); } catch { /* first start */ }
     const key = randomBytes(24).toString('base64url');
-    await this.#o.secrets.put(EMBEDDER_KEY_REF, key);
+    await this.#o.secrets.put(ref, key);
     return key;
   }
 
@@ -229,11 +276,12 @@ export class EmbedderService {
       doorImage: this.#o.runtimeImage,
       doorScript: this.#o.doorScript,
       doorPort: this.doorPort,
-      doorBind: process.env.HATCHABOT_EMBED_BIND?.trim() || (await this.#o.doorBind()),
+      doorBind: (!this.#o.hostId && process.env.HATCHABOT_EMBED_BIND?.trim()) || (await this.#o.doorBind()),
       keysFile: this.keysFile,
       perMin: Number(process.env.HATCHABOT_EMBED_PER_MIN) || 600,
       uid: typeof process.getuid === 'function' ? process.getuid() : 1000,
       gid: typeof process.getgid === 'function' ? process.getgid() : 1000,
+      modelSha256: this.#o.modelSha256 ?? EMBED_MODEL_SHA256,
     };
   }
 
@@ -265,7 +313,9 @@ export class EmbedderService {
       }
       writeFileSync(this.enabledFile, `${new Date().toISOString()}\n`);
       rmSync(this.stoppedFile, { force: true });
-      this.#o.log?.('embedder.started', { door: s.doorAddress });
+      // The start copied the key files to a runner as they stood.
+      if (this.#o.hostId) { try { this.#pushed = readFileSync(this.keysFile, 'utf8'); } catch { /* none yet */ } }
+      this.#o.log?.('embedder.started', { door: s.doorAddress, ...(this.#o.hostId ? { host: this.#o.hostId } : {}) });
       return this.status();
     }
   }
@@ -292,8 +342,11 @@ export class EmbedderService {
   }
 
   /** The health loop: an enabled service that fell over comes back. */
-  async healthTick(): Promise<'ok' | 'restarted' | 'off'> {
+  async healthTick(): Promise<'ok' | 'restarted' | 'off' | 'unreachable'> {
     if (!this.enabled || this.external) return 'off';
+    // A runner asleep (a laptop) is not a service that fell over.
+    const p = this.#o.provider();
+    if (p.reachable && !(await p.reachable())) return 'unreachable';
     const s = await this.status();
     if (s.embedder === 'running' && s.door === 'running') {
       this.syncKeys(); // retired keys (archive, delete) leave the file within a tick

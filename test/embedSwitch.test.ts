@@ -69,11 +69,12 @@ function world(hostKind: 'local' | 'cloud' = 'local') {
   store.insertAgent({ id: 'todo', ownerId: OWNER, name: 'To Do', slug: 'to-do', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
   store.setAgentEmbedMode('todo', 'shared');
   const minted: string[] = [];
+  const mintedFor: Array<string | undefined> = [];
   const embedder: NonNullable<ProvisionDeps['embedder']> = {
-    async credentialsFor(id) { const t = `key-for-${id}`; minted.push(t); store.setEmbedToken(id, embedKeyHash(t)); return { baseUrl: 'http://172.17.0.1:8093/v1', token: t, model: 'embeddinggemma' }; },
+    async credentialsFor(id, hostId) { const t = `key-for-${id}`; minted.push(t); mintedFor.push(hostId); store.setEmbedToken(id, embedKeyHash(t)); return { baseUrl: 'http://172.17.0.1:8093/v1', token: t, model: 'embeddinggemma' }; },
   };
   const deps = (withEmbedder: boolean): ProvisionDeps => ({ store, secrets, provider, channel: channelStub, log: (e) => events.push(e), sleep: async () => {}, ...(withEmbedder ? { embedder } : {}) });
-  return { store, provider, events, minted, deps };
+  return { store, provider, events, minted, mintedFor, deps };
 }
 
 describe('building a switched agent', () => {
@@ -96,11 +97,12 @@ describe('building a switched agent', () => {
     expect(w.store.getAgent('todo')!.appliedEmbedMode).toBe('baked');
   });
 
-  it('on a runner it stays baked (the door is on the other machine)', async () => {
+  it('on a runner it uses that runner\'s own service (before 2.147 it stayed baked, and 2026.9 agents were refused runners)', async () => {
     const w = world('cloud');
     const spec = await buildRuntimeSpec(w.deps(true), 'todo');
-    expect(spec.workspace.configPatch.embed).toBeUndefined();
-    expect(w.minted).toEqual([]);
+    expect(spec.workspace.configPatch.embed?.token).toBe('key-for-todo');
+    expect(w.mintedFor).toEqual(['h1']);
+    expect(w.events).not.toContain('embed.baked_instead');
   });
 
   it('an unswitched agent is untouched: no key, no embed config', async () => {
@@ -163,9 +165,9 @@ describe('re-indexing after a switch', () => {
   });
 
   it('the fallback reason lands on the agent, where the engine row shows it', async () => {
-    const w = world('cloud');
-    await buildRuntimeSpec(w.deps(true), 'todo');
-    expect(w.store.getAgent('todo')!.embedIndexError).toMatch(/own engine — it runs on a runner/);
+    const w = world();
+    await buildRuntimeSpec(w.deps(false), 'todo');
+    expect(w.store.getAgent('todo')!.embedIndexError).toMatch(/own engine — no memory search service/);
   });
 
   it('switching back re-indexes too', async () => {
@@ -221,9 +223,11 @@ describe('an image with no engine of its own (label embed-engine=none)', () => {
     w.provider.imageEmbedEngine = 'none';
     await expect(buildRuntimeSpec(w.deps(false), 'todo')).rejects.toThrow(/no embedding engine/);
     expect(w.events).toContain('embed.engineless_refused');
+    // On a runner it is built on that runner's own service (refused there before 2.147).
     const c = world('cloud');
     c.provider.imageEmbedEngine = 'none';
-    await expect(buildRuntimeSpec(c.deps(true), 'todo')).rejects.toThrow(/runner/);
+    await buildRuntimeSpec(c.deps(true), 'todo');
+    expect(c.mintedFor).toEqual(['h1']);
   });
 
   it('an image that bakes its engine leaves a baked agent alone', async () => {

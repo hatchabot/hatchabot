@@ -95,7 +95,8 @@ server key "known only to Hatchabot" (the door holds it too), "when set,
 Hatchabot forwards there" for `HATCHABOT_EMBED_URL` (switched agents are
 given that server's address, key and model directly), the "inline health"
 row (the result is on the agent's Settings → Advanced engine row), and a
-runner agent reaching the control plane (runners are built baked, for now).
+runner agent reaching the control plane (instead, each runner has its own
+service since v2.147.0).
 The test files are test/embedDoor.test.ts, test/embedder.test.ts and
 test/embedSwitch.test.ts.
 
@@ -213,11 +214,31 @@ rather than leaving the agent without memory search. *Built in v2.51.0.*
 
 ### Machines other than this one
 
-An agent on a remote runner reaches the control plane on that host's
-configured internal address, as its consult tool does today. No second
-embedder in the first version. If the control plane is unreachable, memory
-search reports unavailable and replies continue; OpenClaw's active-memory pass
-does not block a reply on it.
+*Built in v2.147.0:* each runner runs its own service. The first version had
+none, and runner agents were built baked. From 2026.8, with no engine to
+bake, that meant no current agent could be built on a runner at all.
+
+- **One service per runner.** `embedderFor(hostId)` in routes.ts makes the
+  runner's `EmbedderService` on first use. Its state is under
+  `embed-hosts/<host id>` beside this machine's `embed/`, and it has its own
+  server key (`embedder/key/<host id>`).
+- **Keys per machine.** A key is minted for the machine the build is for
+  (`embed_tokens.host_id`), and each door's file holds only its machine's
+  agents.
+- **Files over the docker connection.** The runner's daemon cannot see this
+  machine's disk, so the model and both key files are copied into volumes
+  there (`hatchabot-embed-model`, `hatchabot-embed-keys`) through a
+  short-lived container on the runtime image. The model is copied only when
+  its checksum differs; the keys file whenever it changes, and a build waits
+  for its own key to land. The runner downloads only the engine's image.
+- **Health.** It is asked from inside the door (`docker exec`), since the
+  runner's addresses are out of reach from here. An asleep runner is skipped
+  by the health loop, not restarted.
+- **Bind.** Docker Desktop binds loopback (agents use `host.docker.internal`);
+  Linux binds the runner's bridge gateway.
+- **Moves.** A key minted for a different machine than the last one clears
+  the agent's index confirmation, so the build re-indexes there, and the old
+  door forgets the key.
 
 ## Risks
 

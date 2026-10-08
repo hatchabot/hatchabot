@@ -3,7 +3,7 @@ import { PassThrough, type Readable } from 'node:stream';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, connect } from 'node:net';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
-import { readdirSync, readFileSync } from 'node:fs';
+import { createReadStream, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir, cpus } from 'node:os';
 import { join, dirname } from 'node:path';
 import { promisify } from 'node:util';
@@ -1452,6 +1452,52 @@ export class LocalDockerProvider implements RuntimeProvider {
   #embedNetwork(): string { return `${this.prefix}-embed`; }
   #embedderName(): string { return `${this.prefix}-embedder`; }
   #embedDoorName(): string { return `${this.prefix}-embed-door`; }
+  /** On a runner the files live in volumes there: the daemon cannot see this machine's disk. */
+  #embedModelVolume(): string { return `${this.prefix}-embed-model`; }
+  #embedKeysVolume(): string { return `${this.prefix}-embed-keys`; }
+  /** One file from this machine into a volume on the runner, whole or not at all (written aside, then renamed). */
+  async #putVolumeFile(volume: string, image: string, src: string, name: string, owner: string, mode: string): Promise<void> {
+    if (!/^[A-Za-z0-9._-]+$/.test(name) || !/^\d+:\d+$/.test(owner) || !/^[0-7]{3}$/.test(mode)) throw new Error(`bad volume file ${name}`);
+    // Its own aside name: two copies at once (a key minted during a start) each land whole.
+    const part = `/v/.${name}.${randomBytes(4).toString('hex')}.part`;
+    const res = await this.#runStdin([
+      'run', '--rm', '-i', '--network', 'none', '--user', '0', '-v', `${volume}:/v`, '--entrypoint', 'sh', image,
+      '-c', `set -e; cat > ${part}; chown ${owner} ${part}; chmod ${mode} ${part}; mv -f ${part} /v/${name}`,
+    ], { file: src });
+    if (res.code !== 0) throw new ProviderError(`copy ${name} to the runner failed: ${res.stderr.slice(-300)}`, "Could not copy the memory search service's files to that machine.");
+  }
+  /**
+   * The memory search service on a runner: the model and both key files go
+   * over the docker connection into volumes there (the runner downloads
+   * nothing but the engine's image). The model only when the runner's copy
+   * differs; the key files every time (they are small).
+   */
+  async #embedFilesToRunner(spec: import('../embedder/embedder.js').EmbedderSpec): Promise<void> {
+    if ((await this.#docker(['image', 'inspect', '--format', '{{.Id}}', spec.doorImage])).code !== 0) {
+      throw new ProviderError(`runtime image ${spec.doorImage} is not on the runner`, 'That machine does not have the runtime image yet: Settings → Hosts → Check, then Install image.');
+    }
+    const base = EMBED_MODEL_BASENAME(spec.modelPath);
+    const want = spec.modelSha256 ?? createHash('sha256').update(readFileSync(spec.modelPath)).digest('hex');
+    const have = await this.#docker(['run', '--rm', '--network', 'none', '--user', '0', '-v', `${this.#embedModelVolume()}:/v:ro`, '--entrypoint', 'sha256sum', spec.doorImage, `/v/${base}`], IO_TIMEOUT_MS);
+    if (have.code !== 0 || have.stdout.trim().split(/\s+/)[0] !== want) {
+      await this.#putVolumeFile(this.#embedModelVolume(), spec.doorImage, spec.modelPath, base, '0:0', '644');
+    }
+    await this.pushEmbedKeys(spec);
+  }
+  /** A runner's copy of the key files, after keys changed here (a no-op on this machine, where the door reads them directly). */
+  async pushEmbedKeys(spec: import('../embedder/embedder.js').EmbedKeyFiles): Promise<void> {
+    if (!this.remote) return;
+    const owner = await this.containerUserFor(spec.uid, spec.gid);
+    for (const f of [spec.serverKeyFile, spec.keysFile]) {
+      await this.#putVolumeFile(this.#embedKeysVolume(), spec.doorImage, f, EMBED_MODEL_BASENAME(f), owner, '600');
+    }
+  }
+  /** How many CPUs the daemon's machine has (a runner's, not this one's). */
+  async #daemonCpus(): Promise<number> {
+    if (!this.remote) return cpus().length || 8;
+    const r = await this.#docker(['info', '--format', '{{.NCPU}}']);
+    return Number(r.stdout.trim()) || 4;
+  }
   async #containerState(name: string): Promise<'running' | 'stopped' | 'absent'> {
     const r = await this.#docker(['inspect', '--format', '{{.State.Running}}', name]);
     if (r.code !== 0) return 'absent';
@@ -1468,6 +1514,9 @@ export class LocalDockerProvider implements RuntimeProvider {
     return { embedder, door, doorAddress };
   }
   async ensureEmbedder(spec: import('../embedder/embedder.js').EmbedderSpec): Promise<import('../embedder/embedder.js').EmbedderStatus> {
+    if (this.remote) await this.#embedFilesToRunner(spec);
+    const modelMount = this.remote ? `${this.#embedModelVolume()}:/models:ro` : `${spec.modelPath}:/models/${EMBED_MODEL_BASENAME(spec.modelPath)}:ro`;
+    const keysMount = this.remote ? `${this.#embedKeysVolume()}:/keys:ro` : `${dirname(spec.serverKeyFile)}:/keys:ro`;
     const net = this.#embedNetwork();
     if ((await this.#docker(['network', 'inspect', net])).code !== 0) {
       // Internal: neither container has a way out; the door is published by port below.
@@ -1505,8 +1554,8 @@ export class LocalDockerProvider implements RuntimeProvider {
         // As this user, so it can read the 0600 key file; the key is a FILE,
         // never an argument — argv is world-readable in /proc (27th audit).
         '--user', await this.containerUserFor(spec.uid, spec.gid),
-        '-v', `${spec.modelPath}:/models/${EMBED_MODEL_BASENAME(spec.modelPath)}:ro`,
-        '-v', `${dirname(spec.serverKeyFile)}:/keys:ro`,
+        '-v', modelMount,
+        '-v', keysMount,
         spec.image,
         '--embeddings', '-m', `/models/${EMBED_MODEL_BASENAME(spec.modelPath)}`, '--alias', spec.modelAlias,
         // Measured 2026-09-24 under a re-index-style load (8 workers, 150 s):
@@ -1518,7 +1567,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         // 512 the server refused a 546-token chunk outright ("input is too
         // large to process"), and that agent's index never built (the manager,
         // 2026-09-25). One batch per context: 2048 tokens.
-        '-c', '2048', '-b', '2048', '-ub', '2048', '-t', String(Math.min(8, cpus().length || 8)), '--threads-http', '4', '--host', '0.0.0.0', '--port', '8080',
+        '-c', '2048', '-b', '2048', '-ub', '2048', '-t', String(Math.min(8, await this.#daemonCpus())), '--threads-http', '4', '--host', '0.0.0.0', '--port', '8080',
         '--api-key-file', `/keys/${EMBED_MODEL_BASENAME(spec.serverKeyFile)}`, '--no-webui',
       ], IO_TIMEOUT_MS);
       if (run.code !== 0) throw new ProviderError(`embedder failed: ${run.stderr.slice(-500)}`, 'Could not start the embedding service.');
@@ -1559,7 +1608,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       // The DIRECTORY, not the file: Hatchabot replaces the file by rename,
       // and a bind-mounted file would keep the old inode — a re-minted key
       // would never be seen until the door restarted.
-      '-v', `${dirname(spec.keysFile)}:/keys:ro`, '-e', `EMBED_KEYS_FILE=/keys/${EMBED_MODEL_BASENAME(spec.keysFile)}`,
+      '-v', this.remote ? keysMount : `${dirname(spec.keysFile)}:/keys:ro`, '-e', `EMBED_KEYS_FILE=/keys/${EMBED_MODEL_BASENAME(spec.keysFile)}`,
       '-e', 'EMBED_UPSTREAM=http://embedder:8080', '-e', `EMBED_SERVER_KEY_FILE=/keys/${EMBED_MODEL_BASENAME(spec.serverKeyFile)}`,
       '-e', `EMBED_PER_MIN=${spec.perMin}`, '-e', 'EMBED_DOOR_PORT=8093',
       '--entrypoint', 'node', spec.doorImage, '-e', spec.doorScript,
@@ -1568,9 +1617,13 @@ export class LocalDockerProvider implements RuntimeProvider {
     const joined = keepDoor ? { code: 0, stdout: '', stderr: '' } : await this.#docker(['network', 'connect', net, door]);
     if (joined.code !== 0) throw new ProviderError(`embed door network connect failed: ${joined.stderr.slice(-500)}`, "Could not connect the embedding service's door to its server.");
     // Loading the model takes a few seconds; the door's /health answers for the server.
+    // A runner's door is on that machine's own addresses, out of reach from
+    // here: it is asked from inside its container instead.
     const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
-      const ok = await this.#fetch(`http://${spec.doorBind}:${spec.doorPort}/health`, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false);
+      const ok = this.remote
+        ? (await this.#docker(['exec', door, 'node', '-e', 'fetch("http://127.0.0.1:8093/health").then((r)=>process.exit(r.ok?0:1),()=>process.exit(1))'])).code === 0
+        : await this.#fetch(`http://${spec.doorBind}:${spec.doorPort}/health`, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false);
       if (ok) return this.embedderStatus();
       await new Promise((r) => setTimeout(r, 1500));
     }
@@ -1707,7 +1760,7 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   /** Run a docker command, piping `data` to its stdin (for tar-over-stdin on a
    *  remote daemon, where bind mounts of this box's paths aren't possible). */
-  async #runStdin(args: string[], data: Buffer, oneShot?: string): Promise<ExecResult> {
+  async #runStdin(args: string[], data: Buffer | { file: string }, oneShot?: string): Promise<ExecResult> {
     if (!(await this.reachable())) throw this.#unreachableError();
     return new Promise<ExecResult>((resolve, reject) => {
       const child = spawn(this.docker, this.#argv(args));
@@ -1729,7 +1782,8 @@ export class LocalDockerProvider implements RuntimeProvider {
       // If the child exits without draining stdin, the write races to EPIPE —
       // swallow it (the close handler above is the real result).
       child.stdin.on('error', () => {});
-      child.stdin.end(data);
+      if (Buffer.isBuffer(data)) child.stdin.end(data);
+      else createReadStream(data.file).on('error', (err) => { child.kill('SIGKILL'); reject(err); }).pipe(child.stdin);
     });
   }
 

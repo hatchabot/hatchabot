@@ -155,7 +155,7 @@ import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
 import { eventLabel, IN_PROGRESS } from '../orchestrator/eventLabels.js';
-import { needsPortHeal } from '../openclaw/configWriter.js';
+import { moveCrossesDown, needsPortHeal } from '../openclaw/configWriter.js';
 
 /** The largest file (or folder as .tar.gz) that moves through an agent's Files tab, either way. */
 const FILE_MAX_BYTES = Math.max(1, Number(process.env.HATCHABOT_FILE_MAX_MB ?? 512)) * 1024 * 1024;
@@ -2325,7 +2325,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // ({reachable, serverVersion, error}) — the same mapping the add path does.
     // Without this a *successful* probe renders as "unreachable — no response".
     const ping = await pingRunner(dockerHost);
-    return { reachable: ping.ok, serverVersion: ping.version, hasImage: ping.hasImage, error: ping.error, ...(ping.ok ? await swapOf() : {}) };
+    // Which OpenClaw its image runs, beside this machine's: a runner left on
+    // an old image is offered the update (a runner sat on 2026.7 while the
+    // fleet moved to 2026.9.8, 2026-10-07, with no button to say so).
+    const versions = ping.ok && ping.hasImage ? await (async () => {
+      const there = await providerFor(host.id).currentImageInfo().catch(() => undefined);
+      const local = store.localHostId();
+      const here = local ? await providerFor(local).currentImageInfo().catch(() => undefined) : undefined;
+      return { imageVersion: there?.openclawVersion, currentVersion: here?.openclawVersion };
+    })() : {};
+    return { reachable: ping.ok, serverVersion: ping.version, hasImage: ping.hasImage, ...versions, error: ping.error, ...(ping.ok ? await swapOf() : {}) };
   });
 
   // The control plane's dedicated runner key (created on first ask) plus the
@@ -2387,12 +2396,45 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Where agents reach this machine: the docker bridge's gateway on Linux;
     // Docker Desktop has no such address to bind, so loopback (agents use host.docker.internal).
     doorBind: async () => (await localProvider().hostGatewayAddress?.()) ?? '127.0.0.1',
+    localHostId: () => store.localHostId(),
     log: (e, d) => trace()(e, d),
   });
   (app as unknown as { embedder?: EmbedderService }).embedder = embedder;
+  /**
+   * Each runner runs its own memory search service (2.147): its agents call
+   * it on their own machine, so a laptop away from home keeps its memory
+   * search, and no memory leaves the machine it is on. Made on first use;
+   * its state is under embed-hosts/<host id>.
+   */
+  const runnerEmbedders = new Map<string, EmbedderService>();
+  const embedderFor = (hostId: string | undefined): EmbedderService => {
+    if (!hostId || hostId === store.localHostId()) return embedder;
+    let svc = runnerEmbedders.get(hostId);
+    if (!svc) {
+      svc = new EmbedderService({
+        provider: () => providerFor(hostId),
+        hostId,
+        secrets,
+        store,
+        dataDir: buildDataDir,
+        runtimeImage: process.env.HATCHABOT_IMAGE ?? DEFAULT_BASE,
+        doorScript: embedDoorScript(),
+        // Docker Desktop (a Mac) cannot bind its bridge: loopback, which its
+        // containers reach as host.docker.internal. Linux: the runner's bridge gateway.
+        doorBind: async () => {
+          const p = providerFor(hostId);
+          return (await p.desktop?.().catch(() => false)) ? '127.0.0.1' : ((await p.hostGatewayAddress?.()) ?? '127.0.0.1');
+        },
+        log: (e, d) => trace()(e, { ...d, host: hostId }),
+      });
+      runnerEmbedders.set(hostId, svc);
+    }
+    return svc;
+  };
+  (app as unknown as { embedderFor?: typeof embedderFor }).embedderFor = embedderFor;
   /** What provisioning needs of the service: it up, and a key for the agent. (Exposed on app for tests.) */
   const embedderForProvision: NonNullable<ProvisionDeps['embedder']> = {
-    async credentialsFor(agentId) {
+    async credentialsFor(agentId, hostArg) {
       // A server the operator already runs (Ollama speaks the same API): its
       // address as given, its one key, its model — no container, no door.
       if (embedder.external) {
@@ -2410,31 +2452,42 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // install's first agent died with "not turned on" until the owner found
       // Settings → Hosts (the shared-host bed, 2026-09-25). Stopped on purpose
       // stays stopped for everyone.
-      if (!embedder.enabled) {
-        const agent = store.getAgent(agentId);
-        const local = store.localHostId();
-        const ownersOwn = !!agent && !!local && store.getHost(local)?.ownerId === agent.ownerId;
-        if (ownersOwn && !embedder.stoppedByOwner) {
-          trace(agentId)('embed.auto_started', { by: 'the machine owner\'s agent' });
-          await embedder.start();
+      // The service of the machine the build is for: this one's, or the runner's own.
+      const agent = store.getAgent(agentId);
+      const local = store.localHostId();
+      const hostId = hostArg ?? agent?.hostId ?? local;
+      const svc = embedderFor(hostId);
+      if (!svc.enabled) {
+        const ownersOwn = !!agent && !!hostId && store.getHost(hostId)?.ownerId === agent.ownerId;
+        if (ownersOwn && !svc.stoppedByOwner) {
+          trace(agentId)('embed.auto_started', { by: 'the machine owner\'s agent', ...(svc.hostId ? { host: svc.hostId } : {}) });
+          await svc.start();
         } else {
-          throw new Error(embedder.stoppedByOwner
+          throw new Error(svc.stoppedByOwner
             ? 'the memory search service was stopped by the machine\'s owner (Settings → Hosts)'
             : 'the memory search service is not turned on (Settings → Hosts)');
         }
       }
-      let v = await embedder.status();
+      let v = await svc.status();
       // An enabled service that fell over comes back for this build — but only
       // if it is still enabled once the turn is ours: a Stop that landed in
       // between wins, and this build fails rather than undoing it (30th audit).
-      if (!(v.embedder === 'running' && v.door === 'running')) v = await embedder.start({ onlyIfEnabled: true });
+      if (!(v.embedder === 'running' && v.door === 'running')) v = await svc.start({ onlyIfEnabled: true });
       if (!(v.embedder === 'running' && v.door === 'running')) throw new Error('the memory search service was stopped by the machine\'s owner (Settings → Hosts)');
       if (!v.doorAddress) throw new Error('the embedding service has no address');
       // Docker Desktop publishes on loopback, which a container reaches as host.docker.internal.
       const doorAddress = v.doorAddress.replace(/^(127\.[\d.]+|localhost)(?=:)/, 'host.docker.internal');
       const token = randomBytes(24).toString('base64url');
-      store.setEmbedToken(agentId, embedKeyHash(token));
-      embedder.syncKeys();
+      // A key for another machine than the last one: the agent is moving.
+      // Its index is re-checked there (one forced pass), and the old
+      // machine's door forgets it.
+      const before = store.embedTokenHost(agentId);
+      const moved = before !== undefined && (before ?? local) !== hostId;
+      if (moved) store.setAgentEmbedIndex(agentId, null, null);
+      store.setEmbedToken(agentId, embedKeyHash(token), hostId ?? null);
+      // On a runner the key file is copied there before the build goes on: its first call must work.
+      await svc.syncKeysNow();
+      if (moved) embedderFor(before ?? local).syncKeys();
       return { baseUrl: `http://${doorAddress}/v1`, token, model: EMBED_MODEL_ALIAS };
     },
   };
@@ -2514,10 +2567,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { ...embedFleetView(), switched: agents.length, queued, deferred: agents.length - queued, engineFree };
   });
 
-  app.get('/v1/embedder', async (req) => {
-    const v = await embedder.status();
+  /** `?host=` names a runner (its own service); absent, this machine. Undefined: no such host for this account. */
+  const embedderHostOf = (req: FastifyRequest): { svc: EmbedderService; owns: boolean } | undefined => {
+    const q = (req.query as { host?: unknown } | undefined)?.host ?? (req.body as { host?: unknown } | null | undefined)?.host;
+    const hostId = typeof q === 'string' && q ? q : undefined;
+    if (!hostId || hostId === store.localHostId()) return { svc: embedder, owns: ownsLocalHost(req) };
+    const h = store.listHosts(ownerIdOf(req)).find((x) => x.id === hostId && x.kind !== 'local');
+    return h ? { svc: embedderFor(h.id), owns: h.ownerId === ownerIdOf(req) } : undefined;
+  };
+  app.get('/v1/embedder', async (req, reply) => {
+    const at = embedderHostOf(req);
+    if (!at) return reply.code(404).send({ error: 'No such machine.' });
+    const v = await at.svc.status();
     // The external server's address may carry credentials: the owner's to see.
-    return ownsLocalHost(req) ? v : { ...v, external: v.external ? 'an external server' : undefined, doorAddress: undefined };
+    return at.owns ? v : { ...v, external: v.external ? 'an external server' : undefined, doorAddress: undefined };
   });
 
   /**
@@ -2617,9 +2680,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { at: new Date().toISOString(), hosts };
   });
   const embedderAction = (action: 'start' | 'stop' | 'restart') => async (req: FastifyRequest, reply: FastifyReply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const at = embedderHostOf(req);
+    if (!at) return reply.code(404).send({ error: 'No such machine.' });
+    if (!at.owns) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     try {
-      return await embedder[action]();
+      return await at.svc[action]();
     } catch (err) {
       if (err instanceof ProviderError) return reply.code(502).send({ error: err.userMessage });
       return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) });
@@ -2669,10 +2734,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }).catch((err) => app.log.warn({ err: String(err) }, 'embedder auto-start at boot failed'));
     }, Number(process.env.HATCHABOT_EMBED_BOOT_MS) || 15_000).unref();
     // An enabled service that fell over comes back; a fleet event says so.
-    setInterval(() => {
-      void embedder.healthTick().then((r) => { if (r === 'restarted') app.log.warn('embedder restarted by the health loop'); })
-        .catch((err) => app.log.warn({ err }, 'embedder health tick failed'));
-    }, Number(process.env.HATCHABOT_EMBED_HEALTH_MS) || 5 * 60_000).unref();
+    // Every machine's: this one's, and each runner's that was turned on (an
+    // asleep runner is skipped, and its service comes back when it wakes).
+    const healthTicks = () => {
+      for (const svc of [embedder, ...store.listRunnerHostIds().map(embedderFor)]) {
+        if (!svc.enabled) continue;
+        void svc.healthTick().then((r) => { if (r === 'restarted') app.log.warn({ host: svc.hostId ?? 'local' }, 'embedder restarted by the health loop'); })
+          .catch((err) => app.log.warn({ err, host: svc.hostId ?? 'local' }, 'embedder health tick failed'));
+      }
+    };
+    setTimeout(healthTicks, (Number(process.env.HATCHABOT_EMBED_BOOT_MS) || 15_000) + 30_000).unref();
+    setInterval(healthTicks, Number(process.env.HATCHABOT_EMBED_HEALTH_MS) || 5 * 60_000).unref();
   }
   // A started or woken agent may carry sessions pinned to a runtime its config
   // no longer names (runtimePins.ts): once its gateway answers, clear them.
@@ -10155,12 +10227,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       // No way back across the 2026.8 line on the other machine either: a
       // runner's own :latest may still be 2026.7, which cannot read a volume
-      // migrated here (night review, 2026-09-28). Unknown versions pass.
+      // migrated here (night review, 2026-09-28). Unknown versions pass. Up
+      // across the line is the normal path (a 2026.7 volume is healed on its
+      // build there). This was inverted — it refused the upward move and let
+      // the downward one through — found 2026-10-07, as the promote guard's was.
       if (agent.runtimeRef) {
         const running = await providerFor(agent.hostId).info(agent.runtimeRef).catch(() => ({} as { openclawVersion?: string }));
         const there = await providerFor(host.id).currentImageInfo(dropPin ? undefined : (agent.image ?? undefined)).catch(() => ({} as { openclawVersion?: string }));
-        if (running.openclawVersion && there.openclawVersion && !needsPortHeal(running.openclawVersion) && needsPortHeal(there.openclawVersion)) {
-          return reply.code(409).send({ error: `This agent runs OpenClaw ${running.openclawVersion}; ${host.name} would run ${there.openclawVersion}, which cannot read its data. Update that machine's image first (hatchabot upgrade-image there).` });
+        if (moveCrossesDown(running.openclawVersion, there.openclawVersion)) {
+          return reply.code(409).send({ error: `This agent runs OpenClaw ${running.openclawVersion}; ${host.name} would run ${there.openclawVersion}, which cannot read its data. Copy this machine's image there first (Settings → Hosts → Check, then Install image).` });
         }
       }
       if (dropPin) {

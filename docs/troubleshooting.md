@@ -386,6 +386,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.33.3`
 - **Code:** `src/api/routes.ts` — `dropPin`
 
+### A runner agent cannot move to OpenClaw 2026.8 or newer, or a current agent cannot move to a runner: "has no embedding engine and the shared service is unavailable: it runs on a runner"
+- **Check:** the error names a runner; or the agent's engine row says "built on its own engine — it runs on a runner"; Settings → Hosts → Check on the runner shows an older OpenClaw than this machine.
+- **Cause:** from OpenClaw 2026.8 an image carries no memory search engine of its own, and before v2.147.0 the one memory search service was on the main machine, out of a runner's reach. Runner agents stayed on 2026.7 images, and no 2026.8+ agent could be built on a runner. The move check across the 2026.8 line was also inverted (it refused moving up and let a move down through).
+- **Fix:** upgrade. Each runner runs its own memory search service, which starts with the first agent built there (or Settings → Hosts → the runner's Memory search → Start; `hatchabot embedder start --host <runner>`). To move a runner agent to the current OpenClaw: Settings → Hosts → Check on the runner → **Update image** (a few minutes), then rebuild the agent. The first build there copies the model over, which takes a minute or two.
+- **Fixed in:** `v2.147.0`
+- **Code:** `src/api/routes.ts` — `embedderFor`; `src/providers/localDockerProvider.ts` — `pushEmbedKeys`; `src/openclaw/configWriter.ts` — `moveCrossesDown`
+
 ### A runner agent shows as running although its container stopped or is gone
 - **Check:** `docker ps -a` on the runner against the app's state.
 - **Cause:** the two-minute health sweep looked providers up by name and skipped every runner agent.

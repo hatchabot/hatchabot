@@ -4685,11 +4685,32 @@ async function loadHosts() {
         <span class="grow">${local ? '🖥️' : '☁️'} <b>${esc(h.name)}</b>
           <span class="sub">· ${h.agentCount ?? 0} agent${h.agentCount === 1 ? '' : 's'}</span>
           <div class="sub">${where}</div>
+          ${local ? '' : `<div class="sub hostembed">Memory search <span id="hostembed-${esc(h.id)}">…</span> <span id="hostembedacts-${esc(h.id)}" style="display:inline-flex;gap:6px"></span></div>`}
           <div class="sub" id="hostping-${esc(h.id)}"></div></span>
         <span style="display:flex;gap:6px">${check}${drain}${del}</span>
       </div>`;
     }).join('');
+    for (const h of hosts) if (h.kind !== 'local') loadHostEmbedder(h.id);
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+
+// A runner's own memory search service (2.147): its agents use it on their own machine.
+async function loadHostEmbedder(hostId) {
+  const st = $(`hostembed-${hostId}`), acts = $(`hostembedacts-${hostId}`);
+  if (!st) return;
+  try {
+    const r = await api(`/v1/embedder?host=${encodeURIComponent(hostId)}`);
+    const up = r.embedder === 'running' && r.door === 'running';
+    st.textContent = !r.enabled && r.embedder === 'absent' ? '· off — starts with the first agent built there'
+      : up ? '· running' : `· ${r.enabled ? 'restarting' : 'stopped'}`;
+    st.style.color = up ? 'var(--ok)' : '';
+    // Runners are listed only to their owner; the check is the server's too.
+    const h = (hosts || []).find(x => x.id === hostId);
+    const mine = !h?.ownerId || h.ownerId === myAccount.ownerId;
+    acts.innerHTML = !mine ? '' : up
+      ? `<button class="hbtn" onclick="embedderAction('restart','${jsq(hostId)}')">Restart</button><button class="hbtn" onclick="embedderAction('stop','${jsq(hostId)}')">Stop</button>`
+      : `<button class="hbtn" onclick="embedderAction('start','${jsq(hostId)}')">Start</button>`;
+  } catch (e) { st.textContent = `· ${e.message}`; acts.innerHTML = ''; }
 }
 
 // The embedding service (Settings → Hosts): on/off is the machine owner's.
@@ -4708,13 +4729,15 @@ async function loadEmbedder() {
       : `<button class="primary" onclick="embedderAction('start')">Start</button>`;
   } catch (e) { st.textContent = `· ${e.message}`; }
 }
-async function embedderAction(action) {
-  if (action === 'stop' && !confirm('Stop the memory search service?\n\nEvery agent that uses it loses memory search until it is started again, and their rebuilds wait for it. It stays stopped — for everyone — until you start it.')) return;
-  const st = $('embedStatus'); if (st) st.textContent = action === 'stop' ? '· stopping…' : '· starting (the first start fetches the model)…';
-  $('embedActions').innerHTML = '';
-  try { await api(`/v1/embedder/${action}`, { method: 'POST', body: {} }); toast(action === 'stop' ? 'Embedding service stopped' : 'Embedding service running'); }
+async function embedderAction(action, hostId) {
+  if (action === 'stop' && !confirm(`Stop the memory search service${hostId ? ' on that machine' : ''}?\n\nEvery agent that uses it loses memory search until it is started again, and their rebuilds wait for it. It stays stopped — for everyone — until you start it.`)) return;
+  const st = hostId ? $(`hostembed-${hostId}`) : $('embedStatus');
+  if (st) st.textContent = action === 'stop' ? '· stopping…' : hostId ? '· starting (the first start copies the model over, a minute or two)…' : '· starting (the first start fetches the model)…';
+  const acts = hostId ? $(`hostembedacts-${hostId}`) : $('embedActions');
+  if (acts) acts.innerHTML = '';
+  try { await api(`/v1/embedder/${action}`, { method: 'POST', body: hostId ? { host: hostId } : {} }); toast(action === 'stop' ? 'Memory search stopped' : 'Memory search running'); }
   catch (e) { toast(e.message, 15000); }
-  loadEmbedder();
+  if (hostId) loadHostEmbedder(hostId); else loadEmbedder();
 }
 
 async function pingHost(id) {
@@ -4730,7 +4753,9 @@ async function pingHost(id) {
       el.innerHTML = `✓ reachable · Docker ${esc(r.serverVersion || '')}` +
         (r.hasImage === false
           ? ` · <span style="color:var(--warn)">runtime image missing</span> <button class="hbtn" onclick="installImage('${jsq(id)}')">Install image</button>`
-          : '') +
+          : r.imageVersion && r.currentVersion && r.imageVersion !== r.currentVersion
+          ? ` · <span style="color:var(--warn)">OpenClaw ${esc(r.imageVersion)} (this machine: ${esc(r.currentVersion)})</span> <button class="hbtn" onclick="installImage('${jsq(id)}')">Update image</button>`
+          : r.imageVersion ? ` · OpenClaw ${esc(r.imageVersion)}` : '') +
         (r.swap ? ` · swap: ${r.swap.compressed ? esc(r.swap.summary || r.swap.kind) : `<span class="sub">${esc(r.swap.kind === 'unknown' ? 'could not be read (agents there get none)' : 'not compressed (agents there get none)')}</span>`}` : '');
     }
   } catch (e) { if (el) { el.style.color = 'var(--warn)'; el.textContent = e.message; } }
@@ -4740,7 +4765,7 @@ async function pingHost(id) {
  *  runs for minutes; the toast + button state carry the progress. */
 async function installImage(id) {
   const h = hosts.find(x => x.id === id);
-  if (!confirm(`Copy the runtime image to "${h?.name ?? 'this runner'}"?\n\nIt's large (often over a gigabyte), so this can take several minutes depending on the connection.`)) return;
+  if (!confirm(`Copy the runtime image to "${h?.name ?? 'this runner'}"?\n\nIt's large (often over a gigabyte), so this can take several minutes depending on the connection. Agents there move to it on their next rebuild.`)) return;
   toast(`Copying the runtime image to ${h?.name ?? 'the runner'}… this can take several minutes.`, 900000, 'progress');
   const el = $(`hostping-${id}`);
   if (el) { el.style.color = 'var(--dim)'; el.textContent = 'installing image…'; }

@@ -54,6 +54,21 @@ If the row says **runtime image missing**, tap **Install image** — the control
 plane streams its local image over (`docker save | docker -H … load`). It's a
 multi-GB copy; expect minutes on a tailnet.
 
+When the runner's image is older than this machine's, **Check** names both
+OpenClaw versions and offers **Update image** (the same copy). Agents there
+move to it on their next rebuild.
+
+### Memory search on a runner
+
+Each runner runs its own memory search service, so its agents keep memory
+search when the main machine is off, and their memories never leave the
+runner. The row's **Memory search** line shows its state. It starts by itself
+with the first agent built there, or with **Start**
+(`hatchabot embedder start --host <runner>`). The first start copies the
+model over (about 330 MB) and pulls the engine's image on the runner. It
+then takes up to 2 GB of the runner's memory under load and a few hundred
+MB idle. On Docker Desktop it listens on the runner's loopback only.
+
 ## What runs on a runner
 
 - Agents using an **API-key** AI source, or a **Claude Max setup-token**

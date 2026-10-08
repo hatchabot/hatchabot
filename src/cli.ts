@@ -285,10 +285,10 @@ Commands:
   usage [agent]                Token usage by model; no agent → the fleet ranked by tokens
   top [--sort cpu|mem|name]    Live CPU and memory per agent, per machine
                                (docker's own measurement; a second per machine).
-  embedder [status|start|stop|restart]
-                               The machine's embedding service: one engine for
+  embedder [status|start|stop|restart] [--host <runner>]
+                               The machine's memory search service: one engine for
                                every agent's semantic memory search (Settings →
-                               Hosts). Nothing uses it until an agent is switched to it.
+                               Hosts). Each runner has its own (--host <name>).
   embedder guests | guest-add <name> [--json] | guest-rm <name>
                                Keys for other Hatchabots (the tenants of a shared
                                host) to use this machine's service: guest-add prints
@@ -2405,12 +2405,23 @@ async function main() {
         console.log(`${r.switched} agent(s) switched; ${r.queued} rebuilding now, ${r.deferred} in the quiet hours. ${r.shared} of ${r.total} on the shared service.`);
         return;
       }
-      if (!['status', 'start', 'stop', 'restart'].includes(sub)) fail('usage: hatchabot embedder [status|start|stop|restart|use <agent> shared|baked|default [shared|baked]|move-all shared|baked [--now]]');
+      if (!['status', 'start', 'stop', 'restart'].includes(sub)) fail('usage: hatchabot embedder [status|start|stop|restart [--host <runner>]|use <agent> shared|baked|default [shared|baked]|move-all shared|baked [--now]]');
+      // --host: a runner's own service (each runner has one since 2.147), by name or id.
+      let hostId: string | undefined;
+      let hostName = 'this machine';
+      const want = flags.get('host');
+      if (typeof want === 'string' && want) {
+        const hosts: any[] = await (await api(ctx, '/v1/hosts')).json() as any[];
+        const h = hosts.find((x) => x.id === want || x.name === want) ?? hosts.find((x) => x.name?.toLowerCase() === want.toLowerCase());
+        if (!h) fail(`no machine called "${want}" (Settings → Hosts lists them)`);
+        if (h.kind !== 'local') { hostId = h.id; hostName = h.name; }
+      }
+      const q = hostId ? `?host=${encodeURIComponent(hostId)}` : '';
       const r: any = sub === 'status'
-        ? await (await api(ctx, '/v1/embedder')).json()
-        : await (await api(ctx, `/v1/embedder/${sub}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).json();
+        ? await (await api(ctx, `/v1/embedder${q}`)).json()
+        : await (await api(ctx, `/v1/embedder/${sub}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(hostId ? { host: hostId } : {}) })).json();
       if (r.external) console.log(`embedding: an external server is used — ${r.external}`);
-      console.log(`embedding service: ${r.enabled ? 'on' : 'off'} · engine ${r.embedder} · door ${r.door}${r.doorAddress ? ` at ${r.doorAddress}` : ''} · model ${r.modelPresent ? 'present' : 'not fetched yet'}`);
+      console.log(`memory search on ${hostName}: ${r.enabled ? 'on' : 'off'} · engine ${r.embedder} · door ${r.door}${r.doorAddress ? ` at ${r.doorAddress}` : ''} · model ${r.modelPresent ? 'present' : 'not fetched yet'}`);
       return;
     }
     case 'rebuild-policy': {

@@ -2369,6 +2369,32 @@ const SCENARIOS = String.raw`(() => {
         aiDlg.close();
       } finally { if (typeof aiDlg !== 'undefined' && aiDlg.open) aiDlg.close(); delete window.__override['/v1/budgets']; await agentsCleanup(); }
     },
+    // A runner's own memory search (2.147) and an old image on it (Settings → Hosts). Made-up machines.
+    runnerMemorySearch: async () => {
+      window.__override['/v1/hosts'] = [{ id: 'h1', name: 'This machine', kind: 'local', agentCount: 12 },
+        { id: 'r1', name: 'Laptop runner', kind: 'cloud', settings: { dockerHost: 'ssh://laptop.example.org' }, agentCount: 1 }];
+      window.__override['/v1/embedder'] = { embedder: 'absent', door: 'absent', enabled: false, modelPresent: true };
+      window.__override['/v1/hosts/r1/ping'] = { reachable: true, serverVersion: '29.6.2', hasImage: true, imageVersion: '2026.7.1-2', currentVersion: '2026.9.8' };
+      try {
+        await loadHosts(); await sleep(150);
+        const line = $('hostembed-r1');
+        ok('the runner row has a memory search line: ' + (line?.textContent ?? ''), !!line && /off — starts with the first agent built there/.test(line.textContent));
+        ok('the local row has none (its service is the section above)', !$('hostembed-h1'));
+        const start = [...$('hostembedacts-r1').querySelectorAll('button')].find((b) => b.textContent === 'Start');
+        ok('a Start button on the runner row', !!start);
+        window.__calls.length = 0;
+        start.click(); await sleep(150);
+        const call = window.__calls.find((c) => c.method === 'POST' && c.path === '/v1/embedder/start');
+        ok('Start drives that runner\'s service', call?.body?.host === 'r1');
+        await pingHost('r1'); await sleep(50);
+        const ping = $('hostping-r1').textContent;
+        ok('an old image on the runner is named: ' + ping, ping.includes('OpenClaw 2026.7.1-2 (this machine: 2026.9.8)'));
+        ok('and offered the update', !![...$('hostping-r1').querySelectorAll('button')].find((b) => b.textContent === 'Update image'));
+      } finally {
+        for (const k of ['/v1/hosts', '/v1/embedder', '/v1/hosts/r1/ping']) delete window.__override[k];
+        await loadHosts();
+      }
+    },
     // Apps in agents (docs/apps-in-agents.md): the agent page's App row, and New agent from a repo.
     appRow: async () => {
       const SHA = 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0', NEW = 'f00dfeed1234f00dfeed1234f00dfeed1234f00d';

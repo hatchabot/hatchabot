@@ -2,6 +2,19 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.147.0] — 2026-10-07
+
+### Added
+- **Each runner runs its own memory search service.** Since OpenClaw 2026.8 an image carries no memory search engine of its own, and the one service was on the main machine, out of a runner's reach. So runner agents were stuck on 2026.7 images, and no current agent could be built on or moved to a runner. Now a runner's agents use a service on their own machine: they keep memory search with the main machine off, and their memories stay on the runner.
+  - It starts with the first agent built there, or from Settings → Hosts → the runner's **Memory search** line (`hatchabot embedder start|stop|restart|status --host <runner>`).
+  - The model and keys are copied over the existing Docker connection; the runner downloads only the engine's image.
+  - Each machine's door accepts only its own agents' keys.
+  - Moving an agent between machines re-indexes its memory on the new one.
+- **Settings → Hosts → Check names the runner's OpenClaw version beside this machine's,** and offers **Update image** when the runner's is older. Before, the button appeared only when the image was missing altogether.
+
+### Fixed
+- **The move check across the 2026.8 line was inverted** (as the promote check was in 2.146.1). It refused moving a 2026.7 agent to a runner on a newer image, and let a 2026.8+ agent onto a runner still on 2026.7, which cannot read its data.
+
 ## [2.146.1] — 2026-10-07
 
 ### Fixed

@@ -304,6 +304,15 @@ export class MockProvider implements RuntimeProvider {
     return this.embedder;
   }
   async embedderStatus() { return this.embedder; }
+  /** A runner's key-file copies: the keys file's contents at each copy. */
+  pushedKeys: string[] = [];
+  async pushEmbedKeys(files: import('../embedder/embedder.js').EmbedKeyFiles) {
+    const { readFileSync } = await import('node:fs');
+    this.pushedKeys.push(readFileSync(files.keysFile, 'utf8'));
+  }
+  /** Tests: a runner asleep. */
+  awake = true;
+  async reachable() { return this.awake; }
   /** Tests: a Stop docker refuses (a hung daemon). */
   failStopEmbedder = false;
   async stopEmbedder() {

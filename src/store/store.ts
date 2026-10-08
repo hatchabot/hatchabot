@@ -837,6 +837,8 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN embed_index_error TEXT`,
       // The key a build re-mints joins the old one until the build is accepted.
       `ALTER TABLE embed_tokens ADD COLUMN prev_token_hash TEXT`,
+      // The machine whose memory search service the key is for (null: this one, minted before runners had one).
+      `ALTER TABLE embed_tokens ADD COLUMN host_id TEXT`,
       // An "application" class = model + source + runtime image.
       `ALTER TABLE agent_classes ADD COLUMN image TEXT`,
       // Template-carried schedules awaiting the gateway (applied on RUNNING).
@@ -1424,6 +1426,11 @@ export class Store {
       .prepare(`SELECT id FROM hosts WHERE owner_id = ? OR kind = 'local' ORDER BY created_at`)
       .all(ownerId) as { id: string }[];
     return rows.map((r) => this.getHost(r.id)!).filter(Boolean);
+  }
+
+  /** Every runner (any owner): the machines whose memory search service the health loop watches. */
+  listRunnerHostIds(): string[] {
+    return (this.db.prepare(`SELECT id FROM hosts WHERE kind != 'local' ORDER BY created_at`).all() as { id: string }[]).map((r) => r.id);
   }
 
   deleteHost(id: string): void {
@@ -2627,11 +2634,16 @@ export class Store {
    * audit): the container still running keeps its
    * recall through the build, and keeps it if the build fails (27th audit).
    */
-  setEmbedToken(agentId: string, tokenHash: string): void {
+  setEmbedToken(agentId: string, tokenHash: string, hostId: string | null = null): void {
     this.db
-      .prepare(`INSERT INTO embed_tokens (agent_id, token_hash, created_at, prev_token_hash) VALUES (?, ?, ?, NULL)
-                ON CONFLICT(agent_id) DO UPDATE SET prev_token_hash = COALESCE(embed_tokens.prev_token_hash, embed_tokens.token_hash), token_hash = excluded.token_hash, created_at = excluded.created_at`)
-      .run(agentId, tokenHash, new Date().toISOString());
+      .prepare(`INSERT INTO embed_tokens (agent_id, token_hash, created_at, prev_token_hash, host_id) VALUES (?, ?, ?, NULL, ?)
+                ON CONFLICT(agent_id) DO UPDATE SET prev_token_hash = COALESCE(embed_tokens.prev_token_hash, embed_tokens.token_hash), token_hash = excluded.token_hash, created_at = excluded.created_at, host_id = excluded.host_id`)
+      .run(agentId, tokenHash, new Date().toISOString(), hostId);
+  }
+  /** The machine the agent's key was last minted for: undefined when it has none, null for this machine before keys named one. */
+  embedTokenHost(agentId: string): string | null | undefined {
+    const r = this.db.prepare(`SELECT host_id AS hostId FROM embed_tokens WHERE agent_id = ?`).get(agentId) as { hostId: string | null } | undefined;
+    return r ? r.hostId : undefined;
   }
   /** The build was accepted: only the new key from here. */
   commitEmbedToken(agentId: string): void {
@@ -2641,13 +2653,13 @@ export class Store {
     this.db.prepare(`DELETE FROM embed_tokens WHERE agent_id = ?`).run(agentId);
   }
   /** Every valid key (a build's previous one included) with its agent's state, for the door's file. */
-  listEmbedTokens(): Array<{ agentId: string; tokenHash: string; state: string }> {
+  listEmbedTokens(): Array<{ agentId: string; tokenHash: string; state: string; hostId: string | null }> {
     const rows = this.db
-      .prepare(`SELECT e.agent_id AS agentId, e.token_hash AS tokenHash, e.prev_token_hash AS prev, a.state AS state
+      .prepare(`SELECT e.agent_id AS agentId, e.token_hash AS tokenHash, e.prev_token_hash AS prev, a.state AS state, e.host_id AS hostId
                 FROM embed_tokens e JOIN agents a ON a.id = e.agent_id`)
-      .all() as Array<{ agentId: string; tokenHash: string; prev: string | null; state: string }>;
-    return rows.flatMap((r) => [{ agentId: r.agentId, tokenHash: r.tokenHash, state: r.state },
-      ...(r.prev ? [{ agentId: r.agentId, tokenHash: r.prev, state: r.state }] : [])]);
+      .all() as Array<{ agentId: string; tokenHash: string; prev: string | null; state: string; hostId: string | null }>;
+    return rows.flatMap((r) => [{ agentId: r.agentId, tokenHash: r.tokenHash, state: r.state, hostId: r.hostId },
+      ...(r.prev ? [{ agentId: r.agentId, tokenHash: r.prev, state: r.state, hostId: r.hostId }] : [])]);
   }
 
   /** A token's scope (see createCliToken), or undefined for a full token. */
