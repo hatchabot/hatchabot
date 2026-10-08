@@ -4745,6 +4745,9 @@ async function pingHost(id) {
   if (el) { el.textContent = 'checking…'; el.style.color = 'var(--dim)'; }
   try {
     const r = await api(`/v1/hosts/${id}/ping`);
+    // A copy under way (started from another page, or before a reload): follow it instead.
+    const copy = await api(`/v1/hosts/${id}/install-image`).catch(() => null);
+    if (copy && !copy.idle && !copy.done) { followImageCopy(id); return; }
     if (el) {
       el.style.color = r.reachable ? 'var(--ok)' : 'var(--warn)';
       if (!r.reachable) { el.textContent = `⚠ unreachable — ${r.error || 'no response'}`; return; }
@@ -4761,19 +4764,41 @@ async function pingHost(id) {
   } catch (e) { if (el) { el.style.color = 'var(--warn)'; el.textContent = e.message; } }
 }
 
-/** Copy this server's runtime image to the runner — a multi-GB stream, so it
- *  runs for minutes; the toast + button state carry the progress. */
+/** Copy this server's runtime image to the runner. It runs on the server in
+ *  the background (a relayed link takes 15 minutes or more); the row follows
+ *  its progress, and a page opened meanwhile picks it up (pingHost). */
 async function installImage(id) {
   const h = hosts.find(x => x.id === id);
   if (!confirm(`Copy the runtime image to "${h?.name ?? 'this runner'}"?\n\nIt's large (often over a gigabyte), so this can take several minutes depending on the connection. Agents there move to it on their next rebuild.`)) return;
-  toast(`Copying the runtime image to ${h?.name ?? 'the runner'}… this can take several minutes.`, 900000, 'progress');
-  const el = $(`hostping-${id}`);
-  if (el) { el.style.color = 'var(--dim)'; el.textContent = 'installing image…'; }
+  try { await api(`/v1/hosts/${id}/install-image`, { method: 'POST', body: {} }); }
+  catch (e) { toast(`Image install failed: ${e.message}`, 20000); return; }
+  toast(`Copying the runtime image to ${h?.name ?? 'the runner'}… its row shows how far it has come.`, 8000);
+  followImageCopy(id);
+}
+const imageCopyFollowing = new Set();
+async function followImageCopy(id) {
+  if (imageCopyFollowing.has(id)) return;
+  imageCopyFollowing.add(id);
+  const h = hosts.find(x => x.id === id);
+  const gb = (b) => (b / 1e9).toFixed(1);
   try {
-    await api(`/v1/hosts/${id}/install-image`, { method: 'POST', body: {} });
-    toast(`✅ Runtime image installed on ${h?.name ?? 'the runner'}.`, 10000);
-  } catch (e) { toast(`Image install failed: ${e.message}`, 20000); }
-  pingHost(id);
+    for (;;) {
+      const j = await api(`/v1/hosts/${id}/install-image`).catch(() => null);
+      const el = $(`hostping-${id}`);
+      if (!j || j.idle) return;
+      if (j.done) {
+        if (j.ok) toast(`✅ Runtime image installed on ${h?.name ?? 'the runner'}.`, 10000);
+        else toast(j.error || 'Image install failed.', 20000);
+        pingHost(id);
+        return;
+      }
+      if (el) {
+        el.style.color = 'var(--dim)';
+        el.textContent = `copying the runtime image… ${gb(j.bytes)}${j.total ? ` of ${gb(j.total)}` : ''} GB`;
+      }
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  } finally { imageCopyFollowing.delete(id); }
 }
 
 let runnerSnippet = '';

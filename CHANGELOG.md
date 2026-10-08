@@ -2,6 +2,22 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.147.1] — 2026-10-08
+
+### Fixed
+- **Install image over a slow link.** The copy to a runner was one web request with a fixed 15-minute limit, sent uncompressed. Over a relayed Tailscale link, 2 GB took longer than that, and a browser could give up while the copy went on. Now it is compressed (about half the size over the link), runs in the background, and the runner's row shows "copying the runtime image… 1.1 of 2.2 GB". It is stopped only when it stops moving for 3 minutes. A page opened meanwhile follows the copy already under way, and a second click joins it rather than starting another.
+
+### Added
+- **`scripts/runner-scenarios.mjs`: real moves between this machine and a runner,** on a live install. It covers:
+  - a current agent refused onto an old image;
+  - an old agent moved here, migrated, and still finding its memory by meaning;
+  - copying the image over;
+  - an old agent rebuilt in place on the runner;
+  - a current agent moved there and back, with each machine's memory search holding only its own agents' keys;
+  - a plain rebuild that does not re-index.
+
+  It uses no AI turns and deletes its test agents at the end. A matching test (`test/moveMatrix.test.ts`) covers moves between machines on different OpenClaw versions and images; before, every move test ran one version on both sides.
+
 ## [2.147.0] — 2026-10-07
 
 ### Added

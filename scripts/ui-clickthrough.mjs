@@ -2375,6 +2375,8 @@ const SCENARIOS = String.raw`(() => {
         { id: 'r1', name: 'Laptop runner', kind: 'cloud', settings: { dockerHost: 'ssh://laptop.example.org' }, agentCount: 1 }];
       window.__override['/v1/embedder'] = { embedder: 'absent', door: 'absent', enabled: false, modelPresent: true };
       window.__override['/v1/hosts/r1/ping'] = { reachable: true, serverVersion: '29.6.2', hasImage: true, imageVersion: '2026.7.1-2', currentVersion: '2026.9.8' };
+      window.__override['/v1/hosts/r1/install-image'] = { idle: true };
+      window.__answer = window.__answer || {};
       try {
         await loadHosts(); await sleep(150);
         const line = $('hostembed-r1');
@@ -2389,9 +2391,22 @@ const SCENARIOS = String.raw`(() => {
         await pingHost('r1'); await sleep(50);
         const ping = $('hostping-r1').textContent;
         ok('an old image on the runner is named: ' + ping, ping.includes('OpenClaw 2026.7.1-2 (this machine: 2026.9.8)'));
-        ok('and offered the update', !![...$('hostping-r1').querySelectorAll('button')].find((b) => b.textContent === 'Update image'));
+        const upd = [...$('hostping-r1').querySelectorAll('button')].find((b) => b.textContent === 'Update image');
+        ok('and offered the update', !!upd);
+        // The copy runs on the server; the row follows it (a relayed link took over 15 minutes, 2026-10-08).
+        window.__answer['POST /v1/hosts/r1/install-image'] = [{ status: 202, body: { startedAt: 'now', bytes: 0, done: false } }];
+        window.__override['/v1/hosts/r1/install-image'] = { startedAt: 'now', bytes: 1.1e9, total: 2.2e9, done: false };
+        window.__calls.length = 0;
+        upd.click(); await sleep(300);
+        ok('Update image starts the copy', window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/hosts/r1/install-image'));
+        ok('the row shows how far it has come: ' + $('hostping-r1').textContent, $('hostping-r1').textContent.includes('1.1 of 2.2 GB'));
+        window.__override['/v1/hosts/r1/ping'] = { reachable: true, serverVersion: '29.6.2', hasImage: true, imageVersion: '2026.9.8', currentVersion: '2026.9.8' };
+        window.__override['/v1/hosts/r1/install-image'] = { startedAt: 'now', bytes: 2.2e9, total: 2.2e9, done: true, ok: true };
+        await sleep(3600);
+        ok('done: the row checks again and shows the same version as here: ' + $('hostping-r1').textContent, /OpenClaw 2026\.9\.8/.test($('hostping-r1').textContent) && !/Update image/.test($('hostping-r1').textContent));
       } finally {
-        for (const k of ['/v1/hosts', '/v1/embedder', '/v1/hosts/r1/ping']) delete window.__override[k];
+        if (window.__answer) delete window.__answer['POST /v1/hosts/r1/install-image'];
+        for (const k of ['/v1/hosts', '/v1/embedder', '/v1/hosts/r1/ping', '/v1/hosts/r1/install-image']) delete window.__override[k];
         await loadHosts();
       }
     },

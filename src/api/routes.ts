@@ -18,7 +18,7 @@ import compress from '@fastify/compress';
 import { ChannelTakenError, normalizeHandle, type SectionSort, type Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { ContainerStats, ExecResult, RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
-import { ProviderError } from '../providers/provider.js';
+import { ProviderError, parseByteSize } from '../providers/provider.js';
 import { pingRunner, resolveProvider } from '../providers/resolveProvider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
 import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual.js';
@@ -2357,14 +2357,47 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   // Copy this box's runtime image onto a runner (docker save | docker -H load).
   // Slow — minutes for a multi-GB image — so the UI treats it as a long job.
+  /**
+   * Copying the runtime image to a runner runs in the background, one copy
+   * per runner: a relayed tailnet took over 15 minutes for 2 GB (2026-10-08),
+   * and a request held open that long is dropped by a browser or proxy while
+   * the copy goes on. POST starts it (or answers with the one under way);
+   * GET says how far it has come. `wait: true` holds the request for scripts.
+   */
+  type ImageCopy = { startedAt: string; bytes: number; total?: number; done: boolean; ok?: boolean; error?: string; finishedAt?: string };
+  const imageCopies = new Map<string, { job: ImageCopy; finished: Promise<ImageCopy> }>();
+  app.get<{ Params: { id: string } }>('/v1/hosts/:id/install-image', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    if (!store.getHost(req.params.id)) return reply.code(404).send({ error: 'Not found' });
+    return imageCopies.get(req.params.id)?.job ?? { idle: true };
+  });
   app.post<{ Params: { id: string } }>('/v1/hosts/:id/install-image', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const host = store.getHost(req.params.id);
     if (!host) return reply.code(404).send({ error: 'Not found' });
     const dockerHost = typeof host.settings?.dockerHost === 'string' ? host.settings.dockerHost : '';
     if (!dockerHost) return reply.code(400).send({ error: 'The local host already has the image.' });
-    const res = await installRuntimeImage(dockerHost, { image: process.env.HATCHABOT_IMAGE });
-    if (!res.ok) return reply.code(502).send({ error: `Image install failed: ${res.error}` });
+    const wait = (req.body as { wait?: unknown } | null)?.wait === true;
+    let copy = imageCopies.get(host.id);
+    if (!copy || copy.job.done) {
+      const image = process.env.HATCHABOT_IMAGE ?? 'hatchabot-runtime:latest';
+      const local = store.localHostId();
+      const total = local ? (await providerFor(local).listImageTags().catch(() => []))
+        .find((t) => t.tag === image)?.size : undefined;
+      const job: ImageCopy = { startedAt: new Date().toISOString(), bytes: 0, total: total ? parseByteSize(total) || undefined : undefined, done: false };
+      trace()('host.image_copy_started', { host: host.id, image });
+      const finished = installRuntimeImage(dockerHost, { image, total: job.total, onProgress: (p) => { job.bytes = p.bytes; } })
+        .then((r) => {
+          Object.assign(job, { done: true, ok: r.ok, error: r.ok ? undefined : `Image install failed: ${r.error}`, finishedAt: new Date().toISOString() });
+          trace()(r.ok ? 'host.image_copied' : 'host.image_copy_failed', { host: host.id, bytes: job.bytes, ...(r.ok ? {} : { error: r.error }) });
+          return job;
+        });
+      copy = { job, finished };
+      imageCopies.set(host.id, copy);
+    }
+    if (!wait) return reply.code(202).send(copy.job);
+    const done = await copy.finished;
+    if (!done.ok) return reply.code(502).send({ error: done.error });
     return { installed: true };
   });
 

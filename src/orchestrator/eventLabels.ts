@@ -17,6 +17,9 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'agentsmd.synced': 'AGENTS.md synced',
   'connection.sync_failed': (d) => `a connection did not sync: ${String(d.error ?? '')}`.trim(),
   'runtime.settling': 'waiting for its skills to settle',
+  'host.image_copy_started': 'copying the runtime image to a runner',
+  'host.image_copied': (d) => `runtime image copied to a runner (${(Number(d.bytes ?? 0) / 1e9).toFixed(1)} GB)`,
+  'host.image_copy_failed': (d) => `copying the runtime image to a runner failed: ${String(d.error ?? '')}`.trim(),
   'runtime.ready': (d) => d.settled === false ? 'skills did not settle in time — carrying on' : 'skills settled',
   'memory.reindex': (d) => d.why === 'index incomplete'
     ? 'rebuilding the memory index — it came up partial (minutes on a big memory)'

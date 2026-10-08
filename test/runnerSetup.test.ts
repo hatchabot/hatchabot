@@ -98,4 +98,32 @@ cat > /dev/null; echo 'no space left' >&2; exit 1
     expect(res.ok).toBe(false);
     expect(res.error).toContain('no space left');
   });
+
+  it('sends it compressed (docker load reads gzip) and reports how far it has come', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-imgcopy-'));
+    const got = join(dir, 'received.gz');
+    const docker = stub(`
+if [ "$1" = save ]; then head -c 300000 /dev/zero; exit 0; fi
+cat > ${JSON.stringify(got)}; exit 0
+`);
+    const seen: number[] = [];
+    const res = await installRuntimeImage('ssh://r@x', { docker, total: 300000, onProgress: (p) => seen.push(p.bytes) });
+    expect(res).toEqual({ ok: true });
+    expect(seen.at(-1)).toBe(300000);
+    const { gunzipSync } = await import('node:zlib');
+    const { readFileSync } = await import('node:fs');
+    const body = readFileSync(got);
+    expect(body.length).toBeLessThan(300000 / 10); // zeros compress: it went over gzipped
+    expect(gunzipSync(body).length).toBe(300000);
+  });
+
+  it('a copy that stops moving is stopped (not a fixed ceiling: a slow copy that moves goes on)', async () => {
+    const docker = stub(`
+if [ "$1" = save ]; then echo start; sleep 30; exit 0; fi
+cat > /dev/null; exit 0
+`);
+    const res = await installRuntimeImage('ssh://r@x', { docker, stallMs: 300 });
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/stopped moving/);
+  });
 });

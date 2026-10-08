@@ -58,6 +58,14 @@ When the runner's image is older than this machine's, **Check** names both
 OpenClaw versions and offers **Update image** (the same copy). Agents there
 move to it on their next rebuild.
 
+The copy is compressed and runs in the background; the row shows how far it
+has come. Over a Tailscale link that relays instead of connecting directly
+(`tailscale ping` says "via DERP") it can take 15 minutes or more.
+
+To check that moves to and from a runner work on your machines, run
+`node scripts/runner-scenarios.mjs --runner "<name>"`. It takes 20–40
+minutes, uses no AI turns, and deletes its test agents at the end.
+
 ### Memory search on a runner
 
 Each runner runs its own memory search service, so its agents keep memory

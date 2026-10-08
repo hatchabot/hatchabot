@@ -108,7 +108,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
 
   // ---- step-up: the machine ------------------------------------------------
   r(['POST', 'DELETE', 'PUT', 'PATCH'], /^\/v1\/hosts(\/.*)?$/, 'step-up', 'Hosts and runners (add, remove, drain, install an image)'),
-  r(READ, /^\/v1\/hosts\/:id\/ping$/, 'step-up', 'Hosts and runners (add, remove, drain, install an image)'),
+  r(READ, /^\/v1\/hosts\/:id\/(ping|install-image)$/, 'step-up', 'Hosts and runners (add, remove, drain, install an image)'),
   r('*', /^\/v1\/runner-setup$/, 'step-up', 'Runner set-up script'),
   r(['POST', 'DELETE', 'PUT', 'PATCH'], /^\/v1\/images(\/.*)?$/, 'step-up', 'Images (build, rebuild, delete, promote)'),
   r(['POST', 'DELETE', 'PUT', 'PATCH'], /^\/v1\/runtime(\/.*)?$/, 'step-up', 'Images (build, rebuild, delete, promote)'),

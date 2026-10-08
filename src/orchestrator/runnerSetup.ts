@@ -1,3 +1,4 @@
+import { createGzip } from 'node:zlib';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
@@ -122,55 +123,74 @@ export function runnerSetupSnippet(pubKey: string): string {
   ].join('\n');
 }
 
+/** How far a copy has come: bytes of the image read so far, of about `total`. */
+export interface ImageCopyProgress { bytes: number; total?: number }
+
 /**
  * Copy the control plane's runtime image to a runner:
- * `docker save … | docker -H <endpoint> load`. Big (a GB or more) and slow
- * (minutes over a tailnet) — callers should treat it as a long job, and the
- * default 15-minute ceiling exists so a dead pipe can't hang the route
- * forever. Requires the ssh-config block to already be in place.
+ * `docker save … | gzip | docker -H <endpoint> load` (load reads gzip as
+ * is). Big (2 GB or more before compression) and slow: over a tailnet that
+ * relays instead of connecting directly it took longer than the old fixed
+ * 15-minute ceiling (a laptop runner, 2026-10-08), and the copy was killed
+ * while still moving. Now a copy is stopped only when nothing has moved for
+ * `stallMs` (default 3 minutes), or after `timeoutMs` (default 3 hours) at
+ * worst; `onProgress` follows it. Requires the ssh-config block in place.
  */
 export async function installRuntimeImage(
   endpoint: string,
-  opts: { image?: string; docker?: string; timeoutMs?: number } = {},
+  opts: { image?: string; docker?: string; timeoutMs?: number; stallMs?: number; total?: number; onProgress?: (p: ImageCopyProgress) => void } = {},
 ): Promise<{ ok: boolean; error?: string }> {
   const docker = opts.docker ?? 'docker';
   const image = opts.image ?? 'hatchabot-runtime:latest';
   return new Promise((resolve) => {
     const save = spawn(docker, ['save', image]);
     const load = spawn(docker, ['-H', endpoint, 'load']);
-    save.stdout.pipe(load.stdin);
+    // Fast compression: the layers are plain tars, so even level 1 roughly
+    // halves what crosses the link, at little CPU here.
+    const gzip = createGzip({ level: 1 });
+    save.stdout.pipe(gzip).pipe(load.stdin);
     // A dead receiver EPIPEs the sender; without handlers that's an uncaught
     // stream error that kills the whole control plane.
     save.stdout.on('error', () => {});
+    gzip.on('error', () => {});
     load.stdin.on('error', () => {});
     let stderr = '';
     save.stderr.on('data', (d) => (stderr += d));
     load.stderr.on('data', (d) => (stderr += d));
-    const timer = setTimeout(() => {
-      save.kill('SIGKILL');
-      load.kill('SIGKILL');
-      resolve({ ok: false, error: 'Timed out copying the image to the runner.' });
-    }, opts.timeoutMs ?? 15 * 60_000);
-    timer.unref();
+    let settled = false;
+    const finish = (r: { ok: boolean; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(overall);
+      clearTimeout(stall);
+      resolve(r);
+    };
+    const kill = (error: string) => { save.kill('SIGKILL'); load.kill('SIGKILL'); finish({ ok: false, error }); };
+    const stallMs = opts.stallMs ?? 3 * 60_000;
+    let stall = setTimeout(() => kill('The copy stopped moving (nothing for 3 minutes): is the runner still reachable?'), stallMs);
+    const overall = setTimeout(() => kill('Timed out copying the image to the runner.'), opts.timeoutMs ?? 3 * 3600_000);
+    stall.unref();
+    overall.unref();
+    let bytes = 0;
+    let told = 0;
+    save.stdout.on('data', (c: Buffer) => {
+      bytes += c.length;
+      clearTimeout(stall);
+      stall = setTimeout(() => kill('The copy stopped moving (nothing for 3 minutes): is the runner still reachable?'), stallMs);
+      stall.unref();
+      if (opts.onProgress && Date.now() - told > 1000) { told = Date.now(); opts.onProgress({ bytes, total: opts.total }); }
+    });
     let saveCode: number | null = null;
     save.on('close', (code) => {
       saveCode = code;
       if (code !== 0) load.kill('SIGKILL');
     });
     load.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0 && saveCode === 0) return resolve({ ok: true });
-      resolve({ ok: false, error: stderr.slice(-400) || `exit ${saveCode ?? '?'}/${code}` });
+      opts.onProgress?.({ bytes, total: opts.total });
+      if (code === 0 && saveCode === 0) return finish({ ok: true });
+      finish({ ok: false, error: stderr.slice(-400) || `exit ${saveCode ?? '?'}/${code}` });
     });
-    save.on('error', (err) => {
-      clearTimeout(timer);
-      load.kill('SIGKILL');
-      resolve({ ok: false, error: String(err.message).slice(0, 200) });
-    });
-    load.on('error', (err) => {
-      clearTimeout(timer);
-      save.kill('SIGKILL');
-      resolve({ ok: false, error: String(err.message).slice(0, 200) });
-    });
+    save.on('error', (err) => { load.kill('SIGKILL'); finish({ ok: false, error: String(err.message).slice(0, 200) }); });
+    load.on('error', (err) => { save.kill('SIGKILL'); finish({ ok: false, error: String(err.message).slice(0, 200) }); });
   });
 }

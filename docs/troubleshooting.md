@@ -393,6 +393,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.147.0`
 - **Code:** `src/api/routes.ts` — `embedderFor`; `src/providers/localDockerProvider.ts` — `pushEmbedKeys`; `src/openclaw/configWriter.ts` — `moveCrossesDown`
 
+### Install image fails after 15 minutes: "Timed out copying the image to the runner", or the button says it failed while the copy goes on
+- **Check:** Tailscale relays instead of connecting directly (`tailscale ping <runner>` says "via DERP"); the image is over 2 GB (`docker image ls hatchabot-runtime`).
+- **Cause:** before v2.147.1 the copy was one web request with a fixed 15-minute limit, and it was sent uncompressed. A relayed link moves 2 GB more slowly than that, and a browser or proxy can drop a request held open that long while the copy carries on.
+- **Fix:** upgrade. The copy is compressed and runs in the background; the runner's row shows how far it has come. It is stopped only when nothing has moved for 3 minutes. A direct Tailscale connection (both machines on the same network, or UDP allowed) is much faster.
+- **Fixed in:** `v2.147.1`
+- **Code:** `src/orchestrator/runnerSetup.ts` — `installRuntimeImage`, `stallMs`; `web/index.html` — `followImageCopy`
+
+### A runner's agents run, but Check says "runtime image missing" (a rebuild there would fail)
+- **Check:** `docker -H <runner> image inspect hatchabot-runtime:latest` fails, while `docker -H <runner> ps` shows the agents' containers on an image with no such tag.
+- **Cause:** something on the runner moved or removed the `hatchabot-runtime:latest` tag. A known way: installing Hatchabot itself on the runner's Docker and uninstalling it again. The install points `:latest` at its own image, and the uninstall removes that tag as its own.
+- **Fix:** Settings → Hosts → Check → **Install image**. Or put back the tag the agents were built on: `docker -H <runner> tag <their image id> hatchabot-runtime:latest`. Don't install a second Hatchabot on a machine that is already a runner.
+- **Fixed in:** —
+- **Code:** `scripts/uninstall.sh` — `keeping $img`; `src/providers/resolveProvider.ts` — `pingRunner`
+
 ### A runner agent shows as running although its container stopped or is gone
 - **Check:** `docker ps -a` on the runner against the app's state.
 - **Cause:** the two-minute health sweep looked providers up by name and skipped every runner agent.
