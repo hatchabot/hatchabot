@@ -45,6 +45,13 @@ key that expired), not a bug. Say which it is.
 
   `test:ui` clicks through the real web page with a stubbed API. A UI change
   gets a scenario in `scripts/ui-clickthrough.mjs`.
+- **Live test for moves, runners, images and memory search:** before
+  releasing a change there, run `node scripts/runner-scenarios.mjs --runner
+  "<name>"` on an install with a runner (add `--old-image <a pre-2026.8 image
+  on the runner>` when the runner is already current). It drives the real
+  app and machines: it creates agents, moves and rebuilds them, copies the
+  image, and deletes them after; it uses no AI turns. 20–40 minutes. Record
+  the run in `docs/runner-test-runs.md`.
 - **Releasing:** `docs/releasing.md`.
   - The CHANGELOG headings are `## [x.y.z] — YYYY-MM-DD`.
   - Moving a channel forward (`scripts/promote.sh`) checks CI first.
