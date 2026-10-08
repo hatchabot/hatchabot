@@ -21,3 +21,4 @@ tests that run on their own.
 | 2026-10-08 | clean-install | pass | v2.148.1 | 8 |  |
 | 2026-10-08 | candidate-gate | pass | v2.148.1 | 2 | OpenClaw 2026.9.8 |
 | 2026-10-08 | regress-autonomous | pass | v2.148.1 | 7 | OpenClaw 2026.9.8 |
+| 2026-10-08 | smoke-adopt | pass | v2.149.0 | 1 | web-only, no Telegram |

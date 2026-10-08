@@ -72,6 +72,21 @@ describe('when a live test is due', () => {
     expect(dueFor('v2', [run('v1'), run('v2', 'fail'), run('v2', 'skip')], T1, r)[0]?.why).toMatch(/changed since it passed on v1/);
     expect(dueFor('v1', [run('v3')], T1, r)[0]?.why).toMatch(/never passed/);
   });
+  it('a version bump in package.json is not a change; a dependency is', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-live-pkg-')); dirs.push(dir);
+    const env = { ...process.env, HOME: dir, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
+      GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
+    const git = (...a: string[]) => { const r = spawnSync('git', a, { cwd: dir, env, encoding: 'utf8' }); if (r.status !== 0) throw new Error(r.stderr); };
+    git('init', '-q', '-b', 'main');
+    const pkg = (v: string, deps: Record<string, string>) => JSON.stringify({ name: 'x', version: v, dependencies: deps }, null, 2) + '\n';
+    const commit = (body: string, tag: string) => { writeFileSync(join(dir, 'package.json'), body); git('add', '.'); git('commit', '-q', '-m', tag); git('tag', tag); };
+    commit(pkg('1.0.0', { a: '1' }), 'v1');
+    commit(pkg('1.0.1', { a: '1' }), 'v2');
+    commit(pkg('1.0.2', { a: '2' }), 'v3');
+    const T = [{ name: 'alpha', cmd: ['node', 'a.mjs'], area: ['package.json'] }];
+    expect(dueFor('v2', [run('v1')], T, dir)).toEqual([]);
+    expect(dueFor('v3', [run('v2')], T, dir)[0]?.why).toMatch(/package\.json/);
+  });
   it('a test on hold is never due', () => {
     expect(dueFor('v1', [], [{ ...T1[0], onHold: 'Cloud is on hold' }], repo())).toEqual([]);
   });

@@ -93,6 +93,18 @@ const gitIn = (cwd) => (...args) => spawnSync('git', args, { cwd, encoding: 'utf
 const git = gitIn(ROOT);
 const tagExists = (t, g = git) => g('rev-parse', '-q', '--verify', `refs/tags/${t}`).status === 0;
 
+/**
+ * package.json and its lock change on every release (the version bump): that
+ * alone changes nothing a test proves, or the clean install would be due on
+ * every release (2026-10-08). Their other changes (dependencies) still count.
+ */
+function versionOnly(git, a, b, file) {
+  if (!/(^|\/)package(-lock)?\.json$/.test(file)) return false;
+  const lines = git('diff', '-U0', a, b, '--', file).stdout.split('\n')
+    .filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l));
+  return lines.length > 0 && lines.every((l) => /^[+-]\s*"version":\s*"[^"]*",?\s*$/.test(l));
+}
+
 /** What is due for `tag`, and why (`cwd`: the repository, for tests). */
 export function dueFor(tag, runs, tests = LIVE_TESTS, cwd = ROOT) {
   const git = gitIn(cwd);
@@ -107,7 +119,8 @@ export function dueFor(tag, runs, tests = LIVE_TESTS, cwd = ROOT) {
     // The latest pass: the release nearest the one being promoted.
     const last = passes.reduce((a, b) => (atOrBefore(a.release, b.release) ? b : a));
     if (last.release === tag) continue;
-    const changed = git('diff', '--name-only', last.release, tag, '--', ...t.area).stdout.trim().split('\n').filter(Boolean);
+    const changed = git('diff', '--name-only', last.release, tag, '--', ...t.area).stdout.trim().split('\n').filter(Boolean)
+      .filter((f) => !versionOnly(git, last.release, tag, f));
     if (changed.length) out.push({ test: t.name, why: `${changed.length} file(s) in its area changed since it passed on ${last.release}: ${changed.slice(0, 4).join(', ')}${changed.length > 4 ? ', …' : ''}` });
   }
   return out;
