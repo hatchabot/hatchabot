@@ -803,6 +803,7 @@ export async function buildRuntimeSpec(
         models: profile.models,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',
         cronTriggers: agent.cronTriggers === true,
+        browser: agent.browser === true && !agent.ops,
         userTimezone: agentTimeZone(),
         embed,
         openclawVersion,

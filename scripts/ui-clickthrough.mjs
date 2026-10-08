@@ -2369,6 +2369,31 @@ const SCENARIOS = String.raw`(() => {
         aiDlg.close();
       } finally { if (typeof aiDlg !== 'undefined' && aiDlg.open) aiDlg.close(); delete window.__override['/v1/budgets']; await agentsCleanup(); }
     },
+    // Its own browser (docs/browser.md): off by default, switched on from Advanced, which rebuilds it.
+    agentBrowserSwitch: async () => {
+      const a1 = agents.find((a) => a.id === 'a1');
+      const was = a1.browser;
+      window.__override['/v1/agents/a1/browser'] = { on: false, running: false };
+      try {
+        a1.browser = false;
+        openV2Agent('a1', 'advanced'); await sleep(300);
+        const sel = $('v2Browser');
+        ok('the Advanced tab has a Browser switch, off', !!sel && sel.value === 'off');
+        ok('it says what it costs', /300K tokens/.test($('v2Pane').textContent));
+        window.__calls.length = 0; window.__confirms.length = 0;
+        sel.value = 'on'; sel.dispatchEvent(new Event('change')); await sleep(200);
+        const patch = window.__calls.find((c) => c.method === 'PATCH' && c.path === '/v1/agents/a1');
+        ok('switching it on asks first (it rebuilds)', window.__confirms.some((t) => /rebuilds/.test(t)));
+        ok('and turns it on', patch?.body?.browser === true);
+        window.__override['/v1/agents/a1/browser'] = { on: true, running: true };
+        await v2LoadBrowser('a1');
+        ok('a running browser says so: ' + $('v2BrowserState').textContent, /running/.test($('v2BrowserState').textContent));
+      } finally {
+        a1.browser = was;
+        delete window.__override['/v1/agents/a1/browser'];
+        v2Close?.();
+      }
+    },
     // Adopting without Telegram (2.149): the console is how it is talked to. Made-up workspace.
     adoptWithoutTelegram: async () => {
       window.__answer = window.__answer || {};

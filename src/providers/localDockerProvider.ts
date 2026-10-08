@@ -1448,6 +1448,55 @@ export class LocalDockerProvider implements RuntimeProvider {
     }
   }
 
+  // ---- an agent's own browser (src/orchestrator/browser.ts) ----------------
+  // One Chromium per agent that has the browser on, in the agent's network
+  // namespace: the agent reaches it at 127.0.0.1:9222 and nothing else can.
+  // Its own container: none of the agent's files, its own memory limit, its
+  // profile in memory only (nothing it logs into survives a restart).
+  #browserName(agentContainer: string): string { return `${agentContainer}-browser`; }
+  async #ensureBrowserImage(image: string, dockerfile: string): Promise<void> {
+    if ((await this.#docker(['image', 'inspect', '--format', '{{.Id}}', image])).code === 0) return;
+    if (!IMAGE_REF_RE.test(image)) throw new ProviderError(`bad browser image ${image}`, 'The browser image name is not valid.');
+    const res = await this.#runStdin(['build', '-t', image, '-'], Buffer.from(dockerfile));
+    if (res.code !== 0) throw new ProviderError(`browser image build failed: ${res.stderr.slice(-500)}`, "Could not build the agent's browser (its image).");
+  }
+  async ensureBrowser(spec: import('../orchestrator/browser.js').BrowserSpec): Promise<'running' | 'started'> {
+    const agent = spec.agentContainer;
+    const a = await this.#docker(['inspect', agent, '--format', '{{.State.Running}}|{{.State.StartedAt}}']);
+    const [running, startedAt] = a.stdout.trim().split('|');
+    if (a.code !== 0 || running !== 'true') throw new ProviderError(`agent container ${agent} is not running`, 'The agent is not running, so its browser cannot start.');
+    const name = this.#browserName(agent);
+    // Kept only while it shares the CURRENT network namespace: an agent that
+    // restarted has a new one, and a browser left in the old one is unreachable.
+    const cur = await this.#docker(['inspect', name, '--format', '{{.State.Running}}|{{ index .Config.Labels "hatchabot.browser-with" }}|{{.Config.Image}}']);
+    const [bRunning, bWith, bImage] = cur.stdout.trim().split('|');
+    if (cur.code === 0 && bRunning === 'true' && bWith === startedAt && bImage === spec.image) return 'running';
+    if (cur.code === 0) await this.#docker(['rm', '-f', name]);
+    await this.#ensureBrowserImage(spec.image, spec.dockerfile);
+    const run = await this.#docker([
+      'run', '-d', '--name', name, '--network', `container:${agent}`,
+      '--label', 'hatchabot.role=browser', '--label', `hatchabot.browser-of=${agent}`, '--label', `hatchabot.browser-with=${startedAt}`,
+      '--read-only', '--tmpfs', '/tmp:size=256m', '--tmpfs', '/profile:size=512m,uid=1000,gid=1000',
+      '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+      '--memory', spec.memory, '--pids-limit', '512', '--shm-size', '256m',
+      spec.image,
+    ], IO_TIMEOUT_MS);
+    if (run.code !== 0) throw new ProviderError(`browser failed: ${run.stderr.slice(-500)}`, "Could not start the agent's browser.");
+    return 'started';
+  }
+  async stopBrowser(agentContainer: string): Promise<void> {
+    const r = await this.#docker(['rm', '-f', this.#browserName(agentContainer)]);
+    if (r.code !== 0 && !/no such container/i.test(r.stderr)) throw new ProviderError(`docker rm browser: ${r.stderr.slice(-300)}`, "Couldn't stop the agent's browser.");
+  }
+  async listBrowsers(): Promise<Array<{ name: string; agentContainer: string; running: boolean }>> {
+    const r = await this.#docker(['ps', '-a', '--filter', 'label=hatchabot.role=browser', '--format', '{{.Names}}|{{ .Label "hatchabot.browser-of" }}|{{.State}}']);
+    if (r.code !== 0) return [];
+    return r.stdout.trim().split('\n').filter(Boolean).map((l) => {
+      const [name = '', agentContainer = '', state = ''] = l.split('|');
+      return { name, agentContainer, running: state === 'running' };
+    });
+  }
+
   // ---- the embedding service (src/embedder/embedder.ts) --------------------
   #embedNetwork(): string { return `${this.prefix}-embed`; }
   #embedderName(): string { return `${this.prefix}-embedder`; }

@@ -2,6 +2,21 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.151.0] — 2026-10-08
+
+### Added
+- **An agent's own browser** (docs/browser.md). Switched on for one agent (Advanced → Browser, or `hatchabot browser "<agent>" on`), it gets a Chromium of its own for OpenClaw's browser tool: open pages, click, fill in forms.
+  - It runs in a container beside the agent that shares only its network: none of its files, a memory limit of its own (1 GB), and a profile in memory only, so nothing it logs into is kept across a restart.
+  - A sweep starts it, moves it to a restarted agent, and removes it when the agent stops or the switch goes off.
+  - Off by default. Agents without one have the browser tool switched off: the image carries no browser, and a tool that cannot work only cost the model tokens. One browsing question took 315,000 tokens in the trial, so it is for sites an agent has to use, not for looking things up.
+  - A live test, `browser`, checks it on a test agent without AI turns.
+
+### Fixed
+- **The live tests' first runs on 2.150.0 found:**
+  - **The console test** passes a secure page and a started console app, but its live-connection check needs a signed-in browser (the socket admits a session cookie only, by design). It now runs that part only with a sign-in key (`--signin-key`), instead of failing every time.
+  - **The Debian 12 clean install** cannot run on an arm64 machine: LXD has Debian 12 VM images for x86 only. It is never due on arm64. The clean-install script now names the machine's architecture for `images:` names, which LXD had guessed wrong.
+  - **A VM that stops by itself mid-test** (once, on Ubuntu 22.04) now leaves LXD's record of why.
+
 ## [2.150.0] — 2026-10-08
 
 ### Added

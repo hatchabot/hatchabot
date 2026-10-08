@@ -1,0 +1,15 @@
+# An agent's own browser (docs/browser.md): Chromium, headless, for OpenClaw's
+# browser tool. Hatchabot runs one per agent that has the browser switched on,
+# inside that agent's network namespace, so the agent reaches it at
+# 127.0.0.1:9222 and nothing else can. It holds none of the agent's files.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-noto-color-emoji ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd -m -u 1000 -s /usr/sbin/nologin browser
+USER 1000:1000
+ENV HOME=/tmp
+ENTRYPOINT ["chromium", "--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", \
+  "--no-first-run", "--no-default-browser-check", "--user-data-dir=/profile", \
+  "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9222"]
+CMD ["about:blank"]

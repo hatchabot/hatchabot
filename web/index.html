@@ -12859,6 +12859,7 @@ function v2EmbedPanes(a, tab) {
     if (blockId === 'memoryCapRow') fillMemoryCapRow(a);
   }
   $('v2Pane').append($('editErr'));
+  if ($('v2BrowserState')) void v2LoadBrowser(a.id);
   if (list.some(([p]) => p === 'paneEditConn')) void renderConnections();
   if (list.some(([p]) => p === 'paneEditPeers')) void loadPeers();
 }
@@ -13417,6 +13418,10 @@ function v2Pane(a, tab) {
         <label style="margin:0">Files it may send or receive <select id="v2FilesCap" onchange="v2SetAgentPolicy('${id}', { filesMaxMb: this.value ? Number(this.value) : null })">
           ${[...new Set(['', 5, 10, 25, 50, 100, ...(a.filesMaxMb ? [a.filesMaxMb] : [])])].map(v => `<option value="${v}"${(a.filesMaxMb ?? '') === v ? ' selected' : ''}>${v ? `up to ${v} MB` : 'as the machine does'}</option>`).join('')}</select></label>
         <div class="sub" style="flex-basis:100%">Each app still caps it at its own limit: Telegram 50 MB, a Discord server without boosts 10 MB. On Discord it limits only what it sends.</div>`) : ''}
+      ${built && a.state !== 'ARCHIVED' && !a.ops ? row('Browser', `<label style="margin:0">Its own browser <select id="v2Browser" onchange="v2SetBrowser('${id}', this.value === 'on', this)">
+          <option value="off"${a.browser ? '' : ' selected'}>Off</option><option value="on"${a.browser ? ' selected' : ''}>On</option></select></label>
+        <span class="sub" id="v2BrowserState"></span>
+        <div class="sub" style="flex-basis:100%">A Chromium of its own that it can open pages in, click and fill forms — for sites it must use, not for looking things up (web search is far cheaper: one browsing question can take 300K tokens). It runs beside the agent, with none of its files, up to 1 GB; nothing it logs into is kept across a restart.</div>`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
       <div class="v2danger"><h4>Careful</h4><div class="v2v">
@@ -13689,6 +13694,24 @@ async function openChanSetup(id, kind) {
   if (kind === 'slack') void chanPrefillSlackLink(a.name);
 }
 /** The agent's own sleep and file policy (Advanced tab): saved and applied at once. */
+/** Its own browser (docs/browser.md): switching rebuilds it. */
+async function v2SetBrowser(id, on, el) {
+  if (!confirmRebuild(id, on ? 'Giving it a browser' : 'Taking its browser away')) { if (el) el.value = on ? 'off' : 'on'; return; }
+  try {
+    await api(`/v1/agents/${id}`, { method: 'PATCH', body: { browser: on } });
+    toast(on ? 'Browser on — rebuilding; its browser starts once it is back.' : 'Browser off — rebuilding.', 8000);
+    await refresh(false);
+  } catch (e) { toast(e.message, 8000); if (el) el.value = on ? 'off' : 'on'; }
+}
+async function v2LoadBrowser(id) {
+  const el = $('v2BrowserState');
+  try {
+    const b = await api(`/v1/agents/${id}/browser`);
+    if (!el) return;
+    el.textContent = !b.on ? '' : b.running ? '· running' : '· starting (within a minute of the agent)';
+    el.style.color = b.on && b.running ? 'var(--ok)' : '';
+  } catch { if (el) el.textContent = ''; }
+}
 async function v2SetAgentPolicy(id, body) {
   try { await api(`/v1/agents/${id}`, { method: 'PATCH', body }); toast('Saved.'); await refresh(false); }
   catch (e) { toast(e.message, 6000); await refresh(false); }

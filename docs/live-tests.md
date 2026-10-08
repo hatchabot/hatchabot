@@ -27,7 +27,8 @@ passed on. A run that skipped (nothing to test with) or failed does not count.
 | `runner-scenarios` | Moves and rebuilds between this machine and a runner, across OpenClaw versions; each machine's memory search; Install image ([runner-test-runs.md](runner-test-runs.md)) | A runner: `-- --runner "<name>"`, plus `--old-image <a pre-2026.8 image on it>` once it is current | 20–40 min | none |
 | `transfer` | Clone, a template shared with its memory and imported, and download → delete → restore: each copy runs web-only and still finds its notes by meaning | Room for 3 agents under the account's limit; Hatchabot 2.150.0+ | 10–15 min | none |
 | `apps` | An app installs into an agent (its tests run there), its scheduled command runs by itself, an update keeps its config, a release with failing tests is refused, rollback and stop work | Room for 1 agent | 10–15 min | none |
-| `console` | A real browser opens an agent's console at the public HTTPS address: a secure context, its app starts, its live connection opens and carries messages | `HATCHABOT_PUBLIC_URL`; room for 1 agent | 2–5 min | none |
+| `console` | A real browser opens an agent's console at the public HTTPS address: a secure context and its app starts; with a sign-in key, also that its live connection opens and carries messages | `HATCHABOT_PUBLIC_URL`; room for 1 agent; `-- --signin-key <file>.key` for the live connection (it admits a signed-in browser only, docs/signin-links.md) | 2–5 min | none |
+| `browser` | An agent's own browser: off by default; switched on it opens and reads a real page; none of the agent's files in it; it follows an agent restart; switched off it is gone | Room for 1 agent | 8–12 min | none |
 | `candidate-gate` | An agent on an image builds, answers, and keeps its memory search and tools | The image (default: this machine's default) | 5–10 min | one |
 | `regress-autonomous` | An agent made from the CLI answers, remembers, runs a task on demand and on its schedule, pauses, and keeps both across a restart | The live install | 10–15 min | about eight |
 | `restore-drill` | The newest nightly backup restores, every part of it, without touching the live system | A backup set | 5–15 min | none |
@@ -35,7 +36,7 @@ passed on. A run that skipped (nothing to test with) or failed does not count.
 | `smoke-adopt` | Switching to Hatchabot: an OpenClaw agent is found and adopted web-only on a throwaway control plane; its workspace and tasks arrive, its console answers, its data folder mounts | Nothing (its own ports); `-- --with-telegram` takes over a bot from `.env.smoke` instead | 2–5 min | none |
 | `clean-install` | A stranger's install on a brand-new Linux machine, and a new owner's first steps | LXD here; `-- --ai-source "<name>"`; stop the VM after | 20–40 min | one |
 | `clean-install-ubuntu-2204` | The clean install on Ubuntu 22.04, the oldest glibc the bundle supports (a glibc bug broke stable there once) | As `clean-install` | 20–40 min | one |
-| `clean-install-debian-12` | The clean install on Debian 12 | As `clean-install` | 20–40 min | one |
+| `clean-install-debian-12` | The clean install on Debian 12 | As `clean-install`, on an **x86** machine: LXD has no arm64 Debian 12 VM image, so it is never due on an arm64 one | 20–40 min | one |
 | `shared-host` | Two tenants on one machine cannot reach each other | Test VMs. On hold with Hatchabot Cloud: never due | 30+ min | none |
 
 **No live test uses a Telegram bot.** Bots are scarce (about 20 per Telegram

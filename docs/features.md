@@ -1734,6 +1734,15 @@ startup, any agent whose OpenClaw config lacks the ceiling for one of its apps
 gets it. Only the machine's owner sees the box. An agent overrides two of them
 on its Advanced tab: *Sleep when idle* and *Files it may send or receive*.
 
+## An agent's own browser
+
+Off by default. Switched on for one agent (Advanced → Browser, or
+`hatchabot browser "<agent>" on`), it gets a Chromium of its own for
+OpenClaw's browser tool: it can open pages, click and fill in forms, in a
+container beside it that holds none of its files. For sites it has to use,
+not for looking things up: browsing is expensive in tokens.
+[browser.md](browser.md).
+
 ## The memory search service
 
 Every runtime image since 2026.9.6 carries no embedding engine of its own:

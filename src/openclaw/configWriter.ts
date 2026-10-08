@@ -1,3 +1,4 @@
+import { BROWSER_CDP_URL, BROWSER_PROFILE } from '../orchestrator/browser.js';
 import { filesMb, FILES_MB_DEFAULT } from '../orchestrator/machineDefaults.js';
 import type { OpenClawConfigPatch } from '../providers/provider.js';
 import { createHash } from 'node:crypto';
@@ -603,6 +604,17 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // Event-triggered tasks: convergent like richMessages — an explicit opt-in
   // writes true, everything else re-asserts false on every provision/rebuild.
   cmds.push({ argv: ['config', 'set', 'cron.triggers.enabled', patch.cronTriggers === true ? 'true' : 'false'] });
+  // Its own browser (src/orchestrator/browser.ts): an attach-only profile at
+  // the Chromium in its network namespace. Without one the tool is OFF — the
+  // image carries no browser, and a tool that cannot work only costs the model
+  // tokens and failed attempts (2026-10-08). Convergent: re-asserted every build.
+  if (patch.browser === true) {
+    cmds.push({ argv: ['config', 'set', 'browser.enabled', 'true'] });
+    cmds.push({ argv: ['config', 'set', `browser.profiles.${BROWSER_PROFILE}`, JSON.stringify({ cdpUrl: BROWSER_CDP_URL, attachOnly: true })] });
+    cmds.push({ argv: ['config', 'set', 'browser.defaultProfile', BROWSER_PROFILE] });
+  } else {
+    cmds.push({ argv: ['config', 'set', 'browser.enabled', 'false'] });
+  }
   // Its time zone (timezone.ts): unset, OpenClaw falls back to the container's UTC.
   if (patch.userTimezone) cmds.push({ argv: ['config', 'set', 'agents.defaults.userTimezone', patch.userTimezone] });
 

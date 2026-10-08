@@ -54,6 +54,12 @@ export const LIVE_TESTS = [
     area: ['src/api/consoleProxy.ts', 'src/api/consoleSockets.ts', 'src/orchestrator/consoleAccess.ts', 'src/openclaw/configWriter.ts', 'scripts/console-scenarios.mjs'],
   },
   {
+    name: 'browser', cmd: ['node', 'scripts/browser-scenarios.mjs'], against: 'install', minutes: '8–12', aiTurns: false,
+    needs: 'room for 1 agent; internet from the agents',
+    proves: 'an agent\'s own browser: off by default, switched on it opens and reads a real page, holds none of the agent\'s files, follows an agent restart, and is removed when switched off',
+    area: ['src/orchestrator/browser.ts', 'docker/Dockerfile.browser', 'src/providers/localDockerProvider.ts', 'src/openclaw/configWriter.ts', 'scripts/browser-scenarios.mjs'],
+  },
+  {
     name: 'candidate-gate', cmd: ['bash', 'scripts/candidate-gate.sh'], defaultArgs: ['hatchabot-runtime:latest'], against: 'install', minutes: '5–10', aiTurns: 'one',
     needs: 'the image to check (default: this machine\'s default image)',
     proves: 'an agent on that image builds, answers, and keeps its memory search and tools',
@@ -97,7 +103,9 @@ export const LIVE_TESTS = [
   },
   {
     name: 'clean-install-debian-12', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'images:debian/12/cloud'], against: 'checkout', minutes: '20–40', aiTurns: 'one',
-    needs: 'as clean-install',
+    // LXD's image server has Debian 12 VM images for x86 only (2026-10-08).
+    arch: 'x64',
+    needs: 'as clean-install, on an x86 machine (there is no arm64 Debian 12 VM image)',
     proves: 'the clean install on Debian 12',
     area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'package.json', 'package-lock.json'],
   },
@@ -144,6 +152,8 @@ export function dueFor(tag, runs, tests = LIVE_TESTS, cwd = ROOT) {
   const out = [];
   for (const t of tests) {
     if (t.onHold) continue;
+    // A test this kind of machine cannot run is not due here (it is run on one that can).
+    if (t.arch && t.arch !== process.arch) continue;
     const passes = runs.filter((r) => r.test === t.name && r.result === 'pass' && tagExists(r.release) && atOrBefore(r.release, tag));
     if (!passes.length) { out.push({ test: t.name, why: 'it has never passed (on this release or an earlier one)' }); continue; }
     // The latest pass: the release nearest the one being promoted.
@@ -197,7 +207,8 @@ async function main() {
   if (cmd === 'list' || !cmd) {
     for (const t of LIVE_TESTS) {
       const last = runs.filter((r) => r.test === t.name).at(-1);
-      console.log(`${t.name.padEnd(20)} ${t.onHold ? `(on hold: ${t.onHold})` : last ? `last ${last.result} on ${last.release}, ${last.date}` : 'never recorded'}`);
+      const where = t.arch && t.arch !== process.arch ? ` (runs on an ${t.arch} machine, not this one)` : '';
+      console.log(`${t.name.padEnd(20)} ${t.onHold ? `(on hold: ${t.onHold})` : last ? `last ${last.result} on ${last.release}, ${last.date}` : 'never recorded'}${where}`);
       console.log(`${''.padEnd(20)} ${t.proves}. ${t.minutes} min; AI turns: ${t.aiTurns || 'none'}. Needs: ${t.needs}.`);
     }
     return;

@@ -148,6 +148,8 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('runtime', 'HATCHABOT_OPENCLAW_GATEWAY_UNIT', 'openclaw-gateway', 'The systemd unit of an OpenClaw install on this machine, for bringing its agents in.'),
   s('runtime', 'HATCHABOT_CLAUDE_BIN', null, 'Path to the claude command, if it is not on PATH.'),
   s('runtime', 'HATCHABOT_SSH_DIR', null, 'Where runner SSH keys and config live. Unset: ~/.ssh.'),
+  s('runtime', 'HATCHABOT_BROWSER_MEMORY', '1g', 'Memory limit of each agent\'s own browser (docs/browser.md).'),
+  s('runtime', 'HATCHABOT_BROWSER_SWEEP_MS', '60000', 'How often the agents\' browsers are brought in step with them (started, moved to a restarted agent, removed).'),
 
   // Management agent
   s('manager', 'HATCHABOT_OPS_PORT', '8091', 'The port the Hatchabot agent\'s tools are served on (reachable only from its own network).'),

@@ -231,6 +231,8 @@ export interface Agent {
    *  way an inbox poll wakes only when mail exists. Runs inside the agent's own
    *  container with its tool policy; off by default. */
   cronTriggers?: boolean;
+  /** Its own browser for OpenClaw's browser tool (src/orchestrator/browser.ts). Off by default. */
+  browser?: boolean;
   /** Which engine does its semantic memory search: the one baked into the
    *  image (default), or the machine's shared service. Applies on rebuild. */
   embedMode?: 'baked' | 'shared';

@@ -261,6 +261,18 @@ installed source and docs to diagnose problems.
 - `src/store/store.ts` — `mgmt_proposals`, `ops_tokens`: cards and door keys.
 - `web/index.html` — `v2SetupOps`, `mgmtProposalCard`, `loadProposals`, `askOpsSuggest`: setting it up and the confirm cards.
 
+## An agent's own browser
+
+Off by default; one Chromium container per agent that has it on, in the
+agent's network namespace (docs/browser.md).
+
+- `src/orchestrator/browser.ts` — `browserSweep`, `browserImage`, `BROWSER_CDP_URL`: keeping the browsers in step with the agents.
+- `src/providers/localDockerProvider.ts` — `ensureBrowser`, `stopBrowser`, `listBrowsers`: the containers.
+- `src/openclaw/configWriter.ts` — `browser.enabled`: OpenClaw's attach-only profile, or the tool off.
+- `src/api/routes.ts` — `'/v1/agents/:id/browser'`, `browsersNow`: the switch (PATCH `browser`), its state, the sweep.
+- `web/index.html` — `v2SetBrowser`, `v2LoadBrowser`: the Advanced tab's Browser row.
+- `docker/Dockerfile.browser`: its image.
+
 ## Memory and the memory search service
 
 An agent's memory is its workspace files (SOUL.md, AGENTS.md, MEMORY.md and

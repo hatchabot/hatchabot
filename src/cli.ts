@@ -265,6 +265,9 @@ Commands:
   logs <agent> [-n <lines>]    Recent runtime output
   events <agent> [-n <count>]  The setup log: what Hatchabot did to it and when
                                (each step of a setup, rebuild or move)
+  browser <agent> [on|off]     Its own browser (docs/browser.md): show, or switch it
+                               (rebuilds the agent). Off by default — browsing is
+                               costly in tokens; for sites it must use
   memory <agent> [<cap>|default]
                                Its container's memory cap ("4g"): show, set (applied
                                live, kept across rebuilds), or back to the default
@@ -2514,6 +2517,21 @@ async function main() {
       console.log(`${r.agent} (${r.state}) — setup log, newest first`);
       for (const e of r.events) console.log(`  ${e.at.slice(0, 19).replace('T', ' ')}  ${e.label}${e.note ? ` — ${String(e.note).slice(0, 160)}` : ''}`);
       if (!r.events.length) console.log('  (nothing recorded yet)');
+      return;
+    }
+    case 'browser': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot browser <agent> [on|off]'));
+      const want = rest[1];
+      if (want !== undefined && want !== 'on' && want !== 'off') fail('usage: hatchabot browser <agent> [on|off]');
+      if (want) {
+        await api(ctx, `/v1/agents/${a.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ browser: want === 'on' }) });
+        console.log(want === 'on'
+          ? `"${a.name}" gets its own browser: rebuilding now; the browser starts within a minute of it.`
+          : `"${a.name}" no longer has a browser: rebuilding now.`);
+        return;
+      }
+      const b: any = await (await api(ctx, `/v1/agents/${a.id}/browser`)).json();
+      console.log(`"${a.name}": browser ${b.on ? (b.running ? 'on, running' : 'on, not running yet') : 'off'}`);
       return;
     }
     case 'memory': {

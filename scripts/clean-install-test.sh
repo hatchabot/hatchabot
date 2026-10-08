@@ -66,6 +66,9 @@ cleanup() {
   # holding memory after a run (2026-09-29).
   if [ "${KEEP_RUNNING:-0}" = 1 ]; then echo "kept RUNNING: $VM   (lxc exec $VM -- su - ubuntu · stop it with: lxc stop $VM)"; return; fi
   if [ "$KEEP" = 1 ]; then L stop "$VM" --force >/dev/null 2>&1; echo "kept, stopped: $VM   (lxc start $VM · lxc delete $VM --force)"; return; fi
+  # A VM that stopped by itself (it happened mid-test on Ubuntu 22.04,
+  # 2026-10-08): keep LXD's record of why before it goes.
+  if ! L info "$VM" 2>/dev/null | grep -q 'Status: RUNNING'; then L info "$VM" --show-log >"$OUT/vm-stopped.log" 2>&1 && echo "the VM had stopped by itself: $OUT/vm-stopped.log"; fi
   L delete "$VM" --force >/dev/null 2>&1 && echo "deleted $VM"
 }
 trap cleanup EXIT
@@ -74,6 +77,14 @@ echo "Clean install test — $VM, channel $CHANNEL, logs in $OUT"
 echo
 # No input and a time limit: run from a background job, the lxc client once sat
 # for 15 minutes after the VM was already up.
+# images:<distro>/<release>[/<variant>] without an architecture: LXD may pick
+# one this machine cannot run ("Requested architecture isn't supported",
+# Debian 12 on an arm64 host, 2026-10-08) — name this machine's.
+case "$IMAGE" in images:*)
+  if ! printf '%s' "$IMAGE" | grep -qE '/(amd64|arm64)$'; then
+    case "$(uname -m)" in aarch64|arm64) IMAGE="$IMAGE/arm64" ;; x86_64) IMAGE="$IMAGE/amd64" ;; esac
+  fi ;;
+esac
 timeout 600 bash -c "$(declare -f L); L launch $IMAGE $VM --vm -c limits.cpu=4 -c limits.memory=8GiB -d root,size=40GiB" </dev/null >"$OUT/launch.log" 2>&1 \
   || { bad "launch a fresh $IMAGE VM ($(tail -1 "$OUT/launch.log"))"; exit 1; }
 # Wait for cloud-init where the image has it (Ubuntu's, debian/12/cloud); a

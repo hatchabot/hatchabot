@@ -24,3 +24,8 @@ tests that run on their own.
 | 2026-10-08 | smoke-adopt | pass | v2.149.0 | 1 | web-only, no Telegram |
 | 2026-10-08 | regress-autonomous | pass | v2.149.0 | 6 | OpenClaw 2026.9.8 |
 | 2026-10-08 | runner-scenarios | pass | v2.149.0 | 11 | OpenClaw 2026.9.8 |
+| 2026-10-08 | apps | pass | v2.150.0 | 5 | OpenClaw 2026.9.8 |
+| 2026-10-08 | console | fail | v2.150.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-08 | transfer | pass | v2.150.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-10-08 | clean-install-ubuntu-2204 | fail | v2.150.0 | 5 |  |
+| 2026-10-08 | clean-install-debian-12 | fail | v2.150.0 | 1 |  |

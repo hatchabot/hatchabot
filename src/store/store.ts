@@ -830,6 +830,8 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN rich_messages INTEGER`,
       `ALTER TABLE agents ADD COLUMN files_max_mb INTEGER`,
       `ALTER TABLE agents ADD COLUMN cron_triggers INTEGER`,
+      // Its own browser (src/orchestrator/browser.ts): off unless switched on.
+      `ALTER TABLE agents ADD COLUMN browser INTEGER`,
       // Memory search engine: baked (NULL) or the machine's shared service.
       `ALTER TABLE agents ADD COLUMN embed_mode TEXT`,
       `ALTER TABLE agents ADD COLUMN applied_embed_mode TEXT`,
@@ -4197,6 +4199,9 @@ export class Store {
   setAgentEmbedIndex(id: string, indexedAt: string | null, error: string | null): void {
     this.db.prepare(`UPDATE agents SET embed_indexed_at = ?, embed_index_error = ? WHERE id = ?`).run(indexedAt, error, id);
   }
+  setAgentBrowser(id: string, on: boolean): void {
+    this.db.prepare(`UPDATE agents SET browser = ?, updated_at = ? WHERE id = ?`).run(on ? 1 : 0, new Date().toISOString(), id);
+  }
   setAgentCronTriggers(id: string, on: boolean): void {
     this.db.prepare(`UPDATE agents SET cron_triggers = ?, updated_at = ? WHERE id = ?`).run(on ? 1 : 0, new Date().toISOString(), id);
   }
@@ -5276,6 +5281,7 @@ function rowToAgent(r: any): Agent {
     richMessages: r.rich_messages === null || r.rich_messages === undefined ? undefined : !!r.rich_messages,
     filesMaxMb: r.files_max_mb ?? undefined,
     cronTriggers: !!r.cron_triggers,
+    browser: !!r.browser,
     memoryCap: r.memory_cap ?? undefined,
     memoryCapBaseline: r.memory_cap_baseline ?? undefined,
     swapAllowance: r.swap_allowance ?? undefined,

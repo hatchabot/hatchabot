@@ -140,6 +140,8 @@ export interface OpenClawConfigPatch {
   console?: { trustedProxies: string[]; ownerIdentity: string; guestIdentities: string[] };
   /** cron.triggers.enabled — see Agent.cronTriggers. Written convergently. */
   cronTriggers?: boolean;
+  /** Its own browser: OpenClaw attaches to it (browser.ts). Unset or false: the browser tool is off. Written convergently. */
+  browser?: boolean;
   /** OpenClaw's agents.defaults.userTimezone (IANA): timestamps, schedules and "now" in the prompt. Undefined = leave it. */
   userTimezone?: string;
   /**
@@ -361,6 +363,10 @@ export interface RuntimeProvider {
   ensureEmbedder?(spec: import('../embedder/embedder.js').EmbedderSpec): Promise<import('../embedder/embedder.js').EmbedderStatus>;
   embedderStatus?(): Promise<import('../embedder/embedder.js').EmbedderStatus>;
   stopEmbedder?(): Promise<void>;
+  /** An agent's own browser (src/orchestrator/browser.ts): start it, or keep the one sharing the agent's current network. */
+  ensureBrowser?(spec: import('../orchestrator/browser.js').BrowserSpec): Promise<'running' | 'started'>;
+  stopBrowser?(agentContainer: string): Promise<void>;
+  listBrowsers?(): Promise<Array<{ name: string; agentContainer: string; running: boolean }>>;
   /** A runner's copy of the memory search key files, after they changed here (no-op on this machine). */
   pushEmbedKeys?(files: import('../embedder/embedder.js').EmbedKeyFiles): Promise<void>;
   /** The engine container's live memory and CPU (from `docker stats`), for the health loop's memory guard. */

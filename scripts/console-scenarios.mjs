@@ -9,7 +9,15 @@
  * starts, and its live connection to the agent's gateway opens and carries
  * messages. No AI turns.
  *
- *   node scripts/console-scenarios.mjs [--keep]
+ *   node scripts/console-scenarios.mjs [--keep] [--signin-key <file>.key]
+ *
+ * The console's live connection admits a signed-in BROWSER only (its session
+ * cookie, checked when the socket opens: consoleSockets.ts); a CLI token on
+ * the page's requests cannot carry it. So C2 — the live connection opens and
+ * carries messages — runs only with --signin-key: the private key of the
+ * install's one-time sign-in links (docs/signin-links.md), from which it mints
+ * a five-minute owner link and signs the browser in. Without one it says so
+ * and checks C1 only.
  *
  * Chrome runs from the zenika/alpine-chrome image on the host network (it
  * must reach the tailnet address) with its debugging port on loopback; it and
@@ -41,6 +49,8 @@ async function cdp(wsUrl) {
   return { send, events, close: () => ws.close() };
 }
 
+const keyArg = (() => { const i = process.argv.indexOf('--signin-key'); return i >= 0 ? process.argv[i + 1] : undefined; })();
+
 async function main() {
   if (!PUBLIC.startsWith('https://')) throw new Error(`HATCHABOT_PUBLIC_URL must be the HTTPS address other devices use (got "${PUBLIC || 'nothing'}").`);
   const existing = (await api('/v1/agents')).json.filter((a) => a.name?.startsWith(PREFIX));
@@ -61,8 +71,17 @@ async function main() {
     await c.send('Network.enable');
     await c.send('Page.enable');
     await c.send('Runtime.enable');
-    // Signed in as the owner, the way the app's own session would be.
-    await c.send('Network.setExtraHTTPHeaders', { headers: { authorization: `Bearer ${TOKEN}` } });
+    // Signed in as the owner: with a one-time link when a key is given (a real
+    // browser session, as on a phone), else the CLI token on its requests.
+    if (keyArg) {
+      const { signinLink } = await import('./signin-link.mjs');
+      const { readFileSync } = await import('node:fs');
+      const link = signinLink({ privateKey: readFileSync(keyArg, 'utf8'), url: PUBLIC, owner: true, ttl: 300 });
+      await c.send('Page.navigate', { url: link });
+      await sleep(5000);
+    } else {
+      await c.send('Network.setExtraHTTPHeaders', { headers: { authorization: `Bearer ${TOKEN}` } });
+    }
     const url = `${PUBLIC}/v1/agents/${agent.id}/ui/chat?session=${encodeURIComponent(`agent:${agent.slug}:main`)}`;
     await c.send('Page.navigate', { url });
     await sleep(25_000);
@@ -83,6 +102,10 @@ async function main() {
       ['its app started (no "Control UI did not start")', !page.didNotStart && page.scripts > 0, page.text],
       ['no script errors, no failed loads', !errors.length && !failed.length, [...errors, ...failed].join(' | ')],
     ]);
+    if (!keyArg) {
+      log('(C2 not run — the live connection admits a signed-in browser only; give --signin-key <file>.key to check it. docs/live-tests.md)');
+      return;
+    }
     await scenario('C2 it connects to the agent: its live connection opens and carries messages', async () => [
       [`a live connection to the agent's gateway (${sockets.length} opened)`, sockets.some((s) => s.url.includes(`/v1/agents/${agent.id}/ui`))],
       ['the connection was accepted (101)', opened.length > 0],

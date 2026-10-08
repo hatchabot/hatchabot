@@ -87,6 +87,7 @@ import { RecentTracker, RECENT_CAP, orderRecent, previewFor, previewLine, type R
 import { COST_BANDS, COST_PERIODS, costBadgesOn, costsFor, DEFAULT_COST_PERIOD, TtlCache, windowPricing, spendSeries, SPEND_RANGES, type AgentCost, type SpendRange } from '../orchestrator/agentCosts.js';
 import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
+import { browserImage, browserSweep, containerOf } from '../orchestrator/browser.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
 import { CACHE_READ_DEFAULT, CACHE_WRITE_MULTIPLIER, estimateCost, priceList, pricesNothing, PRICES_CHECKED, PRICES_SOURCE } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
@@ -1119,6 +1120,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       agentId,
       task
         .then(() => checkContextAfterRebuild(agentId, startedAt))
+        // A rebuilt agent has a new network namespace: its browser follows it.
+        .then(() => { if (store.getAgent(agentId)?.browser) void browsersNow(agentId); })
         .catch((err) => app.log.error({ err, agentId }, 'rebuild task failed'))
         .finally(() => { inflight.delete(agentId); rebuildQueued.delete(agentId); rebuildCancelled.delete(agentId); }),
     );
@@ -2779,12 +2782,32 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     setTimeout(healthTicks, (Number(process.env.HATCHABOT_EMBED_BOOT_MS) || 15_000) + 30_000).unref();
     setInterval(healthTicks, Number(process.env.HATCHABOT_EMBED_HEALTH_MS) || 5 * 60_000).unref();
   }
+  // ---- each agent's own browser (src/orchestrator/browser.ts) -----------------
+  const browsersNow = (only?: string) => browserSweep({
+    store,
+    hostIds: () => [store.localHostId(), ...store.listRunnerHostIds()].filter((h): h is string => !!h),
+    providerFor,
+    log: (agentId, e, d) => trace(agentId)(e, d),
+  }, only).catch((err) => { app.log.warn({ err }, 'browser sweep failed'); return undefined; });
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    setInterval(() => { void browsersNow(); }, Number(process.env.HATCHABOT_BROWSER_SWEEP_MS) || 60_000).unref();
+  }
+  (app as unknown as { browsersNow?: typeof browsersNow }).browsersNow = browsersNow;
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/browser', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const c = containerOf(agent.runtimeRef);
+    const b = c ? (await providerFor(agent.hostId).listBrowsers?.().catch(() => []))?.find((x) => x.agentContainer === c) : undefined;
+    return { on: !!agent.browser, running: !!b?.running, image: browserImage().image };
+  });
+
   // A started or woken agent may carry sessions pinned to a runtime its config
   // no longer names (runtimePins.ts): once its gateway answers, clear them.
   // Set once the console's access keeper exists (further down); used only after a start or a wake.
   let consoleAccessLater: ConsoleAccess | undefined;
   const clearPinsWhenUp = (a: Agent): void => {
     if (!a.runtimeRef) return;
+    if (a.browser) void browsersNow(a.id); // started or woken: its browser joins its new network
     forgetDmPolicy(a.id); // started or woken: the door is asserted afresh at the next rest
     // Its memory and swap limits as the kernel holds them, now that it has a fresh cgroup (limitsCheck).
     void limitsCheck({ agentIds: [a.id] }).catch(() => {});
@@ -5375,6 +5398,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
            *  clears back to the managed default (on). */
           richMessages: z.boolean().nullable().optional(),
           cronTriggers: z.boolean().optional(),
+          /** Its own browser (src/orchestrator/browser.ts). Rebuilds it to apply. */
+          browser: z.boolean().optional(),
           /** Memory search engine: the image's own, or the machine's shared service. Applies on rebuild. */
           embedMode: z.enum(['baked', 'shared']).optional(),
           /** Memory cap on its container ("4g"); `null` = back to its class's / the fleet default. Applied live. */
@@ -5413,6 +5438,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         parsed.data.groupAccess === undefined &&
         parsed.data.richMessages === undefined &&
         parsed.data.cronTriggers === undefined &&
+        parsed.data.browser === undefined &&
         parsed.data.embedMode === undefined &&
         parsed.data.memoryCap === undefined &&
         parsed.data.swapAllowance === undefined &&
@@ -5670,6 +5696,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (parsed.data.embedMode !== undefined) {
         store.setAgentEmbedMode(agent.id, parsed.data.embedMode);
         trace(agent.id)('embed.mode', { mode: parsed.data.embedMode });
+      }
+      if (parsed.data.browser !== undefined && parsed.data.browser !== !!agent.browser) {
+        if (agent.ops && parsed.data.browser) return reply.code(400).send({ error: 'The manager has no browser: its tools are Hatchabot\'s only.' });
+        store.setAgentBrowser(agent.id, parsed.data.browser);
+        trace(agent.id)('browser.switched', { on: parsed.data.browser });
+        // OpenClaw reads the browser profile at start: a rebuild writes it and
+        // the sweep then starts (or removes) the browser beside it.
+        if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) kickRebuild(agent.id);
       }
       if (parsed.data.cronTriggers !== undefined) {
         store.setAgentCronTriggers(agent.id, parsed.data.cronTriggers);

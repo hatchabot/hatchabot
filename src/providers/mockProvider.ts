@@ -304,6 +304,17 @@ export class MockProvider implements RuntimeProvider {
     return this.embedder;
   }
   async embedderStatus() { return this.embedder; }
+  /** Each agent's browser, as tests see it: agent container → running. */
+  browsers = new Map<string, boolean>();
+  browserSpecs: Array<import('../orchestrator/browser.js').BrowserSpec> = [];
+  async ensureBrowser(spec: import('../orchestrator/browser.js').BrowserSpec) {
+    this.browserSpecs.push(spec);
+    if (this.browsers.get(spec.agentContainer)) return 'running' as const;
+    this.browsers.set(spec.agentContainer, true);
+    return 'started' as const;
+  }
+  async stopBrowser(agentContainer: string) { this.browsers.delete(agentContainer); }
+  async listBrowsers() { return [...this.browsers].map(([agentContainer, running]) => ({ name: `${agentContainer}-browser`, agentContainer, running })); }
   /** A runner's key-file copies: the keys file's contents at each copy. */
   pushedKeys: string[] = [];
   async pushEmbedKeys(files: import('../embedder/embedder.js').EmbedKeyFiles) {
