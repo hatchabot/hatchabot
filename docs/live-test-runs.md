@@ -34,3 +34,10 @@ tests that run on their own.
 | 2026-10-08 | console | pass | v2.151.0 | 2 | OpenClaw 2026.9.8 |
 | 2026-10-08 | browser | pass | v2.151.0 | 3 | OpenClaw 2026.9.8 |
 | 2026-10-08 | console | pass | v2.151.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-08 | upgrade-check | pass | v2.151.0 | 1 |  |
+| 2026-10-08 | transfer | pass | v2.151.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-10-08 | candidate-gate | pass | v2.151.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-08 | regress-autonomous | pass | v2.151.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-10-08 | runner-scenarios | pass | v2.151.0 | 11 | OpenClaw 2026.9.8 |
+| 2026-10-08 | clean-install | pass | v2.151.0 | 8 |  |
+| 2026-10-08 | clean-install-ubuntu-2204 | pass | v2.151.0 | 8 |  |
