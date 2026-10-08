@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.148.0] — 2026-10-08
+
+### Added
+- **Live tests are run before a release is promoted.** The unit suite, the click-through and CI fake Docker, OpenClaw and the machines; the live tests do not.
+  - `scripts/live.mjs` lists them, says which are due for a release, runs one, and records the result in `docs/live-test-runs.md`.
+  - The register covers the runner moves, the image candidate gate, the autonomous agent check, the restore drill, the upgrade check, the adopt smoke test and the clean install. Each test's page row says what it proves, needs, how long it takes and whether it uses AI turns (docs/live-tests.md).
+  - A test is due when it has never passed, or a file in its area changed since the release it last passed on.
+  - `scripts/promote.sh` refuses while any is due, after the CI check. `HATCHABOT_PROMOTE_IGNORE_LIVE=1` overrides it, and a rollback is not held to it.
+
 ## [2.147.1] — 2026-10-08
 
 ### Fixed

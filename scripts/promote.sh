@@ -55,7 +55,19 @@ ci_gate() {
   fi
   echo "✓ CI passed on $TAG"
 }
-if [ -z "$CURRENT" ] || [ "$NEWER" != "$CURRENT" ]; then ci_gate; fi
+# The live tests (docs/live-tests.md): the unit suite and CI fake Docker,
+# OpenClaw and the machines; these do not. Each is due when it has never
+# passed, or a file in its area changed since the release it last passed on
+# (docs/live-test-runs.md). Not for a rollback, as with CI.
+live_gate() {
+  if [ "${HATCHABOT_PROMOTE_IGNORE_LIVE:-}" = 1 ]; then echo "⚠ Live tests not checked (HATCHABOT_PROMOTE_IGNORE_LIVE=1)."; return 0; fi
+  [ -f scripts/live.mjs ] || return 0
+  command -v node >/dev/null 2>&1 || die "Can't check the live tests: node is not on PATH (HATCHABOT_PROMOTE_IGNORE_LIVE=1 promotes without the check)."
+  node scripts/live.mjs gate "$TAG" \
+    || die "Live tests are due for $TAG — run them (node scripts/live.mjs run <name>), commit docs/live-test-runs.md, then promote. HATCHABOT_PROMOTE_IGNORE_LIVE=1 promotes without them. Nothing changed."
+  echo "✓ No live test is due for $TAG"
+}
+if [ -z "$CURRENT" ] || [ "$NEWER" != "$CURRENT" ]; then ci_gate; live_gate; fi
 
 sed -i.bak -E "s/(\"$CH\"[[:space:]]*:[[:space:]]*\")v[^\"]*(\")/\1$TAG\2/" channels.json && rm -f channels.json.bak
 grep -q "\"$CH\": \"$TAG\"" channels.json || die "Could not update channels.json."

@@ -163,6 +163,7 @@ per container.
 - `src/providers/mockProvider.ts` — `MockProvider`: the in-memory provider used by tests.
 - `src/orchestrator/runnerSetup.ts` — `ensureRunnerKey`, `runnerSetupSnippet`, `installRuntimeImage`: adding a runner machine.
 - `scripts/runner-scenarios.mjs` — `scenario`, `recalls`: real moves between this machine and a runner on a live install (old and new images, memory recalled by meaning).
+- `scripts/live.mjs` — `LIVE_TESTS`, `dueFor`, `readRuns`: the live tests' register, what is due for a release, and the record (`docs/live-tests.md`, `docs/live-test-runs.md`); `scripts/promote.sh` — `live_gate`.
 - `src/orchestrator/moveHost.ts` — `moveAgentToHost`: moving an agent between this install's machines.
 - `src/orchestrator/migrate.ts` — `migrateAgent`, `preflight`: moving an agent to another Hatchabot.
 - `src/orchestrator/transfer.ts` — `exportAgent`, `importAgent`: the whole-agent archive behind download, moving to another Hatchabot, and restore from a download.

@@ -48,12 +48,20 @@ hbt promote          # stable ← what this machine runs     (hbt promote v2.32.
 hbt channels         # where everything points
 ```
 
-Before promoting to `stable`, install it from nothing on a fresh Linux VM —
-the only test that starts where a newcomer does (it needs LXD):
+It then refuses while a **live test** is due for the release
+([live-tests.md](live-tests.md)): the tests that run against the real
+install and machines, which CI cannot. Once the release runs on the
+development machine:
 
 ```sh
-scripts/clean-install-test.sh --ai-source "<an AI source name>"
+node scripts/live.mjs due                         # what is due, and why
+node scripts/live.mjs run runner-scenarios -- --runner "<name>"
+node scripts/live.mjs run clean-install -- --ai-source "<an AI source name>"   # from nothing, on a fresh Linux VM (LXD)
+git add docs/live-test-runs.md && git commit -m "Live tests: …" && git push
 ```
+
+`HATCHABOT_PROMOTE_IGNORE_LIVE=1` promotes without them; a rollback is not
+held to it.
 
 The machine you develop on can run every release first, automatically:
 

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 /**
  * scripts/promote.sh in a sandbox: a throwaway repo with a local bare
@@ -126,3 +126,47 @@ describe('scripts/promote.sh asks CI first (it was red for eight days unseen, 20
     expect(w.channels()).toContain('"stable": "v0.9.0"');
   });
 });
+
+describe('scripts/promote.sh asks for the live tests (docs/live-tests.md)', () => {
+  /** The sandbox with the live register and a record; node on PATH. */
+  const withLive = (record: string) => {
+    const w = world();
+    mkdirSync(join(w.work, 'docs'), { recursive: true });
+    writeFileSync(join(w.work, 'scripts', 'live.mjs'), readFileSync('scripts/live.mjs'));
+    writeFileSync(join(w.work, 'docs', 'live-test-runs.md'), record);
+    w.git(w.work, 'add', '.'); w.git(w.work, 'commit', '-q', '-m', 'live');
+    w.git(w.work, 'push', '-q', 'origin', 'main');
+    const PATH = `${join(w.work, '..', 'bin')}:${dirname(process.execPath)}:/usr/bin:/bin`;
+    return { ...w, run: (extra: Record<string, string> = {}) => w.promote({ PATH, ...extra }, 'v1.1.0') };
+  };
+  const passedAll = async () => {
+    // @ts-expect-error — a plain .mjs script
+    const { LIVE_TESTS } = await import('../scripts/live.mjs');
+    return (LIVE_TESTS as Array<{ name: string }>).map((t) => `| 2026-10-08 | ${t.name} | pass | v1.1.0 | 5 | |`).join('\n') + '\n';
+  };
+
+  it('due: refuses, says what to run, changes nothing', () => {
+    const w = withLive('');
+    const r = w.run();
+    expect(r.status).toBe(1);
+    expect(r.stdout).toMatch(/live test\(s\) due for v1\.1\.0/);
+    expect(r.stderr).toMatch(/Live tests are due for v1\.1\.0 .*HATCHABOT_PROMOTE_IGNORE_LIVE=1/);
+    expect(w.channels()).toContain('"stable": "v1.0.0"');
+  });
+
+  it('all passed on the release: promotes', async () => {
+    const w = withLive(await passedAll());
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('✓ No live test is due for v1.1.0');
+    expect(w.channels()).toContain('"stable": "v1.1.0"');
+  });
+
+  it('the override goes on without them, and says so', () => {
+    const w = withLive('');
+    const r = w.run({ HATCHABOT_PROMOTE_IGNORE_LIVE: '1' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('Live tests not checked');
+  });
+});
+
