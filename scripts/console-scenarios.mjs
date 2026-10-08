@@ -24,6 +24,9 @@
  * the agent ("zz console test") are removed at the end unless --keep.
  */
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { api, cleanupAgents, createAgent, log, scenario, sleep, summary } from './live-lib.mjs';
 
 const PREFIX = 'zz console test';
@@ -49,7 +52,13 @@ async function cdp(wsUrl) {
   return { send, events, close: () => ws.close() };
 }
 
-const keyArg = (() => { const i = process.argv.indexOf('--signin-key'); return i >= 0 ? process.argv[i + 1] : undefined; })();
+// The key: --signin-key, else the live-test key beside the CLI's token when there is one.
+const keyArg = (() => {
+  const i = process.argv.indexOf('--signin-key');
+  if (i >= 0) return process.argv[i + 1];
+  const own = join(homedir(), '.config', 'hatchabot', 'signin-live-test.key');
+  return existsSync(own) ? own : undefined;
+})();
 
 async function main() {
   if (!PUBLIC.startsWith('https://')) throw new Error(`HATCHABOT_PUBLIC_URL must be the HTTPS address other devices use (got "${PUBLIC || 'nothing'}").`);
