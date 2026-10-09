@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
+import { scriptEnv } from './helpers/scriptEnv.js';
 
 // Night review, 2026-09-28: the CLI and the scripts.
 
@@ -23,7 +24,10 @@ describe('deploy and upgrade', () => {
   it('deploy-release and upgrade.sh take the same mkdir lock (flock and mkdir did not exclude each other)', () => {
     const d = src('scripts/deploy-release.sh'), u = src('scripts/upgrade.sh');
     expect(d).not.toMatch(/^[^#]*\bflock\b/m); // no flock command (a comment may name it)
-    const lockOf = (s: string) => s.match(/LOCK="\$\{TMPDIR:-\/tmp\}\/hatchabot-upgrade-\$\(printf %s "\$(\w+)" \| cksum \| cut -d' ' -f1\)\.lock\.d"/);
+    // In the user's own state folder since 2026-10-09 (a /tmp name anyone on a shared host could take first).
+    const locks = (s: string) => s.match(/LOCKS="\$\{XDG_STATE_HOME:-\$HOME\/\.local\/state\}\/hatchabot"/);
+    expect(locks(d)).toBeTruthy(); expect(locks(u)).toBeTruthy();
+    const lockOf = (s: string) => s.match(/LOCK(?:_PATH)?="\$LOCKS\/upgrade-\$\(printf %s "\$(\w+)" \| cksum \| cut -d' ' -f1\)\.lock\.d"/);
     expect(lockOf(d)?.[1]).toBe('PWD');
     expect(lockOf(u)?.[1]).toBe('DIR'); // DIR="$PWD" after its cd
     expect(u).toMatch(/DIR="\$PWD"/);
@@ -61,7 +65,7 @@ describe('scripts/uninstall.sh refuses a database it cannot read', () => {
     // node that cannot load the native module (a Node major upgrade).
     writeFileSync(join(bin, 'node'), '#!/usr/bin/env bash\necho "NODE_MODULE_VERSION mismatch" >&2\nexit 1\n', { mode: 0o755 });
     for (const args of [['--yes'], ['--purge', '--yes']]) {
-      const r = spawnSync('bash', [join(repo, 'scripts', 'uninstall.sh'), ...args], { encoding: 'utf8', env: { ...process.env, HOME: home, PATH: `${bin}:/usr/bin:/bin` } });
+      const r = spawnSync('bash', [join(repo, 'scripts', 'uninstall.sh'), ...args], { encoding: 'utf8', env: scriptEnv(home, `${bin}:/usr/bin:/bin`) });
       expect(r.status, r.stdout + r.stderr).toBe(2);
       expect(r.stdout).toMatch(/Cannot read the database/);
     }
@@ -79,7 +83,7 @@ describe('hatchabot accounts reset-password', () => {
     const plain = store.createCliToken('acct-1', 'laptop');
     const rehost = store.createCliToken('acct-1', 'peer', 90, 'rehost');
     const r = spawnSync('npx', ['tsx', 'src/cli.ts', 'accounts', 'reset-password', 'sam', 'a-new-long-password-1'], {
-      encoding: 'utf8', env: { ...process.env, HATCHABOT_DB: db, HATCHABOT_AUTH: 'accounts' },
+      encoding: 'utf8', env: scriptEnv(dir, process.env.PATH ?? '/usr/bin:/bin', { HATCHABOT_DB: db, HATCHABOT_AUTH: 'accounts' }),
     });
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(r.stdout).toMatch(/1 CLI token was revoked/);

@@ -4,6 +4,7 @@
 #   ./scripts/uninstall.sh              # stop it: service, units, CLI link; agents stopped
 #   ./scripts/uninstall.sh --purge      # …and the data: volumes, database, images, network
 #   ./scripts/uninstall.sh --purge --backups --yes
+#   ./scripts/uninstall.sh --installed  # the install the service runs, from another clone
 #
 # Without --purge NOTHING you would miss is deleted: agent volumes (memory,
 # files, members), the database, the backups and the runtime image all stay,
@@ -11,18 +12,21 @@
 # slate, and it asks you to type the word first.
 #
 # The clone you are standing in is never deleted — the last line tells you how.
+# It acts on the install it lives in; when the service runs from another one,
+# it refuses unless --installed says to act on that one instead.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 [ -x .node/bin/node ] && PATH="$PWD/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 REPO="$(pwd)"
 
-PURGE=0; BACKUPS=0; ASSUME_YES=0
+PURGE=0; BACKUPS=0; ASSUME_YES=0; INSTALLED=0
 for arg in "$@"; do
   case "$arg" in
     --purge) PURGE=1 ;;
     --backups) BACKUPS=1 ;;
+    --installed) INSTALLED=1 ;;
     -y|--yes) ASSUME_YES=1 ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg (try --help)"; exit 2 ;;
   esac
 done
@@ -30,9 +34,11 @@ done
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# A production install runs from its own checkout (see docs/releasing.md), so
-# the .env that names the database may not be the one in the clone you are
-# standing in. Believe the installed unit.
+# Which install? The one this script lives in. The unit names the one the
+# service runs, and until 2026-10-09 that one was believed: run from a dev or
+# test clone, this purged PRODUCTION's containers, volumes, data and .env.
+# Now a clone that is not the service's own refuses, naming both, unless
+# --installed says to act on the service's install from here.
 UNIT="$HOME/.config/systemd/user/hatchabot.service"
 INSTALLED_DIR=""
 if [ -f "$UNIT" ]; then
@@ -48,11 +54,20 @@ elif [ "$(uname -s)" = "Darwin" ]; then
     [ -n "$INSTALLED_DIR" ] && break
   done
 fi
-ENV_DIR="$REPO"
-if [ -n "$INSTALLED_DIR" ] && [ "$INSTALLED_DIR" != "$REPO" ] && [ -d "$INSTALLED_DIR" ]; then
-  ENV_DIR="$INSTALLED_DIR"
-  printf '\033[1mNote:\033[0m the service runs from %s, not this clone — reading its .env for paths.\n' "$INSTALLED_DIR"
+# Compared as real paths: a symlinked home or a trailing slash is the same place.
+if [ -n "$INSTALLED_DIR" ] && [ -d "$INSTALLED_DIR" ] && [ "$(cd "$INSTALLED_DIR" && pwd -P)" != "$(pwd -P)" ]; then
+  if [ "$INSTALLED" != 1 ]; then
+    echo "The service runs from $INSTALLED_DIR, but this script is in $REPO."
+    echo "Refusing: removing the service here would take the other install's service and agents with it."
+    echo "  To remove the install the service runs:  $INSTALLED_DIR/scripts/uninstall.sh   (or add --installed here)"
+    echo "  To remove only this clone:                rm -rf \"$REPO\"   (it has no service of its own)"
+    exit 2
+  fi
+  printf '\033[1mNote:\033[0m acting on the install the service runs from, %s (--installed), not this clone.\n' "$INSTALLED_DIR"
+  REPO="$(cd "$INSTALLED_DIR" && pwd)"
+  [ -x "$REPO/.node/bin/node" ] && PATH="$REPO/.node/bin:$PATH" && export PATH
 fi
+ENV_DIR="$REPO"
 
 # Where the data lives, read the same way the server reads it.
 [ -f "$ENV_DIR/.env" ] && set -a && . "$ENV_DIR/.env" 2>/dev/null; set +a
@@ -115,11 +130,29 @@ volumes() {
   [ -n "$NAMES" ] || return 0
   for n in $NAMES; do docker volume ls -q --filter "name=^$n-vol$" 2>/dev/null; done
 }
+# Containers on this daemon that belong to ANOTHER Hatchabot install: an
+# agent (hatchabot.gen), a service container (hatchabot.role) or the name
+# prefix, and not one of this install's own. While any is there, the images
+# and the agents' network stay — the other install makes its next agents from
+# the same tags and on the same network (review, 2026-10-09).
+other_installs() {
+  local mine; mine="$( { containers; service_containers; } 2>/dev/null | sort -u)"
+  { docker ps -aq --filter "label=hatchabot.gen"
+    docker ps -aq --filter "label=hatchabot.role"
+    docker ps -aq --filter "name=^/hatchabot-"
+    docker ps -aq --filter "name=^/agentclaw-"
+    [ "$PREFIX" = hatchabot ] || docker ps -aq --filter "name=^/$PREFIX-"; } 2>/dev/null | sort -u | while read -r id; do
+      [ -n "$id" ] && ! grep -qxF "$id" <<<"$mine" && echo "$id"
+    done
+  return 0
+}
 # The runtime images to delete with --purge: the ones this install's agents and
 # classes name, plus the default tag — but never one that ANY container still
 # on the daemon uses (a production checkout beside a test one shares
 # hatchabot-runtime:latest; purging the test used to untag production's, 30th
-# audit). Run after this install's containers are gone.
+# audit). Run after this install's containers are gone. "Uses" is by image ID:
+# a container shows the tag it was made from only while the tag still points
+# there (a moved tag shows an ID), and one image can wear several tags.
 images() {
   local named
   named="$( [ -f "$DB_PATH" ] && [ -d "$REPO/node_modules/better-sqlite3" ] && (cd "$REPO" && node -e '
@@ -127,18 +160,27 @@ images() {
     const out = new Set();
     for (const t of ["agents", "agent_classes"]) { try { for (const r of db.prepare(`SELECT DISTINCT image FROM ${t} WHERE image IS NOT NULL`).all()) out.add(r.image); } catch {} }
     console.log([...out].join("\n"));' "$DB_PATH" 2>/dev/null) )"
-  local inuse; inuse="$(docker ps -a --format '{{.Image}}' 2>/dev/null | sort -u)"
+  local others; others="$(other_installs | wc -l | tr -d ' ')"
+  if [ "$others" != 0 ]; then
+    echo "  keeping the runtime images — $others containers of another Hatchabot install on this machine may need them" >&2
+    return 0
+  fi
+  local ids inuse=""
+  ids="$(docker ps -aq 2>/dev/null)"
+  # shellcheck disable=SC2086
+  [ -n "$ids" ] && inuse="$(docker inspect --format '{{.Image}}' $ids 2>/dev/null | sort -u)"
   { printf '%s\n' "${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"; [ -n "$named" ] && printf '%s\n' "$named"; } \
     | grep -E '^hatchabot-runtime:' | sort -u | while read -r img; do
       [ -n "$img" ] || continue
-      grep -qxF "$img" <<<"$inuse" && { echo "  keeping $img — another container on this machine still uses it" >&2; continue; }
+      id="$(docker image inspect --format '{{.Id}}' "$img" 2>/dev/null)"
+      [ -n "$id" ] || continue   # not on this machine: nothing to delete
+      grep -qxF "$id" <<<"$inuse" && { echo "  keeping $img — another container on this machine still uses it" >&2; continue; }
       echo "$img"
     done
 }
 
 say "This install"
 echo "  repo:      $REPO"
-[ "$ENV_DIR" != "$REPO" ] && echo "  installed: $ENV_DIR (what the service runs)"
 echo "  data:      $DATA_DIR $([ -f "$DB_PATH" ] && echo "(database present)" || echo "(no database)")"
 echo "  backups:   $BACKUP_DIR $([ -d "$BACKUP_DIR" ] && echo "($(ls -1 "$BACKUP_DIR" 2>/dev/null | wc -l | tr -d ' ') sets)" || echo "(none)")"
 if have docker; then
@@ -199,6 +241,14 @@ say "Unlinking the hatchabot CLI…"
 # The short name first, and only if it is ours (it points at the hatchabot CLI).
 HBT="$(command -v hbt 2>/dev/null || true)"
 if [ -n "$HBT" ] && [ -L "$HBT" ] && readlink -f "$HBT" | grep -qE '/bin/hatchabot(\.mjs)?$|/hatchabot$'; then rm -f "$HBT" && echo "  removed hbt"; fi
+# A bundle install's commands are two launchers link-cli.sh wrote into
+# ~/.local/bin (it has no npm to link with); they outlived the uninstall
+# (review, 2026-10-09). Only the ones that run THIS install.
+for name in hatchabot hbt; do
+  L="$HOME/.local/bin/$name"
+  [ -f "$L" ] && [ ! -L "$L" ] && grep -q 'written by scripts/link-cli.sh' "$L" 2>/dev/null && grep -qF "\"$REPO/bin/hatchabot.mjs\"" "$L" 2>/dev/null \
+    && rm -f "$L" && echo "  removed ~/.local/bin/$name"
+done
 npm unlink -g hatchabot >/dev/null 2>&1 && echo "  unlinked" || echo "  (was not linked)"
 # The CLI's token and channel pin belong to the USER, not this install (a
 # production checkout beside a test one shares them): only --purge takes them.
@@ -274,24 +324,60 @@ if [ "$PURGE" = 1 ]; then
     else
       echo "  none"
     fi
-    docker network rm hatchabot-agents >/dev/null 2>&1 && echo "  removed the hatchabot-agents network"
+    # The agents' network by the name this install used (its .env may name
+    # another), and never while another install's agents may be on it.
+    NET="${HATCHABOT_AGENT_NETWORK:-hatchabot-agents}"
+    case "$NET" in bridge|host|none|"") ;; *)
+      if [ -n "$(other_installs)" ]; then echo "  kept the $NET network — another Hatchabot install on this machine uses it"
+      else docker network rm "$NET" >/dev/null 2>&1 && echo "  removed the $NET network"; fi ;;
+    esac
     NIDS="$(service_networks | sort -u)"
     # shellcheck disable=SC2086
     [ -n "$NIDS" ] && docker network rm $NIDS >/dev/null 2>&1 && echo "  removed $(echo "$NIDS" | wc -l | tr -d ' ') service networks"
   fi
   say "Deleting local state…"
+  # The backups first, and only Hatchabot's own sets: the folder may be a NAS
+  # mount other machines back up into (backup-volumes.sh prunes only its dated
+  # sets for that reason), and --backups used to rm -rf all of it (review,
+  # 2026-10-09). The folder goes only when that leaves it empty.
+  if [ "$BACKUPS" = 1 ] && [ -d "$BACKUP_DIR" ]; then
+    SETS=0
+    for d in "$BACKUP_DIR"/20??-??-??; do
+      [ -d "$d" ] && { [ -f "$d/backup-status.json" ] || [ -f "$d/hatchabot.sqlite" ]; } || continue
+      rm -rf "$d" && SETS=$((SETS + 1))
+    done
+    echo "  removed $SETS backup sets from $BACKUP_DIR"
+    if rmdir "$BACKUP_DIR" 2>/dev/null; then echo "  removed $BACKUP_DIR (empty now)"
+    else echo "  kept $BACKUP_DIR itself: it holds more than Hatchabot's backup sets"; fi
+  fi
+  # A backup folder inside the data folder is not part of the data: removing
+  # the data folder whole took the backups with it, --backups or not.
+  DB_ONLY=0; KEEP_TOP=""
+  if [ -d "$BACKUP_DIR" ] && [ -d "$DATA_DIR" ]; then
+    B="$(cd "$BACKUP_DIR" && pwd -P)"; D="$(cd "$DATA_DIR" && pwd -P)"
+    case "$D/" in "$B/"*) DB_ONLY=1 ;; esac                               # the data folder IS the backup folder, or inside it
+    case "$B" in "$D/"*) KEEP_TOP="${B#"$D/"}"; KEEP_TOP="${KEEP_TOP%%/*}" ;; esac   # the backups are inside the data folder
+  fi
   # The whole directory only when it is Hatchabot's own (the install's data/
   # or a *hatchabot-data* folder); a database placed elsewhere (a home
   # directory, a NAS folder) loses only its own files (26th audit).
   case "$DATA_DIR" in
-    "$ENV_DIR/data"|*hatchabot-data*|*agentclaw-data*) rm -rf "$DATA_DIR" && echo "  removed $DATA_DIR" ;;
+    "$ENV_DIR/data"|*hatchabot-data*|*agentclaw-data*)
+      if [ "$DB_ONLY" = 1 ]; then
+        rm -f "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" && echo "  removed the database in $DATA_DIR (it is the backup folder too, so the folder stays)"
+      elif [ -n "$KEEP_TOP" ]; then
+        for e in "$D"/* "$D"/.[!.]* "$D"/..?*; do
+          { [ -e "$e" ] || [ -L "$e" ]; } && [ "$e" != "$D/$KEEP_TOP" ] && rm -rf "$e"
+        done
+        echo "  removed $DATA_DIR, except $KEEP_TOP/ — it holds the backups ($BACKUP_DIR)"
+      else
+        rm -rf "$DATA_DIR" && echo "  removed $DATA_DIR"
+      fi ;;
     *) rm -f "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" && echo "  removed the database in $DATA_DIR (the folder is not Hatchabot's own, so it stays)" ;;
   esac
   [ -f "$ENV_DIR/.env" ] && rm -f "$ENV_DIR/.env" && echo "  removed $ENV_DIR/.env"
-  if [ "$BACKUPS" = 1 ] && [ -d "$BACKUP_DIR" ]; then
-    rm -rf "$BACKUP_DIR" && echo "  removed $BACKUP_DIR"
-  elif [ -d "$BACKUP_DIR" ]; then
-    echo "  kept $BACKUP_DIR (pass --backups to delete it too)"
+  if [ "$BACKUPS" != 1 ] && [ -d "$BACKUP_DIR" ]; then
+    echo "  kept $BACKUP_DIR (pass --backups to delete its backup sets too)"
   fi
 fi
 

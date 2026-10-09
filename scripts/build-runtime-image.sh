@@ -196,6 +196,11 @@ elif [ "${OPENCLAW_VERSION}" != "${DEFAULT_OPENCLAW}" ]; then
   fi
 fi
 
+# The image the tag names now, if any: a rebuild under an existing tag moves
+# the tag to the new image, and a new image that failed the check below was
+# removed with the tag — leaving the previous, good image with no name, and
+# every agent pinned to the tag unable to rebuild (review, 2026-10-09).
+PREV_ID="$(docker image inspect --format '{{.Id}}' "${REPO}:${IMAGE_TAG}" 2>/dev/null || true)"
 docker build \
   --build-arg "OPENCLAW_VERSION=${OPENCLAW_VERSION}" \
   --build-arg "EMBED_ENGINE=${EMBED_ENGINE}" \
@@ -214,7 +219,14 @@ RUNS="$(docker run --rm --network none --entrypoint openclaw "${REPO}:${IMAGE_TA
 case "$RUNS" in
   *"${OPENCLAW_VERSION}"*) ;;
   *) echo "✗ ${REPO}:${IMAGE_TAG} runs '${RUNS:-nothing}', not OpenClaw ${OPENCLAW_VERSION}. Removing it." >&2
-     docker rmi "${REPO}:${IMAGE_TAG}" >/dev/null 2>&1 || true
+     NEW_ID="$(docker image inspect --format '{{.Id}}' "${REPO}:${IMAGE_TAG}" 2>/dev/null || true)"
+     # The same image as before the build is what was there: left as it was.
+     if [ -z "$PREV_ID" ] || [ "$NEW_ID" != "$PREV_ID" ]; then
+       docker rmi "${REPO}:${IMAGE_TAG}" >/dev/null 2>&1 || true
+       if [ -n "$PREV_ID" ] && docker tag "$PREV_ID" "${REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
+         echo "  ${REPO}:${IMAGE_TAG} names the image it named before this build again." >&2
+       fi
+     fi
      exit 1 ;;
 esac
 

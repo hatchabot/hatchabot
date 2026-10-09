@@ -21,8 +21,17 @@ git fetch --tags --force --quiet origin
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "No tag $TAG — tag and push the release first."
 [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || die "Promote from main."
 [ -z "$(git status --porcelain channels.json)" ] || die "channels.json has uncommitted changes."
+# What GitHub's main holds, and nothing else. The promote commit is pushed as
+# `main`, so a local commit not yet pushed (work in progress) rode along with
+# it; and the channel's current release is read from there, not from a local
+# file that may be behind (review, 2026-10-09).
+AHEAD="$(git rev-list --count origin/main..HEAD)"; BEHIND="$(git rev-list --count HEAD..origin/main)"
+[ "$AHEAD" = 0 ] && [ "$BEHIND" = 0 ] \
+  || die "Local main is not origin/main ($AHEAD commits ahead, $BEHIND behind) — push or pull first, so a promote publishes nothing but itself."
+# A release that is not on main (a tag on a side branch) never passed main's CI.
+git merge-base --is-ancestor "$TAG^{commit}" origin/main || die "$TAG is not on main — promote only releases tagged on main."
 
-CURRENT="$(sed -nE "s/.*\"$CH\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" channels.json | sed -n 1p)"
+CURRENT="$(git show origin/main:channels.json | sed -nE "s/.*\"$CH\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | sed -n 1p)"
 if [ "$CURRENT" = "$TAG" ]; then echo "$CH already points at $TAG."; exit 0; fi
 # Going backwards is allowed (a bad release gets rolled back this way) but it
 # should never happen by accident.
@@ -43,7 +52,9 @@ ci_gate() {
   command -v gh >/dev/null 2>&1 || die "Can't check CI: the gh command is not installed ($how)."
   local slug="${HATCHABOT_SLUG:-hatchabot/hatchabot}" sha runs id st
   sha="$(git rev-list -n 1 "$TAG")"
-  runs="$(gh run list --repo "$slug" --workflow ci.yml --commit "$sha" --limit 1 --json databaseId,status,conclusion -q '.[] | "\(.databaseId) \(.status) \(.conclusion)"')" \
+  # The run for the push to main: a pull request's run on the same commit
+  # tests it merged into whatever its base was then, not as main (review, 2026-10-09).
+  runs="$(gh run list --repo "$slug" --workflow ci.yml --commit "$sha" --event push --branch main --limit 1 --json databaseId,status,conclusion -q '.[] | "\(.databaseId) \(.status) \(.conclusion)"')" \
     || die "Could not ask GitHub about CI for $TAG ($how)."
   [ -n "$runs" ] || die "No CI run for $TAG (${sha:0:9}) — was it pushed to main? ($how)"
   id="${runs%% *}"; st="${runs#* }"
@@ -80,5 +91,11 @@ MSG="Promote $TAG to $CH"
 
 $HATCHABOT_PROMOTE_TRAILERS"
 git commit -q -m "$MSG"
-git push -q origin main
+# A refused push (main moved on meanwhile) used to leave the promote commit
+# here, and a re-run then said "already points at" with GitHub unchanged
+# (review, 2026-10-09). Take it back off, as if it had not been made.
+if ! git push -q origin main; then
+  git reset -q --soft HEAD~1 && git reset -q -- channels.json && git checkout -q -- channels.json
+  die "The push to origin was refused (did main move on?) — nothing changed here or there. Pull, then run it again."
+fi
 echo "✓ $CH → $TAG  (was ${CURRENT:-unset}). New installs on $CH get it now."

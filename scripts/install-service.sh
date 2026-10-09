@@ -9,6 +9,9 @@
 set -euo pipefail
 [ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
+# $USER is not set everywhere (a provisioner, some containers), and under
+# set -u reading it ended the install half-done (review, 2026-10-09).
+ME="${USER:-$(id -un)}"
 
 if [ ! -f .env ]; then
   echo "No .env found. Create one first (chmod 600) containing:"
@@ -53,14 +56,14 @@ systemctl --user enable hatchabot-backup.timer
 systemctl --user restart hatchabot-backup.timer
 
 # Lingering lets user services start at boot instead of at first login.
-if loginctl show-user "$USER" 2>/dev/null | grep -q '^Linger=yes'; then
+if loginctl show-user "$ME" 2>/dev/null | grep -q '^Linger=yes'; then
   echo "Lingering already enabled — service starts at boot."
 else
-  if loginctl enable-linger "$USER" 2>/dev/null; then
+  if loginctl enable-linger "$ME" 2>/dev/null; then
     echo "Lingering enabled — service starts at boot."
   else
     echo "⚠ Could not enable lingering (needs admin). Run once:"
-    echo "    sudo loginctl enable-linger $USER"
+    echo "    sudo loginctl enable-linger $ME"
     echo "  Until then the service starts at your first login instead of at boot."
   fi
 fi
@@ -72,13 +75,16 @@ fi
 # service is denied Docker while a login shell has it: every agent fails with
 # "Could not create the agent volume" and nothing says why (clean-VM install,
 # 2026-09-23). Restarting the manager fixes it; a login session is not touched.
-DOCKER_GID="$(getent group docker 2>/dev/null | cut -d: -f3)"
-MANAGER="$(pgrep -u "$USER" -x systemd 2>/dev/null | sed -n 1p)"
+# `|| true`: rootless Docker, podman and Docker Desktop for Linux have no
+# docker group, and under pipefail getent's "not found" ended the install
+# here, after the units were written but before the CLI (review, 2026-10-09).
+DOCKER_GID="$(getent group docker 2>/dev/null | cut -d: -f3 || true)"
+MANAGER="$(pgrep -u "$ME" -x systemd 2>/dev/null | sed -n 1p || true)"
 # Since 2026-10-06 the units start through scripts/with-docker.sh, which takes
 # the group with `sg docker` when the manager lacks it — so no restart is
 # offered (in a clean VM `systemctl restart user@` failed and took the user's
 # bus down with it). Kept for an install whose units predate the wrapper.
-if [ ! -x scripts/with-docker.sh ] && [ -n "$DOCKER_GID" ] && [ -n "$MANAGER" ] && id -nG "$USER" | tr ' ' '\n' | grep -qx docker \
+if [ ! -x scripts/with-docker.sh ] && [ -n "$DOCKER_GID" ] && [ -n "$MANAGER" ] && id -nG "$ME" | tr ' ' '\n' | grep -qx docker \
    && ! grep '^Groups:' "/proc/$MANAGER/status" 2>/dev/null | tr ' \t' '\n\n' | grep -qx "$DOCKER_GID"; then
   echo
   echo "⚠ Your background services started before you joined the docker group, so"
