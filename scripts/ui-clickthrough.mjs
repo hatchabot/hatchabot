@@ -3740,9 +3740,12 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/recommendations']; delete window.__override['/v1/agents/a1/recommendations']; v2RecCache.clear();
       }
     },
-    alertsOrder: async () => {
+    alertsMoney: async () => {
       // Alerts keeps a live loop, a budget at 100% and today's spike — one line each, linked to its item — and orders an agent's lines by severity.
+      // (It was also called alertsOrder, which silently replaced phase 3's scenario of that name.)
       const month = new Date().toISOString().slice(0, 7);
+      // The page keeps an agent's Recommended list 30 s; one an earlier scenario left would hide this one's items.
+      if (typeof v2RecCache !== 'undefined') v2RecCache.clear();
       try {
         await withAgents((a) => a.id === 'a1' ? { ...a, memoryCapHits: 3, diskOver: { bytes: 12e9, warnBytes: 10e9 },
             stuck: [{ id: 'ti_7', kind: 'task-failing', text: 'Scheduled task "Quiz" failed 9 runs in a row' }],
@@ -3807,6 +3810,13 @@ try { new Function(SCENARIOS); } catch (err) {
   process.exit(1);
 }
 
+// Two scenarios with one name: the object literal keeps only the last, and
+// the first never runs — say so instead (2026-10-09).
+{
+  const names = [...SCENARIOS.matchAll(/^    ([A-Za-z0-9_]+): async/gm)].map((m) => m[1]);
+  const twice = names.filter((n, i) => names.indexOf(n) !== i);
+  if (twice.length) { console.error(`two scenarios are called ${[...new Set(twice)].join(', ')}: rename one`); process.exit(1); }
+}
 const work = mkdtempSync(join(tmpdir(), 'hb-ui-'));
 try {
   // hb-ui=classic and ?ui=classic (below): opened as a browser that had chosen the classic look (scenario classicMap).
@@ -3822,10 +3832,13 @@ try {
   let dom = '';
   for (let tries = 1; !dom.includes('data-ui-results') && tries <= 3; tries++) {
     try {
+    // Virtual time: 30 min of it. A scenario that times out spends up to 20 s;
+    // past the budget the page never reports and the failing scenario goes
+    // unnamed (seen twice in release runs, 2026-10-09).
       dom = execFileSync('docker', [
         'run', '--rm', '--shm-size=1g', '-v', `${work}:/w`, 'zenika/alpine-chrome',
         '--no-sandbox', '--headless', '--disable-gpu', '--disable-dev-shm-usage', '--hide-scrollbars',
-        '--window-size=1400,1000', '--virtual-time-budget=600000', '--dump-dom', 'file:///w/page.html?ui=classic',
+        '--window-size=1400,1000', '--virtual-time-budget=1800000', '--dump-dom', 'file:///w/page.html?ui=classic',
       ], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] });
     } catch (err) { dom = String(err.stdout ?? ''); }
   }
