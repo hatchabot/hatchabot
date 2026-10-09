@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Nightly agent backups: one tarball per hatchabot volume, 14 days retention.
+# Nightly agent backups: one tarball per hatchabot volume, 14 days retention
+# (an agent's newest copy is kept however old: see the retention at the end).
 #
 # Backs up the hatchabot volumes found in docker. A volume no agent in the
 # registry uses (a leftover from before a rename) is reported, not archived
@@ -43,11 +44,33 @@ IMAGE="${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"
 KEEP_DAYS="${HATCHABOT_BACKUP_KEEP_DAYS:-14}"
 
 # Tarballs contain openclaw.json — bot tokens and gateway tokens in the clear.
-mkdir -p "$BASE" && chmod 700 "$BASE"
+# A base this run makes is 0700; one that is already there is left as it is
+# (chmod'ing a NAS share others use locked them out, 2026-10-09). Each dated
+# set is 0700 whatever the base, and that is what guards the files.
+[ -d "$BASE" ] || mkdir -m 700 -p "$BASE"
 mkdir -m 700 -p "$DEST"
 # mkdir -m only applies on creation — tighten a pre-existing directory too.
 chmod 700 "$DEST"
 umask 077
+
+# One run per set at a time: the nightly timer and "Back up now" (or two
+# installs sharing a base) both wrote '<volume>.tgz' and the record into the
+# same set at once (2026-10-09). mkdir is atomic everywhere (macOS has no
+# flock); the lock holds this run's pid, so one a SIGKILL left behind is
+# taken over. A run that finds the set locked stops before it writes anything.
+LOCK="$DEST/.backup-lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  # No pid yet: a run that has just made the lock — unless the lock is old.
+  if { [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; } || { [ -z "$holder" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; }; then
+    echo "✗ Another backup run${holder:+ (pid $holder)} is writing $DEST — this one stops; that run's record will say how it went." >&2
+    exit 1
+  fi
+  echo "  • an earlier run that was killed left its lock on $DEST — taking it over" >&2
+fi
+echo "$$" > "$LOCK/pid"
+release_lock() { rm -rf "$LOCK"; }
+trap release_lock EXIT
 
 # The set's own record. "running" until the end; whatever way the script ends
 # (a refusal, a failed volume, set -e, Ctrl-C) the EXIT trap writes the verdict.
@@ -71,7 +94,7 @@ write_status() {
 # The record starts only once the run can really begin (below): a run that
 # refuses before it starts (no database, no docker) must not replace the
 # verdict of an earlier run of the same day with "incomplete, 0 volumes".
-finish() { local rc=$?; if [ "$rc" -eq 0 ]; then write_status complete; else write_status incomplete; fi; exit "$rc"; }
+finish() { local rc=$?; if [ "$rc" -eq 0 ]; then write_status complete; else write_status incomplete; fi; release_lock; exit "$rc"; }
 
 # The control plane's own database first: it holds the encrypted bot tokens,
 # the agent registry, memberships and snapshots. Volumes survive without it,
@@ -133,7 +156,8 @@ vols="$(printf '%s\n' "$all_vols" | grep -E "^(${PREFIX}|agentclaw)-" || true)"
 #                         volume is taken when there, but a first start that
 #                         failed purged it, and that must not hold every set
 #                         incomplete (and unpruned) until someone deletes it
-#   remote <vol> <host>   an agent on a runner, read over `docker -H <host>`
+#   remote <vol> <host> <state>
+#                         an agent on a runner, read over `docker -H <host>`
 # and a last line "ok". No "ok": the DB copy could not be read — then every
 # volume is taken, as before, and none is expected. An install from before
 # runners (no hosts table) has local agents only.
@@ -153,7 +177,7 @@ registry="$(node -e '
     // expected volume can only hold a set back from pruning.
     if (r.kind == null || r.kind === "local") { console.log((r.st === "FAILED" ? "failed" : "local") + "\t" + v); continue; }
     let host; try { host = JSON.parse(r.s || "{}").dockerHost; } catch {}
-    if (host) console.log("remote\t" + v + "\t" + host);
+    if (host) console.log("remote\t" + v + "\t" + host + "\t" + r.st);
   }
   console.log("ok");' "$DEST/hatchabot.sqlite" 2>/dev/null || true)"
 registry_read=""
@@ -161,12 +185,12 @@ known=""
 expected=""
 expected_failed=""
 remote=""
-while IFS=$'\t' read -r what rvol rhost; do
+while IFS=$'\t' read -r what rvol rhost rstate; do
   case "$what" in
     known) known="$known$rvol"$'\n' ;;
     local) expected="$expected $rvol" ;;
     failed) expected_failed="$expected_failed $rvol" ;;
-    remote) remote="$remote$rhost"$'\t'"$rvol"$'\n' ;;
+    remote) remote="$remote$rhost"$'\t'"$rvol"$'\t'"$rstate"$'\n' ;;
     ok) registry_read=1 ;;
   esac
 done <<<"$registry"
@@ -214,6 +238,17 @@ while IFS= read -r vol; do
     orphan_list="$orphan_list $vol"
     continue
   fi
+  # Its agent lives on another machine now: this is the copy a move left
+  # behind (its clean-up failed), as of the day it moved. Taken under the
+  # agent's name it stood in for the runner's copy whenever that one was not
+  # taken, and a restore rolled the agent's memory back to the move
+  # (2026-10-09). Only the registry's word that the agent is HERE takes a
+  # volume; the runner's copy is read below.
+  if [ -n "$known" ] && [[ " $expected $expected_failed " != *" $vol "* ]]; then
+    echo "  • $vol: its agent lives on another machine now — this machine's copy is left from before the move, not backed up (docker volume rm $vol once you have looked)"
+    orphan_list="$orphan_list $vol"
+    continue
+  fi
   # Read-only mount; tar from inside a throwaway container so we never need
   # root on the host to reach /var/lib/docker. Run as root so it can read
   # uid-1000 volume files on ANY host (macOS uid is 501), then chown the
@@ -222,10 +257,14 @@ while IFS= read -r vol; do
   # GNU tar exits 1 for "file changed as we read it" — expected on a live
   # volume, and the archive is still usable. Only >1 is a hard failure, and
   # one bad volume must not abort the rest of the run.
+  # Written as .part and renamed once whole: a <volume>.tgz in a set is
+  # always a finished archive (a failed tar left a torn one under the real
+  # name, which the retention below would have trusted).
   rc=0
   docker run --rm --user root -v "$vol:/data:ro" -v "$DEST:/out" "$IMAGE" \
-    bash -c "umask 077 && tar czf '/out/$vol.tgz' $TAR_EXCLUDES -C /data . ; rc=\$?; chown $(id -u):$(id -g) '/out/$vol.tgz' 2>/dev/null; exit \$rc" || rc=$?
-  if [ "$rc" -gt 1 ] || [ ! -f "$DEST/$vol.tgz" ]; then
+    bash -c "umask 077 && tar czf '/out/$vol.tgz.part' $TAR_EXCLUDES -C /data . ; rc=\$?; chown $(id -u):$(id -g) '/out/$vol.tgz.part' 2>/dev/null; exit \$rc" || rc=$?
+  if [ "$rc" -gt 1 ] || [ ! -f "$DEST/$vol.tgz.part" ] || ! mv -f "$DEST/$vol.tgz.part" "$DEST/$vol.tgz"; then
+    rm -f "$DEST/$vol.tgz.part"
     echo "  ✗ $vol failed (exit $rc)" >&2
     failed=$((failed + 1))
     failed_list="$failed_list $vol"
@@ -264,12 +303,15 @@ done
 # the excludes match at the volume root only, like --anchored), into the same
 # <volume>.tgz a restore reads. A runner that does not answer (a laptop
 # asleep) is SKIPPED, not failed: it must not stop the pruning of this
-# machine's sets, and its agents stay "not covered" in the app. The list of them
-# ($remote) was read from the registry above, with the local ones.
+# machine's sets, and its agents stay "not covered" in the app — the retention
+# below keeps each one's newest copy however old it gets. A runner that
+# answers but whose archive fails (tar, a torn gzip, no alpine) is FAILED, as
+# a local volume is: that is a broken backup, not a sleeping laptop
+# (2026-10-09). The list of them ($remote) was read from the registry above.
 if [ -n "$remote" ]; then
   T=""; command -v timeout >/dev/null 2>&1 && T="timeout"
   down_hosts=" "
-  while IFS=$'\t' read -r rhost vol; do
+  while IFS=$'\t' read -r rhost vol rstate; do
     [ -n "$vol" ] || continue
     if [[ "$down_hosts" == *" $rhost "* ]] || ! ${T:+$T 30} docker -H "$rhost" version </dev/null >/dev/null 2>&1; then
       if [[ "$down_hosts" != *" $rhost "* ]]; then
@@ -277,6 +319,27 @@ if [ -n "$remote" ]; then
         down_hosts="$down_hosts$rhost "
       fi
       skipped_list="$skipped_list $vol"
+      continue
+    fi
+    # The volume must be there before it is mounted: `run -v <name>:…` makes
+    # a missing one, so an empty archive was counted as the agent's backup and
+    # an empty volume was left on the runner (2026-10-09). Missing is missing,
+    # as for a local agent; one whose first start failed has none to take.
+    rc=0
+    inspect="$(${T:+$T 60} docker -H "$rhost" volume inspect --format '{{.Name}}' "$vol" </dev/null 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      if [ "$rstate" = FAILED ] && [[ "$inspect" == *"o such volume"* ]]; then
+        echo "  • $vol: its agent failed to start and has no volume — nothing to back up"
+        continue
+      fi
+      if [[ "$inspect" == *"o such volume"* ]]; then
+        echo "  ✗ $vol: an agent on ${rhost#*://} uses it, but that runner has no volume by that name — not in this set" >&2
+        missing_list="$missing_list $vol"
+      else
+        echo "  ✗ $vol on ${rhost#*://}: could not look it up (exit $rc) — not in this set" >&2
+      fi
+      failed=$((failed + 1))
+      failed_list="$failed_list $vol"
       continue
     fi
     rc=0
@@ -288,13 +351,15 @@ if [ -n "$remote" ]; then
     if [ "$rc" -ne 0 ] || ! gzip -t "$DEST/$vol.tgz.part" 2>/dev/null; then
       rm -f "$DEST/$vol.tgz.part"
       echo "  ✗ $vol on ${rhost#*://} failed (exit $rc) — not in this set" >&2
-      skipped_list="$skipped_list $vol"
+      failed=$((failed + 1))
+      failed_list="$failed_list $vol"
       continue
     fi
     mv -f "$DEST/$vol.tgz.part" "$DEST/$vol.tgz"
     chmod 600 "$DEST/$vol.tgz"
     echo "  ✓ $vol (on ${rhost#*://}) → $DEST/$vol.tgz"
     count=$((count + 1))
+    captured_list="$captured_list $vol"
   done <<REMOTE
 $remote
 REMOTE
@@ -305,11 +370,38 @@ fi
 # directories, since the destination may be a shared path (e.g. a NAS).
 if [ "$failed" -gt 0 ] || [ "$count" -eq 0 ]; then
   if [ "$count" -eq 0 ] && [ "$failed" -eq 0 ] && [ -n "$skipped_list" ]; then
-    echo "✗ No volume captured: every runner was asleep or failed — incomplete backup, nothing pruned." >&2
+    echo "✗ No volume captured: every runner was asleep — incomplete backup, nothing pruned." >&2
   else
     echo "✗ $failed volume(s) failed or missing, $count succeeded — incomplete backup, nothing pruned." >&2
   fi
   exit 1
 fi
-find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' -mtime "+$KEEP_DAYS" -exec rm -rf {} +
+
+# Retention, per agent: a set older than KEEP_DAYS goes unless it holds the
+# newest copy of an agent's volume. A runner asleep at backup time is skipped
+# night after night while each set says complete, and the plain age rule then
+# deleted every set holding that agent (2026-10-09). An agent the registry no
+# longer has (deleted) is not held; with no agents to read there, a volume
+# docker still has is.
+# Sets are dated directories, so newest first is reverse name order.
+newer_vols=" "
+old_sets="$(find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' -mtime "+$KEEP_DAYS")"
+while IFS= read -r set; do
+  [ -n "$set" ] || continue
+  if grep -qxF -- "$set" <<<"$old_sets"; then
+    held=""
+    for tgz in "$set"/*.tgz; do
+      [ -e "$tgz" ] || continue
+      v="$(basename "$tgz" .tgz)"
+      [[ "$newer_vols" == *" $v "* ]] && continue
+      if { [ -n "$known" ] && grep -qxF -- "$v" <<<"$known"; } || { [ -z "$known" ] && grep -qxF -- "$v" <<<"$vols"; }; then held="$held $v"; fi
+    done
+    if [ -n "$held" ]; then
+      echo "  • kept $(basename "$set") past $KEEP_DAYS days: the newest copy of$held"
+    else
+      rm -rf "$set"
+    fi
+  fi
+  for tgz in "$set"/*.tgz; do if [ -e "$tgz" ]; then newer_vols="$newer_vols$(basename "$tgz" .tgz) "; fi; done
+done < <(find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' | sort -r)
 echo "Backed up $count volume(s) to $DEST (keeping $KEEP_DAYS days)"

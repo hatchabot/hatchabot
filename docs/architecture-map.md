@@ -164,7 +164,7 @@ per container.
 - `src/providers/mockProvider.ts` — `MockProvider`: the in-memory provider used by tests.
 - `src/orchestrator/runnerSetup.ts` — `ensureRunnerKey`, `runnerSetupSnippet`, `installRuntimeImage`: adding a runner machine.
 - `scripts/runner-scenarios.mjs` — `scenario`, `recalls`: real moves between this machine and a runner on a live install (old and new images, memory recalled by meaning).
-- `scripts/live.mjs` — `LIVE_TESTS`, `dueFor`, `readRuns`: the live tests' register, what is due for a release, and the record (`docs/live-tests.md`, `docs/live-test-runs.md`); `scripts/promote.sh` — `live_gate`.
+- `scripts/live.mjs` — `LIVE_TESTS`, `dueFor`, `touches`, `committedRuns`, `readRuns`, `resultOf`: the live tests' register, what is due for a release (`touches`: a change to a big shared file counts only near the test's own routes), and the record (the gate reads the committed one) (`docs/live-tests.md`, `docs/live-test-runs.md`); `scripts/promote.sh` — `live_gate`.
 - `src/orchestrator/moveHost.ts` — `moveAgentToHost`: moving an agent between this install's machines.
 - `src/orchestrator/migrate.ts` — `migrateAgent`, `preflight`: moving an agent to another Hatchabot.
 - `src/orchestrator/transfer.ts` — `exportAgent`, `importAgent`: the whole-agent archive behind download, moving to another Hatchabot, and restore from a download.
@@ -302,11 +302,11 @@ per run: a copy of the database, the secret key, and one archive per agent
 volume. The app only reads metadata about those sets, can start a run, prune a
 set, or restore one agent's volume from a set.
 
-- `scripts/backup-volumes.sh` — `write_status`, `json_list`: the backup run itself.
+- `scripts/backup-volumes.sh` — `write_status`, `json_list`, `release_lock`: the backup run itself (one run per set; retention keeps each agent's newest copy).
 - `deploy/hatchabot-backup.timer` — `OnCalendar`: when it runs.
 - `deploy/hatchabot-backup.service` — `Type=oneshot`, `ExecStart`: what the timer starts (the backup script).
 - `src/orchestrator/backups.ts` — `listBackups`, `startBackup`, `pruneBackup`, `restoreAgentFromBackup`, `agentsMissingFromSet`, `keepDays`, `restoreSafetyDir`: reading and acting on backup sets (`restoreSafetyDir` is where a restore that could not be undone keeps the pre-restore copy).
-- `scripts/restore-drill.sh` — `cleanup`: proves a backup set restores, without touching the live system.
+- `scripts/restore-drill.sh` — `set_state`, `cleanup`: proves a backup set (the newest complete one by default) restores, without touching the live system.
 - `src/api/routes.ts` — `'/v1/backups'`, `'/v1/backups/run'`, `'/v1/backups/restore'`, `'/v1/agents/:id/backup'`, `'/v1/agents/restore'`: the backup panel, one-agent download and restore from a download.
 - `web/index.html` — `loadBackups`, `runBackupNow`, `pruneBackup`, `restoreFromBackup`, `downloadAgent`: the Backups panel.
 

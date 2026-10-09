@@ -21,8 +21,12 @@
  *
  * --old-image runs phase A on a runner already on the current image: for
  * those few minutes the runner's default (hatchabot-runtime:latest) points at
- * the old image, and it is pointed back afterwards (always, even on failure).
- * Running containers are not affected by a tag moving.
+ * the old image, and it is pointed back as soon as A1 is done (always: on a
+ * failure, Ctrl-C or a kill too; the command to do it by hand is printed
+ * first). Running containers are not affected by a tag moving, but a real
+ * agent created or rebuilt on that runner meanwhile would get the old image:
+ * run it when nobody is doing that. A phase that cannot run prints SKIP, and
+ * live.mjs records the run as a skip, not a pass.
  *
  * It touches only agents it creates ("zz runner test …"), and deletes them at
  * the end unless --keep. Reads HATCHABOT_URL / HATCHABOT_TOKEN from the
@@ -162,6 +166,20 @@ function pointBack() {
   log(`${r.code === 0 ? '' : '✗ '}the runner's default image pointed back at ${restoreLatest.id.slice(7, 19)}${r.code === 0 ? '' : `: ${r.out.slice(-200)}`}`);
   if (r.code === 0) restoreLatest = undefined;
 }
+// Ctrl-C, a closed terminal or a kill skipped the `finally` below and left
+// the runner's default on the old image: any real agent created or rebuilt
+// there after that got 2026.7 (review, 2026-10-09). The tag is pointed back
+// before the run stops. (A per-agent pin can't stand in for the moved tag:
+// phase A checks what the runner's DEFAULT does — a current agent may not
+// move onto it, and a new agent there gets it.)
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => {
+    log(`${sig}: stopping`);
+    pointBack();
+    if (made.length) log(`test agents left behind (delete them before the next run): ${made.map((id) => id.slice(0, 8)).join(', ')}`);
+    process.exit(130);
+  });
+}
 async function main() {
   if (!TOKEN) throw new Error('No HATCHABOT_TOKEN (see ~/.config/hatchabot/env).');
   hosts = (await api('/v1/hosts')).json;
@@ -174,13 +192,15 @@ async function main() {
   let ping = (await api(`/v1/hosts/${runner.id}/ping`)).json;
   if (!ping.reachable) throw new Error(`${runner.name} is not answering: ${ping.error ?? ''}`);
   const old = opt('old-image');
-  if (old && !(ping.hasImage && below2026_8(ping.imageVersion))) {
+  const borrowing = !!old && !(ping.hasImage && below2026_8(ping.imageVersion));
+  if (borrowing) {
     const cur = docker(runner.id, ['image', 'inspect', 'hatchabot-runtime:latest', '--format', '{{.Id}}']);
     const oldId = docker(runner.id, ['image', 'inspect', old, '--format', '{{.Id}}']);
     if (cur.code !== 0 || oldId.code !== 0) throw new Error(`--old-image: ${cur.code ? 'the runner has no default image' : `the runner has no ${old}`}`);
     restoreLatest = { hostId: runner.id, id: cur.out.trim() };
     docker(runner.id, ['tag', old, 'hatchabot-runtime:latest']);
-    log(`for phase A, ${runner.name}'s default image points at ${old} (it will be pointed back)`);
+    log(`for phase A, ${runner.name}'s default image points at ${old} (it will be pointed back after A1; ` +
+      `if this run is killed outright: docker ${conn(runner.id).join(' ')} tag ${restoreLatest.id} hatchabot-runtime:latest)`);
     ping = (await api(`/v1/hosts/${runner.id}/ping`)).json;
   }
   log(`${runner.name}: ${ping.hasImage ? `OpenClaw ${ping.imageVersion} (this machine: ${ping.currentVersion})` : 'no runtime image (hatchabot-runtime:latest)'}`);
@@ -209,6 +229,9 @@ async function main() {
         ['still here, running', after.hostId === local.id],
       ];
     });
+    // Nothing after A1 needs the runner's default on the old image: the
+    // shorter it is borrowed, the fewer real agents can meet it.
+    pointBack();
     await scenario('A2 an old agent moves here: migrated to this machine\'s OpenClaw, memory kept and searchable', async () => {
       const r = await move(T.old1.id, local.id);
       if (r.status !== 200) return [[`move: ${r.status} ${JSON.stringify(r.json).slice(0, 300)}`, false]];
@@ -222,11 +245,12 @@ async function main() {
       ];
     });
   } else {
-    log(`(phase A skipped: ${runner.name} is not on an image older than 2026.8)`);
+    // Upper-case SKIP: live.mjs records a run that skipped a phase as a skip, not a pass (2026-10-09).
+    log(`SKIP phase A: ${runner.name} is not on an image older than 2026.8 (give --old-image <a pre-2026.8 image on it>)`);
   }
 
   // ---- the runner gets this machine's image -----------------------------------
-  if (restoreLatest) pointBack();
+  if (borrowing) pointBack();
   else if (!flag('no-image') && (!ping.hasImage || ping.imageVersion !== ping.currentVersion)) {
     await scenario(`I  ${runner.name} gets this machine's image (Install image)`, async () => {
       // The copy runs on the server; it is followed, not waited on (a request held
@@ -248,7 +272,7 @@ async function main() {
   // ---- Phase B: the runner on the current image -------------------------------
   const now = (await api(`/v1/hosts/${runner.id}/ping`)).json;
   if (!now.hasImage || now.imageVersion !== now.currentVersion) {
-    log(`(phase B skipped: ${runner.name} is on ${now.imageVersion ?? 'no image'}, this machine on ${now.currentVersion})`);
+    log(`SKIP phase B: ${runner.name} is on ${now.imageVersion ?? 'no image'}, this machine on ${now.currentVersion}${flag('no-image') ? ' (--no-image)' : ''}`);
     return;
   }
   if (T.old2) {
@@ -325,5 +349,8 @@ main()
     }
     console.log('\nSummary');
     for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.secs !== undefined ? `  (${r.secs}s)` : ''}`);
-    process.exitCode = results.every((r) => r.ok) ? 0 : 1;
+    // Nothing ran is not a pass: [].every() is true, and a run that skipped
+    // both phases was recorded as one (review, 2026-10-09).
+    if (!results.length) console.log('  FAIL  nothing was tested (both phases skipped)');
+    process.exitCode = results.length && results.every((r) => r.ok) ? 0 : 1;
   });

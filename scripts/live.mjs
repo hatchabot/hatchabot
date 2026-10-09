@@ -26,38 +26,49 @@ export const RECORD = join(ROOT, 'docs', 'live-test-runs.md');
 /**
  * Every live test. `against`: what the release under test is — the live
  * install (`install`: the version it reports) or this checkout (`checkout`).
- * `area`: git pathspecs whose change makes it due again.
+ * `area`: git pathspecs whose change makes it due again, or `{ path, near }`
+ * for a big file most releases touch (routes.ts, cli.ts, store.ts): there a
+ * change counts only when a changed line, or the route or command it sits in
+ * (the `app.get(…)` / `case '…'` line above it), matches `near` (`touches`).
  */
+const ROUTES = 'src/api/routes.ts';
+const CLI = 'src/cli.ts';
+const STORE = 'src/store/store.ts';
+const LIB = 'scripts/live-lib.mjs';
 export const LIVE_TESTS = [
   {
     name: 'runner-scenarios', cmd: ['node', 'scripts/runner-scenarios.mjs'], against: 'install', minutes: '20–40', aiTurns: false,
     needs: 'a runner (Settings → Hosts); pass -- --runner "<name>", and --old-image <a pre-2026.8 image on it> once it is current',
     proves: 'moves and rebuilds between this machine and a runner across OpenClaw versions; each machine\'s memory search; Install image',
-    area: ['src/orchestrator/moveHost.ts', 'src/orchestrator/transfer.ts', 'src/orchestrator/runnerSetup.ts', 'src/orchestrator/provision.ts', 'src/embedder', 'src/providers', 'src/openclaw/configWriter.ts', 'scripts/runner-scenarios.mjs'],
+    area: ['src/orchestrator/moveHost.ts', 'src/orchestrator/transfer.ts', 'src/orchestrator/runnerSetup.ts', 'src/orchestrator/provision.ts', 'src/embedder', 'src/providers', 'src/openclaw/configWriter.ts', 'scripts/runner-scenarios.mjs',
+      { path: ROUTES, near: /'\/v1\/(hosts|embedder|embed-)|'\/v1\/agents\/:id\/(move-host|rebuild|events)'/ }, { path: STORE, near: /host|embed/i }],
   },
   {
     name: 'transfer', cmd: ['node', 'scripts/transfer-scenarios.mjs'], against: 'install', minutes: '10–15', aiTurns: false,
     needs: 'room for 3 agents under the account\'s agent limit; Hatchabot 2.150.0+ (web-only clones)',
     proves: 'clone, a template shared with its memory and imported, and download → delete → restore: each copy runs web-only and still finds its notes by meaning',
-    area: ['src/orchestrator/transfer.ts', 'src/orchestrator/template.ts', 'src/orchestrator/provision.ts', 'scripts/transfer-scenarios.mjs'],
+    area: ['src/orchestrator/transfer.ts', 'src/orchestrator/template.ts', 'src/orchestrator/provision.ts', 'scripts/transfer-scenarios.mjs', LIB,
+      { path: ROUTES, near: /'\/v1\/agents\/(:id\/)?(clone|export|backup|import|restore)'/ }, { path: CLI, near: /case '(clone|share|export|import|download|backup|restore)'/ }],
   },
   {
     name: 'apps', cmd: ['node', 'scripts/app-scenarios.mjs'], against: 'install', minutes: '10–15', aiTurns: false,
     needs: 'room for 1 agent under the account\'s agent limit',
     proves: 'an app installs into an agent (its tests run there), its scheduled command runs by itself, updates keep its config, a release with failing tests is refused, rollback and stop work',
-    area: ['src/orchestrator/apps.ts', 'scripts/app-scenarios.mjs'],
+    area: ['src/orchestrator/apps.ts', 'scripts/app-scenarios.mjs', LIB,
+      { path: ROUTES, near: /'\/v1\/(agents\/:id\/app|apps)\b/ }, { path: CLI, near: /case '(app|data)'/ }],
   },
   {
     name: 'console', cmd: ['node', 'scripts/console-scenarios.mjs'], against: 'install', minutes: '2–5', aiTurns: false,
     needs: 'HATCHABOT_PUBLIC_URL (the HTTPS address other devices use); room for 1 agent',
     proves: 'a real browser opens an agent\'s console at the public address: a secure context, its app starts, its live connection to the agent opens and carries messages',
-    area: ['src/api/consoleProxy.ts', 'src/api/consoleSockets.ts', 'src/orchestrator/consoleAccess.ts', 'src/openclaw/configWriter.ts', 'scripts/console-scenarios.mjs'],
+    area: ['src/api/consoleProxy.ts', 'src/api/consoleSockets.ts', 'src/orchestrator/consoleAccess.ts', 'src/openclaw/configWriter.ts', 'scripts/console-scenarios.mjs', LIB],
   },
   {
     name: 'browser', cmd: ['node', 'scripts/browser-scenarios.mjs'], against: 'install', minutes: '8–12', aiTurns: false,
     needs: 'room for 1 agent; internet from the agents',
     proves: 'an agent\'s own browser: off by default, switched on it opens and reads a real page, holds none of the agent\'s files, follows an agent restart, and is removed when switched off',
-    area: ['src/orchestrator/browser.ts', 'docker/Dockerfile.browser', 'src/providers/localDockerProvider.ts', 'src/openclaw/configWriter.ts', 'scripts/browser-scenarios.mjs'],
+    area: ['src/orchestrator/browser.ts', 'docker/Dockerfile.browser', 'src/providers/localDockerProvider.ts', 'src/openclaw/configWriter.ts', 'scripts/browser-scenarios.mjs', LIB,
+      { path: ROUTES, near: /browser/i }, { path: 'src/orchestrator/provision.ts', near: /browser/i }, { path: CLI, near: /case '(start|stop)'/ }],
   },
   {
     name: 'candidate-gate', cmd: ['bash', 'scripts/candidate-gate.sh'], defaultArgs: ['hatchabot-runtime:latest'], against: 'install', minutes: '5–10', aiTurns: 'one',
@@ -74,7 +85,7 @@ export const LIVE_TESTS = [
   {
     name: 'restore-drill', cmd: ['bash', 'scripts/restore-drill.sh'], against: 'install', minutes: '5–15', aiTurns: false,
     needs: 'a nightly backup set (newest by default)',
-    proves: 'the newest backup restores, every part of it, without touching the live system',
+    proves: 'the newest complete backup restores, every part of it, without touching the live system',
     area: ['scripts/backup-volumes.sh', 'scripts/restore-drill.sh', 'src/orchestrator/backups.ts', 'src/orchestrator/transfer.ts'],
   },
   {
@@ -143,8 +154,45 @@ function versionOnly(git, a, b, file) {
   return lines.length > 0 && lines.every((l) => /^[+-]\s*"version":\s*"[^"]*",?\s*$/.test(l));
 }
 
-/** What is due for `tag`, and why (`cwd`: the repository, for tests). */
-export function dueFor(tag, runs, tests = LIVE_TESTS, cwd = ROOT) {
+/** The line a route or a CLI command starts on, or a function or method. */
+const ANCHOR = /^\s*(?:app\.(?:get|post|put|patch|delete|all)\b|case\s+'[^']*'\s*:)|^ {2}[A-Za-z_$][\w$]*\([^)]*\)[^;=]*\{\s*$|^(?:export\s+)?(?:async\s+)?function\b/;
+
+/**
+ * Did `file` change between a and b in what `near` names? A changed line
+ * that matches, or the route, command or function a change sits in (its
+ * anchor line above, the `case` lines falling into it and the two lines
+ * after, where a route's path often is). routes.ts changes in nearly every
+ * release, so naming it whole made every live test due every time; naming
+ * nothing missed its routes (review, 2026-10-09).
+ */
+export function touches(git, a, b, file, near) {
+  const diff = git('diff', '-U0', a, b, '--', file).stdout;
+  if (!diff.trim()) return false;
+  const show = (rev) => { const r = git('show', `${rev}:${file}`); return r.status === 0 ? r.stdout.split('\n') : []; };
+  const before = show(a), after = show(b);
+  const around = (lines, n) => {
+    let i = Math.min(Math.max(n, 1), lines.length) - 1;
+    while (i >= 0 && !ANCHOR.test(lines[i])) i--;
+    if (i < 0) return '';
+    let s = i;
+    while (s > 0 && /^\s*case\s+'[^']*'\s*:/.test(lines[s - 1])) s--;
+    return lines.slice(s, i + 3).join('\n');
+  };
+  for (const line of diff.split('\n')) {
+    const h = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (h) { if (near.test(around(before, Number(h[1]))) || near.test(around(after, Number(h[2])))) return true; continue; }
+    if (/^[+-]/.test(line) && !/^(\+\+\+|---) /.test(line) && near.test(line.slice(1))) return true;
+  }
+  return false;
+}
+
+/**
+ * What is due for `tag`, and why (`cwd`: the repository, `arch`: this
+ * machine's, both for tests). A test this machine cannot run (`arch`) is
+ * still due when it would be; it is marked `manual`, to be run on a machine
+ * that can — it was left out without a word before (review, 2026-10-09).
+ */
+export function dueFor(tag, runs, tests = LIVE_TESTS, cwd = ROOT, arch = process.arch) {
   const git = gitIn(cwd);
   const tagExists = (t) => git('rev-parse', '-q', '--verify', `refs/tags/${t}`).status === 0;
   /** Is release a at or before release b (in history)? */
@@ -152,18 +200,34 @@ export function dueFor(tag, runs, tests = LIVE_TESTS, cwd = ROOT) {
   const out = [];
   for (const t of tests) {
     if (t.onHold) continue;
-    // A test this kind of machine cannot run is not due here (it is run on one that can).
-    if (t.arch && t.arch !== process.arch) continue;
+    const manual = t.arch && t.arch !== arch ? { manual: `runs on an ${t.arch} machine, not this one (${arch})` } : {};
     const passes = runs.filter((r) => r.test === t.name && r.result === 'pass' && tagExists(r.release) && atOrBefore(r.release, tag));
-    if (!passes.length) { out.push({ test: t.name, why: 'it has never passed (on this release or an earlier one)' }); continue; }
+    if (!passes.length) { out.push({ test: t.name, why: 'it has never passed (on this release or an earlier one)', ...manual }); continue; }
     // The latest pass: the release nearest the one being promoted.
     const last = passes.reduce((a, b) => (atOrBefore(a.release, b.release) ? b : a));
     if (last.release === tag) continue;
-    const changed = git('diff', '--name-only', last.release, tag, '--', ...t.area).stdout.trim().split('\n').filter(Boolean)
-      .filter((f) => !versionOnly(git, last.release, tag, f));
-    if (changed.length) out.push({ test: t.name, why: `${changed.length} file(s) in its area changed since it passed on ${last.release}: ${changed.slice(0, 4).join(', ')}${changed.length > 4 ? ', …' : ''}` });
+    const paths = t.area.filter((x) => typeof x === 'string');
+    const changed = paths.length
+      ? git('diff', '--name-only', last.release, tag, '--', ...paths).stdout.trim().split('\n').filter(Boolean)
+        .filter((f) => !versionOnly(git, last.release, tag, f))
+      : [];
+    for (const n of t.area.filter((x) => typeof x !== 'string')) {
+      if (changed.includes(n.path)) continue;
+      if (touches(git, last.release, tag, n.path, n.near)) changed.push(`${n.path} (where it uses it)`);
+    }
+    if (changed.length) out.push({ test: t.name, why: `${changed.length} file(s) in its area changed since it passed on ${last.release}: ${changed.slice(0, 4).join(', ')}${changed.length > 4 ? ', …' : ''}`, ...manual });
   }
   return out;
+}
+
+/**
+ * The record as committed (HEAD): what the gate reads. Rows a run appended
+ * but nobody committed counted before, so a promote could pass on a record
+ * that never reached the repository (review, 2026-10-09).
+ */
+export function committedRuns(cwd = ROOT) {
+  const r = gitIn(cwd)('show', 'HEAD:docs/live-test-runs.md');
+  return r.status === 0 ? readRuns(r.stdout) : [];
 }
 
 /**
@@ -217,8 +281,16 @@ async function main() {
     const tag = rest[0] || (cmd === 'due' ? (await installVersion()).version : undefined);
     if (!tag) { console.error(`usage: live.mjs ${cmd} <tag>`); process.exit(2); }
     if (!tagExists(tag)) { console.error(`No tag ${tag} here (git fetch --tags).`); process.exit(2); }
-    const due = dueFor(tag, runs);
-    if (!due.length) { console.log(`✓ No live test is due for ${tag}.`); return; }
+    // The gate goes by the committed record only; `due` says what is not committed yet.
+    const committed = committedRuns();
+    const all = dueFor(tag, cmd === 'gate' ? committed : runs);
+    if (cmd === 'due' && runs.length > committed.length) console.log(`(${runs.length - committed.length} run(s) in docs/live-test-runs.md are not committed yet — the gate counts only committed ones.)`);
+    const due = all.filter((d) => !d.manual), manual = all.filter((d) => d.manual);
+    if (manual.length) {
+      console.log(`Due for ${tag} but not on this machine — run each where it can run, and commit the record:`);
+      for (const d of manual) console.log(`  ${d.test.padEnd(20)} ${d.manual}; ${d.why}`);
+    }
+    if (!due.length) { console.log(`✓ No live test${manual.length ? ' this machine can run' : ''} is due for ${tag}.`); return; }
     console.log(`${due.length} live test(s) due for ${tag}:`);
     for (const d of due) console.log(`  ${d.test.padEnd(20)} ${d.why}`);
     console.log('Run each with: node scripts/live.mjs run <name> [-- its arguments]  (docs/live-tests.md)');
