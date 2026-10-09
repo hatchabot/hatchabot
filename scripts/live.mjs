@@ -89,10 +89,10 @@ export const LIVE_TESTS = [
     area: ['src/openclaw', 'src/orchestrator/provision.ts', 'src/orchestrator/crons.ts', 'src/orchestrator/cronImport.ts', 'src/cli.ts', 'scripts/regress-autonomous.sh'],
   },
   {
-    name: 'restore-drill', cmd: ['bash', 'scripts/restore-drill.sh'], against: 'install', minutes: '5–15', aiTurns: false,
+    name: 'restore-drill', cmd: ['bash', 'scripts/restore-drill.sh'], against: 'install', minutes: '10–60', aiTurns: false,
     needs: 'a nightly backup set (newest by default)',
-    proves: 'the newest complete backup restores, every part of it, without touching the live system',
-    area: ['scripts/backup-volumes.sh', 'scripts/restore-drill.sh', 'src/orchestrator/backups.ts', 'src/orchestrator/transfer.ts'],
+    proves: 'the newest complete backup restores, every agent\'s archive into its own throwaway volume with no network, without touching the live system; its record lands under <backups>/drills',
+    area: ['scripts/backup-volumes.sh', 'scripts/restore-drill.sh', 'src/orchestrator/backups.ts', 'src/orchestrator/drills.ts', 'src/orchestrator/transfer.ts'],
   },
   {
     name: 'upgrade-check', cmd: ['bash', 'scripts/upgrade-check.sh'], against: 'checkout', minutes: '2–5', aiTurns: false,

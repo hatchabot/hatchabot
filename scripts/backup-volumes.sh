@@ -13,9 +13,10 @@
 # no agent volumes of its own (issue #3).
 #
 # Each set ends with backup-status.json (complete or not, how many volumes,
-# which failed, went missing or were left out), so the app can tell a finished
-# set from a partial one: the dated directory exists long before the last
-# volume is in.
+# which failed, went missing or were left out, and which were captured whole),
+# so the app can tell a finished set from a partial one: the dated directory
+# exists long before the last volume is in. "captured" is what makes an agent
+# recoverable from an incomplete set (docs/recovery-readiness-design.md).
 #
 #   ./scripts/backup-volumes.sh            # manual run
 #   HATCHABOT_BACKUP_DIR=/mnt/nas/claw …   # override destination
@@ -87,8 +88,8 @@ skipped_list=""
 started="$(date -u +%FT%TZ)"
 json_list() { local out="" x; for x in $1; do out="$out${out:+,}\"$x\""; done; printf '[%s]' "$out"; }
 write_status() {
-  printf '{"state":"%s","startedAt":"%s","finishedAt":"%s","volumes":%d,"failed":%d,"failedVolumes":%s,"missing":%s,"orphans":%s,"skipped":%s}\n' \
-    "$1" "$started" "$(date -u +%FT%TZ)" "$count" "$failed" "$(json_list "$failed_list")" "$(json_list "$missing_list")" "$(json_list "$orphan_list")" "$(json_list "$skipped_list")" \
+  printf '{"state":"%s","startedAt":"%s","finishedAt":"%s","volumes":%d,"failed":%d,"failedVolumes":%s,"missing":%s,"orphans":%s,"skipped":%s,"captured":%s}\n' \
+    "$1" "$started" "$(date -u +%FT%TZ)" "$count" "$failed" "$(json_list "$failed_list")" "$(json_list "$missing_list")" "$(json_list "$orphan_list")" "$(json_list "$skipped_list")" "$(json_list "$captured_list")" \
     > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
 }
 # The record starts only once the run can really begin (below): a run that

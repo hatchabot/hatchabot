@@ -497,6 +497,43 @@ too). Then, from the dated backup directory you want:
    config — use **Rebuild**: the container is disposable, the volume you just
    restored is not.
 
+**Can I get this agent back?** Open the agent, then **Advanced → Recovery**.
+The row answers in one line:
+
+- *Recoverable from 2026-10-08 · last drill 2026-10-05 passed*: the newest
+  backup a restore could use, and the last restore drill that proved its copy
+  comes back.
+- *never drilled*: there is a usable copy, but no drill has checked it yet.
+  Run one from **⚙ Settings → Backups → Run a drill now**.
+- *Its newest backup is from … (5 days ago) — left out of the last 4
+  backups: its machine was asleep or offline*: the nightly run could not
+  reach it. Wake the runner (or keep it awake at 03:30), or use **Download
+  copy** for now. The agent shows under **Alerts** once its newest copy is
+  more than 2 days old while the rest of the machine is backed up; when the
+  whole machine is late, the machine's own alert says so instead.
+- *No backup holds it*: no set has a copy a restore could use.
+- *Not backed up yet*: it was made after the last backup; tonight's run
+  takes it.
+
+**Restore…** on that row is the guided path (the machine's owner only): it
+lists the backups that hold the agent, newest usable chosen, with each one's
+size and whether a drill checked it, and says what will be undone (everything
+it learned or changed since that night; its current Telegram bot, members and
+model stay as they are now). You then type its name to confirm, as from
+Settings → Backups. **Settings → Backups** shows the same for every agent in
+one table (latest usable, left out of, last drill, status).
+
+**Restore drills.** A drill restores each agent's archive from the newest
+complete set into a throwaway volume, one at a time, in a container with no
+network, 1 GB of memory and one CPU, with only that archive mounted (never
+the database or the key), and removes it after. It also checks the database
+copy and that the saved key decrypts it. Nothing live is touched, no bot is
+started. Each run leaves a record under `HATCHABOT_BACKUP_DIR/drills/` and a
+line in Activity. Automatic drills are off unless you turn them on
+(**Restore drills: Weekly** or **Daily** in Settings → Backups, or
+`HATCHABOT_DRILL_EVERY` in `.env`); they run between 05:00 and 07:00 after
+that night's backup.
+
 ## Status and limitations
 
 Working and used daily by its author, but young — expect rough edges.

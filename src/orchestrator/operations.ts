@@ -32,7 +32,8 @@ export type OpKind =
   | 'app-update'
   | 'app-rollback'
   | 'install-image'
-  | 'backup-run';
+  | 'backup-run'
+  | 'restore-drill';
 
 export type OpStatus = OperationRow['status'];
 export type Operation = OperationRow;
@@ -149,6 +150,7 @@ export const KIND_LABEL: Record<string, string> = {
   'app-rollback': 'App roll back',
   'install-image': 'Image install',
   'backup-run': 'Backup',
+  'restore-drill': 'Restore drill',
 };
 
 const ACTIVE: OpStatus[] = ['queued', 'running', 'interrupted', 'held'];
@@ -357,6 +359,7 @@ export function operationTitles(kind: string, params: Record<string, unknown> | 
       return h ? three(`Image install on ${h}`, `Copying the image to ${h}`, `Copied the image to ${h}`) : three('Image install', 'Copying the image', 'Copied the image');
     }
     case 'backup-run': return three('Backup', 'Backing up', 'Backed up');
+    case 'restore-drill': return three('Restore drill', 'Drilling a restore from the backups', 'Restore drill passed');
     case 'rebuild': return three('Rebuild', 'Rebuilding', 'Rebuilt');
     case 'provision': return three('Setup', 'Setting up', 'Set up');
     default: { const k = KIND_LABEL[kind] ?? kind; return three(k, k, k); }

@@ -191,6 +191,8 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/backups/run': 'run_backup',
   'POST /v1/backups/restore': 'app: fleet-wide/irreversible — restoring from a backup set',
   'DELETE /v1/backups/:date': 'app: later — delete a backup set',
+  'POST /v1/backups/drill': 'app: later — run a restore drill now (Settings → Backups)',
+  'PUT /v1/backups/drill-schedule': 'app: later — automatic restore drills off, weekly or daily (Settings → Backups)',
 
   // ---- people, accounts, sign-in ----
   'POST /v1/local-accounts': 'app: secret — account creation and invitations',

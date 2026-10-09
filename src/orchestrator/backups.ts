@@ -67,13 +67,27 @@ export interface BackupSet {
   orphans?: string[];
   /** When the run started (ISO), from the record. */
   startedAt?: string;
+  /** When the run ended (ISO), from the record. */
+  finishedAt?: string;
+  /** Volumes an agent on this machine uses that docker did not have. */
+  missing?: string[];
+  /** Volumes on a runner that did not answer (asleep or offline): left out, not failed. */
+  skipped?: string[];
+  /**
+   * Volumes whose archive was written whole (absent in a record from before
+   * v2.157.0). What makes an agent recoverable from an incomplete set
+   * (recoveryReadiness.ts).
+   */
+  captured?: string[];
 }
+
+type SetRecord = Pick<BackupSet, 'complete' | 'running' | 'failedVolumes' | 'orphans' | 'startedAt' | 'finishedAt' | 'missing' | 'skipped' | 'captured'>;
 
 /** A run that has said "running" this long without a verdict was killed. */
 const RUN_STALE_MS = 6 * 3600_000;
 
 /** What a set's backup-status.json says, read defensively (the file is the script's, not ours). */
-export function readSetStatus(dir: string, now = Date.now()): Pick<BackupSet, 'complete' | 'running' | 'failedVolumes' | 'orphans' | 'startedAt'> {
+export function readSetStatus(dir: string, now = Date.now()): SetRecord {
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(join(dir, STATUS_FILE), 'utf8'));
@@ -84,10 +98,15 @@ export function readSetStatus(dir: string, now = Date.now()): Pick<BackupSet, 'c
   const r = raw as Record<string, unknown>;
   const names = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, 500) : []);
   const startedAt = typeof r.startedAt === 'string' ? r.startedAt : undefined;
-  const out: Pick<BackupSet, 'complete' | 'running' | 'failedVolumes' | 'orphans' | 'startedAt'> = {
+  const finishedAt = typeof r.finishedAt === 'string' && r.state !== 'running' ? r.finishedAt : undefined;
+  const out: SetRecord = {
     ...(startedAt ? { startedAt } : {}),
+    ...(finishedAt ? { finishedAt } : {}),
     failedVolumes: names(r.failedVolumes),
     orphans: names(r.orphans),
+    ...(Array.isArray(r.missing) ? { missing: names(r.missing) } : {}),
+    ...(Array.isArray(r.skipped) ? { skipped: names(r.skipped) } : {}),
+    ...(Array.isArray(r.captured) ? { captured: names(r.captured) } : {}),
   };
   if (r.state === 'complete') out.complete = true;
   else if (r.state === 'running') {

@@ -308,9 +308,18 @@ set, or restore one agent's volume from a set.
 - `deploy/hatchabot-backup.timer` — `OnCalendar`: when it runs.
 - `deploy/hatchabot-backup.service` — `Type=oneshot`, `ExecStart`: what the timer starts (the backup script).
 - `src/orchestrator/backups.ts` — `listBackups`, `startBackup`, `pruneBackup`, `restoreAgentFromBackup`, `resumeBackupRestore`, `recoverBackupRestore`, `agentsMissingFromSet`, `keepDays`, `restoreSafetyDir`: reading and acting on backup sets. A restore writes its copy of how the agent was to `restoreSafetyDir` before the volume is replaced (removed once the restore ends either way; kept when its undo failed, or while a restore cut off by a restart is held for "Finish the restore" / "Put back the copy from before").
-- `scripts/restore-drill.sh` — `set_state`, `cleanup`: proves a backup set (the newest complete one by default) restores, without touching the live system.
+- `scripts/restore-drill.sh` — `set_state`, `take_lock`, `write_record`, `cleanup`: proves a backup set (the newest complete one by default) restores — every archive read, each restored into a throwaway volume with no network, limits and only that archive mounted — and writes its record to `<backups>/drills/`.
 - `src/api/routes.ts` — `'/v1/backups'`, `'/v1/backups/run'`, `'/v1/backups/restore'`, `'/v1/agents/:id/backup'`, `'/v1/agents/restore'`: the backup panel, one-agent download and restore from a download.
 - `web/index.html` — `loadBackups`, `runBackupNow`, `pruneBackup`, `restoreFromBackup`, `downloadAgent`: the Backups panel.
+
+Recovery readiness (docs/recovery-readiness-design.md): per agent, the newest
+usable backup, the sets that left it out and why, the last drill that checked
+it, one status; restore drills recorded, and opt-in on a schedule.
+
+- `src/orchestrator/recoveryReadiness.ts` — `computeReadiness`, `usableFor`, `setAgeDays`: the readiness of each agent from the sets' records and the drill records (and the Alerts fold).
+- `src/orchestrator/drills.ts` — `listDrills`, `drillEvery`, `drillDue`, `startDrill`, `drillRunState`: the drill records, the schedule (`HATCHABOT_DRILL_EVERY`) and running the drill from the app.
+- `src/api/routes.ts` — `'/v1/backups/readiness'`, `'/v1/backups/drill'`, `'/v1/backups/drill-schedule'`, `runDrill`, `drillSweep`: the API, the `restore-drill` operation and the 15-minute schedule check.
+- `web/index.html` — `v2LoadReadiness`, `v2PaintRecovery`, `v2RecoveryToggle`, `v2RecoveryGo`, `loadReadiness`, `renderDrillRun`, `runDrillNow`, `setDrillEvery`, `v2BackupWarn`, `v2MachineAlerts`: the agent sheet's Recovery row and guided restore, the table and drill controls in Settings → Backups, and the Alerts.
 
 ## Health, reconcile and the event log
 
@@ -333,10 +342,10 @@ is finished, undone or held by its kind's rule (docs/operations-and-one-interfac
 
 Kinds: move-host, migrate, import (v2.154.0); restore-backup, restore-snapshot,
 archive, rebuild, provision, app-install / app-update / app-rollback,
-install-image and backup-run (v2.155.0). A rebuild or a setup is recorded
+install-image and backup-run (v2.155.0); restore-drill (v2.157.0). A rebuild or a setup is recorded
 (`queued` while it waits its turn) but its guard stays in memory
 (`BACKGROUND_KINDS`): it refuses nothing on disk until a restart cuts it off.
-An image copy and Back up now are a machine's operations (no agent): the
+An image copy, Back up now and a restore drill are a machine's operations (no agent): the
 Activity list reads them from the table (`listMachineOperations`).
 
 In the background (v2.156.0): a move (`move-host`), a move to another

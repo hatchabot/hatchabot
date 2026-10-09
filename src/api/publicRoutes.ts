@@ -116,9 +116,9 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(['PUT'], /^\/v1\/budgets\/machine$/, 'step-up', 'Machine settings (defaults, rebuild policy, memory search)'),
   r(['PUT'], /^\/v1\/spend-alert\/machine$/, 'step-up', 'Machine settings (defaults, rebuild policy, memory search)'),
   r(['POST', 'DELETE'], /^\/v1\/(embedder|embed)\/.*$/, 'step-up', 'Machine settings (defaults, rebuild policy, memory search)'),
-  r(['POST', 'DELETE'], /^\/v1\/backups(\/.*)?$/, 'step-up', 'Backups (run, restore, delete) and downloads of an agent'),
-  r(READ, /^\/v1\/agents\/:id\/(backup|export|fs\/archive)$/, 'step-up', 'Backups (run, restore, delete) and downloads of an agent'),
-  r(['POST'], /^\/v1\/agents\/(import|:id\/restore|:id\/snapshots\/:snapId\/restore)$/, 'step-up', 'Backups (run, restore, delete) and downloads of an agent'),
+  r(['POST', 'DELETE', 'PUT'], /^\/v1\/backups(\/.*)?$/, 'step-up', 'Backups (run, restore, delete, restore drills) and downloads of an agent'),
+  r(READ, /^\/v1\/agents\/:id\/(backup|export|fs\/archive)$/, 'step-up', 'Backups (run, restore, delete, restore drills) and downloads of an agent'),
+  r(['POST'], /^\/v1\/agents\/(import|:id\/restore|:id\/snapshots\/:snapId\/restore)$/, 'step-up', 'Backups (run, restore, delete, restore drills) and downloads of an agent'),
   r(['POST', 'DELETE'], /^\/v1\/agents\/:id\/env(\/:envId)?$/, 'step-up', 'An agent\'s environment variables'),
   // The Files tab reads and writes the agent's whole home: its config and tokens are there.
   r('*', /^\/v1\/agents\/:id\/fs(\/file)?$/, 'step-up', 'An agent\'s Files tab (its home holds its config and tokens)'),
@@ -154,7 +154,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(READ, /^\/v1\/(ai-profiles|ai-profiles\/usage|ai-profiles\/:id\/available-models)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['POST'], /^\/v1\/ai-profiles\/usage\/sample$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(READ, /^\/v1\/(model-scorecard|model-options|model-changes|model-prices|token-health|token-incidents|budgets)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
-  r(READ, /^\/v1\/(hosts|images|images\/:name\/log|runtime|runtime\/build|runtime\/capabilities|runtime\/images|runtime\/images\/:tag\/history|backups|bots|bot-inventory|pool|discord-bots|slack-apps|connections|channels\/connectors|channels\/slack\/manifest|machine-defaults|rebuild-policy|rebuild-concurrency|embed-default|embedder|embedder\/guests|media-key|search-key|google-oauth\/client|ops-agent)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
+  r(READ, /^\/v1\/(hosts|images|images\/:name\/log|runtime|runtime\/build|runtime\/capabilities|runtime\/images|runtime\/images\/:tag\/history|backups|backups\/readiness|bots|bot-inventory|pool|discord-bots|slack-apps|connections|channels\/connectors|channels\/slack\/manifest|machine-defaults|rebuild-policy|rebuild-concurrency|embed-default|embedder|embedder\/guests|media-key|search-key|google-oauth\/client|ops-agent)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['POST'], /^\/v1\/ops-agent\/suggest$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['DELETE'], /^\/v1\/connections\/:id$/, 'signed-in', 'Removing a Google connection'),
 ];

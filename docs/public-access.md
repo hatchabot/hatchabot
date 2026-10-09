@@ -319,7 +319,7 @@ has no rule.
 | step-up | Runner set-up script |
 | step-up | Images (build, rebuild, delete, promote) |
 | step-up | Machine settings (defaults, rebuild policy, memory search) |
-| step-up | Backups (run, restore, delete) and downloads of an agent |
+| step-up | Backups (run, restore, delete, restore drills) and downloads of an agent |
 | step-up | An agent's environment variables |
 | step-up | An agent's Files tab (its home holds its config and tokens) |
 | step-up | Folders of this machine given to an agent, and bringing in workspaces |
