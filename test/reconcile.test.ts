@@ -6,6 +6,8 @@ import { reconcileAgents } from '../src/orchestrator/reconcile.js';
 import { clearBusy, markBusy } from '../src/orchestrator/busy.js';
 import type { RuntimeProvider } from '../src/providers/provider.js';
 import type { AgentState } from '../src/domain/types.js';
+import { moveAgentToHost } from '../src/orchestrator/moveHost.js';
+import { makeWorld, seedRunningAgent } from './support/world.js';
 
 async function setup(dbState: AgentState, runtimePhase: 'running' | 'stopped' | 'absent') {
   const store = new Store(new Database(':memory:'));
@@ -266,5 +268,49 @@ describe('agents on a runner are checked too (2026-10-06)', () => {
     await reconcileAgents(store, () => provider, (e) => events.push(e));
     expect(store.getAgent('b1')!.state).toBe('RUNNING');
     expect(events).toContain('reconcile.host_unreachable');
+  });
+});
+
+describe('a status from the host an agent left is not judged (#13)', () => {
+  it('a move that completes while the source status is pending leaves the agent RUNNING on the target', async () => {
+    const w = await makeWorld();
+    w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock', name: 'Runner', settings: {}, createdAt: 'now' });
+    const target = new MockProvider();
+    w.provider.daemonId = async () => 'daemon-source';
+    target.daemonId = async () => 'daemon-target';
+    const id = await seedRunningAgent(w);
+
+    // Reconcile's status call to the SOURCE is held until the move is done.
+    const realStatus = w.provider.status.bind(w.provider);
+    let entered!: () => void;
+    let release!: () => void;
+    const statusEntered = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    let held = true;
+    w.provider.status = async (ref: string) => {
+      if (held) { held = false; entered(); await gate; }
+      return realStatus(ref);
+    };
+    const events: string[] = [];
+    const sweep = reconcileAgents(w.store, (host) => (host.id === 'h2' ? target : w.provider), (e) => { events.push(e); });
+    await statusEntered;
+
+    const channel = { kind: 'telegram', pool: { availableCount: () => 0, owns: () => false } } as any;
+    const moved = await moveAgentToHost(
+      { store: w.store, secrets: w.secrets, channel, source: w.provider, target, sleep: async () => {} },
+      id, 'h2',
+    );
+    expect(moved.hostId).toBe('h2');
+    expect(moved.state).toBe('RUNNING');
+    // Same runtimeRef on both daemons; on the host it left it is now gone.
+    expect((await realStatus(moved.runtimeRef!)).phase).toBe('absent');
+
+    release();
+    await sweep;
+    const after = w.store.getAgent(id)!;
+    expect(after.state).toBe('RUNNING');
+    expect(after.hostId).toBe('h2');
+    expect(events).not.toContain('reconcile.runtime_missing');
+    expect((await target.status(after.runtimeRef!)).phase).toBe('running');
   });
 });
