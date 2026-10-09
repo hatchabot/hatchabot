@@ -113,7 +113,7 @@ that happens to hold something else.
 If both machines run Hatchabot, register the destination once and move agents
 with a single action — no files to shuttle.
 
-On the **destination**: ⚙ Settings → Security → **New token**, and copy it.
+On the **destination**: ⚙ Settings → Security → **Token for moving agents here**, and copy it. That token can move agents in and do nothing else — safer to keep on another server than a full **New token**.
 
 On the **source**: ⚙ Settings → Advanced → Other Hatchabot servers → add its name, URL and that token.
 Hatchabot checks the token works before saving it.
