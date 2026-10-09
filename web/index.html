@@ -379,6 +379,11 @@
   .member.linked { border-color: var(--ok); }
   .kick { margin-left: 6px; cursor: pointer; color: var(--off); font-weight: 700; }
   .kick:hover { color: var(--bad); }
+  /* Link-looking actions that are real buttons, so a keyboard reaches them (review, 2026-10-09). */
+  button.kick { background: none; border: 0; padding: 0; font-size: inherit; line-height: inherit; }
+  button.kick.pressed { background: none; color: var(--bad); }
+  button.linkish { background: none; border: 0; padding: 0; font: inherit; color: inherit; text-decoration: underline; display: inline; }
+  button.linkish.pressed { background: none; color: inherit; }
   .invite-link { font-family: ui-monospace, monospace; font-size: 13px;
                  background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
                  padding: 10px 12px; word-break: break-all; white-space: pre-wrap;
@@ -2815,6 +2820,12 @@
   </div>
 </dialog>
 
+<dialog id="choiceDlg" style="width:min(480px,94vw)">
+  <h3 id="choiceTitle" style="margin:0 0 8px"></h3>
+  <div id="choiceText" class="sub" style="margin-bottom:10px;white-space:pre-line"></div>
+  <div id="choiceBtns" class="actions" style="justify-content:flex-end;gap:8px;flex-wrap:wrap"></div>
+</dialog>
+
 <dialog id="groupDlg" style="width:min(420px,94vw)">
   <h3 style="margin:0 0 8px">Group <span id="groupDlgAgent"></span></h3>
   <div class="sub" style="margin-bottom:8px">Pick an existing group or type a new one. Leave blank to ungroup.</div>
@@ -2978,6 +2989,9 @@ const api = async (path, opts = {}) => {
     // A route that wants the caller to decide something (a pinned image the
     // runner lacks) names the case in `code`; keep it, and what it refers to.
     if (typeof data.code === 'string') { err.code = data.code; err.image = data.image; }
+    // The whole answer too: a failed app install says why in data.test.output,
+    // which the dialogs read as e.data (never set until 2026-10-09).
+    err.data = data;
     throw err;
   }
   return data;
@@ -3023,6 +3037,29 @@ function askSecondFactor(kind) {
   return promise;
 }
 function sfDone() { if (sfDlg.open) sfDlg.close(); sfPending?.resolve(); }
+/**
+ * fetch() for what api() cannot carry (a file up or down), with api()'s
+ * second-factor prompt: a 401 asking for it is asked, then the request made
+ * once more. Raw fetches used to skip the prompt, so a backup, an import or a
+ * Share at the public address just failed (review, 2026-10-09). A cancelled
+ * prompt throws, as api() does. The body must be one that can be sent twice
+ * (a File or a string).
+ */
+async function sfFetch(url, init) {
+  const res = await fetch(url, init);
+  if (res.status !== 401) return res;
+  const data = await res.clone().json().catch(() => ({}));
+  if (data.secondFactor !== 'required' && data.secondFactor !== 'step-up') return res;
+  await askSecondFactor(data.secondFactor);
+  return fetch(url, init);
+}
+/** A step-up download link (a folder's .tar.gz): at the public address it is fetched through sfFetch, so the second factor is asked instead of a page of raw JSON; elsewhere the link streams as before. */
+function sfLink(ev, el, fallbackName) {
+  if (!appConfig.publicAddress) return true;
+  ev.preventDefault();
+  void saveFromServer(el.getAttribute('href'), fallbackName);
+  return false;
+}
 async function sfCancel() {
   const kind = sfPending?.kind;
   if (sfDlg.open) sfDlg.close();
@@ -4550,7 +4587,7 @@ async function loadPoolPane(kind) {
           ${b.warnings?.length ? `<ul class="v2chan-warn">${b.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}</span>
         <span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
           ${b.free
-            ? `${b.addToServerUrl ? `<a class="btn" href="${esc(b.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
+            ? `${httpsUrl(b.addToServerUrl) ? `<a class="btn" href="${esc(b.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
                <button onclick="recheckPoolApp('${kind}','${jsq(b.applicationId)}', this)" title="Ask ${U.label} again: ${U.rooms}, and whether anything still needs fixing">↻ Re-check</button>
                ${b.mine || myAccount.hostOwner ? `<button class="hbtn danger" onclick="removePoolApp('${kind}','${jsq(b.applicationId)}','${jsq(b.botName || b.applicationId)}')" title="Discard the stored token${kind === 'slack' ? 's' : ''}. The ${kind === 'slack' ? 'app' : 'bot'} itself still exists at ${U.label}.">🗑 Delete</button>` : ''}`
             : `<span class="sub" title="Its agent would lose the ${kind === 'slack' ? 'app' : 'bot'} it answers on. Remove ${U.label} from the agent (or delete or archive it) — that parks it back here.">in use</span>`}
@@ -7133,7 +7170,7 @@ function memberCard(a) {
   <div class="card" id="card-${a.id}">
     <div class="row">
       <div class="grow">
-        ${a.deepLink && a.state === 'RUNNING'
+        ${httpsUrl(a.deepLink) && a.state === 'RUNNING'
           ? `<a class="name" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open this agent's chat in the Telegram app">${esc(a.name)}</a>`
           : `<span class="name">${esc(a.name)}</span>`}
         ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
@@ -7230,11 +7267,11 @@ function agentCard(a) {
     <div class="card-body">
       <div class="row">
         <div class="grow">
-          ${a.deepLink && a.state === 'RUNNING'
+          ${httpsUrl(a.deepLink) && a.state === 'RUNNING'
             ? `<a class="name" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open this agent's chat in the Telegram app">${esc(a.name)}</a>`
             : `<span class="name">${esc(a.name)}</span>`}
           ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
-          ${a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona) ? `<div class="sub" style="color:var(--warn)">⚙ Template not configured — <a onclick="openEdit('${a.id}','${jsq(a.name)}','def')" style="cursor:pointer;text-decoration:underline">fill its Setup values</a> to complete the description.</div>` : ''}
+          ${a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona) ? `<div class="sub" style="color:var(--warn)">⚙ Template not configured — <button type="button" class="linkish" onclick="openEdit('${a.id}','${jsq(a.name)}','def')">fill its Setup values</button> to complete the description.</div>` : ''}
         </div>
         <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
       </div>
@@ -7333,14 +7370,14 @@ function agentNotices(a, opts = {}) {
                   title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
           ${selfBtn ? `<button class="primary" onclick="approve('${a.id}','${jsq(p.code)}', true,'${kind}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}')"
                   title="${tg ? 'This is your own Telegram: bind it to your login so every agent you make admits you automatically — no more pairing with yourself.' : `This is you on ${V2_CHAN_LABEL[kind] || kind}: link it to you on this agent.`}">That's me — link</button>` : ''}
-          <button class="${selfBtn ? '' : 'primary'}" onclick="approve('${a.id}','${jsq(p.code)}', false,'${kind}')">Let them in</button>
+          ${a.ops ? '' /* the manager is its owner's alone: the server answers 400 (review, 2026-10-09) */ : `<button class="${selfBtn ? '' : 'primary'}" onclick="approve('${a.id}','${jsq(p.code)}', false,'${kind}')">Let them in</button>`}
         </div>`;
       }).join('')}
       ${(members[a.id] ?? []).length > 1 ? `
         <div class="members">👥 ${(members[a.id] ?? []).map(m => {
           const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 8))}</span>`;
           const x = m.role === 'owner' ? '' :
-            `<span class="kick" title="Remove this member" onclick="kick('${a.id}','${jsq(m.userId)}','${jsq(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}')">×</span>`;
+            `<button type="button" class="kick" title="Remove this member" aria-label="Remove this member" onclick="kick('${a.id}','${jsq(m.userId)}','${jsq(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}')">×</button>`;
           return `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Not linked to Telegram yet'}">${label}${m.role === 'owner' ? ' ★' : ''}${x}</span>`;
         }).join('')}
         </div>` : ''}`;
@@ -9508,7 +9545,7 @@ async function loadSetupLog() {
     const r = await api(`/v1/agents/${setupLogAgentId}/events?limit=80`);
     const when = (iso) => { const d = new Date(iso); return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`; };
     $('setupLogBody').innerHTML = r.events.length
-      ? r.events.map(e => `<div style="display:flex;gap:10px;padding:3px 0;border-bottom:1px solid var(--line)"><span class="sub" style="flex:none;font-variant-numeric:tabular-nums">${esc(when(e.at))}</span><span>${esc(e.label)}${e.note ? ` <span class="sub">— ${esc(String(e.note)).slice(0, 200)}</span>` : ''}</span></div>`).join('')
+      ? r.events.map(e => `<div style="display:flex;gap:10px;padding:3px 0;border-bottom:1px solid var(--line)"><span class="sub" style="flex:none;font-variant-numeric:tabular-nums">${esc(when(e.at))}</span><span>${esc(e.label)}${e.note ? ` <span class="sub">— ${esc(String(e.note).slice(0, 200))}</span>` : ''}</span></div>`).join('')
       : '<div class="sub">Nothing recorded yet.</div>';
   } catch (e) { $('setupLogBody').textContent = e.message; }
 }
@@ -9598,7 +9635,7 @@ function editCronJob(id) {
   $('cronAddBtn').textContent = 'Save changes (replaces the task)';
   const note = $('cronEditNote');
   note.style.display = '';
-  note.innerHTML = `Editing <b>${esc(c.name || '(unnamed task)')}</b> — <a style="cursor:pointer;text-decoration:underline" onclick="cancelCronEdit()">cancel</a>`;
+  note.innerHTML = `Editing <b>${esc(c.name || '(unnamed task)')}</b> — <button type="button" class="linkish" onclick="cancelCronEdit()">cancel</button>`;
   // The form sits under the list: with a dozen tasks it is off-screen, and
   // Edit looked like it did nothing (Stock Advisor, 2026-09-26). Bring it up.
   note.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -10102,7 +10139,9 @@ function consoleUnmark() {
 }
 /** The address's agent (by slug, or id), once signed in and the agents are loaded. */
 function consoleFromHash() {
-  const key = decodeURIComponent(/(?:^#|&)console=([^&]+)/.exec(location.hash)?.[1] || '');
+  // A malformed address (#console=%E0) is no agent, not an exception (review, 2026-10-09).
+  let key = '';
+  try { key = decodeURIComponent(/(?:^#|&)console=([^&]+)/.exec(location.hash)?.[1] || ''); } catch { key = ''; }
   if (!key || !UI_V2) return;
   const a = (agents || []).find(x => (x.slug === key || x.id === key) && consoleOpenable(x));
   if (!a) { consoleUnmark(); toast(`No agent of yours called "${key}" to open.`); return; }
@@ -10259,7 +10298,10 @@ function markConsoleSeen(id) {
   if (a?.unread) { a.unread = false; renderAgents(); }
   api(`/v1/agents/${id}/seen`, { method: 'POST' }).catch(() => {});
 }
-setInterval(() => { if ($('consoleDlg')?.open && consoleAgentId) markConsoleSeen(consoleAgentId); }, 20000);
+// Not while the browser tab is hidden: nobody is reading it then (review, 2026-10-09).
+function consoleSeenTick() { if ($('consoleDlg')?.open && consoleAgentId && !document.hidden) markConsoleSeen(consoleAgentId); }
+setInterval(consoleSeenTick, 20000);
+document.addEventListener('visibilitychange', consoleSeenTick); // shown again: what is on screen is read
 
 /**
  * Approve this browser without making anyone click. Opening the console IS the
@@ -10335,7 +10377,7 @@ async function downloadAgent(id, name) {
   // not a page of raw JSON in place of the app.
   toast('Preparing the copy…', 20000);
   try {
-    const res = await fetch(`/v1/agents/${id}/backup`);
+    const res = await sfFetch(`/v1/agents/${id}/backup`);
     if (!res.ok) { const j = await res.json().catch(() => ({})); toast(j.error || `The download failed (${res.status}).`, 10000); return; }
     const blob = await res.blob();
     const file = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '')?.[1] || 'agent.hatchabot';
@@ -10446,7 +10488,7 @@ async function importAgentFile(file) {
       query = `?values=${encodeURIComponent(JSON.stringify(values))}`;
     }
     const send = async (q) => {
-      const res = await fetch(`/v1/agents/import${q}`, {
+      const res = await sfFetch(`/v1/agents/import${q}`, {
         method: 'POST',
         headers: { 'content-type': 'application/octet-stream' },
         body: file,
@@ -10571,14 +10613,35 @@ async function refreshInboxBadge() {
   try { const { shares } = await api('/v1/inbox'); updateInboxBadge(shares.length); } catch {}
 }
 
-function shareTemplate(id) {
+/**
+ * A question with more than OK and Cancel: resolves the key of the button
+ * pressed, or null on Cancel, Esc or a click outside. confirm() made Cancel
+ * mean "the other choice", so Esc on Share still exported and on Recover
+ * context still started the job (review, 2026-10-09).
+ */
+let choiceResolve = null;
+function askChoice(title, text, choices) {
+  choicePick(null); // a question still open is answered "no"
+  $('choiceTitle').textContent = title; $('choiceText').textContent = text;
+  $('choiceBtns').innerHTML = `<button onclick="choicePick(null)">Cancel</button>` +
+    choices.map(([k, label], i) => `<button${i === choices.length - 1 ? ' class="primary"' : ''} onclick="choicePick('${jsq(k)}')">${esc(label)}</button>`).join('');
+  return new Promise((res) => { choiceResolve = res; choiceDlg.showModal(); });
+}
+function choicePick(k) {
+  const r = choiceResolve; choiceResolve = null;
+  if (choiceDlg.open) choiceDlg.close();
+  r?.(k);
+}
+// Esc or a click outside: Cancel. A late close event of an earlier question must not answer the next one.
+choiceDlg.addEventListener('close', () => { if (!choiceDlg.open) choicePick(null); });
+
+async function shareTemplate(id, name) {
   // Only MEMORY.md travels: its daily notes (memory/) never do (2026-09-30).
-  const inclMem = confirm(
-    'Also include MEMORY.md in the shared copy?\n\n' +
-    'OK — also include MEMORY.md (its summary notes; may contain personal facts).\n' +
-    'Cancel — its instructions and scheduled tasks only.',
-  );
-  return saveFromServer(`/v1/agents/${id}/export${inclMem ? '' : '?excludeMemory=1'}`, 'agent-template.json', personalCheck);
+  const pick = await askChoice(`Share a copy${name ? ` of ${name}` : ''}`,
+    'Its instructions and scheduled tasks, without its bot, members or conversations.\n\nMEMORY.md (its summary notes) may contain personal facts.',
+    [['memory', 'Also MEMORY.md'], ['plain', 'Instructions and tasks only']]);
+  if (!pick) return;
+  return saveFromServer(`/v1/agents/${id}/export${pick === 'memory' ? '' : '?excludeMemory=1'}`, 'agent-template.json', personalCheck);
 }
 
 // What a shared copy mentions about real people, as the server found it
@@ -10616,7 +10679,7 @@ function personalCheck(res) {
  */
 async function saveFromServer(url, fallbackName, check) {
   try {
-    const res = await fetch(url);
+    const res = await sfFetch(url);
     if (!res.ok) { const j = await res.json().catch(() => ({})); toast(j.error || `The download failed (${res.status}).`, 10000); return; }
     if (check && !check(res)) { toast('Not saved.'); return; }
     const blob = await res.blob();
@@ -10902,20 +10965,28 @@ async function openInspect(id, name) {
   } catch (e) { $('inspFileList').innerHTML = `<span class="sub">${esc(e.message)}</span>`; }
 }
 
+// Late answers are dropped, as openInspect does: another agent (or file) may
+// be showing by the time one lands (review, 2026-10-09).
+let inspectFileWant = null;
 async function loadInspectFile(name) {
   for (const b of document.querySelectorAll('#inspFileList .inspfile'))
     b.style.borderColor = b.dataset.name === name ? 'var(--accent)' : '';
   $('inspFileBody').textContent = 'Loading…';
+  const id = inspectId; inspectFileWant = name;
+  const late = () => inspectId !== id || inspectFileWant !== name;
   try {
-    const f = await api(`/v1/agents/${inspectId}/inspect/file/${encodeURIComponent(name)}`);
+    const f = await api(`/v1/agents/${id}/inspect/file/${encodeURIComponent(name)}`);
+    if (late()) return;
     $('inspFileBody').textContent = (f.content || '(empty)') + (f.truncated ? '\n\n… (truncated — too large to show in full)' : '');
-  } catch (e) { $('inspFileBody').textContent = e.message; }
+  } catch (e) { if (!late()) $('inspFileBody').textContent = e.message; }
 }
 
 async function loadInspectChat() {
   $('inspChatBody').innerHTML = '<span class="sub">Reading the transcript…</span>';
+  const id = inspectId;
   try {
-    const t = await api(`/v1/agents/${inspectId}/inspect/transcript?maxTurns=400`);
+    const t = await api(`/v1/agents/${id}/inspect/transcript?maxTurns=400`);
+    if (inspectId !== id) return;
     $('inspChatMeta').textContent = t.turns.length
       ? `${t.turns.length} shown${t.totalTurns > t.turns.length ? ` of ${t.totalTurns} (most recent)` : ''}`
       : 'No conversation found on the volume.';
@@ -10923,7 +10994,7 @@ async function loadInspectChat() {
       const me = turn.role === 'user';
       return `<div style="align-self:${me ? 'flex-end' : 'flex-start'};max-width:80%;background:${me ? 'var(--accent)' : 'var(--panel-2)'};color:${me ? '#fff' : 'var(--text)'};border-radius:10px;padding:7px 11px;font-size:13px;white-space:pre-wrap;word-break:break-word">${esc(turn.text)}</div>`;
     }).join('');
-  } catch (e) { $('inspChatBody').innerHTML = `<span class="sub">${esc(e.message)}</span>`; }
+  } catch (e) { if (inspectId === id) $('inspChatBody').innerHTML = `<span class="sub">${esc(e.message)}</span>`; }
 }
 
 async function restoreAgent(id, name) {
@@ -11187,9 +11258,13 @@ async function dismissContextReset(id) {
 }
 
 async function recoverContext(id, name) {
-  if (!confirm(`Recover "${name}"'s earlier conversations?\n\nConversations from before a reset get written into its workspace, and the agent reads them and saves the important parts to memory. Runs in the background (a few minutes, uses tokens); it confirms in its Telegram chat when done.`)) return;
+  // One question with a real Cancel: a second confirm() made Cancel mean "earlier ones only", so Esc still started it (review, 2026-10-09).
+  const pick = await askChoice(`Recover "${name}"'s earlier conversations?`,
+    "Conversations from before a reset get written into its workspace, and the agent reads them and saves the important parts to memory. Runs in the background (a few minutes, uses tokens); it confirms in its Telegram chat when done.\n\nInclude the current conversation too if you just switched this agent's AI source: its current chat is about to be reset on the next message.",
+    [['live', 'Also the current one'], ['earlier', 'Earlier ones only']]);
+  if (!pick) return;
   try {
-    const includeLive = confirm('Also include the CURRENT conversation?\n\nOK — yes, I just switched this agent\'s AI source (its current chat is about to be reset on the next message).\nCancel — no, only conversations from before earlier resets.');
+    const includeLive = pick === 'live';
     const r = await api(`/v1/agents/${id}/recover-context`, { method: 'POST', body: { includeLive } });
     if (!r.started) { toast(r.reason || 'Nothing to recover.', 9000); return; }
     toast(`Recovering ${r.messages} messages from ${r.conversations} earlier conversation${r.conversations > 1 ? 's' : ''} — "${name}" will confirm in Telegram when it's saved them.`, 10000);
@@ -12004,7 +12079,16 @@ function mgmtCardPlace(p) {
 
 
 let pollTimer, pairTick = 0, pollPaused = false;
-async function refresh(withMeta) {
+// Refreshes overlap (a poll, and one after a change): an older answer that
+// lands last would put back what the newer one no longer has, a deleted agent
+// among it (review, 2026-10-09). Only the newest answer is used; an older call
+// waits for the newer one, so whoever awaited it still sees fresh agents.
+let refreshSeq = 0, refreshLatest = Promise.resolve();
+function refresh(withMeta) {
+  const seq = ++refreshSeq;
+  return (refreshLatest = refreshNow(withMeta, seq));
+}
+async function refreshNow(withMeta, seq) {
   void refreshInboxBadge(); // keep the inbox count live without opening it
   try {
     if (withMeta || !profiles.length || !hosts.length) {
@@ -12028,7 +12112,9 @@ async function refresh(withMeta) {
       // Green dot when there's stock, muted when the pool is empty.
       el.innerHTML = `<span class="pool-dot"${n > 0 ? '' : ' style="color:var(--off)"'}>●</span> ${n} instant bot${n === 1 ? '' : 's'} ready`;
     }).catch(() => {});
-    agents = await api('/v1/agents');
+    const list = await api('/v1/agents');
+    if (seq !== refreshSeq) { await refreshLatest; return; } // a newer refresh has it, and polls on
+    agents = list;
     markArchiving(agents); // an archive this page started, before the server's list shows it
     agentsLoaded = true;
     if ($('consoleDlg')?.open && !consoleGuest) renderConsoleTabs(); // the new-reply dots
@@ -12162,11 +12248,16 @@ const chanIcon = (kind) => (V2_MARK_SVG[kind] || '')
  *  bar: the console is Hatchabot's own window on the agent, but the
  *  conversation people actually have with it lives in Telegram, Slack or
  *  Discord — one press away instead of a hunt through the app. */
+/**
+ * A link from the server that the page opens: https only, or '' (nothing to
+ * link). A stored value that ever became javascript: or data: must not be
+ * clickable. Everything Hatchabot stores is an https link built server-side;
+ * this is the belt, now on every such link, not only the chat-app ones
+ * (review, 2026-10-09).
+ */
+const httpsUrl = (u) => (typeof u === 'string' && /^https:\/\//i.test(u) ? u : '');
 function agentChannelLinks(a) {
-  // https only: these links are opened, so a stored value that ever became
-  // javascript: or data: must not be clickable. Everything Hatchabot stores is
-  // an https deep link built server-side; this is the belt.
-  const ok = (u) => typeof u === 'string' && /^https:\/\//i.test(u);
+  const ok = (u) => !!httpsUrl(u);
   return [
     ...(a?.botUsername && ok(a?.deepLink) ? [{ kind: 'telegram', url: a.deepLink }] : []),
     ...((a?.otherChannels ?? []).filter((c) => ok(c.deepLink) && V2_MARK_SVG[c.kind]).map((c) => ({ kind: c.kind, url: c.deepLink }))),
@@ -12892,11 +12983,12 @@ function v2RenderSheetBar() {
   $('v2AgentBar').innerHTML = `${v2Mine(a) ? `<span role="button" tabindex="0" title="Change its icon" onclick="openV2Icon('${jsq(a.id)}')" onkeydown="if(event.key==='Enter')openV2Icon('${jsq(a.id)}')">${v2IconHTML(a, st)}</span>` : v2IconHTML(a, st)}
     <div class="v2ttl"><b id="v2AgentName">${esc(a.name)}</b>${!v2Mine(a) ? '<span>shared with you</span>' : ''}</div>
     <span class="v2pill ${v2PillCls(st)}"${st.why.length ? ` title="${esc(st.why.join(' · '))}"` : ''}>${st.glyph || '●'} ${esc(st.label)}</span>
-    ${a.state === 'STOPPED' && a.hibernatedAt ? `<button class="primary" onclick="act('${jsq(a.id)}','wake')" title="Start it now — a Telegram message, opening its console or an ask would too">💤 Wake</button>` : ''}
-    ${a.state === 'STOPPED' && !a.hibernatedAt ? `<button onclick="act('${jsq(a.id)}','start')">Start</button>` : ''}
+    ${/* Lifecycle buttons are the owner's: the server answers a member 404 (review, 2026-10-09). */ ''}
+    ${v2Mine(a) && a.state === 'STOPPED' && a.hibernatedAt ? `<button class="primary" onclick="act('${jsq(a.id)}','wake')" title="Start it now — a Telegram message, opening its console or an ask would too">💤 Wake</button>` : ''}
+    ${v2Mine(a) && a.state === 'STOPPED' && !a.hibernatedAt ? `<button onclick="act('${jsq(a.id)}','start')">Start</button>` : ''}
     ${a.state === 'RUNNING' && v2Mine(a) && !a.ops && !v2ChannelKinds(a).some(k => k !== 'telegram') ? `<button onclick="act('${jsq(a.id)}','hibernate')" title="Stop it with its volume kept; it wakes on a Telegram message, its console or an ask">💤 Sleep</button>` : ''}
-    ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${jsq(a.id)}','provision')">Retry</button>` : ''}
-    ${a.state === 'ARCHIVED' ? `<button onclick="openInspect('${jsq(a.id)}','${jsq(a.name)}')">🔍 Inspect</button><button onclick="v2Close();restoreAgent('${jsq(a.id)}','${jsq(a.name)}')" title="Bring it back from the archive">📤 Restore…</button>` : ''}
+    ${v2Mine(a) && a.state === 'FAILED' ? `<button class="primary" onclick="act('${jsq(a.id)}','provision')">Retry</button>` : ''}
+    ${v2Mine(a) && a.state === 'ARCHIVED' ? `<button onclick="openInspect('${jsq(a.id)}','${jsq(a.name)}')">🔍 Inspect</button><button onclick="v2Close();restoreAgent('${jsq(a.id)}','${jsq(a.name)}')" title="Bring it back from the archive">📤 Restore…</button>` : ''}
     ${chat ? `<button class="primary" onclick="v2Close();openGateway('${jsq(a.id)}','${jsq(a.slug)}')" title="Talk to it here">💬 Chat</button>` : ''}
     ${!v2Mine(a) && a.webChat && a.state !== 'ARCHIVED' ? `<button class="primary" onclick="v2Close();openWebChat('${jsq(a.id)}')" title="Talk to it here — no chat app needed">💬 Chat</button>` : ''}
     <button onclick="v2Close()" aria-label="Close">✕</button>`;
@@ -13015,7 +13107,7 @@ async function appRead() {
       <div class="sub">Runs on a schedule: ${(m.tasks || []).map(t => `${esc(t.name)} (every ${esc(t.every || t.cron)})`).join(', ') || 'nothing'}${m.test ? ' · its tests run in the agent before it goes live' : ''}${m.model ? ` · chat model ${esc(m.model)}` : ''}</div>
       ${(r.connections || []).filter(c => c.kind !== 'google').map(c => `<div class="sub" style="color:var(--warn)">Needs a ${esc(c.kind)} connection for ${esc(c.purpose)}: attach it in the agent's settings (Knowledge → Connections).</div>`).join('')}</div>`;
     const field = (f) => {
-      const id = 'appF_' + f.key;
+      const id = esc('appF_' + f.key); // a manifest's key is the app author's text (review, 2026-10-09)
       const label = `<label for="${id}">${esc(f.key)}${f.required ? ' <span style="color:var(--warn)">*</span>' : ''}${f.label ? ` <span class="sub">— ${esc(f.label)}</span>` : ''}</label>`;
       if (f.type === 'bool') return `<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="${id}" style="width:auto" ${f.default ? 'checked' : ''}> ${esc(f.key)}${f.label ? ` <span class="sub">— ${esc(f.label)}</span>` : ''}</label>`;
       const v = Array.isArray(f.default) ? f.default.join(', ') : f.default ?? '';
@@ -13085,17 +13177,19 @@ async function appGo() {
   const shared = appSharedOk(); if (!shared.ok) return;
   const connId = $('appConn')?.value || '';
   $('appGoBtn').disabled = true; $('appErr').textContent = ''; $('appOut').hidden = true;
+  let created = null;
   try {
     if (appDlgMode === 'create') {
       const name = $('appName').value.trim() || m.name;
       const local = hosts.find(h => h.kind === 'local') || hosts[0];
-      const a = await api('/v1/agents', { method: 'POST', body: { name, persona: m.chat || m.description || undefined,
+      const a = created = await api('/v1/agents', { method: 'POST', body: { name, persona: m.chat || m.description || undefined,
         aiProfileId: ($('appProfile') && $('appProfile').value) || profiles[0]?.id, hostId: local?.id,
         telegram: $('appNoTelegram').checked ? false : undefined } });
       if (m.model) { try { await api(`/v1/agents/${a.id}/model`, { method: 'POST', body: { model: m.model } }); } catch { /* the source's default stays */ } }
       // Its account goes on before it first runs (it is materialized as the agent comes up).
       if (connId) await api(`/v1/agents/${a.id}/connections/attach`, { method: 'POST', body: { connectionId: connId } });
       await api(`/v1/agents/${a.id}/app/pending`, { method: 'POST', body: { source: appInspected.source, values, ...(shared.allowShared ? { allowShared: true } : {}) } });
+      created = null; // made whole: nothing below undoes it
       appDlg.close();
       toast(`Creating "${name}" — ${m.name} installs as soon as it is running (its tests run first).`, 12000);
       await refresh(false);
@@ -13108,6 +13202,9 @@ async function appGo() {
       if (v2AgentId === appDlgAgent) void v2LoadApp(appDlgAgent, true);
     }
   } catch (e) {
+    // A half-made agent holds the name, so Create again said "name taken":
+    // remove it, as doAdopt does (review, 2026-10-09).
+    if (created) { try { await api(`/v1/agents/${created.id}`, { method: 'DELETE' }); } catch {} void refresh(false); }
     toast('Not installed.', 6000);
     $('appErr').textContent = e.message.split('\n')[0];
     if (e.data?.test?.output) { $('appOut').hidden = false; $('appOut').textContent = e.data.test.output; }
@@ -13151,14 +13248,14 @@ async function v2LoadFiles(id, path) {
     const open = e.type === 'dir' ? `<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','${jsq(p)}')">📁 ${esc(e.name)}/</a>`
       : e.type === 'file' && viewable(e.name) ? `📄 <a href="${dl('file', p)}&inline=1" target="_blank" rel="noopener" title="Open in a new tab">${esc(e.name)}</a>`
       : `${e.type === 'link' ? '🔗' : '📄'} ${esc(e.name)}`;
-    const get = e.type === 'dir' ? `<a class="btn" href="${dl('archive', p)}" title="This folder as a .tar.gz">⬇ .tar.gz</a>`
+    const get = e.type === 'dir' ? `<a class="btn" href="${dl('archive', p)}" onclick="return sfLink(event, this, 'folder.tar.gz')" title="This folder as a .tar.gz">⬇ .tar.gz</a>`
       : e.type === 'file' ? `<a class="btn" href="${dl('file', p)}" download title="Download">⬇</a>` : '';
     return `<tr><td>${open}</td><td class="num">${e.type === 'dir' ? '' : fmtBytes(e.size)}</td><td class="sub">${e.mtime ? ago(e.mtime) : ''}</td><td>${get}</td></tr>`;
   }).join('');
   const canUpload = !(r.path || '').startsWith('.openclaw') || (r.path || '') === ws || (r.path || '').startsWith(ws + '/');
   box.innerHTML = `<div class="v2row"><div class="v2k">Folder</div><div class="v2v"><span style="font-family:ui-monospace,monospace">~/ ${crumb}</span>
       ${ws && (r.path || '') !== ws ? `<button onclick="v2LoadFiles('${jsq(id)}','${jsq(ws)}')">Workspace</button>` : ''}
-      <a class="btn" href="${dl('archive', r.path || '')}" title="This folder as a .tar.gz">⬇ Whole folder</a>
+      <a class="btn" href="${dl('archive', r.path || '')}" onclick="return sfLink(event, this, 'folder.tar.gz')" title="This folder as a .tar.gz">⬇ Whole folder</a>
       ${canUpload ? `<button onclick="$('v2UploadInput').click()" title="Put a file from this computer into this folder">⬆ Upload…</button><input type="file" id="v2UploadInput" multiple hidden onchange="v2UploadFiles('${jsq(id)}','${jsq(r.path || '')}', this.files)">` : ''}
       <span class="sub">Click a name to open it in a new tab, ⬇ to download. ${canUpload ? 'Drop files on the list to upload them here.' : "OpenClaw's own state — uploads go in the workspace or outside .openclaw."} Its workspace holds what it wrote; memory is under .openclaw.</span></div></div>
     <div id="v2FilesDrop">${r.entries.length ? `<table class="tbl"><thead><tr><th>Name</th><th class="num">Size</th><th>Changed</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="sub" style="padding:8px 0">Empty folder.</div>'}</div>
@@ -13179,7 +13276,7 @@ async function v2UploadFiles(id, path, files) {
   let done = 0;
   for (const f of list) {
     say(`Uploading ${f.name} (${fmtBytes(f.size)})…`);
-    const put = async (overwrite) => fetch(`/v1/agents/${id}/fs/file?path=${encodeURIComponent(path)}&name=${encodeURIComponent(f.name)}${overwrite ? '&overwrite=1' : ''}`,
+    const put = async (overwrite) => sfFetch(`/v1/agents/${id}/fs/file?path=${encodeURIComponent(path)}&name=${encodeURIComponent(f.name)}${overwrite ? '&overwrite=1' : ''}`,
       { method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: f }); // the session cookie is the auth
     try {
       let res = await put(false);
@@ -13225,7 +13322,11 @@ function v2MemberAbout(a) {
  * as plain text (escaped; line breaks kept by the bubble's pre-wrap) — never
  * as HTML.
  */
-let webChatAgentId = null, webChatSending = false;
+let webChatAgentId = null;
+// Per agent: one waiting reply blocked Send for every other agent, and its
+// "…thinking" line was taken off whichever chat was open (review, 2026-10-09).
+const webChatSending = new Set();
+const webChatWait = (id) => [...$('wchatLog').querySelectorAll('.wchat-msg.wait')].find(el => el.dataset.wait === id);
 const webChatBubble = (role, text, cls = '') => `<div class="wchat-msg${role === 'user' ? ' me' : ''}${cls}">${esc(text)}</div>`;
 const webChatScroll = () => { const l = $('wchatLog'); l.scrollTop = l.scrollHeight; };
 /**
@@ -13267,6 +13368,7 @@ async function openWebChatPanel(id, note = '') {
   $('wchatNote').textContent = note;
   $('wchatNote').hidden = !note;
   webChatAgentId = id;
+  $('wchatSend').disabled = webChatSending.has(id);
   $('wchatAgent').textContent = a.name;
   $('wchatErr').textContent = '';
   $('wchatLog').innerHTML = '<div class="sub" id="wchatEmpty">Loading your conversation…</div>';
@@ -13280,6 +13382,7 @@ async function openWebChatPanel(id, note = '') {
     $('wchatLog').innerHTML = (r.messages || []).map(m => webChatBubble(m.role, m.text)).join('')
       || (sent.length ? '' : `<div class="sub" id="wchatEmpty">${esc(r.note || 'Nothing here yet — say hello.')}</div>`);
     for (const el of sent) $('wchatLog').append(el);
+    if (webChatSending.has(id) && !webChatWait(id)) $('wchatLog').insertAdjacentHTML('beforeend', `<div class="wchat-msg wait" data-wait="${esc(id)}">…thinking</div>`);
     webChatScroll();
   } catch (e) {
     if (webChatAgentId !== id) return;
@@ -13290,19 +13393,21 @@ async function openWebChatPanel(id, note = '') {
 async function webChatSend() {
   const id = webChatAgentId, box = $('wchatText');
   const text = box.value.trim();
-  if (!id || !text || webChatSending) return;
-  webChatSending = true; $('wchatSend').disabled = true;
+  if (!id || !text || webChatSending.has(id)) return;
+  webChatSending.add(id); $('wchatSend').disabled = true;
+  const name = v2Find(id)?.name || 'The agent';
   $('wchatErr').textContent = '';
   $('wchatEmpty')?.remove();
   box.value = '';
-  $('wchatLog').insertAdjacentHTML('beforeend', webChatBubble('user', text) + '<div class="wchat-msg wait" id="wchatWait">…thinking</div>');
+  $('wchatLog').insertAdjacentHTML('beforeend', webChatBubble('user', text) + `<div class="wchat-msg wait" data-wait="${esc(id)}">…thinking</div>`);
   webChatScroll();
   try {
     const r = await api(`/v1/agents/${id}/chat`, { method: 'POST', body: { text } });
-    $('wchatWait')?.remove();
-    if (webChatAgentId === id) $('wchatLog').insertAdjacentHTML('beforeend', webChatBubble('assistant', r.reply));
+    if (webChatAgentId === id) { webChatWait(id)?.remove(); $('wchatLog').insertAdjacentHTML('beforeend', webChatBubble('assistant', r.reply)); }
+    else toast(`${name} answered — open its chat to read it.`, 8000); // not dropped without a word
   } catch (e) {
-    $('wchatWait')?.remove();
+    if (webChatAgentId === id) webChatWait(id)?.remove();
+    else toast(`${name}: ${e.message}`, 8000);
     // It can't give a guest a member's (limited) turn until it is rebuilt: the
     // message was not delivered, so it comes back into the box (step 2).
     if (e.code === 'needs-rebuild' && webChatAgentId === id) {
@@ -13312,7 +13417,8 @@ async function webChatSend() {
     // Busy, too many this hour, no answer in time, not allowed, needs a rebuild: said where they are typing.
     if (webChatAgentId === id) $('wchatErr').textContent = e.message;
   } finally {
-    webChatSending = false; $('wchatSend').disabled = false;
+    webChatSending.delete(id);
+    if (webChatAgentId === id) $('wchatSend').disabled = false;
     webChatScroll();
   }
 }
@@ -13555,8 +13661,8 @@ async function v2LoadChans(id) {
       ${kind === 'slack' ? `<div class="sub">${c.team ? `In the <b>${esc(c.team)}</b> workspace. ` : ''}${servers.length ? `In ${servers.length === 1 ? 'one channel' : `${servers.length} channels`}: ${servers.map(g => `<b>#${esc(g.name || g.id)}</b>`).join(', ')}.` : 'Not in any channel yet: invite it with /invite in a channel.'}</div>` : ''}
       ${kind === 'telegram' ? `<div class="sub">Its @handle is fixed for life; its display name follows the agent's name.${c.pooled ? ' A pool bot: deleting or archiving the agent parks it for the next one.' : ' Your own bot: it stays yours.'}</div>` : ''}
       <div class="v2chan-h">
-        ${c.deepLink ? `<a class="btn" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open in ${label}</a>` : ''}
-        ${c.addToServerUrl ? `<a class="btn" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
+        ${httpsUrl(c.deepLink) ? `<a class="btn" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open in ${label}</a>` : ''}
+        ${httpsUrl(c.addToServerUrl) ? `<a class="btn" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
         ${canChange && spares > 0 ? `<button onclick="chanSwap('${jsq(id)}','${kind}')" title="Move it onto a spare bot from your pool: members and memory come with it; the old bot is parked, and everyone on it is told where to find it">🔁 Change bot…</button>` : ''}
         ${canChange ? `<button onclick="chanRemove('${jsq(id)}','${kind}')">Detach…</button>` : ''}
       </div>
@@ -13793,8 +13899,8 @@ function chanShowConnected(c) {
     <p>It is <b>${esc(c.displayName || label)}</b>. It restarts now to pick this up (its memory is kept).</p>
     ${c.warnings?.length ? `<ul class="v2chan-warn">${c.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
     <ol class="v2steps">
-      ${c.addToServerUrl ? `<li><a class="btn primary" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add it to your server</a>. People can only message it once they share a server with it.</li>` : ''}
-      <li><a class="btn${c.addToServerUrl ? '' : ' primary'}" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open ${label}</a> and send it a direct message. ${c.youAreLinked ? 'It already knows you.' : `Your message shows up here as a request: approve it with <b>That's me</b>. (A ${label} bot can be seen by a whole server, so nobody is linked on their first message alone.)`}</li>
+      ${httpsUrl(c.addToServerUrl) ? `<li><a class="btn primary" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add it to your server</a>. People can only message it once they share a server with it.</li>` : ''}
+      <li>${httpsUrl(c.deepLink) ? `<a class="btn${httpsUrl(c.addToServerUrl) ? '' : ' primary'}" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open ${label}</a>` : `Open ${label}`} and send it a direct message. ${c.youAreLinked ? 'It already knows you.' : `Your message shows up here as a request: approve it with <b>That's me</b>. (A ${label} bot can be seen by a whole server, so nobody is linked on their first message alone.)`}</li>
     </ol>
     <div class="v2wait" id="chanWait"><span class="spinner" aria-hidden="true"></span> ${c.youAreLinked ? 'Restarting…' : 'Waiting for your request…'}</div>`;
   clearInterval(chanWatch);
@@ -14084,6 +14190,8 @@ async function reportOpenIssue() {
 }
 async function reportDiscard() {
   if (!reportCur) return;
+  // Asked first, like every other delete: a draft (the agent's too) is gone for good (review, 2026-10-09).
+  if (!confirm(`Discard the draft "${reportCur.title || 'this report'}"? It is deleted, and cannot be brought back.`)) return;
   try { await api(`/v1/problem-reports/${encodeURIComponent(reportCur.id)}`, { method: 'DELETE' }); } catch { /* gone already */ }
   reportCur = null; $('reportReview').hidden = true; $('reportForm').hidden = false;
   void reportLoadDrafts();
@@ -14180,7 +14288,7 @@ function renderV2Joins() {
         <span class="grow">🔑 <b class="pii">${esc(who)}</b> wants to talk to <b>${esc(a.name)}</b>${kind === 'telegram' ? '' : ` on ${V2_CHAN_LABEL[kind] || kind}`}</span>
         <button onclick="denyPair('${jsq(a.id)}','${jsq(p.code)}','${jsq(who)}','${kind}')" title="Turn this request away — they can ask again by messaging the bot">Not now</button>
         ${self ? `<button onclick="approve('${jsq(a.id)}','${jsq(p.code)}', true,'${kind}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}')" title="This is you: admit and link this account to your login">That's me</button>` : ''}
-        <button class="primary" onclick="approve('${jsq(a.id)}','${jsq(p.code)}', false,'${kind}')">Let them in</button>
+        ${a.ops ? '' /* the manager is its owner's alone: the server answers 400 (review, 2026-10-09) */ : `<button class="primary" onclick="approve('${jsq(a.id)}','${jsq(p.code)}', false,'${kind}')">Let them in</button>`}
       </div>`);
     }
   }

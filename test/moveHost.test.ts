@@ -119,6 +119,17 @@ describe('moveAgentToHost — across two daemons', () => {
     expect(w.store.getAgent(id)!.state).toBe('STOPPED');
   });
 
+  it('refuses when the agent left the host its source provider was made for (2026-10-09)', async () => {
+    const { w, target, deps } = await crossDaemonWorld();
+    const id = await seedRunningAgent(w, { memory: 'precious-memory' });
+    w.store.insertHost({ id: 'h3', ownerId: w.owner, kind: 'cloud', provider: 'mock', name: 'Third', settings: {}, createdAt: 'now' });
+    // The route made `source` for h1; a move to h3 finished before this one took the lock.
+    (w.store as any).db.prepare(`UPDATE agents SET host_id = 'h3' WHERE id = ?`).run(id);
+    await expect(moveAgentToHost({ ...deps, sourceHostId: 'h1' }, id, 'h2')).rejects.toThrow(/moved to another machine meanwhile/);
+    expect(w.store.getAgent(id)!.hostId).toBe('h3');
+    expect(target.stateStore.size).toBe(0);
+  });
+
   it('refuses states that are not RUNNING/STOPPED', async () => {
     const { w, deps } = await crossDaemonWorld();
     const id = await seedRunningAgent(w);

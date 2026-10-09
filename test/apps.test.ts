@@ -329,14 +329,14 @@ describe('a failed update leaves the running app as it was', () => {
 
 describe('the app routes', () => {
   const OWNER = 'owner-1';
-  async function app() {
+  async function app(appGit?: typeof hostGit) {
     const store = new Store(new Database(':memory:'));
     const provider = new FakeAgent();
     store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
     store.insertAIProfile({ id: 'p', ownerId: OWNER, name: 'Plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-sonnet-5', secretRef: 'ai/p', createdAt: 'now' } as never);
     store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Demo', slug: 'demo-agent', state: 'RUNNING', runtimeRef: 'mock://a1', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
     const f = Fastify();
-    await registerRoutes(f, { store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} }, providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0 } } } as never);
+    await registerRoutes(f, { store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} }, providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0 } }, appGit } as never);
     return { f, store, provider };
   }
   const as = { 'x-hatchabot-owner': OWNER };
@@ -476,6 +476,57 @@ describe('the app routes', () => {
     // Another account, or a confirmation, is fine.
     expect((await f.inject({ method: 'POST', url: '/v1/agents/a2/app', headers: as, payload: { source: dir, values: { mailbox: 'other@example.org' } } })).statusCode).toBe(200);
     expect((await f.inject({ method: 'POST', url: '/v1/agents/a2/app', headers: as, payload: { source: dir, values, allowShared: true } })).statusCode).toBe(200);
+  });
+
+  /** A fetch that waits at a gate once armed: the minutes a real one can take. */
+  const gatedFetch = () => {
+    let armed = false;
+    let entered!: () => void;
+    let letGo!: () => void;
+    const inFetch = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { letGo = r; });
+    const run: typeof hostGit = async (args, cwd) => { if (armed) { armed = false; entered(); await gate; } return hostGit(args, cwd); };
+    return { run, arm: () => { armed = true; }, inFetch, letGo };
+  };
+
+  it('an update judges the agent and its app again once it holds the lock (2026-10-09)', async () => {
+    const g = gatedFetch();
+    const { f, store, provider } = await app(g.run);
+    const dir = repo();
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } })).statusCode).toBe(200);
+    const first = store.getAgentApp('a1')!;
+    commit(dir);
+
+    // Stopped while the release was fetched: nothing is installed into it.
+    g.arm();
+    const pending = f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} });
+    await g.inFetch;
+    store.setAgentState('a1', 'STOPPED');
+    const sent = provider.calls.length;
+    g.letGo();
+    const res = await pending;
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/changed while the release was fetched/);
+    expect(provider.calls.length).toBe(sent);
+    expect(store.getAgentApp('a1')!.sha).toBe(first.sha);
+  });
+
+  it('an update refuses when another install finished while it fetched (2026-10-09)', async () => {
+    const g = gatedFetch();
+    const { f, store } = await app(g.run);
+    const dir = repo();
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } })).statusCode).toBe(200);
+    commit(dir);
+    g.arm();
+    const pending = f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} });
+    await g.inFetch;
+    const other = { ...store.getAgentApp('a1')!, installedAt: new Date(Date.now() + 1000).toISOString() };
+    store.setAgentApp(other);
+    g.letGo();
+    const res = await pending;
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/app changed meanwhile/);
+    expect(store.getAgentApp('a1')!.installedAt).toBe(other.installedAt);
   });
 
   it('only the machine owner, and only a running agent', async () => {

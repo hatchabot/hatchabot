@@ -344,9 +344,15 @@ export async function syncConnections(
   const agent = deps.store.getAgent(agentId);
   if (!agent) return;
   const attached = deps.store.listAgentConnections(agentId);
-  const attachedEmails = new Set(
-    attached.map((a) => deps.store.getConnection(a.connectionId)?.email).filter((e): e is string => !!e),
+  // Judged afresh at each step, not from the list read here: every step
+  // awaits a docker exec, and an Attach or a Detach landing meanwhile was
+  // undone — a just-detached account imported again from the stale list, a
+  // just-attached one removed as unattached (concurrency review, 2026-10-09).
+  const emailOf = new Map(attached.map((a) => [a.connectionId, deps.store.getConnection(a.connectionId)?.email]));
+  const attachedEmailsNow = () => new Set(
+    deps.store.listAgentConnections(agentId).map((a) => deps.store.getConnection(a.connectionId)?.email).filter((e): e is string => !!e),
   );
+  const stillAttached = (connectionId: string) => deps.store.listAgentConnections(agentId).some((x) => x.connectionId === connectionId);
   // Reconcile FIRST: pull off any platform account this agent still has
   // materialized but is no longer attached to — e.g. it was detached while the
   // agent was STOPPED, so the live detach never ran and the credential would
@@ -359,7 +365,7 @@ export async function syncConnections(
   // or when the same account was deliberately attached again (then it stays
   // and is re-imported below). A failure keeps it for the next sync (#11).
   for (const email of deps.store.connectionRemovals(agentId)) {
-    if (attachedEmails.has(email)) {
+    if (attachedEmailsNow().has(email)) {
       deps.store.clearConnectionRemoval(agentId, email);
       continue;
     }
@@ -372,7 +378,7 @@ export async function syncConnections(
     const parsed = JSON.parse(res.stdout) as { accounts?: Array<{ email?: string }> };
     for (const acc of parsed.accounts ?? []) {
       const email = acc.email;
-      if (email && vaultEmails.has(email) && !attachedEmails.has(email)) {
+      if (email && vaultEmails.has(email) && !attachedEmailsNow().has(email)) {
         // A failure is remembered, so deleting the vault entry later can't lose the email.
         const r = await dematerializeConnection(deps, { id: agentId, runtimeRef }, email);
         if (!r.ok) deps.store.addConnectionRemoval(agentId, email);
@@ -382,6 +388,14 @@ export async function syncConnections(
     /* gog absent or output unparsable → nothing to reconcile */
   }
   for (const a of attached) {
+    if (!stillAttached(a.connectionId)) continue;
     await materializeConnection(deps, { id: agentId, slug: agent.slug, runtimeRef }, a.connectionId);
+    // Detached during the import: its live removal may have run before the
+    // import landed. Off again, and remembered if that fails.
+    const email = emailOf.get(a.connectionId);
+    if (email && !stillAttached(a.connectionId) && !attachedEmailsNow().has(email)) {
+      const r = await dematerializeConnection(deps, { id: agentId, runtimeRef }, email);
+      if (!r.ok) deps.store.addConnectionRemoval(agentId, email);
+    }
   }
 }

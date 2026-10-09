@@ -581,3 +581,31 @@ describe('a remote machine that is asleep or offline answers at once (2026-10-05
     expect(await tcpReachable('127.0.0.1', port, 2000)).toBe(false);
   });
 });
+
+describe('exporting a volume that is not there (2026-10-09)', () => {
+  /** A docker stub that records its argv and knows no volume. */
+  function noVolume() {
+    const d = mkdtempSync(join(tmpdir(), 'acl-novol-'));
+    const log = join(d, 'argv.log');
+    const bin = join(d, 'docker');
+    writeFileSync(bin,
+      '#!/usr/bin/env bash\n' +
+      `printf '%s\\n' "$*" >> ${JSON.stringify(log)}\n` +
+      'if [ "$1" = volume ] && [ "$2" = inspect ]; then echo "Error response from daemon: get x-vol: no such volume" >&2; exit 1; fi\n' +
+      'exit 0\n', { mode: 0o755 });
+    chmodSync(bin, 0o755);
+    return { p: new LocalDockerProvider({ docker: bin, image: 'test-image:latest' }), argv: () => (existsSync(log) ? readFileSync(log, 'utf8') : '') };
+  }
+
+  it('fails clearly instead of creating it empty and exporting nothing', async () => {
+    const { p, argv } = noVolume();
+    await expect(p.exportState('df918a55-88cd-4d00-a17c-b8415a26ceb6/kitchen-helper')).rejects.toThrow(/does not exist/);
+    expect(argv()).not.toMatch(/^run /m); // no one-shot that would have created the volume
+  });
+
+  it('exports as before when the volume is there', async () => {
+    await provider.exportState('df918a55-88cd-4d00-a17c-b8415a26ceb6/kitchen-helper');
+    expect(argv()).toMatch(/^volume inspect /m);
+    expect(argv()).toMatch(/^run .*:\/vol:ro alpine tar cz/m);
+  });
+});

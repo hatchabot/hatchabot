@@ -1086,6 +1086,18 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   async exportState(runtimeRef: string): Promise<Buffer> {
     const { volume } = this.#names(runtimeRef);
+    // Asked first: `-v name:/vol` CREATES a volume that is not there, empty,
+    // and its archive is a valid empty tarball. An export from the wrong
+    // machine (or of a volume already gone) "succeeded" with nothing in it,
+    // and a move went on to retire the real one (concurrency review,
+    // 2026-10-09). The nightly backup script checks the same way.
+    const has = await this.#docker(['volume', 'inspect', '--format', '{{.Name}}', volume]);
+    if (has.code !== 0) {
+      if (/no such volume/i.test(has.stderr)) {
+        throw new ProviderError(`volume ${volume} does not exist on this daemon`, "This agent's data isn't on that machine, so nothing was copied.");
+      }
+      throw new ProviderError(`volume check failed: ${has.stderr.slice(0, 300)}`, "Couldn't snapshot the agent's state.");
+    }
     const one = this.#oneShot('io');
     try {
       const { stdout } = await execFileP(
