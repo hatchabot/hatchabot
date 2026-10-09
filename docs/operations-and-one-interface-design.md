@@ -189,8 +189,8 @@ steps done, and the time. The Hatchabot agent gets the same through its tools.
 
 | Capability | Proposal |
 |---|---|
-| **Planned agents** ("Plan an agent…": a to-do list of agents to make, `/v1/agent-todos`) | **Decide**: (a) bring it to the icon home screen as a "Planned" group of ghost tiles, made with one click; or (b) retire it — existing entries shown once as a list to copy, the route kept read-only for a release. |
-| **Manual order within a group** (▲/▼, ±5, a position select, drag) and **sort a group once and keep it** (`/v1/groups/sort`) | Add **"My order"** to the home screen's sort (beside Age · Name · Activity), using the order already stored: drag within a group, and in the sheet "Move earlier / later" buttons for the keyboard. |
+| **Planned agents** ("Plan an agent…": a to-do list of agents to make, `/v1/agent-todos`) | **Decided (2026-10-09): bring it to the home screen** as a "Planned" group of ghost tiles, each made with one click (New agent, its name filled in), removable by keyboard. |
+| **Manual order within a group** (▲/▼, ±5, a position select, drag) and **sort a group once and keep it** (`/v1/groups/sort`) | **Decided (2026-10-09): keep it.** Add **"My order"** to the home screen's sort (beside Age · Name · Activity), using the order already stored: drag within a group, and in the sheet "Move earlier / later" buttons for the keyboard. |
 | **Run health checks on every agent** (`runFleetHealthChecks`, with the config check) | Add "Check all" to the machine line's menu, results under Alerts. |
 | **"Template not configured — fill its Setup values"** | Show the same notice in the sheet's Overview (it comes from `agentNotices`). |
 | **Telegram Web link for the owner** | Add it beside "Open Telegram" in the Telegram tab. |
@@ -215,11 +215,10 @@ click-through scenario:
 
 ### Moving people over
 
-- One release before removal, a browser on classic shows a one-line notice:
-  "The classic look goes away in the next release — everything is in the
-  agent's page now. [Show me where]" (a short map: card button → sheet tab).
-- On the removal release, `hb-ui=classic` is cleared on first load and the same
-  map is shown once.
+**Decided (2026-10-09): one step**, no notice release. On the removal
+release, `hb-ui=classic` is cleared on first load and a short map is shown
+once: "The classic look is gone — everything is in the agent's page now"
+(card button → sheet tab, from the Appendix).
 - Nothing server-side changes for the switch itself. `/v1/groups/sort` and
   `/v1/agent-todos` stay if "My order" and Planned keep them; otherwise they go
   with the coverage ledger's entries.
@@ -247,22 +246,19 @@ gone, and the knowledge-pack test if the map does.
 
 1. The parity items (decided above) and the accessibility fixes, each with a
    click-through scenario.
-2. The notice release.
-3. The removal release.
+2. The removal release, with the one-time map.
 
 ---
 
 ## Questions for review
 
-1. **Planned agents**: bring them to the home screen, or retire them?
-2. **Manual order**: is "My order" worth keeping, or are Age · Name · Activity
-   enough?
+1. ~~Planned agents~~ — bring them to the home screen (decided 2026-10-09).
+2. ~~Manual order~~ — keep it as "My order" (decided 2026-10-09).
 3. **Automatic recovery**: the table above finishes or undoes a move, an
    import and an archive by itself when the direction is certain, and holds
    the rest for you. Is that the right line, or should every interrupted
    operation wait for you?
-4. **Notice release**: needed, given who uses the classic look, or remove it
-   in one release?
+4. ~~Notice release~~ — no: one step (decided 2026-10-09).
 
 ---
 
