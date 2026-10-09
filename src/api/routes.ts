@@ -70,7 +70,7 @@ import { AgentBusyError, clearBusy, isBusy, markBusy, whileBusy } from '../orche
 import { contextStats, exportTranscript, recoverContext } from '../orchestrator/transcript.js';
 import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
-import { commandOwnersFor } from '../orchestrator/provision.js';
+import { commandOwnersFor, reapplyCurrentSettings } from '../orchestrator/provision.js';
 import { CronSystemOwnedError, addCron, cronTargetFor, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
 import { request as httpRequest } from 'node:http';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
@@ -179,7 +179,7 @@ import { clearStaleRuntimePinsWhenUp } from '../orchestrator/runtimePins.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
-import { operationRefusal, publicOperation } from '../orchestrator/operations.js';
+import { beginOperation, currentBootId, handleFor, KIND_LABEL, operationRefusal, publicOperation, rethrowIfCrash, type OpHandle } from '../orchestrator/operations.js';
 import { recoverOperation, RecoverError, resumeOperations, startOperationRetryLoop, type ResumeContext } from '../orchestrator/operationsResume.js';
 import {
   ensureRunnerKey,
@@ -993,10 +993,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!agent) return;
       const provider = providerFor(agent.hostId);
       const log = trace(agentId);
-      const result = await runProvisionSteps(
-        { store, secrets, provider, channel: deps.channel, log, embedder: embedderForProvision, webOnlyIfNoBot: opts.webOnlyIfNoBot },
-        agentId,
-      );
+      // On disk (operations.ts): a restart in the middle is settled by
+      // reconcile's rules on purpose, with the outcome on this record.
+      const op = beginOperation(store, 'provision', agentId, { from: agent.state, hostId: agent.hostId });
+      let result: Awaited<ReturnType<typeof runProvisionSteps>>;
+      try {
+        result = await runProvisionSteps(
+          { store, secrets, provider, channel: deps.channel, log, embedder: embedderForProvision, webOnlyIfNoBot: opts.webOnlyIfNoBot },
+          agentId,
+        );
+      } catch (err) {
+        op.fail(err);
+        throw err;
+      }
+      const s = result.agent.state;
+      if (s === 'FAILED') op.fail(result.agent.stateReason ?? 'Setup failed.');
+      else op.done(s === 'RUNNING' ? 'Set up and running.' : result.agent.pendingAction ? 'Waiting for a step from you.' : `Setup ended ${s.toLowerCase()}.`);
       // Fresh agent went live in pairing mode → watch for the owner's first
       // message and bind it (the §12.4 claim). DETACHED: the claim window is
       // 10 minutes of idle polling on an agent that is already live — holding
@@ -1095,18 +1107,37 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (was.state === 'RUNNING' && now.state === 'STOPPED') return now.hibernatedAt ? 'put to sleep' : 'stopped by its owner';
     return undefined;
   };
-  const kickRebuild = (agentId: string, opts: { checkpoint?: boolean } = {}): boolean => {
+  /**
+   * `resume`: a rebuild queued before a restart, put back in the queue at
+   * boot (resumeOperations); `was` is the agent as it was when it was asked
+   * for, so staleRebuild judges it as before.
+   */
+  const kickRebuild = (agentId: string, opts: { checkpoint?: boolean; resume?: { opId: string; was: Agent } } = {}): boolean => {
     if (inflight.has(agentId)) return false;
-    const agent = store.getAgent(agentId);
-    if (!agent?.runtimeRef) return false;
+    const now0 = store.getAgent(agentId);
+    const agent = opts.resume ? { ...now0!, ...opts.resume.was } as Agent : now0;
+    if (!now0 || !agent?.runtimeRef) return false;
     // A copy that moved to another Hatchabot is never rebuilt here: started,
     // it polls the same bot as the copy there (bulk source switches and the
     // channel routes reached it; night review, 2026-09-28).
-    if (agent.migratedTo) return false;
+    if (now0.migratedTo) return false;
     // Nor one with a long operation not over (a move or import interrupted by
     // a restart, or held for its owner): the rebuild would start it.
-    if (store.activeOperationFor(agentId)) return false;
+    { const onDisk = store.activeOperationFor(agentId); if (onDisk && onDisk.id !== opts.resume?.opId) return false; }
     const startedAt = Date.now();
+    // Queued on disk (operations.ts): a restart keeps its place — re-queued
+    // at boot, judged by staleRebuild then as now. Its own steps are never
+    // refused by it: a rebuild in this process is guarded in memory, as before.
+    let op: OpHandle;
+    if (opts.resume) {
+      op = handleFor(store, opts.resume.opId);
+      store.updateOperation(op.id, { status: 'queued', bootId: currentBootId() });
+    } else {
+      op = beginOperation(store, 'rebuild', agentId, {
+        checkpoint: !!opts.checkpoint,
+        was: { state: agent.state, hostId: agent.hostId, runtimeRef: agent.runtimeRef, migratedTo: agent.migratedTo ?? null },
+      }, { queued: true });
+    }
     const task = (async () => {
       rebuildQueued.add(agentId);
       // The checkpoint slot first, then the rebuild slot, and the checkpoint
@@ -1121,14 +1152,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       try {
         const now = store.getAgent(agentId);
         const stale = staleRebuild(agent, now);
-        if (stale) { trace(agentId)('rebuild.skipped', { why: stale }); return; }
-        await rebuildAgent(
-          {
-            store, secrets, provider: providerFor(now!.hostId), channel: deps.channel,
-            log: trace(agentId), checkpointMemory: opts.checkpoint, afterCheckpoint: releaseCheckpoint, embedder: embedderForProvision,
-          },
-          agentId,
-        );
+        if (stale) { trace(agentId)('rebuild.skipped', { why: stale }); op.rolledBack(`Not rebuilt: ${stale}.`); return; }
+        op.start();
+        let rebuilt: Agent;
+        try {
+          rebuilt = await rebuildAgent(
+            {
+              store, secrets, provider: providerFor(now!.hostId), channel: deps.channel,
+              log: trace(agentId), checkpointMemory: opts.checkpoint, afterCheckpoint: releaseCheckpoint, embedder: embedderForProvision,
+            },
+            agentId,
+          );
+        } catch (err) {
+          op.fail(err);
+          throw err;
+        }
+        if (rebuilt.state === 'FAILED') op.fail(rebuilt.stateReason ?? 'The rebuild failed.');
+        else op.done('Rebuilt.');
       } finally {
         releaseCheckpoint();
         rebuildGate.release();
@@ -1141,7 +1181,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // A rebuilt agent has a new network namespace: its browser follows it.
         .then(() => { if (store.getAgent(agentId)?.browser) void browsersNow(agentId); })
         .catch((err) => app.log.error({ err, agentId }, 'rebuild task failed'))
-        .finally(() => { inflight.delete(agentId); rebuildQueued.delete(agentId); rebuildCancelled.delete(agentId); }),
+        .finally(() => {
+          inflight.delete(agentId); rebuildQueued.delete(agentId); rebuildCancelled.delete(agentId);
+          // However it ended (a throw before its turn), the record is not left queued.
+          const row = store.getOperation(op.id);
+          if (row && (row.status === 'queued' || row.status === 'running') && row.bootId === currentBootId()) op.fail('The rebuild did not run.');
+        }),
     );
     return true;
   };
@@ -2419,11 +2464,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * GET says how far it has come. `wait: true` holds the request for scripts.
    */
   type ImageCopy = { startedAt: string; bytes: number; total?: number; done: boolean; ok?: boolean; error?: string; finishedAt?: string; pulled?: string };
+  const INSTALL_AGAIN = { actions: [{ action: 'install-again', label: 'Install again' }], recommended: 'install-again' };
   const imageCopies = new Map<string, { job: ImageCopy; finished: Promise<ImageCopy> }>();
   app.get<{ Params: { id: string } }>('/v1/hosts/:id/install-image', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     if (!store.getHost(req.params.id)) return reply.code(404).send({ error: 'Not found' });
-    return imageCopies.get(req.params.id)?.job ?? { idle: true };
+    const live = imageCopies.get(req.params.id)?.job;
+    if (live) return live;
+    // After a restart the job in memory is gone; its record says how it ended
+    // (an interrupted one is "interrupted", not idle: the copy did not finish).
+    const op = store.listMachineOperations([req.params.id], 20).find((o) => o.kind === 'install-image');
+    if (!op) return { idle: true };
+    const over = !['queued', 'running'].includes(op.status) || op.bootId !== currentBootId();
+    return {
+      startedAt: op.requestedAt, bytes: 0, done: over, ok: op.status === 'succeeded',
+      ...(op.status === 'succeeded' ? {} : { error: op.outcome ?? 'The image copy was interrupted by a restart.' }),
+      ...(op.finishedAt ? { finishedAt: op.finishedAt } : {}),
+      interrupted: op.status === 'interrupted' || (op.status === 'running' && op.bootId !== currentBootId()) || /interrupted by a restart/.test(op.outcome ?? '') || undefined,
+      operation: op.id,
+    };
   });
   app.post<{ Params: { id: string } }>('/v1/hosts/:id/install-image', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
@@ -2440,6 +2499,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         .find((t) => t.tag === image)?.size : undefined;
       const job: ImageCopy = { startedAt: new Date().toISOString(), bytes: 0, total: total ? parseByteSize(total) || undefined : undefined, done: false };
       trace()('host.image_copy_started', { host: host.id, image });
+      // On disk (operations.ts): a restart in the middle leaves "interrupted —
+      // Install again", and the Activity list shows it (GET /v1/events).
+      const op = beginOperation(store, 'install-image', null, { image, host: host.name }, { hostId: host.id, requestedBy: ownerIdOf(req) });
       // A runner on another CPU pulls the published image of the same OpenClaw instead (installRuntimeImage).
       const version = local ? (await providerFor(local).currentImageInfo().catch(() => undefined))?.openclawVersion : undefined;
       const published = version && /^\d{4}\.\d+\.\d+(?:-\d+)?$/.test(version)
@@ -2449,6 +2511,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         .then((r) => {
           Object.assign(job, { done: true, ok: r.ok, error: r.ok ? undefined : `Image install failed: ${r.error}`, finishedAt: new Date().toISOString(), ...(r.pulled ? { pulled: r.pulled } : {}) });
           trace()(r.ok ? 'host.image_copied' : 'host.image_copy_failed', { host: host.id, bytes: job.bytes, ...(r.pulled ? { pulled: r.pulled } : {}), ...(r.ok ? {} : { error: r.error }) });
+          if (r.ok) op.done(r.pulled ? `${host.name} pulled the published image ${r.pulled}.` : `The runtime image was copied to ${host.name} (${(job.bytes / 1e9).toFixed(1)} GB).`);
+          else op.fail(job.error ?? 'Image install failed.', INSTALL_AGAIN);
           return job;
         });
       copy = { job, finished };
@@ -6251,7 +6315,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (busyNow(agent, reply)) return reply;
       try {
         return await whileBusy(agent.id, () =>
-          restoreSnapshot(snapshotDeps(agent), agent.id, req.params.snapId),
+          restoreSnapshot({ ...snapshotDeps(agent), requestedBy: ownerIdOf(req) }, agent.id, req.params.snapId),
         );
       } catch (err) {
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
@@ -6884,7 +6948,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     `${names.join(' and ')} already ${names.length > 1 ? 'run' : 'runs'} ${m.name} on the same account. Two copies would both answer every email. ` +
     'Stop the app there first, or use another account; or confirm you want both (allowShared).'), { conflict: names });
 
-  const installFromSource = async (a: Agent, source: string, ref: string, values: Record<string, unknown>, allowShared = false) => {
+  /** Recorded as it goes (appOperations.ts): its steps, and how it ended. A (simulated) dead process records nothing more. */
+  const appOpFailed = (op: OpHandle | undefined, e: unknown) => {
+    rethrowIfCrash(e);
+    if (op && op.get().status === 'running') op.fail(e);
+  };
+  const withSteps = (d: InstallDeps, op: OpHandle): InstallDeps => ({ ...d, step: (k) => op.step(k) });
+  const installFromSource = async (a: Agent, source: string, ref: string, values: Record<string, unknown>, allowShared = false, requestedBy?: string) => {
     const src = parseSource(source);
     const label = src.kind === 'dir' ? src.path : src.url;
     const repo = await repoFor(appGit, src, appCacheDir);
@@ -6895,12 +6965,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Another app in its place: its tasks come off first (never two apps on one mailbox),
     // and go back on if this install fails, so the agent still matches the record.
     const replaced = had && had.app !== rel.manifest.app ? had : undefined;
+    let op: OpHandle | undefined;
     const done = await whileBusy(a.id, async () => {
       a = appStillAsWas(a, had);
+      op = beginOperation(store, 'app-install', a.id, {
+        app: rel.manifest.app, toSha: rel.sha, fromSha: had?.app === rel.manifest.app ? had.sha : null,
+        fromApp: had?.app ?? null, source: label, ref,
+      }, { requestedBy: requestedBy ?? a.ownerId });
       if (replaced) await removeTasks(appDeps(a), replaced.app);
       try {
-        return await installRelease(appDeps(a), rel, values);
+        return await installRelease(withSteps(appDeps(a), op), rel, values);
       } catch (e) {
+        rethrowIfCrash(e);
         if (replaced) {
           await syncTasks(appDeps(a), replaced.manifest as AppManifest).catch((err: unknown) => {
             if (e instanceof Error) e.message += ` ${replaced.app}'s tasks could not be put back: ${(err as Error)?.message ?? err}`;
@@ -6908,18 +6984,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         }
         throw e;
       }
-    });
+    }).catch((e: unknown) => { appOpFailed(op, e); throw e; });
     store.setAgentApp({ agentId: a.id, app: done.app, source: label, ref, sha: done.sha, manifest: done.manifest,
       previousSha: had?.app === done.app ? had.sha : undefined, previousManifest: had?.app === done.app ? had.manifest : undefined,
       installedAt: new Date().toISOString(), testOk: done.test?.ok });
     trace(a.id)('app.installed', { app: done.app, sha: done.sha.slice(0, 12), source: label });
+    op?.done(`${done.app} ${done.sha.slice(0, 12)} installed.`);
     return done;
   };
   /** A new agent "from a repo": install once it runs; a failure stays on the record for its page. */
   runPendingApp = async (agentId: string) => {
     const p = store.getAppPending(agentId);
     const a = store.getAgent(agentId);
-    if (!p || !a || a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) return;
+    if (!p || !a || a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id) || store.activeOperationFor(a.id)) return;
     try {
       const { __allowShared, ...values } = p.values as Record<string, unknown> & { __allowShared?: boolean };
       await installFromSource(a, p.source, p.ref, values, __allowShared === true);
@@ -6935,7 +7012,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Params: { id: string }; Body: { source?: string; ref?: string; values?: Record<string, unknown>; allowShared?: boolean } }>('/v1/agents/:id/app', async (req, reply) => {
     const a = appTarget(req, reply); if (!a) return reply;
     try {
-      const done = await installFromSource(a, req.body?.source ?? '', req.body?.ref || 'HEAD', req.body?.values ?? {}, req.body?.allowShared === true);
+      const done = await installFromSource(a, req.body?.source ?? '', req.body?.ref || 'HEAD', req.body?.values ?? {}, req.body?.allowShared === true, ownerIdOf(req));
       return { app: appView(a), test: done.test ?? null };
     } catch (e) { return appFail(reply, e); }
   });
@@ -6976,11 +7053,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const ref = req.body?.ref || had.ref;
       const rel = await resolveRelease(appGit, repo, ref);
       if (rel.sha === had.sha && !req.body?.values) return { app: appView(a), unchanged: true };
-      const done = await whileBusy(a.id, () => installRelease(appDeps(appStillAsWas(a, had)), rel, req.body?.values ?? {}));
+      let op: OpHandle | undefined;
+      const done = await whileBusy(a.id, () => {
+        const now = appStillAsWas(a, had);
+        op = beginOperation(store, 'app-update', a.id, { app: had.app, toSha: rel.sha, fromSha: had.sha, fromApp: had.app, source: had.source, ref }, { requestedBy: ownerIdOf(req) });
+        return installRelease(withSteps(appDeps(now), op), rel, req.body?.values ?? {});
+      }).catch((e: unknown) => { appOpFailed(op, e); throw e; });
       store.setAgentApp({ ...had, ref, sha: done.sha, manifest: done.manifest,
         previousSha: rel.sha === had.sha ? had.previousSha : had.sha, previousManifest: rel.sha === had.sha ? had.previousManifest : had.manifest,
         installedAt: new Date().toISOString(), testOk: done.test?.ok });
       trace(a.id)('app.updated', { app: done.app, from: had.sha.slice(0, 12), to: done.sha.slice(0, 12) });
+      op?.done(`${done.app} updated to ${done.sha.slice(0, 12)}.`);
       return { app: appView(a), test: done.test ?? null };
     } catch (e) { return appFail(reply, e); }
   });
@@ -6991,10 +7074,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const had = store.getAgentApp(a.id);
     if (!had?.previousSha || !had.previousManifest) return reply.code(409).send({ error: 'There is no earlier release to go back to.' });
     try {
-      await whileBusy(a.id, () => switchTo(appDeps(a), had.previousManifest as AppManifest, had.previousSha!, had.manifest as AppManifest));
+      let op: OpHandle | undefined;
+      await whileBusy(a.id, () => {
+        op = beginOperation(store, 'app-rollback', a.id, { app: had.app, toSha: had.previousSha!, fromSha: had.sha, fromApp: had.app }, { requestedBy: ownerIdOf(req) });
+        return switchTo(withSteps(appDeps(a), op), had.previousManifest as AppManifest, had.previousSha!, had.manifest as AppManifest);
+      }).catch((e: unknown) => { appOpFailed(op, e); throw e; });
       store.setAgentApp({ ...had, sha: had.previousSha!, manifest: had.previousManifest, previousSha: had.sha, previousManifest: had.manifest,
         installedAt: new Date().toISOString(), testOk: undefined });
       trace(a.id)('app.rolled_back', { app: had.app, from: had.sha.slice(0, 12), to: had.previousSha!.slice(0, 12) });
+      op?.done(`${had.app} is back on ${had.previousSha!.slice(0, 12)}.`);
       return { app: appView(a) };
     } catch (e) { return appFail(reply, e); }
   });
@@ -10082,11 +10170,28 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Another owner's agent shared with you: what happened, not its details
     // (an event can carry an address or an error text; use-case audit, 2026-09-27).
     const mine = new Set(visible.filter((a) => a.ownerId === ownerIdOf(req)).map((a) => a.id));
-    return store.listEvents(ids, limit).map((e) => ({
+    const rows: Array<Record<string, unknown> & { at: string }> = store.listEvents(ids, limit).map((e) => ({
       ...e,
       ...(mine.has(e.agentId) ? {} : { detail: undefined }),
       agentName: names.get(e.agentId),
     }));
+    if (req.query.agentId) return rows;
+    // A machine's own operations (a runner's image copy, Back up now) have no
+    // agent and so no agent_events row: read from the operations table, one
+    // row each, for that machine's owner only (design, "On the page").
+    const hosts = store.listHosts(ownerIdOf(req)).filter((h) => h.ownerId === ownerIdOf(req));
+    const hostName = new Map(hosts.map((h) => [h.id, h.kind === 'local' ? 'This machine' : h.name]));
+    const machine = store.listMachineOperations([...hostName.keys()], limit).map((op) => {
+      const pub = publicOperation(op, { recovery: false })!;
+      const event = { queued: 'op.started', running: 'op.started', succeeded: 'op.done', failed: 'op.failed', rolled_back: 'op.rolled_back', held: 'op.held', interrupted: 'op.interrupted' }[String(pub.status)] ?? 'op.done';
+      const detail = { op: op.id, kind: op.kind, label: KIND_LABEL[op.kind] ?? op.kind, outcome: op.outcome ?? undefined, hostId: op.hostId };
+      return {
+        agentId: null, at: op.finishedAt ?? op.requestedAt, event, detail,
+        agentName: hostName.get(op.hostId ?? '') ?? 'A machine',
+        label: `${KIND_LABEL[op.kind] ?? op.kind}: ${eventLabel(event, detail)}`,
+      };
+    });
+    return [...rows, ...machine].sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
   });
 
   // ---- runtime image / OpenClaw version status ----------------------------
@@ -10178,7 +10283,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   app.post('/v1/backups/run', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
-    return { run: startBackup(Date.now()) };
+    // Recorded for the Activity list (a machine's operation, operations.ts);
+    // backup-status.json stays what says whether the set is whole.
+    const already = backupRunState().status === 'running';
+    let op: OpHandle | undefined;
+    const run = startBackup(Date.now(), (st) => {
+      if (st.status === 'ok') op?.done('Backed up.');
+      else op?.fail(st.summary?.split('\n').pop() || 'The backup failed.');
+    });
+    const local = store.localHostId();
+    if (!already && local) {
+      op = beginOperation(store, 'backup-run', null, {}, { hostId: local, requestedBy: ownerIdOf(req) });
+      if (run.status === 'error') op.fail(run.summary || 'The backup could not start.');
+    }
+    return { run };
   });
 
   app.delete<{ Params: { date: string } }>('/v1/backups/:date', async (req, reply) => {
@@ -10210,14 +10328,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           ...snapshotDeps(agent),
           // The same second provision Import and Move use: this installation's
           // bot, members and model over the restored openclaw.json.
-          reapply: async () => {
-            const pdeps = { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision };
-            // A build that was never accepted: its memory-search decision
-            // must not be stamped by a later model change (2026-10-09).
-            try { await pdeps.provider.provision(await buildRuntimeSpec(pdeps, agent.id)); }
-            catch (err) { forgetEmbedDecision(agent.id); throw err; }
-            recordApplied(store, agent.id);
-          },
+          reapply: () => reapplyCurrentSettings(
+            { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision },
+            agent.id,
+          ),
+          requestedBy: ownerIdOf(req),
         }, agent.id, date),
       );
     } catch (err) {
@@ -10622,6 +10737,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     store, secrets, channel: deps.channel, embedder: embedderForProvision,
     providerForHost: (hostId) => { try { return providerFor(hostId); } catch { return undefined; } },
     logFor: (agentId) => trace(agentId ?? undefined),
+    // A rebuild queued before the restart takes its place in the queue again.
+    requeueRebuild: (op) => {
+      const p = op.params as { checkpoint?: boolean; was?: Partial<Agent> };
+      return kickRebuild(op.agentId!, { checkpoint: p.checkpoint === true, resume: { opId: op.id, was: (p.was ?? {}) as Agent } });
+    },
+    appDeps: (agentId) => { const a = store.getAgent(agentId); return a?.runtimeRef ? appDeps(a) : undefined; },
   };
   /** An operation the caller may see: on an agent they own. Members see nothing. */
   const ownedOperation = (req: FastifyRequest, id: string) => {
@@ -12721,7 +12842,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       step('archiving — stopping it and handing its bot back');
       try {
         await archiveAgent(
-          { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id) },
+          { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id), requestedBy: ownerIdOf(req) },
           agent.id,
         );
         // Discord, like Telegram: the bot is parked (kept for this agent, so a
@@ -12919,7 +13040,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   return {
     /** At boot, after the first reconcile: settle what the last process left running. */
-    resumeOperations: () => resumeOperations(opsCtx),
+    resumeOperations: async () => {
+      await resumeOperations(opsCtx);
+      // An app waiting for its agent's setup (a new agent "from a repo") went
+      // in only when that setup finished in this process: one whose setup
+      // ended before a restart (or was settled by it) goes in now.
+      for (const id of store.listAppPendingAgents()) {
+        if (store.getAgent(id)?.state === 'RUNNING') await runPendingApp(id).catch(() => {});
+      }
+    },
     /** Ask again, every 10 minutes, the questions a held operation is waiting on. */
     startOperationRetryLoop: (intervalMs?: number) => startOperationRetryLoop(opsCtx, intervalMs),
   };

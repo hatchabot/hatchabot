@@ -31,13 +31,18 @@ export type OpKind =
   | 'app-install'
   | 'app-update'
   | 'app-rollback'
-  | 'install-image';
+  | 'install-image'
+  | 'backup-run';
 
 export type OpStatus = OperationRow['status'];
 export type Operation = OperationRow;
 
-/** What to do when a restart cut the operation off right after this step. */
-export type AfterStep = 'nothing' | 'undo' | 'finish' | 'ask';
+/**
+ * What to do when a restart cut the operation off right after this step:
+ * nothing was changed; undo it; finish it; ask another server; or hold it for
+ * the owner's choice (a restore half-written: either way is right).
+ */
+export type AfterStep = 'nothing' | 'undo' | 'finish' | 'ask' | 'hold';
 
 export interface StepDef {
   key: string;
@@ -82,7 +87,52 @@ export const STEPS: Partial<Record<OpKind, StepDef[]>> = {
     { key: 'started', label: 'started', destructive: false, after: 'undo' },
     { key: 'settled', label: 'its skills settled', destructive: false, after: 'undo' },
   ],
+  'restore-backup': [
+    { key: 'stopped', label: 'stopped for the restore', destructive: true, after: 'undo' },
+    { key: 'safety-taken', label: 'a copy of how it was saved to disk', destructive: false, after: 'hold' },
+    { key: 'replaced', label: "that night's copy written in", destructive: true, after: 'hold' },
+    { key: 'reapplied', label: 'its current settings put back over it', destructive: false, after: 'finish' },
+  ],
+  'restore-snapshot': [
+    { key: 'safety-taken', label: 'a snapshot of how its files were taken', destructive: false, after: 'hold' },
+    { key: 'file-written', label: 'writing its files', destructive: true, after: 'hold' },
+    { key: 'written', label: 'its files written', destructive: false, after: 'finish' },
+  ],
+  archive: [
+    { key: 'stopped', label: 'stopped', destructive: true, after: 'undo' },
+    { key: 'bot-released', label: 'its bot given back', destructive: true, after: 'finish' },
+    { key: 'archived', label: 'put in the archive', destructive: false, after: 'finish' },
+  ],
+  'app-install': appSteps(),
+  'app-update': appSteps(),
+  'app-rollback': [
+    { key: 'switching', label: 'switching back', destructive: true, after: 'hold' },
+    { key: 'tasks', label: 'its scheduled tasks set', destructive: false, after: 'hold' },
+  ],
 };
+
+/** An install or update: nothing live changes before the switch (apps.ts, installRelease). */
+function appSteps(): StepDef[] {
+  return [
+    { key: 'unpacked', label: 'its code copied in', destructive: false, after: 'nothing' },
+    { key: 'configured', label: 'its configuration staged', destructive: false, after: 'nothing' },
+    { key: 'tested', label: 'its tests passed', destructive: false, after: 'nothing' },
+    { key: 'switching', label: 'switching to it', destructive: true, after: 'hold' },
+    { key: 'switched', label: 'switched to it', destructive: true, after: 'hold' },
+    { key: 'tasks', label: 'its scheduled tasks set', destructive: false, after: 'hold' },
+  ];
+}
+
+/**
+ * Kinds whose live guard is in memory (the rebuild queue's `inflight`, the
+ * busy flag). They are recorded so a restart keeps a queued rebuild and
+ * settles one cut off, but in the process running them they never refuse
+ * anything on disk (Start, Archive and Delete wait on a rebuild as they always
+ * did; store.activeOperationFor leaves them out), and their lines stay in the
+ * journal: their own events (runtime.rebuilt, provision.failed…) are the
+ * timeline's.
+ */
+export const BACKGROUND_KINDS: readonly string[] = ['rebuild', 'provision'];
 
 export const KIND_LABEL: Record<string, string> = {
   'move-host': 'Move to another machine',
@@ -98,6 +148,7 @@ export const KIND_LABEL: Record<string, string> = {
   'app-update': 'App update',
   'app-rollback': 'App roll back',
   'install-image': 'Image install',
+  'backup-run': 'Backup',
 };
 
 const ACTIVE: OpStatus[] = ['queued', 'running', 'interrupted', 'held'];
@@ -147,6 +198,8 @@ export interface Recovery {
 
 export interface OpHandle {
   readonly id: string;
+  /** A queued operation starts now, in this process. */
+  start(): void;
   /** The last step confirmed done; `detail` (never a secret) is merged into params. */
   step(key: string, detail?: Record<string, unknown>): void;
   done(outcome: string): void;
@@ -159,8 +212,10 @@ export interface OpHandle {
 
 function event(store: Store, op: Operation, name: string, detail: Record<string, unknown>): void {
   const d = { op: op.id, kind: op.kind, ...detail };
-  journal(name, { agentId: op.agentId, ...d });
-  if (!op.agentId) return;
+  journal(name, { agentId: op.agentId, ...(op.hostId ? { hostId: op.hostId } : {}), ...d });
+  // A machine's operation (an image copy, a backup run) has no agent: the
+  // Activity list reads it from the operations table itself (GET /v1/events).
+  if (!op.agentId || BACKGROUND_KINDS.includes(op.kind)) return;
   try {
     store.recordEvent(op.agentId, name, d);
   } catch {
@@ -205,6 +260,10 @@ export function handleFor(store: Store, id: string): OpHandle {
   };
   return {
     id,
+    start() {
+      const op = store.updateOperation(id, { status: 'running', bootId: currentBootId() });
+      if (op) event(store, op, 'op.started', { label: KIND_LABEL[op.kind] ?? op.kind });
+    },
     step(key, detail) {
       const op = get();
       if (stepHook) stepHook(op, key);
@@ -233,17 +292,18 @@ export function beginOperation(
   kind: OpKind,
   agentId: string | null,
   params: Record<string, unknown>,
-  opts: { hostId?: string; requestedBy?: string } = {},
+  opts: { hostId?: string; requestedBy?: string; queued?: boolean } = {},
 ): OpHandle {
   const now = new Date().toISOString();
   const id = `op_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
   store.insertOperation({
     id, agentId, hostId: opts.hostId ?? null, kind, requestedBy: opts.requestedBy ?? null,
-    requestedAt: now, params, step: null, stepAt: null, status: 'running', outcome: null,
+    requestedAt: now, params, step: null, stepAt: null, status: opts.queued ? 'queued' : 'running', outcome: null,
     recovery: null, bootId: currentBootId(), updatedAt: now, finishedAt: null,
   });
   const op = store.getOperation(id)!;
-  event(store, op, 'op.started', { label: KIND_LABEL[kind] ?? kind });
+  // A queued one says "started" when it does (start()).
+  if (!opts.queued) event(store, op, 'op.started', { label: KIND_LABEL[kind] ?? kind });
   return handleFor(store, id);
 }
 

@@ -115,6 +115,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'agent.exported': 'exported',
   'agent.archiving': (d) => d.checkpoint ? 'archiving — saving its conversation to memory first' : 'archiving',
   'agent.archived': 'archived',
+  'archive.undone': 'an archive cut off by a restart was undone — it is as it was',
   'ops.created': 'the manager was created',
   // ---- the rest of the trail (review 2026-09-25: every emitted event has words) ----
   'a2a.consult': (d) => `asked ${String(d.peer ?? d.target ?? 'another agent')}`,

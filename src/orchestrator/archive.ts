@@ -4,6 +4,7 @@ import type { RuntimeProvider } from '../providers/provider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
 import { whileBusy } from './busy.js';
 import { canTransition } from '../domain/stateMachine.js';
+import { beginOperation, handleFor, rethrowIfCrash, type OpHandle } from './operations.js';
 
 /**
  * Archive: a STOPPED agent that has handed its Telegram bot back.
@@ -27,8 +28,10 @@ export interface ArchiveDeps {
   store: Store;
   secrets: SecretStore;
   provider: RuntimeProvider;
-  channel: CompositeTelegramProvisioner;
+  channel: Pick<CompositeTelegramProvisioner, 'pool' | 'release'> & Partial<Pick<CompositeTelegramProvisioner, 'discardPending'>>;
   log: (event: string, detail: Record<string, unknown>) => void;
+  /** Who asked, for the operation's record. */
+  requestedBy?: string;
 }
 
 export class ArchiveError extends Error {
@@ -49,66 +52,134 @@ export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<
     // the state left the agent neither archived nor whole (night review).
     if (!canTransition(agent.state, 'ARCHIVED')) throw new ArchiveError(`It is ${agent.state.toLowerCase()} — wait for it to settle, then archive it.`);
 
-    // Stop first, and only release the bot once the runtime is actually down.
-    // A container left polling a token that has gone back in the pool is the
-    // one genuinely bad outcome here: the next agent to lease it would fight
-    // this one for every message.
-    // Whatever the state: a FAILED agent's container may still be up and
-    // polling (a failed delete or rebuild leaves it so). If it cannot be
-    // stopped, the bot is not given up (night review, 2026-09-27).
-    if (agent.runtimeRef) {
-      try {
-        await provider.stop(agent.runtimeRef);
-      } catch (err) {
-        if (agent.state === 'RUNNING') throw err;
-        const st = await provider.status(agent.runtimeRef).catch(() => ({ phase: 'unknown' as const }));
-        // A record that says STOPPED on a machine that cannot be reached (a
-        // runner that is off) archives as it used to (regression review).
-        const offline = agent.state === 'STOPPED' && st.phase === 'unknown';
-        if (!offline && st.phase !== 'absent' && st.phase !== 'stopped') {
-          throw new ArchiveError("Couldn't stop its runtime, so its bot was not given up. Try again in a moment.");
-        }
-      }
-    }
-
+    // Recorded as it goes (operations.ts): a restart before the bot is given
+    // back is undone (it is started again if it ran); after, the archive is
+    // finished (resumeArchive) — the bot is gone, going back would need another.
     const row = store.getChannelForAgent(agentId);
-    if (row && !agent.migratedTo) {
-      // A PASTED bot is parked in the pool first, exactly as delete does it —
-      // the token stays usable, which is the entire point of archiving. Under
-      // the agent's OWNER: their token, their pool slot, never another user's
-      // next lease.
-      if (!channel.pool.owns(row.accountId)) {
+    const wasRunning = agent.state === 'RUNNING';
+    const op = beginOperation(store, 'archive', agentId, { wasRunning, accountId: row?.accountId ?? null }, { requestedBy: deps.requestedBy });
+    try {
+      // Stop first, and only release the bot once the runtime is actually down.
+      // A container left polling a token that has gone back in the pool is the
+      // one genuinely bad outcome here: the next agent to lease it would fight
+      // this one for every message.
+      // Whatever the state: a FAILED agent's container may still be up and
+      // polling (a failed delete or rebuild leaves it so). If it cannot be
+      // stopped, the bot is not given up (night review, 2026-09-27).
+      if (agent.runtimeRef) {
         try {
-          await channel.pool.addToPool(row.accountId, await secrets.get(row.secretRef), agent.ownerId);
+          await provider.stop(agent.runtimeRef);
         } catch (err) {
-          // Recycling is the bonus, not the job. An agent that can't be parked
-          // in the pool is still archived; the token just isn't reusable.
-          log('archive.recycle_failed', { agentId, error: String(err) });
+          rethrowIfCrash(err);
+          if (agent.state === 'RUNNING') throw err;
+          const st = await provider.status(agent.runtimeRef).catch(() => ({ phase: 'unknown' as const }));
+          // A record that says STOPPED on a machine that cannot be reached (a
+          // runner that is off) archives as it used to (regression review).
+          const offline = agent.state === 'STOPPED' && st.phase === 'unknown';
+          if (!offline && st.phase !== 'absent' && st.phase !== 'stopped') {
+            throw new ArchiveError("Couldn't stop its runtime, so its bot was not given up. Try again in a moment.");
+          }
         }
       }
-      // agentId explicitly: a token parked a line ago has no lease to read, and
-      // its members would otherwise get no goodbye at all.
-      await channel.release(row.accountId, { reason: 'archived', agentId });
-      // An imported agent's token lives outside the username-keyed space that
-      // release() scrubs.
-      if (row.secretRef.startsWith('channel/')) await secrets.delete(row.secretRef).catch(() => {});
-      store.deleteChannelForAgent(agentId);
-    }
+      op.step('stopped');
 
-    // Any outstanding invite points at a bot this agent no longer has. Let them
-    // go rather than mint a membership with nowhere to talk.
-    // An archived management agent keeps nothing running: its doorman goes too.
-    if (agent.ops) await provider.removeOpsJail?.(agentId).catch(() => {});
-    store.expireInvitesFor(agentId, 'agent-archived');
-    // A parked human step ("paste a bot token") is meaningless now and would
-    // otherwise follow the agent into the archive — the card would sit there
-    // asking for a token for an agent that isn't running, and the fleet's
-    // needs-attention count would never come down. Restore re-parks it if the
-    // pool is still dry. Same for a token stashed but never committed: we are
-    // giving up this identity, so don't quietly provision onto it later.
-    store.setAgentPendingAction(agentId, null);
-    channel.discardPending?.(agentId);
-    store.setAgentState(agentId, 'ARCHIVED');
-    log('agent.archived', { agentId, accountId: row?.accountId });
+      if (row && !agent.migratedTo) {
+        // A PASTED bot is parked in the pool first, exactly as delete does it —
+        // the token stays usable, which is the entire point of archiving. Under
+        // the agent's OWNER: their token, their pool slot, never another user's
+        // next lease.
+        if (!channel.pool.owns(row.accountId)) {
+          try {
+            await channel.pool.addToPool(row.accountId, await secrets.get(row.secretRef), agent.ownerId);
+          } catch (err) {
+            rethrowIfCrash(err);
+            // Recycling is the bonus, not the job. An agent that can't be parked
+            // in the pool is still archived; the token just isn't reusable.
+            log('archive.recycle_failed', { agentId, error: String(err) });
+          }
+        }
+        // agentId explicitly: a token parked a line ago has no lease to read, and
+        // its members would otherwise get no goodbye at all.
+        await channel.release(row.accountId, { reason: 'archived', agentId });
+      }
+      op.step('bot-released');
+      await finishArchive(deps, op, agentId);
+    } catch (err) {
+      rethrowIfCrash(err);
+      // The stop or the release failed in this process: the route says so, as
+      // it always did; the record ends with it.
+      if (op.get().status === 'running') op.fail(err);
+      throw err;
+    }
   });
+}
+
+/**
+ * Everything after the bot is given back, each step safe to run twice: the
+ * token an import kept, the channel row, a management agent's doorman, the
+ * invites and the parked human step, then ARCHIVED. The container stays
+ * stopped. Shared by the archive and its finish after a restart.
+ */
+async function finishArchive(deps: ArchiveDeps, op: OpHandle, agentId: string): Promise<void> {
+  const { store, secrets, provider, channel, log } = deps;
+  const agent = store.getAgent(agentId);
+  if (!agent) return;
+  const row = store.getChannelForAgent(agentId);
+  if (row && !agent.migratedTo) {
+    // An imported agent's token lives outside the username-keyed space that
+    // release() scrubs.
+    if (row.secretRef.startsWith('channel/')) await secrets.delete(row.secretRef).catch(() => {});
+    store.deleteChannelForAgent(agentId);
+  }
+
+  // Any outstanding invite points at a bot this agent no longer has. Let them
+  // go rather than mint a membership with nowhere to talk.
+  // An archived management agent keeps nothing running: its doorman goes too.
+  if (agent.ops) await provider.removeOpsJail?.(agentId).catch(() => {});
+  store.expireInvitesFor(agentId, 'agent-archived');
+  // A parked human step ("paste a bot token") is meaningless now and would
+  // otherwise follow the agent into the archive — the card would sit there
+  // asking for a token for an agent that isn't running, and the fleet's
+  // needs-attention count would never come down. Restore re-parks it if the
+  // pool is still dry. Same for a token stashed but never committed: we are
+  // giving up this identity, so don't quietly provision onto it later.
+  store.setAgentPendingAction(agentId, null);
+  channel.discardPending?.(agentId);
+  if (agent.state !== 'ARCHIVED') store.setAgentState(agentId, 'ARCHIVED');
+  op.step('archived');
+  log('agent.archived', { agentId, accountId: row?.accountId ?? (op.get().params.accountId as string | null) ?? undefined });
+  op.done('Archived.');
+}
+
+/**
+ * An archive a restart cut off (the design's archive row). Its bot given back
+ * — recorded, or found back in the pool and not leased to it (a pasted bot is
+ * parked there before it is released) — means finish: ARCHIVED, the container
+ * left stopped. Otherwise nothing was given up: undone, and started again if
+ * it ran.
+ */
+export async function resumeArchive(deps: ArchiveDeps, opId: string): Promise<void> {
+  const op = handleFor(deps.store, opId);
+  const row = op.get();
+  const agent = row.agentId ? deps.store.getAgent(row.agentId) : undefined;
+  if (!agent || agent.state === 'DELETED') { op.fail('Interrupted by a restart; the agent is gone.'); return; }
+  if (agent.state === 'ARCHIVED') { await finishArchive(deps, op, agent.id); return; }
+  const p = row.params as { wasRunning?: boolean; accountId?: string | null };
+  const released = row.step === 'bot-released' || row.step === 'archived' || (() => {
+    if (!p.accountId) return false;
+    const entry = deps.channel.pool.list().find((e) => e.username.toLowerCase() === String(p.accountId).toLowerCase());
+    return !!entry && entry.leasedTo !== agent.id;
+  })();
+  if (released) {
+    // Its container must not poll a bot that may be someone else's now.
+    if (agent.runtimeRef) await deps.provider.stop(agent.runtimeRef).catch(() => {});
+    await finishArchive(deps, op, agent.id);
+    return;
+  }
+  if (p.wasRunning && agent.runtimeRef) {
+    await deps.provider.start(agent.runtimeRef);
+    if (deps.store.getAgent(agent.id)?.state !== 'RUNNING') deps.store.setAgentState(agent.id, 'RUNNING');
+  }
+  deps.log('archive.undone', { agentId: agent.id });
+  op.rolledBack('The archive was interrupted by a restart before its bot was given back — it was left as it was.');
 }

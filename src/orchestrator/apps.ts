@@ -16,6 +16,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { z } from 'zod';
 import type { RuntimeProvider } from '../providers/provider.js';
+import { SimulatedCrash } from './operations.js';
 
 export const MANIFEST_FILE = 'hatchabot.json';
 export const APPS_ROOT = '/home/node/.openclaw/apps';
@@ -200,6 +201,8 @@ export interface InstallDeps {
   runtimeRef: string;
   facts: AgentFacts;
   log?: (step: string, detail?: Record<string, unknown>) => void;
+  /** The operation's record (operations.ts): each step as it is done (appOperations.ts). */
+  step?: (key: string) => void;
 }
 
 async function sh(d: InstallDeps, script: string, timeoutMs = 60_000) {
@@ -219,12 +222,12 @@ export async function currentSha(d: InstallDeps, app: string): Promise<string | 
 }
 
 /** Point `current` at `link` again, atomically ('' = there was none). */
-function pointBack(p: ReturnType<typeof appPaths>, link: string) {
+export function pointBack(p: ReturnType<typeof appPaths>, link: string) {
   return link ? `cd ${sq(p.root)} && ln -sfn ${sq(link)} current.new && mv -T current.new current` : `rm -f ${sq(p.current)}`;
 }
 
 /** The manifest a release on the volume was installed with (to put its tasks back). */
-async function releaseManifest(d: InstallDeps, dir: string): Promise<AppManifest | undefined> {
+export async function releaseManifest(d: InstallDeps, dir: string): Promise<AppManifest | undefined> {
   const r = await sh(d, `cat ${sq(`${dir}/${MANIFEST_FILE}`)} 2>/dev/null || true`);
   try { return parseManifest(r.stdout); } catch { return undefined; }
 }
@@ -251,7 +254,9 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
   const name = m.config?.file ?? 'config.json';
   const live = `${p.data}/${name}`;
   const staged = `${stage}/${name}`;
+  const step = d.step ?? (() => {});
   let switching = false;
+  let crashed = false;
   try {
     // 1. the code, and an empty staging folder for its data while it is tested
     log('app.unpack', { app: m.app, sha: short });
@@ -260,6 +265,7 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
         + ` && mkdir -p ${sq(p.data)} && rm -rf ${sq(stage)} && mkdir -p ${sq(stage)}`],
       rel.tar);
     if (un.code !== 0) throw new AppError(`Could not unpack the code: ${errText(un)}`);
+    step('unpacked');
 
     // 2. the config, staged: the live file is not touched until the switch
     if (m.config) {
@@ -272,6 +278,7 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
         ['sh', '-c', `umask 077 && cat > ${sq(staged)}`], Buffer.from(JSON.stringify(config, null, 2) + '\n'));
       if (w.code !== 0) throw new AppError(`Could not write ${staged}.`);
     }
+    step('configured');
 
     // 3. its tests: the new release, with its env, {data_dir} = the staged folder (the new config, none of the live data)
     let test: Installed['test'];
@@ -286,8 +293,10 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
         throw Object.assign(new AppError(`Its tests failed, so ${short} was not switched on:\n${test.output.slice(-1500)}`), { test });
       }
     }
+    step('tested');
 
     // 4. switch: the config (the old one kept aside, or a note there was none), then `current`, atomically
+    step('switching');
     switching = true;
     const cfg = m.config
       ? `{ if [ -f ${sq(live)} ]; then cp -p ${sq(live)} ${sq(`${staged}.prev`)}; else : > ${sq(`${staged}.none`)}; fi; } && mv -f ${sq(staged)} ${sq(live)} && `
@@ -295,16 +304,21 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
     const sw = await sh(d, `cd ${sq(p.root)} && ${cfg}ln -sfn releases/${short} current.new && mv -T current.new current`);
     if (sw.code !== 0) throw new AppError(`Could not switch to ${short}: ${errText(sw)}`);
     log('app.switched', { app: m.app, sha: short, previous: previousSha ?? null });
+    step('switched');
 
     // 5. its scheduled commands (syncTasks leaves the old set in place when it fails)
     const before = previousSha ? await releaseManifest(d, `${p.releases}/${previousSha}`) : undefined;
     const tasks = await syncTasks(d, m, before);
+    step('tasks');
 
     // 6. keep the newest releases (never the live one or the one before it)
     const prune = await sh(d, `cd ${sq(p.root)} && ls -1t releases | tail -n +${KEEP_RELEASES + 1} | grep -v -x -e ${short} -e ${sq(previousSha ?? short)} | while read r; do rm -rf "releases/$r"; done`);
     if (prune.code !== 0) log('app.prune_failed', { app: m.app, error: errText(prune) });
     return { app: m.app, sha: rel.sha, previousSha, manifest: m, test, tasks };
   } catch (e) {
+    // A (simulated) dead process puts nothing back and clears nothing: the
+    // restart finds it as it is (appOperations.ts, resumeAppOperation).
+    if (e instanceof SimulatedCrash) { crashed = true; throw e; }
     if (!switching) throw e;
     // Put the previous release back: its config (when this one was moved in) and `current`.
     const cfgBack = m.config
@@ -320,8 +334,20 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
     if (e instanceof Error) e.message += said;
     throw e;
   } finally {
-    await sh(d, `rm -rf ${sq(stage)}; rmdir ${sq(`${p.root}/staging`)} 2>/dev/null; true`).catch(() => undefined);
+    if (!crashed) await clearStaging(d, m.app, short);
   }
+}
+
+/** Where an install stages a release's data while it is tested ({data_dir} for its tests, the config's way in). */
+export function stagingDir(app: string, short: string): string {
+  return `${appPaths(app).root}/staging/${short}`;
+}
+
+/** Remove a release's staging folder (and the staging folder when empty); never throws. */
+export async function clearStaging(d: InstallDeps, app: string, short?: string): Promise<void> {
+  const root = appPaths(app).root;
+  const what = short ? sq(stagingDir(app, short)) : `${sq(`${root}/staging`)}/*`;
+  await sh(d, `rm -rf ${what}; rmdir ${sq(`${root}/staging`)} 2>/dev/null; true`).catch(() => undefined);
 }
 
 /**
@@ -333,11 +359,14 @@ export async function switchTo(d: InstallDeps, m: AppManifest, sha: string, from
   const p = appPaths(m.app);
   const short = sha.slice(0, 12);
   const before = await currentLink(d, m.app);
+  d.step?.('switching');
   const r = await sh(d, `cd ${sq(p.root)} && test -d releases/${short} && ln -sfn releases/${short} current.new && mv -T current.new current`);
   if (r.code !== 0) throw new AppError(`Release ${short} is no longer in the agent.`);
   try {
     await syncTasks(d, m, from);
+    d.step?.('tasks');
   } catch (e) {
+    if (e instanceof SimulatedCrash) throw e;
     const back = await sh(d, pointBack(p, before)).catch(() => ({ code: 1, stdout: '', stderr: '' }));
     if (e instanceof Error) e.message += back.code === 0 ? ` Still on ${shaOf(before) ?? 'the release it had'}.` : ' Pointing back at the release it had failed too.';
     throw e;

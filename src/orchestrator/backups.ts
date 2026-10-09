@@ -7,7 +7,7 @@
  * trigger a run or prune an old one.
  */
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { defaultBackupsDir } from '../envCompat.js';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,7 @@ import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
 import { allowlistScrubScript, keepOnlyTelegramAccountScript, RESTORED_ACCESS_SCRIPT, revokedScrubTargets } from './members.js';
+import { beginOperation, handleFor, rethrowIfCrash, type OpHandle } from './operations.js';
 
 // A dated backup directory is exactly `YYYY-MM-DD`, matching what the script
 // creates (`date +%F`) and prunes. Anything else in the base dir is ignored,
@@ -214,9 +215,13 @@ export function backupRunState(): BackupRunState {
  * state is returned unchanged — the button is idempotent). `now` is injected
  * so callers can stamp times without this module reaching for the clock.
  */
-export function startBackup(now: number): BackupRunState {
+export function startBackup(now: number, onFinish?: (state: BackupRunState) => void): BackupRunState {
   if (runState.status === 'running') return runState;
   runState = { status: 'running', startedAt: now };
+  const settle = (next: BackupRunState) => {
+    runState = next;
+    try { onFinish?.(next); } catch { /* the record of a run never breaks the run */ }
+  };
 
   const lines: string[] = [];
   const capture = (buf: Buffer) => {
@@ -244,20 +249,21 @@ export function startBackup(now: number): BackupRunState {
   child.stdout?.on('data', capture);
   child.stderr?.on('data', capture);
   child.on('error', (err) => {
-    runState = {
+    if (runState.status !== 'running') return;
+    settle({
       status: 'error',
       startedAt: runState.startedAt,
       summary: `Couldn't run the backup script: ${err.message}`,
-    };
+    });
   });
   child.on('close', (code) => {
     // A run that already errored out (spawn error event) stays errored.
     if (runState.status !== 'running') return;
-    runState = {
+    settle({
       status: code === 0 ? 'ok' : 'error',
       startedAt: runState.startedAt,
       summary: lines.slice(-15).join('\n') || (code === 0 ? 'Backup complete.' : `Backup failed (exit ${code}).`),
-    };
+    });
   });
   return runState;
 }
@@ -292,15 +298,25 @@ export function restoreSafetyDir(): string {
   return join(backupsDir(), 'restore-safety');
 }
 
+/** Where this restore's copy of the volume goes (decided before it is written, so a restart knows). */
+function safetyCopyPath(runtimeRef: string): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return join(restoreSafetyDir(), `${agentArchiveName(runtimeRef).replace(/\.tgz$/, '')}-before-restore-${stamp}.tgz`);
+}
+
 /** Write the pre-restore copy to disk, owner-only (it holds the agent's secrets). */
-function keepSafetyCopy(runtimeRef: string, safety: Buffer): string {
+function keepSafetyCopy(file: string, safety: Buffer): void {
   const dir = restoreSafetyDir();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const file = join(dir, `${agentArchiveName(runtimeRef).replace(/\.tgz$/, '')}-before-restore-${stamp}.tgz`);
   writeFileSync(file, safety, { mode: 0o600 });
-  return file;
+}
+
+/** A restore that ended either way no longer needs its copy (it holds secrets); the folder goes when empty. */
+function dropSafetyCopy(file: string | undefined): void {
+  if (!file || !file.startsWith(restoreSafetyDir())) return;
+  try { rmSync(file, { force: true }); } catch { /* best effort */ }
+  try { rmdirSync(restoreSafetyDir()); } catch { /* not empty, or gone */ }
 }
 
 function short(err: unknown): string {
@@ -321,21 +337,27 @@ export interface RestoreResult {
  * memory, so the agent is stopped for the swap and only restarted if it was
  * running before. A safety copy of the current volume is taken first and rolled
  * back if the extract fails, so a broken archive can't leave a half-written
- * volume. If that rollback fails too, the agent is left stopped and FAILED and
- * the copy is written under restoreSafetyDir() for recovery. The caller is
- * responsible for the busy guard and for gating this to the machine's owner.
+ * volume. That copy is written under restoreSafetyDir() BEFORE the volume is
+ * replaced (and removed once the restore ends either way), so a restart in the
+ * middle can still put it back (resumeBackupRestore). If the rollback fails
+ * too, the agent is left stopped and FAILED and the copy stays there for
+ * recovery. The caller is responsible for the busy guard and for gating this
+ * to the machine's owner.
  */
+export interface RestoreDeps {
+  store: Store; provider: RuntimeProvider; log?: (e: string, d: Record<string, unknown>) => void;
+  /** Put this installation's current settings (bot, members, model) back over the restored config, as Import and Move do. */
+  reapply?: (runtimeRef: string) => Promise<void>;
+  /** Who asked, for the operation's record. */
+  requestedBy?: string;
+}
+
 export async function restoreAgentFromBackup(
-  deps: {
-    store: Store; provider: RuntimeProvider; log?: (e: string, d: Record<string, unknown>) => void;
-    /** Put this installation's current settings (bot, members, model) back over the restored config, as Import and Move do. */
-    reapply?: (runtimeRef: string) => Promise<void>;
-  },
+  deps: RestoreDeps,
   agentId: string,
   date: string,
 ): Promise<RestoreResult> {
-  const { store, provider } = deps;
-  const log = deps.log ?? (() => {});
+  const { store } = deps;
   if (!DATE_DIR.test(date)) throw new RestoreError('Not a backup date.');
 
   const agent = store.getAgent(agentId);
@@ -353,37 +375,71 @@ export async function restoreAgentFromBackup(
   const data = readFileSync(file);
 
   const wasRunning = agent.state === 'RUNNING';
+  const runtimeRef = agent.runtimeRef;
+  // Recorded as it goes (operations.ts): a restart after the copy of how it
+  // was is on disk holds the agent stopped for its owner's choice, and the
+  // copy is there to put back (resumeBackupRestore).
+  const safetyFile = safetyCopyPath(runtimeRef);
+  const op = beginOperation(store, 'restore-backup', agentId, { date, wasRunning, safetyFile }, { requestedBy: deps.requestedBy });
+  try {
+    return await restoreSteps(deps, op, agentId, runtimeRef, date, data, wasRunning, safetyFile);
+  } catch (err) {
+    rethrowIfCrash(err);
+    // Whatever was not recorded below (an unexpected error) ends the record too.
+    const row = op.get();
+    if (row.status === 'running') op.fail(err);
+    throw err;
+  }
+}
+
+async function restoreSteps(
+  deps: RestoreDeps, op: OpHandle, agentId: string, runtimeRef: string, date: string, data: Buffer, wasRunning: boolean, safetyFile: string,
+): Promise<RestoreResult> {
+  const { store, provider } = deps;
+  const log = deps.log ?? (() => {});
   if (wasRunning) {
-    await provider.stop(agent.runtimeRef);
+    await provider.stop(runtimeRef);
     store.setAgentState(agentId, 'STOPPED');
   }
+  op.step('stopped');
 
-  const restartIfWasRunning = async () => {
-    if (!wasRunning) return;
-    try {
-      await provider.start(agent.runtimeRef!);
-      store.setAgentState(agentId, 'RUNNING');
-    } catch (startErr) {
-      log('restore.restart_failed', { agentId, error: String(startErr) });
-    }
+  const restartIfWasRunning = () => restartAfterRestore(deps, agentId, runtimeRef, wasRunning);
+  const nothingChanged = async (why: string): Promise<never> => {
+    await restartIfWasRunning();
+    dropSafetyCopy(safetyFile);
+    op.rolledBack(why);
+    throw new RestoreError(why);
   };
 
   // Safety net: capture the current volume so a failed extract can be undone.
   // No copy, no restore: the extract empties the volume first, so a failure
   // part-way left nothing to go back to (night review, 2026-09-27).
-  let safety: Buffer | undefined;
+  let safety: Buffer;
   try {
-    safety = await provider.exportState(agent.runtimeRef);
+    safety = await provider.exportState(runtimeRef);
   } catch (err) {
+    rethrowIfCrash(err);
     log('restore.safety_capture_failed', { agentId, error: String(err) });
-    await restartIfWasRunning();
     // No pointer at Download copy: it tars the same volume the same way, so it
     // fails for the same reason (review, 2026-09-29).
-    throw new RestoreError(
+    return nothingChanged(
       "Its current state could not be copied first, so the restore would not be undoable — nothing was changed. " +
         "Try again in a moment; if it keeps failing, check this machine's free disk space.",
     );
   }
+  // On disk BEFORE the volume is replaced: in memory only, a restart in the
+  // middle lost the one copy of how it was (design, "After a restart").
+  try {
+    keepSafetyCopy(safetyFile, safety);
+  } catch (err) {
+    rethrowIfCrash(err);
+    log('restore.safety_keep_failed', { agentId, error: String(err) });
+    return nothingChanged(
+      `Its current state could not be saved to disk first (${short(err)}), so the restore would not be undoable — nothing was changed. ` +
+        "Check this machine's free disk space, then try again.",
+    );
+  }
+  op.step('safety-taken');
 
   /**
    * Put the pre-restore copy back after `what` failed. Only a rollback that
@@ -397,56 +453,91 @@ export async function restoreAgentFromBackup(
   const rollBack = async (what: string, cause: unknown, leftAsItWas: string): Promise<never> => {
     let rollbackErr: unknown;
     try {
-      await provider.importState(agent.runtimeRef!, safety!);
+      await provider.importState(runtimeRef, safety);
     } catch (e) {
+      rethrowIfCrash(e);
       rollbackErr = e;
       log('restore.rollback_failed', { agentId, error: String(e) });
     }
     if (rollbackErr === undefined) {
       await restartIfWasRunning();
+      dropSafetyCopy(safetyFile);
+      op.rolledBack(leftAsItWas);
       throw new RestoreError(leftAsItWas);
     }
     // A re-apply may have started it again; whatever is in its volume now must not run.
-    try { await provider.stop(agent.runtimeRef!); } catch (e) { log('restore.stop_failed', { agentId, error: String(e) }); }
-    let kept: string | undefined;
-    let keepErr: unknown;
-    try { kept = keepSafetyCopy(agent.runtimeRef!, safety!); } catch (e) { keepErr = e; log('restore.safety_keep_failed', { agentId, error: String(e) }); }
-    const where = kept
-      ? `The copy of how it was before the restore is kept at ${kept}.`
-      : `The copy of how it was before the restore could not be saved either (${short(keepErr)}).`;
+    try { await provider.stop(runtimeRef); } catch (e) { log('restore.stop_failed', { agentId, error: String(e) }); }
+    const where = `The copy of how it was before the restore is kept at ${safetyFile}.`;
     store.setAgentState(
       agentId,
       'FAILED',
       `A restore from the ${date} backup failed and could not be undone, so its memory may be half-restored. ${where} ` +
         'Restore a backup again, or put that copy back by hand, before tapping Retry.',
     );
-    log('restore.left_failed', { agentId, date, kept: kept ?? null });
-    throw new RestoreError(
+    log('restore.left_failed', { agentId, date, kept: safetyFile });
+    const msg =
       `${what} (${short(cause)}), and putting it back as it was failed too (${short(rollbackErr)}). ` +
-        `The agent could not be put back: it is stopped and marked failed so it does not run on a half-restored memory. ${where} ` +
-        'Restore a backup again, or put that copy back by hand, before starting it.',
-    );
+      `The agent could not be put back: it is stopped and marked failed so it does not run on a half-restored memory. ${where} ` +
+      'Restore a backup again, or put that copy back by hand, before starting it.';
+    op.fail(msg);
+    throw new RestoreError(msg);
   };
 
   forgetDmPolicy(agentId); // the restored config is whatever the archive held
   try {
-    await provider.importState(agent.runtimeRef, data);
+    await provider.importState(runtimeRef, data);
   } catch (err) {
+    rethrowIfCrash(err);
     // The volume may be half-overwritten. Put the pre-restore state back, so a
     // broken archive never corrupts a working agent.
     log('restore.import_failed', { agentId, error: String(err) });
     await rollBack('Restore failed', err, 'Restore failed — the agent was left as it was.');
   }
+  op.step('replaced');
 
-  // The backup is that night's whole volume, config and approvals included.
-  // Memory and files are what a restore is for; who may talk to the agent and
-  // which bot it uses follow Hatchabot's records now, or a removed member was
-  // let back in where the app could not show it, and a swapped-away bot was
-  // polled by two agents (review #5, 2026-09-29; Chris chose this over a
-  // whole-volume rollback). What was undone is reported, not silently dropped.
+  let undone: string[];
+  try {
+    undone = await applyCurrentSettingsOver(deps, agentId, runtimeRef);
+  } catch (err) {
+    rethrowIfCrash(err);
+    // Never leave that night's access in force: back to how it was before.
+    log('restore.reapply_failed', { agentId, error: String(err) });
+    return rollBack(
+      "The backup was read, but this agent's current settings could not be put back over it",
+      err,
+      "The backup was read, but this agent's current settings could not be put back over it, so it was left as it was.",
+    );
+  }
+  op.step('reapplied');
+  return completeRestore(deps, op, agentId, runtimeRef, date, wasRunning, safetyFile, undone);
+}
+
+/** Start it again if the restore stopped it; a failed start is logged, not thrown (the result says what it is). */
+async function restartAfterRestore(deps: RestoreDeps, agentId: string, runtimeRef: string, wasRunning: boolean): Promise<void> {
+  if (!wasRunning) return;
+  try {
+    await deps.provider.start(runtimeRef);
+    if (deps.store.getAgent(agentId)?.state !== 'RUNNING') deps.store.setAgentState(agentId, 'RUNNING');
+  } catch (startErr) {
+    (deps.log ?? (() => {}))('restore.restart_failed', { agentId, error: String(startErr) });
+  }
+}
+
+/**
+ * The backup is that night's whole volume, config and approvals included.
+ * Memory and files are what a restore is for; who may talk to the agent and
+ * which bot it uses follow Hatchabot's records now, or a removed member was
+ * let back in where the app could not show it, and a swapped-away bot was
+ * polled by two agents (review #5, 2026-09-29; Chris chose this over a
+ * whole-volume rollback). What was undone is reported, not silently dropped.
+ * Throws when the part that matters for safety could not be done.
+ */
+async function applyCurrentSettingsOver(deps: RestoreDeps, agentId: string, runtimeRef: string): Promise<string[]> {
+  const { store, provider } = deps;
+  const log = deps.log ?? (() => {});
   const undone: string[] = [];
   try {
-    const seen = await provider.execShellOnVolume(agent.runtimeRef, RESTORED_ACCESS_SCRIPT, { readOnly: true });
+    const seen = await provider.execShellOnVolume(runtimeRef, RESTORED_ACCESS_SCRIPT, { readOnly: true });
     const had = JSON.parse(seen.stdout || '{}') as { ids?: string[]; telegramAccounts?: string[] };
     const ids = new Set(had.ids ?? []);
     const back = revokedScrubTargets(store, agentId).people.filter((p) => p.ids.some((id) => ids.has(id))).map((p) => p.name);
@@ -456,43 +547,131 @@ export async function restoreAgentFromBackup(
       undone.push(current ? 'It used a different Telegram bot that night; it keeps the one it has now.' : 'It had a Telegram bot that night; it stays without one.');
     }
   } catch (err) {
+    rethrowIfCrash(err);
     log('restore.access_read_failed', { agentId, error: String(err) });
   }
-  try {
-    if (deps.reapply) {
-      try { await deps.reapply(agent.runtimeRef); }
-      catch (err) {
-        // A full re-apply can fail for reasons a rebuild would too (its AI
-        // source gone). The part that matters for safety still runs: only its
-        // current bot stays; the rest follows at its next rebuild.
-        log('restore.reapply_partial', { agentId, error: String(err).slice(0, 200) });
-        const res = await provider.execShellOnVolume(agent.runtimeRef, keepOnlyTelegramAccountScript(store.getChannelForAgent(agentId, 'telegram')?.accountId));
-        if (res.code !== 0) throw new Error(`dropping the old bot failed: ${res.stderr.slice(-200)}`);
-        undone.push("Its other current settings (model, AI source) couldn't be put back now; they follow at its next rebuild.");
-      }
+  if (deps.reapply) {
+    try { await deps.reapply(runtimeRef); }
+    catch (err) {
+      rethrowIfCrash(err);
+      // A full re-apply can fail for reasons a rebuild would too (its AI
+      // source gone). The part that matters for safety still runs: only its
+      // current bot stays; the rest follows at its next rebuild.
+      log('restore.reapply_partial', { agentId, error: String(err).slice(0, 200) });
+      const res = await provider.execShellOnVolume(runtimeRef, keepOnlyTelegramAccountScript(store.getChannelForAgent(agentId, 'telegram')?.accountId));
+      if (res.code !== 0) throw new Error(`dropping the old bot failed: ${res.stderr.slice(-200)}`);
+      undone.push("Its other current settings (model, AI source) couldn't be put back now; they follow at its next rebuild.");
     }
-    const { targets } = revokedScrubTargets(store, agentId);
-    if (targets.length) {
-      const res = await provider.execShellOnVolume(agent.runtimeRef, allowlistScrubScript(targets));
-      if (res.code !== 0) throw new Error(`removing people again failed: ${res.stderr.slice(-200)}`);
-    }
-  } catch (err) {
-    // Never leave that night's access in force: back to how it was before.
-    log('restore.reapply_failed', { agentId, error: String(err) });
-    await rollBack(
-      "The backup was read, but this agent's current settings could not be put back over it",
-      err,
-      "The backup was read, but this agent's current settings could not be put back over it, so it was left as it was.",
-    );
   }
+  const { targets } = revokedScrubTargets(store, agentId);
+  if (targets.length) {
+    const res = await provider.execShellOnVolume(runtimeRef, allowlistScrubScript(targets));
+    if (res.code !== 0) throw new Error(`removing people again failed: ${res.stderr.slice(-200)}`);
+  }
+  return undone;
+}
 
-  log('agent.restored', { agentId, date, undone: undone.length });
+/** The last of a restore: say so, start it again if it ran, and drop the copy of how it was. */
+async function completeRestore(
+  deps: RestoreDeps, op: OpHandle, agentId: string, runtimeRef: string, date: string, wasRunning: boolean, safetyFile: string | undefined, undone: string[],
+): Promise<RestoreResult> {
+  const { store } = deps;
+  (deps.log ?? (() => {}))('agent.restored', { agentId, date, undone: undone.length });
   // A FAILED agent (an earlier restore that could not be undone) has its
   // memory back now; Retry is what starts it.
   if (store.getAgent(agentId)?.state === 'FAILED') {
     store.setAgentState(agentId, 'FAILED', `Restored from the ${date} backup — tap Retry to start it.`);
   }
-  await restartIfWasRunning();
+  await restartAfterRestore(deps, agentId, runtimeRef, wasRunning);
+  dropSafetyCopy(safetyFile);
   // What it IS now, not what it was: a failed restart used to report "restarting".
-  return { date, running: deps.store.getAgent(agentId)?.state === 'RUNNING', ...(undone.length ? { undone } : {}) };
+  const running = store.getAgent(agentId)?.state === 'RUNNING';
+  op.done(`Restored from the ${date} backup${running ? '' : wasRunning ? '; it could not be started again' : ''}.`);
+  return { date, running, ...(undone.length ? { undone } : {}) };
+}
+
+/** The choices a restore interrupted with its volume possibly half-written offers. */
+const RESTORE_CHOICES = {
+  actions: [
+    { action: 'finish', label: 'Finish the restore' },
+    { action: 'put-back', label: 'Put back the copy from before' },
+  ],
+  recommended: 'finish',
+};
+
+/**
+ * A restore a restart cut off (the design's restore-backup row). Before the
+ * copy of how it was reached the disk nothing was changed: it is started again
+ * if it ran. From then until its settings were put back over that night's
+ * copy, its volume may be half-written and only the owner knows which way they
+ * want it: held, stopped, with [Finish the restore] [Put back the copy from
+ * before]. After that, only the restart was left: finished.
+ */
+export async function resumeBackupRestore(deps: RestoreDeps, opId: string): Promise<void> {
+  const op = handleFor(deps.store, opId);
+  const row = op.get();
+  const p = row.params as { date?: string; wasRunning?: boolean; safetyFile?: string };
+  const agent = row.agentId ? deps.store.getAgent(row.agentId) : undefined;
+  if (!agent?.runtimeRef || agent.state === 'DELETED') { op.fail('Interrupted by a restart; the agent is gone.'); return; }
+  const date = String(p.date ?? '');
+  const step = row.step ?? null;
+  if (step === null || step === 'stopped') {
+    await restartAfterRestore(deps, agent.id, agent.runtimeRef, p.wasRunning === true);
+    dropSafetyCopy(p.safetyFile);
+    op.rolledBack(`The restore from the ${date} backup was interrupted by a restart before anything was changed — it is as it was.`);
+    return;
+  }
+  if (step === 'reapplied') {
+    await completeRestore(deps, op, agent.id, agent.runtimeRef, date, p.wasRunning === true, p.safetyFile, []);
+    return;
+  }
+  // Whatever its volume holds now must not run until the owner chooses.
+  await deps.provider.stop(agent.runtimeRef).catch(() => {});
+  if (agent.state === 'RUNNING') deps.store.setAgentState(agent.id, 'STOPPED');
+  op.hold(
+    `The restore from the ${date} backup was interrupted by a restart, so its memory may be half-restored. It stays stopped until you choose.`,
+    RESTORE_CHOICES,
+  );
+}
+
+/** The owner's choice on a held restore: finish it from that night's copy, or put back the copy from before. */
+export async function recoverBackupRestore(deps: RestoreDeps, opId: string, action: string): Promise<void> {
+  const op = handleFor(deps.store, opId);
+  const row = op.get();
+  const p = row.params as { date?: string; wasRunning?: boolean; safetyFile?: string };
+  const agent = row.agentId ? deps.store.getAgent(row.agentId) : undefined;
+  if (!agent?.runtimeRef) throw new RestoreError('The agent is gone.');
+  const date = String(p.date ?? '');
+  const ref = agent.runtimeRef;
+  if (action === 'put-back') {
+    if (!p.safetyFile || !existsSync(p.safetyFile)) {
+      throw new RestoreError('The copy from before the restore is no longer on disk, so it cannot be put back. Finish the restore, or restore another backup.');
+    }
+    await deps.provider.importState(ref, readFileSync(p.safetyFile)).catch((err: unknown) => {
+      throw new RestoreError(`The copy from before could not be put back: ${short(err)}. It stays stopped; try again.`);
+    });
+    forgetDmPolicy(agent.id);
+    await restartAfterRestore(deps, agent.id, ref, p.wasRunning === true);
+    dropSafetyCopy(p.safetyFile);
+    op.rolledBack(`Put back as it was before the restore from the ${date} backup.`);
+    return;
+  }
+  // finish
+  if (!DATE_DIR.test(date)) throw new RestoreError('Not a backup date.');
+  const file = join(backupsDir(), date, agentArchiveName(ref));
+  if (!existsSync(file)) {
+    throw new RestoreError(`The ${date} backup is no longer on disk, so the restore cannot be finished. Put back the copy from before instead.`);
+  }
+  forgetDmPolicy(agent.id);
+  await deps.provider.importState(ref, readFileSync(file)).catch((err: unknown) => {
+    throw new RestoreError(`The restore could not be finished: ${short(err)}. It stays stopped; put back the copy from before, or try again.`);
+  });
+  op.step('replaced');
+  // A failure here leaves it held and stopped: the owner may still put the copy back.
+  const undone = await applyCurrentSettingsOver(deps, agent.id, ref).catch((err: unknown) => {
+    deps.provider.stop(ref).catch(() => {});
+    throw new RestoreError(`The restore could not be finished: ${short(err)}. It stays stopped; put back the copy from before, or try again.`);
+  });
+  op.step('reapplied');
+  await completeRestore(deps, op, agent.id, ref, date, p.wasRunning === true, p.safetyFile, undone);
 }

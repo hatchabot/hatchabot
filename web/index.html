@@ -8365,7 +8365,7 @@ async function loadActivity() {
     card.hidden = evs.length === 0;
     $('activityCount').textContent = evs.length ? `last ${evs.length}` : '';
     $('activity').innerHTML = evs.map(e => {
-      const what = EVENT_WORDS[e.event] ?? e.event.replace(/[._]/g, ' ');
+      const what = EVENT_WORDS[e.event] ?? e.label ?? e.event.replace(/[._]/g, ' ');
       const bad = /fail|missing|unhealthy|rolled_back/.test(e.event);
       return `<div style="display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--line);font-size:13px">
         <span style="color:var(--dim);white-space:nowrap;min-width:74px">${ago(e.at)}</span>
@@ -8406,7 +8406,7 @@ async function v2LoadActivity(force = false) {
     box.hidden = !evs.length;
     $('v2ActCount').textContent = evs.length ? String(evs.length) : '';
     $('v2ActList').innerHTML = evs.map(e => {
-      const what = EVENT_WORDS[e.event] ?? e.event.replace(/[._]/g, ' ');
+      const what = EVENT_WORDS[e.event] ?? e.label ?? e.event.replace(/[._]/g, ' ');
       const bad = /fail|missing|unhealthy|rolled_back/.test(e.event);
       return `<div class="v2actrow"><span class="t" title="${esc(new Date(e.at).toLocaleString())}">${esc(ago(e.at))}</span>
         <span class="w"><b>${esc(e.agentName ?? 'agent')}</b> <span${bad ? ' class="bad"' : ''}>${esc(what)}</span></span></div>`;
@@ -8512,7 +8512,7 @@ function auditDetail(e) {
 function renderAudit(evs) {
   if (!evs.length) { $('auditList').innerHTML = '<div class="sub">No events recorded yet.</div>'; return; }
   $('auditList').innerHTML = evs.map(e => {
-    const what = EVENT_WORDS[e.event] ?? e.event.replace(/[._]/g, ' ');
+    const what = EVENT_WORDS[e.event] ?? e.label ?? e.event.replace(/[._]/g, ' ');
     const bad = /fail|missing|unhealthy|rolled_back/.test(e.event);
     const det = auditDetail(e);
     return `<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px">

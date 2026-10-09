@@ -124,7 +124,7 @@ the step that failed.
 - `src/orchestrator/template.ts` — `exportTemplate`, `importTemplate`: templates (a trained copy for someone else); also behind clone.
 - `src/orchestrator/adopt.ts` — `inspectWorkspace`, `applyWorkspace`: adopting an existing OpenClaw workspace.
 - `src/orchestrator/openclawImport.ts` — `discoverOpenclawAgents`, `quiesceOpenclawBots`: finding OpenClaw agents already on the machine.
-- `src/orchestrator/archive.ts` — `archiveAgent`: archiving (stops the agent and gives its bot back).
+- `src/orchestrator/archive.ts` — `archiveAgent`, `resumeArchive`: archiving (stops the agent and gives its bot back); after a restart, finished once the bot was given back, undone before.
 - `src/api/routes.ts` — `'/v1/agents/:id/archive'`, `'/v1/agents/:id/restore'`, `archiving`, `progressOf`: archive (the `archiving` marker the list shows while the conversation is saved first) and unarchive.
 - `src/orchestrator/provision.ts` — `provisionChannelOrGoWebOnly`, `webOnlyIfNoBot`: no pool bot free on an unarchive, clone, derive or template import → the agent goes on web-only instead of waiting for a token (create still asks).
 - `src/orchestrator/timezone.ts` — `agentTimeZone`: the time zone every agent gets (`HATCHABOT_TIMEZONE`, else the machine's): OpenClaw's `userTimezone` at seed (`buildConfigCommands` in `src/openclaw/configWriter.ts`), the container's `TZ` (`buildRuntimeSpec`), and set live on running agents by `retargetCronSweep` in `src/api/routes.ts`.
@@ -181,7 +181,8 @@ per container.
 A codebase with a `hatchabot.json`, installed into an agent (docs/apps-in-agents.md).
 
 - `src/orchestrator/apps.ts` — `parseManifest`, `parseSource`, `repoFor`, `resolveRelease`: the manifest and the source, read on the host (a folder, or a git address mirrored beside the database).
-- `src/orchestrator/apps.ts` — `installRelease`, `mergeConfig`, `syncTasks`, `switchTo`, `removeTasks`: inside the agent (releases under `~/.openclaw/apps/<app>/`, its config, its tests before the switch, its scheduled commands).
+- `src/orchestrator/apps.ts` — `installRelease`, `mergeConfig`, `syncTasks`, `switchTo`, `removeTasks`, `clearStaging`: inside the agent (releases under `~/.openclaw/apps/<app>/`, its config, its tests before the switch, its scheduled commands).
+- `src/orchestrator/appOperations.ts` — `resumeAppOperation`, `recoverAppOperation`: an install, update or roll back cut off by a restart (the `current` link and config compared with the record; held with "Use the new release" / "Go back to the previous one").
 - `src/api/routes.ts` — `'/v1/apps/inspect'`, `'/v1/agents/:id/app'`, `'/v1/agents/:id/app/update'`, `'/v1/agents/:id/app/rollback'`, `appTarget`: the routes (machine owner only).
 - `src/store/store.ts` — `agent_apps`, `getAgentApp`, `setAgentApp`: which app, source, commit and previous commit.
 - `src/api/routes.ts` — `'/v1/agents/:id/app/pending'`, `runPendingApp`, `installFromSource`: a new agent from a repo installs its app when provisioning finishes.
@@ -283,7 +284,7 @@ from the app takes a snapshot first. Memory search uses embeddings, normally
 from one shared embedder container on each machine (this one, and each runner
 its own since 2.147); switching embedder, or moving machine, means a re-index.
 
-- `src/orchestrator/snapshots.ts` — `CORE_FILES`, `captureSnapshot`, `autoSnapshot`, `restoreSnapshot`, `writeCoreFile`: snapshots and safe edits of the core files.
+- `src/orchestrator/snapshots.ts` — `CORE_FILES`, `captureSnapshot`, `autoSnapshot`, `restoreSnapshot`, `writeCoreFile`, `resumeSnapshotRestore`, `recoverSnapshotRestore`: snapshots and safe edits of the core files; a restore cut off part-way is held with "Finish" / "Revert to the copy taken before".
 - `src/orchestrator/provision.ts` — `checkpointMemory`, `reindexMemoryIfSwitched`, `memoryIndexIncomplete`: saving memory before risky steps; re-indexing.
 - `src/orchestrator/transcript.ts` — `recoverContext`, `contextStats`, `exportTranscript`: recovering context after a reset; chat history download.
 - `src/orchestrator/inspect.ts` — `readInspectableFile`, `readTranscript`: reading an archived agent's files.
@@ -306,7 +307,7 @@ set, or restore one agent's volume from a set.
 - `scripts/backup-volumes.sh` — `write_status`, `json_list`, `release_lock`: the backup run itself (one run per set; retention keeps each agent's newest copy).
 - `deploy/hatchabot-backup.timer` — `OnCalendar`: when it runs.
 - `deploy/hatchabot-backup.service` — `Type=oneshot`, `ExecStart`: what the timer starts (the backup script).
-- `src/orchestrator/backups.ts` — `listBackups`, `startBackup`, `pruneBackup`, `restoreAgentFromBackup`, `agentsMissingFromSet`, `keepDays`, `restoreSafetyDir`: reading and acting on backup sets (`restoreSafetyDir` is where a restore that could not be undone keeps the pre-restore copy).
+- `src/orchestrator/backups.ts` — `listBackups`, `startBackup`, `pruneBackup`, `restoreAgentFromBackup`, `resumeBackupRestore`, `recoverBackupRestore`, `agentsMissingFromSet`, `keepDays`, `restoreSafetyDir`: reading and acting on backup sets. A restore writes its copy of how the agent was to `restoreSafetyDir` before the volume is replaced (removed once the restore ends either way; kept when its undo failed, or while a restore cut off by a restart is held for "Finish the restore" / "Put back the copy from before").
 - `scripts/restore-drill.sh` — `set_state`, `cleanup`: proves a backup set (the newest complete one by default) restores, without touching the live system.
 - `src/api/routes.ts` — `'/v1/backups'`, `'/v1/backups/run'`, `'/v1/backups/restore'`, `'/v1/agents/:id/backup'`, `'/v1/agents/restore'`: the backup panel, one-agent download and restore from a download.
 - `web/index.html` — `loadBackups`, `runBackupNow`, `pruneBackup`, `restoreFromBackup`, `downloadAgent`: the Backups panel.
@@ -321,7 +322,7 @@ Setup log and Activity.
 
 - `src/orchestrator/reconcile.ts` — `reconcileAgents`, `startReconcileLoop`, `reconcileEventLog`: registry versus Docker; its findings about an agent go to that agent's timeline too. It leaves alone an agent whose operation is not over (`activeOperationFor`).
 
-### Durable operations (moves and imports that survive a restart)
+### Durable operations (long changes that survive a restart)
 
 A long change records itself in the `operations` table as it goes: what was
 asked, the last step done, the outcome, and what the owner may do next. An
@@ -330,10 +331,20 @@ a choice is busy on disk: Start, Rebuild, Archive, Move, Delete, Wake and Retry
 refuse with its line. At boot, after the first reconcile, each interrupted one
 is finished, undone or held by its kind's rule (docs/operations-and-one-interface-design.md, docs/moving-agents.md).
 
-- `src/orchestrator/operations.ts` — `beginOperation`, `STEPS`, `operationRefusal`, `activeOperation`, `markInterrupted`, `publicOperation`, `currentBootId`: the record, each kind's steps, and the on-disk busy check.
-- `src/orchestrator/operationsResume.ts` — `resumeOperations`, `recoverOperation`, `retryHeldOperations`, `startOperationRetryLoop`: settling interrupted operations at boot, the owner's choices, and the 10-minute question to another Hatchabot.
-- `src/store/store.ts` — `operations`, `insertOperation`, `updateOperation`, `activeOperationFor`, `pruneOperations`: the table (kept 90 days, at least 50 per agent).
-- `src/api/routes.ts` — `'/v1/operations'`, `'/v1/operations/:id'`, `'/v1/operations/:id/recover'`, `busyNow`, `startRefusal`: the API and the guards.
+Kinds: move-host, migrate, import (v2.154.0); restore-backup, restore-snapshot,
+archive, rebuild, provision, app-install / app-update / app-rollback,
+install-image and backup-run (v2.155.0). A rebuild or a setup is recorded
+(`queued` while it waits its turn) but its guard stays in memory
+(`BACKGROUND_KINDS`): it refuses nothing on disk until a restart cuts it off.
+An image copy and Back up now are a machine's operations (no agent): the
+Activity list reads them from the table (`listMachineOperations`).
+
+- `src/orchestrator/operations.ts` — `beginOperation`, `STEPS`, `BACKGROUND_KINDS`, `operationRefusal`, `activeOperation`, `markInterrupted`, `publicOperation`, `currentBootId`: the record, each kind's steps, and the on-disk busy check.
+- `src/orchestrator/operationsResume.ts` — `resumeOperations`, `resumeBackground`, `recoverOperation`, `retryHeldOperations`, `startOperationRetryLoop`: settling interrupted operations at boot (a queued rebuild queued again; an interrupted rebuild or setup by reconcile's rules), the owner's choices, and the 10-minute pass.
+- `src/orchestrator/reconcile.ts` — `applyReconcileRule`: reconcile's rules for one agent, also how an interrupted rebuild or setup is settled.
+- `src/orchestrator/provision.ts` — `reapplyCurrentSettings`: this installation's settings over a restored volume (a backup restore, and its finish after a restart).
+- `src/store/store.ts` — `operations`, `insertOperation`, `updateOperation`, `activeOperationFor`, `listMachineOperations`, `listAppPendingAgents`, `pruneOperations`: the table (kept 90 days, at least 50 per agent).
+- `src/api/routes.ts` — `'/v1/operations'`, `'/v1/operations/:id'`, `'/v1/operations/:id/recover'`, `busyNow`, `startRefusal`, `kickRebuild`, `kickProvision`, `'/v1/hosts/:id/install-image'`, `'/v1/backups/run'`, `'/v1/events'`: the API, the guards, the recorded queue, and a machine's operations in Activity.
 - `src/mgmt/restTools.ts` — `list_operations`, `recover_operation`: the Hatchabot agent's tools for them.
 - `web/index.html` — `opNotice`, `recoverOp`, `agentAttention`: a held operation in the sheet's Overview and under Alerts.
 - `src/orchestrator/health.ts` — `agentHealth`, `aiSourceHealth`, `doctorLint`: the live health check and OpenClaw config lint.
