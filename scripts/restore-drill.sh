@@ -27,12 +27,30 @@ BASE="${HATCHABOT_BACKUP_DIR:-$HOME/hatchabot-backups}"
 [ -d "$BASE" ] || [ -n "${HATCHABOT_BACKUP_DIR:-}" ] || { [ -d "$HOME/agentclaw-backups" ] && BASE="$HOME/agentclaw-backups"; }
 IMAGE="${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"
 
+# A set's own record (backup-status.json, written by backup-volumes.sh) says
+# whether its run finished with every volume in. A set from before the record
+# has none and is taken as it is.
+set_state() { local s; s="$(grep -o '"state":"[a-z]*"' "$1/backup-status.json" 2>/dev/null | head -n1 || true)"; s="${s#\"state\":\"}"; printf '%s' "${s%\"}"; }
+
 if [ $# -ge 1 ]; then
   BACKUP="$1"
   [ -d "$BACKUP" ] || { echo "✗ No such backup directory: $BACKUP" >&2; exit 1; }
+  st="$(set_state "$BACKUP")"
+  if [ -n "$st" ] && [ "$st" != complete ]; then echo "  ⚠ $(basename "$BACKUP") is not a complete set (its run says \"$st\") — drilling it anyway, as asked." >&2; fi
 else
-  BACKUP="$(find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' | sort | tail -n1)"
-  [ -n "$BACKUP" ] && [ -d "$BACKUP" ] || { echo "✗ No backup directory found under $BASE" >&2; exit 1; }
+  # The base checked first: under pipefail a find on a missing directory
+  # ended the script with find's own error and not this one (2026-10-09).
+  [ -d "$BASE" ] || { echo "✗ No backups directory at $BASE (HATCHABOT_BACKUP_DIR) — no backup has run yet, or it writes elsewhere." >&2; exit 1; }
+  # The newest set whose run finished: a partial or still-running one is not
+  # what a restore would use, and drilling it proved nothing (2026-10-09).
+  BACKUP=""
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    st="$(set_state "$d")"
+    if [ -z "$st" ] || [ "$st" = complete ]; then BACKUP="$d"; break; fi
+    echo "  • $(basename "$d") is not a complete set (its run says \"$st\") — passing over it" >&2
+  done < <(find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' | sort -r)
+  [ -n "$BACKUP" ] || { echo "✗ No complete backup set under $BASE" >&2; exit 1; }
 fi
 echo "Drilling restore from: $BACKUP"
 
