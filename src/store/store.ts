@@ -731,6 +731,22 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS operations_agent ON operations (agent_id, requested_at DESC);
       CREATE INDEX IF NOT EXISTS operations_status ON operations (status);
+      -- Moves another Hatchabot announced (orchestrator/migrate.ts
+      -- receiveMove): the id its restore request carried, written before the
+      -- import awaits anything, so the mover can ask about THAT import. Its
+      -- agent row comes later (after the image is looked at), and an empty
+      -- agent list in between proved nothing (issue #19, 2026-10-09).
+      -- op_id: the import's operation once it has one; boot_id: the process
+      -- that took it (another one means it was cut off before any row).
+      CREATE TABLE IF NOT EXISTS move_receipts (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        op_id TEXT,
+        outcome TEXT,
+        boot_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       -- Hourly limits that must survive a restart (web chat per person,
       -- consults per agent): one row per counted event, pruned after an hour.
       -- They lived in memory and every deploy reset them (2026-09-30).
@@ -2774,6 +2790,29 @@ export class Store {
     }
     this.db.prepare(`DELETE FROM operations WHERE agent_id = ? AND ${over} AND requested_at < ? AND id NOT IN (
       SELECT id FROM operations WHERE agent_id = ? ORDER BY requested_at DESC LIMIT 50)`).run(agentId, cutoff, agentId);
+  }
+
+  // ---- Moves another Hatchabot announced (migrate.ts receiveMove) ---------
+
+  /** The first moment of a restore that carried a move id; kept 90 days. A repeat keeps the first. */
+  insertMoveReceipt(r: { id: string; ownerId: string; bootId: string }, now = Date.now()): void {
+    const at = new Date(now).toISOString();
+    this.db.prepare(`DELETE FROM move_receipts WHERE created_at < ?`).run(new Date(now - 90 * 86_400_000).toISOString());
+    this.db
+      .prepare(`INSERT OR IGNORE INTO move_receipts (id, owner_id, op_id, outcome, boot_id, created_at, updated_at) VALUES (?, ?, NULL, NULL, ?, ?, ?)`)
+      .run(r.id, r.ownerId, r.bootId, at, at);
+  }
+
+  updateMoveReceipt(id: string, patch: { opId?: string; outcome?: 'landed' | 'failed' }): void {
+    if (patch.opId !== undefined) this.db.prepare(`UPDATE move_receipts SET op_id = ?, updated_at = ? WHERE id = ?`).run(patch.opId, new Date().toISOString(), id);
+    if (patch.outcome !== undefined) this.db.prepare(`UPDATE move_receipts SET outcome = ?, updated_at = ? WHERE id = ?`).run(patch.outcome, new Date().toISOString(), id);
+  }
+
+  getMoveReceipt(id: string): { id: string; ownerId: string; opId: string | null; outcome: 'landed' | 'failed' | null; bootId: string } | undefined {
+    const r = this.db.prepare(`SELECT * FROM move_receipts WHERE id = ?`).get(id) as
+      | { id: string; owner_id: string; op_id: string | null; outcome: 'landed' | 'failed' | null; boot_id: string }
+      | undefined;
+    return r ? { id: r.id, ownerId: r.owner_id, opId: r.op_id, outcome: r.outcome, bootId: r.boot_id } : undefined;
   }
 
   // ---- Peers (other Hatchabot servers) ------------------------------------

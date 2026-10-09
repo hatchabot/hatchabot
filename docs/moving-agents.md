@@ -143,6 +143,16 @@ because an automatic delete would make a mistaken move unrecoverable. Delete it
 yourself once you have confirmed the agent works on the other machine — and
 until then, never start it, or two runtimes will fight over one bot token.
 
+When the destination's answer is lost (a dropped connection, a proxy's 504),
+the source asks the destination about that very move: each move carries an id
+the destination records the moment the request arrives, before its agent
+appears in any list. Only "that import failed there" (or "that request never
+arrived", asked twice) restarts the source. A destination older than v2.158.1
+can only show its agent list, and an agent missing from it may simply not be
+made yet, so then the source stays **stopped** and the move waits (Hatchabot
+asks again every 10 minutes, or you say on the agent's page whether it
+arrived).
+
 ## Moving by file instead
 
 On the target machine (once):
