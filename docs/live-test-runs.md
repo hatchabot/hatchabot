@@ -63,3 +63,15 @@ tests that run on their own.
 | 2026-10-09 | clean-install-debian-12 | pass | v2.153.1 | 1 |  |
 | 2026-10-09 | runner-scenarios | pass | v2.153.1 | 10 | OpenClaw 2026.9.8 |
 | 2026-10-09 | privacy | pass | v2.153.1 | 1 | OpenClaw 2026.9.8 |
+| 2026-10-09 | privacy | pass | v2.154.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-10-09 | upgrade-check | pass | v2.154.0 | 1 |  |
+| 2026-10-09 | restore-drill | pass | v2.154.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-10-09 | console | pass | v2.154.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-09 | browser | pass | v2.154.0 | 3 | OpenClaw 2026.9.8 |
+| 2026-10-09 | transfer | pass | v2.154.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-10-09 | candidate-gate | pass | v2.154.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-09 | regress-autonomous | pass | v2.154.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-10-09 | runner-scenarios | pass | v2.154.0 | 11 | OpenClaw 2026.9.8 |
+| 2026-10-09 | clean-install | pass | v2.154.0 | 1 |  |
+| 2026-10-09 | clean-install-ubuntu-2204 | pass | v2.154.0 | 1 |  |
+| 2026-10-09 | clean-install-debian-12 | pass | v2.154.0 | 1 |  |
