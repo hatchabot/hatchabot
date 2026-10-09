@@ -2368,6 +2368,17 @@ const SCENARIOS = String.raw`(() => {
         document.getElementById('bgUsd_machine').closest('.bg-form').querySelector('button').click();
         await until(() => window.__calls.slice(mark2).some((c) => c.method === 'PUT' && c.path === '/v1/budgets/machine'));
         ok('the machine has a step too', !!document.getElementById('bgStep_machine'));
+        // The same agent, edited here after its Usage tab was open: its row is
+        // on the page twice, and Save must take this row's values, not the
+        // sheet's stale copy (deep review, 2026-10-09).
+        const rowInput = [...document.querySelectorAll('#budgetsBody [id="bgUsd_' + meal.id + '"]')][0];
+        ok('the agent\'s row is here too', !!rowInput);
+        rowInput.value = '100';
+        rowInput.parentElement.querySelector('[id="bgAt_' + meal.id + '"]').value = 'cheaper';
+        const mark3 = window.__calls.length;
+        rowInput.parentElement.querySelector('button').click();
+        const put3 = await until(() => window.__calls.slice(mark3).find((c) => c.method === 'PUT' && c.path === '/v1/agents/' + meal.id + '/budget'));
+        eq('this row\'s values are saved, not the sheet\'s', put3.body, { usd: 100, atLimit: 'cheaper' });
         aiDlg.close();
       } finally { if (typeof aiDlg !== 'undefined' && aiDlg.open) aiDlg.close(); delete window.__override['/v1/budgets']; await agentsCleanup(); }
     },

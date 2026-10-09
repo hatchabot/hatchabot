@@ -8483,16 +8483,23 @@ function bgControls(key, b, suggested, manager) {
   return `<input type="number" id="bgUsd_${key}" min="1" max="100000" step="1" value="${usd}" placeholder="${suggested ? 'e.g. ' + suggested : 'none'}" aria-label="Monthly budget in US dollars">
     <select id="bgAt_${key}" aria-label="At the limit"${manager ? ' disabled title="Your Hatchabot agent is never paused or moved to another model: its budget only warns."' : ''}>
       <option value="warn"${!b || b.atLimit === 'warn' ? ' selected' : ''}>warn me</option><option value="cheaper"${b?.atLimit === 'cheaper' ? ' selected' : ''}>cheaper model</option><option value="pause"${b?.atLimit === 'pause' ? ' selected' : ''}>pause it</option></select>
-    <button onclick="saveBudget('${key}')">Save</button>`;
+    <button onclick="saveBudget('${key}', this)">Save</button>`;
 }
 /** "Tell me every $…": an input and Save; with the month so far when set. */
 function bgStepControls(key, v) {
   return `<span class="bg-form"><span class="sub">every $</span><input type="number" id="bgStep_${key}" min="1" max="100000" step="1" value="${v ? v.every : ''}" placeholder="none" aria-label="Tell me each time it spends another this many dollars">
-    <button onclick="saveStep('${key}')">Save</button></span>`;
+    <button onclick="saveStep('${key}', this)">Save</button></span>`;
 }
 const bgStepState = (v) => v ? `next at ${bgMoney(v.next)}` : '';
-async function saveStep(key) {
-  const raw = $('bgStep_' + key)?.value.trim();
+/**
+ * A budget input beside the Save that was pressed. The same agent's controls
+ * can be on the page twice (Settings → Budgets and its own Usage tab, which
+ * stays in the page after the sheet closes): by id alone, Save read the
+ * other, stale copy and saved its values (deep review, 2026-10-09).
+ */
+const bgInput = (btn, id) => (btn?.parentElement?.querySelector(`[id="${id}"]`)) || $(id);
+async function saveStep(key, btn) {
+  const raw = bgInput(btn, 'bgStep_' + key)?.value.trim();
   const every = raw === '' ? null : Number(raw);
   if (every !== null && !(every >= 1 && every <= 100000)) return toast('A step is from $1 to $100,000 — or empty the box to stop the alerts.');
   try {
@@ -8520,11 +8527,12 @@ function renderBudgets(d) {
     <tbody>${rows || '<tr><td colspan="6" class="sub">No agents yet.</td></tr>'}</tbody></table></div>
     <p class="sub mp-note">US dollars at API list prices, the same as the cost badges — on a Claude plan it is an equivalent, not a bill. <b>Tell me every $…</b>: a message (at most one an hour per agent) and a line under Alerts each time this month's spend passes another step — at $100, $200, $300 … for 100; it counts from when you set it, and starts again each month. <b>Monthly limit</b>: you hear at 80% and at 100% (under Alerts, and once on your Hatchabot agent's chat). <b>Cheaper model</b> moves it at 100% to the cheapest model its AI source offers until the 1st — it keeps answering; raise the budget to switch it back sooner (change its model yourself and the budget leaves it alone). <b>Pause it</b> stops the agent at 100% until the 1st — raise the budget or start it to bring it back sooner (started by hand, it runs on until the 1st); anyone who writes to it on Telegram gets one reply saying so. Empty a box and Save to remove a budget.</p>`;
 }
-async function saveBudget(key) {
-  const raw = $('bgUsd_' + key)?.value.trim();
+async function saveBudget(key, btn) {
+  const raw = bgInput(btn, 'bgUsd_' + key)?.value.trim();
   const usd = raw === '' ? null : Number(raw);
   if (usd !== null && !(usd >= 1 && usd <= 100000)) return toast('A budget is from $1 to $100,000 a month — or empty the box to remove it.');
-  const atLimit = ['pause', 'cheaper'].includes($('bgAt_' + key)?.value) ? $('bgAt_' + key).value : 'warn';
+  const at = bgInput(btn, 'bgAt_' + key)?.value;
+  const atLimit = ['pause', 'cheaper'].includes(at) ? at : 'warn';
   try {
     const r = await api(key === 'machine' ? '/v1/budgets/machine' : `/v1/agents/${key}/budget`, { method: 'PUT', body: { usd, atLimit } });
     toast(r.message || 'Saved.', 6000);
