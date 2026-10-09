@@ -30,7 +30,7 @@ IMAGE="${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"
 # A set's own record (backup-status.json, written by backup-volumes.sh) says
 # whether its run finished with every volume in. A set from before the record
 # has none and is taken as it is.
-set_state() { local s; s="$(grep -o '"state":"[a-z]*"' "$1/backup-status.json" 2>/dev/null | head -n1 || true)"; s="${s#\"state\":\"}"; printf '%s' "${s%\"}"; }
+set_state() { local s; s="$(grep -m1 -o '"state":"[a-z]*"' "$1/backup-status.json" 2>/dev/null || true)"; s="${s#\"state\":\"}"; printf '%s' "${s%\"}"; }
 
 if [ $# -ge 1 ]; then
   BACKUP="$1"

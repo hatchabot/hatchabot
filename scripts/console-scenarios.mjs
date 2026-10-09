@@ -16,18 +16,19 @@
  * the page's requests cannot carry it. So C2 — the live connection opens and
  * carries messages — runs only with --signin-key: the private key of the
  * install's one-time sign-in links (docs/signin-links.md), from which it mints
- * a five-minute owner link and signs the browser in. Without one it says so
- * and checks C1 only.
+ * a five-minute owner link and signs the browser in. Without one it checks C1
+ * only and says SKIP, so the run is recorded as a skip, not a pass.
  *
  * Chrome runs from the zenika/alpine-chrome image on the host network (it
- * must reach the tailnet address) with its debugging port on loopback; it and
- * the agent ("zz console test") are removed at the end unless --keep.
+ * must reach the tailnet address) with its debugging port on loopback; it is
+ * always removed at the end, and the agent ("zz console test") too unless
+ * --keep.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { api, cleanupAgents, createAgent, log, scenario, sleep, summary } from './live-lib.mjs';
+import { api, cleanupAgents, createAgent, log, results, scenario, sleep, summary } from './live-lib.mjs';
 
 const PREFIX = 'zz console test';
 const keep = process.argv.includes('--keep');
@@ -112,7 +113,8 @@ async function main() {
       ['no script errors, no failed loads', !errors.length && !failed.length, [...errors, ...failed].join(' | ')],
     ]);
     if (!keyArg) {
-      log('(C2 not run — the live connection admits a signed-in browser only; give --signin-key <file>.key to check it. docs/live-tests.md)');
+      // Upper-case SKIP: a run without C2 is recorded as a skip, not a pass (review, 2026-10-09).
+      log('SKIP C2 — the live connection admits a signed-in browser only; give --signin-key <file>.key to check it. docs/live-tests.md');
       return;
     }
     await scenario('C2 it connects to the agent: its live connection opens and carries messages', async () => [
@@ -127,11 +129,11 @@ async function main() {
 }
 
 main()
-  .catch((err) => log(`✗ ${err.message || err}`))
+  .catch((err) => { results.push({ name: 'run', ok: false, secs: 0 }); log(`✗ ${err.message || err}`); })
   .finally(async () => {
-    if (!keep) {
-      spawnSync('docker', ['rm', '-f', CHROME]);
-      await cleanupAgents(PREFIX);
-    }
+    // Chrome goes even with --keep: it may be signed in as the owner, with its
+    // debugging port open on this machine's loopback (review, 2026-10-09).
+    spawnSync('docker', ['rm', '-f', CHROME]);
+    if (!keep) await cleanupAgents(PREFIX);
     process.exitCode = summary() ? 0 : 1;
   });
