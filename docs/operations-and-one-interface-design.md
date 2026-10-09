@@ -1,6 +1,6 @@
 # Design: durable operations, and one interface
 
-Status: **proposal, for review** (2026-10-09). Two changes from an outside
+Status: **accepted 2026-10-09; being built.** Two changes from an outside
 review of Hatchabot, chosen to come first:
 
 - **Part A — durable operations.** Every long-running change (a move, an
@@ -254,10 +254,9 @@ gone, and the knowledge-pack test if the map does.
 
 1. ~~Planned agents~~ — bring them to the home screen (decided 2026-10-09).
 2. ~~Manual order~~ — keep it as "My order" (decided 2026-10-09).
-3. **Automatic recovery**: the table above finishes or undoes a move, an
-   import and an archive by itself when the direction is certain, and holds
-   the rest for you. Is that the right line, or should every interrupted
-   operation wait for you?
+3. ~~Automatic recovery~~ — keep the line in the table: finish or undo by
+   itself only when the direction is certain, hold the rest (decided
+   2026-10-09).
 4. ~~Notice release~~ — no: one step (decided 2026-10-09).
 
 ---
