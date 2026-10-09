@@ -151,8 +151,11 @@ management agent stays pinned and moves last.
 3. Commit, tag, push:
    ```sh
    git commit -am "Release vX.Y.Z"
-   git tag vX.Y.Z && git push origin main --tags
+   git tag vX.Y.Z && git push origin main vX.Y.Z
    ```
+   Push the one tag by name, never `--tags`: a checkout can hold tags that
+   must not be public (the pre-1.0 history's `v0.*` tags reached GitHub that
+   way, found 2026-10-09).
 4. Create the GitHub Release from the tag with the CHANGELOG section as its
    notes: `gh release create vX.Y.Z --notes-from-tag` (or paste).
 5. Deploy it (below).
