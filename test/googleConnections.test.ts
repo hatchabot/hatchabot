@@ -275,29 +275,148 @@ describe('attach / detach / remove', () => {
     return { events, inside, release };
   }
 
-  it('a detach during a sync\'s import is not undone by it (2026-10-09)', async () => {
+  it('a detach during a sync\'s import waits its turn, then takes the account off (2026-10-09, #16)', async () => {
     const w = await connectedWorld();
     expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } })).statusCode).toBe(200);
     const g = gated(w.provider, 'gog auth import');
     const syncing = syncConnections({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.store.getAgent('a1')!.runtimeRef!);
     await g.inside;
-    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/detach', headers: H, payload: { connectionId: w.connId } })).json().removed).toBe(true);
+    const detaching = w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/detach', headers: H, payload: { connectionId: w.connId } });
+    await settle();
+    expect(g.events).not.toContain('remove'); // waiting for the sync's turn
     g.release();
     await syncing;
-    // The import landed after the detach's removal: it comes off again.
+    expect((await detaching).json().removed).toBe(true);
     expect(g.events.at(-1)).toBe('remove');
   });
 
-  it('a detach before a sync reaches that account: the sync does not import it (2026-10-09)', async () => {
+  it('a detach outside the turn before a sync reaches that account: the sync does not import it (2026-10-09)', async () => {
     const w = await connectedWorld();
     expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } })).statusCode).toBe(200);
     const g = gated(w.provider, 'gog auth list');
     const syncing = syncConnections({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.store.getAgent('a1')!.runtimeRef!);
     await g.inside;
-    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/detach', headers: H, payload: { connectionId: w.connId } });
+    // Straight in the store (no route holds the turn): the sync's own re-checks are the defence.
+    w.store.addConnectionRemoval('a1', 'chris@example.com');
+    w.store.detachConnection('a1', w.connId);
     g.release();
     await syncing;
     expect(g.events).not.toContain('import');
+  });
+
+  // ---- issue #16: attach, detach and delete take turns per agent -----------
+
+  /**
+   * gog on the volume as a set of accounts (import adds, remove takes off,
+   * list reports), with a barrier on the first script matching `what`.
+   */
+  function gogBarrier(provider: MockProvider, what: string) {
+    const held = new Set<string>();
+    const events: string[] = [];
+    const state = { failRemove: false };
+    let entered!: () => void;
+    let release!: () => void;
+    const inside = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    let once = true;
+    provider.execShell = (async (_ref: string, script: string) => {
+      if (once && script.includes(what)) { once = false; entered(); await gate; }
+      const email = /--email "([^"]+)"|remove --force -- "([^"]+)"/.exec(script);
+      if (script.includes('gog auth import')) { held.add(email![1]!); events.push('import'); return { code: 0, stdout: '', stderr: '' }; }
+      if (script.includes('gog auth remove')) {
+        events.push('remove');
+        if (state.failRemove) return { code: 1, stdout: '', stderr: 'keyring locked' };
+        held.delete(email![2]!);
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (script.includes('gog auth list')) return { code: 0, stdout: JSON.stringify({ accounts: [...held].map((e) => ({ email: e })) }), stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    }) as typeof provider.execShell;
+    return { held, events, inside, release, state };
+  }
+  const attachReq = (w: { f: any; connId: string }) =>
+    w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } });
+  const detachReq = (w: { f: any; connId: string }) =>
+    w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/detach', headers: H, payload: { connectionId: w.connId } });
+
+  it('a detach while an attach is importing waits for it; the credential ends off (issue #16)', async () => {
+    const w = await connectedWorld('mailbox@example.org');
+    const g = gogBarrier(w.provider, 'gog auth import');
+    const attaching = attachReq(w);
+    await g.inside;
+    const detaching = detachReq(w);
+    await settle();
+    g.release();
+    const [att, det] = await Promise.all([attaching, detaching]);
+    expect(att.statusCode).toBe(200);
+    expect(det.json()).toMatchObject({ detached: true, removed: true });
+    expect(g.events).toEqual(['import', 'remove']);
+    expect(g.held.has('mailbox@example.org')).toBe(false);
+    expect(w.store.listAgentConnections('a1')).toHaveLength(0);
+    expect(w.store.connectionRemovals('a1')).toEqual([]);
+  });
+
+  it('an attach while a detach is removing waits for it; the agent ends attached with the credential (issue #16)', async () => {
+    const w = await connectedWorld('mailbox@example.org');
+    const g = gogBarrier(w.provider, 'gog auth remove');
+    expect((await attachReq(w)).json()).toMatchObject({ attached: true, live: true });
+    const detaching = detachReq(w);
+    await g.inside;
+    const attaching = attachReq(w);
+    await settle();
+    g.release();
+    const [det, att] = await Promise.all([detaching, attaching]);
+    expect(det.json()).toMatchObject({ detached: true, removed: true });
+    expect(att.json()).toMatchObject({ attached: true, live: true });
+    expect(g.events).toEqual(['import', 'remove', 'import']);
+    expect(g.held.has('mailbox@example.org')).toBe(true);
+    expect(w.store.listAgentConnections('a1')).toHaveLength(1);
+    expect(w.store.connectionRemovals('a1')).toEqual([]);
+  });
+
+  it('detached outside the turn during an attach\'s import: the attach takes it off again, and remembers a failure (issue #16)', async () => {
+    const w = await connectedWorld('mailbox@example.org');
+    const g = gogBarrier(w.provider, 'gog auth import');
+    const attaching = attachReq(w);
+    await g.inside;
+    w.store.detachConnection('a1', w.connId); // no route: nothing else will undo the import
+    g.state.failRemove = true;
+    g.release();
+    expect((await attaching).json()).toMatchObject({ attached: false, live: false });
+    expect(g.events).toEqual(['import', 'remove']);
+    expect(w.store.connectionRemovals('a1')).toEqual(['mailbox@example.org']);
+  });
+
+  it('deleting a connection while an attach imports it: the import lands first, then comes off (issue #16)', async () => {
+    const w = await connectedWorld('mailbox@example.org');
+    const g = gogBarrier(w.provider, 'gog auth import');
+    const attaching = attachReq(w);
+    await g.inside;
+    const deleting = w.f.inject({ method: 'DELETE', url: `/v1/connections/${w.connId}`, headers: H });
+    await settle();
+    g.release();
+    const [, del] = await Promise.all([attaching, deleting]);
+    expect(del.json()).toMatchObject({ removed: true, pendingOn: 0 });
+    expect(g.events).toEqual(['import', 'remove']);
+    expect(g.held.size).toBe(0);
+    expect(w.store.connectionRemovals('a1')).toEqual([]);
+  });
+
+  it('an attach while the connection is being deleted is refused, not imported behind the removal (issue #16)', async () => {
+    const w = await connectedWorld('mailbox@example.org');
+    const g = gogBarrier(w.provider, 'gog auth remove');
+    await attachReq(w);
+    const deleting = w.f.inject({ method: 'DELETE', url: `/v1/connections/${w.connId}`, headers: H });
+    await g.inside;
+    const attaching = attachReq(w);
+    await settle();
+    g.release();
+    const [del, att] = await Promise.all([deleting, attaching]);
+    expect(del.json()).toMatchObject({ removed: true, pendingOn: 0 });
+    expect(att.statusCode).toBe(404);
+    expect(g.events).toEqual(['import', 'remove']);
+    expect(g.held.size).toBe(0);
+    expect(w.store.connectionRemovals('a1')).toEqual([]);
   });
 
   it('syncConnections leaves a SELF-connected account (not in the vault) alone', async () => {

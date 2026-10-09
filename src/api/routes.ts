@@ -148,7 +148,7 @@ import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAc
 import { memoryPolicySection, replaceMemoryPolicy, replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import {
   DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar,
-  exchangeGoogleCode, googleAuthUrl, materializeConnection, removeQueuedNow, syncConnections,
+  exchangeGoogleCode, googleAuthUrl, materializeConnection, offAgainIfDetached, removeQueuedNow, syncConnections, withConnectionLock,
   parseOAuthClient, revokeGoogleToken, type OAuthClient,
 } from '../orchestrator/googleConnections.js';
 import { INSPECTABLE_FILES, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
@@ -9877,6 +9877,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     };
   });
 
+  /** Connections whose DELETE is under way: an attach refuses them. */
+  const connectionsDeleting = new Set<string>();
   app.delete<{ Params: { id: string } }>('/v1/connections/:id', async (req, reply) => {
     const conn = store.getConnection(req.params.id);
     if (!conn || conn.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
@@ -9886,22 +9888,38 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // entry — so a half-failure errs toward less access. A record clears only
     // when the account is verifiably off; a stopped agent or a failed remove
     // is retried at its next start, wake or rebuild (issue #11).
-    const holders = store.listAgentsForConnection(conn.id)
-      .map((aid) => store.getAgent(aid))
-      .filter((a): a is NonNullable<typeof a> => !!a);
-    for (const a of holders) store.addConnectionRemoval(a.id, conn.email);
+    // From here no attach takes it (one already importing is a holder below
+    // and finishes first): an attach landing between this agent's removal and
+    // the vault row going put the account back with its record cleared
+    // (issue #16, 2026-10-09).
+    connectionsDeleting.add(conn.id);
     let pendingOn = 0;
-    for (const a of holders) {
-      if (!(await removeQueuedNow(connSyncDeps(a.hostId), a, conn.email))) pendingOn++;
+    let revoked = false;
+    let shared = false;
+    try {
+      const holders = store.listAgentsForConnection(conn.id)
+        .map((aid) => store.getAgent(aid))
+        .filter((a): a is NonNullable<typeof a> => !!a);
+      for (const a of holders) store.addConnectionRemoval(a.id, conn.email);
+      for (const a of holders) {
+        // In that agent's connection turn, so an import in flight lands first.
+        const off = await withConnectionLock(a.id, async () => {
+          const now = store.getAgent(a.id);
+          return !!now && removeQueuedNow(connSyncDeps(now.hostId), now, conn.email);
+        });
+        if (!off) pendingOn++;
+      }
+      // Not revoked while another account holds the same Google account: both
+      // share one grant for this install's client, and revoking ends it for
+      // them too (night review, 2026-09-28).
+      shared = store.connectionEmailHeldElsewhere(conn.kind, conn.email, conn.ownerId);
+      const token = await secrets.get(conn.secretRef).catch(() => null);
+      revoked = token && !shared ? await revokeGoogleToken(token, oauthFetch) : false;
+      await secrets.delete(conn.secretRef).catch(() => {});
+      store.deleteConnection(conn.id);
+    } finally {
+      connectionsDeleting.delete(conn.id);
     }
-    // Not revoked while another account holds the same Google account: both
-    // share one grant for this install's client, and revoking ends it for
-    // them too (night review, 2026-09-28).
-    const shared = store.connectionEmailHeldElsewhere(conn.kind, conn.email, conn.ownerId);
-    const token = await secrets.get(conn.secretRef).catch(() => null);
-    const revoked = token && !shared ? await revokeGoogleToken(token, oauthFetch) : false;
-    await secrets.delete(conn.secretRef).catch(() => {});
-    store.deleteConnection(conn.id);
     trace()('connection.unlinked', { email: conn.email, revoked, keptForOtherAccount: shared, pendingOn });
     return { removed: true, pendingOn };
   });
@@ -9919,19 +9937,30 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // to your agent is exactly the cross-owner grant this vault must not
       // allow (sharing, if ever, is an explicit owner opt-in like AI sources).
       if (!conn || conn.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'No such connection.' });
-      store.attachConnection(agent.id, conn.id, body.gmailNoSend === true);
-      // Attached again on purpose: a removal still pending from an earlier
-      // detach must not take the account off at the next start (issue #11).
-      store.clearConnectionRemoval(agent.id, conn.email);
-      let live = false;
-      let error: string | undefined;
-      if (agent.state === 'RUNNING' && agent.runtimeRef) {
-        const r = await materializeConnection(connSyncDeps(agent.hostId), { id: agent.id, slug: agent.slug, runtimeRef: agent.runtimeRef }, conn.id);
-        live = r.ok;
-        error = r.ok ? undefined : r.error;
-      }
-      trace(agent.id)('connection.attached', { email: conn.email, live });
-      return { attached: true, live, error };
+      // In the agent's connection turn, judged afresh once it is ours: a
+      // detach that ran while this import was in flight took the account off
+      // and cleared its record, then the import put it back with nothing
+      // left to undo it (issue #16, 2026-10-09).
+      const out = await withConnectionLock(agent.id, async () => {
+        // Deleted, or being deleted, while this waited its turn.
+        if (!store.getConnection(conn.id) || connectionsDeleting.has(conn.id)) return null;
+        store.attachConnection(agent.id, conn.id, body.gmailNoSend === true);
+        // Attached again on purpose: a removal still pending from an earlier
+        // detach must not take the account off at the next start (issue #11).
+        store.clearConnectionRemoval(agent.id, conn.email);
+        const now = store.getAgent(agent.id) ?? agent;
+        if (now.state !== 'RUNNING' || !now.runtimeRef) return { attached: true, live: false };
+        const deps = connSyncDeps(now.hostId);
+        const r = await materializeConnection(deps, { id: now.id, slug: now.slug, runtimeRef: now.runtimeRef }, conn.id);
+        // Defence for a path outside the turn: detached during the import → off again.
+        if (await offAgainIfDetached(deps, { id: now.id, runtimeRef: now.runtimeRef }, conn.id, conn.email)) {
+          return { attached: false, live: false, error: 'Detached while it was being attached.' };
+        }
+        return { attached: true, live: r.ok, error: r.ok ? undefined : r.error };
+      });
+      if (!out) return reply.code(404).send({ error: 'No such connection.' });
+      trace(agent.id)('connection.attached', { email: conn.email, live: out.live, attached: out.attached });
+      return out;
     },
   );
 
@@ -9947,9 +9976,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // used to lose it here, and deleting the vault entry afterwards erased
       // the last place its email was known (issue #11). Running → removed now;
       // otherwise (or on failure) at its next start, wake or rebuild.
-      store.addConnectionRemoval(agent.id, conn.email);
-      store.detachConnection(agent.id, conn.id);
-      const removed = await removeQueuedNow(connSyncDeps(agent.hostId), agent, conn.email);
+      // In the agent's connection turn: an attach still importing finishes
+      // first, so this removal lands after it (issue #16, 2026-10-09).
+      const removed = await withConnectionLock(agent.id, async () => {
+        store.addConnectionRemoval(agent.id, conn.email);
+        store.detachConnection(agent.id, conn.id);
+        const now = store.getAgent(agent.id) ?? agent;
+        return removeQueuedNow(connSyncDeps(now.hostId), now, conn.email);
+      });
       trace(agent.id)('connection.detached', { email: conn.email, removed });
       return { detached: true, removed };
     },
