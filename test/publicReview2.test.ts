@@ -478,13 +478,29 @@ describe('what a stranger can hold open', () => {
     h = await publicApp();
     await h.addAccount('owner', { owner: true });
     await h.app.publicAccess!.evaluate();
-    const socks = await Promise.all(Array.from({ length: 600 }, () => new Promise<Socket>((res) => { const s = connect(h!.port, '127.0.0.1', () => res(s)); s.on('error', () => res(s)); extra.push(s); })));
-    const state = socks.map(() => false);
-    socks.forEach((s, i) => s.on('close', () => { state[i] = true; }));
-    await sleep(500);
-    const held = state.filter((c) => !c).length;
-    expect(held).toBeLessThanOrEqual(512);
-    expect(held).toBeGreaterThan(400);
+    // 2026-10-09 (#24): a socket is watched from the moment it is made. Close listeners added after
+    // Promise.all missed the ones the server had already shut, and counted them as held (572 > 512 under load).
+    const closed = new Set<Socket>();
+    const open = (): Promise<Socket> => new Promise<Socket>((res) => {
+      const s = connect(h!.port, '127.0.0.1', () => res(s));
+      s.on('close', () => { closed.add(s); res(s); });
+      s.on('error', () => res(s));
+      extra.push(s);
+    });
+    const socks = await Promise.all(Array.from({ length: 600 }, open));
+    const held = () => socks.filter((s) => !closed.has(s) && !s.destroyed).length;
+    // Settle: the same count three looks in a row (bounded), since refusals arrive a moment after the connect.
+    let last = -1;
+    for (let i = 0, same = 0; i < 100 && same < 3; i++) { await sleep(100); const n = held(); same = n === last ? same + 1 : 0; last = n; }
+    expect(held()).toBeLessThanOrEqual(512);
+    expect(held()).toBeGreaterThan(400);
+    expect(socks.length - held()).toBeGreaterThanOrEqual(600 - 512); // the excess were refused
+    // The cap still holds now: one more is shut at the door while the others are held.
+    if (held() === 512) {
+      const more = await open();
+      for (let i = 0; i < 50 && !closed.has(more); i++) await sleep(100);
+      expect(closed.has(more)).toBe(true);
+    }
   }, 30_000);
 });
 
