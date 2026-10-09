@@ -36,6 +36,9 @@ import { TransferError } from './transfer.js';
 export interface MoveDeps extends Omit<ProvisionDeps, 'provider'> {
   source: RuntimeProvider;
   target: RuntimeProvider;
+  /** The host `source` was made for. The caller builds it before its own
+   *  checks (awaits); the agent is judged on it again under the lock. */
+  sourceHostId?: string;
 }
 
 export async function moveAgentToHost(
@@ -55,6 +58,13 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
   if (!agent?.runtimeRef) throw new TransferError('This agent has no runtime to move yet.');
   if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
     throw new TransferError(`Can't move while the agent is ${agent.state}.`);
+  }
+  // `source` was made for the host the caller read before its checks; a move
+  // that finished meanwhile left it pointing at a daemon the agent is no
+  // longer on, and the export would read that one (concurrency review,
+  // 2026-10-09).
+  if (deps.sourceHostId && agent.hostId !== deps.sourceHostId) {
+    throw new TransferError('It moved to another machine meanwhile. Look again, then move it from there.');
   }
   const sourceHost = store.getHost(agent.hostId);
   const targetHost = store.getHost(targetHostId);

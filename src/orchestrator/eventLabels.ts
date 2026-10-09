@@ -188,6 +188,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'migrate.restart_failed': 'did not restart after the failed move',
   'migrate.rolled_back': 'move rolled back',
   'model.live_set_failed': 'the running agent did not take the new model — it applies at the next rebuild',
+  'model.apply_deferred': 'the new model was saved while another change was under way — it applies with that change or the next rebuild',
   'model.changed': (d) => `model changed: ${String(d.from ?? 'unknown')} → ${String(d.to ?? '')}`,
   'model.guard_proposed': (d) => `Hatchabot suggests switching back to ${String(d.to ?? 'the previous model')}: it did worse on ${String(d.from ?? 'the new one')}`,
   'model.ledger_backfilled': 'earlier model changes recorded in the ledger',

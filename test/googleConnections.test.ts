@@ -256,6 +256,50 @@ describe('attach / detach / remove', () => {
     expect(w.store.connectionRemovals('a1')).toEqual([]);
   });
 
+  /** Hold the next shell script matching `what` until the test lets it go; record imports (when done) and removes. */
+  function gated(provider: MockProvider, what: string) {
+    const real = provider.execShell.bind(provider);
+    const events: string[] = [];
+    let entered!: () => void;
+    let release!: () => void;
+    const inside = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    let once = true;
+    provider.execShell = (async (ref: string, script: string, opts?: { timeoutMs?: number; secret?: boolean }) => {
+      if (script.includes('gog auth remove')) events.push('remove');
+      if (once && script.includes(what)) { once = false; entered(); await gate; }
+      const r = await real(ref, script, opts);
+      if (script.includes('gog auth import')) events.push('import');
+      return r;
+    }) as typeof provider.execShell;
+    return { events, inside, release };
+  }
+
+  it('a detach during a sync\'s import is not undone by it (2026-10-09)', async () => {
+    const w = await connectedWorld();
+    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } })).statusCode).toBe(200);
+    const g = gated(w.provider, 'gog auth import');
+    const syncing = syncConnections({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.store.getAgent('a1')!.runtimeRef!);
+    await g.inside;
+    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/detach', headers: H, payload: { connectionId: w.connId } })).json().removed).toBe(true);
+    g.release();
+    await syncing;
+    // The import landed after the detach's removal: it comes off again.
+    expect(g.events.at(-1)).toBe('remove');
+  });
+
+  it('a detach before a sync reaches that account: the sync does not import it (2026-10-09)', async () => {
+    const w = await connectedWorld();
+    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } })).statusCode).toBe(200);
+    const g = gated(w.provider, 'gog auth list');
+    const syncing = syncConnections({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.store.getAgent('a1')!.runtimeRef!);
+    await g.inside;
+    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/detach', headers: H, payload: { connectionId: w.connId } });
+    g.release();
+    await syncing;
+    expect(g.events).not.toContain('import');
+  });
+
   it('syncConnections leaves a SELF-connected account (not in the vault) alone', async () => {
     const { provider, store, secrets } = await connectedWorld();
     // An account the agent connected itself in chat — not an owner vault entry.

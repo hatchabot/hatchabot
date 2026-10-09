@@ -15,7 +15,7 @@ import { hostname as osHostname, totalmem } from 'node:os';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import compress from '@fastify/compress';
-import { ChannelTakenError, normalizeHandle, type SectionSort, type Store } from '../store/store.js';
+import { ChannelTakenError, normalizeHandle, type SectionSort, Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { ContainerStats, ExecResult, RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
 import { ProviderError, parseByteSize } from '../providers/provider.js';
@@ -48,6 +48,7 @@ import {
   effectiveModel,
   prefixedModelRef,
   recordApplied,
+  forgetEmbedDecision,
   buildRuntimeSpec,
   type ProvisionDeps,
   sharePathProblem,
@@ -1129,6 +1130,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
 
   /**
+   * After a bot handover (a swap, a detach): the container still holds the
+   * old bot until a rebuild writes the new row into it. When a rebuild or a
+   * setup is already in flight, kickRebuild says no — and a queued rebuild
+   * kicked while the agent ran skips itself once it finds it stopped, so the
+   * agent sat stopped on the new row. Another follows the one in flight
+   * instead (concurrency review, 2026-10-09). Start refuses meanwhile
+   * (startRefusal): the old container is not booted on a bot it gave back.
+   */
+  const rebuildAfterHandover = (agentId: string): boolean => {
+    if (kickRebuild(agentId)) return true;
+    const running = inflight.get(agentId);
+    if (!running) return false;
+    void running.then(() => { kickRebuild(agentId); }).catch(() => {});
+    return true;
+  };
+
+  /**
    * Did this rebuild cost the agent its conversation?
    *
    * OpenClaw ends a conversation by renaming its file to `*.jsonl.reset.<ts>`,
@@ -1702,6 +1720,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // recordApplied, which would stamp the new source as applied and hide the
     // rebuild the agent still needs. The model lands with that rebuild.
     if (a.appliedProfileId && a.appliedProfileId !== a.aiProfileId) return 'rebuild';
+    // Mid-move, mid-restore, mid-rebuild (or one waiting its turn): stored
+    // only. Editing the volume then raced the operation's own config, and
+    // recordApplied consumed the build's memory-search decision and retired
+    // its old key before that build was accepted (concurrency review,
+    // 2026-10-09). The operation writes the model from the store; one that
+    // already had written it leaves the change for the next rebuild.
+    if (isBusy(agentId) || inflight.has(agentId)) {
+      trace(agentId)('model.apply_deferred', { why: 'busy' });
+      return 'none';
+    }
     const ref = prefixedModelRef(a, p);
     const provider = providerFor(a.hostId);
     let res;
@@ -6694,6 +6722,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const appFail = (reply: FastifyReply, e: unknown) => {
     const conflict = (e as { conflict?: string[] })?.conflict;
     if (e instanceof AppError && conflict) return reply.code(409).send({ error: e.message, conflict });
+    if (e instanceof AppError && (e as { stale?: boolean }).stale) return reply.code(409).send({ error: e.message });
     if (e instanceof AppError) return reply.code(400).send({ error: e.message, test: (e as AppError & { test?: unknown }).test });
     return reply.code(502).send({ error: `The install did not finish: ${(e as Error)?.message ?? e}` });
   };
@@ -6703,6 +6732,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const m = r.manifest as AppManifest;
     return { app: r.app, name: m.name, source: r.source, ref: r.ref, sha: r.sha, previousSha: r.previousSha ?? null,
       installedAt: r.installedAt, testOk: r.testOk ?? null, tasks: m.tasks.map((t) => `${m.app}-${t.name}`) };
+  };
+  /**
+   * Judged again once the lifecycle lock is held. The release fetch before it
+   * can take minutes, and the agent row and app record read before it could
+   * be gone by then: a move, a stop or another install landed meanwhile, and
+   * the install then ran on the old host's runtime or recorded over the other
+   * install (concurrency review, 2026-10-09).
+   */
+  const appStillAsWas = (a: Agent, had: ReturnType<typeof store.getAgentApp>): Agent => {
+    const stale = (msg: string) => Object.assign(new AppError(msg), { stale: true });
+    const now = store.getAgent(a.id);
+    if (!now || now.state !== 'RUNNING' || !now.runtimeRef || now.migratedTo || now.hostId !== a.hostId || now.runtimeRef !== a.runtimeRef) {
+      throw stale(`${a.name} changed while the release was fetched (it is ${now ? now.state.toLowerCase() : 'gone'}${now && now.hostId !== a.hostId ? ', on another machine' : ''}). Try again.`);
+    }
+    const cur = store.getAgentApp(a.id);
+    if ((cur?.app ?? null) !== (had?.app ?? null) || (cur?.sha ?? null) !== (had?.sha ?? null) || (cur?.installedAt ?? null) !== (had?.installedAt ?? null)) {
+      throw stale('Its app changed meanwhile (another install or update finished). Look again, then try again.');
+    }
+    return now;
   };
   const appTarget = (req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
     if (!ownsLocalHost(req)) { reply.code(403).send({ error: "Only this machine's owner can install or change an app (it reads this machine's folders and git login)." }); return undefined; }
@@ -6765,6 +6813,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // and go back on if this install fails, so the agent still matches the record.
     const replaced = had && had.app !== rel.manifest.app ? had : undefined;
     const done = await whileBusy(a.id, async () => {
+      a = appStillAsWas(a, had);
       if (replaced) await removeTasks(appDeps(a), replaced.app);
       try {
         return await installRelease(appDeps(a), rel, values);
@@ -6844,7 +6893,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const ref = req.body?.ref || had.ref;
       const rel = await resolveRelease(appGit, repo, ref);
       if (rel.sha === had.sha && !req.body?.values) return { app: appView(a), unchanged: true };
-      const done = await whileBusy(a.id, () => installRelease(appDeps(a), rel, req.body?.values ?? {}));
+      const done = await whileBusy(a.id, () => installRelease(appDeps(appStillAsWas(a, had)), rel, req.body?.values ?? {}));
       store.setAgentApp({ ...had, ref, sha: done.sha, manifest: done.manifest,
         previousSha: rel.sha === had.sha ? had.previousSha : had.sha, previousManifest: rel.sha === had.sha ? had.previousManifest : had.manifest,
         installedAt: new Date().toISOString(), testOk: done.test?.ok });
@@ -7558,6 +7607,33 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // call token and hits POST /message, which runs a turn on the peer and
   // returns its reply. Same-owner only, grant-gated, depth-limited.
 
+  /**
+   * Make sure the agent holds a call token whose secret and hash agree. The
+   * secret is written FIRST and the hash goes live after it, one mint per
+   * agent at a time: the hash went first, so a failed secret write, or two
+   * grants at once each writing their own token, left a live hash with a
+   * different secret, and "has a token" kept every later grant from
+   * repairing it — the agent's consults all failed (concurrency review,
+   * 2026-10-09). A token whose secret no longer matches is minted again.
+   */
+  const callTokenMints = new Map<string, Promise<void>>();
+  const ensureAgentCallToken = (agentId: string, ownerId: string): Promise<void> => {
+    const ref = `agent-call-token/${agentId}`;
+    const run = async () => {
+      if (store.hasAgentCallToken(agentId)) {
+        const held = await secrets.get(ref).catch(() => undefined);
+        if (held && store.agentCallTokenIs(agentId, held)) return;
+      }
+      const token = Store.mintAgentCallToken();
+      await secrets.put(ref, token);
+      store.createAgentCallToken(agentId, ownerId, token);
+    };
+    const next = (callTokenMints.get(agentId) ?? Promise.resolve()).catch(() => {}).then(run);
+    const settled = next.catch(() => {}).finally(() => { if (callTokenMints.get(agentId) === settled) callTokenMints.delete(agentId); });
+    callTokenMints.set(agentId, settled);
+    return next;
+  };
+
   /** The owner's view: this agent's granted peers + the pickable candidates. */
   app.get<{ Params: { id: string } }>('/v1/agents/:id/peers', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
@@ -7600,9 +7676,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (valid.length) {
         // Mint when the DB has no live token row (never minted, expired, or
         // revoked) — checking only the secret left a revoked token unrepairable.
-        if (!store.hasAgentCallToken(agent.id)) {
-          await secrets.put(`agent-call-token/${agent.id}`, store.createAgentCallToken(agent.id, ownerIdOf(req)));
-        }
+        await ensureAgentCallToken(agent.id, ownerIdOf(req));
       }
       return { peers: valid };
     },
@@ -7645,9 +7719,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Keep the "may ask it to act" grants to peers that stay (they were wiped).
       store.setAgentPeers(a.id, next, store.listAgentActionPeers(a.id).filter((p) => next.includes(p)));
       changed++;
-      if (next.length && !store.hasAgentCallToken(a.id)) {
-        await secrets.put(`agent-call-token/${a.id}`, store.createAgentCallToken(a.id, ownerIdOf(req)));
-      }
+      if (next.length) await ensureAgentCallToken(a.id, ownerIdOf(req));
     }
     const pending = store.agentsWithPeersPending(ownerIdOf(req));
     return {
@@ -8799,7 +8871,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       { store, provider, log: trace(agent.id) },
       { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: 'telegram', accountId: row.accountId },
     ).catch(() => false);
-    kickRebuild(agent.id);
+    rebuildAfterHandover(agent.id);
     return reply.code(202).send({ released: row.accountId });
   });
 
@@ -9211,7 +9283,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     trace(agent.id)('channel.swapped', { kind, from: old.accountId, to: verified.accountId, told, parked });
     const fresh = store.getChannelForAgent(agent.id, kind)!;
     if (conn.rename) await renameChannelBot(agent, fresh, agent.name);
-    const started = kickRebuild(agent.id);
+    const started = rebuildAfterHandover(agent.id);
     return { swapped: true, from: old.accountId, to: verified.accountId, told, parked, rebuilding: started, channel: publicChannel(store.getChannelForAgent(agent.id, kind)!) };
   });
 
@@ -9362,7 +9434,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
         { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: conn.kind, accountId: CHANNEL_ACCOUNT },
       ).catch(() => false);
-      kickRebuild(agent.id);
+      rebuildAfterHandover(agent.id);
     }
     return reply.code(202).send({ removed: conn.kind, parked });
   });
@@ -10023,7 +10095,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // bot, members and model over the restored openclaw.json.
           reapply: async () => {
             const pdeps = { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision };
-            await pdeps.provider.provision(await buildRuntimeSpec(pdeps, agent.id));
+            // A build that was never accepted: its memory-search decision
+            // must not be stamped by a later model change (2026-10-09).
+            try { await pdeps.provider.provision(await buildRuntimeSpec(pdeps, agent.id)); }
+            catch (err) { forgetEmbedDecision(agent.id); throw err; }
             recordApplied(store, agent.id);
           },
         }, agent.id, date),
@@ -10360,7 +10435,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       try {
         const moved = await moveAgentToHost(
           { store, secrets, channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision,
-            source: providerFor(agent.hostId), target: providerFor(host.id) },
+            source: providerFor(agent.hostId), sourceHostId: agent.hostId, target: providerFor(host.id) },
           agent.id,
           host.id,
         );
@@ -11439,18 +11514,27 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (busyNow(agent, reply)) return reply;
       try {
-        await revokeMember(
-          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-          agent.id,
-          req.params.userId,
-        );
+        // Under the lifecycle lock, on the host the agent is on once it is
+        // held: mid-move the scrub hit the volume the move had already
+        // exported (the copy kept them), a rebuild's seed or a restore's
+        // import put them back (concurrency review, 2026-10-09).
+        await whileBusy(agent.id, async () => {
+          const now = store.getAgent(agent.id) ?? agent;
+          await revokeMember(
+            { store, provider: providerFor(now.hostId), log: trace(agent.id) },
+            agent.id,
+            req.params.userId,
+          );
+        });
         // Their open console (the full chat) ends with the membership, and
         // their name leaves the gateway's list.
         consoleAccess.dropGuests(agent.id, req.params.userId);
         if (agent.state === 'RUNNING') void consoleAccess.ensureReady(agent, 'removal').catch(() => {});
         return { revoked: true };
       } catch (err) {
+        if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof RevokeError) return reply.code(400).send({ error: err.userMessage });
         throw err;
       }
@@ -12076,67 +12160,90 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       });
     }
 
-    // Lease the new identity BEFORE letting go of the old one: the farewell
-    // has to name it, and a failure here must leave the agent as it was.
-    let fresh;
+    // The whole handover holds the agent's lifecycle lock, judged again once
+    // it is held: lease, farewell, stop, old bot back, row swapped. Holding it
+    // only for the stop let a Start or a Rebuild land between the old bot
+    // going back and the new row; a pasted bot was parked (free to lease) BEFORE
+    // the stop, and a stop that failed still swapped the row — the agent kept
+    // polling a bot the next agent could take (concurrency review, 2026-10-09).
+    type Swapped = { fresh: { accountId: string; secretRef: string; deepLink?: string }; told: number };
+    let out: Swapped | { code: number; error: string };
     try {
-      // Never its own bot back: pool leasing is idempotent per agent, so
-      // without the exclusion a pool-bot agent was "moved" to the bot it had,
-      // which the release below then freed under it (night review, 2026-09-27).
-      fresh = await deps.channel.provision({
-        agentId: agent.id, agentName: agent.name, slug: agent.slug, ownerId: agent.ownerId, exclude: [old.accountId],
+      out = await whileBusy(agent.id, async (): Promise<Swapped | { code: number; error: string }> => {
+        const now = store.getAgent(agent.id);
+        if (!now?.runtimeRef || (now.state !== 'RUNNING' && now.state !== 'STOPPED') || now.migratedTo || now.hostId !== agent.hostId
+          || store.getChannelForAgent(agent.id, 'telegram')?.accountId !== old.accountId) {
+          return { code: 409, error: 'It changed meanwhile — look again, then try again.' };
+        }
+        // Lease the new identity BEFORE letting go of the old one: the farewell
+        // has to name it, and a failure here must leave the agent as it was.
+        let fresh;
+        try {
+          // Never its own bot back: pool leasing is idempotent per agent, so
+          // without the exclusion a pool-bot agent was "moved" to the bot it had,
+          // which the release below then freed under it (night review, 2026-09-27).
+          fresh = await deps.channel.provision({
+            agentId: agent.id, agentName: agent.name, slug: agent.slug, ownerId: agent.ownerId, exclude: [old.accountId],
+          });
+        } catch (err) {
+          return { code: 409, error: `Could not take a spare bot: ${String((err as Error)?.message ?? err).slice(0, 160)}` };
+        }
+        if (fresh.accountId.toLowerCase() === old.accountId.toLowerCase()) {
+          return { code: 409, error: 'No other spare bot to move to. Add one under ⚙ Settings → Telegram → Add a bot, then try again.' };
+        }
+        const clash = store.findAgentUsingAccount(fresh.accountId);
+        if (clash && clash.id !== agent.id) {
+          await deps.channel.release(fresh.accountId).catch(() => {});
+          return { code: 409, error: `@${fresh.accountId} already belongs to "${clash.name}".` };
+        }
+
+        // Say goodbye on the bot that still works, and where to find it next.
+        const told = await announceToMembers(
+          { store, provider: providerFor(now.hostId), log: trace(agent.id) },
+          {
+            agentId: agent.id, runtimeRef: now.runtimeRef, accountId: old.accountId,
+            text: `📮 ${agent.name} is moving to @${fresh.accountId}. Open that bot and say hi — this chat will stop answering. Everything it knows comes with it.`,
+          },
+        ).catch(() => 0);
+
+        // Stopped before its old bot goes anywhere: until its rebuild the
+        // container still polls that token (regression review, 2026-09-28).
+        // Not stopped: nothing changes — the old bot stays its own, the new
+        // lease goes back, and the owner is told to try again.
+        if (!(await stopForBotHandover(now))) {
+          await deps.channel.release(fresh.accountId, { reason: 'swapped', agentId: agent.id }).catch(() => {});
+          return { code: 409, error: `It would not stop, so it stays on @${old.accountId}. Try again in a moment.` };
+        }
+        // An owner's own bot (not from the pool) goes INTO the pool, as Detach
+        // does: release alone deleted its token (use-case audit, 2026-09-27).
+        // Only now, once nothing polls it any more.
+        const tgPool = (deps.channel as { pool?: { owns(u: string): boolean; addToPool(u: string, t: string, o?: string | null): Promise<void> } }).pool;
+        if (tgPool && !tgPool.owns(old.accountId)) {
+          try { await tgPool.addToPool(old.accountId, await secrets.get(old.secretRef), agent.ownerId); }
+          catch (err) { trace(agent.id)('channel.recycle_failed', { error: String(err).slice(0, 200) }); }
+        }
+        // `swapped`: the members were told above where to go; no "removed" notice.
+        await deps.channel.release(old.accountId, { reason: 'swapped', agentId: agent.id }).catch((err: unknown) =>
+          app.log.warn({ agentId: agent.id, err: String(err) }, 'old bot release failed'));
+        store.replaceChannelRow(agent.id, 'telegram', {
+          id: randomUUID(), agentId: agent.id, kind: 'telegram',
+          accountId: fresh.accountId, secretRef: fresh.secretRef, deepLink: fresh.deepLink,
+          createdAt: new Date().toISOString(),
+        } as never);
+        trace(agent.id)('channel.swapped', { from: old.accountId, to: fresh.accountId, told });
+        return { fresh, told };
       });
     } catch (err) {
-      return reply.code(409).send({ error: `Could not take a spare bot: ${String((err as Error)?.message ?? err).slice(0, 160)}` });
+      if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+      throw err;
     }
-    if (fresh.accountId.toLowerCase() === old.accountId.toLowerCase()) {
-      return reply.code(409).send({ error: 'No other spare bot to move to. Add one under ⚙ Settings → Telegram → Add a bot, then try again.' });
-    }
-    const clash = store.findAgentUsingAccount(fresh.accountId);
-    if (clash && clash.id !== agent.id) {
-      await deps.channel.release(fresh.accountId).catch(() => {});
-      return reply.code(409).send({ error: `@${fresh.accountId} already belongs to "${clash.name}".` });
-    }
-
-    // Say goodbye on the bot that still works, and where to find it next.
-    const told = await announceToMembers(
-      { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-      {
-        agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: old.accountId,
-        text: `📮 ${agent.name} is moving to @${fresh.accountId}. Open that bot and say hi — this chat will stop answering. Everything it knows comes with it.`,
-      },
-    ).catch(() => 0);
-
-    // An owner's own bot (not from the pool) goes INTO the pool first, as
-    // Detach does: release alone deleted its token (use-case audit, 2026-09-27).
-    const tgPool = (deps.channel as { pool?: { owns(u: string): boolean; addToPool(u: string, t: string, o?: string | null): Promise<void> } }).pool;
-    if (tgPool && !tgPool.owns(old.accountId)) {
-      try { await tgPool.addToPool(old.accountId, await secrets.get(old.secretRef), agent.ownerId); }
-      catch (err) { trace(agent.id)('channel.recycle_failed', { error: String(err).slice(0, 200) }); }
-    }
-    // Stopped before its old bot goes back: until its rebuild the container
-    // still polls that token, and a new agent could lease it meanwhile
-    // (regression review, 2026-09-28). The rebuild below starts it again.
-    const oldStopped = await whileBusy(agent.id, () => stopForBotHandover(agent)).catch(() => false);
-    // `swapped`: the members were told above where to go; no "removed" notice.
-    // Not stopped: the old bot stays leased to it, so nobody else can take it.
-    if (oldStopped) {
-      await deps.channel.release(old.accountId, { reason: 'swapped', agentId: agent.id }).catch((err: unknown) =>
-        app.log.warn({ agentId: agent.id, err: String(err) }, 'old bot release failed'));
-    } else {
-      trace(agent.id)('channel.stop_failed', { error: 'kept the old bot leased: the agent would not stop' });
-    }
-    store.replaceChannelRow(agent.id, 'telegram', {
-      id: randomUUID(), agentId: agent.id, kind: 'telegram',
-      accountId: fresh.accountId, secretRef: fresh.secretRef, deepLink: fresh.deepLink,
-      createdAt: new Date().toISOString(),
-    } as never);
-    trace(agent.id)('channel.swapped', { from: old.accountId, to: fresh.accountId, told });
+    if ('error' in out) return reply.code(out.code).send({ error: out.error });
+    const { fresh, told } = out;
 
     // A rebuild writes the whole Telegram block from the new row — the account
     // key, the token, the allowlist and the door policy together. Doing that by
     // hand on a live config is the class of edit that has bitten us twice.
-    const started = kickRebuild(agent.id);
+    const started = rebuildAfterHandover(agent.id);
     return {
       swapped: true, from: old.accountId, to: fresh.accountId,
       deepLink: fresh.deepLink, told, rebuilding: started,
@@ -12210,6 +12317,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!a || !a.runtimeRef) return 'Not found';
     if (a.migratedTo) return `It moved to ${a.migratedTo}.`;
     if ((!holdingLock && isBusy(a.id)) || archiving.has(a.id)) return BUSY_MSG;
+    // A rebuild in flight or waiting its turn (one follows every bot
+    // handover): the container still holds the bot it gave back, and
+    // starting it as it is polled a bot another agent may lease
+    // (concurrency review, 2026-10-09). The rebuild starts it.
+    if (inflight.has(a.id)) return 'It is being rebuilt; it starts by itself when that is done.';
     if (a.state !== 'STOPPED') return `Cannot start while ${a.state}`;
     return undefined;
   };

@@ -3995,8 +3995,7 @@ export class Store {
    *  agent as a CALLER to the A2A /message endpoint. Long-lived; rotated by a
    *  fresh mint. The raw token is returned once — store it in the SecretStore
    *  for injection; only its hash is kept here for lookup. */
-  createAgentCallToken(agentId: string, ownerId: string): string {
-    const token = `hatchabot_a2a_${randomBytes(32).toString('base64url')}`;
+  createAgentCallToken(agentId: string, ownerId: string, token = Store.mintAgentCallToken()): string {
     this.db.prepare(`DELETE FROM cli_tokens WHERE agent_id = ?`).run(agentId);
     this.db
       .prepare(
@@ -4006,6 +4005,19 @@ export class Store {
       .run(randomUUID(), ownerId, hashToken(token), 'a2a', new Date().toISOString(),
         new Date(Date.now() + 3650 * 86_400_000).toISOString(), agentId);
     return token;
+  }
+
+  /** A fresh A2A call token, not yet anyone's: the caller stores it as a
+   *  secret FIRST and only then makes it live with createAgentCallToken. */
+  static mintAgentCallToken(): string {
+    return `hatchabot_a2a_${randomBytes(32).toString('base64url')}`;
+  }
+
+  /** Is `token` this agent's live call token? (No use recorded: a check, not a call.) */
+  agentCallTokenIs(agentId: string, token: string): boolean {
+    return !!this.db
+      .prepare(`SELECT 1 FROM cli_tokens WHERE agent_id = ? AND token_hash = ? AND (expires_at IS NULL OR expires_at > ?)`)
+      .get(agentId, hashToken(token), new Date().toISOString());
   }
 
   /** Resolve an A2A caller token to its agent, or undefined. Records the use. */

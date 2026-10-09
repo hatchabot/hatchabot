@@ -279,9 +279,9 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
    * cosmetic and must not cost anyone their agent.
    */
   /** Record the name this bot SHOULD have, and the earliest we may try. */
-  #park(username: string, name: string, delayMs: number): void {
+  #park(username: string, name: string, delayMs: number, onlyIfFree = false): void {
     this.db
-      .prepare(`UPDATE telegram_pool SET desired_name = ?, rename_after = ? WHERE username = ? COLLATE NOCASE`)
+      .prepare(`UPDATE telegram_pool SET desired_name = ?, rename_after = ? WHERE username = ? COLLATE NOCASE${onlyIfFree ? ' AND leased_to IS NULL' : ''}`)
       .run(name, new Date(Date.now() + delayMs).toISOString(), username);
   }
 
@@ -539,7 +539,11 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // ended up called "Hatchabot (unassigned)" for three hours. Deferring means
     // a bot re-leased before the sweep runs spends NONE, while one that really
     // is sitting free still stops advertising a departed agent.
-    this.#park(accountId, TelegramPoolProvisioner.IDLE_NAME, IDLE_RENAME_DELAY_MS);
+    // Only while it is still free: the farewell above awaits Telegram, and a
+    // lease taken meanwhile named the bot for its new agent — parking the
+    // idle name over that renamed a serving bot "unassigned" at the next
+    // sweep (concurrency review, 2026-10-09).
+    this.#park(accountId, TelegramPoolProvisioner.IDLE_NAME, IDLE_RENAME_DELAY_MS, true);
   }
 
   /**

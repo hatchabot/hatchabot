@@ -32,7 +32,7 @@ async function world() {
   const f = Fastify();
   await registerRoutes(f, { store, secrets, providers: new Map([['mock', new MockProvider()]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
   const mesh = (agentIds: string[], connect: boolean) => f.inject({ method: 'POST', url: '/v1/agent-peers/mesh', headers: as, payload: { agentIds, connect } });
-  return { store, secrets, mesh };
+  return { store, secrets, mesh, f };
 }
 
 describe('POST /v1/agent-peers/mesh', () => {
@@ -71,5 +71,39 @@ describe('POST /v1/agent-peers/mesh', () => {
     expect((await mesh(['stock', 'old'], true)).statusCode).toBe(400);
     expect((await mesh(['stock'], true)).statusCode).toBe(400);
     expect((await mesh(['stock', 'theirs'], true)).statusCode).toBe(404);
+  });
+});
+
+describe('the call token: its secret and its hash always agree (2026-10-09)', () => {
+  const peers = (w: Awaited<ReturnType<typeof world>>, id: string, ids: string[]) =>
+    w.f.inject({ method: 'PUT', url: `/v1/agents/${id}/peers`, headers: as, payload: { peerIds: ids } });
+
+  it('a failed secret write leaves no live hash, so the next grant mints again', async () => {
+    const w = await world();
+    const put = w.secrets.put.bind(w.secrets);
+    let fail = true;
+    w.secrets.put = async (r: string, v: string) => { if (fail) { fail = false; throw new Error('disk full'); } return put(r, v); };
+    expect((await peers(w, 'stock', ['tax'])).statusCode).toBe(500);
+    expect(w.store.hasAgentCallToken('stock')).toBe(false);
+    expect((await peers(w, 'stock', ['tax'])).statusCode).toBe(200);
+    expect(w.store.agentCallTokenIs('stock', w.secrets.map.get('agent-call-token/stock')!)).toBe(true);
+  });
+
+  it('a live hash whose secret is gone is minted again', async () => {
+    const w = await world();
+    w.store.createAgentCallToken('stock', OWNER); // the hash, with no secret written
+    expect((await peers(w, 'stock', ['tax'])).statusCode).toBe(200);
+    expect(w.store.agentCallTokenIs('stock', w.secrets.map.get('agent-call-token/stock')!)).toBe(true);
+  });
+
+  it('two grants at once end with one token, secret and hash the same', async () => {
+    const w = await world();
+    const put = w.secrets.put.bind(w.secrets);
+    // The first write is slow: the second grant's mint would otherwise overtake it.
+    let first = true;
+    w.secrets.put = async (r: string, v: string) => { if (first) { first = false; await new Promise((res) => setTimeout(res, 20)); } return put(r, v); };
+    const [a, b] = await Promise.all([peers(w, 'stock', ['tax']), w.mesh(['stock', 'legal'], true)]);
+    expect([a.statusCode, b.statusCode]).toEqual([200, 200]);
+    expect(w.store.agentCallTokenIs('stock', w.secrets.map.get('agent-call-token/stock')!)).toBe(true);
   });
 });

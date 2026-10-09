@@ -155,7 +155,12 @@ export async function compactAgent(deps: CompactDeps, agent: Agent, req: Compact
   const lines = req.mode === 'lines' ? Math.min(Math.max(Math.round(req.lines ?? THRESHOLDS.keepLines), 20), 5000) : undefined;
   const health = store.tokenHealths([agent.id]).get(agent.id)?.health as TokenHealthRaw | undefined;
   const beforeCtx = key === mainSessionKey(agent.slug) ? health?.main?.[agent.slug]?.ctx : undefined;
-  const loop = await retryLoopNow(deps, agent, now());
+  // Claimed before the first await: added after the log read, two requests
+  // that both passed the check above ran two compactions of one conversation
+  // at once (concurrency review, 2026-10-09). Let go on every way out.
+  inFlight.add(agent.id);
+  let loop: Awaited<ReturnType<typeof retryLoopNow>>;
+  try { loop = await retryLoopNow(deps, agent, now()); } catch (err) { inFlight.delete(agent.id); throw err; }
   const action: TokenActionRow = {
     id: `ta_${randomBytes(8).toString('hex')}`, agentId: agent.id, ownerId: agent.ownerId, kind: 'compaction', at: new Date(now()).toISOString(),
     by: req.meta.by, via: req.meta.via, ...(req.meta.why ? { why: req.meta.why.slice(0, 400) } : {}), ...(req.meta.proposalId ? { proposalId: req.meta.proposalId } : {}),
@@ -163,9 +168,8 @@ export async function compactAgent(deps: CompactDeps, agent: Agent, req: Compact
       ...(loop.looping ? { retryLoop: { count: loop.count, limitMs: loop.limitMs } } : {}) },
     outcome: 'running',
   };
-  store.addTokenAction(action);
+  try { store.addTokenAction(action); } catch (err) { inFlight.delete(agent.id); throw err; }
   deps.log?.('token.compaction_started', { agentId: agent.id, mode: req.mode, retryLoop: loop.looping });
-  inFlight.add(agent.id);
 
   const run = async (): Promise<CompactResult> => {
     const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
