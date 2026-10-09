@@ -95,3 +95,5 @@ tests that run on their own.
 | 2026-10-09 | browser | pass | v2.157.0 | 3 | OpenClaw 2026.9.8 |
 | 2026-10-09 | candidate-gate | pass | v2.157.0 | 2 | OpenClaw 2026.9.8 |
 | 2026-10-09 | regress-autonomous | pass | v2.157.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-10-09 | restore-drill | pass | v2.157.0 | 3 | OpenClaw 2026.9.8 |
+| 2026-10-09 | upgrade-check | pass | v2.157.0 | 1 |  |

@@ -1540,6 +1540,13 @@ const SCENARIOS = String.raw`(() => {
       const title = document.title, opened = []; const realOpen = window.open;
       window.open = (u) => { opened.push(u); return null; };
       try {
+        // Start clean: an earlier scenario can leave a console open or the
+        // same #console= address in the bar, and setting an address already
+        // there fires no hashchange — the open then never happens (it failed
+        // 2 of 12 CI runs, 2026-10-09).
+        if (consoleDlg.open) closeConsole();
+        await until(() => !consoleOpening, 20000);
+        history.replaceState(null, '', location.pathname + location.search);
         location.hash = '#console=' + key;
         // Opening chains several awaited steps (wake, health, access): slower
         // machines (GitHub's runners) need more than the usual 8 s (2026-10-09).
