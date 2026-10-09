@@ -196,8 +196,7 @@ steps done, and the time. The Hatchabot agent gets the same through its tools.
 | **Telegram Web link for the owner** | Add it beside "Open Telegram" in the Telegram tab. |
 
 Everything else on the classic card has an equivalent in the agent's sheet
-(the full table is in the research notes of this design's review; nothing else
-is missing).
+or the home screen (Appendix).
 
 ### Accessibility, before classic goes
 
@@ -228,7 +227,7 @@ click-through scenario:
 ### Removal
 
 The removal release deletes the classic-only HTML, CSS and JavaScript (listed
-by function in the review notes: `agentCard`, `cardMenu`, `memberCard`,
+by function: `agentCard`, `cardMenu`, `memberCard`,
 `renderToc`, the classic ordering and drag code, `fleetDlg`, `groupDlg`,
 `fleetSourcesDlg`, the classic header and Activity card…), keeps what the sheet
 borrows (`agentNotices`, `editDlg`/`cronDlg`/`healthDlg` panes, `prepareEdit`,
@@ -264,3 +263,34 @@ gone, and the knowledge-pack test if the map does.
    operation wait for you?
 4. **Notice release**: needed, given who uses the classic look, or remove it
    in one release?
+
+---
+
+## Appendix — where each classic control lives on the home screen
+
+| Classic | Home screen |
+|---|---|
+| Invite… | Sharing → Invite… |
+| ⚙ Settings | the agent's sheet (12 tabs) |
+| ⏰ Tasks | Schedule |
+| 🏷 Sync name | Telegram (shown when the names differ) |
+| 📝 Chat → Memory, 📥 Recover context | Personality → Memory |
+| 💬 History | Data → History |
+| ⧉ Clone, 📤 Share, 📨 Send, 👪 New child, Proposals, Push, Propose | Sharing → Copy or share |
+| Move (to a runner), Move to another Hatchabot, Download copy | Advanced |
+| Wake, Start, Retry, Sleep, Stop | the sheet's bar; Stop in Overview → Checks |
+| Rebuild / Update | Overview → Rebuild; notices |
+| 📥 Archive, 📤 Restore, 🔍 Inspect, Delete | Advanced → Careful; the sheet's bar; drag to Archived or the bin |
+| 🏷 Group | Overview → Group; drag between groups |
+| 📊 Usage, ❤️ Health, Logs (per agent) | Overview → Checks, Usage |
+| OpenClaw (debug) | the agent's icon, 💬 Chat |
+| Members list with remove × | Sharing → Remove |
+| Bulk actions, Rebuild all | ⚡ Bulk actions (Rebuild all at its foot) |
+| Inbox | the Inbox button (when not empty), the account menu |
+| Import, 📋 Templates | New agent → open a .hatchabot file / start from a template |
+| 📊 Usage, 📊 Sources (all agents) | Usage; View by → Source / Model |
+| Setup guide, Help, Install app, theme, sign out | the header and the account menu |
+| Rate-limit banner, bot pool count | the tile's status and Alerts; Settings → Telegram |
+| Recent activity | Activity |
+| 📑 Jump legend | not needed with icons; View by → Alerts |
+| Planned agents; manual order; Run health checks (all); Setup-values notice; Telegram Web | **missing** — see "What only classic has" |
