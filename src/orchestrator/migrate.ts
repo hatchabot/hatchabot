@@ -542,7 +542,8 @@ async function migrateSteps(
     return settleUnanswered(`HTTP ${res.status} without an agent in the body`, `${res.status} with no agent in the reply`);
   }
   const remote = body as { id: string; state: string; name: string };
-  op.step('answered');
+  // Its id there is what the caller is told once it is done (publicOperation's result).
+  op.step('answered', typeof remote.id === 'string' ? { remoteAgentId: remote.id.slice(0, 64) } : undefined);
 
   // 4. Verify it actually came up there before we consider this done.
   if (remote.state !== 'RUNNING') {

@@ -179,7 +179,7 @@ import { clearStaleRuntimePinsWhenUp } from '../orchestrator/runtimePins.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
-import { beginOperation, currentBootId, handleFor, KIND_LABEL, operationRefusal, publicOperation, rethrowIfCrash, type OpHandle } from '../orchestrator/operations.js';
+import { BACKGROUND_KINDS, beginOperation, currentBootId, handleFor, KIND_LABEL, operationRefusal, operationSummary, publicOperation, rethrowIfCrash, runInBackground, spanWords, STATUS_EVENT, type OpHandle } from '../orchestrator/operations.js';
 import { recoverOperation, RecoverError, resumeOperations, startOperationRetryLoop, type ResumeContext } from '../orchestrator/operationsResume.js';
 import {
   ensureRunnerKey,
@@ -6269,6 +6269,26 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     },
   );
 
+  // ---- long changes in the background (operations.ts, phase 3) -------------
+  // A move, a move to another Hatchabot, an import of a full copy, a restore
+  // from a backup or a snapshot answer 202 { operation } as soon as they are
+  // validated and their operation has begun; the work goes on here, and the
+  // page and the CLI follow GET /v1/operations/:id. `?wait=1` keeps the old
+  // answer (sent when it is over) for older CLIs and scripts: nothing new
+  // uses it.
+  const waitAsked = (req: FastifyRequest): boolean =>
+    ['1', 'true', 'yes'].includes(String((req.query as { wait?: unknown } | undefined)?.wait ?? ''));
+  /** The 202: the operation as the page shows it, and its agent when there is one. */
+  const accepted = (reply: FastifyReply, opId: string) => {
+    const op = store.getOperation(opId);
+    const agent = op?.agentId ? store.getAgent(op.agentId) : undefined;
+    return reply.code(202).send({ operation: publicOperation(op), ...(agent ? { agent: publicAgent(agent) } : {}) });
+  };
+  /** What a background operation threw: its outcome is on its row; the journal gets the rest. */
+  const backgroundError = (err: unknown, opId: string) => {
+    app.log.warn({ op: opId, err: String(err instanceof Error ? err.message : err).slice(0, 300) }, 'operation.background_ended');
+  };
+
   // ---- snapshots (core-file history) ---------------------------------------
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/snapshots', async (req, reply) => {
@@ -6313,10 +6333,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // guard, so a restore could interleave with a migrate/adopt/export
       // reading or replacing the same volume. Hold the flag for the write.
       if (busyNow(agent, reply)) return reply;
+      const run = (onOperation?: (id: string) => void) => whileBusy(agent.id, () =>
+        restoreSnapshot({ ...snapshotDeps(agent), requestedBy: ownerIdOf(req), onOperation }, agent.id, req.params.snapId));
       try {
-        return await whileBusy(agent.id, () =>
-          restoreSnapshot({ ...snapshotDeps(agent), requestedBy: ownerIdOf(req) }, agent.id, req.params.snapId),
-        );
+        if (waitAsked(req)) return await run();
+        // In the background once it has begun (phase 3); its refusals
+        // (stopped, no such snapshot) come first, as before.
+        const bg = await runInBackground(store, run, { onError: backgroundError });
+        return bg.started ? accepted(reply, bg.opId) : bg.value;
       } catch (err) {
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof SnapshotError) return reply.code(409).send({ error: err.userMessage });
@@ -10170,12 +10194,60 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Another owner's agent shared with you: what happened, not its details
     // (an event can carry an address or an error text; use-case audit, 2026-09-27).
     const mine = new Set(visible.filter((a) => a.ownerId === ownerIdOf(req)).map((a) => a.id));
-    const rows: Array<Record<string, unknown> & { at: string }> = store.listEvents(ids, limit).map((e) => ({
+    const shape = (e: ReturnType<typeof store.listEvents>[number]) => ({
       ...e,
       ...(mine.has(e.agentId) ? {} : { detail: undefined }),
       agentName: names.get(e.agentId),
+    });
+    // One agent's timeline: every line, an operation's steps among them.
+    if (req.query.agentId) return store.listEvents(ids, limit).map(shape);
+    // The feed (Activity): an operation is ONE row that opens to its steps
+    // (phase 3), not a row per step. Its own lines (op.*) are left out, and
+    // so is what the agent logged while it ran (runtime.started,
+    // agent.moved…: the operation's doing, kept in the Setup log). The agent
+    // is busy on disk for that time, so nothing else of its own happens then.
+    const agentOps = store.listOperations(ids, limit).filter((op) => !BACKGROUND_KINDS.includes(op.kind));
+    const nowMs = Date.now();
+    // Its window: until it ended; while it runs, until now; held or cut off
+    // by a restart, a little past its last step (a held one is asked about
+    // again every 10 minutes, which must not hide that agent's lines for days).
+    const windows = agentOps.map((op) => ({
+      agentId: op.agentId,
+      from: Date.parse(op.requestedAt),
+      to: op.finishedAt ? Date.parse(op.finishedAt) + 2000
+        : op.status === 'running' || op.status === 'queued' ? nowMs + 2000
+        : Date.parse(op.stepAt ?? op.requestedAt) + 120_000,
     }));
-    if (req.query.agentId) return rows;
+    const during = (e: { agentId: string; at: string }) => {
+      const t = Date.parse(e.at);
+      return windows.some((w) => w.agentId === e.agentId && t >= w.from && t <= w.to);
+    };
+    const rows: Array<Record<string, unknown> & { at: string }> = store
+      .listEvents(ids, Math.min(limit * 3, 600), { withoutOps: true })
+      .filter((e) => !during(e))
+      .slice(0, limit)
+      .map(shape);
+    for (const op of agentOps) {
+      const pub = publicOperation(op, { recovery: false })!;
+      const own = mine.has(op.agentId!);
+      const ended = op.finishedAt ?? null;
+      const ms = Math.max(0, Date.parse(ended ?? (op.status === 'running' || op.status === 'queued' ? new Date(nowMs).toISOString() : op.updatedAt)) - Date.parse(op.requestedAt));
+      // Another owner's agent shared with you: what happened, not where to or why.
+      const summary = own ? String(pub.summary) : operationSummary(op.kind, String(pub.status), {});
+      const steps = own
+        ? store.eventsForOperation(op.agentId!, op.id).filter((e) => e.event !== 'op.started').map((e) => ({ at: e.at, event: e.event, label: eventLabel(e.event, e.detail) }))
+        : [];
+      rows.push({
+        agentId: op.agentId, at: ended ?? op.updatedAt, event: STATUS_EVENT[String(pub.status)] ?? 'op.done',
+        detail: own ? { op: op.id, kind: op.kind, outcome: op.outcome ?? undefined } : undefined,
+        agentName: names.get(op.agentId!),
+        label: `${summary} · ${spanWords(ms)}`,
+        op: {
+          id: op.id, kind: op.kind, kindLabel: pub.kindLabel, status: pub.status, summary, durationMs: ms,
+          startedAt: op.requestedAt, finishedAt: ended, ...(own ? { outcome: op.outcome ?? undefined, steps } : {}),
+        },
+      });
+    }
     // A machine's own operations (a runner's image copy, Back up now) have no
     // agent and so no agent_events row: read from the operations table, one
     // row each, for that machine's owner only (design, "On the page").
@@ -10183,12 +10255,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const hostName = new Map(hosts.map((h) => [h.id, h.kind === 'local' ? 'This machine' : h.name]));
     const machine = store.listMachineOperations([...hostName.keys()], limit).map((op) => {
       const pub = publicOperation(op, { recovery: false })!;
-      const event = { queued: 'op.started', running: 'op.started', succeeded: 'op.done', failed: 'op.failed', rolled_back: 'op.rolled_back', held: 'op.held', interrupted: 'op.interrupted' }[String(pub.status)] ?? 'op.done';
+      const event = STATUS_EVENT[String(pub.status)] ?? 'op.done';
       const detail = { op: op.id, kind: op.kind, label: KIND_LABEL[op.kind] ?? op.kind, outcome: op.outcome ?? undefined, hostId: op.hostId };
+      const ms = Math.max(0, Date.parse(op.finishedAt ?? new Date(nowMs).toISOString()) - Date.parse(op.requestedAt));
       return {
         agentId: null, at: op.finishedAt ?? op.requestedAt, event, detail,
         agentName: hostName.get(op.hostId ?? '') ?? 'A machine',
         label: `${KIND_LABEL[op.kind] ?? op.kind}: ${eventLabel(event, detail)}`,
+        // No agent, so no timeline of steps: how it ended is the whole story.
+        op: { id: op.id, kind: op.kind, kindLabel: pub.kindLabel, status: pub.status, summary: pub.summary, durationMs: ms,
+          startedAt: op.requestedAt, finishedAt: op.finishedAt ?? null, outcome: op.outcome ?? undefined, steps: [] },
       };
     });
     return [...rows, ...machine].sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
@@ -10322,19 +10398,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = store.getAgent(agentId);
     if (!agent || agent.state === 'DELETED') return reply.code(404).send({ error: 'Not found' });
     if (busyNow(agent, reply)) return reply;
+    const run = (onOperation?: (id: string) => void) => whileBusy(agent.id, () =>
+      restoreAgentFromBackup({
+        ...snapshotDeps(agent),
+        // The same second provision Import and Move use: this installation's
+        // bot, members and model over the restored openclaw.json.
+        reapply: () => reapplyCurrentSettings(
+          { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision },
+          agent.id,
+        ),
+        requestedBy: ownerIdOf(req),
+        onOperation,
+      }, agent.id, date));
     try {
-      return await whileBusy(agent.id, () =>
-        restoreAgentFromBackup({
-          ...snapshotDeps(agent),
-          // The same second provision Import and Move use: this installation's
-          // bot, members and model over the restored openclaw.json.
-          reapply: () => reapplyCurrentSettings(
-            { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision },
-            agent.id,
-          ),
-          requestedBy: ownerIdOf(req),
-        }, agent.id, date),
-      );
+      if (waitAsked(req)) return await run();
+      // In the background once it has begun (phase 3): minutes on a large
+      // agent. Its refusals (no such date, not in that set) come first.
+      const bg = await runInBackground(store, run, { onError: backgroundError });
+      return bg.started ? accepted(reply, bg.opId) : bg.value;
     } catch (err) {
       if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
       if (err instanceof RestoreError) return reply.code(400).send({ error: err.userMessage });
@@ -10666,27 +10747,36 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         store.setAgentImage(agent.id, null);
         trace(agent.id)('image.unpinned', { reason: 'move-host', was: agent.image, to: host.id });
       }
-      // The move is recorded as an operation (operations.ts); its id comes back
-      // either way. Still answered when it is done: running it in the
-      // background with a 202 comes with the page's operation view (phase 3).
+      // The move is recorded as an operation (operations.ts) and answers 202
+      // with it once it has begun; the move goes on in the background
+      // (phase 3). ?wait=1: the old answer, when it is over.
       let operation: string | undefined;
-      try {
-        const moved = await moveAgentToHost(
-          { store, secrets, channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision,
-            source: providerFor(agent.hostId), sourceHostId: agent.hostId, target: providerFor(host.id),
-            requestedBy: ownerIdOf(req), onOperation: (id) => { operation = id; } },
-          agent.id,
-          host.id,
-        );
-        return { ...publicAgent(moved), operation };
-      } catch (err) {
-        // A move that did not happen keeps its pin: the agent stays on the
-        // old host, where the next rebuild would otherwise drop the image's
-        // extra packages (the 26th-audit bug by another door; night review).
-        if (dropPin && store.getAgent(agent.id)?.hostId === agent.hostId) {
-          store.setAgentImage(agent.id, agent.image ?? null);
-          trace(agent.id)('image.repinned', { reason: 'move-host failed', image: agent.image });
+      const run = async (onOperation?: (id: string) => void) => {
+        try {
+          return await moveAgentToHost(
+            { store, secrets, channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision,
+              source: providerFor(agent.hostId), sourceHostId: agent.hostId, target: providerFor(host.id),
+              requestedBy: ownerIdOf(req), onOperation: (id) => { operation = id; onOperation?.(id); } },
+            agent.id,
+            host.id,
+          );
+        } catch (err) {
+          // A move that did not happen keeps its pin: the agent stays on the
+          // old host, where the next rebuild would otherwise drop the image's
+          // extra packages (the 26th-audit bug by another door; night review).
+          // In the background too: the request may have been answered long ago.
+          if (dropPin && store.getAgent(agent.id)?.hostId === agent.hostId) {
+            store.setAgentImage(agent.id, agent.image ?? null);
+            trace(agent.id)('image.repinned', { reason: 'move-host failed', image: agent.image });
+          }
+          throw err;
         }
+      };
+      try {
+        if (waitAsked(req)) return { ...publicAgent(await run()), operation };
+        const bg = await runInBackground(store, run, { onError: backgroundError });
+        return bg.started ? accepted(reply, bg.opId) : { ...publicAgent(bg.value), operation };
+      } catch (err) {
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage, operation });
         throw err;
@@ -10712,14 +10802,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // extra packages, so it's refused unless the caller states the choice.
       const allowDroppedPin = (req.body as { allowDroppedPin?: boolean } | null)?.allowDroppedPin === true;
       let operation: string | undefined;
+      const run = (onOperation?: (id: string) => void) => migrateAgent(
+        { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
+          log: trace(agent.id) },
+        agent.id,
+        peer,
+        { allowDroppedPin, requestedBy: ownerIdOf(req), onOperation: (id) => { operation = id; onOperation?.(id); } },
+      );
       try {
-        return await migrateAgent(
-          { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
-            log: trace(agent.id) },
-          agent.id,
-          peer,
-          { allowDroppedPin, requestedBy: ownerIdOf(req), onOperation: (id) => { operation = id; } },
-        );
+        if (waitAsked(req)) return await run();
+        // 202 once the other server has said yes to the preflight (nothing
+        // has stopped before that, so its refusal is still this answer); the
+        // export, the transfer and the check go on in the background.
+        const bg = await runInBackground(store, run, { readyAt: 'preflight-ok', onError: backgroundError });
+        return bg.started ? accepted(reply, bg.opId) : bg.value;
       } catch (err) {
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof MigrateError) return reply.code(400).send({ error: err.userMessage, operation });
@@ -10836,7 +10932,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
   });
 
-  app.post<{ Querystring: { aiProfileId?: string; hostId?: string; image?: string } }>(
+  // Synchronous unless the caller asks `?async=1` (the CLI's `restore`): the
+  // other Hatchabot's side of a move to it (migrate.ts) posts here and reads
+  // the agent from the answer — a 202 would read as "no answer" and hold the
+  // move. Its requests carry no marker of their own, and older servers post
+  // too, so the background is the opt-in, never the default.
+  app.post<{ Querystring: { aiProfileId?: string; hostId?: string; image?: string; async?: string } }>(
     '/v1/agents/restore',
     async (req, reply) => {
       { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
@@ -10858,14 +10959,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         }
       }
       let operation: string | undefined;
+      const run = (onOperation?: (id: string) => void) => importAgent(
+        // No id yet — trace() picks it up from the orchestrator's log detail.
+        { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
+        body,
+        { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId), verifyToken: deps.verifyImportedToken,
+          onOperation: (id) => { operation = id; onOperation?.(id); } },
+      );
       try {
-        const agent = await importAgent(
-          // No id yet — trace() picks it up from the orchestrator's log detail.
-          { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
-          body,
-          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId), verifyToken: deps.verifyImportedToken,
-            onOperation: (id) => { operation = id; } },
-        );
+        if (req.query.async === '1') {
+          const bg = await runInBackground(store, run, { onError: backgroundError });
+          if (bg.started) return accepted(reply, bg.opId);
+          return reply.code(201).send({ ...publicAgent(bg.value), operation });
+        }
+        const agent = await run();
         return reply.code(201).send({ ...publicAgent(agent), operation });
       } catch (err) {
         if (err instanceof ImageDecisionNeeded) return reply.code(409).send(imageDecisionBody(err));
@@ -11609,13 +11716,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (req.query.telegram === '0') {
           return reply.code(400).send({ error: 'This file is a full copy (a Download): it brings the agent back with its own Telegram bot, so "no Telegram" does not apply. Import it without that option; to make a new agent without a bot from it, export it as a template instead.' });
         }
-        const agent = await importAgent(
+        const run = (onOperation?: (id: string) => void) => importAgent(
           { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
           body,
           { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId), verifyToken: deps.verifyImportedToken,
-            onOperation: (id) => { operation = id; } },
+            onOperation: (id) => { operation = id; onOperation?.(id); } },
         );
-        return reply.code(201).send({ ...publicAgent(agent), kind: 'agent', operation });
+        if (waitAsked(req)) return reply.code(201).send({ ...publicAgent(await run()), kind: 'agent', operation });
+        // A full copy runs in the background once its record exists (phase
+        // 3): minutes for a large one. The file's refusals come first.
+        const bg = await runInBackground(store, run, { onError: backgroundError });
+        if (bg.started) {
+          const op = store.getOperation(bg.opId);
+          const made = op?.agentId ? store.getAgent(op.agentId) : undefined;
+          return reply.code(202).send({ operation: publicOperation(op), kind: 'agent', ...(made ? { agent: publicAgent(made) } : {}) });
+        }
+        return reply.code(201).send({ ...publicAgent(bg.value), kind: 'agent', operation });
       } catch (err) {
         if (err instanceof ImageDecisionNeeded) return reply.code(409).send(imageDecisionBody(err));
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage, operation });

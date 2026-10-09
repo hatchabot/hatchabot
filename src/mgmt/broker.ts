@@ -708,7 +708,12 @@ export class Broker {
 
   async #execMutate(name: string, r: Resolved): Promise<string | void> {
     if (r.rest) {
-      const out = await this.#need(this.api.raw).call(this.api, r.rest.call.method, r.rest.call.path, r.rest.call.body);
+      const raw = this.#need(this.api.raw);
+      const out = await raw.call(this.api, r.rest.call.method, r.rest.call.path, r.rest.call.body);
+      // A long change answers 202 { operation } and goes on in the background
+      // (operations.ts, phase 3): follow it, so "done" means done.
+      const followed = await followOperation(out, (path) => raw.call(this.api, 'GET', path));
+      if (followed) return followed;
       if (r.rest.rebuild && r.agentId) await this.api.rebuildAgent(r.agentId);
       return REST_BY_NAME.get(name)?.done?.(out);
     }
@@ -791,6 +796,42 @@ export class Broker {
 /** Approximate line-diff size: "120 → 180 lines (~64 changed)". Set-based, so
  *  it understates moves — good enough for a card whose full content the owner
  *  can read below it. */
+/** Statuses of an operation that is not over (operations.ts). */
+const OP_ACTIVE = new Set(['queued', 'running', 'interrupted']);
+
+/**
+ * A call that answered 202 { operation }: follow GET /v1/operations/:id until
+ * it is over (up to `limitMs`), and say how it ended, step and all. Undefined
+ * when the answer is not an operation under way (the old synchronous shape).
+ */
+export async function followOperation(
+  out: unknown,
+  get: (path: string) => Promise<unknown>,
+  opts: { limitMs?: number; everyMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<string | undefined> {
+  const op = (out as { operation?: unknown } | null)?.operation as { id?: unknown; status?: unknown } | undefined;
+  if (!op || typeof op !== 'object' || typeof op.id !== 'string' || !OP_ACTIVE.has(String(op.status))) return undefined;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const deadline = Date.now() + (opts.limitMs ?? 180_000);
+  let now = op as Record<string, unknown>;
+  for (;;) {
+    now = (await get(`/v1/operations/${encodeURIComponent(op.id)}`)) as Record<string, unknown>;
+    if (!OP_ACTIVE.has(String(now.status))) break;
+    if (Date.now() > deadline) {
+      const at = now.stepN ? ` (step ${String(now.stepN)} of ${String(now.steps)}: ${String(now.stepLabel ?? '')})` : '';
+      return `${String(now.title ?? now.kindLabel ?? 'It')} is still under way${at} — list_operations shows how it goes (operation ${op.id}).`;
+    }
+    await sleep(opts.everyMs ?? 1500);
+  }
+  const result = now.result as { safetySnapshotId?: string } | undefined;
+  const choices = (now.recovery as { actions?: Array<{ action: string; label: string }> } | undefined)?.actions ?? [];
+  return [
+    String(now.outcome ?? now.summary ?? 'Done.'),
+    now.status === 'held' && choices.length ? `It is waiting for the owner's choice (recover_operation ${op.id}): ${choices.map((c) => `"${c.action}" — ${c.label}`).join('; ')}.` : '',
+    result?.safetySnapshotId ? `Undo with restore_snapshot ${result.safetySnapshotId}.` : '',
+  ].filter(Boolean).join(' ');
+}
+
 export function diffStat(before: string, after: string): string {
   const a = before.split('\n');
   const b = after.split('\n');

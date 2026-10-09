@@ -356,8 +356,9 @@ export const REST_TOOLS: RestTool[] = [
   {
     name: 'list_operations', tier: 'read',
     description:
-      'The long changes recorded for the owner\'s agents (moves to another machine or another Hatchabot, imports), newest first: '
-      + 'kind, status (running, succeeded, failed, rolled_back, interrupted, held), the last step done, the outcome in plain words, and — '
+      'The long changes recorded for the owner\'s agents (moves to another machine or another Hatchabot, imports, restores, archives, app installs), newest first: '
+      + 'kind, title ("Moving to Laptop runner"), status (queued, running, succeeded, failed, rolled_back, interrupted, held), how far it got '
+      + '(stepN of steps: stepLabel — the last step done), when it began, the outcome in plain words, and — '
       + 'for a HELD one, which keeps the agent from starting until someone chooses — the choices (recovery.actions). With agent: only that agent\'s.',
     input_schema: obj({ agent: { ...agentRef, description: 'Optional: only this agent\'s operations.' } }),
     call: async ({ input, resolve }) => {

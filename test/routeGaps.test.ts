@@ -128,7 +128,7 @@ describe('snapshots over HTTP: create, restore, delete', () => {
     expect(created.statusCode).toBe(201);
     const snapId = created.json().id as string;
 
-    const restored = await f.inject({ method: 'POST', url: `/v1/agents/a1/snapshots/${snapId}/restore`, headers: H, payload: {} });
+    const restored = await f.inject({ method: 'POST', url: `/v1/agents/a1/snapshots/${snapId}/restore?wait=1`, headers: H, payload: {} });
     expect(restored.statusCode).toBe(200);
     expect(restored.json().restored.length).toBeGreaterThan(0);
 

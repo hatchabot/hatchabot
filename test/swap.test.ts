@@ -399,7 +399,7 @@ describe('every path that makes or starts a container carries the allowance', ()
     w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock2', name: 'Runner Two', settings: {}, createdAt: 'now' });
     const id = await seedRunningAgent(w);
     process.env.HATCHABOT_AGENT_SWAP = '2g';
-    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h2' } })).statusCode).toBe(200);
+    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as(), payload: { hostId: 'h2' } })).statusCode).toBe(200);
     expect(target.lastSpec).toMatchObject({ memory: '3g', memorySwap: '2g' });
   });
 

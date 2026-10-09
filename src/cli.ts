@@ -161,10 +161,26 @@ Commands:
   download <agent> [-o <file>] Download a complete private copy (.hatchabot) — for
                                your own keeping (contains its bot token, so treat
                                as a secret; the agent is left STOPPED)
-  restore <file> [--profile <aiProfileId>] [--host <id>] [--build-image|--drop-pin]
+  restore <file> [--profile <aiProfileId>] [--host <id>] [--build-image|--drop-pin] [--no-wait]
                                Restore an agent from a downloaded copy and boot it.
                                Pinned to an image this machine lacks: shows its
                                recipe and asks (build it here, or default image)
+  backups [list]               This machine's nightly backup sets (machine owner)
+  backups restore <agent name> <YYYY-MM-DD> --yes [--no-wait]
+                               Put an agent back as it was in that night's set:
+                               the agent's full name and --yes, as the app asks.
+                               Its current bot, members and settings are put
+                               back over it; a copy of it now is kept first
+  ops [agent] [--all] [--json] Long changes — moves, imports, restores, archives,
+                               app installs: kind, status, step n/m, outcome, age.
+                               Without --all: what is not over and the last day's
+  ops recover <op-id> <action> Choose for one held after a restart (its choices
+                               are listed by ops --json and in the app's Alerts)
+
+  Moves, imports and restores run on the server in the background: the commands
+  that start one follow it with a line per step until it ends (exit 1 if it
+  failed, was undone or is waiting for a choice). --no-wait returns at once;
+  --timeout <min> stops following (default 60; it goes on regardless).
   share <agent> [-o <file>] [--include-memory]
                                Share a TEMPLATE for someone else — a copy of its
                                instructions and scheduled tasks, without its bot,
@@ -235,7 +251,12 @@ Commands:
   servers add <name> <url> <token>
                                Register one (on that server: ⚙ Settings →
                                Security → "Token for moving agents here")
-  rehost <agent> <server> [--drop-pin]
+  move <agent> <machine> [--drop-pin] [--no-wait]
+                               Move an agent to another machine of this Hatchabot
+                               (this machine ⇄ a runner): same bot, same members.
+                               A pinned image the machine lacks is rebuilt there;
+                               --drop-pin runs its default image instead
+  rehost <agent> <server> [--drop-pin] [--no-wait]
                                Move an agent there: preflight, transfer, verify.
                                The source is left STOPPED, never deleted.
                                A pinned image is rebuilt there from its recipe
@@ -465,7 +486,7 @@ function repoDir(): string {
  */
 const userPath = (p: string): string => resolve(process.env.HATCHABOT_CWD || process.cwd(), p);
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
+const BOOL_FLAGS = new Set(['private', 'no-wait', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
 const VALUE_FLAGS = new Set(['ref', 'kind', 'at-once', 'agents', 'base', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
@@ -590,6 +611,76 @@ async function streamImageBuild(ctx: Ctx, name: string): Promise<void> {
     if (r.status === 'FAILED') fail(`\n✗ Build failed: ${r.error ?? 'see the log above'}`);
     await new Promise((res) => setTimeout(res, 1200));
   }
+}
+
+/** An operation that is not over (operations.ts): followed until it is. */
+const OP_GOING = new Set(['queued', 'running', 'interrupted']);
+
+/** The 202 answer of a long change: `{ operation: { id, status… } }`. Undefined for an older server's answer. */
+export function startedOperation(res: unknown): Record<string, any> | undefined {
+  const op = (res as { operation?: unknown } | null)?.operation;
+  return op && typeof op === 'object' && typeof (op as { id?: unknown }).id === 'string' ? (op as Record<string, any>) : undefined;
+}
+
+/** "step 4 of 10: its memory copied in" — or nothing before the first step. */
+export function opStepLine(op: Record<string, any>): string {
+  return op.stepN ? `step ${op.stepN} of ${op.steps}: ${op.stepLabel ?? op.step}` : '';
+}
+
+/**
+ * Follow a long change the server runs in the background (moves, imports,
+ * restores — operations.ts, phase 3): a line per step until it ends, then its
+ * outcome. Returns the finished operation; exits non-zero when it failed, was
+ * undone or is waiting for the owner's choice. `--no-wait`: say where to
+ * watch it and return at once.
+ */
+async function followOperation(ctx: Ctx, started: Record<string, any>, flags: Map<string, string>, agentRef?: string): Promise<Record<string, any>> {
+  const watch = `hatchabot ops ${agentRef ? JSON.stringify(agentRef) : ''}`.trim();
+  console.log(`${started.title ?? started.kindLabel ?? 'Working'}… (operation ${started.id})`);
+  if (flags.has('no-wait')) {
+    console.log(`started — it goes on without you. Follow it with: ${watch}`);
+    return started;
+  }
+  const limit = Number(flags.get('timeout') ?? 60);
+  const deadline = Date.now() + (Number.isFinite(limit) && limit > 0 ? limit : 60) * 60_000;
+  let op = started;
+  let said = '';
+  for (;;) {
+    const line = opStepLine(op);
+    if (line && line !== said) { console.log(`  ${line}`); said = line; }
+    if (!OP_GOING.has(String(op.status))) break;
+    if (Date.now() > deadline) fail(`still under way after ${limit} min — it goes on; follow it with: ${watch}`);
+    await new Promise((r) => setTimeout(r, 1000));
+    op = (await (await api(ctx, `/v1/operations/${encodeURIComponent(started.id)}`)).json()) as Record<string, any>;
+  }
+  if (op.status === 'succeeded') {
+    console.log(`✓ ${op.outcome ?? op.summary ?? 'done'}`);
+    return op;
+  }
+  if (op.status === 'held') {
+    console.log(`⏸ ${op.outcome ?? 'waiting for your choice'}`);
+    for (const c of op.recovery?.actions ?? []) console.log(`    hatchabot ops recover ${op.id} ${c.action}    # ${c.label}${c.action === op.recovery?.recommended ? ' (recommended)' : ''}`);
+    process.exit(1);
+  }
+  fail(`${op.status === 'rolled_back' ? 'undone' : 'failed'}: ${op.outcome ?? op.summary ?? op.status}`);
+}
+
+/** The table `hatchabot ops` prints: one line per operation. */
+export function opsTable(ops: Array<Record<string, any>>, nameOf: (id: string | null) => string, now = Date.now()): string[] {
+  if (!ops.length) return ['no operations'];
+  const rows = ops.map((o) => [
+    o.id,
+    nameOf(o.agentId ?? null),
+    o.kindLabel ?? o.kind,
+    o.status,
+    o.stepN ? `${o.stepN}/${o.steps}` : o.steps ? `0/${o.steps}` : '-',
+    (() => { const s = (now - Date.parse(o.requestedAt)) / 1000; return s < 90 ? 'just now' : s < 3600 ? `${Math.round(s / 60)}m ago` : s < 86400 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`; })(),
+    String(o.outcome ?? o.title ?? '').replace(/\s+/g, ' ').slice(0, 90),
+  ]);
+  const head = ['OPERATION', 'AGENT', 'KIND', 'STATUS', 'STEP', 'STARTED', 'OUTCOME'];
+  const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)));
+  const line = (r: string[]) => r.map((c, i) => (i === r.length - 1 ? c : String(c).padEnd(w[i]!))).join('  ');
+  return [line(head), ...rows.map(line)];
 }
 
 /**
@@ -1891,12 +1982,108 @@ async function main() {
       if (!peer) fail(`no server matches "${ref}"`);
       console.log(`rehosting "${a.name}" to ${peer.name}…`);
       // A pinned image is rebuilt there from its recipe; --drop-pin opts out.
-      const res: any = await (await jsonPost(`/v1/agents/${a.id}/rehost`, {
+      let res: any = await (await jsonPost(`/v1/agents/${a.id}/rehost`, {
         peerId: peer.id, ...(flags.has('drop-pin') ? { allowDroppedPin: true } : {}),
       })).json();
+      // Since v2.156.0 the move goes on in the background: follow it.
+      const started = startedOperation(res);
+      if (started) {
+        const op = await followOperation(ctx, started, flags, a.name);
+        if (op.status !== 'succeeded') return;
+        res = { movedTo: op.result?.movedTo ?? peer.name, remoteAgentId: op.result?.remoteAgentId ?? '(see that server)', sourceState: 'STOPPED' };
+      }
       console.log(`done — now running on ${res.movedTo} as ${res.remoteAgentId}`);
       console.log(`"${a.name}" here is ${res.sourceState} and was NOT deleted.`);
       console.log(`Keep it that way: two copies polling one bot token fight over messages.`);
+      return;
+    }
+    case 'ops': {
+      // Long changes (operations.ts): moves, imports, restores, archives, app installs.
+      if (rest[0] === 'recover' && rest[1]?.startsWith('op_')) {
+        const opId = rest[1];
+        const action = rest[2] ?? fail('usage: hatchabot ops recover <op-id> <action>  (see: hatchabot ops)');
+        const op = (await (await api(ctx, `/v1/operations/${encodeURIComponent(opId)}`)).json()) as any;
+        const choices: Array<{ action: string; label: string }> = op.recovery?.actions ?? [];
+        if (op.status !== 'held') fail(`${op.title ?? opId} is ${op.status}, not waiting for a choice`);
+        if (!choices.some((c) => c.action === action)) {
+          fail(`"${action}" is not one of its choices:\n${choices.map((c) => `  ${c.action.padEnd(12)} ${c.label}`).join('\n')}`);
+        }
+        const r = (await (await jsonPost(`/v1/operations/${encodeURIComponent(opId)}/recover`, { action })).json()) as any;
+        console.log(`${r.operation?.status === 'held' ? '⏸' : r.operation?.status === 'succeeded' || r.operation?.status === 'rolled_back' ? '✓' : '•'} ${r.operation?.outcome ?? 'done'}`);
+        return;
+      }
+      const a = rest[0] ? await resolveAgent(ctx, rest[0]) : undefined;
+      const all = flags.has('all');
+      const list = ((await (await api(ctx, `/v1/operations?limit=${all ? 200 : 50}${a ? `&agentId=${encodeURIComponent(a.id)}` : ''}`)).json()) as any).operations as any[];
+      // Without --all: what is not over, and what ended in the last day.
+      const dayAgo = Date.now() - 86_400_000;
+      const shown = all ? list : list.filter((o) => OP_GOING.has(o.status) || o.status === 'held' || Date.parse(o.finishedAt ?? o.updatedAt ?? o.requestedAt) >= dayAgo);
+      if (flags.has('json')) return console.log(JSON.stringify(shown, null, 2));
+      const names = new Map(((await agents(ctx)) as any[]).map((x) => [x.id, x.name]));
+      for (const l of opsTable(shown, (id) => (id ? names.get(id) ?? id.slice(0, 8) : 'machine'))) console.log(l);
+      const held = shown.filter((o) => o.status === 'held');
+      if (held.length) console.log(`\n${held.length} waiting for your choice — hatchabot ops recover <operation> <action>; its choices: hatchabot ops ${a ? JSON.stringify(a.name) + ' ' : ''}--json`);
+      if (!all && shown.length < list.length) console.log(`(${list.length - shown.length} older — --all shows them)`);
+      return;
+    }
+    case 'move': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot move <agent> <machine> [--drop-pin]'));
+      const ref = rest.slice(1).join(' ').trim() || fail('give the machine to move it to (see: ⚙ Settings → Hosts)');
+      const hostList = (await (await api(ctx, '/v1/hosts')).json()) as any[];
+      const lower = ref.toLowerCase();
+      const host = hostList.find((h) => h.id === ref)
+        ?? hostList.find((h) => String(h.name).toLowerCase() === lower)
+        ?? (['local', 'here', 'this machine'].includes(lower) ? hostList.find((h) => h.kind === 'local') : undefined)
+        ?? fail(`no machine matches "${ref}" — one of: ${hostList.map((h) => h.name).join(', ')}`);
+      if (host.id === a.hostId) fail(`"${a.name}" is already on ${host.name}`);
+      let res: any;
+      try {
+        res = await (await jsonPost(`/v1/agents/${a.id}/move-host`, { hostId: host.id, ...(flags.has('drop-pin') ? { dropPin: true } : {}) })).json();
+      } catch (e: any) {
+        if (e?.data?.code === 'pinned_image_missing') fail(`${e.message}\n  Re-run with --drop-pin to move it on ${host.name}'s default image.`);
+        throw e;
+      }
+      const started = startedOperation(res);
+      if (!started) { console.log(`moved "${a.name}" to ${host.name} (${res.state})`); return; }
+      const op = await followOperation(ctx, started, flags, a.name);
+      if (op.status === 'succeeded') console.log(`"${a.name}" now runs on ${host.name}.`);
+      return;
+    }
+    case 'backups': {
+      const sub = rest[0] ?? 'list';
+      if (sub === 'list') {
+        const b = (await (await api(ctx, '/v1/backups')).json()) as any;
+        const sets: any[] = b.backups ?? [];
+        if (flags.has('json')) return console.log(JSON.stringify(b, null, 2));
+        if (!sets.length) return console.log('no backups yet — the nightly job runs at 03:30');
+        for (const s of sets) console.log(`${s.date}  ${String((s.volumes ?? []).length).padStart(3)} agents  ${((s.sizeBytes ?? 0) / 1e9).toFixed(2)} GB${s.complete === false ? '  (incomplete)' : ''}`);
+        return;
+      }
+      if (sub !== 'restore') fail(`unknown: backups ${sub}. Try: backups [list] | backups restore <agent> <date> --yes`);
+      // Machine owner (the server checks), and typed like the web's: the
+      // agent's own name, and --yes. It replaces everything it remembers.
+      const usage = 'usage: hatchabot backups restore <agent name> <YYYY-MM-DD> --yes';
+      const ref = rest[1] ?? fail(usage);
+      const date = rest[2] ?? fail(usage);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) fail(`"${date}" is not a backup date (YYYY-MM-DD) — see: hatchabot backups`);
+      // The machine owner may restore any agent on it, not only their own.
+      const everyone = ((await api(ctx, '/v1/agents?all=1').then((r) => r.json()).catch(() => null)) as any[] | null) ?? (await agents(ctx));
+      const named = everyone.filter((x) => String(x.name).toLowerCase() === ref.toLowerCase() && x.state !== 'DELETED');
+      if (named.length !== 1) {
+        const { hit } = matchAgent(everyone, ref);
+        fail(named.length > 1
+          ? `"${ref}" names ${named.length} agents — restore from the web app (Settings → Backups) to pick one`
+          : hit ? `type the agent's name to confirm: "${hit.name}"` : `no agent is named "${ref}" — see: hatchabot list`);
+      }
+      const a = named[0]!;
+      if (!flags.has('yes')) {
+        fail(`This replaces everything "${a.name}" remembers with the ${date} backup (a copy of it now is kept first, and its current bot, members and settings are put back over it).\n  Re-run with --yes to do it.`);
+      }
+      const res = (await (await jsonPost('/v1/backups/restore', { agentId: a.id, date })).json()) as any;
+      const started = startedOperation(res);
+      if (!started) { console.log(`restored "${a.name}" from the ${date} backup`); return; }
+      const op = await followOperation(ctx, started, flags, a.name);
+      if (op.status === 'succeeded') console.log(`"${a.name}" is back as it was on ${date}.`);
       return;
     }
     case 'invite': {
@@ -2135,7 +2322,17 @@ async function main() {
       const params = new URLSearchParams();
       if (flags.has('profile')) params.set('aiProfileId', flags.get('profile')!);
       if (flags.has('host')) params.set('hostId', flags.get('host')!);
+      // In the background (an older server ignores it and answers when done).
+      params.set('async', '1');
       const agent = await uploadAgentFile(ctx, '/v1/agents/restore', params, data, flags, askLine);
+      const started = startedOperation(agent);
+      if (started) {
+        const op = await followOperation(ctx, started, flags, agent.agent?.name);
+        if (op.status !== 'succeeded') return;
+        const now = op.agentId ? (await (await api(ctx, `/v1/agents/${op.agentId}`)).json()) as any : agent.agent;
+        console.log(`restored "${now?.name ?? 'the agent'}" (${now?.state ?? 'RUNNING'})`);
+        return;
+      }
       console.log(`restored "${agent.name}" (${agent.state})`);
       return;
     }
@@ -2209,6 +2406,15 @@ async function main() {
       if (flags.has('no-telegram')) params.set('telegram', '0');
       const j = await uploadAgentFile(ctx, '/v1/agents/import', params, data, flags, askLine);
       if (j.kind === 'agent') {
+        // A full copy goes on in the background (v2.156.0): follow it.
+        const started = startedOperation(j);
+        if (started) {
+          const op = await followOperation(ctx, started, flags, j.agent?.name);
+          if (op.status !== 'succeeded') return;
+          const now = op.agentId ? (await (await api(ctx, `/v1/agents/${op.agentId}`)).json()) as any : j.agent;
+          console.log(`restored "${now?.name ?? 'the agent'}" (${now?.state ?? 'RUNNING'})`);
+          return;
+        }
         console.log(`restored "${j.name}" (${j.state})`);
         return;
       }
@@ -2487,7 +2693,13 @@ async function main() {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot revert <agent> <snapshotId>'));
       const snapId = rest[1] ?? fail('give the snapshot id (see: hatchabot snapshots)');
       await confirmOr(`Roll "${a.name}"'s files back to snapshot ${snapId}? (its current files are snapshotted first)`);
-      const res: any = await (await jsonPost(`/v1/agents/${a.id}/snapshots/${snapId}/restore`, {})).json();
+      let res: any = await (await jsonPost(`/v1/agents/${a.id}/snapshots/${snapId}/restore`, {})).json();
+      const started = startedOperation(res);
+      if (started) {
+        const op = await followOperation(ctx, started, flags, a.name);
+        if (op.status !== 'succeeded') return;
+        res = { restored: op.result?.restored ?? [], safetySnapshotId: op.result?.safetySnapshotId };
+      }
       console.log(`reverted ${res.restored.join(', ')}`);
       if (res.safetySnapshotId) console.log(`undo with: hatchabot revert "${a.name}" ${res.safetySnapshotId}`);
       console.log('applies to new conversations — send /new in Telegram');

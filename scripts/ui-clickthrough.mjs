@@ -2906,8 +2906,9 @@ const SCENARIOS = String.raw`(() => {
         ok('its Alerts key names the operation', attentionFingerprint(a).includes('op:op_test1'));
         ok('its tile says it waits for a choice: ' + tile(a.name).getAttribute('aria-label'), /waiting for your choice/.test(tile(a.name).getAttribute('aria-label')));
         byText('.v2views button', 'Alerts').click(); await sleep(50);
-        const sec = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Alerts'));
-        ok('it is under Alerts', !!sec && [...sec.querySelectorAll('.v2agent .v2name')].some((n) => n.textContent === a.name));
+        // Its own bin, first, since v2.156.0 (it cannot be cleared: the agent refuses Start until it is chosen).
+        const sec = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Waiting for your choice'));
+        ok('it is under Alerts, waiting for your choice', !!sec && [...sec.querySelectorAll('.v2agent .v2name')].some((n) => n.textContent === a.name));
         ok('the tooltip gives the outcome', tipText(a.name).includes(outcome));
         openV2Agent('a1', 'overview');
         const box = await until(() => document.querySelector('#v2AgentDlg .oprecover'));
@@ -3192,6 +3193,116 @@ const SCENARIOS = String.raw`(() => {
         const arch = [...document.querySelectorAll('#v2groups .v2group')].find((s) => s.querySelector('h3').textContent === 'Archived');
         ok('Archived hint', !!arch && arch.textContent.includes('By keyboard: open the agent, then Advanced → Archive'));
       } finally { if (!document.getElementById('v2AcctPop').hidden) v2CloseAccount(); v2SetView('group'); }
+    },
+  });
+  // Long operations on the page (operations.ts, phase 3, v2.156.0): Working on reads the
+  // operation, the page follows it and says how it ended; Activity has one row per operation.
+  Object.assign(T, {
+    opWorkingOn: async () => {
+      const toastText = () => document.getElementById('toast').textContent;
+      const started = new Date(Date.now() - 2 * 60000 - 5000).toISOString();
+      const op = { id: 'op_run1', agentId: 'a1', kind: 'move-host', kindLabel: 'Move to another machine', title: 'Moving to Laptop runner', status: 'running',
+        step: 'target-created', stepLabel: 'made on the other machine', stepN: 4, steps: 10, requestedAt: started, updatedAt: new Date().toISOString() };
+      window.__answer = window.__answer || {};
+      try {
+        await withAgents((a) => a.id === 'a1' ? { ...a, busy: true, operation: op } : undefined);
+        const a = agents.find((x) => x.id === 'a1');
+        const want = 'Moving to Laptop runner — step 4 of 10, made on the other machine · 2 min';
+        ok('the tile\'s ring says what, which step of how many, how long: ' + tile(a.name).getAttribute('aria-label'), tile(a.name).getAttribute('aria-label').includes(want));
+        openV2Agent('a1', 'overview');
+        const line = await until(() => document.getElementById('v2OpWorking'));
+        eq('the sheet\'s Working on line', line.textContent, want);
+        ok('one Working on row, not the state\'s as well', [...document.querySelectorAll('#v2Pane .v2k')].filter((k) => k.textContent === 'Working on').length === 1);
+        ok('followed: the page reads the operation', v2Ops.has('op_run1'));
+        // A later step: the line moves on without the agent list being read again.
+        window.__answer['GET /v1/operations/op_run1'] = [{ body: { ...op, step: 'host-flipped', stepLabel: 'recorded on the other machine', stepN: 6 } }];
+        await v2OpTick();
+        await until(() => document.getElementById('v2OpWorking')?.textContent.includes('step 6 of 10, recorded on the other machine'));
+        eq('it asked for that operation', calls('GET', /^\/v1\/operations\/op_run1$/).length, 1);
+        // The end: a toast says how it ended, and the line goes.
+        window.__answer['GET /v1/operations/op_run1'] = [{ body: { ...op, status: 'succeeded', step: 'source-removed', stepN: 10, outcome: 'Moved to Laptop runner.', summary: 'Moved to Laptop runner', finishedAt: new Date().toISOString() } }];
+        await withAgents((x) => x.id === 'a1' ? { ...x, busy: false, operation: undefined } : undefined);
+        // (the list no longer carries it; the follower still has it)
+        v2Ops.set('op_run1', 'a1');
+        await v2OpTick();
+        await until(() => toastText().includes('Moved to Laptop runner.'));
+        ok('the toast names the agent: ' + toastText(), toastText().includes('✅') && toastText().includes(a.name));
+        ok('no longer followed', !v2Ops.has('op_run1'));
+        await until(() => !document.getElementById('v2OpWorking'));
+        v2Close();
+      } finally { delete window.__answer['GET /v1/operations/op_run1']; v2Ops.clear(); await agentsCleanup(); }
+    },
+    opStartedHere: async () => {
+      // Move to a runner from the page: the 202's operation is followed at once.
+      const toastText = () => document.getElementById('toast').textContent;
+      const runner = { id: 'h9', name: 'Laptop runner', kind: 'cloud', online: true };
+      hosts.push(runner);
+      window.__answer = window.__answer || {};
+      window.__promptAnswer = '1';
+      const op = { id: 'op_run2', agentId: 'a2', kind: 'move-host', kindLabel: 'Move to another machine', title: 'Moving to Laptop runner', status: 'running', steps: 10, requestedAt: new Date().toISOString() };
+      window.__answer['POST /v1/agents/a2/move-host'] = [{ status: 202, body: { operation: op } }];
+      try {
+        const a = agents.find((x) => x.id === 'a2');
+        await moveHostAgent('a2', a.name);
+        eq('the move was asked for', calls('POST', /^\/v1\/agents\/a2\/move-host$/).at(-1).body, { hostId: 'h9' });
+        ok('it says it goes on, and where to watch: ' + toastText(), toastText().includes('Moving ' + a.name + ' to Laptop runner') && toastText().includes('its tile shows each step'));
+        ok('followed', v2Ops.has('op_run2'));
+      } finally { hosts.splice(hosts.indexOf(runner), 1); window.__promptAnswer = null; delete window.__answer['POST /v1/agents/a2/move-host']; v2Ops.clear(); await refresh(false); }
+    },
+    activityOpRow: async () => {
+      const now = Date.now(), iso = (m) => new Date(now - m * 60000).toISOString();
+      window.__override['/v1/events'] = [
+        { agentId: 'a1', agentName: 'Homework Helper', at: iso(2), event: 'op.done', label: 'Moved to Laptop runner · 3 min',
+          op: { id: 'op_a1', kind: 'move-host', status: 'succeeded', summary: 'Moved to Laptop runner', durationMs: 180000, outcome: 'Moved to Laptop runner.',
+            steps: [{ at: iso(5), event: 'op.step', label: 'stopped here (step 2 of 10)' }, { at: iso(4), event: 'op.step', label: 'its memory copied in (step 5 of 10)' }, { at: iso(2), event: 'op.done', label: 'Moved to Laptop runner.' }] } },
+        { agentId: 'a2', agentName: 'Soccer Schedule', at: iso(20), event: 'op.rolled_back', label: 'Import undone · 1 min',
+          op: { id: 'op_a2', kind: 'import', status: 'rolled_back', summary: 'Import undone', durationMs: 60000, outcome: 'Import failed and was rolled back.', steps: [{ at: iso(20), event: 'op.rolled_back', label: 'undone: Import failed and was rolled back.' }] } },
+        { agentId: 'a3', agentName: 'Piano Practice', at: iso(30), event: 'op.held', label: 'Move to Laptop runner is waiting for your choice · 2 min',
+          op: { id: 'op_a3', kind: 'move-host', status: 'held', summary: 'Move to Laptop runner is waiting for your choice', durationMs: 120000, steps: [] } },
+        { id: 7, agentId: 'a1', agentName: 'Homework Helper', at: iso(60), event: 'agent.rebuilt', detail: {} },
+      ];
+      try {
+        await v2LoadActivity(true);
+        const rows = [...document.querySelectorAll('#v2ActList .v2actrow')];
+        eq('one row per operation, and the other line', rows.length, 4);
+        ok('the move reads as one line: ' + rows[0].textContent, rows[0].textContent.includes('Moved to Laptop runner · 3 min'));
+        const btn = rows[0].querySelector('button.v2actopbtn');
+        ok('it opens with a real button (keyboard: Enter, Space)', !!btn && btn.tagName === 'BUTTON' && btn.getAttribute('aria-expanded') === 'false');
+        const list = document.getElementById(btn.getAttribute('aria-controls'));
+        ok('its steps are there, closed', !!list && list.hidden && list.querySelectorAll('li').length === 3);
+        btn.click();
+        ok('opened', btn.getAttribute('aria-expanded') === 'true' && !list.hidden && list.textContent.includes('its memory copied in (step 5 of 10)'));
+        await v2LoadActivity(true);
+        const again = document.querySelector('#v2ActList button.v2actopbtn[data-op="op_a1"]');
+        ok('stays open across a reload', again.getAttribute('aria-expanded') === 'true' && !document.getElementById(again.getAttribute('aria-controls')).hidden);
+        again.click();
+        ok('closes again', again.getAttribute('aria-expanded') === 'false');
+        ok('an undone one in red', !!rows[1].querySelector('.bad') && rows[1].textContent.includes('Import undone'));
+        ok('a held one in amber', !!document.querySelectorAll('#v2ActList .v2actrow')[2].querySelector('.warn'));
+        ok('a row with nothing to open is not a button', !document.querySelectorAll('#v2ActList .v2actrow')[2].querySelector('button'));
+      } finally { delete window.__override['/v1/events']; v2ActOpen.clear(); await v2LoadActivity(true); }
+    },
+    alertsOrder: async () => {
+      // Alerts, most urgent first: an operation held for a choice, then failures; it was ordered by
+      // the bins' emoji, which put "⚠ Alerts" above "❌ Failed" and Knocking near the end (2026-10-09).
+      const held = { id: 'op_h1', agentId: 'a3', kind: 'move-host', kindLabel: 'Move to another machine', status: 'held', outcome: 'The move was interrupted.',
+        recovery: { actions: [{ action: 'put-back', label: 'Put it back on This machine' }] }, updatedAt: new Date().toISOString() };
+      try {
+        await withAgents((a) => a.id === 'a1' ? { ...a, state: 'FAILED', stateReason: 'made-up failure' }
+          : a.id === 'a2' ? { ...a, rebuild: { level: 'required', reasons: ['a made-up reason'] } }
+          : a.id === 'a3' ? { ...a, state: 'STOPPED', operation: held } : undefined);
+        v2SetView('attention'); await sleep(50);
+        const heads = [...document.querySelectorAll('#v2groups .v2group h3')].map((h) => h.textContent.trim());
+        const at = (w) => heads.findIndex((h) => h.includes(w));
+        ok('held for a choice comes first: ' + heads.join(' | '), at('Waiting for your choice') === 0);
+        ok('then failed, then to rebuild: ' + heads.join(' | '), at('Failed') === 1 && at('To rebuild') > at('Failed'));
+        ok('Fine last of the bins: ' + heads.join(' | '), at('Fine') > at('To rebuild'));
+        const first = document.querySelector('#v2groups .v2group');
+        ok('no Clear button on the held bin (it cannot be cleared)', !first.querySelector('button[aria-label="Clear from Alerts"]'));
+        // Its sheet: the choice first among what is wrong.
+        const a = agents.find((x) => x.id === 'a3');
+        eq('first of its alerts', agentAttention(a)[0].key, 'op:op_h1');
+      } finally { await agentsCleanup(); }
     },
   });
   (async () => {

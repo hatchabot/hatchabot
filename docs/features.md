@@ -101,7 +101,12 @@ The header holds:
 - **The foot of the home screen**: **Activity** — the newest dozen events
   (rebuilds, members let in, snapshots, failures in red), read with the list
   at most every 30 seconds, foldable; **See all** opens the full log (filter by
-  agent, each event's detail). Under it, for the machine's owner, **the machine
+  agent, each event's detail). A long change — a move, an import, a restore,
+  an archive, an app install — is **one line** ("Moved to Laptop runner ·
+  3 min", red if it failed or was undone, amber while it waits for your
+  choice) that opens to its steps (a button: Enter or Space opens it too);
+  its steps are not lines of their own (they stay in the agent's Setup log).
+  Under it, for the machine's owner, **the machine
   line**: each machine and its agents (a runner says whether it answers),
   the latest backup (late, incomplete or keyless in amber), the OpenClaw
   version. A runner that is not answering and backups that are late are also
@@ -247,8 +252,10 @@ an agent is pinned to, or that it follows the fleet default), **Class**, **Statu
 **Activity** (when each agent last did something: the last hour, today, this
 week, this month, longer ago, never) or **Rebuilt** (the same bins, by when
 its container was last built),
-read-only, remembered per device. **Alerts** bins by what wants you:
-Knocking, To read, To rebuild, Alerts, Fine — and **Cleared**: an
+read-only, remembered per device. **Alerts** bins by what wants you, most
+urgent first: Waiting for your choice (a move, import or restore a restart
+cut off, held until you choose — it cannot be cleared), Failed or changed by
+hand, Knocking, To read, To rebuild, Alerts, Fine — and **Cleared**: an
 agent you have taken out of the way with 🔕 (on the section's header for
 everyone in it, or on the agent's own sheet under its notices). Clearing
 remembers what was flagged, so the agent comes back the moment something
@@ -1639,6 +1646,13 @@ double-click it (or press its ✏️), type, Enter saves, Escape puts it back. A
 rename carries every agent in the group and the group's place in the order.
 
 ## The Setup log: what is it doing?
+
+A move, an import or a restore runs on the server in the background
+(v2.156.0): the agent's tile and the **Working on** line on its ⚙ sheet read
+it — "Moving to Laptop runner — step 4 of 10, made on the other machine ·
+2 min" — and follow it every 2 seconds; a message says how it ended, even if
+it was started from the command line. You can close the page meanwhile.
+See [moving-agents.md](moving-agents.md#moves-run-in-the-background--where-to-watch-one).
 
 An agent that says *Rebuilding* or *Setting up* for a while now says which
 step it is on — on its ⚙ sheet ("Working on: rebuilding the memory index — it

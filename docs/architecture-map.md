@@ -339,14 +339,30 @@ install-image and backup-run (v2.155.0). A rebuild or a setup is recorded
 An image copy and Back up now are a machine's operations (no agent): the
 Activity list reads them from the table (`listMachineOperations`).
 
+In the background (v2.156.0): a move (`move-host`), a move to another
+Hatchabot (`rehost`), a full-copy import, a backup restore and a snapshot
+restore answer `202 { operation }` once validated and begun (`runInBackground`;
+a move to another Hatchabot after its preflight), and go on after the answer.
+`?wait=1` keeps the old answer. `POST /v1/agents/restore` stays synchronous
+unless `?async=1`: the other Hatchabot's migrate reads the agent from its
+answer. The page and the CLI follow `GET /v1/operations/:id`; Activity shows
+one row per operation (its op.* lines and what it logged meanwhile left out of
+the feed, kept in the agent's own timeline).
+
 - `src/orchestrator/operations.ts` — `beginOperation`, `STEPS`, `BACKGROUND_KINDS`, `operationRefusal`, `activeOperation`, `markInterrupted`, `publicOperation`, `currentBootId`: the record, each kind's steps, and the on-disk busy check.
+- `src/orchestrator/operations.ts` — `runInBackground`, `operationTitles`, `operationSummary`, `spanWords`, `STATUS_EVENT`: a long change answered at once and run on; its words ("Moving to Laptop runner", "Moved to Laptop runner · 3 min").
 - `src/orchestrator/operationsResume.ts` — `resumeOperations`, `resumeBackground`, `recoverOperation`, `retryHeldOperations`, `startOperationRetryLoop`: settling interrupted operations at boot (a queued rebuild queued again; an interrupted rebuild or setup by reconcile's rules), the owner's choices, and the 10-minute pass.
 - `src/orchestrator/reconcile.ts` — `applyReconcileRule`: reconcile's rules for one agent, also how an interrupted rebuild or setup is settled.
 - `src/orchestrator/provision.ts` — `reapplyCurrentSettings`: this installation's settings over a restored volume (a backup restore, and its finish after a restart).
 - `src/store/store.ts` — `operations`, `insertOperation`, `updateOperation`, `activeOperationFor`, `listMachineOperations`, `listAppPendingAgents`, `pruneOperations`: the table (kept 90 days, at least 50 per agent).
+- `src/store/store.ts` — `eventsForOperation`, `withoutOps`: an operation's own steps (the Activity row that opens), and the feed without them.
 - `src/api/routes.ts` — `'/v1/operations'`, `'/v1/operations/:id'`, `'/v1/operations/:id/recover'`, `busyNow`, `startRefusal`, `kickRebuild`, `kickProvision`, `'/v1/hosts/:id/install-image'`, `'/v1/backups/run'`, `'/v1/events'`: the API, the guards, the recorded queue, and a machine's operations in Activity.
+- `src/api/routes.ts` — `waitAsked`, `accepted`, `backgroundError`, `'/v1/agents/:id/move-host'`, `'/v1/agents/:id/rehost'`, `'/v1/agents/import'`, `'/v1/agents/restore'`, `'/v1/backups/restore'`, `'/v1/agents/:id/snapshots/:snapId/restore'`: the routes that answer 202 and run on.
+- `src/cli.ts` — `followOperation`, `startedOperation`, `opsTable`, `'ops'`, `'move'`, `'backups'`: `hatchabot ops [agent]`, `ops recover`, `move`, `backups restore`, and following an operation a command started.
+- `src/mgmt/broker.ts` — `followOperation`: the Hatchabot agent's tools wait for an operation they started to end.
 - `src/mgmt/restTools.ts` — `list_operations`, `recover_operation`: the Hatchabot agent's tools for them.
 - `web/index.html` — `opNotice`, `recoverOp`, `agentAttention`: a held operation in the sheet's Overview and under Alerts.
+- `web/index.html` — `v2OpLine`, `v2FollowOp`, `v2WatchOps`, `v2OpTick`, `v2ActOpRow`, `v2ToggleActOp`, `v2ViewKey`: Working on and the ring read the operation, the page follows it (2 s) and toasts its end, Activity's row per operation, Alerts' "Waiting for your choice" bin first.
 - `src/orchestrator/health.ts` — `agentHealth`, `aiSourceHealth`, `doctorLint`: the live health check and OpenClaw config lint.
 - `src/orchestrator/posture.ts` — `computePosture`, `runPostureSweep`, `measureAgentDisks`: the daily security and disk posture.
 - `src/orchestrator/eventLabels.ts` — `eventLabel`: plain words for event names.

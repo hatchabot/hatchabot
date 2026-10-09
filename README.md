@@ -258,6 +258,11 @@ hatchabot rehost "Kitchen Helper" Desktop
 # or move it by file
 hatchabot download "Kitchen Helper" -o kitchen.hatchabot
 hatchabot --url http://desktop:8080 restore kitchen.hatchabot
+
+# to a runner of this Hatchabot; moves and restores run on the server
+# and the command follows them step by step (--no-wait: return at once)
+hatchabot move "Kitchen Helper" "Laptop runner"
+hatchabot ops                           # what is under way, step n of m
 ```
 
 `hatchabot help` lists every command. See

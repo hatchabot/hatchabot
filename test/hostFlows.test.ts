@@ -156,11 +156,11 @@ describe('Move — POST /v1/agents/:id/move-host', () => {
     addMockHost(w);
     const id = await seedRunningAgent(w);
 
-    const res = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h2' } });
+    const res = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as(), payload: { hostId: 'h2' } });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ hostId: 'h2', state: 'RUNNING' });
 
-    const back = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h1' } });
+    const back = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as(), payload: { hostId: 'h1' } });
     expect(back.statusCode).toBe(200);
     expect(w.store.getAgent(id)!.hostId).toBe('h1');
   });
@@ -169,9 +169,9 @@ describe('Move — POST /v1/agents/:id/move-host', () => {
     const w = await makeWorld();
     addMockHost(w);
     const id = await seedRunningAgent(w);
-    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h1' } })).statusCode).toBe(400);
-    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'nope' } })).statusCode).toBe(400);
-    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as('intruder'), payload: { hostId: 'h2' } })).statusCode).toBe(404);
+    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as(), payload: { hostId: 'h1' } })).statusCode).toBe(400);
+    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as(), payload: { hostId: 'nope' } })).statusCode).toBe(400);
+    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as('intruder'), payload: { hostId: 'h2' } })).statusCode).toBe(404);
   });
 
   it('refuses a machine-login Max agent onto a non-local host; allows setup-token', async () => {
@@ -181,14 +181,14 @@ describe('Move — POST /v1/agents/:id/move-host', () => {
 
     w.store.insertAIProfile({ id: 'sub-ml', ownerId: w.owner, name: 'Max login', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: undefined, createdAt: 'now' });
     (w.store as any).db.prepare(`UPDATE agents SET ai_profile_id = 'sub-ml' WHERE id = ?`).run(id);
-    const ml = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h2' } });
+    const ml = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as(), payload: { hostId: 'h2' } });
     expect(ml.statusCode).toBe(400);
     expect(ml.json().error).toMatch(/setup-token/);
 
     w.store.insertAIProfile({ id: 'sub-tok', ownerId: w.owner, name: 'Max token', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/tok', createdAt: 'now' });
     await w.secrets.put('ai/tok', 'sk-tok');
     (w.store as any).db.prepare(`UPDATE agents SET ai_profile_id = 'sub-tok' WHERE id = ?`).run(id);
-    const tok = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h2' } });
+    const tok = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as(), payload: { hostId: 'h2' } });
     expect(tok.statusCode).toBe(200);
     expect(tok.json().hostId).toBe('h2');
   });
@@ -223,14 +223,14 @@ describe('Move — a pinned image the runner does not have (2026-09-22)', () => 
     w.store.setAgentImage(created.id, 'hatchabot-runtime:2026.7.1-2-plus-traceroute');
     mock2.tags = [{ tag: 'hatchabot-runtime:latest', imageId: 'x' }] as any;
 
-    const refused = await w.f.inject({ method: 'POST', url: `/v1/agents/${created.id}/move-host`, headers: as(), payload: { hostId: 'h2' } });
+    const refused = await w.f.inject({ method: 'POST', url: `/v1/agents/${created.id}/move-host?wait=1`, headers: as(), payload: { hostId: 'h2' } });
     expect(refused.statusCode).toBe(409);
     expect(refused.json()).toMatchObject({ code: 'pinned_image_missing', image: 'hatchabot-runtime:2026.7.1-2-plus-traceroute' });
     expect(refused.json().error).toMatch(/Laptop does not have/);
     // Nothing stopped: the refusal came before the move began.
     expect(w.store.getAgent(created.id)!.hostId).toBe('h1');
 
-    const moved = await w.f.inject({ method: 'POST', url: `/v1/agents/${created.id}/move-host`, headers: as(), payload: { hostId: 'h2', dropPin: true } });
+    const moved = await w.f.inject({ method: 'POST', url: `/v1/agents/${created.id}/move-host?wait=1`, headers: as(), payload: { hostId: 'h2', dropPin: true } });
     expect(moved.statusCode).toBe(200);
     expect(w.store.getAgent(created.id)!.image ?? null).toBeNull();
     expect(w.store.getAgent(created.id)!.hostId).toBe('h2');
@@ -250,7 +250,7 @@ describe('Move — the pinned image travels as its recipe (item 5, 2026-09-23)',
     (w.providers.get('mock') as MockProvider).tags.push(sourceTag as any);
     mock2.tags = [{ tag: 'hatchabot-runtime:latest', imageId: 'x' }] as any;
     const move = (body: Record<string, unknown> = {}) =>
-      w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h2', ...body } });
+      w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as(), payload: { hostId: 'h2', ...body } });
     return { w, mock2, id, tag, move };
   };
 

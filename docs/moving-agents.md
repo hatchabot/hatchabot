@@ -169,6 +169,47 @@ The web app can do the same: **Download copy** in the agent's Advanced tab, then
 **New** → *open a .hatchabot file* — it takes any `.hatchabot` file, restoring a full
 backup as the same agent or standing a shared template up as a fresh one.
 
+## Moves run in the background — where to watch one
+
+Since v2.156.0 a move to another machine, a move to another Hatchabot, importing
+a full copy, and a restore from a backup or a snapshot run **on the server, in
+the background**. Hatchabot checks what it can first — the other machine is not
+this one, the agent can move, the backup holds it, the other Hatchabot says yes
+— and a refusal is said at once, as before. Once it has begun, the page, the
+command line and the Hatchabot agent are told so straight away, and you can
+close the page or the terminal: it goes on.
+
+Where to watch it:
+
+- **The agent's tile and its page.** The ring and the **Working on** line read
+  the operation: *Moving to Laptop runner — step 4 of 10, made on the other
+  machine · 2 min*. The page reads it every 2 seconds while it runs, and a
+  message says how it ended (✅ moved, ⚠ failed or undone, ⏸ waiting for your
+  choice).
+- **Activity**, at the foot of the home screen: one line per operation —
+  *Moved to Laptop runner · 3 min*, red if it failed or was undone, amber while
+  it waits for you. Open the line (it is a button) to see its steps. Each step
+  is also in the agent's **Setup log**.
+- **The command line.** `hatchabot move`, `rehost`, `restore <file>`, `import`
+  (a full copy), `revert` and `backups restore` print a line per step until it
+  ends, and exit 1 if it failed, was undone or waits for a choice. `--no-wait`
+  returns at once; `hatchabot ops [agent]` lists operations (kind, status,
+  step n/m, outcome, age) and `hatchabot ops recover <op-id> <action>` makes a
+  held one's choice.
+
+```sh
+hatchabot move "Kitchen Helper" "Laptop runner"     # this machine ⇄ a runner
+hatchabot backups restore "Kitchen Helper" 2026-10-08 --yes
+hatchabot ops                                       # what is under way, and the last day's
+```
+
+Older scripts that expect the old answer can add `?wait=1` to the request: the
+server then answers when it is over, in the old shape. The other Hatchabot's
+side of a move between servers (`POST /v1/agents/restore`) still answers when
+the agent is running there — the moving server reads the agent from that
+answer — and runs in the background only when asked with `?async=1` (the
+command line's `restore` does).
+
 ## Interrupted operations
 
 A move takes minutes, and Hatchabot can restart in the middle of one: an
@@ -204,11 +245,14 @@ is asked about again every 10 minutes by itself. Until one of these is settled,
 Start, Rebuild, Archive, Move and Delete say why they must wait, so two copies
 can never answer the same bot.
 
-The Activity list and the agent's Setup log show each step. A machine's own
-operations — copying the image to a runner, **Back up now** — show in the
-Activity list too, to that machine's owner. The command line and the Hatchabot
-agent can read them: `GET /v1/operations?agentId=…`, and the agent's
-`list_operations` and `recover_operation` tools.
+A held operation comes **first under Alerts**, in its own *Waiting for your
+choice* section, which cannot be cleared away. The Activity list shows each
+operation as one line that opens to its steps, and the agent's Setup log shows
+every step. A machine's own operations — copying the image to a runner, **Back
+up now** — show in the Activity list too, to that machine's owner. The command
+line and the Hatchabot agent can read them: `hatchabot ops`, `GET
+/v1/operations?agentId=…`, and the agent's `list_operations` and
+`recover_operation` tools.
 
 ## Rules of the road
 

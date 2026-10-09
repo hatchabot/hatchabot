@@ -38,6 +38,8 @@ export interface SnapshotDeps {
   log?: (event: string, detail: Record<string, unknown>) => void;
   /** Who asked, for a restore's operation record. */
   requestedBy?: string;
+  /** Told a restore's operation id once it begins (the route answers 202 with it). */
+  onOperation?: (id: string) => void;
 }
 
 export class SnapshotError extends Error {
@@ -207,6 +209,7 @@ export async function restoreSnapshot(
   // files holds the agent for its owner — finish, or revert to the snapshot
   // taken just before (resumeSnapshotRestore).
   const op = beginOperation(store, 'restore-snapshot', agentId, { snapshotId, label: snapshot.label }, { requestedBy: deps.requestedBy });
+  deps.onOperation?.(op.id);
 
   // A restore is itself destructive — capture the current state first so an
   // unwanted rollback is one more rollback away, not a loss.

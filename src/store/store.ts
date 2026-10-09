@@ -2594,8 +2594,12 @@ export class Store {
     return undefined;
   }
 
-  /** Newest first, across every agent this owner can see. */
-  listEvents(agentIds: string[], limit = 60): Array<{
+  /**
+   * Newest first, across every agent this owner can see. `withoutOps`: leave
+   * out an operation's own lines (op.started, op.step… — operations.ts), which
+   * the Activity list shows as one row per operation instead.
+   */
+  listEvents(agentIds: string[], limit = 60, opts: { withoutOps?: boolean } = {}): Array<{
     agentId: string;
     at: string;
     event: string;
@@ -2607,7 +2611,7 @@ export class Store {
       this.db
         .prepare(
           `SELECT agent_id, at, event, detail FROM agent_events
-           WHERE agent_id IN (${marks}) ORDER BY id DESC LIMIT ?`,
+           WHERE agent_id IN (${marks})${opts.withoutOps ? ` AND event NOT LIKE 'op.%'` : ''} ORDER BY id DESC LIMIT ?`,
         )
         .all(...agentIds, limit) as any[]
     ).map((r) => ({
@@ -2618,6 +2622,19 @@ export class Store {
       // one bad row must not take the whole timeline down with it.
       detail: r.detail ? safeParse(r.detail) : undefined,
     }));
+  }
+
+  /** One operation's own timeline lines (detail.op), oldest first: its steps, for the Activity row that opens. */
+  eventsForOperation(agentId: string, opId: string, limit = 60): Array<{ at: string; event: string; detail?: Record<string, unknown> }> {
+    return (
+      this.db
+        .prepare(
+          `SELECT at, event, detail FROM agent_events
+           WHERE agent_id = ? AND event LIKE 'op.%'
+             AND (CASE WHEN json_valid(detail) THEN json_extract(detail, '$.op') END) = ? ORDER BY id LIMIT ?`,
+        )
+        .all(agentId, opId, limit) as any[]
+    ).map((r) => ({ at: r.at, event: r.event, detail: r.detail ? safeParse(r.detail) : undefined }));
   }
 
   /** The agent's newest timeline line, if any. */

@@ -253,6 +253,7 @@ export function handleFor(store: Store, id: string): OpHandle {
     // Tests: a death after the last step, before the outcome is written.
     if (stepHook && was) stepHook(was, `#${status}`);
     const op = store.updateOperation(id, { status, outcome: outcome.slice(0, 600), recovery, finishedAt: over ? now : null })!;
+    notify(id);
     // Held again with the same words (the 10-minute question to another
     // server): one line in the timeline, not one every ten minutes.
     if (was?.status === status && was.outcome === op.outcome) return;
@@ -271,6 +272,7 @@ export function handleFor(store: Store, id: string): OpHandle {
       const params = detail ? { ...op.params, ...detail } : op.params;
       store.updateOperation(id, { step: key, stepAt: new Date().toISOString(), ...(detail ? { params } : {}) });
       event(store, op, 'op.step', { step: key, label: info?.label ?? key, ...(info ? { n: info.n, of: info.of } : {}) });
+      notify(id);
     },
     done(outcome) { finish('succeeded', outcome, null, 'op.done'); },
     fail(err, recovery) {
@@ -307,6 +309,195 @@ export function beginOperation(
   return handleFor(store, id);
 }
 
+// ---- what the page and the CLI show (phase 3) -------------------------------
+
+/** One operation's words: what it is, while it runs, once it is done. */
+export interface OpTitles {
+  /** "Move to Laptop runner" */
+  what: string;
+  /** "Moving to Laptop runner" */
+  doing: string;
+  /** "Moved to Laptop runner" */
+  done: string;
+}
+
+const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 80) : undefined);
+
+/** From the kind and its params (never a secret): host and server names, a date, a label, an app. */
+export function operationTitles(kind: string, params: Record<string, unknown> | null | undefined): OpTitles {
+  const p = params ?? {};
+  const three = (what: string, doing: string, done: string): OpTitles => ({ what, doing, done });
+  switch (kind) {
+    case 'move-host': {
+      const to = str(p.toName);
+      return to ? three(`Move to ${to}`, `Moving to ${to}`, `Moved to ${to}`) : three('Move to another machine', 'Moving to another machine', 'Moved to another machine');
+    }
+    case 'migrate': {
+      const to = str(p.peerName);
+      return to ? three(`Move to ${to}`, `Moving to ${to}`, `Moved to ${to}`) : three('Move to another Hatchabot', 'Moving to another Hatchabot', 'Moved to another Hatchabot');
+    }
+    case 'import': return three('Import', 'Importing', 'Imported');
+    case 'restore-backup': {
+      const d = str(p.date);
+      return d ? three(`Restore from the ${d} backup`, `Restoring from the ${d} backup`, `Restored from the ${d} backup`)
+        : three('Restore from a backup', 'Restoring from a backup', 'Restored from a backup');
+    }
+    case 'restore-snapshot': {
+      const l = str(p.label);
+      return l ? three(`Restore of its files from "${l}"`, `Restoring its files from "${l}"`, `Restored its files from "${l}"`)
+        : three('Restore from a snapshot', 'Restoring from a snapshot', 'Restored from a snapshot');
+    }
+    case 'archive': return three('Archive', 'Archiving', 'Archived');
+    case 'unarchive': return three('Restore from the archive', 'Restoring from the archive', 'Restored from the archive');
+    case 'app-install': { const a = str(p.app); return three(`Install of ${a ?? 'its app'}`, `Installing ${a ?? 'its app'}`, `Installed ${a ?? 'its app'}`); }
+    case 'app-update': { const a = str(p.app); return three(`Update of ${a ?? 'its app'}`, `Updating ${a ?? 'its app'}`, `Updated ${a ?? 'its app'}`); }
+    case 'app-rollback': { const a = str(p.app); return three(`Roll back of ${a ?? 'its app'}`, `Rolling back ${a ?? 'its app'}`, `Rolled back ${a ?? 'its app'}`); }
+    case 'install-image': {
+      const h = str(p.host);
+      return h ? three(`Image install on ${h}`, `Copying the image to ${h}`, `Copied the image to ${h}`) : three('Image install', 'Copying the image', 'Copied the image');
+    }
+    case 'backup-run': return three('Backup', 'Backing up', 'Backed up');
+    case 'rebuild': return three('Rebuild', 'Rebuilding', 'Rebuilt');
+    case 'provision': return three('Setup', 'Setting up', 'Set up');
+    default: { const k = KIND_LABEL[kind] ?? kind; return three(k, k, k); }
+  }
+}
+
+/** The Activity row's words for how it ended (or where it is): "Moved to Laptop runner", "Move to Laptop runner failed". */
+export function operationSummary(kind: string, status: string, params: Record<string, unknown> | null | undefined): string {
+  const t = operationTitles(kind, params);
+  switch (status) {
+    case 'succeeded': return t.done;
+    case 'failed': return `${t.what} failed`;
+    case 'rolled_back': return `${t.what} undone`;
+    case 'held': return `${t.what} is waiting for your choice`;
+    case 'interrupted': return `${t.what} was interrupted by a restart`;
+    case 'queued': return `${t.what} is waiting its turn`;
+    default: return t.doing;
+  }
+}
+
+/** The timeline event an operation's status reads as (the Activity row's colour). */
+export const STATUS_EVENT: Record<string, string> = {
+  queued: 'op.started', running: 'op.started', succeeded: 'op.done', failed: 'op.failed',
+  rolled_back: 'op.rolled_back', held: 'op.held', interrupted: 'op.interrupted',
+};
+
+/** How long it took, as people say it: "40 s", "3 min", "2 h 5 min", "3 days". */
+export function spanWords(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${Math.max(s, 1)} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h} h${m % 60 ? ` ${m % 60} min` : ''}`;
+  return `${Math.round(h / 24)} days`;
+}
+
+/** What a finished operation leaves for the caller that asked (the old synchronous answers), never a secret. */
+function operationResult(op: Operation): Record<string, unknown> | undefined {
+  const p = op.params ?? {};
+  if (op.kind === 'restore-snapshot') {
+    return { restored: Array.isArray(p.restored) ? p.restored : [], ...(typeof p.safetySnapshotId === 'string' ? { safetySnapshotId: p.safetySnapshotId } : {}) };
+  }
+  if (op.kind === 'migrate') {
+    return { movedTo: str(p.peerName), ...(typeof p.remoteAgentId === 'string' ? { remoteAgentId: p.remoteAgentId } : {}) };
+  }
+  if (op.kind === 'move-host') return { movedTo: str(p.toName), hostId: typeof p.to === 'string' ? p.to : undefined };
+  return undefined;
+}
+
+// ---- running one in the background (phase 3) ---------------------------------
+
+/** Called when an operation's row changes (a step, an outcome): runInBackground's waits. */
+const watchers = new Map<string, Set<() => void>>();
+function notify(id: string): void {
+  for (const fn of [...(watchers.get(id) ?? [])]) fn();
+}
+function watch(id: string, fn: () => void): () => void {
+  let set = watchers.get(id);
+  if (!set) watchers.set(id, (set = new Set()));
+  set.add(fn);
+  return () => { set!.delete(fn); if (!set!.size) watchers.delete(id); };
+}
+
+export type Background<T> =
+  /** The operation began (and reached `readyAt`): the request answers 202 now; the work goes on. */
+  | { started: true; opId: string; done: Promise<T | undefined> }
+  /** The work ended before that: a quick end, with the old answer. */
+  | { started: false; value: T };
+
+/**
+ * Run a long change so its request can answer as soon as the operation has
+ * begun: `run` is the orchestrator call, given the `onOperation` hook it
+ * reports its row's id through. Resolves `started` once the row exists — and,
+ * with `readyAt`, once it has reached that step (a move to another Hatchabot
+ * waits for the other server's preflight, so its refusal is still the
+ * request's answer) or is over. A refusal thrown before that rejects, so the
+ * route answers it synchronously, as before.
+ *
+ * After `started`, the work goes on in this process. What it throws is the
+ * operation's outcome (the orchestrators record it); one that escapes without
+ * an outcome — a bug — is recorded as failed here, so the row never stays
+ * "running" in a process that is no longer running it. A simulated death
+ * (tests) records nothing, as a dead process would not.
+ */
+export function runInBackground<T>(
+  store: Store,
+  run: (onOperation: (id: string) => void) => Promise<T>,
+  opts: { readyAt?: string; onError?: (err: unknown, opId: string) => void } = {},
+): Promise<Background<T>> {
+  return new Promise((resolve, reject) => {
+    let opId: string | undefined;
+    let answered = false;
+    let unwatch: (() => void) | undefined;
+    let settle!: (v: T | undefined) => void;
+    const done = new Promise<T | undefined>((r) => { settle = r; });
+    // Ready: begun, and at `readyAt` or past it (or held there). An operation
+    // that ENDED before `readyAt` is a refusal: its rejection is the answer.
+    const ready = (): boolean => {
+      if (!opId) return false;
+      if (!opts.readyAt) return true;
+      const row = store.getOperation(opId);
+      return !!row && (row.status === 'held' || (ACTIVE.includes(row.status) && stepReached(row.kind, row.step, opts.readyAt)));
+    };
+    const answerStarted = () => {
+      if (answered || !opId) return;
+      answered = true;
+      unwatch?.();
+      resolve({ started: true, opId, done });
+    };
+    const onOperation = (id: string) => {
+      opId = id;
+      if (ready()) answerStarted();
+      else unwatch = watch(id, () => { if (ready()) answerStarted(); });
+    };
+    const work = run(onOperation);
+    work.then(
+      (value) => {
+        settle(value);
+        if (answered) return;
+        answered = true;
+        unwatch?.();
+        resolve({ started: false, value });
+      },
+      (err) => {
+        settle(undefined);
+        if (!answered) {
+          answered = true;
+          unwatch?.();
+          reject(err);
+          return;
+        }
+        if (err instanceof SimulatedCrash) return;
+        const row = opId ? store.getOperation(opId) : undefined;
+        if (row && (row.status === 'running' || row.status === 'queued') && row.bootId === currentBootId()) handleFor(store, row.id).fail(err);
+        opts.onError?.(err, opId!);
+      },
+    );
+  });
+}
+
 /** The agent's operation that is not over, if any. */
 export function activeOperation(store: Store, agentId: string): Operation | undefined {
   return store.activeOperationFor(agentId);
@@ -334,12 +525,19 @@ export function operationRefusal(store: Store, agentId: string): string | undefi
 export function publicOperation(op: Operation | undefined, opts: { recovery?: boolean } = {}): Record<string, unknown> | undefined {
   if (!op) return undefined;
   const info = stepInfo(op.kind, op.step);
+  const status = op.status === 'running' && op.bootId !== currentBootId() ? 'interrupted' : op.status;
+  const titles = operationTitles(op.kind, op.params);
+  const result = !ACTIVE.includes(op.status) ? operationResult(op) : undefined;
   return {
     id: op.id,
     agentId: op.agentId,
     kind: op.kind,
     kindLabel: KIND_LABEL[op.kind] ?? op.kind,
-    status: op.status === 'running' && op.bootId !== currentBootId() ? 'interrupted' : op.status,
+    /** "Moving to Laptop runner" — the Working on line, the CLI's progress. */
+    title: titles.doing,
+    /** "Moved to Laptop runner", "Move to Laptop runner failed" — the Activity row. */
+    summary: operationSummary(op.kind, status, op.params),
+    status,
     step: op.step,
     stepLabel: info?.label,
     stepN: info?.n,
@@ -348,6 +546,7 @@ export function publicOperation(op: Operation | undefined, opts: { recovery?: bo
     requestedAt: op.requestedAt,
     updatedAt: op.updatedAt,
     finishedAt: op.finishedAt,
+    ...(result ? { result } : {}),
     ...(opts.recovery === false ? {} : { recovery: op.recovery ?? undefined }),
   };
 }
