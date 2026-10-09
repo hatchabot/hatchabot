@@ -327,6 +327,7 @@ Setup log and Activity.
 - `src/api/routes.ts` — `'/healthz'`, `'/v1/agents/:id/health'`, `'/v1/agents/:id/logs'`, `'/v1/agents/:id/events'`, `'/v1/events'`, `'/v1/security/posture'`, `diskSweep`, `limitsCheck`: health, logs, events and posture.
 - `src/store/store.ts` — `agent_events`, `recordEvent`, `listEvents`, `posture_snapshots`: where it is stored.
 - `web/index.html` — `openHealth`, `runFleetHealthChecks`, `openLogs`, `openSetupLog`, `openAudit`, `v2InlineHealth`: health and logs on screen.
+- `web/index.html` — `v2CheckAll`, `v2HealthProblems`, `v2PaintCheckAll`: Check all on the home screen (every running agent, results as Alerts and a line above the agents).
 
 ## Costs, usage, budgets and the token steward
 
@@ -419,6 +420,9 @@ API through one fetch helper.
 - `web/index.html` — `initV2`, `renderV2`, `refresh`, `api`: start-up, the home grid, the periodic reload and the fetch helper.
 - `web/index.html` — `openV2Agent`, `v2Open`, `v2Pane`, `v2RenderSheet`: the agent sheet; v2Pane's tabs are overview, personality, ai, messaging, knowledge, sharing, usage, schedule, files and advanced.
 - `web/index.html` — `v2SetView`, `v2SetSort`, `v2LoadRecent`, `agentAttention`, `v2LoadMachine`: View by, sorting, Activity, Alerts and the machine line.
+- `web/index.html` — `v2PlannedHTML`, `loadTodos`, `createFromTodo`, `retireMadeTodos`: the Planned group (ghost tiles; the plans are the agent-todos routes).
+- `web/index.html` — `v2PlaceInGroup`, `v2MoveInGroup`, `v2DropTarget`, `sortGroup`: My order — drag within a group, Move earlier / later, a group's kept A→Z (the agent move and group sort routes).
+- `web/index.html` — `v2TabKeys`, `v2AcctItems`: arrow keys for the View by and sheet tabs and the account menu.
 - `web/index.html` — `setupSteps`, `renderSetup`, `openSetupGuide`: the first-run guide.
 - `web/index.html` — `openCrons`, `renderCrons`, `openInspect`, `openGallery`, `openInbox`: scheduled tasks, archived-agent inspector, templates, shared agents.
 - `web/index.html` — `renderAgents`, `agentCard`: the classic look.

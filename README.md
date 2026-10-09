@@ -92,8 +92,9 @@ adopting, backing up, and operating a fleet of agents.
   messages through their own servers).
 - **Organize your fleet.** Sort agents into named groups and arrange them: drag an
   icon onto another group, or into the empty strip to start a new group and name it
-  in place; sort by age, name or activity. (The classic look keeps the ⠿ grip,
-  ▲5 / ▼5 and position numbers.)
+  in place; sort by age, name or activity, or by **My order** — the order you
+  arrange by dragging within a group or with Move earlier / later on the agent's
+  page. A **Planned** group keeps agents you mean to make, one click from New agent.
 - **Manage scheduled tasks.** See an agent's cron jobs (⏰ Tasks), enable or
   disable them, run one now to test, or delete one — no shelling into the
   container. Tasks live on the agent's durable volume and survive rebuilds.

@@ -83,7 +83,7 @@ The header holds:
   problems Alerts on the Hatchabot agent's tile), and Activity is the home
   screen's last section.
 - **Bulk actions** (a bolt), shown once there are two agents to pick from;
-  **Rebuild all** is at its foot.
+  **Rebuild all** and **Check all** are at its foot.
 - The buttons are symbols only — speech bubble, chart, chip, bolt, gear, plus — with the name on
   hover (Chris, 2026-09-27). On a phone they tighten, and under 400 px wide the
   wordmark gives way to the logo.
@@ -125,19 +125,54 @@ The header holds:
   never get this far; see *Members & invites*) with **Let them in**,
   **That's me** and **Not now**, which is where someone is admitted now that
   the Telegram management bot is retired.
-- **Each group sorts on demand.** **A→Z** and **⏳** on a group header sort
-  that section once, and pressing the same button again reverses it — Z→A, or
-  newest first — the way a table column does. Which way "again" means is read
-  off the order on screen, not remembered, so it still does the right thing
-  after a reload. Nothing is kept: an agent you drag somewhere stays there
-  until you ask for a sort again.
-- **Agents are icons** in their groups. Drag one to reorder it, onto another
-  group to move it, onto **Archived** to archive it, or onto one of the two
+- **My order: arrange them yourself.** Beside **Age · Name · Activity** above
+  the agents is a fourth choice, **My order**: the order you put them in.
+  With it chosen, drag an icon to where you want it inside its group (a thin
+  line shows where it will land), or drop it between two icons of another
+  group to move it there. Without a mouse, open the agent: its **Overview**
+  has an **Order** row — "2 of 5 in Family" — with **Move earlier** and **Move
+  later** (hold Shift to go all the way to the start or the end). Using them
+  while another sort is chosen switches the home screen to My order, so you
+  see the move. Under Age, Name or Activity the icons stay in that sort, and
+  dragging one inside its own group changes nothing (the page says to choose
+  My order). In My order each group's header also has **A→Z**: it puts that
+  group in alphabetical order once and keeps it — press it again for Z→A —
+  and dragging or Move earlier / later still rearrange it afterwards. My
+  order is the same order the classic look kept, so nothing you arranged
+  there is lost.
+- **Agents are icons** in their groups. Drag one onto another group to move
+  it, onto **Archived** to archive it, or onto one of the two
   strips that appear at the bottom while you drag: **start a new group**, or
   the **bin**. Dropping on the bin does not delete anything — it opens the
   confirmation that makes you type the agent's name, because a drag is a fast,
   imprecise gesture and deleting is the one thing that cannot be undone. On a phone, press and hold,
-  then drag; an ordinary swipe still scrolls.
+  then drag; an ordinary swipe still scrolls. Every drop has a keyboard way
+  too, and the strips say where: the agent's Overview → **Group** (including
+  ＋ New group…), Advanced → **Archive**, and Advanced → **Delete…**.
+- **Planned: agents you mean to make.** In the Groups view, a **Planned**
+  group sits below your groups (before *Shared with me* and *Archived*). Type
+  a name in **Plan an agent…** and press Enter or **Add**: it appears as a
+  ghost tile — a dashed outline with a ＋, no colour — so it reads as not
+  made yet. Click a ghost tile to make it: **New agent** opens with the name
+  filled in, and once an agent with that name exists the plan leaves the
+  group by itself. The small **×** on a ghost tile removes the plan (it asks
+  first); it is a real button, so Tab reaches it. While the group is empty
+  it stays folded to one header line; **Show** opens it. Plans are per
+  account and are kept on the machine, so every browser you sign in with
+  sees the same list.
+- **Check all: a health check on every agent.** **Check all** at the foot
+  of **Bulk actions**, or **❤️ Check all agents** on the machine line, asks
+  each of your running agents in turn whether it answers and checks its
+  settings for mistakes — the same check as **Check health** on one agent's
+  Overview, a few seconds each. A line above the agents shows how far it has
+  got (with **Stop**), then what it found: how many were checked, which ones
+  are worth a look (each name opens that agent), and how many were not
+  running and so not checked. An agent with a problem shows **Worth a look**
+  on its icon, the finding in its tooltip ("Health check: it didn't answer",
+  "1 setting to fix: …"), and sits under View by → **Alerts** — **Show under
+  Alerts** goes there. The results last until you check again, press ✕ on
+  that line, or reload the page; clearing an agent from Alerts does not hide
+  a fresh finding.
 - **A red dot at the top left** means the agent has said something in its
   console since you last had that console open — a reply that finished after
   you closed it, or a scheduled task's result on an agent with no chat app.
@@ -169,6 +204,12 @@ The header holds:
   invites and peers; **Data** is delineated into Folders, Git repos,
   Connections and History. The editors live right in those tabs, not
   one panel deeper. Every button from the classic card is in one of them.
+  A template agent whose Setup values were never filled in says so at the
+  top of Overview, with **Fill its Setup values** to go straight to them; the
+  Telegram tab has **Telegram Web** beside **Open in Telegram**, for a
+  computer without the Telegram app. Each select on the sheet is named by a
+  real label, and the agent's icon in the sheet's bar is a button (Enter or
+  Space changes it).
 - **Every panel slides in from the right** with **‹ Back** at the top. Panels
   stack: Back returns to whatever opened it.
 - **Machine settings have eleven tabs**: You (your account, other accounts,
@@ -197,7 +238,7 @@ The header holds:
 ### View by
 
 The bar above the agents: *Groups* is the arrangement
-you made — drag to reorder, drag between groups. The other views bin the same
+you made — drag between groups, and under My order within one. The other views bin the same
 agents by **Machine**, **AI source**, **Model**, **Cost** (a week at API
 prices; see [Cost badges](#cost-badges)), **Image** (the fleet default, a
 pinned base image, or each derived image by name), **Pinned** (which image
@@ -216,11 +257,16 @@ read are not cleared this way: they go away by answering. The bar appears
 once there is more than one agent; the read-only views list their bins
 alphabetically (the two time views newest first), with *Shared with me* and
 *Archived* last. On the same
-bar in every view, **Age** (newest agent first), **Name** (A→Z) or
-**Activity** (most recently active first) orders the agents within each bin;
-press the active one again to flip it. Dragging an agent's icon still moves
+bar in every view, **Age** (newest agent first), **Name** (A→Z),
+**Activity** (most recently active first) or **My order** (the order you
+arranged; see *My order* above) orders the agents within each bin;
+press the active one again to flip it (My order has no direction). Dragging an agent's icon still moves
 it to another group (or to Archived); positions inside a group follow the
-sort. The Cost view has its own **Cost** sort as well (most expensive first).
+sort, and only My order lets a drag place it. The Cost view has its own **Cost** sort as well (most expensive first).
+The views are tabs for the keyboard too: Tab reaches the chosen one, and the
+left and right arrow keys (Home and End) move between them; the agent
+sheet's tabs work the same way, and the account menu's items follow the up
+and down arrow keys.
 
 ### The Activity view: Unread first, and each agent's last line
 

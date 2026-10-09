@@ -2384,7 +2384,7 @@ const SCENARIOS = String.raw`(() => {
         ok('no total where nothing is priced', !sec('No usage').querySelector('.v2gnote'));
         // The Sort control works here as elsewhere; Cost is its own, first, choice in this view.
         const sortBtns = () => [...document.querySelectorAll('.v2binsort button')].map((b) => b.textContent.replace(/ [▲▼]$/, ''));
-        eq('sort buttons', sortBtns(), ['Cost', 'Age', 'Name', 'Activity']);
+        eq('sort buttons', sortBtns(), ['Cost', 'Age', 'Name', 'Activity', 'My order']);
         byText('.v2binsort button', 'Name').click(); await sleep(30);
         eq('Name A→Z inside a band', namesIn('>$100/wk'), ['Budget Tracker', 'Homework Helper', 'Soccer Schedule']);
         byText('.v2binsort button', 'Cost').click(); await sleep(30);
@@ -2394,7 +2394,7 @@ const SCENARIOS = String.raw`(() => {
         byText('.v2binsort button', 'Cost').click(); await sleep(30);
         const groupsSort = JSON.stringify(v2Sort);
         byText('.v2views button', 'Groups').click(); await sleep(30);
-        eq('Groups has no Cost sort', sortBtns(), ['Age', 'Name', 'Activity']);
+        eq('Groups has no Cost sort', sortBtns(), ['Age', 'Name', 'Activity', 'My order']);
         eq('the other views keep their own sort', JSON.stringify(v2Sort), groupsSort);
       } finally { await costCleanup(); }
     },
@@ -2876,6 +2876,268 @@ const SCENARIOS = String.raw`(() => {
       eq('one PATCH with the switch', calls('PATCH', /^\/v1\/agents\/a1$/).at(-1).body, { browser: true });
       await v2SetBrowser('a1', true, null);
       await until(() => toastText().includes('Browser on — rebuilding'));
+    },
+  });
+  // One interface, step 1 (2026-10-09): what only the classic look had, on the home screen,
+  // and the keyboard fixes before classic goes (docs/operations-and-one-interface-design.md, Part B).
+  Object.assign(T, {
+    plannedAgents: async () => {
+      const toastText = () => document.getElementById('toast').textContent;
+      window.__override['/v1/agent-todos'] = { todos: [{ id: 't1', name: 'Recipe Box' }, { id: 't2', name: 'Book Club', note: 'for the reading group' }] };
+      try {
+        v2SetView('group');
+        await loadTodos();
+        const head = byText('#v2groups .v2ghead h3', 'Planned');
+        ok('a Planned group on the home screen', !!head);
+        const sec = head.closest('.v2group');
+        ok('open when it has plans', !sec.classList.contains('collapsed'));
+        const ghosts = [...sec.querySelectorAll('.v2plantile')];
+        eq('a ghost tile per plan', ghosts.map((g) => g.querySelector('.v2name').textContent), ['Recipe Box', 'Book Club']);
+        ok('a ghost is not an agent tile (no drag, no console)', !sec.querySelector('.v2agent') && !ghosts[0].dataset.v2id);
+        ok('it says it is not made yet: ' + ghosts[0].getAttribute('aria-label'), ghosts[0].getAttribute('aria-label').includes('planned, not made yet'));
+        ok('dashed, not coloured', getComputedStyle(ghosts[0].querySelector('.v2ic')).borderTopStyle === 'dashed');
+        const archived = byText('#v2groups .v2ghead h3', 'Archived');
+        ok('before Archived', !!(head.compareDocumentPosition(archived) & Node.DOCUMENT_POSITION_FOLLOWING));
+        // Plan one: a labelled box, Enter adds it.
+        const box = document.getElementById('v2TodoNew');
+        ok('the box has a real label', !!box && box.labels.length === 1 && box.labels[0].textContent.includes('Plan an agent'));
+        box.value = 'Chore Chart';
+        box.form.requestSubmit();
+        const post = await until(() => calls('POST', /^\/v1\/agent-todos$/)[0]);
+        eq('added', post.body, { name: 'Chore Chart' });
+        // Make one with one click: New agent, its name filled in.
+        byText('#v2groups .v2plantile', 'Recipe Box').click();
+        await until(() => createDlg.open);
+        eq('the name is filled in', document.getElementById('agentName').value, 'Recipe Box');
+        createDlg.close();
+        // Once an agent of that name exists, the plan leaves on the next list.
+        const list = await (await fetch('/v1/agents')).json();
+        window.__override['/v1/agents'] = list.concat([{ ...list[0], id: 'made1', name: 'Recipe Box', group: 'Family' }]);
+        await refresh(false);
+        await until(() => calls('DELETE', /^\/v1\/agent-todos\/t1$/).length);
+        await until(() => !byText('#v2groups .v2plantile', 'Recipe Box'));
+        // Remove one by keyboard: a real button with a name.
+        const x = document.querySelector('#v2groups button[aria-label="Remove Book Club from Planned"]');
+        ok('the remove button is a real, named button', !!x && x.tagName === 'BUTTON' && x.type === 'button');
+        window.__confirms.length = 0;
+        x.click();
+        await until(() => calls('DELETE', /^\/v1\/agent-todos\/t2$/).length);
+        ok('it asked first', window.__confirms.some((c) => c.includes('Book Club')));
+        // Only in the Groups view: the other views are bins of what exists.
+        v2SetView('state');
+        ok('not in another view', !byText('#v2groups .v2ghead h3', 'Planned'));
+        ok('no stray toast error', !/error/i.test(toastText()));
+      } finally {
+        delete window.__override['/v1/agent-todos']; delete window.__override['/v1/agents'];
+        v2SetView('group'); await loadTodos(); await refresh(false);
+      }
+    },
+    myOrder: async () => {
+      const toastText = () => document.getElementById('toast').textContent;
+      const names = (group) => [...document.querySelector('.v2grid[data-v2drop="' + group + '"]').querySelectorAll('.v2agent .v2name')].map((n) => n.textContent);
+      const famHead = () => byText('#v2groups .v2ghead', 'Family');
+      try {
+        v2SetView('group');
+        v2SetSort('name');
+        eq('Name sorts the group', names('Family'), ['Homework Helper', 'Piano Practice', 'Soccer Schedule']);
+        ok('no keep-sorted button outside My order', !famHead().querySelector('button[aria-label="Sort this group A to Z and keep that order"]'));
+        // Under another sort a drop in the same group moves nothing, and says how to arrange by hand.
+        let mark = window.__calls.length;
+        document.activeElement?.blur?.();
+        let from = tile('Piano Practice'), to = tile('Homework Helper');
+        from.scrollIntoView({ block: 'center' }); // on screen, or the pointer lands on nothing
+        let p = centre(from), r = to.getBoundingClientRect();
+        pointer('pointerdown', from, p.x, p.y); pointer('pointermove', window, p.x + 12, p.y + 12);
+        pointer('pointermove', window, r.left + r.width * 0.2, r.top + r.height / 2);
+        pointer('pointerup', window, r.left + r.width * 0.2, r.top + r.height / 2);
+        await until(() => toastText().includes('choose My order'));
+        ok('no move asked for', !window.__calls.slice(mark).some((c) => /\/move$/.test(c.path)));
+        // My order: the stored order, a fourth choice beside Age, Name, Activity.
+        document.getElementById('v2sort-manual').click();
+        ok('My order is chosen', v2Sort.key === 'manual' && document.getElementById('v2sort-manual').getAttribute('aria-pressed') === 'true');
+        eq('the stored order', names('Family'), ['Homework Helper', 'Soccer Schedule', 'Piano Practice']);
+        // Drag within the group places it.
+        mark = window.__calls.length;
+        from = tile('Piano Practice'); to = tile('Homework Helper');
+        from.scrollIntoView({ block: 'center' });
+        p = centre(from); r = to.getBoundingClientRect();
+        pointer('pointerdown', from, p.x, p.y); pointer('pointermove', window, p.x + 12, p.y + 12);
+        pointer('pointermove', window, r.left + r.width * 0.2, r.top + r.height / 2);
+        pointer('pointerup', window, r.left + r.width * 0.2, r.top + r.height / 2);
+        const mv = await until(() => window.__calls.slice(mark).find((c) => c.method === 'POST' && c.path === '/v1/agents/a3/move'));
+        eq('placed before Homework Helper', mv.body, { before: 'a1' });
+        // Sort a group A→Z once and keep it: a group action in My order.
+        const az = famHead().querySelector('button[aria-label="Sort this group A to Z and keep that order"]');
+        ok('a keep-sorted A→Z on the group', !!az);
+        az.click();
+        const srt = await until(() => calls('POST', /^\/v1\/groups\/sort$/)[0]);
+        eq('sorted once, kept', srt.body, { group: 'Family', mode: 'name', desc: false });
+        // The keyboard's drag: Move earlier / later on the sheet's Overview.
+        openV2Agent('a2', 'overview');
+        const row = await until(() => document.getElementById('v2Place'));
+        ok('its place: ' + row.textContent, row.textContent.includes('2 of 3 in Family'));
+        mark = window.__calls.length;
+        document.getElementById('v2MoveEarlier').click();
+        const e1 = await until(() => window.__calls.slice(mark).find((c) => c.method === 'POST' && c.path === '/v1/agents/a2/move'));
+        eq('earlier: before the first', e1.body, { before: 'a1' });
+        await until(() => document.activeElement && document.activeElement.id === 'v2MoveEarlier');
+        mark = window.__calls.length;
+        document.getElementById('v2MoveLater').click();
+        const e2 = await until(() => window.__calls.slice(mark).find((c) => c.method === 'POST' && c.path === '/v1/agents/a2/move'));
+        eq('later: the end of its group', e2.body, { before: null, group: 'Family' });
+        v2Close();
+        // From another sort, moving by hand switches the home screen to My order.
+        v2SetSort('age');
+        openV2Agent('a2', 'overview');
+        await until(() => document.getElementById('v2MoveEarlier'));
+        document.getElementById('v2MoveEarlier').click();
+        await until(() => v2Sort.key === 'manual');
+        ok('and says so', toastText().includes('My order'));
+        v2Close();
+        ok('no Order row for the manager', (() => { openV2Agent(agents.find((a) => a.ops).id, 'overview'); const none = !document.getElementById('v2Place'); v2Close(); return none; })());
+      } finally {
+        if (v2AgentDlg.open) v2Close();
+        v2Sort = { key: 'age', dir: -1 }; try { localStorage.removeItem('hb-v2-sort'); } catch {}
+        await refresh(false); renderV2();
+      }
+    },
+    checkAll: async () => {
+      const healthy = { status: 'healthy', reachable: true, doctor: { findings: [], checksRun: 12 } };
+      const running = agents.filter((a) => a.state === 'RUNNING' && v2Mine(a));
+      for (const a of agents) window.__override['/v1/agents/' + a.id + '/health'] = healthy;
+      window.__override['/v1/agents/a1/health'] = { status: 'healthy', reachable: true, doctor: { findings: [{ severity: 'warn', checkId: 'search', message: 'web search is turned off' }], checksRun: 12 } };
+      window.__override['/v1/agents/a4/health'] = { status: 'unreachable', reachable: false };
+      const mark = window.__calls.length;
+      try {
+        openFleetActions();
+        await until(() => fleetActionsDlg.open);
+        document.getElementById('faCheckAllBtn').click();
+        await until(() => !fleetActionsDlg.open);
+        await until(() => v2CheckLast && !v2CheckRun);
+        const asked = window.__calls.slice(mark).filter((c) => c.method === 'GET' && /\/health$/.test(c.path));
+        eq('every running agent of yours, once', asked.length, running.length);
+        ok('with the settings check', asked.every((c) => c.url.includes('doctor=1')));
+        ok('not the stopped or rebuilding ones', !asked.some((c) => c.path === '/v1/agents/a10/health' || c.path === '/v1/agents/a5/health'));
+        const line = document.getElementById('v2CheckAll');
+        const said = line.textContent.replace(/\s+/g, ' ');
+        ok('a line says how it went: ' + said, !line.hidden && said.includes(running.length + ' running agents checked') && said.includes('2 worth a look') && said.includes('Homework Helper') && said.includes('Meal Planner') && said.includes('2 not running'));
+        ok('above the agents', !!(line.compareDocumentPosition(document.getElementById('v2groups')) & Node.DOCUMENT_POSITION_FOLLOWING));
+        ok('the tile says Worth a look', tile('Homework Helper').getAttribute('aria-label').includes('Worth a look'));
+        const tip = tipText('Homework Helper');
+        ok('its tooltip says what: ' + tip.slice(0, 200), tip.includes('Health check: 1 setting to fix: web search is turned off'));
+        ok('one that did not answer', tipText('Meal Planner').includes("Health check: it didn't answer"));
+        ok('a fine one stays fine', !tile('Budget Tracker').getAttribute('aria-label').includes('Worth a look'));
+        byText('#v2CheckAll button', 'Show under Alerts').click();
+        ok('Alerts view', v2View === 'attention');
+        const alerts = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Alerts'));
+        ok('both under Alerts', !!alerts && alerts.textContent.includes('Homework Helper') && alerts.textContent.includes('Meal Planner'));
+        // The machine line has it too (its owner's).
+        const saved = v2Machine;
+        v2Machine = { hosts: [{ id: 'h1', name: 'This machine', kind: 'local', hostname: 'home-box', agentCount: 12 }], backup: null, runtime: null };
+        v2PaintMachine();
+        ok('on the machine line', !!document.getElementById('v2MachineCheckAll'));
+        v2Machine = saved; v2PaintMachine();
+        // Clear: the results go, and the tiles with them.
+        document.querySelector('#v2CheckAll button[aria-label="Clear the health check results"]').click();
+        ok('cleared', line.hidden && !tile('Homework Helper').getAttribute('aria-label').includes('Worth a look'));
+      } finally {
+        for (const a of agents) delete window.__override['/v1/agents/' + a.id + '/health'];
+        v2ClearChecks(); v2SetView('group');
+        if (fleetActionsDlg.open) fleetActionsDlg.close();
+      }
+    },
+    setupValuesNotice: async () => {
+      try {
+        await withAgents((a) => a.id === 'a1' ? { ...a, persona: 'Helps {{child_name}} with homework' } : undefined);
+        openV2Agent('a1', 'overview');
+        const btn = await until(() => byText('#v2Pane .v2notices button', 'Fill its Setup values'));
+        ok('the notice is there, with a real button', btn.type === 'button' && byText('#v2Pane .v2notices .pair', 'Template not configured'));
+        ok('not said twice in the list below', ![...document.querySelectorAll('#v2Pane .v2why li')].some((li) => li.textContent.includes('setup values')));
+        btn.click();
+        await until(() => v2Tab === 'personality');
+        ok('it opens the Personality tab (Setup values)', v2Tab === 'personality' && !!document.querySelector('#v2Pane #paneDef'));
+        v2Close();
+        openV2Agent('a2', 'overview');
+        ok('no notice on a filled-in agent', !byText('#v2Pane .v2notices button', 'Fill its Setup values'));
+        v2Close();
+      } finally { if (v2AgentDlg.open) v2Close(); await agentsCleanup(); }
+    },
+    telegramWeb: async () => {
+      window.__override['/v1/agents/a1/channels'] = { channels: [{ kind: 'telegram', displayName: 'Homework Helper', deepLink: 'https://t.me/HomeworkHelperBot', youAreLinked: true, rooms: { mode: 'members' } }], imageSupports: ['telegram'], spare: {} };
+      try {
+        openV2Agent('a1', 'messaging');
+        const web = await until(() => [...document.querySelectorAll('#v2Chans a')].find((x) => x.textContent === 'Telegram Web'));
+        ok('a Telegram Web link: ' + web.href, web.href.startsWith('https://web.telegram.org/k/#?tgaddr=') && web.href.includes('HomeworkHelperBot'));
+        const open = [...document.querySelectorAll('#v2Chans a')].find((x) => x.textContent === 'Open in Telegram');
+        ok('beside Open in Telegram', !!open && open.parentElement === web.parentElement);
+        ok('in a new tab, without a way back', web.target === '_blank' && web.rel.includes('noopener'));
+      } finally { delete window.__override['/v1/agents/a1/channels']; if (v2AgentDlg.open) v2Close(); }
+    },
+    sheetKeyboard: async () => {
+      const key = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+      try {
+        openV2Agent('a1', 'overview');
+        // Real labels for the Overview's selects.
+        const g = document.getElementById('v2GroupSel'), c = document.getElementById('editClass');
+        ok('Group has a label', g.labels.length === 1 && g.labels[0].textContent === 'Group');
+        ok('Class has a label', c.labels.length === 1 && c.labels[0].textContent === 'Class');
+        // The bar's icon is a real button (Space and Enter both press it).
+        const ic = document.querySelector('#v2AgentBar .v2iconbtn');
+        ok('the icon is a button', !!ic && ic.tagName === 'BUTTON' && ic.getAttribute('aria-label') === 'Change its icon' && !document.querySelector('#v2AgentBar [role="button"]'));
+        // Tabs: each controls the pane; arrow keys move between them.
+        const tabs = [...document.querySelectorAll('#v2Tabs [role="tab"]')];
+        ok('each tab controls the pane', tabs.every((t) => t.getAttribute('aria-controls') === 'v2Pane'));
+        const pane = document.getElementById('v2Pane');
+        ok('the pane is the tab panel', pane.getAttribute('role') === 'tabpanel' && pane.getAttribute('aria-labelledby') === 'v2tab-overview');
+        ok('one tab in the Tab order', tabs.filter((t) => t.tabIndex === 0).length === 1);
+        document.getElementById('v2tab-overview').focus();
+        key(document.activeElement, 'ArrowRight');
+        ok('ArrowRight: the next tab, chosen and focused', v2Tab === 'personality' && document.activeElement.id === 'v2tab-personality');
+        key(document.activeElement, 'End');
+        ok('End: the last', v2Tab === 'advanced' && document.activeElement.id === 'v2tab-advanced');
+        for (const id of ['v2Sleep', 'v2FilesCap', 'v2Browser']) { const s = document.getElementById(id); if (s) ok(id + ' is labelled', s.labels.length > 0); }
+        key(document.activeElement, 'ArrowRight');
+        ok('wraps to the first', v2Tab === 'overview' && document.activeElement.id === 'v2tab-overview');
+        key(document.activeElement, 'ArrowLeft');
+        ok('ArrowLeft wraps to the last', v2Tab === 'advanced');
+        v2Close();
+      } finally { if (v2AgentDlg.open) v2Close(); }
+    },
+    homeKeyboard: async () => {
+      const key = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+      try {
+        v2SetView('group');
+        // View by: real tabs over one panel, arrow keys between them.
+        const first = document.getElementById('v2view-group');
+        ok('a view tab controls the panel', first.getAttribute('aria-controls') === 'v2ViewPanel');
+        const panel = document.getElementById('v2ViewPanel');
+        ok('the panel is labelled by the chosen view', panel.getAttribute('role') === 'tabpanel' && panel.getAttribute('aria-labelledby') === 'v2view-group' && panel.contains(tile('Homework Helper')));
+        first.focus();
+        key(first, 'ArrowRight');
+        ok('ArrowRight: the next view, focused: ' + v2View, v2View !== 'group' && document.activeElement.id === 'v2view-' + v2View);
+        key(document.activeElement, 'Home');
+        ok('Home: Groups again', v2View === 'group' && document.activeElement.id === 'v2view-group');
+        // The account menu: menu items, arrow keys.
+        v2ToggleAccount();
+        const pop = document.getElementById('v2AcctPop');
+        const items = [...pop.querySelectorAll('button')].filter((b) => !b.hidden && b.offsetParent !== null);
+        ok('every button is a menu item', items.every((b) => /^menuitem/.test(b.getAttribute('role') || '')));
+        ok('the first item has focus', document.activeElement === items[0]);
+        ok('the theme says which is on', ['true', 'false'].includes(document.getElementById('v2ThemeLight').getAttribute('aria-checked')));
+        key(document.activeElement, 'ArrowDown');
+        ok('ArrowDown: the next item', document.activeElement === items[1]);
+        key(document.activeElement, 'ArrowUp'); key(document.activeElement, 'ArrowUp');
+        ok('ArrowUp wraps to the last', document.activeElement === items[items.length - 1]);
+        key(document.activeElement, 'Home');
+        ok('Home: the first', document.activeElement === items[0]);
+        key(document.activeElement, 'Escape');
+        ok('Escape closes, back on the avatar', pop.hidden && document.activeElement.id === 'v2AvatarBtn');
+        // The pointer-only strips say where the keyboard does the same.
+        ok('new-group strip hint', document.getElementById('v2NewGroup').textContent.includes('By keyboard: open the agent, then Overview → Group'));
+        ok('bin hint', document.getElementById('v2Trash').textContent.includes('By keyboard: open the agent, then Advanced → Delete'));
+        const arch = [...document.querySelectorAll('#v2groups .v2group')].find((s) => s.querySelector('h3').textContent === 'Archived');
+        ok('Archived hint', !!arch && arch.textContent.includes('By keyboard: open the agent, then Advanced → Archive'));
+      } finally { if (!document.getElementById('v2AcctPop').hidden) v2CloseAccount(); v2SetView('group'); }
     },
   });
   (async () => {

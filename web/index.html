@@ -439,7 +439,7 @@
   body.v2 .hbtn { background:var(--panel-2) }
   body.v2 .danger { color:var(--bad) }
   body.v2 button.pressed, body.v2 .btn.pressed { background:color-mix(in srgb, var(--accent) 22%, var(--panel-2)); color:var(--text); border-color:var(--accent) }
-  body.v2 .v2seg button[aria-pressed="true"] { background:var(--panel-2); color:var(--accent-text) }
+  body.v2 .v2seg button[aria-pressed="true"], body.v2 .v2seg button[aria-checked="true"] { background:var(--panel-2); color:var(--accent-text) }
   body.v2 .wrap { padding-top:0 }
   /* v2 header: one quiet bar. Brand left; New agent, Settings and the account
      menu right. Inbox shows only when something is waiting in it. */
@@ -498,7 +498,7 @@
   .v2poprow { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 10px; font-size:14px }
   .v2seg { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden }
   .v2seg button { background:none; border:0; border-radius:0; padding:4px 10px; font:inherit; font-size:12.5px; color:var(--dim); cursor:pointer }
-  .v2seg button[aria-pressed="true"] { background:var(--accent); color:var(--accent-ink); font-weight:600 }
+  .v2seg button[aria-pressed="true"], .v2seg button[aria-checked="true"] { background:var(--accent); color:var(--accent-ink); font-weight:600 }
   .v2popsep { height:1px; background:var(--line); margin:4px 2px }
   .v2ver { color:var(--dim); font-size:11.5px; padding:4px 10px 2px; font-variant-numeric:tabular-nums }
   @media (max-width:560px) {
@@ -836,6 +836,29 @@
   @keyframes v2nudge { 0%,100% { transform:none } 50% { transform:translateY(-3px) } }
   @media (prefers-reduced-motion: reduce) { .v2st-working .v2ic::after, .v2st-waiting .v2ic { animation:none } .v2ic { transition:none } }
   .v2newgroup { border:1px dashed var(--line); border-radius:12px; padding:14px; text-align:center; color:var(--dim); font-size:13px }
+  /* The strips are pointer-only: each says where the keyboard does the same (2026-10-09). */
+  .v2newgroup .v2keyhint { display:block; font-size:11.5px; margin-top:3px; opacity:.85 }
+  /* Read by a screen reader, not shown. */
+  .v2sr { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0 }
+  /* Planned: ghost tiles — a dashed outline and no colour, so they read as "not made yet". */
+  .v2plan { position:relative; display:flex; justify-content:center }
+  .v2plantile { background:none; border:0; padding:6px 2px 4px; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:8px;
+                border-radius:12px; color:var(--dim); font:inherit }
+  .v2plantile .v2ic { background:transparent; border:1.5px dashed var(--line); color:var(--dim); font-size:24px }
+  .v2plantile:hover .v2ic, .v2plantile:focus-visible .v2ic { border-color:var(--accent); color:var(--text) }
+  .v2plantile:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
+  .v2planx { position:absolute; top:0; right:8px; width:22px; height:22px; padding:0; border-radius:50%; line-height:1; font-size:14px;
+             background:var(--panel); color:var(--dim); border:1px solid var(--line); opacity:.6 }
+  .v2plan:hover .v2planx, .v2planx:focus-visible { opacity:1 }
+  .v2planadd { grid-column:1/-1; display:flex; gap:8px; align-items:center; max-width:420px; margin:2px 0 6px }
+  .v2planadd input { flex:1; min-width:0 }
+  /* The sheet bar's icon: a button that looks like the icon. */
+  .v2sbar .v2iconbtn { background:none; border:0; padding:0; border-radius:12px; flex:none; cursor:pointer }
+  .v2sbar .v2iconbtn:focus-visible { outline:2px solid var(--accent); outline-offset:3px }
+  /* Check all: one quiet line while it runs, then what it found. */
+  .v2checkall { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; margin:0 0 12px; padding:8px 12px; border:1px solid var(--line); border-radius:12px; font-size:13px }
+  .v2checkall .warn { color:var(--warn); font-weight:600 }
+  .v2checkall button { font-size:12.5px; padding:3px 10px }
   /* The new-group strip is there at rest too — a quiet dashed line, so people
      know the gesture exists (Chris, 2026-09-25) — and the delete strip only
      while dragging. While dragging, the strips dock to the bottom of the
@@ -880,6 +903,7 @@
   .v2row { display:grid; grid-template-columns:170px 1fr; gap:12px; align-items:baseline; padding-bottom:12px; border-bottom:1px solid var(--line) }
   .v2row:last-child { border-bottom:0 }
   .v2k { font-size:13px; color:var(--dim) }
+  label.v2k { margin:0 } /* a row key that names its select: looks like the others */
   .v2v { display:flex; gap:8px; align-items:center; flex-wrap:wrap; min-width:0 }
   .v2v .sub { flex-basis:100% }
   .ord { display:inline-flex; flex-direction:column; gap:1px; margin-right:2px }
@@ -994,8 +1018,8 @@
         <div class="v2who"><span class="v2avatar" id="v2AvatarBig" aria-hidden="true">?</span><div class="v2whotext"><b id="v2WhoName"></b><span id="v2WhoSub"></span></div></div>
         <div class="v2poprow"><span>Appearance</span>
           <div class="v2seg" role="group" aria-label="Theme">
-            <button type="button" id="v2ThemeLight" onclick="v2SetTheme('light')">Light</button>
-            <button type="button" id="v2ThemeDark" onclick="v2SetTheme('dark')">Dark</button>
+            <button type="button" role="menuitemradio" aria-checked="false" id="v2ThemeLight" onclick="v2SetTheme('light')">Light</button>
+            <button type="button" role="menuitemradio" aria-checked="false" id="v2ThemeDark" onclick="v2SetTheme('dark')">Dark</button>
           </div>
         </div>
         <div class="v2popsep"></div>
@@ -1090,10 +1114,11 @@
       <div id="v2JoinList" style="display:grid;gap:8px;margin-bottom:8px"></div>
       <div id="v2PropList"></div>
     </section>
+    <div class="v2checkall" id="v2CheckAll" role="status" aria-live="polite" hidden></div>
     <div id="v2groups"><div class="hb-loading" aria-live="polite"><span class="hb-spin" aria-hidden="true"></span> Loading your agents… <span class="sub">(a few seconds on a big fleet: every agent is checked)</span></div></div>
     <div class="v2dropstrips">
-      <div class="v2newgroup" id="v2NewGroup">＋ Drag an icon here to start a new group — you name it right there</div>
-      <div class="v2newgroup v2trash" id="v2Trash">🗑 Drop here to delete — it asks first</div>
+      <div class="v2newgroup" id="v2NewGroup">＋ Drag an icon here to start a new group — you name it right there<span class="v2keyhint">By keyboard: open the agent, then Overview → Group → ＋ New group…</span></div>
+      <div class="v2newgroup v2trash" id="v2Trash">🗑 Drop here to delete — it asks first<span class="v2keyhint">By keyboard: open the agent, then Advanced → Delete…</span></div>
     </div>
     <section class="v2group" id="v2Activity" hidden aria-labelledby="v2ActTitle">
       <div class="v2ghead"><h3 id="v2ActTitle">Activity</h3><span class="n" id="v2ActCount"></span>
@@ -1108,7 +1133,7 @@
 
 <dialog id="v2AgentDlg" class="v2sheet" aria-labelledby="v2AgentName">
   <div class="v2sbar" id="v2AgentBar"></div>
-  <div class="v2tabs" role="tablist" id="v2Tabs"></div>
+  <div class="v2tabs" role="tablist" id="v2Tabs" aria-label="Its settings" onkeydown="v2TabKeys(event)"></div>
   <div class="v2pane" id="v2Pane"></div>
 </dialog>
 
@@ -2729,6 +2754,10 @@
   <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
     <b>Rebuild everything</b><button onclick="rebuildAll()">Rebuild all</button>
     <span class="sub" style="flex-basis:100%">A new container for every running agent, memory kept. Picks up a new runtime image or network. Stopped and sleeping agents are rebuilt when they next start.</span>
+  </div>
+  <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <b>Check every agent</b><button id="faCheckAllBtn" onclick="fleetActionsDlg.close(); v2CheckAll()">❤️ Check all</button>
+    <span class="sub" style="flex-basis:100%">Asks each running agent whether it answers, and checks its settings for mistakes — one at a time, a few seconds each. What it finds shows on the agent's icon and under View by → Alerts.</span>
   </div>
   <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px;flex-wrap:wrap">
     <button onclick="fleetActionsDlg.close()">Close</button>
@@ -7329,11 +7358,33 @@ function agentCard(a) {
  * members list. One builder, so the classic card and the v2 settings sheet
  * can never disagree about what needs doing.
  */
+/** A template agent whose description still has {{placeholders}}: its Setup values were never filled in. */
+const templateUnfilled = (a) => !!a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona);
+const TEMPLATE_WHY = 'template setup values not filled in';
+/** The notice's button: its Personality tab, scrolled to the Setup values once they have loaded. */
+function goSetupValues(id, name) {
+  void openEdit(id, name, 'def');
+  let n = 0;
+  const t = setInterval(() => {
+    const row = $('setupValuesRow');
+    const shown = row && !row.hidden && row.offsetParent !== null;
+    if (!shown && ++n < 20) return;
+    clearInterval(t);
+    if (shown) { row.scrollIntoView({ block: 'center' }); row.querySelector('input, select, textarea')?.focus(); }
+  }, 150);
+}
+/**
+ * The notices above an agent's settings. opts: skipFailure / skipTokenForm (the
+ * sheet shows those itself), setupValues (the sheet's "fill its Setup values";
+ * the classic card says it in its own line).
+ */
 function agentNotices(a, opts = {}) {
   const pending = a.pendingAction?.type === 'bot_token';
   const pairs = pairings[a.id] ?? [];
   return `
       ${recheckNote(a)}
+      ${opts.setupValues && templateUnfilled(a) ? `<div class="pair">⚙ <span class="grow">Template not configured — fill its Setup values to complete the description.</span>
+        <button type="button" onclick="goSetupValues('${jsq(a.id)}','${jsq(a.name)}')">Fill its Setup values</button></div>` : ''}
       ${a.contextReset ? `<div class="pair" style="align-items:flex-start">🧠 <span class="grow"><b>Its chat started fresh ${esc(ago(a.contextReset.resetAt))}</b> — ${a.contextReset.lostMessages} earlier message${a.contextReset.lostMessages === 1 ? '' : 's'} are no longer in its context. Its saved memory is untouched; <b>Recover context</b> has it read the old conversation and keep what matters.</span>
         <button class="primary" onclick="recoverContext('${a.id}','${jsq(a.name)}')">📥 Recover context</button>
         <button onclick="dismissContextReset('${a.id}')" title="Stop offering this">Dismiss</button></div>` : ''}
@@ -8408,6 +8459,8 @@ function v2PaintMachine() {
   if (bk) parts.push(bk.date ? `<span>💾 Backup ${esc(bk.date)}${bk.ageDays ? ` (${bk.ageDays}d ago)` : ''}${bk.warn ? ` · <span class="warn">${esc(bk.warn)}</span>` : ''}</span>` : `<span>💾 Backups: <span class="warn">${esc(bk.warn)}</span></span>`);
   const rt = v2Machine.runtime;
   if (rt?.imageVersion) parts.push(`<span>OpenClaw ${esc(rt.imageVersion)}${rt.upgradeAvailable && rt.npmLatest ? ` · ${esc(rt.npmLatest)} out` : ''}</span>`);
+  // A health check on every running agent (also at the foot of Bulk actions).
+  if (parts.length) parts.push('<button type="button" class="v2more" id="v2MachineCheckAll" onclick="v2CheckAll()" title="Ask each running agent whether it answers, and check its settings — what it finds shows under Alerts">❤️ Check all agents</button>');
   el.innerHTML = parts.join('');
   el.hidden = !parts.length;
 }
@@ -11714,12 +11767,79 @@ function recheckNote(a) {
 // counts that tick — more cap hits do not re-flag; a NEW restart or a new
 // rebuild reason does). Stored on the agent, so every device agrees.
 function attentionFingerprint(a) {
-  const keys = [a.state === 'FAILED' ? 'state:FAILED' : '', a.opsDrift ? 'opsDrift' : '', ...agentAttention(a).map(x => x.key)].filter(Boolean);
+  // A Check all finding is this page's alone (gone on a reload): kept out, or a
+  // Clear made with one on screen would come back after every reload.
+  const keys = [a.state === 'FAILED' ? 'state:FAILED' : '', a.opsDrift ? 'opsDrift' : '', ...agentAttention(a).filter(x => !x.health).map(x => x.key)].filter(Boolean);
   return keys.length ? keys.sort().join('\n') : '';
 }
-/** True when the owner cleared exactly what is flagged now (nothing new since). */
+/** True when the owner cleared exactly what is flagged now (nothing new since). A fresh Check all finding shows regardless. */
 function attentionCleared(a) {
-  return !!a.attentionAck && a.attentionAck === attentionFingerprint(a);
+  return !!a.attentionAck && a.attentionAck === attentionFingerprint(a) && !v2HealthBad(a);
+}
+
+// ---- Check all: a health check on every running agent (2026-10-09, from the classic Health panel) ----
+// GET /v1/agents/:id/health?doctor=1 for each, one at a time (an exec into
+// each container: gentle). What it finds is an alert on the agent's tile and
+// under View by → Alerts, and a line above the agents says how it went. The
+// results live in this page until the next check, Clear, or a reload.
+let v2Health = {}, v2CheckRun = null, v2CheckLast = null;
+const v2HealthBad = (a) => !!v2Health[a.id]?.problems?.length;
+/** What a health answer says is wrong, in words; [] when it is fine. */
+function v2HealthProblems(h) {
+  if (h.error) return [`the check could not run (${h.error})`];
+  if (!h.reachable) return ["it didn't answer — Rebuild it if this keeps happening"];
+  const out = [];
+  if (h.aiSource?.refusingSince) out.push(`its AI source has been ${h.aiSource.refusal === 'refused' ? 'refusing (rate-limited)' : 'failing'} since ${ago(h.aiSource.refusingSince)}`);
+  if (h.status === 'degraded') out.push(`it is slow to respond${h.eventLoop?.reasons?.length ? ` (${h.eventLoop.reasons.join(', ')})` : ''}`);
+  if (h.telegram && h.telegram.connected === false) out.push(`Telegram is not connected${h.telegram.lastError ? ` (${h.telegram.lastError})` : ''}`);
+  if (h.pluginErrors?.length) out.push(`plugin errors: ${h.pluginErrors.slice(0, 3).join(', ')}`);
+  const f = h.doctor?.findings ?? [];
+  if (f.length) out.push(`${f.length} setting${f.length > 1 ? 's' : ''} to fix: ${f.slice(0, 2).map(x => x.message).join('; ')}${f.length > 2 ? '; …' : ''}`);
+  return out;
+}
+async function v2CheckAll() {
+  if (v2CheckRun) { toast('Already checking — the line above your agents shows how far it is.'); return; }
+  const mine = liveAgents().filter(v2Mine);
+  const run = mine.filter(a => a.state === 'RUNNING');
+  if (!run.length) { toast('None of your agents is running, so there is nothing to check.'); return; }
+  v2CheckRun = { done: 0, total: run.length, skipped: mine.length - run.length, stop: false, ids: [] };
+  v2PaintCheckAll();
+  for (const a of run) {
+    if (v2CheckRun.stop) break;
+    let h;
+    try { h = await api(`/v1/agents/${a.id}/health?doctor=1`); } catch (e) { h = { error: e.message }; }
+    v2Health[a.id] = { at: Date.now(), problems: v2HealthProblems(h || {}) };
+    v2CheckRun.done++; v2CheckRun.ids.push(a.id);
+    v2PaintCheckAll(); renderV2();
+  }
+  const r = v2CheckRun;
+  v2CheckRun = null;
+  v2CheckLast = { at: new Date().toISOString(), ids: r.ids, skipped: r.skipped + (r.total - r.done), stopped: r.stop };
+  v2PaintCheckAll(); renderV2();
+}
+function v2StopCheck() { if (v2CheckRun) v2CheckRun.stop = true; }
+function v2ClearChecks() {
+  if (v2CheckRun) v2CheckRun.stop = true;
+  v2Health = {}; v2CheckLast = null;
+  v2PaintCheckAll(); renderV2();
+}
+/** The line above the agents: how far a check is, then what it found, with a way to each agent that needs a look. */
+function v2PaintCheckAll() {
+  const el = $('v2CheckAll'); if (!el) return;
+  const run = v2CheckRun, last = v2CheckLast;
+  if (run) {
+    el.innerHTML = `<span>❤️ Checking your agents' health: ${run.done} of ${run.total}…</span><button type="button" onclick="v2StopCheck()">Stop</button>`;
+  } else if (last) {
+    const bad = last.ids.map(v2Find).filter(a => a && v2HealthBad(a));
+    const n = last.ids.length;
+    el.innerHTML = `<span>❤️ Health check, ${esc(clock(last.at))}: ${n} running agent${n === 1 ? '' : 's'} checked${last.stopped ? ' (stopped early)' : ''} — ${bad.length
+      ? `<span class="warn">${bad.length} worth a look</span>${bad.length <= 4 ? ': ' + bad.map(a => `<button type="button" class="linkish" onclick="openV2Agent('${jsq(a.id)}')">${esc(a.name)}</button>`).join(', ') : ''}`
+      : 'all answered, and their settings are clean'}${last.skipped ? ` · ${last.skipped} not running, so not checked` : ''}.</span>
+      ${bad.length ? '<button type="button" onclick="v2SetView(\'attention\')">Show under Alerts</button>' : ''}
+      <button type="button" onclick="v2CheckAll()">Check again</button>
+      <button type="button" onclick="v2ClearChecks()" aria-label="Clear the health check results" title="Clear the results">✕</button>`;
+  } else el.innerHTML = '';
+  el.hidden = !run && !last;
 }
 async function clearAttention(id, on = true) {
   const a = agents.find(x => x.id === id); if (!a) return;
@@ -11751,7 +11871,7 @@ function agentAttention(a) {
   const rechecking = isRechecking(a);
   const unsynced = rechecking ? [] : (a.dataSources || []).filter(d => d.syncError);
   if (unsynced.length) out.push({ key: 'unsynced:' + unsynced.map(d => d.mountName).join(','), icon: '⚠', why: unsynced.map(d => `${d.mountName} didn't sync — ${d.syncError}`).join('; ') });
-  if (a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona)) out.push({ key: 'template', icon: '⚙', why: 'template setup values not filled in' });
+  if (templateUnfilled(a)) out.push({ key: 'template', icon: '⚙', why: TEMPLATE_WHY });
   if (a.opsDrift) out.push({ key: 'opsDrift', icon: '🔒', why: `its safety settings were changed (${a.opsDrift}), so its access to Hatchabot is paused — Rebuild it to restore them` });
   if (a.migratedTo) out.push({ key: 'migrated', icon: '📦', why: `moved to ${a.migratedTo} — this is a leftover copy` });
   if (sourceUsageOf(a.aiProfileId)?.status === 'limited') out.push({ key: 'limited', icon: '⛔', why: `its AI source is being rate-limited (since ${clock(sourceUsageOf(a.aiProfileId).limitedSince)})` });
@@ -11779,6 +11899,8 @@ function agentAttention(a) {
   if (a.machineBudget?.line) out.push({ key: `mbudget:${a.machineBudget.month}:${a.machineBudget.level}:${a.machineBudget.usd}`, icon: '💵', why: 'This Hatchabot (every agent): ' + a.machineBudget.line.replace(/^Over /, 'over ').replace(/^Used /, 'used ') + ' (⚙ Settings → AI sources → Budgets)' });
   if (a.ops && v2Mine(a)) out.push(...v2MachineAlerts());
   if (a.selfRestarts) out.push({ key: 'restart:' + a.selfRestarts, icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Resources shows its memory against the cap` });
+  // Check all (this page's own finding; kept out of the Clear fingerprint).
+  if (v2HealthBad(a)) out.push({ key: 'health', icon: '❤️', health: true, why: `Health check: ${v2Health[a.id].problems.join('; ')} (Overview → Check health has the detail)` });
   return out;
 }
 
@@ -11870,8 +11992,8 @@ function renderToc() {
       <span class="toc-badge" style="animation:none;cursor:pointer" title="Remove from the plan" onclick="event.stopPropagation(); removeTodo('${t.id}', '${jsq(t.name)}')">✕</span></a>`;
   }
   planned += `<div class="toc-item" style="cursor:default;gap:4px">
-    <input id="todoNew" placeholder="Plan an agent…" maxlength="64" style="flex:1;min-width:0;font-size:12px;padding:2px 6px" onkeydown="if (event.key === 'Enter') addTodo()">
-    <button class="hbtn" style="padding:1px 7px" title="Add to the plan" onclick="addTodo()">+</button></div>`;
+    <input id="todoNew" placeholder="Plan an agent…" maxlength="64" style="flex:1;min-width:0;font-size:12px;padding:2px 6px" onkeydown="if (event.key === 'Enter') addTodo('todoNew')">
+    <button class="hbtn" style="padding:1px 7px" title="Add to the plan" onclick="addTodo('todoNew')">+</button></div>`;
   // Every poll rebuilds this list; keep what was being typed in "Plan an
   // agent…" (and the focus) instead of wiping it every few seconds.
   const typing = $('todoNew'), draft = typing?.value ?? '', focused = !!typing && document.activeElement === typing;
@@ -11882,29 +12004,47 @@ function renderToc() {
   if (box && focused) { box.focus(); if (caret !== null) box.setSelectionRange(caret, caret); }
 }
 
-let agentTodos = null, pendingTodoName = null;
+let agentTodos = null, pendingTodoName = null, todosBusy = false;
+/** The names of the agents that exist now, lower-cased: a plan carrying one of them is done. */
+const todoMadeNames = () => new Set(agents.filter(a => a.state !== 'DELETED').map(a => a.name.trim().toLowerCase()));
 async function loadTodos() {
-  try { agentTodos = (await api('/v1/agent-todos')).todos || []; } catch { agentTodos = []; }
-  // Created since? An agent now carrying a planned name retires the plan.
-  const live = new Set(agents.filter(a => a.state !== 'DELETED').map(a => a.name.trim().toLowerCase()));
-  for (const t of agentTodos.filter(t => live.has(t.name.trim().toLowerCase()))) {
-    try { await api(`/v1/agent-todos/${t.id}`, { method: 'DELETE' }); } catch {}
-    agentTodos = agentTodos.filter(x => x.id !== t.id);
-  }
-  renderToc();
+  if (todosBusy) return;
+  todosBusy = true;
+  try {
+    try { agentTodos = (await api('/v1/agent-todos')).todos || []; } catch { agentTodos = []; }
+    // Created since? An agent now carrying a planned name retires the plan.
+    const live = todoMadeNames();
+    for (const t of agentTodos.filter(t => live.has(t.name.trim().toLowerCase()))) {
+      try { await api(`/v1/agent-todos/${t.id}`, { method: 'DELETE' }); } catch {}
+      agentTodos = agentTodos.filter(x => x.id !== t.id);
+    }
+  } finally { todosBusy = false; }
+  // The home screen's Planned group, or the classic legend; each has its own "Plan an agent…" box.
+  if (UI_V2) renderV2(); else renderToc();
 }
-async function addTodo() {
-  const name = ($('todoNew')?.value || '').trim();
+/** A planned agent was made (from its ghost tile, or by hand) since the plans were read: retire it. */
+function retireMadeTodos() {
+  if (!agentTodos?.length || todosBusy) return;
+  const live = todoMadeNames();
+  if (agentTodos.some(t => live.has(t.name.trim().toLowerCase()))) void loadTodos();
+}
+async function addTodo(boxId = UI_V2 ? 'v2TodoNew' : 'todoNew') {
+  const name = ($(boxId)?.value || '').trim();
   if (!name) return;
   try {
     await api('/v1/agent-todos', { method: 'POST', body: { name } });
-    if ($('todoNew')) $('todoNew').value = ''; // the list keeps a draft across redraws; an added one is done
+    if ($(boxId)) $(boxId).value = ''; // the list keeps a draft across redraws; an added one is done
     await loadTodos();
+    if (UI_V2) $(boxId)?.focus(); // ready for the next one
   } catch (e) { toast(e.message); }
 }
 async function removeTodo(id, name) {
   if (!confirm(`Remove "${name}" from the plan?`)) return;
-  try { await api(`/v1/agent-todos/${id}`, { method: 'DELETE' }); await loadTodos(); } catch (e) { toast(e.message); }
+  try {
+    await api(`/v1/agent-todos/${id}`, { method: 'DELETE' });
+    await loadTodos();
+    if (UI_V2) $('v2TodoNew')?.focus(); // the button pressed is gone: keep the keyboard in the group
+  } catch (e) { toast(e.message); }
 }
 function createFromTodo(id) {
   const t = (agentTodos || []).find(x => x.id === id);
@@ -12117,6 +12257,7 @@ async function refreshNow(withMeta, seq) {
     agents = list;
     markArchiving(agents); // an archive this page started, before the server's list shows it
     agentsLoaded = true;
+    retireMadeTodos(); // a planned agent that now exists leaves Planned
     if ($('consoleDlg')?.open && !consoleGuest) renderConsoleTabs(); // the new-reply dots
     if (location.hash.includes('report=')) reportFromHash();
     if (location.hash.includes('console=') && !consoleHashTried) { consoleHashTried = true; consoleFromHash(); }
@@ -12337,20 +12478,26 @@ let v2View = (() => { try { const v = localStorage.getItem('hb-v2-view'); return
 // only, where dragging works), Name, or Activity. Name and Activity order the
 // agents on screen and never touch the arrangement; Status has the
 // buttons that rewrite it. Remembered per device.
-let v2Sort = (() => { try { const v = JSON.parse(localStorage.getItem('hb-v2-sort') || 'null'); return v && ['age', 'name', 'activity'].includes(v.key) ? v : { key: 'age', dir: -1 }; } catch { return { key: 'age', dir: -1 }; } })();
+// "My order" (2026-10-09, the classic look's manual order kept): the order
+// stored on the agents — the list arrives in it — which drag and the sheet's
+// Move earlier / later change, and a group's A→Z writes once.
+let v2Sort = (() => { try { const v = JSON.parse(localStorage.getItem('hb-v2-sort') || 'null'); return v && ['age', 'name', 'activity', 'manual'].includes(v.key) ? v : { key: 'age', dir: -1 }; } catch { return { key: 'age', dir: -1 }; } })();
 function v2SetSort(key) {
   // Age, Activity and Cost start newest / most recent / dearest first; Name starts A→Z. Again flips.
+  // My order has no direction: it is the order you made.
   const cur = v2CurSort();
-  const next = { key, dir: cur.key === key ? -cur.dir : (key === 'name' ? 1 : -1) };
+  const next = { key, dir: key === 'manual' ? 1 : cur.key === key ? -cur.dir : (key === 'name' ? 1 : -1) };
   if (v2View === 'cost') { v2CostSort = next; try { localStorage.setItem('hb-v2-sort-cost', JSON.stringify(next)); } catch {} }
   else { v2Sort = next; try { localStorage.setItem('hb-v2-sort', JSON.stringify(next)); } catch {} }
   renderV2();
 }
 // The Cost view keeps a sort of its own, most expensive first until you pick
 // another; the other views keep theirs (Age · Name · Activity).
-let v2CostSort = (() => { try { const v = JSON.parse(localStorage.getItem('hb-v2-sort-cost') || 'null'); return v && ['cost', 'age', 'name', 'activity'].includes(v.key) ? v : { key: 'cost', dir: -1 }; } catch { return { key: 'cost', dir: -1 }; } })();
+let v2CostSort = (() => { try { const v = JSON.parse(localStorage.getItem('hb-v2-sort-cost') || 'null'); return v && ['cost', 'age', 'name', 'activity', 'manual'].includes(v.key) ? v : { key: 'cost', dir: -1 }; } catch { return { key: 'cost', dir: -1 }; } })();
 const v2CurSort = () => (v2View === 'cost' ? v2CostSort : v2Sort);
 const v2SortKey = () => v2CurSort().key;
+/** Sorted by My order: tiles stand where you put them, and drag places them. */
+const v2Manual = () => v2SortKey() === 'manual';
 function v2BinCmp(x, y) {
   const key = v2SortKey(), dir = v2CurSort().dir;
   if (key === 'cost') return dir * ((v2CostOf(x)?.weekly ?? -1) - (v2CostOf(y)?.weekly ?? -1)) || x.name.localeCompare(y.name);
@@ -12416,7 +12563,8 @@ function v2Fold(key) {
   try { localStorage.setItem('hb-v2-collapsed', JSON.stringify(v2Collapsed)); } catch {}
   renderV2();
 }
-const v2IsCollapsed = (key) => (key in v2Collapsed ? v2Collapsed[key] : key === 'archived');
+// Archived starts folded; so does Planned while it is empty (one quiet header, until you plan something).
+const v2IsCollapsed = (key) => (key in v2Collapsed ? v2Collapsed[key] : key === 'archived' || (key === 'planned' && !agentTodos?.length));
 
 // ---- Activity view: the Unread section and each agent's last line ----------
 // GET /v1/recent (orchestrator/recent.ts): each agent's last line, for its
@@ -12622,30 +12770,39 @@ function renderV2() {
   if (v2View !== 'group') sections.sort((x, y) => (x.key === 'shared' || x.key === 'archived') - (y.key === 'shared' || y.key === 'archived') || (y.key === V2_UNREAD) - (x.key === V2_UNREAD) || (timeView ? x.key.localeCompare(y.key) : x.label.localeCompare(y.label)));
   // Unread: newest reply first, whatever the sort.
   const newestFirst = (x, y) => String(y.lastActiveAt || '').localeCompare(String(x.lastActiveAt || '')) || x.name.localeCompare(y.name);
-  for (const s of sections) s.items.sort((p, q) => ((q.a.ops ? 1 : 0) - (p.a.ops ? 1 : 0)) || (s.key === V2_UNREAD ? newestFirst(p.a, q.a) : v2BinCmp(p.a, q.a))); // the manager stays first
+  // My order: the order they were placed in above is the stored one, a child
+  // right after its parent (the way the classic look nested them).
+  for (const s of sections) if (!v2Manual() || s.key === V2_UNREAD) s.items.sort((p, q) => ((q.a.ops ? 1 : 0) - (p.a.ops ? 1 : 0)) || (s.key === V2_UNREAD ? newestFirst(p.a, q.a) : v2BinCmp(p.a, q.a))); // the manager stays first
   // A Cost section's header says what its agents came to this week.
   if (v2View === 'cost') for (const s of sections) {
     const week = !v2Costs?.period || v2Costs.period === '1w';
     const sum = s.items.reduce((t, { a }) => { const c = v2CostOf(a); return t + (c && c.priced && !c.local ? (week ? c.weekly : c.cost) : 0); }, 0);
     if (sum > 0 && s.key.startsWith('$:')) s.note = `(${v2Money(sum)} total)`;
   }
-  const sortBar = `<span class="v2binsort">${[...(v2View === 'cost' ? [['cost', 'Cost']] : []), ['age', 'Age'], ['name', 'Name'], ['activity', 'Activity']].map(([k, l]) => {
+  const sortBar = `<span class="v2binsort" role="group" aria-label="Order within each section">${[...(v2View === 'cost' ? [['cost', 'Cost']] : []), ['age', 'Age'], ['name', 'Name'], ['activity', 'Activity'], ['manual', 'My order']].map(([k, l]) => {
     const on = v2SortKey() === k;
-    const title = k === 'cost' ? 'Most expensive first; again for cheapest first' : k === 'age' ? 'Newest agent first; again for oldest first' : k === 'name' ? 'A→Z; again for Z→A' : 'Most recently active first; again for quietest first';
-    return `<button class="${on ? 'on' : ''}" onclick="v2SetSort('${k}')" title="${title}">${l}${on ? (v2CurSort().dir > 0 ? ' ▲' : ' ▼') : ''}</button>`;
+    const title = k === 'cost' ? 'Most expensive first; again for cheapest first' : k === 'age' ? 'Newest agent first; again for oldest first' : k === 'name' ? 'A→Z; again for Z→A'
+      : k === 'manual' ? 'The order you arranged: drag icons within a group, or use Move earlier / later on an agent\'s Overview' : 'Most recently active first; again for quietest first';
+    return `<button id="v2sort-${k}" class="${on ? 'on' : ''}" aria-pressed="${on}" onclick="v2SetSort('${k}')" title="${esc(title)}">${l}${on && k !== 'manual' ? (v2CurSort().dir > 0 ? ' ▲' : ' ▼') : ''}</button>`;
   }).join('')}</span>`;
   const views = v2CostsOff() ? V2_VIEWS.filter(([k]) => k !== 'cost') : V2_VIEWS;
-  const viewBar = live.length > 1 ? `<div class="v2viewbar"><div class="v2views" role="tablist" aria-label="Group agents by">${views.map(([k, l]) =>
-    `<button role="tab" aria-selected="${k === v2View}" class="${k === v2View ? 'on' : ''}" onclick="v2SetView('${k}')">${esc(l)}</button>`).join('')}</div>${sortBar}</div>` : '';
+  // Real tabs: arrow keys move between them, and each controls the sections below (2026-10-09).
+  const viewBar = live.length > 1 ? `<div class="v2viewbar"><div class="v2views" role="tablist" aria-label="Group agents by" onkeydown="v2TabKeys(event)">${views.map(([k, l]) =>
+    `<button role="tab" id="v2view-${k}" aria-selected="${k === v2View}" aria-controls="v2ViewPanel" tabindex="${k === v2View ? 0 : -1}" class="${k === v2View ? 'on' : ''}" onclick="v2SetView('${k}')">${esc(l)}</button>`).join('')}</div>${sortBar}</div>` : '';
   // View by → Cost: the window its sections and every icon's chip show.
   const costBar = v2View === 'cost' && !v2CostsOff() ? `<div class="v2costbar" role="group" aria-label="Cost over">${V2_COST_PERIODS.map(([k, l, w]) =>
     `<button class="su-period${k === v2CostPeriod ? ' on' : ''}" aria-pressed="${k === v2CostPeriod}" title="What each agent cost in ${w}, at API prices" onclick="v2SetCostPeriod('${k}')">${esc(l)}</button>`).join('')}</div>` : '';
   v2SectionsNow = sections;
-  const html = viewBar + costBar + sections.map(s => `
+  // Planned agents (2026-10-09, from the classic legend): ghost tiles in the
+  // Groups view, before Shared with me and Archived.
+  if (agentTodos === null) { agentTodos = []; void loadTodos(); }
+  const planned = v2View === 'group' && (agentTodos.length || live.some(v2Mine)) ? v2PlannedHTML() : '';
+  const parts = sections.map(s => `
     <section class="v2group${v2IsCollapsed(s.key) ? ' collapsed' : ''}">
       <div class="v2ghead"><h3${/^\$:\d/.test(s.key) ? ' class="v2h-money"' : ''}${s.key.startsWith('g:') && s.drop ? ` class="group-name" tabindex="0" title="Double-click to rename" ondblclick="editGroupName(this)" onkeydown="if (event.key === 'Enter' && !this.isContentEditable) { event.preventDefault(); editGroupName(this); }"` : ''}>${esc(s.label)}</h3><span class="n">${s.items.length}</span>${s.note ? `<span class="n v2gnote">${esc(s.note)}</span>` : ''}
         <span class="v2gtools">
           ${s.key.startsWith('g:') && s.drop ? `<button onclick="editGroupName(this.closest('.v2ghead').querySelector('h3'))" title="Rename this group" aria-label="Rename group">✏️</button><button onclick="moveGroup('${jsq(s.drop)}','up')" title="Move this group up" aria-label="Move group up">↑</button><button onclick="moveGroup('${jsq(s.drop)}','down')" title="Move this group down" aria-label="Move group down">↓</button>` : ''}
+          ${v2View === 'group' && v2Manual() && s.key.startsWith('g:') && s.drop !== null && s.items.filter(({ a }) => v2Mine(a) && !a.ops).length > 1 ? `<button onclick="sortGroup('${jsq(s.drop)}','name')" title="Put this group in A→Z order and keep it — press again for Z→A; drag or Move earlier / later still rearrange it" aria-label="Sort this group A to Z and keep that order">A→Z</button>` : ''}
           ${s.items.some(({ a }) => v2Mine(a) && a.state !== 'ARCHIVED') ? `<button onclick="v2BulkSection('${jsq(s.key)}','${jsq(s.label)}')" title="Bulk actions on the agents in this section">⚡</button>` : ''}
           ${s.items.length ? `<button onclick="v2CopySection('${jsq(s.key)}')" title="Copy the names of the agents in this section" aria-label="Copy agent names">⧉</button>` : ''}
           ${v2View === 'attention' && ['n:1', 'n:4', 'n:5'].includes(s.key) && s.items.some(({ a }) => v2Mine(a)) ? `<button onclick="clearAttentionSection('${jsq(s.key)}')" title="Clear these from Alerts — each comes back if something new happens to it" aria-label="Clear from Alerts">🔕</button>` : ''}
@@ -12658,18 +12815,59 @@ function renderV2() {
           const cost = v2CostChip(a) ? (!v2Costs.period || v2Costs.period === '1w' ? `, about ${v2Money(v2CostOf(a).weekly)} a week at API prices` : `, about ${v2Money(v2CostOf(a).cost)} in ${v2CostWindow()} at API prices`) : '';
           return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) || a.ops ? ' data-v2fixed="1"' : ''}
             aria-label="${esc(a.name)}${a.ops ? ` (${esc(V2_OPS_TIP)})` : ''} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}${esc(cost)}${prev ? `. ${esc(prev)}` : ''}">${v2IconHTML(a, st, { cost: true })}<span class="v2name">${esc(a.name)}</span></button>`;
-        }).join('') || (s.key === 'archived' ? '<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept.</span>' : '')}
+        }).join('') || (s.key === 'archived' ? `<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept. By keyboard: open the agent, then Advanced → Archive.</span>` : '')}
       </div>
-    </section>`).join('');
+    </section>`);
+  const tail = sections.findIndex(s => s.key === 'shared' || s.key === 'archived');
+  if (planned) parts.splice(tail < 0 ? parts.length : tail, 0, planned);
+  const html = viewBar + `<div id="v2ViewPanel"${viewBar ? ` role="tabpanel" aria-labelledby="v2view-${v2View}"` : ''}>` + costBar + parts.join('') + '</div>';
   // The poll calls this every few seconds. Rebuilding identical markup would
   // drop keyboard focus and strand a tooltip over a replaced icon, so only
   // touch the DOM when something changed, and put focus back if it did.
   const root = $('v2groups');
   if (root.__html === html) return;
-  const focused = document.activeElement?.closest?.('.v2agent')?.dataset.v2id;
+  const was = document.activeElement;
+  const focused = was?.closest?.('.v2agent')?.dataset.v2id;
+  // A control with an id (a view tab, a sort, "Plan an agent…") gets focus back too, and a draft keeps its text.
+  const focusId = root.contains(was) && was.id ? was.id : '';
+  const draft = $('v2TodoNew')?.value ?? '', caret = focusId === 'v2TodoNew' ? was.selectionStart : null;
   root.innerHTML = html; root.__html = html;
   $('v2Tip').hidden = true;
+  if ($('v2TodoNew') && draft) $('v2TodoNew').value = draft;
   if (focused) root.querySelector(`.v2agent[data-v2id="${CSS.escape(focused)}"]`)?.focus();
+  else if (focusId && $(focusId)) { $(focusId).focus(); if (caret !== null) $(focusId).setSelectionRange(caret, caret); }
+}
+/** The Planned group: agents you mean to make, as ghost tiles. One click makes one (New agent, its name filled in). */
+function v2PlannedHTML() {
+  const todos = agentTodos || [];
+  const folded = v2IsCollapsed('planned');
+  return `
+    <section class="v2group v2planned${folded ? ' collapsed' : ''}" aria-labelledby="v2PlanTitle">
+      <div class="v2ghead"><h3 id="v2PlanTitle" title="Agents you plan to make — not made yet">Planned</h3><span class="n">${todos.length}</span>
+        <span class="v2gtools"><button onclick="v2Fold('planned')" aria-expanded="${!folded}">${folded ? 'Show' : 'Hide'}</button></span></div>
+      <div class="v2grid">
+        ${todos.map(t => `<div class="v2plan">
+          <button type="button" class="v2plantile" onclick="createFromTodo('${jsq(t.id)}')" aria-label="${esc(t.name)} — planned, not made yet. Make it now" title="${esc(`Not made yet — click to make it${t.note ? `: ${t.note}` : ''}`)}"><span class="v2ic" aria-hidden="true">＋</span><span class="v2name">${esc(t.name)}</span></button>
+          <button type="button" class="v2planx" onclick="removeTodo('${jsq(t.id)}','${jsq(t.name)}')" aria-label="Remove ${esc(t.name)} from Planned" title="Remove from Planned">×</button></div>`).join('')}
+        <form class="v2planadd" onsubmit="event.preventDefault(); addTodo('v2TodoNew')">
+          <label for="v2TodoNew" class="v2sr">Plan an agent: its name</label>
+          <input id="v2TodoNew" maxlength="64" placeholder="Plan an agent…" autocomplete="off">
+          <button type="submit">Add</button></form>
+      </div>
+    </section>`;
+}
+/** Arrow keys, Home and End between the tabs of a tablist; the tab moved to is chosen (2026-10-09). */
+function v2TabKeys(e) {
+  const tabs = [...e.currentTarget.querySelectorAll('[role="tab"]')];
+  const i = tabs.indexOf(document.activeElement);
+  if (i < 0) return;
+  const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+  if (j === undefined) return;
+  e.preventDefault();
+  const t = tabs[(j + tabs.length) % tabs.length];
+  const id = t.id;
+  t.click(); // redraws the tabs: focus the new one by its id
+  ($(id) || t).focus();
 }
 
 // Icons for agents that have none yet: one batch, picked by the management AI.
@@ -12802,8 +13000,9 @@ function v2DropTarget(x, y, st) {
   if (!best || bestD > 140) return { zone: grid, group, before: null };
   const after = x > best.r.left + best.r.width / 2;
   const next = after ? tiles[tiles.indexOf(best.t) + 1] : best.t;
+  // The caret promises a place: only My order keeps one (another sort puts the icon back in its sorted spot).
   return { zone: grid, group, before: next ? next.dataset.v2id : null,
-    caret: { x: after ? best.r.right + 4 : best.r.left - 4, top: best.r.top, h: best.r.height } };
+    caret: v2Manual() ? { x: after ? best.r.right + 4 : best.r.left - 4, top: best.r.top, h: best.r.height } : null };
 }
 function v2DragEnd() {
   const st = v2drag.st;
@@ -12843,10 +13042,16 @@ window.addEventListener('pointerup', async (e) => {
       const head = [...document.querySelectorAll('#v2groups .v2ghead h3.group-name')].find(h => h.textContent.trim() === fresh);
       if (head) { head.scrollIntoView({ block: 'center' }); editGroupName(head); }
       return;
+    } else if (v2Manual()) {
+      // My order: the drop is a place — just before the icon the caret stood
+      // at (taking that icon's group), or the end of the group (2026-10-09).
+      await api(`/v1/agents/${a.id}/move`, { method: 'POST', body: t.before ? { before: t.before } : { before: null, group: t.group } });
+      if ((t.group ?? '') !== (a.group ?? '')) toast(`${a.name} moved to ${t.group || 'Default'}`);
     } else {
-      // Positions inside a group are sorted on screen, so a drop is a move
-      // BETWEEN groups; a drop back into the same one changes nothing.
-      if ((t.group ?? '') === (a.group ?? '')) return renderV2();
+      // Under Age, Name or Activity positions inside a group are sorted on
+      // screen, so a drop is a move BETWEEN groups; a drop back into the
+      // same one changes nothing — but says how to arrange by hand.
+      if ((t.group ?? '') === (a.group ?? '')) { toast('To arrange icons by hand, choose My order (beside Age · Name · Activity).', 6000); return renderV2(); }
       const r = await api(`/v1/agents/${a.id}/move`, { method: 'POST', body: { before: null, group: t.group } });
       if ((r.group ?? '') !== (a.group ?? '')) toast(`${a.name} moved to ${r.group || 'Default'}`);
     }
@@ -12980,7 +13185,8 @@ function v2RenderSheetBar() {
   const st = v2Status(a);
   const chat = v2CanChat(a) && window.isSecureContext;
   $('v2AgentBar').className = `v2sbar v2st-${st.cls}`;
-  $('v2AgentBar').innerHTML = `${v2Mine(a) ? `<span role="button" tabindex="0" title="Change its icon" onclick="openV2Icon('${jsq(a.id)}')" onkeydown="if(event.key==='Enter')openV2Icon('${jsq(a.id)}')">${v2IconHTML(a, st)}</span>` : v2IconHTML(a, st)}
+  // The icon is a real button (Enter and Space both work; it was a span, 2026-10-09).
+  $('v2AgentBar').innerHTML = `${v2Mine(a) ? `<button type="button" class="v2iconbtn" title="Change its icon" aria-label="Change its icon" onclick="openV2Icon('${jsq(a.id)}')">${v2IconHTML(a, st)}</button>` : v2IconHTML(a, st)}
     <div class="v2ttl"><b id="v2AgentName">${esc(a.name)}</b>${!v2Mine(a) ? '<span>shared with you</span>' : ''}</div>
     <span class="v2pill ${v2PillCls(st)}"${st.why.length ? ` title="${esc(st.why.join(' · '))}"` : ''}>${st.glyph || '●'} ${esc(st.label)}</span>
     ${/* Lifecycle buttons are the owner's: the server answers a member 404 (review, 2026-10-09). */ ''}
@@ -12999,10 +13205,17 @@ function v2RenderSheet() {
   const tabs = !v2Mine(a) ? [] : a.state === 'ARCHIVED' ? V2_TABS.filter(([k]) => k === 'overview' || k === 'files' || k === 'advanced') : V2_TABS;
   if (tabs.length && !tabs.some(([k]) => k === v2Tab)) v2Tab = 'overview';
   $('v2Tabs').hidden = !tabs.length;
-  $('v2Tabs').innerHTML = tabs.map(([k, l]) => `<button role="tab" aria-selected="${k === v2Tab}" onclick="openV2Agent('${jsq(a.id)}','${k}')">${l}</button>`).join('');
+  // A redraw (a tab chosen, a poll) keeps the keyboard where it was: on the same tab or button, by id.
+  const was = document.activeElement, focusId = v2AgentDlg.contains(was) && was.id ? was.id : '';
+  // Real tabs (2026-10-09): arrow keys between them (v2TabKeys on #v2Tabs), each controlling the pane.
+  $('v2Tabs').innerHTML = tabs.map(([k, l]) => `<button role="tab" id="v2tab-${k}" aria-selected="${k === v2Tab}" aria-controls="v2Pane" tabindex="${k === v2Tab ? 0 : -1}" onclick="openV2Agent('${jsq(a.id)}','${k}')">${l}</button>`).join('');
   v2ParkPanes();
   v2SheetSig = v2SheetSigOf(a);
-  $('v2Pane').innerHTML = v2Mine(a) ? v2Pane(a, v2Tab) : v2MemberPane(a);
+  const pane = $('v2Pane');
+  if (tabs.length) { pane.setAttribute('role', 'tabpanel'); pane.setAttribute('aria-labelledby', `v2tab-${v2Tab}`); }
+  else { pane.removeAttribute('role'); pane.removeAttribute('aria-labelledby'); }
+  pane.innerHTML = v2Mine(a) ? v2Pane(a, v2Tab) : v2MemberPane(a);
+  if (focusId && $(focusId) && document.activeElement !== $(focusId)) $(focusId).focus();
   if (v2Mine(a)) v2EmbedPanes(a, v2Tab);
   const g = $('v2GroupSel'); if (g) g.value = a.group || '';
   if ($('editClass')) void renderClassPicker(a);
@@ -13447,32 +13660,39 @@ function v2Pane(a, tab) {
   // id/n go into onclick strings: escaped even though ids are server UUIDs.
   const id = jsq(a.id), n = jsq(a.name), run = a.state === 'RUNNING', built = !!a.runtimeRef;
   const B = (label, call, extra = '') => `<button onclick="${call}" ${extra}>${label}</button>`;
-  const row = (k, v) => `<div class="v2row"><div class="v2k">${k}</div><div class="v2v">${v}</div></div>`;
+  // forId: the row's one control, named by its key through a real <label> (2026-10-09: the selects had none).
+  const row = (k, v, forId) => `<div class="v2row">${forId ? `<label class="v2k" for="${forId}">${k}</label>` : `<div class="v2k">${k}</div>`}<div class="v2v">${v}</div></div>`;
   const slot = (pane) => `<div data-v2slot="${pane}"></div>`;
   const goto = (t) => `openV2Agent('${id}','${t}')`;
+  const place = v2PlaceInGroup(a);
   const st = v2Status(a);
+  // Overview's list of what is wrong, less what a notice above already says with its button.
+  const whyList = st.why.filter(w => !(a.state === 'FAILED' && /^it failed/.test(w)) && !(w === TEMPLATE_WHY && a.state !== 'ARCHIVED'));
   const src = profiles.find(p => p.id === a.aiProfileId);
   const host = hosts.find(h => h.id === a.hostId);
   const groups = [...new Set(agents.filter(x => v2Mine(x) && x.group).map(x => x.group))].sort();
   switch (tab) {
     case 'overview': return `
-      <div class="v2notices">${agentNotices(a, { skipFailure: true, skipTokenForm: true }).trim()}</div>
+      <div class="v2notices">${agentNotices(a, { skipFailure: true, skipTokenForm: true, setupValues: a.state !== 'ARCHIVED' }).trim()}</div>
       ${a.pendingAction?.type === 'bot_token' ? row('Telegram bot', `<div class="grow"><span class="sub">The bot pool is empty, so this agent is waiting for a bot of its own — or it can go on without one.</span>${tokenForm(a)}</div>`) : ''}
       ${a.state === 'FAILED' && a.stateReason ? `<p class="sub" style="margin:0 0 8px">${esc(a.stateReason)}</p>` : ''}
       ${a.archiving ? row('Working on', `<span>${esc(a.archiving.step)}${a.archiving.at ? ` <span class="sub">· ${esc(ago(a.archiving.at))}</span>` : ''}</span>${B('Setup log', `openSetupLog('${id}','${n}')`)}`) : ''}
       ${(a.state === 'REBUILDING' || a.state === 'PROVISIONING') ? row('Working on', `<span>${esc(a.progress?.step || (a.state === 'REBUILDING' ? 'rebuilding' : 'setting up'))}${a.progress?.at ? ` <span class="sub">· ${esc(ago(a.progress.at))}</span>` : ''}</span>${B('Setup log', `openSetupLog('${id}','${n}')`)}
         <span class="sub">Moving onto a new OpenClaw line runs its migrations and rebuilds the memory index — minutes on an agent with a long history.</span>`) : ''}
-      ${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).length
-        ? `<ul class="v2why" style="margin:0 0 10px">${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
+      ${whyList.length ? `<ul class="v2why" style="margin:0 0 10px">${whyList.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
       ${row('Name &amp; icon', `<span>${esc(a.name)}</span>${B('Change icon', `openV2Icon('${id}')`)}${a.state !== 'ARCHIVED' ? B('Rename…', goto('personality')) : ''}
         ${a.persona ? `<span class="sub">${esc(a.persona)}</span>` : ''}`)}
       ${a.state !== 'ARCHIVED' ? row('AI', `<span>${esc(src?.name || 'unknown')}${a.model ? ' · ' + esc(a.model) : ''}</span>${B('Change…', goto('ai'))}`) : ''}
       ${a.state !== 'ARCHIVED' && built ? '<div id="v2AppRow"></div>' : ''}
       ${a.state !== 'ARCHIVED' ? row('Group', `<select id="v2GroupSel" onchange="v2SetGroup('${id}', this.value)" style="width:auto">
           <option value="">${groups.length ? 'Default' : 'No group'}</option>${groups.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
-          <option value="${V2_NEW_GROUP}">＋ New group…</option></select><span class="sub">Or drag its icon on the home screen.</span>`) : ''}
+          <option value="${V2_NEW_GROUP}">＋ New group…</option></select><span class="sub">Or drag its icon on the home screen.</span>`, 'v2GroupSel') : ''}
+      ${place ? row('Order', `<span id="v2Place">${place.i + 1} of ${place.order.length} in ${esc(a.group || (groups.length ? 'Default' : 'its group'))}</span>
+          ${B('Move earlier', `v2MoveInGroup('${id}', -1, event)`, `id="v2MoveEarlier"${place.i === 0 ? ' disabled' : ''} title="One place earlier in its group (Shift: to the start)"`)}
+          ${B('Move later', `v2MoveInGroup('${id}', 1, event)`, `id="v2MoveLater"${place.i === place.order.length - 1 ? ' disabled' : ''} title="One place later in its group (Shift: to the end)"`)}
+          <span class="sub">Its place when the home screen is sorted by <b>My order</b>${v2Sort.key === 'manual' ? '' : ' (moving it switches the home screen to My order)'}. Dragging its icon does the same.</span>`) : ''}
       ${a.state !== 'ARCHIVED' ? row('Class', `<select id="editClass" style="width:auto" onchange="assignClass()"></select>
-          <span class="sub">A tier — model, AI source, image — shared with other agents. Make them in ⚙ Settings → Classes.</span>`) : ''}
+          <span class="sub">A tier — model, AI source, image — shared with other agents. Make them in ⚙ Settings → Classes.</span>`, 'editClass') : ''}
       ${a.state !== 'ARCHIVED' ? row(v2ChannelKinds(a).length > 1 ? 'Messaging' : 'Telegram', v2ChannelKinds(a).length
         ? `<span>${v2ChannelKinds(a).map(k => k === 'telegram' ? `Telegram · @${esc(a.botUsername)}` : V2_CHAN_LABEL[k]).join(' · ')}</span>${run ? agentChannelLinks(a).map(l => `<a class="btn" href="${esc(l.url)}" target="_blank" rel="noopener">Open ${V2_CHAN_LABEL[l.kind]}</a>`).join('') : ''}${B('Manage…', goto('messaging'))}`
         : `<span>None — you talk to it here.</span>${B('Add an app…', goto('messaging'))}`) : ''}
@@ -13662,6 +13882,7 @@ async function v2LoadChans(id) {
       ${kind === 'telegram' ? `<div class="sub">Its @handle is fixed for life; its display name follows the agent's name.${c.pooled ? ' A pool bot: deleting or archiving the agent parks it for the next one.' : ' Your own bot: it stays yours.'}</div>` : ''}
       <div class="v2chan-h">
         ${httpsUrl(c.deepLink) ? `<a class="btn" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open in ${label}</a>` : ''}
+        ${kind === 'telegram' && httpsUrl(c.deepLink) ? `<a class="btn" href="${esc(tgWebLink(a.botUsername || c.deepLink.replace(/^https:\/\/t\.me\//, '')))}" target="_blank" rel="noopener" title="Open it in Telegram in your browser — on a computer without the Telegram app">Telegram Web</a>` : ''}
         ${httpsUrl(c.addToServerUrl) ? `<a class="btn" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
         ${canChange && spares > 0 ? `<button onclick="chanSwap('${jsq(id)}','${kind}')" title="Move it onto a spare bot from your pool: members and memory come with it; the old bot is parked, and everyone on it is told where to find it">🔁 Change bot…</button>` : ''}
         ${canChange ? `<button onclick="chanRemove('${jsq(id)}','${kind}')">Detach…</button>` : ''}
@@ -13963,6 +14184,52 @@ async function chanRemove(id, kind) {
   } catch (e) { toast(e.message, 8000); }
 }
 
+/**
+ * Where an agent stands in its group under My order: the agents of yours in
+ * that group as the home screen shows them (the stored order, the manager and
+ * child agents aside: those are not moved by hand), or null when it has no
+ * place to change.
+ */
+function v2PlaceInGroup(a) {
+  if (!a || !v2Mine(a) || a.ops || a.state === 'ARCHIVED') return null;
+  const liveIds = new Set(liveAgents().map(x => x.id));
+  const nested = (x) => !!x.parentAgentId && liveIds.has(x.parentAgentId);
+  if (nested(a)) return null;
+  const order = liveAgents().filter(x => v2Mine(x) && !x.ops && !nested(x) && (x.group || '') === (a.group || '')).map(x => x.id);
+  const i = order.indexOf(a.id);
+  return order.length > 1 && i >= 0 ? { order, i } : null;
+}
+/** Switch the home screen to My order (when moving an agent by hand); true if it was on another sort. */
+function v2UseManual() {
+  if (v2Sort.key === 'manual' && (v2View !== 'cost' || v2CostSort.key === 'manual')) return false;
+  v2Sort = { key: 'manual', dir: 1 };
+  try { localStorage.setItem('hb-v2-sort', JSON.stringify(v2Sort)); } catch {}
+  if (v2View === 'cost') { v2CostSort = { key: 'manual', dir: 1 }; try { localStorage.setItem('hb-v2-sort-cost', JSON.stringify(v2CostSort)); } catch {} }
+  return true;
+}
+/** The sheet's Move earlier / later: one place in its group (Shift: to the start or the end). The keyboard's drag. */
+async function v2MoveInGroup(id, delta, ev) {
+  const a = v2Find(id), place = v2PlaceInGroup(a);
+  if (!place) return;
+  const { order, i } = place;
+  const j = ev?.shiftKey ? (delta < 0 ? 0 : order.length - 1) : Math.max(0, Math.min(order.length - 1, i + delta));
+  if (j === i) { toast(delta < 0 ? 'Already first in its group' : 'Already last in its group', 1800); return; }
+  const before = order.filter(x => x !== id)[j] ?? null; // its place in the list without it
+  try {
+    await api(`/v1/agents/${id}/move`, { method: 'POST', body: before ? { before } : { before: null, group: a.group || '' } });
+    if (v2UseManual()) toast('The home screen now shows My order — the order you arrange.', 5000);
+    await refresh(false);
+  } catch (e) { toast(e.message); return; }
+  // The row, whether or not the sheet was redrawn; the keyboard stays on the button pressed.
+  const now = v2PlaceInGroup(v2Find(id));
+  if (!now || !$('v2Place')) return;
+  $('v2Place').textContent = $('v2Place').textContent.replace(/^\d+ of \d+/, `${now.i + 1} of ${now.order.length}`);
+  $('v2MoveEarlier').disabled = now.i === 0;
+  $('v2MoveLater').disabled = now.i === now.order.length - 1;
+  const mine = $(delta < 0 ? 'v2MoveEarlier' : 'v2MoveLater'), other = $(delta < 0 ? 'v2MoveLater' : 'v2MoveEarlier');
+  (mine.disabled ? other : mine).focus();
+}
+
 async function v2SetGroup(id, value) {
   let group = value;
   if (value === V2_NEW_GROUP) {
@@ -14074,19 +14341,29 @@ function v2ToggleAccount(force) {
   if (open) v2RenderWho();
   pop.hidden = !open;
   $('v2AvatarBtn').setAttribute('aria-expanded', String(open));
-  if (open) pop.querySelector('button')?.focus();
+  if (open) v2AcctItems()[0]?.focus();
 }
 function v2CloseAccount() { v2ToggleAccount(false); }
+/** The account menu's items, in order, as the arrow keys walk them (the theme pair included). */
+const v2AcctItems = () => [...$('v2AcctPop').querySelectorAll('[role^="menuitem"]')].filter(b => !b.hidden && !b.disabled && b.offsetParent !== null);
 document.addEventListener('click', (e) => {
   if (!$('v2AcctPop').hidden && !e.target.closest('.v2acct')) v2CloseAccount();
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('v2AcctPop').hidden) { v2CloseAccount(); $('v2AvatarBtn').focus(); }
+  if ($('v2AcctPop').hidden) return;
+  if (e.key === 'Escape') { v2CloseAccount(); $('v2AvatarBtn').focus(); return; }
+  // A menu's keys (2026-10-09): Up and Down walk the items and wrap, Home and End jump.
+  if (!$('v2AcctPop').contains(document.activeElement)) return;
+  const items = v2AcctItems(), i = items.indexOf(document.activeElement);
+  const j = { ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: items.length - 1 }[e.key];
+  if (j === undefined || !items.length) return;
+  e.preventDefault();
+  items[(j + items.length) % items.length].focus();
 });
 function v2SyncTheme() {
   const dark = document.documentElement.dataset.theme !== 'light';
-  $('v2ThemeDark').setAttribute('aria-pressed', String(dark));
-  $('v2ThemeLight').setAttribute('aria-pressed', String(!dark));
+  $('v2ThemeDark').setAttribute('aria-checked', String(dark));
+  $('v2ThemeLight').setAttribute('aria-checked', String(!dark));
 }
 function v2SetTheme(t) {
   document.documentElement.dataset.theme = t;
