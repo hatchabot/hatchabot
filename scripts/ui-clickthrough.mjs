@@ -3418,6 +3418,126 @@ const SCENARIOS = String.raw`(() => {
         ok('a row with nothing to open is not a button', !document.querySelectorAll('#v2ActList .v2actrow')[2].querySelector('button'));
       } finally { delete window.__override['/v1/events']; v2ActOpen.clear(); await v2LoadActivity(true); }
     },
+    // Recovery readiness (v2.157.0, made-up data): the agent sheet's Recovery row and its guided restore.
+    recoveryRow: async () => {
+      const ready = { agentId: 'a1', name: 'Homework Helper', hostId: 'h1', status: 'ready', line: 'Recoverable from 2026-10-08 · last drill 2026-10-05 passed',
+        latestUsable: { date: '2026-10-08', ageDays: 1, sizeBytes: 2048, complete: true }, leftOut: { count: 0, of: 3, asleep: 0, failed: 0, missing: 0, other: 0 },
+        drill: { at: '2026-10-05T05:20:00Z', set: '2026-10-05', passed: true, restored: true, checks: ['archive read whole'] },
+        restorable: [{ date: '2026-10-08', sizeBytes: 2048, complete: true, drill: 'passed' }, { date: '2026-10-07', sizeBytes: 1024, complete: false }] };
+      const answer = (over, rest = {}) => ({ agents: [{ ...ready, ...over }], newestSet: '2026-10-08', newestFresh: true, staleDays: 2, canRestore: true, drill: { every: 'off', hours: { from: 5, to: 7 } }, ...rest });
+      window.__override['/v1/backups/readiness'] = answer({});
+      try {
+        await v2LoadReadiness(true);
+        openV2Agent('a1', 'advanced');
+        const row = await until(() => { const r = document.getElementById('v2RecoveryRow'); return r && r.textContent.includes('Recoverable from') ? r : null; });
+        ok('the row says it in words: ' + row.textContent.replace(/\s+/g, ' ').slice(0, 120), row.textContent.includes('Recoverable from 2026-10-08 · last drill 2026-10-05 passed'));
+        ok('not in the warning colour when ready', !document.getElementById('v2RecoveryLine').classList.contains('warn'));
+        const btn = document.getElementById('v2RecoveryBtn');
+        ok('a Restore… button', btn && btn.textContent === 'Restore…' && btn.getAttribute('aria-expanded') === 'false');
+        btn.click();
+        const pick = await until(() => document.querySelector('#v2RecoveryPick input[name="v2RecDate"]') && document.getElementById('v2RecoveryPick'));
+        ok('it asked for this agent\'s sets', calls('GET', /\/v1\/backups\/readiness$/).some((c) => c.url.includes('agentId=a1')));
+        eq('the newest usable backup is chosen', document.querySelector('#v2RecoveryPick input[name="v2RecDate"]:checked').value, '2026-10-08');
+        ok('what each set holds: ' + pick.textContent.replace(/\s+/g, ' ').slice(0, 300), pick.textContent.includes('drill passed') && pick.textContent.includes('a set that was not complete; its own copy is whole'));
+        ok('what will be undone', pick.textContent.includes('What is undone: everything it learned or changed since 2026-10-08') && pick.textContent.includes('stay as they are now'));
+        const other = [...document.querySelectorAll('#v2RecoveryPick input[name="v2RecDate"]')].find((i) => i.value === '2026-10-07');
+        other.checked = true; other.dispatchEvent(new Event('change', { bubbles: true }));
+        const go = await until(() => byText('#v2RecoveryPick button', 'Restore from 2026-10-07'));
+        ok('the keyboard stays on the choice', document.activeElement && document.activeElement.value === '2026-10-07');
+        // The existing typed-name confirm stays: a wrong name restores nothing.
+        window.__promptAnswer = 'Homework';
+        go.click();
+        await until(() => document.getElementById('toast').textContent.includes('did not match'));
+        eq('no restore on a wrong name', calls('POST', /\/v1\/backups\/restore$/).length, 0);
+        ok('the choices stay open after a wrong name', !!byText('#v2RecoveryPick button', 'Restore from 2026-10-07'));
+        window.__promptAnswer = 'Homework Helper';
+        window.__answer = { 'POST /v1/backups/restore': [{ status: 200, body: { date: '2026-10-07', running: true } }] };
+        byText('#v2RecoveryPick button', 'Restore from 2026-10-07').click();
+        const post = await until(() => calls('POST', /\/v1\/backups\/restore$/)[0]);
+        eq('the restore, with the date chosen', post.body, { agentId: 'a1', date: '2026-10-07' });
+        await until(() => !document.getElementById('v2RecoveryPick'));
+        // A problem in plain words; someone who does not own the machine cannot restore.
+        window.__override['/v1/backups/readiness'] = answer({ status: 'stale', line: 'Its newest backup is from 2026-10-01 (8 days ago) — left out of the last 7 backups: its machine (Laptop runner) was asleep or offline.' }, { canRestore: false });
+        await v2LoadReadiness(true); openV2Agent('a1', 'advanced');
+        await until(() => document.getElementById('v2RecoveryLine') && document.getElementById('v2RecoveryLine').textContent.includes('8 days ago'));
+        ok('the problem in the warning colour', document.getElementById('v2RecoveryLine').classList.contains('warn'));
+        ok('no Restore… for someone who does not own the machine', !document.getElementById('v2RecoveryBtn') && document.getElementById('v2RecoveryRow').textContent.includes("Only this machine's owner can restore it"));
+      } finally {
+        v2Close(); v2RecoveryPick = null; window.__promptAnswer = null; window.__answer = {};
+        delete window.__override['/v1/backups/readiness']; v2Readiness = null; v2ReadinessAt = 0;
+      }
+    },
+    readinessTable: async () => {
+      window.__override['/v1/backups'] = { dir: '/backups', keepDays: 14, run: { status: 'idle' }, backups: [], missing: [] };
+      window.__override['/v1/backups/readiness'] = { newestSet: '2026-10-08', newestFresh: true, staleDays: 2, canRestore: true,
+        drill: { every: 'weekly', hours: { from: 5, to: 7 }, run: { status: 'idle' }, last: { at: '2026-10-05T05:20:00Z', set: '2026-10-05', passed: true, checked: 12, failed: 0, restored: 12, database: 'ok', key: 'ok' } },
+        agents: [
+          { agentId: 'a1', name: 'Homework Helper', hostId: 'h1', status: 'ready', line: 'Recoverable from 2026-10-08 · last drill 2026-10-05 passed',
+            latestUsable: { date: '2026-10-08', ageDays: 1, sizeBytes: 2048, complete: true }, leftOut: { count: 0, of: 3, asleep: 0, failed: 0, missing: 0, other: 0 },
+            drill: { at: '2026-10-05T05:20:00Z', set: '2026-10-05', passed: true, restored: true, checks: [] } },
+          { agentId: 'a2', name: 'Soccer Schedule', hostId: 'h2', runner: { name: 'Laptop runner', reachable: false }, status: 'stale', line: 'Its newest backup is from 2026-10-01 (8 days ago).',
+            latestUsable: { date: '2026-10-01', ageDays: 8, sizeBytes: 1024, complete: true }, leftOut: { count: 7, of: 7, asleep: 7, failed: 0, missing: 0, other: 0 } },
+        ] };
+      window.__answer = { 'POST /v1/backups/drill': [{ status: 200, body: { run: { status: 'running', trigger: 'app' } } }] };
+      try {
+        await openAiDlg('backups');
+        const table = await until(() => document.getElementById('bkReadyTable'));
+        const rows = [...table.querySelectorAll('tbody tr')];
+        eq('one row per agent', rows.map((r) => r.dataset.agent), ['a1', 'a2']);
+        eq('the columns', [...table.querySelectorAll('thead th')].map((t) => t.textContent), ['Agent', 'Latest usable', 'Left out of', 'Last drill', 'Status']);
+        const cells = (r) => [...r.querySelectorAll('td')].map((c) => c.textContent.replace(/\s+/g, ' ').trim());
+        eq('a ready agent', cells(rows[0]), ['Homework Helper', '2026-10-08 (1d ago)', '—', '2026-10-05 passed', 'ready']);
+        eq('one on a runner asleep', cells(rows[1]), ['Soccer Schedule (Laptop runner, not answering)', '2026-10-01 (8d ago)', '7 of 7 (machine asleep)', 'never', 'stale']);
+        ok('its status in the warning colour, its line on hover', rows[1].lastElementChild.classList.contains('warn') && rows[1].lastElementChild.title.includes('8 days ago'));
+        eq('the drill setting', document.getElementById('bkDrillEvery').value, 'weekly');
+        const said = document.getElementById('bkDrill').textContent;
+        ok('the last drill and the schedule said: ' + said, said.includes('Last drill 2026-10-05 on the 2026-10-05 backup: passed — 12 agents checked, 12 restored') && said.includes('weekly, between 05:00 and 07:00'));
+        const sel = document.getElementById('bkDrillEvery');
+        sel.value = 'off'; sel.dispatchEvent(new Event('change', { bubbles: true }));
+        const put = await until(() => calls('PUT', /\/v1\/backups\/drill-schedule$/)[0]);
+        eq('the setting is saved', put.body, { every: 'off' });
+        await until(() => document.getElementById('bkDrillEvery').value === 'weekly'); // read back (the stub still says weekly)
+        document.getElementById('bkDrillBtn').click();
+        await until(() => calls('POST', /\/v1\/backups\/drill$/).length === 1);
+        await until(() => document.getElementById('bkDrillBtn').textContent === 'Drilling…');
+        ok('the button waits while it runs', document.getElementById('bkDrillBtn').disabled);
+      } finally {
+        clearTimeout(bkDrillTimer); bkDrillTimer = null; aiDlg.close(); window.__answer = {};
+        delete window.__override['/v1/backups']; delete window.__override['/v1/backups/readiness']; v2Readiness = null; v2ReadinessAt = 0;
+      }
+    },
+    recoveryAlert: async () => {
+      // An agent the fresh newest set left out (2+ days without a usable copy) is under Alerts on its own
+      // tile; the machine's alert no longer names it (the fold), and a failed drill is the machine's.
+      const today = new Date().toISOString().slice(0, 10);
+      window.__override['/v1/hosts'] = [{ id: 'h1', name: 'This machine', kind: 'local', hostname: 'home-box', agentCount: 12 }];
+      window.__override['/v1/runtime'] = { imageVersion: '2026.9.6', upgradeAvailable: false };
+      window.__override['/v1/backups'] = { backups: [{ date: today, hasKey: true, complete: true }], keepDays: 14,
+        missing: [{ agentId: 'a2', name: 'Soccer Schedule', host: 'Laptop runner' }, { agentId: 'b9', name: 'Garden Planner', host: 'Laptop runner' }] };
+      window.__override['/v1/backups/readiness'] = { newestSet: today, newestFresh: true, staleDays: 2, canRestore: true,
+        drill: { every: 'off', hours: { from: 5, to: 7 }, run: { status: 'idle' }, last: { at: today + 'T05:20:00Z', set: today, passed: false, checked: 12, failed: 1, restored: 11, database: 'ok', key: 'ok' } },
+        agents: [{ agentId: 'a2', name: 'Soccer Schedule', hostId: 'h2', status: 'stale', line: 'Its newest backup is from 2026-10-01 (8 days ago).',
+          latestUsable: { date: '2026-10-01', ageDays: 8, sizeBytes: 1024, complete: true }, leftOut: { count: 7, of: 7, asleep: 7, failed: 0, missing: 0, other: 0 },
+          alert: { key: 'recovery:2026-10-01', why: 'Its newest backup is from 2026-10-01 (8 days ago) (its settings → Advanced → Recovery)' } }] };
+      const owner = myAccount.hostOwner; myAccount.hostOwner = true;
+      try {
+        await v2LoadReadiness(true); await v2LoadMachine(true); renderV2();
+        const a2 = agents.find((a) => a.id === 'a2');
+        const mine = agentAttention(a2).find((x) => x.key === 'recovery:2026-10-01');
+        ok('the agent carries its own alert', mine && mine.why.includes('8 days ago'));
+        ok('its tile is under Alerts: ' + v2Status(a2).label, v2Status(a2).label === 'Worth a look');
+        const mgr = agents.find((a) => a.ops);
+        const machine = agentAttention(mgr).filter((x) => x.icon === '💾').map((x) => x.why).join(' | ');
+        ok('the machine alert still names the other left-out agent: ' + machine, machine.includes('Garden Planner (on Laptop runner) not in it'));
+        ok('but not the one with its own alert (the fold): ' + machine, !machine.includes('Soccer Schedule'));
+        ok('a failed drill is the machine\'s alert', machine.includes('the last restore drill (' + today + ') failed'));
+        ok('the machine line still lists both', document.getElementById('v2Machine').textContent.includes('Soccer Schedule'));
+      } finally {
+        myAccount.hostOwner = owner;
+        for (const k of ['/v1/hosts', '/v1/backups', '/v1/runtime', '/v1/backups/readiness']) delete window.__override[k];
+        v2Readiness = null; v2ReadinessAt = 0; v2Machine = null; v2PaintMachine(); await refresh(false);
+      }
+    },
     alertsOrder: async () => {
       // Alerts, most urgent first: an operation held for a choice, then failures; it was ordered by
       // the bins' emoji, which put "⚠ Alerts" above "❌ Failed" and Knocking near the end (2026-10-09).

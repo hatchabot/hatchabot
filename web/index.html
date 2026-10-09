@@ -1972,6 +1972,17 @@
       <button class="primary" id="bkRunBtn" onclick="runBackupNow()">Back up now</button>
     </div>
     <div id="bkRun" class="sub" style="margin:8px 0" hidden></div>
+    <h4 style="margin:18px 0 4px">Can each agent be brought back?</h4>
+    <div class="sub">For each agent, the newest backup a restore could use, and the last restore drill that checked it.
+      A drill restores each agent's copy into a throwaway volume with no network, then removes it — nothing live is touched.</div>
+    <div class="actions" style="justify-content:flex-start;align-items:center;gap:10px;margin:8px 0 4px;flex-wrap:wrap">
+      <label style="margin:0">Restore drills <select id="bkDrillEvery" onchange="setDrillEvery(this.value)">
+        <option value="off">Off</option><option value="weekly">Weekly</option><option value="daily">Daily</option></select></label>
+      <button id="bkDrillBtn" onclick="runDrillNow()">Run a drill now</button>
+    </div>
+    <div id="bkDrill" class="sub" style="margin:4px 0"></div>
+    <div id="bkReady" style="margin-top:6px;overflow-x:auto">Loading…</div>
+    <h4 style="margin:18px 0 4px">Sets</h4>
     <div id="bkList" style="margin-top:8px">Loading…</div>
   </section>
 
@@ -4785,6 +4796,7 @@ let bkPollTimer = null;
 
 async function loadBackups() {
   const el = $('bkList');
+  void loadReadiness(); // the per-agent table above the sets (recovery readiness)
   try {
     const r = await api('/v1/backups');
     $('bkDir').textContent = r.dir;
@@ -4891,7 +4903,167 @@ async function restoreFromBackup(agentId, date, name) {
       toast(`Restored “${name}” from ${date}${r.running ? ' — restarting' : ''}.${(r.undone || []).map(u => ' ' + u).join('')}`, (r.undone || []).length ? 20000 : 12000);
     }
     await refresh(true);
+    return true; // under way (the Recovery row closes its choices)
   } catch (e) { toast(e.message, 30000); }
+}
+
+// ---- Recovery readiness (docs/recovery-readiness-design.md) -------------------
+// Per agent: the newest backup a restore could use, the sets that left it out,
+// the last restore drill that checked it, one status. Read once a minute for
+// the Alerts (an agent left out of a fresh night's set), the agent sheet's
+// Recovery row and Settings → Backups.
+let v2Readiness = null, v2ReadinessAt = 0, v2ReadinessP = null;
+/** At most once a minute unless forced; a reading under way is shared, never doubled. */
+function v2LoadReadiness(force = false) {
+  if (v2ReadinessP) return v2ReadinessP;
+  if (!force && Date.now() - v2ReadinessAt < 60_000) return Promise.resolve(v2Readiness);
+  v2ReadinessP = (async () => {
+    try {
+      const r = await api('/v1/backups/readiness');
+      v2Readiness = r && Array.isArray(r.agents) ? r : null;
+    } catch { /* the last reading stays */ }
+    finally { v2ReadinessAt = Date.now(); v2ReadinessP = null; }
+    return v2Readiness;
+  })();
+  return v2ReadinessP;
+}
+const v2RecoveryOf = (id) => (v2Readiness?.agents || []).find(r => r.agentId === id);
+const v2ReadinessSig = () => JSON.stringify([(v2Readiness?.agents || []).map(r => [r.agentId, r.status, r.alert?.key || '']), v2Readiness?.drill?.last?.at || '']);
+/** The poll's reading: what changed is painted (the tiles' Alerts, an open Recovery row). */
+async function v2LoadReadinessPaint(force = false) {
+  const before = v2ReadinessSig();
+  await v2LoadReadiness(force);
+  if (v2ReadinessSig() === before) return;
+  renderV2();
+  const row = $('v2RecoveryRow'); if (row) void v2PaintRecovery(row.dataset.agent);
+}
+const RECOVERY_BAD = ['stale', 'not covered', 'drill failed'];
+
+/** The guided restore open in the agent's Recovery row: { id, date, sets } (sets: the ones a restore can use). */
+let v2RecoveryPick = null;
+async function v2PaintRecovery(id) {
+  if (!v2Readiness) await v2LoadReadiness(true);
+  const el = $('v2RecoveryRow'); if (!el || el.dataset.agent !== id) return;
+  const r = v2RecoveryOf(id), a = v2Find(id);
+  if (!r || !a) { el.innerHTML = '<span class="sub">Nothing is known about its backups yet.</span>'; return; }
+  const can = !!v2Readiness.canRestore && !!r.latestUsable;
+  const pick = v2RecoveryPick?.id === id ? v2RecoveryPick : null;
+  const guided = pick ? (() => {
+    const sets = pick.sets || [];
+    if (!sets.length) return '<div class="sub" style="flex-basis:100%">Loading the backups that hold it…</div>';
+    const s = sets.find(x => x.date === pick.date) || sets[0];
+    return `<div id="v2RecoveryPick" style="flex-basis:100%;margin-top:6px">
+      <fieldset style="border:0;padding:0;margin:0"><legend class="sub">Restore it from the backup of</legend>
+      ${sets.map(x => `<label style="display:block;margin:2px 0"><input type="radio" name="v2RecDate" value="${esc(x.date)}"${x.date === s.date ? ' checked' : ''} onchange="v2RecoveryChoose('${jsq(id)}', this.value)">
+        ${esc(x.date)} <span class="sub">· ${fmtBytes(x.sizeBytes)}${x.complete === false ? ' · a set that was not complete; its own copy is whole' : ''}${x.drill ? ` · drill ${x.drill === 'passed' ? 'passed' : 'failed'}` : ''}</span></label>`).join('')}
+      </fieldset>
+      <div class="sub" style="margin:6px 0">What it holds: its whole memory, files and OpenClaw settings as they were that night.
+        What is undone: everything it learned or changed since ${esc(s.date)}. Its current Telegram bot, the people who may use it and its model stay as they are now.
+        It is stopped for the swap${a.state === 'RUNNING' ? ' and started again after' : ''}; you type its name to confirm.</div>
+      <button type="button" class="primary" onclick="v2RecoveryGo('${jsq(id)}')">Restore from ${esc(s.date)}…</button>
+      <button type="button" onclick="v2RecoveryToggle('${jsq(id)}')">Cancel</button>
+    </div>`;
+  })() : '';
+  el.innerHTML = `<span id="v2RecoveryLine"${RECOVERY_BAD.includes(r.status) ? ' class="warn"' : ''}>${esc(r.line)}</span>
+    ${can ? `<button type="button" id="v2RecoveryBtn" aria-expanded="${!!pick}" onclick="v2RecoveryToggle('${jsq(id)}')">Restore…</button>` : ''}
+    ${!v2Readiness.canRestore && r.latestUsable ? '<span class="sub">Only this machine\'s owner can restore it.</span>' : ''}
+    ${guided}`;
+}
+/** Restore… opens the guided restore with its newest usable backup chosen (and closes it again). */
+async function v2RecoveryToggle(id) {
+  if (v2RecoveryPick?.id === id) { v2RecoveryPick = null; void v2PaintRecovery(id); return; }
+  const r = v2RecoveryOf(id);
+  v2RecoveryPick = { id, date: r?.latestUsable?.date, sets: [] };
+  void v2PaintRecovery(id);
+  try {
+    const one = await api(`/v1/backups/readiness?agentId=${encodeURIComponent(id)}`);
+    const sets = (one?.agents || []).find(x => x.agentId === id)?.restorable || [];
+    if (v2RecoveryPick?.id !== id) return;
+    v2RecoveryPick.sets = sets;
+    if (!sets.some(x => x.date === v2RecoveryPick.date)) v2RecoveryPick.date = sets[0]?.date;
+    if (!sets.length) { v2RecoveryPick = null; toast('No backup that holds it could be found now.', 8000); }
+  } catch (e) { v2RecoveryPick = null; toast(e.message, 8000); }
+  void v2PaintRecovery(id);
+}
+async function v2RecoveryChoose(id, date) {
+  if (v2RecoveryPick?.id !== id) return;
+  v2RecoveryPick.date = date;
+  await v2PaintRecovery(id);
+  [...document.querySelectorAll('#v2RecoveryPick input[name="v2RecDate"]')].find(i => i.value === date)?.focus(); // the keyboard stays on the choice
+}
+/** The chosen date into the existing restore (its typed-name confirm and /v1/backups/restore). */
+async function v2RecoveryGo(id) {
+  const a = v2Find(id), date = v2RecoveryPick?.id === id ? v2RecoveryPick.date : null;
+  if (!a || !date) return;
+  // A wrong name or Cancel restores nothing: the choices stay open.
+  if (!(await restoreFromBackup(id, date, a.name))) return;
+  v2RecoveryPick = null;
+  void v2PaintRecovery(id);
+  void v2LoadReadinessPaint(true);
+}
+
+// Settings → Backups: the per-agent table, the drill setting and Run a drill now.
+let bkDrillTimer = null;
+async function loadReadiness() {
+  const el = $('bkReady'); if (!el) return;
+  const r = await v2LoadReadiness(true);
+  if (!r) { el.innerHTML = '<div class="sub">Not known yet.</div>'; renderDrillRun(null); return; }
+  $('bkDrillEvery').value = r.drill?.every || 'off';
+  renderDrillRun(r.drill);
+  if (!r.agents.length) { el.innerHTML = '<div class="sub">No agent has anything to back up yet.</div>'; return; }
+  const lo = (x) => {
+    const l = x.leftOut || {};
+    if (!l.count) return '—';
+    const why = [l.asleep ? 'machine asleep' : '', l.failed ? 'failed' : '', l.missing ? 'volume missing' : '', l.other ? 'not taken' : ''].filter(Boolean).join(', ');
+    return `${l.count} of ${l.of} <span class="sub">(${why})</span>`;
+  };
+  const cell = 'style="padding:4px 8px 4px 0;border-top:1px solid var(--line);vertical-align:top"';
+  el.innerHTML = `<table id="bkReadyTable" style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr class="sub" style="text-align:left"><th ${cell}>Agent</th><th ${cell}>Latest usable</th><th ${cell}>Left out of</th><th ${cell}>Last drill</th><th ${cell}>Status</th></tr></thead>
+    <tbody>${r.agents.map(x => `<tr data-agent="${esc(x.agentId)}">
+      <td ${cell}>${esc(x.name)}${x.runner ? ` <span class="sub">(${esc(x.runner.name)}${x.runner.reachable === false ? ', not answering' : ''})</span>` : ''}</td>
+      <td ${cell}>${x.latestUsable ? `${esc(x.latestUsable.date)}${x.latestUsable.ageDays ? ` <span class="sub">(${x.latestUsable.ageDays}d ago)</span>` : ''}` : '<span class="warn">none</span>'}</td>
+      <td ${cell}>${lo(x)}</td>
+      <td ${cell}>${x.drill ? `${esc(x.drill.at.slice(0, 10))} ${x.drill.passed ? 'passed' : '<span class="warn">failed</span>'}` : 'never'}</td>
+      <td ${cell} title="${esc(x.line)}"${RECOVERY_BAD.includes(x.status) ? ' class="warn"' : ''}>${esc(x.status)}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+function renderDrillRun(d) {
+  const el = $('bkDrill'), btn = $('bkDrillBtn'); if (!el || !btn) return;
+  if (bkDrillTimer) { clearTimeout(bkDrillTimer); bkDrillTimer = null; }
+  const run = d?.run, last = d?.last;
+  if (run?.status === 'running') {
+    btn.disabled = true; btn.textContent = 'Drilling…';
+    el.style.color = 'var(--dim)';
+    el.textContent = "A restore drill is running: each agent's copy is restored into a throwaway volume, one at a time. It can take a while; Activity shows how it ends.";
+    bkDrillTimer = setTimeout(() => { if (!$('paneBackups').hidden) void loadReadiness(); }, 5000);
+    return;
+  }
+  btn.disabled = false; btn.textContent = 'Run a drill now';
+  const hh = (n) => String(n).padStart(2, '0') + ':00';
+  const when = d?.every && d.every !== 'off'
+    ? ` Automatic drills: ${d.every}, between ${hh(d.hours?.from ?? 5)} and ${hh(d.hours?.to ?? 7)} after that night's backup.`
+    : ' Automatic drills are off.';
+  const failedRun = run?.status === 'error' && !last ? ` ${(run.summary || '').split('\n').slice(-1)[0]}` : '';
+  const words = last
+    ? `Last drill ${last.at.slice(0, 10)}${last.set ? ` on the ${last.set} backup` : ''}: ${last.passed ? 'passed' : 'failed'} — ${last.checked} agent${last.checked === 1 ? '' : 's'} checked, ${last.restored} restored into a throwaway volume${last.failed ? `, ${last.failed} did not pass` : ''}${last.database !== 'ok' ? ', the database copy did not pass' : ''}${last.key !== 'ok' ? ', the saved key did not pass' : ''}.`
+    : 'No restore drill has run yet.';
+  el.style.color = last && !last.passed ? 'var(--warn)' : '';
+  el.textContent = words + when + failedRun;
+}
+async function runDrillNow() {
+  try {
+    const r = await api('/v1/backups/drill', { method: 'POST' });
+    renderDrillRun({ ...(v2Readiness?.drill || {}), run: r.run });
+    if (r.run?.status === 'error') toast(r.run.summary || 'The restore drill could not start.', 12000);
+  } catch (e) { toast(e.message, 12000); }
+}
+async function setDrillEvery(every) {
+  try {
+    await api('/v1/backups/drill-schedule', { method: 'PUT', body: { every } });
+    toast(every === 'off' ? 'Automatic restore drills are off.' : `A restore drill will run ${every}, early in the morning after that night's backup.`);
+    await loadReadiness();
+  } catch (e) { toast(e.message, 12000); $('bkDrillEvery').value = v2Readiness?.drill?.every || 'off'; }
 }
 
 /** The Runtime tab's capability list: probed tool versions from the image,
@@ -8051,19 +8223,10 @@ async function v2LoadMachine(force = false) {
       if (!latest) backup = { warn: 'none yet — the nightly job runs at 03:30' };
       else {
         const ageDays = Math.floor((Date.now() - Date.parse(latest.date + 'T00:00:00')) / 86400000);
-        // Named when few: "1 agent not covered" sent people hunting (2026-10-06).
         const miss = b.missing ?? [];
-        const missing = !miss.length ? '' : miss.length <= 3
-          ? `${miss.map(m => m.name + (m.host ? ` (on ${m.host})` : '')).join(', ')} not in it`
-          : `${miss.length} agents not in it`;
-        const dated = [latest.complete === false ? 'the latest is incomplete' : '', !latest.hasKey ? 'no key' : ''].filter(Boolean);
-        const why = [ageDays > 2 ? `the latest is ${ageDays} days old` : '', ...dated, missing].filter(Boolean).join(', ');
-        // What "Clear from Alerts" remembers. Not the date alone: every night's
-        // set is new, so a cleared "not covered" came back each morning. The
-        // same agents left out stay cleared; a new one, a stale or broken set
-        // brings it back.
-        const key = [dated.length ? latest.date : '', ageDays > 2 ? 'stale:' + latest.date : '', miss.map(m => m.agentId).sort().join(',')].join('|');
-        backup = { date: latest.date, ageDays, ...(why ? { warn: why, key } : {}) };
+        const { why, key } = v2BackupWarn(latest, ageDays, miss);
+        // latest and miss stay for the alert, which folds in each agent's own (v2MachineAlerts).
+        backup = { date: latest.date, ageDays, latest, miss, ...(why ? { warn: why, key } : {}) };
       }
     }
     v2Machine = { hosts: Array.isArray(hs) ? hs : [], backup, runtime: rt };
@@ -8071,6 +8234,21 @@ async function v2LoadMachine(force = false) {
     renderV2(); // the Hatchabot agent's tile carries the machine's alerts
   } catch { /* the line stays as it was */ }
   finally { v2MachineBusy = false; v2MachineAt = Date.now(); }
+}
+/** The machine's backup warning: late, broken, or agents the newest set left out. */
+function v2BackupWarn(latest, ageDays, miss) {
+  // Named when few: "1 agent not covered" sent people hunting (2026-10-06).
+  const missing = !miss.length ? '' : miss.length <= 3
+    ? `${miss.map(m => m.name + (m.host ? ` (on ${m.host})` : '')).join(', ')} not in it`
+    : `${miss.length} agents not in it`;
+  const dated = [latest.complete === false ? 'the latest is incomplete' : '', !latest.hasKey ? 'no key' : ''].filter(Boolean);
+  const why = [ageDays > 2 ? `the latest is ${ageDays} days old` : '', ...dated, missing].filter(Boolean).join(', ');
+  // What "Clear from Alerts" remembers. Not the date alone: every night's
+  // set is new, so a cleared "not covered" came back each morning. The
+  // same agents left out stay cleared; a new one, a stale or broken set
+  // brings it back.
+  const key = [dated.length ? latest.date : '', ageDays > 2 ? 'stale:' + latest.date : '', miss.map(m => m.agentId).sort().join(',')].join('|');
+  return { why, key };
 }
 function v2PaintMachine() {
   const el = $('v2Machine'); if (!el) return;
@@ -8097,7 +8275,16 @@ function v2MachineAlerts() {
     out.push({ key: 'runner-down:' + h.id, icon: '💻', why: `${h.name} isn't answering (asleep or offline?) — its ${h.agentCount} agent${h.agentCount === 1 ? '' : 's'} can't be reached until it is back` });
   }
   const bk = v2Machine.backup;
-  if (bk?.warn) out.push({ key: `backup:${bk.key ?? bk.date ?? 'none'}`, icon: '💾', why: `backups: ${bk.warn} (⚙ Settings → Backups)` });
+  // The fold (recovery readiness): an agent whose own tile carries its
+  // "left out" alert is not named here again; the machine's alert stays for
+  // what is the whole machine's (late, incomplete, no key).
+  const own = new Set((v2Readiness?.agents || []).filter(r => r.alert && v2Find(r.agentId) && v2Mine(v2Find(r.agentId))).map(r => r.agentId));
+  const w = bk?.latest && own.size ? v2BackupWarn(bk.latest, bk.ageDays, (bk.miss || []).filter(m => !own.has(m.agentId))) : null;
+  const warn = w ? w.why : bk?.warn, key = w ? w.key : bk?.key;
+  if (warn) out.push({ key: `backup:${key ?? bk.date ?? 'none'}`, icon: '💾', why: `backups: ${warn} (⚙ Settings → Backups)` });
+  // A restore drill that failed is the machine's: its backups may not bring an agent back.
+  const ld = v2Readiness?.drill?.last;
+  if (ld && !ld.passed) out.push({ key: 'drill:' + ld.at, icon: '💾', why: `the last restore drill (${String(ld.at).slice(0, 10)}) failed — its backups may not bring every agent back (⚙ Settings → Backups)` });
   return out;
 }
 
@@ -11083,6 +11270,11 @@ function agentAttention(a) {
   // Measured once a day by the security sweep (2026-09-30); keyed on the size
   // in whole GB so a cleared warning comes back only if it keeps growing.
   if (a.diskOver) out.push({ key: 'disk:' + Math.floor(a.diskOver.bytes / 1e9), icon: '💾', why: `it uses ${(a.diskOver.bytes / 1e9).toFixed(1)} GB of storage (the warning is at ${(a.diskOver.warnBytes / 1e9).toFixed(0)} GB) — ask it to clear old files, or look under Files` });
+  // Recovery readiness: its newest usable backup is over 2 days old, or none
+  // holds it, while the machine's newest set is fresh (the server's fold: a
+  // late machine is the machine's alert, once). Keyed on that date.
+  const recovery = v2Mine(a) && a.state !== 'ARCHIVED' ? v2RecoveryOf(a.id) : null;
+  if (recovery?.alert) out.push({ key: recovery.alert.key, icon: '💾', why: recovery.alert.why });
   // A loop Hatchabot's watcher found (tokenWatch.ts): what repeats, since when, and the fix.
   if ((a.stuck || []).length) out.push({ key: 'stuck:' + a.stuck.map(x => x.id).sort().join(','), icon: '🔁', stuck: true,
     why: a.stuck.map(x => x.text + (x.fix ? `. Fix: ${x.fix}` : '')).join(' · ') });
@@ -11331,6 +11523,7 @@ async function refreshNow(withMeta, seq) {
     $('offlineBanner').hidden = true; // reached the server: any earlier warning is stale
     // Activity, at the foot of the home screen, with the machine line.
     void v2LoadActivity(); void v2LoadMachine();
+    void v2LoadReadinessPaint(); // each agent's recovery readiness (its Alerts), at most once a minute
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
     if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); loadFleetKeys(); void loadSecurityNotices(); }
@@ -12289,6 +12482,7 @@ function v2RenderSheet() {
   if ($('v2BudgetRow')) void v2LoadBudgetRow(a.id);
   if ($('v2AppRow')) void v2LoadApp(a.id);
   if ($('v2Access')) void v2LoadAccess(a.id);
+  if ($('v2RecoveryRow')) void v2PaintRecovery(a.id);
 }
 
 // ---- Apps in agents (docs/apps-in-agents.md): the agent page's App row ----------------
@@ -12827,6 +13021,7 @@ function v2Pane(a, tab) {
         <span class="sub" id="v2BrowserState"></span>
         <div class="sub" style="flex-basis:100%">A Chromium of its own that it can open pages in, click and fill forms — for sites it must use, not for looking things up (web search is far cheaper: one browsing question can take 300K tokens). It runs beside the agent, with none of its files, up to 1 GB; nothing it logs into is kept across a restart.</div>`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
+      ${built ? row('Recovery', `<div id="v2RecoveryRow" data-agent="${esc(a.id)}" style="flex-basis:100%;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline"><span class="sub">Loading…</span></div>`) : ''}
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
       ${(run || a.state === 'STOPPED') && built ? `<h4 class="v2sec" id="v2BetweenServers">Between servers</h4>${row('Another Hatchabot', `${B('Move to another Hatchabot', `rehostAgent('${id}','${n}')`)}
         <span class="sub">Only for a second Hatchabot server with its own dashboard (⚙ Settings → Advanced). To run it on another computer under this one, add that computer as a runner and use <b>Move…</b> on its Machine row.</span>`)}` : ''}

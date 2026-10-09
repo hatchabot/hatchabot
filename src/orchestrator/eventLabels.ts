@@ -258,6 +258,8 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'rebuild.concurrency_set': (d) => `rebuild at once set to ${String(d.value ?? d.concurrency ?? '')}`.trim(),
   'rebuild.on_start': 'rebuilt at start-up',
   'rebuild.policy_set': (d) => `automatic rebuilds: ${String(d.policy ?? d.mode ?? 'changed')}`,
+  'backup.drill_schedule_set': (d) => `automatic restore drills: ${String(d.every ?? 'changed')}`,
+  'backup.drill_finished': (d) => `restore drill ${d.status === 'ok' ? 'passed' : 'failed'}${d.set ? ` on the ${String(d.set)} backup` : ''}`,
   'rebuild_hook.error': 'its rebuild hook failed',
   'rebuild_hook.failed': 'its rebuild hook failed',
   'rebuild_hook.ran': 'its rebuild hook ran',

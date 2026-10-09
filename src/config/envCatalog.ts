@@ -78,6 +78,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('data', 'HATCHABOT_DB', null, 'The registry and secret store (SQLite). Unset: data/hatchabot.sqlite in this folder. Production keeps it outside the checkout.'),
   s('data', 'HATCHABOT_BACKUP_DIR', null, 'Where nightly backups go (absolute path; may be a NAS mount). Unset: ~/hatchabot-backups.'),
   s('data', 'HATCHABOT_BACKUP_KEEP_DAYS', '14', 'How many days of nightly backups to keep.'),
+  s('data', 'HATCHABOT_DRILL_EVERY', 'off', 'Automatic restore drills: off, weekly or daily. A drill restores each agent\'s newest backup into a throwaway volume with no network, between 05:00 and 07:00 after that night\'s backup (Settings → Backups).'),
 
   // Limits
   s('limits', 'HATCHABOT_MAX_AGENTS_PER_ACCOUNT', '0', 'Most agents one account may have (the host owner included).'),
@@ -210,11 +211,11 @@ export const ENV_INTERNAL: string[] = [
   'HATCHABOT_CHANNEL', 'HATCHABOT_DIR', 'HATCHABOT_DRY_RUN', 'HATCHABOT_YES', 'HATCHABOT_SETUP_ENV', 'HATCHABOT_SETUP_PASSWORD',
   'HATCHABOT_SETUP_PORT', 'HATCHABOT_SETUP_SIGNIN', 'HATCHABOT_UPGRADE_COPY', 'HATCHABOT_UPGRADE_DIR', 'HATCHABOT_UPGRADE_IMAGE', 'HATCHABOT_UPGRADE_BY_TIMER',
   'HATCHABOT_INSTALL_CMD', 'HATCHABOT_RESTART_CMD', 'HATCHABOT_PROD_DIR', 'HATCHABOT_SERVICE', 'HATCHABOT_HEALTH_URL',
-  'HATCHABOT_REPO', 'HATCHABOT_IMAGE_REPO', 'HATCHABOT_PROMOTE_TRAILERS', 'HATCHABOT_PROMOTE_IGNORE_CI', 'HATCHABOT_PROMOTE_IGNORE_LIVE', 'HATCHABOT_DRILL_DB', 'HATCHABOT_ENV_FILE',
+  'HATCHABOT_REPO', 'HATCHABOT_IMAGE_REPO', 'HATCHABOT_PROMOTE_TRAILERS', 'HATCHABOT_PROMOTE_IGNORE_CI', 'HATCHABOT_PROMOTE_IGNORE_LIVE', 'HATCHABOT_DRILL_DB', 'HATCHABOT_DRILL_TRIGGER', 'HATCHABOT_ENV_FILE',
   // the release bundle (install.sh, upgrade.sh, build-bundle.sh, sqlite-driver.sh, with-docker.sh)
   'HATCHABOT_NATIVE', 'HATCHABOT_SLUG', 'HATCHABOT_BUNDLE_BASE', 'HATCHABOT_BUNDLE_REF', 'HATCHABOT_APP_DIR', 'HATCHABOT_IN_DOCKER_GROUP',
   // test knobs
-  'HATCHABOT_TAILSCALE_BIN', 'HATCHABOT_BACKUP_SCRIPT', 'HATCHABOT_SMOKE_AI_KEY', 'HATCHABOT_SMOKE_BOT_TOKEN', 'HATCHABOT_SMOKE_GATEWAY_BASE', 'HATCHABOT_SMOKE_EMBED_PORT', 'HATCHABOT_CONSOLE_TEST_PORT', 'HATCHABOT_SMOKE_PORT',
+  'HATCHABOT_TAILSCALE_BIN', 'HATCHABOT_BACKUP_SCRIPT', 'HATCHABOT_DRILL_SCRIPT', 'HATCHABOT_SMOKE_AI_KEY', 'HATCHABOT_SMOKE_BOT_TOKEN', 'HATCHABOT_SMOKE_GATEWAY_BASE', 'HATCHABOT_SMOKE_EMBED_PORT', 'HATCHABOT_CONSOLE_TEST_PORT', 'HATCHABOT_SMOKE_PORT',
   // marker text in the page, and placeholders in the service unit templates (__HATCHABOT_PATH__)
   'HATCHABOT_VERSION', 'HATCHABOT_PATH',
 ];

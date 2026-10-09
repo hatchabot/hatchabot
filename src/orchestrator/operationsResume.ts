@@ -122,6 +122,10 @@ async function runKind(ctx: ResumeContext, op: Operation, action: string | undef
     case 'backup-run':
       handleFor(ctx.store, op.id).fail("The backup run was interrupted by a restart, so the set it was writing is incomplete — run Back up now again, or wait for tonight's run.");
       return;
+    case 'restore-drill':
+      // Nothing live was touched; its throwaway volume goes at the next drill's start.
+      handleFor(ctx.store, op.id).fail('The restore drill was interrupted by a restart, so it proved nothing — run a drill again (Settings → Backups).');
+      return;
     default:
       // A kind not instrumented: recorded as interrupted, nothing guessed.
       handleFor(ctx.store, op.id).fail(`Interrupted by a restart.`);

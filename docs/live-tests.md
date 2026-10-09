@@ -41,7 +41,7 @@ on a machine that can; it does not hold the gate here.
 | `browser` | An agent's own browser: off by default; switched on it opens and reads a real page; none of the agent's files in it; it follows an agent restart; switched off it is gone | Room for 1 agent | 8–12 min | none |
 | `candidate-gate` | An agent on an image builds, answers, and keeps its memory search and tools | The image (default: this machine's default) | 5–10 min | one |
 | `regress-autonomous` | An agent made from the CLI answers, remembers, runs a task on demand and on its schedule, pauses, and keeps both across a restart | The live install | 10–15 min | about eight |
-| `restore-drill` | The newest complete nightly backup restores, every part of it, without touching the live system | A backup set | 5–15 min | none |
+| `restore-drill` | The newest complete nightly backup restores, every agent's archive into its own throwaway volume (no network, no secrets mounted), without touching the live system; writes its record under `<backups>/drills` | A backup set | 10–60 min | none |
 | `upgrade-check` | Databases made by older releases open with this one | Nothing (temporary databases) | 2–5 min | none |
 | `smoke-adopt` | Switching to Hatchabot: an OpenClaw agent is found and adopted web-only on a throwaway control plane; its workspace and tasks arrive, its console answers, its data folder mounts | Nothing (its own ports); `-- --with-telegram` takes over a bot from `.env.smoke` instead | 2–5 min | none |
 | `clean-install` | A stranger's install on a brand-new Linux machine, and a new owner's first steps | LXD here; `-- --ai-source "<name>"`; stop the VM after | 20–40 min | one |
