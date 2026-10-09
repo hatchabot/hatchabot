@@ -61,17 +61,17 @@ describe('icon validation', () => {
 
 describe('picking icons', () => {
   it('keywords: name first, then the description, else a robot', () => {
-    expect(keywordIcon('Stock Advisor')).toBe('📈');
+    expect(keywordIcon('Stock Watcher')).toBe('📈');
     expect(keywordIcon('Helper', 'plans our trip to Sicily')).toBe('🧭');
     expect(keywordIcon('Zork')).toBe('🤖');
   });
   it('colour is stable and from the palette', () => {
-    expect(colorFor('Tax Advisor')).toBe(colorFor('tax advisor'));
-    expect(ICON_PALETTE).toContain(colorFor('Tax Advisor'));
+    expect(colorFor('Budget Tracker')).toBe(colorFor('budget tracker'));
+    expect(ICON_PALETTE).toContain(colorFor('Budget Tracker'));
   });
   it('keeps only valid AI answers; the rest fall back per agent', async () => {
     const out = await pickIcons(
-      [{ id: 'a', name: 'Stock Advisor' }, { id: 'b', name: 'Taco Agent' }, { id: 'c', name: 'Zork' }],
+      [{ id: 'a', name: 'Stock Watcher' }, { id: 'b', name: 'Recipe Box' }, { id: 'c', name: 'Zork' }],
       async () => 'Sure! [{"id":"a","icon":"💹","color":"#3a8fd0"},{"id":"b","icon":"<script>","color":"#3a8fd0"},{"id":"c","icon":"🐉","color":"#123456"}]',
     );
     expect(out[0]).toEqual({ id: 'a', icon: '💹', color: '#3a8fd0', via: 'ai' });
@@ -79,8 +79,8 @@ describe('picking icons', () => {
     expect(out[2]).toMatchObject({ id: 'c', icon: '🐉', color: colorFor('Zork'), via: 'ai' }); // off-palette colour → stable pick
   });
   it('a failing AI never blocks: everything falls back', async () => {
-    const out = await pickIcons([{ id: 'a', name: 'Legal Advisor' }], async () => { throw new Error('429'); });
-    expect(out).toEqual([{ id: 'a', icon: '⚖️', color: colorFor('Legal Advisor'), via: 'keywords' }]);
+    const out = await pickIcons([{ id: 'a', name: 'Contract Reviewer' }], async () => { throw new Error('429'); });
+    expect(out).toEqual([{ id: 'a', icon: '⚖️', color: colorFor('Contract Reviewer'), via: 'keywords' }]);
   });
   it('parseChoices ignores junk', () => {
     expect(parseChoices('no json here').size).toBe(0);
@@ -91,7 +91,7 @@ describe('picking icons', () => {
 describe('clearing an agent from Alerts', () => {
   it('PATCH stores the fingerprint of what was flagged, the list carries it, and null shows it again', async () => {
     const { store, f } = await world();
-    store.insertAgent(agent('a1', 'Stock Advisor'));
+    store.insertAgent(agent('a1', 'Stock Watcher'));
     let r = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: H, payload: { attentionAck: 'rebuild:the fleet default moved\nrestart:1' } });
     expect(r.statusCode).toBe(200);
     expect(store.getAgent('a1')?.attentionAck).toBe('rebuild:the fleet default moved\nrestart:1');
@@ -109,7 +109,7 @@ describe('clearing an agent from Alerts', () => {
 describe('icon routes', () => {
   it('PATCH sets and clears an icon, and rejects a non-emoji', async () => {
     const { store, f } = await world();
-    store.insertAgent(agent('a1', 'Stock Advisor'));
+    store.insertAgent(agent('a1', 'Stock Watcher'));
     let r = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: H, payload: { icon: '📈', iconColor: '#3aa36b' } });
     expect(r.statusCode).toBe(200);
     expect(store.getAgent('a1')).toMatchObject({ icon: '📈', iconColor: '#3aa36b' });
@@ -125,22 +125,22 @@ describe('icon routes', () => {
   it('auto fills only agents without an icon, via the management AI', async () => {
     const { store, f, calls } = await world('[{"id":"a2","icon":"🌮","color":"#e0a13a"}]');
     store.insertAIProfile(PROFILE);
-    store.insertAgent(agent('a1', 'Stock Advisor', { icon: '💹' }));
-    store.insertAgent(agent('a2', 'Taco Agent'));
+    store.insertAgent(agent('a1', 'Stock Watcher', { icon: '💹' }));
+    store.insertAgent(agent('a2', 'Recipe Box'));
     const r = await f.inject({ method: 'POST', url: '/v1/agents/icons/auto', headers: H, payload: {} });
     expect(r.statusCode).toBe(200);
     expect(r.json()).toMatchObject({ assigned: 1, via: 'ai' });
     expect(store.getAgent('a1')?.icon).toBe('💹'); // chosen by the owner: untouched
     expect(store.getAgent('a2')).toMatchObject({ icon: '🌮', iconColor: '#e0a13a' });
     expect(calls).toHaveLength(1);
-    expect(calls[0]).not.toContain('Stock Advisor'); // only the ones being picked are sent
+    expect(calls[0]).not.toContain('Stock Watcher'); // only the ones being picked are sent
     await f.close();
   });
 
   it('auto without any AI source uses keywords; never touches another owner', async () => {
     const { store, f } = await world();
-    store.insertAgent(agent('a1', 'Legal Advisor'));
-    store.insertAgent({ ...agent('x1', 'Stock Advisor'), ownerId: 'someone-else' });
+    store.insertAgent(agent('a1', 'Contract Reviewer'));
+    store.insertAgent({ ...agent('x1', 'Stock Watcher'), ownerId: 'someone-else' });
     const r = await f.inject({ method: 'POST', url: '/v1/agents/icons/auto', headers: H, payload: {} });
     expect(r.json()).toMatchObject({ assigned: 1, via: 'keywords' });
     expect(store.getAgent('a1')?.icon).toBe('⚖️');
@@ -151,7 +151,7 @@ describe('icon routes', () => {
   it('redo re-picks the named agents even when they have one', async () => {
     const { store, f } = await world('[{"id":"a1","icon":"💹","color":"#3a8fd0"}]');
     store.insertAIProfile(PROFILE);
-    store.insertAgent(agent('a1', 'Stock Advisor', { icon: '📈' }));
+    store.insertAgent(agent('a1', 'Stock Watcher', { icon: '📈' }));
     const r = await f.inject({ method: 'POST', url: '/v1/agents/icons/auto', headers: H, payload: { ids: ['a1'], redo: true } });
     expect(r.json().icons).toEqual([{ id: 'a1', icon: '💹', color: '#3a8fd0' }]);
     expect(store.getAgent('a1')?.icon).toBe('💹');

@@ -301,7 +301,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // 2026.8+ (image label plugin-install=npm): a channel plugin is installed
   // into the volume as the official npm package, offline from the cache the
   // image carries, so OpenClaw's trust model accepts it ("trusted-official";
-  // a linked path is refused anything keyed — Taco Agent's Discord,
+  // a linked path is refused anything keyed — one agent's Discord,
   // 2026-09-24). The version is the one baked beside the cache. Static text:
   // nothing of the agent's goes into the line. "Already installed" is a
   // refusal, not a failure; a real failure surfaces at `plugins enable`.
@@ -701,8 +701,8 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     // No bot: turn Telegram OFF and empty its accounts, every build. The
     // config lives on the volume, so a bot this agent USED to have stayed in
     // it after the bot was moved to another agent — both containers then
-    // polled the same bot and fought over its messages (Ethernet cable fix →
-    // Genetic Algorithm Trading, 2026-09-24). Same convergent removal as
+    // polled the same bot and fought over its messages (a bot moved between
+    // two agents, 2026-09-24). Same convergent removal as
     // Slack and Discord below.
     cmds.push({ argv: ['config', 'set', 'channels.telegram.enabled', 'false'] });
     cmds.push({ argv: ['config', 'set', 'channels.telegram.accounts', '{}'] });
@@ -823,8 +823,8 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     });
   }
   // Name it what the owner calls it. `agents add` takes only the id (the
-  // slug), so the Control UI labelled every agent "stock-advisor" rather than
-  // "Stock Advisor". Cosmetic, so a failure here must not fail a provision.
+  // slug), so the Control UI labelled every agent "stock-watcher" rather than
+  // "Stock Watcher". Cosmetic, so a failure here must not fail a provision.
   if (patch.displayName) {
     cmds.push({
       argv: ['agents', 'set-identity', '--agent', patch.agentId, '--name', patch.displayName], optional: true,

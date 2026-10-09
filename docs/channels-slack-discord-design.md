@@ -97,7 +97,7 @@ export interface ChannelConnector {
   /** Talk to the platform with the pasted credentials. Throws a plain-words error. */
   verify(creds: Record<string, string>): Promise<{
     accountId: string;        // Slack: bot user id. Discord: application id.
-    displayName: string;      // "@Tax Advisor in Krueger Family"
+    displayName: string;      // "@Budget Tracker in Example Household"
     deepLink: string;         // opens a DM with the bot
     addToServerUrl?: string;  // Discord only
     warnings: string[];       // e.g. "Message Content Intent is off"
@@ -248,8 +248,8 @@ Telegram group access).
 
 - **Messaging tab**: one card per channel, same layout: mark, name, state
   line, one button.
-  - Not set up → **Set up**. Connected → "Connected as **@Tax Advisor** in
-    **Krueger Family**", **Open**, **Remove**. Problems → the warning and
+  - Not set up → **Set up**. Connected → "Connected as **@Budget Tracker** in
+    **Example Household**", **Open**, **Remove**. Problems → the warning and
     **Fix**.
   - Each card has the same "Group chats" control Telegram has (Off, Members
     only, One room + its id). Help text says where to find the id.

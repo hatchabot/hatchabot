@@ -6,7 +6,7 @@
  * absolute (`/assets/index-….js`, `/favicon.svg?v=…`). Reached through
  * `/v1/agents/<id>/ui/`, those links resolve against Hatchabot's own root,
  * the app bundle never loads, and the page's watchdog reports "Control UI
- * did not start" (Cooking Teacher, 2026-09-24). 2026.7 wrote relative links
+ * did not start" (one agent, 2026-09-24). 2026.7 wrote relative links
  * (`./assets/…`) and worked untouched.
  *
  * The gateway has a `gateway.controlUi.basePath` setting that would make it

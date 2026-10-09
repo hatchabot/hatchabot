@@ -66,7 +66,7 @@ export const pairingStorePath = (kind: ChannelKind = 'telegram') => `/home/node/
  * instead of the credentials files (tables `channel_pairing_requests` and
  * `channel_pairing_allow_entries`); the files are simply absent. Every read
  * or surgery below tries the file first, then the database — a missing file
- * is not "nothing there" (Taco Agent's Discord knock was invisible, and the
+ * is not "nothing there" (one agent's Discord knock was invisible, and the
  * owner's own first message was never claimed, 2026-09-24).
  */
 export const PAIRING_DB = '/home/node/.openclaw/state/openclaw.sqlite';

@@ -47,7 +47,7 @@ describe('internal error text never reaches the client', () => {
   it('a ProviderError answers with its user message; anything else with a fixed line', async () => {
     const f = Fastify();
     installErrorHandler(f);
-    f.get('/docker', async () => { throw new ProviderError('docker stop failed: ssh: connect to host macbook.tail1329ea.ts.net port 22', "Couldn't reach that host's Docker daemon."); });
+    f.get('/docker', async () => { throw new ProviderError('docker stop failed: ssh: connect to host laptop.tailnet-example.ts.net port 22', "Couldn't reach that host's Docker daemon."); });
     f.get('/boom', async () => { throw new Error('/var/lib/docker/volumes/hatchabot-secret-vol is full'); });
     const a = await f.inject({ method: 'GET', url: '/docker' });
     expect(a.statusCode).toBe(500);

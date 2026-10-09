@@ -118,7 +118,7 @@ describe('fleet search key: provision injection ↔ web hint', () => {
 });
 
 describe('base image carries the OCR stack (silent-fail class)', () => {
-  // Image-only PDF pages silently drop without local OCR — the condo agent
+  // Image-only PDF pages silently drop without local OCR — one agent
   // lost 7 pages of vendor approvals to exactly this. Base, not derived:
   // every agent gets handed PDFs eventually.
   it('the Dockerfile installs the PDF/OCR packages', () => {

@@ -6,7 +6,7 @@
  * waits OPENCLAW_TELEGRAM_SPOOLED_HANDLER_TIMEOUT_MS (default 300000, 5
  * minutes) for the turn to be adopted. A /compact on a 446K conversation
  * spends that long summarising before any turn starts, so it was aborted and
- * retried every ~5 minutes for hours (2026-10-04, Stock Advisor): OpenClaw only
+ * retried every ~5 minutes for hours (2026-10-04, one agent): OpenClaw only
  * dead-letters an event after 8 attempts AND 24 hours. Hatchabot gives every
  * agent 30 minutes instead, in the container's environment (applies at the
  * next rebuild; the agent's own Environment value wins).

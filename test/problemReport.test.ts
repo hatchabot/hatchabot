@@ -133,7 +133,7 @@ describe('check_known_problem (matchKnownProblems)', () => {
     expect(missed).toEqual([]);
   });
   it('the incident the Hatchabot agent got wrong is found from how it was described (2026-10-07), with the whole entry', () => {
-    const r = matchKnownProblems(process.cwd(), "taxjson QA: every message failed with 'LLM request failed (request format rejected, HTTP 400)' when the chat was switched to Claude Opus 5.5", 'v2.138.0');
+    const r = matchKnownProblems(process.cwd(), "taxkit QA: every message failed with 'LLM request failed (request format rejected, HTTP 400)' when the chat was switched to Claude Opus 5.5", 'v2.138.0');
     expect(r.matches[0]!.title).toMatch(/request format rejected, HTTP 400/);
     expect(r.matches[0]!.text).toMatch(/\*\*Check:\*\*[\s\S]*\*\*Cause:\*\*[\s\S]*\*\*Fix:\*\*/);
   });

@@ -15,7 +15,7 @@ function world() {
   const store = new Store(new Database(':memory:'));
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
   store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p1', createdAt: 'now' } as never);
-  store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Condo', slug: 'condo', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
+  store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'HOA', slug: 'hoa', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
   return store;
 }
 
@@ -31,7 +31,7 @@ describe('command owners', () => {
   });
 
   it('a removed member is taken off the owner list too', () => {
-    const script = allowlistScrubScript([{ channel: 'telegram', acct: 'condobot', id: '8001', cred: '/home/node/.openclaw/credentials/telegram-condobot-allowFrom.json' }]);
+    const script = allowlistScrubScript([{ channel: 'telegram', acct: 'hoabot', id: '8001', cred: '/home/node/.openclaw/credentials/telegram-hoabot-allowFrom.json' }]);
     expect(script).toContain('cfg.commands.ownerAllowFrom');
   });
 });

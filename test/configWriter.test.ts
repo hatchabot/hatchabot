@@ -368,7 +368,7 @@ describe('an agent without a bot converges: Telegram off, accounts emptied', () 
 });
 
 describe('session continuity (idle window + active-memory)', () => {
-  const base = { agentId: 'cross-country-agent', model: 'm', authMode: 'api-key' as const, provider: 'ollama' as const, gatewayToken: 'x' };
+  const base = { agentId: 'swim-team-agent', model: 'm', authMode: 'api-key' as const, provider: 'ollama' as const, gatewayToken: 'x' };
   it('writes a 30-day idle reset window so overnight gaps resume, not reset', () => {
     const v = argFor(buildConfigCommands(base), 'session.reset');
     expect(JSON.parse(v!)).toEqual({ mode: 'idle', idleMinutes: 43200 });
@@ -377,7 +377,7 @@ describe('session continuity (idle window + active-memory)', () => {
     const v = JSON.parse(argFor(buildConfigCommands(base), 'plugins.entries.active-memory')!);
     expect(v.enabled).toBe(true);
     expect(v.config.enabled).toBe(true);
-    expect(v.config.agents).toEqual(['cross-country-agent']); // the slug, not "main"
+    expect(v.config.agents).toEqual(['swim-team-agent']); // the slug, not "main"
     expect(v.config.allowedChatTypes).toEqual(['direct']);
     // no pinned recall model → inherits the session model
     expect(v.config.model).toBeUndefined();
@@ -386,12 +386,12 @@ describe('session continuity (idle window + active-memory)', () => {
 
 describe('the OpenClaw console shows the agent by its Hatchabot name', () => {
   // `agents add` takes only the id, so the console labelled every agent by its
-  // slug ("stock-advisor") instead of what the owner calls it.
+  // slug ("stock-watcher") instead of what the owner calls it.
   it('sets the identity name after adding the agent, and never lets it fail a provision', () => {
-    const cmds = buildConfigCommands({ agentId: 'stock-advisor', displayName: 'Stock Advisor', authMode: 'api-key' } as never);
+    const cmds = buildConfigCommands({ agentId: 'stock-watcher', displayName: 'Stock Watcher', authMode: 'api-key' } as never);
     const i = cmds.findIndex((c) => c.argv[0] === 'agents' && c.argv[1] === 'set-identity');
     expect(i).toBeGreaterThan(-1);
-    expect(cmds[i]!.argv).toEqual(['agents', 'set-identity', '--agent', 'stock-advisor', '--name', 'Stock Advisor']);
+    expect(cmds[i]!.argv).toEqual(['agents', 'set-identity', '--agent', 'stock-watcher', '--name', 'Stock Watcher']);
     expect(cmds[i]!.optional).toBe(true);
     // …and only once the agent exists.
     const add = cmds.findIndex((c) => c.argv[0] === 'agents' && c.argv[1] === 'add');
@@ -483,7 +483,7 @@ describe('channel plugins on an npm-install image (2026.8+ trust model)', () => 
     // Each app's file ceiling (OpenClaw's own 5 MB dropped a 5.2 MB PDF in silence, 2026-09-27).
     expect(argFor(cmds, 'channels.slack.mediaMaxMb')).toBe('100');
     expect(argFor(cmds, 'channels.discord.mediaMaxMb')).toBe('10');
-    const tg = buildConfigCommands({ ...base, telegram: { accountId: 'tacobot', botToken: 'fake-token-T', dmPolicy: 'pairing', allowFrom: [] } } as never);
+    const tg = buildConfigCommands({ ...base, telegram: { accountId: 'recipebot', botToken: 'fake-token-T', dmPolicy: 'pairing', allowFrom: [] } } as never);
     expect(argFor(tg, 'channels.telegram.mediaMaxMb')).toBe('50');
     expect(JSON.parse(argFor(cmds, 'channels.discord.accounts')!).hatchabot.dmPolicy).toBe('pairing'); // absent = pairing, as before
     const raw = cmds.map((c) => c.rawShell ?? '').join('\n');

@@ -223,8 +223,8 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // that risk. Own bots first, so house stock is preserved for newcomers.
     // Prefer a bot we can still RENAME. Telegram's setMyName quota is per bot
     // and measured in hours, so a bot that was just renamed cannot take the new
-    // agent's name — and a bot serving "Tax Advisor" while Telegram still calls
-    // it "Condo Adviser" is worse than a bot with a plain name. When every free
+    // agent's name — and a bot serving "Budget Tracker" while Telegram still calls
+    // it "HOA Helper" is worse than a bot with a plain name. When every free
     // bot is rate-limited this changes nothing; there is simply no better pick.
     const free = (
       this.db

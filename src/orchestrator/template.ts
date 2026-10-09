@@ -215,8 +215,8 @@ export async function exportTemplate(
     agent: { name: agent.name, persona: agent.persona, sharedMemory: agent.sharedMemory, icon: agent.icon, iconColor: agent.iconColor },
     files,
     ai: { vendor: profile?.vendor ?? 'anthropic' },
-    // agentTurn crons travel as DECLARATIONS (name/schedule/message) — the
-    // Stock Broker's briefings arrive scheduled. Command crons carry scripts
+    // agentTurn crons travel as DECLARATIONS (name/schedule/message) — a daily
+    // briefing's crons arrive scheduled. Command crons carry scripts
     // and stay behind. Best-effort: an unreadable cron list exports none.
     schedules: (await listCrons(provider, agent.runtimeRef, agent.slug).catch(() => []))
       // enabled only: a task the owner deliberately switched off must not
@@ -283,8 +283,8 @@ process.stdout.write(JSON.stringify({ files, skipped }));
 
 /**
  * What a clone takes from its source beyond MEMORY.md: USER.md and the daily
- * notes under memory/. That is where agents keep most of what they save — the
- * Condo Adviser's memory/ holds 624 KB beside a 3.7 KB MEMORY.md — so a clone
+ * notes under memory/. That is where agents keep most of what they save — one
+ * agent's memory/ holds 624 KB beside a 3.7 KB MEMORY.md — so a clone
  * of MEMORY.md alone was not the faithful copy it promised (2026-09-30). Only
  * clones read this: the owner copying their own agent. Shared copies never
  * carry it. One exec; a failure copies nothing and says so.

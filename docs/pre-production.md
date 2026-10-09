@@ -152,7 +152,7 @@ vacuous — any reset of a day-old session satisfies it.
   message, or the `sessions.reset` gateway RPC. There is no timer.
 - Only 9 resets exist across this installation's whole history.
 - 7 of the 9 had no Hatchabot operation on that agent within 8–29 hours.
-- The 2 on Art Advisor landed 11s and 15s after a container replacement — but
+- The 2 on Piano Practice landed 11s and 15s after a container replacement — but
   there have been 298 `runtime.rebuilt` events in total, so replacement plainly
   does not reset a session as a rule.
 - Archiving never deletes a transcript. The previous one is kept beside the new
@@ -162,7 +162,7 @@ vacuous — any reset of a day-old session satisfies it.
 are a `/new` or `/reset` typed in the chat, and something specific to the
 container-replacement path that fires only sometimes.
 
-**The decisive test, run 2026-08-31:** Art Advisor was archived mid-conversation
+**The decisive test, run 2026-08-31:** Piano Practice was archived mid-conversation
 (about Van Gogh), restored, left alone for five minutes, then messaged in the
 existing chat with no command. The thread survived intact — same session id,
 no new `.reset.` file, the Van Gogh exchange still in context. Messaged 11s,
@@ -189,7 +189,7 @@ comes back starts a new session.
 with the outgoing transcript's messages, the natural place to hang a
 checkpoint — so a `/new` or `/reset` typed in the chat still loses the thread
 with no checkpoint. `MEMORY.md` is written only if the agent chooses to write
-it (on Art Advisor it was still the 166-byte stub), so a chat-initiated reset
+it (on Piano Practice it was still the 166-byte stub), so a chat-initiated reset
 takes the only copy of that context.
 
 ---

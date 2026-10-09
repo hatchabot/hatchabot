@@ -36,24 +36,24 @@ async function world(opts: { guestNewest?: boolean } = {}) {
     id, ownerId: OWNER, name, slug, state, aiProfileId: 'p1', hostId: 'h1', runtimeRef: `mock://${id}`,
     persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now',
   } as never);
-  agent('r-lunch', 'Lunch Agent', 'lunch');
+  agent('r-lunch', 'Lunch Picker', 'lunch');
   const GKEY = guestConsoleSessionKey(store.ensureGatewayAccess('r-lunch').token, 'lunch', GUEST);
   sessions['mock://r-lunch'] = {
     'agent:lunch:main': { updatedAt: now - 2 * 60_000, lastChannel: 'webchat' },
     [GKEY]: { updatedAt: now - (opts.guestNewest ? 1 : 10) * 60_000, lastChannel: 'webchat' },
   };
-  sessions['mock://r-tax'] = { 'agent:tax:cron:j1': { updatedAt: now - 14 * 60_000 } };
+  sessions['mock://r-ledger'] = { 'agent:ledger:cron:j1': { updatedAt: now - 14 * 60_000 } };
   lines['mock://r-lunch'] = {
     'agent:lunch:main': { role: 'assistant', text: 'Booked **Thursday** at Pasta Place' },
     [GKEY]: { role: 'user', text: opts.guestNewest ? 'hello there' : 'is there a vegetarian option?' },
   };
-  lines['mock://r-tax'] = { 'agent:tax:cron:j1': { role: 'assistant', text: 'summary', task: 'Daily brief' } };
-  agent('r-tax', 'Tax Helper', 'tax');
-  agent('r-sleepy', 'Stock Advisor', 'stocks', 'STOPPED');
+  lines['mock://r-ledger'] = { 'agent:ledger:cron:j1': { role: 'assistant', text: 'summary', task: 'Daily brief' } };
+  agent('r-ledger', 'Ledger Helper', 'ledger');
+  agent('r-sleepy', 'Stock Watcher', 'stocks', 'STOPPED');
   store.setHibernated('r-sleepy', new Date(now - 3600_000).toISOString());
   // Its line from before it fell asleep, as the tracker stored it.
   store.setAgentRecent('r-sleepy', { lastActiveAt: now - 3 * 3600_000, sessions: { 'agent:stocks:cron:b': { at: now - 3 * 3600_000, role: 'assistant', text: 'markets up', task: 'Morning brief' } } });
-  agent('r-old', 'Cooking Teacher', 'cook', 'STOPPED');
+  agent('r-old', 'Meal Planner', 'cook', 'STOPPED');
   store.setAgentRecent('r-old', { lastActiveAt: now - 9 * 86_400_000, sessions: {} });
   store.insertMembership({ id: 'm1', agentId: 'r-lunch', userId: GUEST, role: 'user', displayName: 'Sam', status: 'active', webChat: true });
   store.insertMembership({ id: 'm2', agentId: 'r-lunch', userId: MEMBER, role: 'user', displayName: 'Robin', channelUserId: '4242', status: 'active' });
@@ -73,9 +73,9 @@ describe('GET /v1/recent', () => {
     await w.settle(OWNER);
     const { items, total, cap } = await w.recent(OWNER);
     expect(cap).toBe(8);
-    expect(items.map((i) => i.id)).toEqual(['r-lunch', 'r-tax', 'r-sleepy']);
+    expect(items.map((i) => i.id)).toEqual(['r-lunch', 'r-ledger', 'r-sleepy']);
     expect(total).toBe(3);
-    expect(items[0]).toMatchObject({ name: 'Lunch Agent', line: 'Booked Thursday at Pasta Place', by: 'agent' });
+    expect(items[0]).toMatchObject({ name: 'Lunch Picker', line: 'Booked Thursday at Pasta Place', by: 'agent' });
     expect(items[1]).toMatchObject({ line: '⏰ Daily brief ran', by: 'task' });
     expect(items[2]).toMatchObject({ line: '⏰ Morning brief ran', asleep: true });
   });
@@ -152,13 +152,13 @@ describe('GET /v1/recent', () => {
 describe('a machine that does not answer (2026-10-04)', () => {
   it('the agent list does not wait for it: it answers in a few seconds and fills that agent in later', async () => {
     const w = await world();
-    // r-tax's machine hangs: its sessions read never returns (a laptop asleep).
+    // r-ledger's machine hangs: its sessions read never returns (a laptop asleep).
     const real = w.execShell.getMockImplementation()!;
     let release: (() => void) | undefined;
     w.execShell.mockImplementation(async (ref: string, script: string) => {
-      if (ref === 'mock://r-tax' && script.includes('sessions.json')) {
+      if (ref === 'mock://r-ledger' && script.includes('sessions.json')) {
         await new Promise<void>((r) => { release = r; });
-        return { code: 0, stdout: JSON.stringify({ 'agent:tax:cron:j1': { updatedAt: Date.now() } }), stderr: '' } as never;
+        return { code: 0, stdout: JSON.stringify({ 'agent:ledger:cron:j1': { updatedAt: Date.now() } }), stderr: '' } as never;
       }
       return real(ref, script);
     });
@@ -167,12 +167,12 @@ describe('a machine that does not answer (2026-10-04)', () => {
     const took = Date.now() - t0;
     expect(r.statusCode).toBe(200);
     expect(took).toBeLessThan(10_000);
-    const tax = (r.json() as Array<{ id: string; lastActiveAt?: string }>).find((a) => a.id === 'r-tax')!;
+    const tax = (r.json() as Array<{ id: string; lastActiveAt?: string }>).find((a) => a.id === 'r-ledger')!;
     expect(tax.lastActiveAt).toBeUndefined();
     release!();
     await new Promise((res) => setTimeout(res, 30));
     const again = (await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) })).json() as Array<{ id: string; lastActiveAt?: string }>;
-    expect(again.find((a) => a.id === 'r-tax')!.lastActiveAt).toBeTruthy();
+    expect(again.find((a) => a.id === 'r-ledger')!.lastActiveAt).toBeTruthy();
   }, 20_000);
 });
 
@@ -182,14 +182,14 @@ describe('a machine whose agent check hangs (2026-10-04)', () => {
     const realInfo = w.provider.info.bind(w.provider);
     let calls = 0;
     vi.spyOn(w.provider, 'info').mockImplementation(async (ref?: string) => {
-      if (ref === 'mock://r-tax') { calls++; return new Promise(() => {}) as never; } // a laptop that never answers
+      if (ref === 'mock://r-ledger') { calls++; return new Promise(() => {}) as never; } // a laptop that never answers
       return realInfo(ref);
     });
     const t0 = Date.now();
     const r = await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) });
     expect(r.statusCode).toBe(200);
     expect(Date.now() - t0).toBeLessThan(10_000);
-    expect((r.json() as Array<{ id: string }>).map((a) => a.id)).toContain('r-tax');
+    expect((r.json() as Array<{ id: string }>).map((a) => a.id)).toContain('r-ledger');
     const before = calls;
     const t1 = Date.now();
     await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) });
@@ -197,9 +197,9 @@ describe('a machine whose agent check hangs (2026-10-04)', () => {
     expect(calls).toBe(before);
     // Every agent on that machine says its machine isn't answering (here the test world has one machine).
     const list = (await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) })).json() as Array<{ id: string; hostUnreachable?: boolean; state: string }>;
-    expect(list.find((a) => a.id === 'r-tax')!.hostUnreachable).toBe(true);
+    expect(list.find((a) => a.id === 'r-ledger')!.hostUnreachable).toBe(true);
     // Its console answers in words, at once, instead of a JSON error.
-    const ui = await w.f.inject({ method: 'GET', url: '/v1/agents/r-tax/ui/', headers: as(OWNER) });
+    const ui = await w.f.inject({ method: 'GET', url: '/v1/agents/r-ledger/ui/', headers: as(OWNER) });
     expect(ui.statusCode).toBe(503);
     expect(ui.headers['content-type']).toMatch(/text\/html/);
     expect(ui.body).toMatch(/isn(&#39;|&#x27;|')t answering/);

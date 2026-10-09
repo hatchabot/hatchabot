@@ -167,7 +167,7 @@ describe('the 2026.9 Control UI page works from under the proxy prefix', () => {
   // OpenClaw 2026.9 writes root-absolute asset links and an empty base path
   // into its page. Reached through /v1/agents/<id>/ui/ those pointed at
   // Hatchabot's own root, the bundle never loaded, and the page reported
-  // "Control UI did not start" (Cooking Teacher, 2026-09-24).
+  // "Control UI did not start" (one agent, 2026-09-24).
   const owner = { 'x-hatchabot-owner': OWNER };
   const withOwnerHeader = async <T,>(fn: () => Promise<T>): Promise<T> => {
     const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
@@ -279,7 +279,7 @@ describe('approving the console for a new browser', () => {
   });
 
   it('no pending store at all (2026.9 keeps them in its database) means ask the CLI, not "nothing pending"', async () => {
-    // Cooking Teacher, 2026-09-24: the file the fast path read is gone on
+    // One agent, 2026-09-24: the file the fast path read is gone on
     // 2026.9; taking that for "nobody waiting" left the browser on "Approve
     // this browser" for good.
     const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;

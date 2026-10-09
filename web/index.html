@@ -1386,14 +1386,14 @@
     <div style="margin-top:8px">
       <label>Workspace folder <span style="color:var(--dim)">(an absolute path on this machine)</span></label>
       <div style="display:flex;gap:8px">
-        <input type="text" id="adoptPath" placeholder="/home/you/.openclaw/workspace-tech-advisor" style="flex:1"
+        <input type="text" id="adoptPath" placeholder="/home/you/.openclaw/workspace-garden-advisor" style="flex:1"
                onkeydown="if(event.key==='Enter'){event.preventDefault();adoptInspect()}">
         <button id="adoptInspectBtn" onclick="adoptInspect()" style="width:auto">Inspect</button>
       </div>
       <div id="adoptPreview" style="margin-top:10px"></div>
       <div id="adoptForm" hidden>
         <label>Name for the managed agent</label>
-        <input type="text" id="adoptName" placeholder="Tech Advisor" maxlength="64">
+        <input type="text" id="adoptName" placeholder="Garden Advisor" maxlength="64">
         <div id="adoptBotArea" style="margin-top:12px"></div>
         <div class="actions" style="justify-content:flex-end;margin-top:8px">
           <button class="primary" id="adoptBtn" onclick="runAdopt()" disabled>Bring it in</button>
@@ -6981,7 +6981,7 @@ async function adoptInspect() {
         <div class="sub" style="margin-top:2px">${p.files.length} files · ${(p.bytes / 1e6).toFixed(1)} MB · ${md.length} markdown${md.length ? `: ${esc(shown)}` : ''}</div>
         ${skip}
       </div>`;
-    // Suggest a name from the folder: "…/workspace-tech-advisor" → "Tech Advisor".
+    // Suggest a name from the folder: "…/workspace-garden-advisor" → "Garden Advisor".
     if (!$('adoptName').value) {
       const base = (p.path.split('/').pop() || '').replace(/^workspace-/, '').replace(/[-_]+/g, ' ').trim();
       if (base) $('adoptName').value = base.replace(/\b\w/g, c => c.toUpperCase());
@@ -9637,7 +9637,7 @@ function editCronJob(id) {
   note.style.display = '';
   note.innerHTML = `Editing <b>${esc(c.name || '(unnamed task)')}</b> — <button type="button" class="linkish" onclick="cancelCronEdit()">cancel</button>`;
   // The form sits under the list: with a dozen tasks it is off-screen, and
-  // Edit looked like it did nothing (Stock Advisor, 2026-09-26). Bring it up.
+  // Edit looked like it did nothing (one agent, 2026-09-26). Bring it up.
   note.scrollIntoView({ block: 'start', behavior: 'smooth' });
   setTimeout(() => $('cronName').focus(), 250);
   toast(`"${c.name || 'The task'}" is in the form below — change it and Save.`, 4000);

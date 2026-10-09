@@ -15,7 +15,7 @@ preview (what will copy, what's skipped, the bot it already owns) before you
 confirm. Or from the command line:
 
 ```sh
-hatchabot adopt ~/.openclaw/workspace-tech-advisor "Tech Advisor"
+hatchabot adopt ~/.openclaw/workspace-garden-advisor "Garden Advisor"
 ```
 
 Either way it shows what it found, creates a managed agent (asking for a
@@ -41,7 +41,7 @@ and points you at folder sharing — bulk data
 belongs in a folder the agent *reads*, not in a copy the agent *owns*:
 
 ```sh
-hatchabot folders "Tech Advisor" add ~/condo-documents
+hatchabot folders "Garden Advisor" add ~/condo-documents
 ```
 
 ### Without Telegram
@@ -49,7 +49,7 @@ hatchabot folders "Tech Advisor" add ~/condo-documents
 An agent doesn't need a Telegram bot: its web console is a full chat.
 
 ```sh
-hatchabot adopt ~/.openclaw/workspace-tech-advisor "Tech Advisor" --no-telegram
+hatchabot adopt ~/.openclaw/workspace-garden-advisor "Garden Advisor" --no-telegram
 ```
 
 brings it in web-only. You talk to it from its icon in the web app, it costs
@@ -65,7 +65,7 @@ many agents you can run — not CPU or memory. A workspace you are adopting
 almost always already owns a bot, so:
 
 ```sh
-hatchabot adopt ~/.openclaw/workspace-conf-advisor "Conference Advisor" --reuse-bot
+hatchabot adopt ~/.openclaw/workspace-event-planner "Event Planner" --reuse-bot
 ```
 
 takes that bot over. It costs no new slot, and everyone who already messages

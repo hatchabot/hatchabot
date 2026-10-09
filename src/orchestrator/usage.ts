@@ -11,9 +11,9 @@ import type { RuntimeProvider } from '../providers/provider.js';
  * `totalTokens` — which OpenClaw sets to the size of the conversation's
  * context at its LAST call, not a running total. The usage views then
  * counted context growth: a 400K-token conversation making a thousand calls
- * a day barely registered (Meeting Scheduler QA: 540M tokens on 09-27, shown
+ * a day barely registered (one QA agent: 540M tokens on 09-27, shown
  * as almost nothing), while a new or woken conversation counted its whole
- * context as fresh use (Cooking Teacher's 72K on a day it did nothing).
+ * context as fresh use (one agent's 72K on a day it did nothing).
  *
  * Every agent in the container counts (the Hatchabot agent and OpenClaw's
  * default "main", whose heartbeats and Control UI turns spend the same plan).

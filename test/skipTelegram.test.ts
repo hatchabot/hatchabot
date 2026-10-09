@@ -16,7 +16,7 @@ async function box() {
   const store = new Store(new Database(':memory:'));
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
   store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p1', createdAt: 'now' } as never);
-  store.insertAgent({ id: 'lunch', ownerId: OWNER, name: 'Lunch Agent', slug: 'lunch-agent', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, webOnly: false, createdAt: 'now', updatedAt: 'now' } as never);
+  store.insertAgent({ id: 'lunch', ownerId: OWNER, name: 'Lunch Picker', slug: 'lunch-picker', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, webOnly: false, createdAt: 'now', updatedAt: 'now' } as never);
   store.setAgentPendingAction('lunch', { type: 'bot_token', instructions: 'paste it' } as never);
   const f = Fastify();
   await registerRoutes(f, { store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} }, providers: new Map([['mock', new MockProvider()]]), channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0 } } } as never);

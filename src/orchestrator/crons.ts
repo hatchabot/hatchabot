@@ -209,7 +209,7 @@ export const consoleSessionKey = (slug: string): string => `agent:${slug}:main`;
  *
  * An agent in no chat app gets its console conversation instead: the owner
  * talks to it only there, and a daily reminder that went nowhere was the
- * complaint (Lunch Agent, 2026-09-30). Undefined = an agent in a chat app
+ * complaint (one agent, 2026-09-30). Undefined = an agent in a chat app
  * whose owner's id there is not known yet: nowhere safe to post, so its tasks
  * stay quiet (their runs are read in the app).
  */
@@ -329,7 +329,7 @@ export function msToEvery(ms: number): string {
 /**
  * Create a scheduled task. The one verb this module lacked — Hatchabot could
  * list/enable/run/delete crons but nothing could CREATE one, so a definition
- * that *describes* a schedule (the Stock Broker's 8am briefing) never actually
+ * that *describes* a schedule (one agent's 8am briefing) never actually
  * fired (audit backlog; surfaced by Chris 2026-09-04).
  */
 export async function addCron(

@@ -16,7 +16,7 @@ import type { SecretStore } from '../src/secrets/secretStore.js';
 
 const root = mkdtempSync(join(tmpdir(), 'hb-oc-entries-'));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
-const ws = join(root, 'workspace-tech-advisor');
+const ws = join(root, 'workspace-garden-advisor');
 mkdirSync(ws, { recursive: true });
 
 const cfgPath = join(root, 'openclaw.json');
@@ -25,12 +25,12 @@ writeFileSync(cfgPath, JSON.stringify({
     defaults: { model: 'x' },
     ownership: {},
     entries: {
-      'tech-advisor': { workspace: ws, agentDir: `${ws}/agent` },
+      'garden-advisor': { workspace: ws, agentDir: `${ws}/agent` },
       main: {},
     },
   },
-  bindings: [{ agentId: 'tech-advisor', match: { channel: 'telegram', accountId: 'TechAdvBot' } }],
-  channels: { telegram: { accounts: { TechAdvBot: { botToken: '4242:fake-test-token', allowFrom: ['1000000001'] } } } },
+  bindings: [{ agentId: 'garden-advisor', match: { channel: 'telegram', accountId: 'GardenAdvisorBot' } }],
+  channels: { telegram: { accounts: { GardenAdvisorBot: { botToken: '4242:fake-test-token', allowFrom: ['1000000001'] } } } },
 }));
 
 class NoSecrets implements SecretStore {
@@ -49,15 +49,15 @@ describe('agents.entries (OpenClaw 2026.8+) as well as agents.list', () => {
 
   it('discover lists the agents', async () => {
     const found = await discoverOpenclawAgents({ store: new Store(new Database(':memory:')), secrets: new NoSecrets() }, cfgPath);
-    const tech = found.find((a) => a.id === 'tech-advisor');
-    expect(tech?.bot?.accountId).toBe('TechAdvBot');
+    const tech = found.find((a) => a.id === 'garden-advisor');
+    expect(tech?.bot?.accountId).toBe('GardenAdvisorBot');
   });
 
   it('adopt finds the existing bot', () => {
-    expect(findExistingBot(ws, cfgPath)?.sourceAgentId).toBe('tech-advisor');
+    expect(findExistingBot(ws, cfgPath)?.sourceAgentId).toBe('garden-advisor');
   });
 
   it('cron import resolves the agent id', () => {
-    expect(openclawAgentEntryForWorkspace(ws, cfgPath)?.id).toBe('tech-advisor');
+    expect(openclawAgentEntryForWorkspace(ws, cfgPath)?.id).toBe('garden-advisor');
   });
 });

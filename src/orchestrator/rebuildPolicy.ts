@@ -54,7 +54,7 @@ export interface RebuildNeed {
  * The image reason in the owner's terms. "A newer runtime image is available"
  * read as news about the world; on an agent that already follows the fleet
  * default it needs to say what the rebuild changes: the default moved to
- * another OpenClaw and this container still runs the old one (Stock Broker
+ * another OpenClaw and this container still runs the old one (one agent
  * and four more after the 2026.9.6 promotion, 2026-09-24), or the default was
  * rebuilt on the same version.
  */

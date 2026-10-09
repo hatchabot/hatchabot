@@ -6,7 +6,7 @@ sharing (a template that carries the manifest).*
 
 Some agents are mostly a program: a loop that reads mail, keeps records and
 sends replies, with a model only where judgement on free-form input is needed.
-Meeting Scheduler is the first: rewritten from an AI agent that ran at about $1,700
+Calendar Helper is the first: rewritten from an AI agent that ran at about $1,700
 a month at API prices (about $2,700 with its QA agent) into a Python program that costs cents, it runs
 inside an ordinary Hatchabot agent as a scheduled command. This is how any such
 codebase gets deployed, updated and rolled back from Hatchabot.
@@ -30,8 +30,8 @@ codebase gets deployed, updated and rolled back from Hatchabot.
 
 ```json
 {
-  "app": "meetingscheduler",
-  "name": "Meeting Scheduler",
+  "app": "calendarhelper",
+  "name": "Calendar Helper",
   "description": "Schedules meetings and runs board votes by email.",
   "model": "claude-haiku-4-5",
   "chat": "You are the owner's control panel for {name}. Run `cd {app_dir} && {env} python3 -m msched status` …",
@@ -85,7 +85,7 @@ codebase gets deployed, updated and rolled back from Hatchabot.
 
 1. Hatchabot reads the source **on the host** (only the machine's owner can do
    this; it uses the host's paths and git credentials): a local repo folder
-   (`~/meetingscheduler`) or a git URL (cloned into
+   (`~/calendarhelper`) or a git URL (cloned into
    `~/hatchabot-data/app-sources/`). It resolves the ref (default `HEAD`) to a
    commit and reads `hatchabot.json` from that commit.
 2. It copies `git archive <sha>` into `releases/<sha>` on the agent's volume.

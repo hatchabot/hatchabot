@@ -4,17 +4,17 @@ import { buildGitSyncScript, normalizeGitUrl, gitSyncReason, buildPublicGitSyncS
 describe('normalizeGitUrl', () => {
   it('normalizes ssh, ssh://, and https forms to the ssh clone URL', () => {
     for (const input of [
-      'git@github.com:cksci/portoml-ai-defs.git',
-      'git@github.com:cksci/portoml-ai-defs',
-      'https://github.com/cksci/portoml-ai-defs',
-      'https://github.com/cksci/portoml-ai-defs.git',
-      'ssh://git@github.com/cksci/portoml-ai-defs.git',
+      'git@github.com:example-owner/household-ai-defs.git',
+      'git@github.com:example-owner/household-ai-defs',
+      'https://github.com/example-owner/household-ai-defs',
+      'https://github.com/example-owner/household-ai-defs.git',
+      'ssh://git@github.com/example-owner/household-ai-defs.git',
     ]) {
       expect(normalizeGitUrl(input)).toEqual({
-        sshUrl: 'git@github.com:cksci/portoml-ai-defs.git',
-        httpsUrl: 'https://github.com/cksci/portoml-ai-defs.git',
+        sshUrl: 'git@github.com:example-owner/household-ai-defs.git',
+        httpsUrl: 'https://github.com/example-owner/household-ai-defs.git',
         host: 'github.com',
-        repoName: 'portoml-ai-defs',
+        repoName: 'household-ai-defs',
       });
     }
   });
@@ -29,9 +29,9 @@ describe('normalizeGitUrl', () => {
   it('rejects junk, traversal, and shell metacharacters', () => {
     for (const bad of [
       'not a url',
-      'github.com/cksci/repo', // no scheme/user
-      'git@github.com:cksci/../secret.git',
-      'git@github.com:cksci/re;po.git',
+      'github.com/example-owner/repo', // no scheme/user
+      'git@github.com:example-owner/../secret.git',
+      'git@github.com:example-owner/re;po.git',
       'https://github.com/onlyowner',
       '',
     ]) {
@@ -42,9 +42,9 @@ describe('normalizeGitUrl', () => {
 
 describe('buildGitSyncScript', () => {
   const script = buildGitSyncScript(
-    { mountName: 'defs', sshUrl: 'git@github.com:cksci/defs.git', host: 'github.com' },
+    { mountName: 'defs', sshUrl: 'git@github.com:example-owner/defs.git', host: 'github.com' },
     'QkFTRTY0',
-    { name: 'Stock Advisor', email: 'stock-advisor@hatchabot.local' },
+    { name: 'Stock Watcher', email: 'stock-watcher@example.org' },
   );
 
   it('writes the key, pins the host, and clones only when absent', () => {
@@ -52,13 +52,13 @@ describe('buildGitSyncScript', () => {
     expect(script).toContain('base64 -d'); // key written from base64
     expect(script).toContain('ssh-keyscan');
     expect(script).toContain("if [ ! -d '/home/node/.openclaw/defs'/.git ]"); // idempotent clone
-    expect(script).toContain("git clone 'git@github.com:cksci/defs.git'");
+    expect(script).toContain("git clone 'git@github.com:example-owner/defs.git'");
     expect(script).toContain('core.sshCommand');
-    expect(script).toContain("user.email 'stock-advisor@hatchabot.local'");
+    expect(script).toContain("user.email 'stock-watcher@example.org'");
   });
 
   it('shell-quotes the commit name so spaces are safe', () => {
-    expect(script).toContain("user.name 'Stock Advisor'");
+    expect(script).toContain("user.name 'Stock Watcher'");
   });
 });
 

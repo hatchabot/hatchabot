@@ -45,7 +45,7 @@ describe('inspectWorkspace', () => {
 
   it('counts subdirectories, because that is what gets copied', () => {
     // A real workspace keeps daily notes in memory/ and work in projects/.
-    // Counting only the top level understated tech-advisor as 8 files when
+    // Counting only the top level understated garden-advisor as 8 files when
     // the copy actually moved 17.
     const p = inspectWorkspace(ws);
     expect(p.files).toContain('memory/2026-06-14.md');
@@ -111,15 +111,15 @@ describe('reusing the bot a workspace already owns', () => {
     writeFileSync(p, JSON.stringify({
       agents: { list: [
         { id: 'main' },
-        { id: 'tech-advisor', workspace: dir, agentDir: dir + '/agent' },
+        { id: 'garden-advisor', workspace: dir, agentDir: dir + '/agent' },
       ] },
       bindings: [
         { type: 'route', agentId: 'other', match: { channel: 'telegram', accountId: 'OtherBot' } },
-        { type: 'route', agentId: 'tech-advisor', match: { channel: 'telegram', accountId: 'TechAdvBot' } },
+        { type: 'route', agentId: 'garden-advisor', match: { channel: 'telegram', accountId: 'GardenAdvisorBot' } },
       ],
       channels: { telegram: { accounts: {
         OtherBot: { botToken: 'nope' },
-        TechAdvBot: { botToken: '123:secret', allowFrom: ['1000000001', 'bogus'] },
+        GardenAdvisorBot: { botToken: '123:secret', allowFrom: ['1000000001', 'bogus'] },
       } } },
     }));
     return p;
@@ -127,9 +127,9 @@ describe('reusing the bot a workspace already owns', () => {
 
   it('resolves workspace -> agent -> binding -> token', () => {
     const found = findExistingBot(ws, cfgFor(ws));
-    expect(found?.accountId).toBe('TechAdvBot');
+    expect(found?.accountId).toBe('GardenAdvisorBot');
     expect(found?.botToken).toBe('123:secret');
-    expect(found?.sourceAgentId).toBe('tech-advisor');
+    expect(found?.sourceAgentId).toBe('garden-advisor');
   });
 
   it('carries only well-formed Telegram ids, so the owner skips pairing', () => {

@@ -2895,7 +2895,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (woken.state !== 'RUNNING') return woken;
     const provider = providerFor(woken.hostId);
     // A 2026.9 gateway takes 20–60 s to answer on a loaded box: the first console
-    // open after a sleep timed out at 45 s (Meeting Scheduler, 2026-09-26).
+    // open after a sleep timed out at 45 s (one agent, 2026-09-26).
     const deadline = Date.now() + Number(process.env.HATCHABOT_WAKE_TIMEOUT_MS ?? 120_000);
     while (Date.now() < deadline) {
       const st = await provider.status(woken.runtimeRef!).catch(() => undefined);
@@ -6370,14 +6370,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Tailscale Serve adds X-Forwarded-For/-Proto) describe THAT hop, not
     // this one. OpenClaw 2026.9 refuses gateway-authenticated routes that
     // carry forwarded claims from an address it does not trust
-    // ("proxy_attribution_required" — History Teacher, 2026-09-24), and
+    // ("proxy_attribution_required" — one agent, 2026-09-24), and
     // 2026.7 already warned about them. They never belonged to the gateway.
     for (const k of Object.keys(h)) {
       const l = k.toLowerCase();
       // Tailscale Serve/Funnel adds Tailscale-User-Login and friends; 2026.9's
       // gateway counts "Tailscale-owned" headers as proxy-shaped too
       // (resolveGatewayIngressAttribution: forwarded OR Tailscale headers
-      // from an untrusted address → refused). Meeting Scheduler, 2026-09-24.
+      // from an untrusted address → refused). Seen on one agent, 2026-09-24.
       if (l.startsWith('x-forwarded-') || l.startsWith('tailscale-') || l === 'forwarded' || l === 'x-real-ip' || l === 'via' || l === 'x-client-ip' || l === 'true-client-ip' || l === 'cf-connecting-ip') delete h[k];
     }
     return h;

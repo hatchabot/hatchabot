@@ -15,7 +15,7 @@ function seed() {
   const store = new Store(new Database(':memory:'));
   store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
   store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
-  store.insertAgent({ id: 'a1', ownerId: 'o', name: 'Mom Finances', slug: 'mom', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
+  store.insertAgent({ id: 'a1', ownerId: 'o', name: 'Household Finances', slug: 'finances', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
   store.insertChannel({ id: 'ch1', agentId: 'a1', kind: 'telegram', accountId: 'mombot', secretRef: 'channel/a1', deepLink: 'https://t.me/mombot', createdAt: 'now' } as any);
   return store;
 }

@@ -1,7 +1,7 @@
 /**
  * What a shared copy of an agent says about real people. A template carries
  * the agent's instructions and its scheduled tasks' messages, and agents
- * write personal notes into their own AGENTS.md: the Condo Adviser's would
+ * write personal notes into their own AGENTS.md: one agent's would
  * have carried 13 email addresses, its owner's among them (review,
  * 2026-09-30). Nothing can tell a note that must stay from one that must
  * not, so this only finds and counts them, and the owner reads before sending.

@@ -3,7 +3,7 @@ import { buildConfigCommands, channelPluginDir, describeConfigCommands } from '.
 
 /** Slack and Discord in OpenClaw's config: only where the image has the plugin, and convergent. */
 
-const base = { agentId: 'tax', model: 'm', authMode: 'api-key' as const };
+const base = { agentId: 'ledger', model: 'm', authMode: 'api-key' as const };
 const argvs = (p: Parameters<typeof buildConfigCommands>[0]) => buildConfigCommands(p).map((c) => c.argv.join(' '));
 const sets = (p: Parameters<typeof buildConfigCommands>[0]) =>
   Object.fromEntries(buildConfigCommands(p).filter((c) => c.argv[0] === 'config' && c.argv[1] === 'set').map((c) => [c.argv[2], c.argv[3]]));
@@ -30,11 +30,11 @@ describe('channel config', () => {
     expect(JSON.parse(s['channels.slack.accounts']!)).toEqual({
       hatchabot: { enabled: true, botToken: 'xoxb-secret', appToken: 'xapp-secret', dmPolicy: 'pairing', allowFrom: ['U1'] },
     });
-    expect(a).toContain('agents bind --agent tax --bind slack:hatchabot');
+    expect(a).toContain('agents bind --agent ledger --bind slack:hatchabot');
     // Discord is in the image but not set up: switched off and emptied.
     expect(s['channels.discord.enabled']).toBe('false');
     expect(s['channels.discord.accounts']).toBe('{}');
-    expect(a).toContain('agents unbind --agent tax --bind discord:hatchabot');
+    expect(a).toContain('agents unbind --agent ledger --bind discord:hatchabot');
     expect(buildConfigCommands(p).find((c) => c.argv[1] === 'unbind')?.optional).toBe(true);
   });
 

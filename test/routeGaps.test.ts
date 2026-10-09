@@ -245,7 +245,7 @@ describe('agent connections (gog accounts)', () => {
   const GOG_LIST = JSON.stringify({
     accounts: [
       { email: 'chris@example.com', client: 'default', auth: 'oauth', error: 'no TTY for keyring probe' },
-      { email: 'board@example.com', client: 'condo', auth: 'oauth' },
+      { email: 'board@example.com', client: 'hoa', auth: 'oauth' },
     ],
   });
 
@@ -256,7 +256,7 @@ describe('agent connections (gog accounts)', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().accounts).toEqual([
       { email: 'chris@example.com', client: 'default', auth: 'oauth' },
-      { email: 'board@example.com', client: 'condo', auth: 'oauth' },
+      { email: 'board@example.com', client: 'hoa', auth: 'oauth' },
     ]);
     expect(res.body).not.toContain('TTY'); // probe-shell noise never surfaces
 

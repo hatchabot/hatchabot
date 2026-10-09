@@ -4,7 +4,7 @@
  * OpenClaw pins that runtime on every session it served. The pin outlives the
  * switch: a rebuild re-seeds the config (token profile, no claude-cli runtime)
  * but the sessions keep asking for the CLI, which is no longer logged in —
- * "Not logged in · Please run /login" (Girlfriend Advisor, 2026-09-27, silent
+ * "Not logged in · Please run /login" (one agent, 2026-09-27, silent
  * since 09-11; four agents on the Spark). OpenClaw's doctor sees it ("stale
  * Anthropic session routing state") but repairs it only at a prompt, and the
  * seed runs it non-interactively.

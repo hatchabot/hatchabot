@@ -117,7 +117,7 @@ describe('template parameters (sharing Phase 2a)', () => {
   const { gzipSync } = require('node:zlib');
   const mk = (extra: Record<string, unknown> = {}) => gzipSync(Buffer.from(JSON.stringify({
     format: 'hatchabot-template', version: 1, exportedAt: 'now',
-    agent: { name: 'Stock Advisor', persona: 'advises with {{style}} discipline', sharedMemory: false },
+    agent: { name: 'Stock Watcher', persona: 'advises with {{style}} discipline', sharedMemory: false },
     files: {
       'SOUL.md': 'You advise with a {{style}} philosophy and {{risk}} risk appetite.',
       'AGENTS.md': 'Report to {{ style }} standards.', // spaced placeholder form

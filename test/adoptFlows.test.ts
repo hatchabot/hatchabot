@@ -80,13 +80,13 @@ describe('Discovery — GET /v1/openclaw/agents', () => {
   it('lists agents with their bot, and matches an already-imported one by bot-id', async () => {
     const w = await makeWorld();
     // A Hatchabot agent already on techbot's bot (same id 111, different token).
-    await seedRunningAgent(w, { id: 'a1', name: 'Tech Advisor', slug: 'tech-adv', accountId: 'TechAdvBot', botToken: '111:zzz' });
+    await seedRunningAgent(w, { id: 'a1', name: 'Garden Advisor', slug: 'garden-adv', accountId: 'GardenAdvisorBot', botToken: '111:zzz' });
 
     const res = await w.f.inject({ method: 'GET', url: '/v1/openclaw/agents', headers: as() });
     expect(res.statusCode).toBe(200);
     const by = Object.fromEntries(res.json().agents.map((a: any) => [a.id, a]));
     expect(by['tech'].bot).toMatchObject({ accountId: 'techbot', enabledInSource: true });
-    expect(by['tech'].alreadyAdoptedAs).toBe('Tech Advisor'); // matched by bot id 111
+    expect(by['tech'].alreadyAdoptedAs).toBe('Garden Advisor'); // matched by bot id 111
     expect(by['fresh'].alreadyAdoptedAs).toBeUndefined(); // not imported
   });
 
@@ -100,7 +100,7 @@ describe('Discovery — GET /v1/openclaw/agents', () => {
 describe('Adopt workspace — POST /v1/agents/:id/adopt-workspace', () => {
   it('copies the workspace and carries the source agent\'s crons (disabled)', async () => {
     const w = await makeWorld();
-    await seedRunningAgent(w, { id: 'a1', slug: 'tech-adv' });
+    await seedRunningAgent(w, { id: 'a1', slug: 'garden-adv' });
 
     const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/adopt-workspace', headers: as(), payload: { path: wsTech } });
     expect(res.statusCode).toBe(200);

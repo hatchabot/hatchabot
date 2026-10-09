@@ -27,10 +27,10 @@ describe('cronAddArgs', () => {
         payloadKind: 'agentTurn',
         payloadMessage: 'Import the portfolio.',
       },
-      'stock-advisor',
+      'stock-watcher',
     );
     expect(args).toEqual([
-      'cron', 'add', '--agent', 'stock-advisor', '--disabled',
+      'cron', 'add', '--agent', 'stock-watcher', '--disabled',
       '--name', 'Daily Portfolio Import',
       '--description', 'imports the portfolio',
       '--cron', '30 8 * * *', '--tz', 'America/Toronto',
@@ -48,7 +48,7 @@ describe('cronAddArgs', () => {
         sessionTarget: 'isolated', deliveryMode: 'announce',
         deliveryChannel: 'telegram', deliveryTo: 'telegram:1000000001',
       },
-      'condo-adviser',
+      'hoa-helper',
     );
     expect(args).toContain('--session'); expect(args).toContain('isolated');
     expect(args).toContain('--announce');
@@ -122,26 +122,26 @@ describe('readOpenclawCrons + workspace resolution', () => {
     schedule_tz TEXT, every_ms INTEGER, at TEXT, payload_kind TEXT, payload_message TEXT,
     sort_order INTEGER, created_at_ms INTEGER)`);
   d.prepare(`INSERT INTO cron_jobs (agent_id,name,schedule_kind,schedule_expr,schedule_tz,payload_kind,payload_message,sort_order,created_at_ms)
-             VALUES (?,?,?,?,?,?,?,?,?)`).run('tech-advisor', 'Daily brief', 'cron', '0 8 * * *', 'America/Toronto', 'agentTurn', 'Write the brief', 0, 1);
+             VALUES (?,?,?,?,?,?,?,?,?)`).run('garden-advisor', 'Daily brief', 'cron', '0 8 * * *', 'America/Toronto', 'agentTurn', 'Write the brief', 0, 1);
   d.prepare(`INSERT INTO cron_jobs (agent_id,name,schedule_kind,schedule_expr,payload_kind,payload_message,sort_order,created_at_ms)
              VALUES (?,?,?,?,?,?,?,?)`).run('other-agent', 'Not mine', 'cron', '0 9 * * *', 'agentTurn', 'x', 0, 1);
   d.close();
 
-  writeFileSync(cfg, JSON.stringify({ agents: { list: [{ id: 'tech-advisor', workspace: join(root, 'ws-tech') }] } }));
+  writeFileSync(cfg, JSON.stringify({ agents: { list: [{ id: 'garden-advisor', workspace: join(root, 'ws-tech') }] } }));
 
   it('reads only the named agent\'s crons', () => {
-    const crons = readOpenclawCrons('tech-advisor', db);
+    const crons = readOpenclawCrons('garden-advisor', db);
     expect(crons).toHaveLength(1);
     expect(crons[0]).toMatchObject({ name: 'Daily brief', scheduleExpr: '0 8 * * *', payloadMessage: 'Write the brief' });
   });
 
   it('resolves a workspace path to its OpenClaw agent id', () => {
-    expect(openclawAgentIdForWorkspace(join(root, 'ws-tech'), cfg)).toBe('tech-advisor');
+    expect(openclawAgentIdForWorkspace(join(root, 'ws-tech'), cfg)).toBe('garden-advisor');
     expect(openclawAgentIdForWorkspace(join(root, 'ws-unknown'), cfg)).toBeUndefined();
   });
 
   it('returns [] for a missing DB', () => {
-    expect(readOpenclawCrons('tech-advisor', join(root, 'nope.sqlite'))).toEqual([]);
+    expect(readOpenclawCrons('garden-advisor', join(root, 'nope.sqlite'))).toEqual([]);
   });
 
   it('migrateCrons recreates each cron in the container, disabled', async () => {

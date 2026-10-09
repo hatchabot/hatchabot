@@ -22,8 +22,8 @@ const root = mkdtempSync(join(tmpdir(), 'acl-oc-'));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 // Two real workspace dirs, one deliberately absent.
-const wsA1 = join(root, 'workspace-tech-advisor');
-const wsAdopted = join(root, 'workspace-stock-advisor');
+const wsA1 = join(root, 'workspace-garden-advisor');
+const wsAdopted = join(root, 'workspace-stock-watcher');
 mkdirSync(wsA1, { recursive: true });
 mkdirSync(wsAdopted, { recursive: true });
 
@@ -33,14 +33,14 @@ function writeConfig(path: string) {
     JSON.stringify({
       agents: {
         list: [
-          { id: 'tech-advisor', workspace: wsA1 },
+          { id: 'garden-advisor', workspace: wsA1 },
           { id: 'ghost', workspace: join(root, 'workspace-gone') }, // missing dir, no binding
-          { id: 'stock-advisor', workspace: wsAdopted },
+          { id: 'stock-watcher', workspace: wsAdopted },
         ],
       },
       bindings: [
-        { agentId: 'tech-advisor', match: { channel: 'telegram', accountId: 'a1bot' } },
-        { agentId: 'stock-advisor', match: { accountId: 'adoptedbot' } },
+        { agentId: 'garden-advisor', match: { channel: 'telegram', accountId: 'a1bot' } },
+        { agentId: 'stock-watcher', match: { accountId: 'adoptedbot' } },
       ],
       channels: {
         telegram: {
@@ -76,12 +76,12 @@ describe('discoverOpenclawAgents', () => {
     const agents = await discoverOpenclawAgents({ store, secrets }, cfg);
     const by = Object.fromEntries(agents.map((a) => [a.id, a]));
 
-    expect(by['tech-advisor']).toMatchObject({
-      name: 'Tech Advisor', // derived from workspace-tech-advisor
+    expect(by['garden-advisor']).toMatchObject({
+      name: 'Garden Advisor', // derived from workspace-garden-advisor
       bot: { accountId: 'a1bot', enabledInSource: true, allowFrom: ['123'] }, // junk id filtered
     });
-    expect(by['tech-advisor']!.alreadyAdoptedAs).toBeUndefined();
-    expect(by['tech-advisor']!.problem).toBeUndefined();
+    expect(by['garden-advisor']!.alreadyAdoptedAs).toBeUndefined();
+    expect(by['garden-advisor']!.problem).toBeUndefined();
 
     // no binding → no bot; missing folder → flagged
     expect(by['ghost']!.bot).toBeUndefined();
@@ -89,7 +89,7 @@ describe('discoverOpenclawAgents', () => {
 
     // config key "adoptedbot" ≠ stored @username "RealAdoptedName", but the
     // bot-id (222) matches → still recognised as already imported
-    expect(by['stock-advisor']!.alreadyAdoptedAs).toBe('Already Here');
+    expect(by['stock-watcher']!.alreadyAdoptedAs).toBe('Already Here');
   });
 
   it('returns [] when the config is unreadable', async () => {

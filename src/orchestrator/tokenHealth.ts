@@ -32,7 +32,7 @@ const DAY = 24 * HOUR;
 export const THRESHOLDS = {
   /** A conversation is LARGE when its median context per call reaches this (T1: the heavy agents ran 200–700K; 93–98% of their bill was context). */
   largeConversation: 150_000,
-  /** Its main conversation is worth compacting NOW at this size (Stock Advisor's 446K could not be summarised within 5 minutes). */
+  /** Its main conversation is worth compacting NOW at this size (one agent's 446K could not be summarised within 5 minutes). */
   compactNow: 250_000,
   /** The cap to suggest for a large conversation: OpenClaw then compacts at about this − 20K (T1: a 100K cap was −42% to −60%; 150K keeps more of a long chat). */
   suggestedCap: 150_000,

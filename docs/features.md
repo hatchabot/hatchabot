@@ -382,7 +382,7 @@ different one, in pricing.ts.
 **Tell me every $X** (v2.125.0, Chris: "warned each time the spend increases
 by $100"): give an agent a step — $5 for a quiet one, $100 for a busy one —
 and each time its spend this month passes the next multiple ($100, $200,
-$300 …) you get a message on your Hatchabot agent's chat ("💵 "Stock Advisor"
+$300 …) you get a message on your Hatchabot agent's chat ("💵 "Stock Watcher"
 has spent $212 in October — you hear every $100. On pace for $750.") and a
 🔔 line under Alerts (cleared until the next step). At most one message an
 hour per agent: steps passed meanwhile come as one, with the latest total. It
@@ -1796,7 +1796,7 @@ per model), and the chart below. (A *By agent* table under it went in v2.130.0, 
 read: the picker narrows to any agents, and each agent's Usage tab has its
 own.) Requests that did not go through in the last 24 hours are **one line**
 at the top, only when there were any: "⛔ Last 24 hours: 12 refused (rate
-limits) · 1 failed — Stock Advisor 9 · …". Since v2.140.3 each slice of the
+limits) · 1 failed — Stock Watcher 9 · …". Since v2.140.3 each slice of the
 spend chart in which calls were refused is shaded too, with the count in its
 tip and the total in the key (for the agents charted; another account's
 refusals never show here). **Saved by cheaper

@@ -49,7 +49,7 @@ describe('one bot, two agents, taking turns', () => {
 
     // Exactly one bot exists.
     await pool.addToPool('onlybot', 'tok-1');
-    mk('a', 'Tax Advisor');
+    mk('a', 'Budget Tracker');
     mk('b', 'Trip Planner');
 
     // A takes it.
@@ -86,6 +86,6 @@ describe('one bot, two agents, taking turns', () => {
     const restored = await runProvisionSteps(deps as any, 'a');
     expect(restored.agent.state).toBe('RUNNING');
     expect(store.getChannelForAgent('a')!.accountId).toBe('secondbot');
-    expect(store.getAgent('a')!.name).toBe('Tax Advisor');
+    expect(store.getAgent('a')!.name).toBe('Budget Tracker');
   });
 });

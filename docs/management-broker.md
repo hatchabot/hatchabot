@@ -260,12 +260,12 @@ Uniform, so the model always knows what happened — including "not yet":
 
 // resolution / validation failure  (model relays this to the user)
 { "ok": false, "tool": "stop_agent", "error": { "code": "AMBIGUOUS",
-  "message": "3 agents match \"advisor\": Tech Advisor, CMT advisor, Airplane Advisor. Say which id." } }
+  "message": "3 agents match \"advisor\": Garden Advisor, Market advisor, Travel Advisor. Say which id." } }
 
 // mutate: NOT executed — a confirmation was posted to the chat
 { "ok": true, "tool": "stop_agent", "pending": {
   "confirmId": "c_7Gf3kQ2p",
-  "summary": "Awaiting your tap to stop \"Tech Advisor\"." } }
+  "summary": "Awaiting your tap to stop \"Garden Advisor\"." } }
 ```
 
 The `pending` shape is what stops a hijacked model from "believing" it acted:
@@ -375,7 +375,7 @@ table), so "why did it rebuild at 3am" is answerable:
 { "ts": 0, "kind": "mgmt.tool",
   "actor": { "telegramUserId": 1000000001, "ownerId": "user-..." },
   "tool": "stop_agent", "input": { "agent": "tech" },
-  "resolved": { "agentId": "169c...", "agentName": "Tech Advisor" },
+  "resolved": { "agentId": "169c...", "agentName": "Garden Advisor" },
   "decision": "pending" ,                 // or "executed" | "rejected"
   "confirmId": "c_7Gf3kQ2p",
   "outcome": { "ok": true, "status": 200 } }   // filled on confirm

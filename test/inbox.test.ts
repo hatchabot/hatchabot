@@ -28,10 +28,10 @@ describe('agent shares reach the recipient', () => {
     const s = store();
     s.recordAccount('u2', 'bob@example.com');
     s.insertShare({ id: 'sh1', fromOwner: 'u1', fromEmail: 'a@example.com', toEmail: 'bob@example.com',
-      toOwner: s.ownerForEmail('bob@example.com'), agentName: 'Stock Advisor', blob, createdAt: 'now' });
+      toOwner: s.ownerForEmail('bob@example.com'), agentName: 'Stock Watcher', blob, createdAt: 'now' });
     const inbox = s.listInbox('u2', 'bob@example.com');
     expect(inbox).toHaveLength(1);
-    expect(inbox[0]!.agentName).toBe('Stock Advisor');
+    expect(inbox[0]!.agentName).toBe('Stock Watcher');
     expect(s.getShareFor('sh1', 'u2', 'bob@example.com')!.blob.toString()).toBe('template-bytes');
     // ...and NOT to anyone else.
     expect(s.getShareFor('sh1', 'u3', 'eve@example.com')).toBeUndefined();
@@ -40,7 +40,7 @@ describe('agent shares reach the recipient', () => {
   it('a share to an email that has NOT signed in waits, then binds on sign-in', () => {
     const s = store();
     s.insertShare({ id: 'sh2', fromOwner: 'u1', toEmail: 'later@example.com',
-      toOwner: undefined, agentName: 'Condo Advisor', blob, createdAt: 'now' });
+      toOwner: undefined, agentName: 'HOA Advisor', blob, createdAt: 'now' });
     // Not visible to a random owner...
     expect(s.listInbox('u9', 'other@example.com')).toHaveLength(0);
     // ...but visible by the unclaimed email, and claimable on sign-in.

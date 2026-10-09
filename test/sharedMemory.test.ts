@@ -65,7 +65,7 @@ describe('memory is always shared', () => {
     const s1 = new Store(db);
     s1.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
     s1.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
-    s1.insertAgent({ id: 'b1', ownerId: OWNER, name: 'Condo', slug: 'condo', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
+    s1.insertAgent({ id: 'b1', ownerId: OWNER, name: 'HOA', slug: 'hoa', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
     s1.insertAgent({ id: 'b2', ownerId: OWNER, name: 'Hatchabot', slug: 'hatchabot', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, ops: true, createdAt: 'now', updatedAt: 'now' } as any);
     db.exec(`DELETE FROM store_migrations WHERE name = '2026-09-29-memory-always-shared'`);
     const s2 = new Store(db);

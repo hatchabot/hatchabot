@@ -105,8 +105,8 @@ describe('a push budget, and Discord when Telegram cannot carry it (2026-09-25)'
     expect(calls).toHaveLength(2);
     const dms: string[] = [];
     const viaDiscord = createOpsPush({ botToken: async () => undefined, chatId: () => undefined, sendDiscord: async (_o, text) => { dms.push(text); return true; }, fetchImpl: stubFetch(calls) });
-    expect(await viaDiscord.waiting('o2', 'Someone wants to talk to "Taco".', 'Let them in under Waiting for you.')).toBe(true);
-    expect(dms[0]).toContain('Taco'); expect(dms[0]).toContain('Confirm it in the Hatchabot app.');
+    expect(await viaDiscord.waiting('o2', 'Someone wants to talk to "Recipe".', 'Let them in under Waiting for you.')).toBe(true);
+    expect(dms[0]).toContain('Recipe'); expect(dms[0]).toContain('Confirm it in the Hatchabot app.');
     expect(calls).toHaveLength(2); // Telegram untouched
     const nothing = createOpsPush({ botToken: async () => undefined, chatId: () => undefined, fetchImpl: stubFetch(calls) });
     expect(await nothing.waiting('o3', 'x')).toBe(false);

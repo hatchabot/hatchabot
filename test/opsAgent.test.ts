@@ -99,9 +99,9 @@ describe('its runtime spec', () => {
 describe('its door: reads run, changes only become proposals', () => {
   async function ready() {
     const w = await world();
-    const { runtimeRef } = await w.provider.provision({ agentId: 't1', slug: 'taco', workspace: { files: {}, configPatch: { agentId: 'taco', authMode: 'api-key' } }, env: {} } as any);
+    const { runtimeRef } = await w.provider.provision({ agentId: 't1', slug: 'recipe', workspace: { files: {}, configPatch: { agentId: 'recipe', authMode: 'api-key' } }, env: {} } as any);
     await w.provider.start(runtimeRef);
-    w.store.insertAgent({ id: 't1', ownerId: OWNER, name: 'Taco Agent', slug: 'taco', state: 'RUNNING', runtimeRef, aiProfileId: `p-${OWNER}`, hostId: `h-${OWNER}`, persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as any);
+    w.store.insertAgent({ id: 't1', ownerId: OWNER, name: 'Recipe Box', slug: 'recipe', state: 'RUNNING', runtimeRef, aiProfileId: `p-${OWNER}`, hostId: `h-${OWNER}`, persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as any);
     w.store.insertAgent({ id: 'x1', ownerId: 'owner-b', name: 'Secret Agent', slug: 'secret', state: 'RUNNING', aiProfileId: 'p-owner-b', hostId: 'h-owner-b', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as any);
     await w.f.inject({ method: 'POST', url: '/v1/ops-agent', headers: H, payload: {} });
     const a = w.store.getOpsAgent(OWNER)!;
@@ -129,13 +129,13 @@ describe('its door: reads run, changes only become proposals', () => {
     const { door } = await ready();
     const out = (await door.mcp('key-123', rpc('tools/call', { name: 'list_agents', arguments: {} }))) as any;
     const names = JSON.parse(out.result.content[0].text).map((x: any) => x.name);
-    expect(names).toContain('Taco Agent');
+    expect(names).toContain('Recipe Box');
     expect(names).not.toContain('Secret Agent');
   });
 
   it('a change is filed for the owner and nothing happens until THEY confirm', async () => {
     const { door, store, f } = await ready();
-    const out = (await door.mcp('key-123', rpc('tools/call', { name: 'stop_agent', arguments: { agent: 'Taco Agent' } }))) as any;
+    const out = (await door.mcp('key-123', rpc('tools/call', { name: 'stop_agent', arguments: { agent: 'Recipe Box' } }))) as any;
     expect(out.result.content[0].text).toMatch(/NOT done/);
     expect(store.getAgent('t1')!.state).toBe('RUNNING');
     const list = (await f.inject({ method: 'GET', url: '/v1/proposals', headers: H })).json();

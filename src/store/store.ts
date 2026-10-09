@@ -81,7 +81,7 @@ export class ChannelTakenError extends Error {
 /**
  * A zero right after a real reading is a read that caught the container
  * stopping, not every session erased: kept as the baseline, the next reading
- * counted the agent's whole history as new use (Cooking Teacher, 72K tokens
+ * counted the agent's whole history as new use (one agent, 72K tokens
  * "used" on a day it did nothing, 2026-09-28). A new agent's first zero is
  * real and stays.
  */

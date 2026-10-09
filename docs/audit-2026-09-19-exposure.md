@@ -91,7 +91,7 @@ Probed live: `ss -ltnp`, `tailscale serve/funnel status`, docker port bindings,
 | Listener | Reach | Assessment |
 |---|---|---|
 | Tailscale serve → `localhost:8080` | **tailnet only** — Funnel is off | correct; the app is not published to the internet |
-| `0.0.0.0:8080` (Hatchabot) | loopback + LAN (`192.168.2.53`) + tailnet + docker bridges | **worth changing.** Access is meant to be via Tailscale; binding to every interface puts the login page (and the auth-exempt `/join/*`, `/v1/invites/*` paths) on the home LAN for no benefit |
+| `0.0.0.0:8080` (Hatchabot) | loopback + LAN (`192.0.2.53`) + tailnet + docker bridges | **worth changing.** Access is meant to be via Tailscale; binding to every interface puts the login page (and the auth-exempt `/join/*`, `/v1/invites/*` paths) on the home LAN for no benefit |
 | `*:11434` (Ollama, unauthenticated) | LAN **and tailnet** | **the real finding.** Anyone on either can use the GPU, read prompts and pull/delete models. Agents reach it at `172.17.0.1:11434`, so binding Ollama to `127.0.0.1` **and** the docker bridge keeps them working while taking it off the LAN |
 | `0.0.0.0:4000` | LAN + tailnet | **unidentified**, owned by another user (invisible from this account); accepts TCP, answers neither HTTP nor TLS. Identify with `sudo ss -ltnp sport = :4000` |
 | `0.0.0.0:22` (sshd) | LAN + tailnet | expected; confirm `PasswordAuthentication no` |
@@ -112,7 +112,7 @@ and the session cookie is stripped before anything reaches a gateway.
    answers. Open since the 19th audit.
 2. **Bind Hatchabot to loopback** and let Tailscale serve reach it
    (`tailscale serve` already proxies `localhost:8080`). Requires knowing
-   whether anything on the LAN uses `192.168.2.53:8080` directly.
+   whether anything on the LAN uses `192.0.2.53:8080` directly.
 3. **Identify port 4000** with sudo, and close it if it is not wanted.
 4. Confirm sshd has password authentication off.
 

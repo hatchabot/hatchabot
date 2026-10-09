@@ -30,7 +30,7 @@ class FakeApi implements ApiClient {
   }
   async listEvents(agentId: string | undefined, limit: number) {
     this.calls.push(`events:${agentId ?? 'all'}:${limit}`);
-    return [{ agentId: 'a1', agentName: 'Tech Advisor', at: 'now', event: 'runtime.rebuilt' }];
+    return [{ agentId: 'a1', agentName: 'Garden Advisor', at: 'now', event: 'runtime.rebuilt' }];
   }
   async getHealth(id: string) {
     this.calls.push(`health:${id}`);
@@ -170,8 +170,8 @@ class FakeApi implements ApiClient {
 }
 
 const AGENTS: AgentSummary[] = [
-  { id: 'a1', name: 'Tech Advisor', slug: 'tech-advisor', state: 'RUNNING', model: 'claude-opus-4-8', aiProfileId: 'p1' },
-  { id: 'a2', name: 'CMT advisor', slug: 'cmt-advisor', state: 'STOPPED', aiProfileId: 'p1' },
+  { id: 'a1', name: 'Garden Advisor', slug: 'garden-advisor', state: 'RUNNING', model: 'claude-opus-4-8', aiProfileId: 'p1' },
+  { id: 'a2', name: 'Market advisor', slug: 'market-advisor', state: 'STOPPED', aiProfileId: 'p1' },
   { id: 'a3', name: 'Advisor', slug: 'advisor', state: 'RUNNING', aiProfileId: 'p1' },
 ];
 
@@ -209,14 +209,14 @@ describe('broker read tier', () => {
 
   it('list_events resolves and filters to one agent', async () => {
     const { broker, api } = make();
-    const res = await broker.handleTool('list_events', { agent: 'Tech Advisor', limit: 5 }, WHO);
+    const res = await broker.handleTool('list_events', { agent: 'Garden Advisor', limit: 5 }, WHO);
     expect(res.ok).toBe(true);
     expect(api.calls).toContain('events:a1:5');
   });
 
   it('get_health / get_usage are read-tier and resolve the agent', async () => {
     const { broker, api } = make();
-    const h = await broker.handleTool('get_health', { agent: 'Tech Advisor' }, WHO);
+    const h = await broker.handleTool('get_health', { agent: 'Garden Advisor' }, WHO);
     expect(h.ok).toBe(true);
     expect((h as any).data.status).toBe('healthy');
     expect(api.calls).toContain('health:a1');
@@ -230,7 +230,7 @@ describe('broker read tier', () => {
 describe('broker resolution (owner-scoped)', () => {
   it('resolves by id, slug, and unique name', async () => {
     const { broker } = make();
-    for (const ref of ['a1', 'tech-advisor', 'Tech Advisor']) {
+    for (const ref of ['a1', 'garden-advisor', 'Garden Advisor']) {
       const r = await broker.handleTool('get_agent', { agent: ref }, WHO);
       expect((r as any).data.id).toBe('a1');
     }
@@ -311,12 +311,12 @@ describe('authoring tools — the full spec rides the confirmation', () => {
     const { broker, api, pending } = make({ rw: true });
     const r = await broker.handleTool(
       'create_agent',
-      { name: 'Stock Broker', persona: 'Markets copilot', soul: 'You are {{risk_tolerance}}.\nLine 2.', fields: FIELDS },
+      { name: 'Portfolio Coach', persona: 'Markets copilot', soul: 'You are {{risk_tolerance}}.\nLine 2.', fields: FIELDS },
       WHO,
     );
     expect(r.ok).toBe(true);
     const summary = (r as any).pending.summary as string;
-    expect(summary).toContain('Create agent "Stock Broker"');
+    expect(summary).toContain('Create agent "Portfolio Coach"');
     expect(summary).toContain('Claude Max'); // broker-chosen placement is on the card
     expect(summary).toContain('risk_tolerance, enable_leaps');
     expect(summary).toContain('SOUL.md'); // preview present
@@ -328,7 +328,7 @@ describe('authoring tools — the full spec rides the confirmation', () => {
 
   it('refuses a name clash and bad fields BEFORE showing a card', async () => {
     const { broker, pending } = make({ rw: true });
-    const clash = await broker.handleTool('create_agent', { name: 'tech advisor', soul: 's' }, WHO);
+    const clash = await broker.handleTool('create_agent', { name: 'garden advisor', soul: 's' }, WHO);
     expect(clash).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     const badKey = await broker.handleTool(
       'create_agent',
@@ -384,7 +384,7 @@ describe('authoring tools — the full spec rides the confirmation', () => {
       WHO,
     );
     const summary = (r as any).pending.summary as string;
-    expect(summary).toContain('Update definition of "Tech Advisor"');
+    expect(summary).toContain('Update definition of "Garden Advisor"');
     expect(summary).toContain('2 → 3 lines'); // measured against the LIVE file
     expect(api.calls).toEqual([]);
     const out = await broker.confirm('c_1', 'confirm', { fromUserId: 555, chatId: 100 });
@@ -587,7 +587,7 @@ describe('base-image candidates from chat — candidate first, promote stays in 
       const bad = await broker.handleTool('try_base_candidate', { agent: 'a1', tag }, WHO);
       expect(bad.ok).toBe(false);
     }
-    const r = await broker.handleTool('try_base_candidate', { agent: 'Tech Advisor', tag: 'hatchabot-runtime:2026.9.0' }, WHO);
+    const r = await broker.handleTool('try_base_candidate', { agent: 'Garden Advisor', tag: 'hatchabot-runtime:2026.9.0' }, WHO);
     expect(r.ok).toBe(true);
     expect(api.calls).toEqual([]);
     await broker.confirm((r as any).pending.confirmId, 'confirm', { fromUserId: 555, chatId: 100 });
@@ -598,7 +598,7 @@ describe('base-image candidates from chat — candidate first, promote stays in 
     const { broker, api } = make({ rw: true });
     const not = await broker.handleTool('end_base_trial', { agent: 'a1' }, WHO);
     expect(not).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
-    api.baseTags[1]!.pinned.push({ id: 'a1', name: 'Tech Advisor' });
+    api.baseTags[1]!.pinned.push({ id: 'a1', name: 'Garden Advisor' });
     const r = await broker.handleTool('end_base_trial', { agent: 'a1' }, WHO);
     await broker.confirm((r as any).pending.confirmId, 'confirm', { fromUserId: 555, chatId: 100 });
     expect(api.calls).toEqual(['image:a1:default', 'rebuild:a1']);
@@ -626,14 +626,14 @@ describe('one-call tools (restTools.ts) — resolved at propose time, replayed o
 
   it('a read runs straight away, through the owner-scoped client', async () => {
     const { broker } = make();
-    const r = await broker.handleTool('list_crons', { agent: 'Tech Advisor' }, WHO);
+    const r = await broker.handleTool('list_crons', { agent: 'Garden Advisor' }, WHO);
     expect((r as any).data).toEqual({ path: '/v1/agents/a1/crons' });
   });
 
   it('archive: the card names the agent, nothing happens until confirm, then exactly that call', async () => {
     const { broker, api } = make({ rw: true });
-    const r = await broker.handleTool('archive_agent', { agent: 'tech-advisor' }, WHO);
-    expect((r as any).pending.summary).toMatch(/Archive "Tech Advisor"/);
+    const r = await broker.handleTool('archive_agent', { agent: 'garden-advisor' }, WHO);
+    expect((r as any).pending.summary).toMatch(/Archive "Garden Advisor"/);
     expect(api.calls).toEqual([]);
     await confirm(broker, r);
     expect(api.calls).toEqual(['POST /v1/agents/a1/archive {"checkpoint":true}']);
@@ -656,8 +656,8 @@ describe('one-call tools (restTools.ts) — resolved at propose time, replayed o
 
   it('set_peers resolves every peer against the owner’s fleet and names them on the card', async () => {
     const { broker, api } = make({ rw: true });
-    const r = await broker.handleTool('set_peers', { agent: 'a1', peers: ['CMT advisor', 'a3'], allow_actions: ['a3'] }, WHO);
-    expect((r as any).pending.summary).toMatch(/may ask: CMT advisor, Advisor/);
+    const r = await broker.handleTool('set_peers', { agent: 'a1', peers: ['Market advisor', 'a3'], allow_actions: ['a3'] }, WHO);
+    expect((r as any).pending.summary).toMatch(/may ask: Market advisor, Advisor/);
     expect((r as any).pending.summary).toMatch(/ask these to act: Advisor/);
     await confirm(broker, r);
     expect(api.calls).toEqual(['PUT /v1/agents/a1/peers {"peerIds":["a2","a3"],"allowActions":["a3"]}', 'rebuild:a1']);
@@ -712,7 +712,7 @@ describe('night review, 2026-09-27: what a card shows is what runs', () => {
   it("set_class ignores a __className the model supplied: clearing says it clears", async () => {
     const { broker } = make({ rw: true });
     const r = await broker.handleTool('set_class', { agent: 'a1', class: '', __className: 'Premium' }, WHO);
-    expect((r as any).pending.summary).toMatch(/Remove "Tech Advisor" from its class/);
+    expect((r as any).pending.summary).toMatch(/Remove "Garden Advisor" from its class/);
     expect((r as any).pending.summary).not.toMatch(/Premium/);
   });
 

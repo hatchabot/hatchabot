@@ -99,7 +99,7 @@ parameters: [
 
 **Examples**
 
-- *Stock Advisor*: `investment_style` (choice: value / growth / index → `soul`),
+- *Stock Watcher*: `investment_style` (choice: value / growth / index → `soul`),
   `risk_tolerance` (text → `soul`). SOUL.md contains "You advise with a
   **{{investment_style}}** philosophy and **{{risk_tolerance}}** risk appetite."
 - *Condo Advisor*: `gmail_account` (email → `agents`), `drive_link` (url →
@@ -138,7 +138,7 @@ a working, personalized Condo Advisor boots, on their bot, their account.*
    emailing files"), reuses everything, zero new security surface.
 2. **Placeholder parameters** (Phase 2a — DONE, v0.87.0) — `{{key}}` →
    `soul`/`agents` only. The biggest UX win for the least machinery; covers
-   Stock Advisor's "investment style" case entirely.
+   Stock Watcher's "investment style" case entirely.
 3. **Typed targets** (Phase 2b) — `env:` and `datasource:` parameters, for the
    connection-heavy case (Condo Advisor's Gmail/Drive).
 

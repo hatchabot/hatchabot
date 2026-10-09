@@ -54,14 +54,14 @@ describe('identity headers', () => {
 
 describe('what a guest may fetch over HTTP', () => {
   it.each([
-    ['GET', '/'], ['GET', '/chat'], ['GET', '/chat/taco/guest/abc'], ['GET', '/assets/index-x.js'], ['GET', '/fonts/a.woff2'],
+    ['GET', '/'], ['GET', '/chat'], ['GET', '/chat/recipe/guest/abc'], ['GET', '/assets/index-x.js'], ['GET', '/fonts/a.woff2'],
     ['GET', '/favicon.svg'], ['GET', '/sw.js'], ['GET', '/manifest.webmanifest'], ['GET', '/control-ui-config.json'],
     ['GET', '/api/users/0ef51984-a983-430b-8282-88762f780209/avatar'], ['GET', '/__openclaw__/assistant-media'],
     ['GET', '/__openclaw__/workspace-icon/agent%3Ataco%3Amain'], ['HEAD', '/assets/x.css'], ['POST', '/api/chat/media/outgoing'],
   ])('%s %s is the chat app', (m, p) => expect(guestHttpAllowed(m, p)).toBe(true));
   it.each([
     ['POST', '/tools/invoke'], ['GET', '/v1/models'], ['POST', '/v1/chat/completions'], ['POST', '/v1/responses'],
-    ['POST', '/hooks/agent'], ['GET', '/sessions/agent:taco:main/history'], ['GET', '/__openclaw__/canvas/x'],
+    ['POST', '/hooks/agent'], ['GET', '/sessions/agent:recipe:main/history'], ['GET', '/__openclaw__/canvas/x'],
     ['GET', '/__openclaw__/plugins/control-ui/x.js'], ['GET', '/api/artifacts/download/x'], ['GET', '/j/abc'],
     ['POST', '/'], ['DELETE', '/chat'], ['GET', '/assets/../../tools/invoke'], ['GET', '/assets/%2e%2e/x'], ['GET', '/secret.json'],
     ['GET', '/mcp'], ['POST', '/mcp'], ['GET', '/metrics'], ['GET', '/systems'], ['GET', '/settings'], ['GET', '/chat/x.json'],
@@ -100,19 +100,19 @@ describe('other people are taken out of what the gateway tells a guest', () => {
   const me = { mode: 'webchat', user: { email: GUEST.toUpperCase(), name: 'me' }, ip: '192.0.2.1' };
   const them = { mode: 'webchat', user: { email: OWNER, name: 'Owner' }, ip: '192.0.2.2' };
   const gw = { mode: 'gateway', reason: 'self', host: 'x' };
-  const health = { ok: true, agents: [{ agentId: 'taco', sessions: { count: 3, recent: [{ key: 'agent:taco:main' }] } }] };
+  const health = { ok: true, agents: [{ agentId: 'recipe', sessions: { count: 3, recent: [{ key: 'agent:recipe:main' }] } }] };
 
   it('the hello: presence down to the gateway and themselves, no recent sessions', () => {
     const out = scrubForGuest({ type: 'res', id: 'c', ok: true, payload: { type: 'hello-ok', snapshot: { presence: [gw, me, them], health } } }, GUEST, new Map()) as any;
     expect(out.payload.snapshot.presence).toEqual([gw, me]);
     expect(out.payload.snapshot.health.agents[0].sessions.recent).toEqual([]);
-    expect(JSON.stringify(out)).not.toContain('agent:taco:main');
+    expect(JSON.stringify(out)).not.toContain('agent:recipe:main');
   });
   it('presence and health events, and the reply to their own health call', () => {
     expect((scrubForGuest({ type: 'event', event: 'presence', payload: { presence: [them, me] } }, GUEST, new Map()) as any).payload.presence).toEqual([me]);
-    expect(JSON.stringify(scrubForGuest({ type: 'event', event: 'health', payload: health }, GUEST, new Map()))).not.toContain('agent:taco:main');
+    expect(JSON.stringify(scrubForGuest({ type: 'event', event: 'health', payload: health }, GUEST, new Map()))).not.toContain('agent:recipe:main');
     const ids = new Map([['h9', 'health']]);
-    expect(JSON.stringify(scrubForGuest({ type: 'res', id: 'h9', ok: true, payload: health }, GUEST, ids))).not.toContain('agent:taco:main');
+    expect(JSON.stringify(scrubForGuest({ type: 'res', id: 'h9', ok: true, payload: health }, GUEST, ids))).not.toContain('agent:recipe:main');
     expect(ids.has('h9')).toBe(false);
   });
   it('anything else passes untouched', () => {
@@ -230,26 +230,26 @@ describe('the guest hello advertises only what a guest may use (2026-09-30)', ()
 });
 
 describe("what a guest's Control UI is told (2026-09-30)", () => {
-  const scope = { agentId: 'taco', sessionKey: 'agent:taco:guest:0123456789abcdef' };
+  const scope = { agentId: 'recipe', sessionKey: 'agent:recipe:guest:0123456789abcdef' };
   const list = {
     defaultId: 'main', mainKey: 'main', scope: 'per-sender',
     agents: [
       { id: 'main', defaultPermissionMode: 'full', workspace: '/w/main' },
-      { id: 'taco', name: 'taco', defaultPermissionMode: 'full', workspace: '/w/taco' },
+      { id: 'recipe', name: 'recipe', defaultPermissionMode: 'full', workspace: '/w/recipe' },
     ],
   };
 
   it('agents.list: only their agent, their conversation as its main one, no permission mode to call "Full Access"', async () => {
     const { guestAgentsList } = await import('../src/api/consoleProxy.js');
     const out = guestAgentsList(list, scope) as any;
-    expect(out.agents).toEqual([{ id: 'taco', name: 'taco', workspace: '/w/taco' }]);
-    expect(out.defaultId).toBe('taco');
+    expect(out.agents).toEqual([{ id: 'recipe', name: 'recipe', workspace: '/w/recipe' }]);
+    expect(out.defaultId).toBe('recipe');
     expect(out.mainKey).toBe('guest:0123456789abcdef');
     expect(JSON.stringify(out)).not.toContain('defaultPermissionMode');
     expect(list.agents[0]!.defaultPermissionMode).toBe('full'); // the original is not touched
     // Not knowing their agent: the list stays whole, the mode still goes.
     const unscoped = guestAgentsList(list) as any;
-    expect(unscoped.agents.map((a: any) => a.id)).toEqual(['main', 'taco']);
+    expect(unscoped.agents.map((a: any) => a.id)).toEqual(['main', 'recipe']);
     expect(unscoped.defaultId).toBe('main');
     expect(JSON.stringify(unscoped)).not.toContain('defaultPermissionMode');
     expect(guestAgentsList('nope', scope)).toBe('nope');
@@ -258,7 +258,7 @@ describe("what a guest's Control UI is told (2026-09-30)", () => {
   it("the hello's session defaults: their agent and their conversation", async () => {
     const { guestSessionDefaults } = await import('../src/api/consoleProxy.js');
     const d = { defaultAgentId: 'main', mainKey: 'main', mainSessionKey: 'agent:main:main', scope: 'per-sender' };
-    expect(guestSessionDefaults(d, scope)).toEqual({ defaultAgentId: 'taco', mainKey: 'guest:0123456789abcdef', mainSessionKey: scope.sessionKey, scope: 'per-sender' });
+    expect(guestSessionDefaults(d, scope)).toEqual({ defaultAgentId: 'recipe', mainKey: 'guest:0123456789abcdef', mainSessionKey: scope.sessionKey, scope: 'per-sender' });
     expect(guestSessionDefaults(d, {})).toBe(d);
   });
 
@@ -273,8 +273,8 @@ describe("what a guest's Control UI is told (2026-09-30)", () => {
     gateway.feed(encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'res', id: 'a1', ok: true, payload: list })), false));
     await tick();
     const [hello, mine, unasked] = texts(browser.sent);
-    expect(hello.payload.snapshot.sessionDefaults).toMatchObject({ defaultAgentId: 'taco', mainSessionKey: scope.sessionKey });
-    expect(mine.payload.agents.map((a: any) => a.id)).toEqual(['taco']);
+    expect(hello.payload.snapshot.sessionDefaults).toMatchObject({ defaultAgentId: 'recipe', mainSessionKey: scope.sessionKey });
+    expect(mine.payload.agents.map((a: any) => a.id)).toEqual(['recipe']);
     expect(JSON.stringify(mine)).not.toContain('defaultPermissionMode');
     expect(unasked.payload.agents).toHaveLength(2);
   });
@@ -311,8 +311,8 @@ describe("what a guest's Control UI is told (2026-09-30)", () => {
     const fresh = run({});
     expect(JSON.parse(fresh.get(key)!)).toEqual({ gatewayUrl: 'ws://box:8080/v1/agents/a1/ui', sidebarEntries: [] });
     // A browser that already had the default: owner pages go, their own things stay, the rest of the settings too.
-    const had = run({ [key]: JSON.stringify({ gatewayUrl: 'ws://box:8080/v1/agents/a1/ui', theme: 'claw', sidebarEntries: ['route:agents-home', 'route:dashboards', 'route:cron', 'plugin:x/y', 'route:sessions', 'session:agent:taco:guest:1'] }) });
-    expect(JSON.parse(had.get(key)!)).toEqual({ gatewayUrl: 'ws://box:8080/v1/agents/a1/ui', theme: 'claw', sidebarEntries: [...GUEST_SIDEBAR_ROUTES, 'session:agent:taco:guest:1'] });
+    const had = run({ [key]: JSON.stringify({ gatewayUrl: 'ws://box:8080/v1/agents/a1/ui', theme: 'claw', sidebarEntries: ['route:agents-home', 'route:dashboards', 'route:cron', 'plugin:x/y', 'route:sessions', 'session:agent:recipe:guest:1'] }) });
+    expect(JSON.parse(had.get(key)!)).toEqual({ gatewayUrl: 'ws://box:8080/v1/agents/a1/ui', theme: 'claw', sidebarEntries: [...GUEST_SIDEBAR_ROUTES, 'session:agent:recipe:guest:1'] });
     // Nothing to prune: not rewritten. Not a console page: nothing done. Broken storage: no throw.
     const clean = JSON.stringify({ sidebarEntries: ['route:sessions'] });
     expect(run({ [key]: clean }).get(key)).toBe(clean);

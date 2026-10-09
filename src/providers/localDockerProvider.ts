@@ -528,7 +528,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       } else {
         // The long timeout, not the probe default (60 s): on OpenClaw 2026.8+
         // the seed runs doctor's state migrations, which on a big volume take
-        // minutes (Taco Agent, 2026-09-24: "docker run timed out"). No
+        // minutes (one agent, 2026-09-24: "docker run timed out"). No
         // network: nothing in the seed needs one — links, config writes,
         // doctor, the token paste are all local — and with it, doctor's npm
         // calls for a stale per-volume plugin stall on DNS retries.

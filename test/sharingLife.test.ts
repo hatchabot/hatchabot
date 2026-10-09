@@ -66,7 +66,7 @@ describe('what a shared copy mentions', () => {
   it('scans every part of a template that can name someone', () => {
     const m: TemplateManifest = {
       format: 'hatchabot-template', version: 1, exportedAt: 'now',
-      agent: { name: 'Condo', persona: 'Helps dave@example.com', sharedMemory: false },
+      agent: { name: 'HOA', persona: 'Helps dave@example.com', sharedMemory: false },
       files: { 'AGENTS.md': 'x\neve@example.com', 'SOUL.md': '' },
       ai: { vendor: 'anthropic' },
       dataNeeds: [{ kind: 'git', access: 'ro', mountName: 'docs', repoUrl: 'https://someone:hunter2hunter2@example.com/r.git' }],

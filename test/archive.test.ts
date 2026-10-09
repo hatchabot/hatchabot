@@ -41,12 +41,12 @@ async function world(opts: { pasted?: boolean } = {}) {
 
   store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
   store.insertAgent({
-    id: 'a1', ownerId: 'o', name: 'Tax Advisor', slug: 'tax', state: 'PROVISIONING',
+    id: 'a1', ownerId: 'o', name: 'Budget Tracker', slug: 'ledger', state: 'PROVISIONING',
     aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
   });
   const { runtimeRef } = await provider.provision({
-    agentId: 'a1', slug: 'tax',
-    workspace: { files: {}, configPatch: { agentId: 'tax', authMode: 'api-key' } },
+    agentId: 'a1', slug: 'ledger',
+    workspace: { files: {}, configPatch: { agentId: 'ledger', authMode: 'api-key' } },
     env: {},
   });
   await provider.start(runtimeRef);
@@ -61,7 +61,7 @@ async function world(opts: { pasted?: boolean } = {}) {
     await secrets.put(secretRef, 'user-token');
   } else {
     await pool.addToPool('poolbot', 'pool-token');
-    const ch = await pool.provision({ agentId: 'a1', agentName: 'Tax Advisor', slug: 'tax' });
+    const ch = await pool.provision({ agentId: 'a1', agentName: 'Budget Tracker', slug: 'ledger' });
     accountId = ch.accountId;
     secretRef = ch.secretRef;
   }
@@ -115,7 +115,7 @@ describe('archiving frees the bot and keeps the agent', () => {
     const { store, deps } = await world();
     await archiveAgent(deps as any, 'a1');
     const a = store.getAgent('a1')!;
-    expect(a.name).toBe('Tax Advisor');
+    expect(a.name).toBe('Budget Tracker');
     expect(store.listMemberships('a1')).toHaveLength(1);
     // Telegram user ids are global, not per-bot, so the allowlist survives the
     // bot change and nobody has to pair again on restore.

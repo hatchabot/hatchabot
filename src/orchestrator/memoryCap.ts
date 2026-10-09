@@ -2,7 +2,7 @@
  * The memory cap on an agent's container: a ceiling, not a reservation.
  *
  * One fleet-wide number sized for the typical agent starves the heavy one
- * (Genetic Algorithm Trading ran a 12-worker backtest into a 2 GiB cap, had
+ * (one trading agent ran a 12-worker backtest into a 2 GiB cap, had
  * 27 workers killed by the kernel, and its gateway quit; 2026-09-24). So:
  * the fleet default (HATCHABOT_AGENT_MEMORY) covers OpenClaw's own baseline
  * with headroom; a class or an agent can carry its own cap; members may raise

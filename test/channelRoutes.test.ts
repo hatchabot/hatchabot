@@ -310,8 +310,8 @@ describe('the Discord bot pool', () => {
 describe('the Slack manifest', () => {
   it('is Socket Mode, named for the agent', async () => {
     const { inject } = await setup();
-    const m = (await inject('GET', '/v1/channels/slack/manifest?name=Tax%20Advisor')).json();
-    expect(m.display_information.name).toBe('Tax Advisor');
+    const m = (await inject('GET', '/v1/channels/slack/manifest?name=Budget%20Tracker')).json();
+    expect(m.display_information.name).toBe('Budget Tracker');
     expect(m.settings.socket_mode_enabled).toBe(true);
     expect(m.oauth_config.scopes.bot).toEqual(expect.arrayContaining(['im:history', 'im:write', 'chat:write']));
   });
@@ -395,19 +395,19 @@ describe('the bot is named for the agent (2026-09-25)', () => {
     expect(r.json().displayName).toMatch(/^@To Do Agent in Home/);
     expect(store.listEvents([id]).some((e) => e.event === 'channel.renamed' && (e.detail as any).ok === true)).toBe(true);
     // Pasted: not renamed unasked.
-    const other = add({ name: 'Taco' });
+    const other = add({ name: 'Recipe' });
     store.deleteChannelForAgent(id, 'discord'); renameCalls.length = 0;
     await inject('POST', `/v1/agents/${other}/channels/discord`, { token: 'ok-good' });
     expect(renameCalls).toEqual([]);
     const sync = await inject('POST', `/v1/agents/${other}/bot-name/sync`, { kind: 'discord' });
-    expect(sync.json()).toEqual({ ok: true, name: 'Taco' });
-    expect(renameCalls).toEqual([['discord', 'ok-good', 'Taco']]);
+    expect(sync.json()).toEqual({ ok: true, name: 'Recipe' });
+    expect(renameCalls).toEqual([['discord', 'ok-good', 'Recipe']]);
     // Renaming the agent renames its bot too; a refusal is recorded, not fatal.
     renameCalls.length = 0;
     expect((await inject('PATCH', `/v1/agents/${other}`, { name: 'Refused' })).statusCode).toBe(200);
     await new Promise((r) => setTimeout(r, 20));
     expect(renameCalls).toEqual([['discord', 'ok-good', 'Refused']]);
-    expect(store.getChannelForAgent(other, 'discord')?.settings?.botName).toBe('Taco');
+    expect(store.getChannelForAgent(other, 'discord')?.settings?.botName).toBe('Recipe');
     expect(store.listEvents([other]).some((e) => e.event === 'channel.renamed' && (e.detail as any).ok === false && String((e.detail as any).note).includes('few name changes'))).toBe(true);
     expect((await inject('POST', `/v1/agents/${other}/bot-name/sync`, { kind: 'slack' })).statusCode).toBe(409); // it has no Slack
   });

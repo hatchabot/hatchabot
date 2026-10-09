@@ -15,7 +15,7 @@ const env = (body: string) => {
   writeFileSync(p, body, { mode: 0o600 });
   return p;
 };
-const URL_ = 'https://macbook.tail1329ea.ts.net';
+const URL_ = 'https://laptop.tailnet-example.ts.net';
 
 describe('writing HATCHABOT_PUBLIC_URL', () => {
   it('appends when there is no line, keeping everything else', async () => {

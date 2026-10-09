@@ -35,7 +35,7 @@ async function world() {
     store.setAgentState(id, 'RUNNING');
   };
   await mk('a1', 'Family Agent');
-  await mk('a2', 'Tax Advisor');
+  await mk('a2', 'Budget Tracker');
   const member = (agentId: string, userId: string, tg: string | null, role = 'user', displayName?: string) =>
     store.insertMembership({
       id: `${agentId}-${userId}`, agentId, userId, role,
@@ -44,7 +44,7 @@ async function world() {
     } as any);
   member('a1', 'owner', '111', 'owner');
   member('a2', 'owner', '111', 'owner');
-  member('a1', 'telegram:222', '222', 'user', 'Sophie');
+  member('a1', 'telegram:222', '222', 'user', 'Family Member');
   member('a1', 'invited-user', null); // invited, never messaged
 
   const f = Fastify();
@@ -58,7 +58,7 @@ async function world() {
 describe('GET /v1/users', () => {
   it('groups memberships by Telegram user and attributes the last exchange', async () => {
     const { provider, f } = await world();
-    // a1's session store: the most recent DM exchange was with Sophie (222).
+    // a1's session store: the most recent DM exchange was with the family member (222).
     provider.execResponses.set('sh', {
       code: 0,
       stdout: JSON.stringify({
@@ -70,12 +70,12 @@ describe('GET /v1/users', () => {
     const res = await f.inject({ method: 'GET', url: '/v1/users', headers: as });
     expect(res.statusCode).toBe(200);
     const { users } = res.json();
-    expect(users).toHaveLength(3); // owner, Sophie, the unlinked invitee
+    expect(users).toHaveLength(3); // owner, the family member, the unlinked invitee
 
-    const sophie = users.find((u: any) => u.channelUserId === '222');
-    expect(sophie.displayName).toBe('Sophie');
-    expect(sophie.memberships.map((m: any) => m.agentName)).toEqual(['Family Agent']);
-    expect(sophie.lastSeen.agentName).toBe('Family Agent');
+    const relative = users.find((u: any) => u.channelUserId === '222');
+    expect(relative.displayName).toBe('Family Member');
+    expect(relative.memberships.map((m: any) => m.agentName)).toEqual(['Family Agent']);
+    expect(relative.lastSeen.agentName).toBe('Family Agent');
 
     const owner = users.find((u: any) => u.channelUserId === '111');
     expect(owner.memberships).toHaveLength(2); // both agents, one row

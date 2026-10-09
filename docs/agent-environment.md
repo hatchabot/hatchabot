@@ -139,5 +139,5 @@ carried by `adopt`/`migrate`: a per-agent **tool/lib manifest**
 (`requirements.txt`/`setup.sh`) run on provision and rebuild, so the volume
 libs (above) are reproducible and portable.
 
-Until then, reconstruct the libraries by hand as above; the Stock Advisor
+Until then, reconstruct the libraries by hand as above; the Stock Watcher
 migration is the worked example.

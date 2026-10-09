@@ -19,7 +19,7 @@ async function world(hostOwner: boolean) {
   store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
   store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p1', createdAt: 'now' } as never);
   store.insertAgent({
-    id: 'a1', ownerId: 'o', name: 'Tax', slug: 'tax', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1',
+    id: 'a1', ownerId: 'o', name: 'Ledger', slug: 'ledger', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1',
     persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
   } as never);
   store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'TaxBot', secretRef: 'chan/a1', deepLink: 'x', createdAt: 'now' } as never);

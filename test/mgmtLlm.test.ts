@@ -124,7 +124,7 @@ class FakeSink implements AgentSink {
 }
 
 const AGENTS: AgentSummary[] = [
-  { id: 'a1', name: 'Tech Advisor', slug: 'tech-advisor', state: 'RUNNING', model: 'claude-opus-4-8', aiProfileId: 'p1' },
+  { id: 'a1', name: 'Garden Advisor', slug: 'garden-advisor', state: 'RUNNING', model: 'claude-opus-4-8', aiProfileId: 'p1' },
 ];
 const WHO = { ownerId: 'o', chatId: 100, fromUserId: 555 };
 
@@ -153,7 +153,7 @@ describe('LlmAgent tool loop', () => {
     const tr = second.content[0] as Extract<ContentBlock, { type: 'tool_result' }>;
     expect(tr.type).toBe('tool_result');
     expect(tr.tool_use_id).toBe('t1');
-    expect(tr.content).toContain('Tech Advisor');
+    expect(tr.content).toContain('Garden Advisor');
   });
 
   it('a change tool posts a confirmation card and does NOT execute', async () => {
@@ -161,8 +161,8 @@ describe('LlmAgent tool loop', () => {
       [toolUse('t1', 'stop_agent', { agent: 'a1' }), finalText('Queued — tap Confirm to stop it.')],
       { rw: true },
     );
-    await agent.respond(WHO, 'stop tech advisor', sink);
-    expect(sink.cards).toEqual([{ confirmId: 'c_x', summary: '⏹ Stop "Tech Advisor"' }]);
+    await agent.respond(WHO, 'stop garden advisor', sink);
+    expect(sink.cards).toEqual([{ confirmId: 'c_x', summary: '⏹ Stop "Garden Advisor"' }]);
     expect(api.calls).toEqual([]); // proposed, not executed
     expect(sink.texts).toContain('Queued — tap Confirm to stop it.');
     // The model was told it is not done yet.
@@ -189,7 +189,7 @@ describe('LlmAgent tool loop', () => {
       [toolUse('t1', 'delete_agent', { agent: 'a1' }), finalText('I can’t delete agents from here.')],
       { rw: true },
     );
-    await agent.respond(WHO, 'delete tech advisor', sink);
+    await agent.respond(WHO, 'delete garden advisor', sink);
     const back = model.reqs[1]!.messages.at(-1) as { content: ContentBlock[] };
     const tr = back.content[0] as Extract<ContentBlock, { type: 'tool_result' }>;
     expect(tr.is_error).toBe(true);

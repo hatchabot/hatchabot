@@ -61,14 +61,14 @@ describe('TelegramPoolProvisioner', () => {
     }) as unknown as typeof fetch;
     const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl: recorder });
     await pool.addToPool('recycledbot', 'tok-r');
-    await pool.provision({ agentId: 'a1', agentName: 'Art Test', slug: 'art-test' });
+    await pool.provision({ agentId: 'a1', agentName: 'Piano Test', slug: 'piano-test' });
     const renames = calls.filter((c) => c.url.includes('setMyName'));
     expect(renames).toHaveLength(1);
     expect(renames[0]!.url).toContain('/bottok-r/setMyName');
-    expect(JSON.parse(renames[0]!.body)).toEqual({ name: 'Art Test' });
+    expect(JSON.parse(renames[0]!.body)).toEqual({ name: 'Piano Test' });
     // The idempotent re-lease does NOT rename again (nothing changed).
     calls.length = 0;
-    await pool.provision({ agentId: 'a1', agentName: 'Art Test', slug: 'art-test' });
+    await pool.provision({ agentId: 'a1', agentName: 'Piano Test', slug: 'piano-test' });
     expect(calls).toHaveLength(0);
   });
 
@@ -192,9 +192,9 @@ describe('setTelegramDisplayName', () => {
       calls.push({ url: String(url), body: String(init?.body ?? '') });
       return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
     }) as unknown as typeof fetch;
-    expect(await setTelegramDisplayName('tok', '  Condo Adviser  ', rec)).toEqual({ ok: true });
+    expect(await setTelegramDisplayName('tok', '  HOA Helper  ', rec)).toEqual({ ok: true });
     expect(calls[0]!.url).toContain('/bottok/setMyName');
-    expect(JSON.parse(calls[0]!.body)).toEqual({ name: 'Condo Adviser' });
+    expect(JSON.parse(calls[0]!.body)).toEqual({ name: 'HOA Helper' });
     await setTelegramDisplayName('tok', 'x'.repeat(200), rec);
     expect(JSON.parse(calls[1]!.body).name).toHaveLength(64);
   });
@@ -258,7 +258,7 @@ describe('a recycled pool bot does not keep the last agent\'s identity', () => {
     const db = new Database(':memory:');
     const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl });
     await pool.addToPool('recycled', 'tok');
-    await pool.provision({ agentId: 'a1', agentName: 'Condo Adviser', slug: 'condo' });
+    await pool.provision({ agentId: 'a1', agentName: 'HOA Helper', slug: 'hoa' });
     // A member who has been chatting with it.
     db.prepare(`CREATE TABLE IF NOT EXISTS memberships (id TEXT, agent_id TEXT, user_id TEXT, role TEXT, channel_user_id TEXT, status TEXT)`).run();
     db.prepare(`INSERT INTO memberships VALUES ('m1','a1','u1','user','555','active')`).run();
@@ -317,7 +317,7 @@ describe('a recycled pool bot does not keep the last agent\'s identity', () => {
     const db = new Database(':memory:');
     const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl });
     await pool.addToPool('recycled', 'tok');
-    await pool.provision({ agentId: 'old', agentName: 'Condo Adviser', slug: 'condo' });
+    await pool.provision({ agentId: 'old', agentName: 'HOA Helper', slug: 'hoa' });
     db.prepare(`CREATE TABLE IF NOT EXISTS memberships (id TEXT, agent_id TEXT, user_id TEXT, role TEXT, channel_user_id TEXT, status TEXT)`).run();
     db.prepare(`INSERT INTO memberships VALUES ('m0','old','u0','user','777','active')`).run();
 
@@ -329,12 +329,12 @@ describe('a recycled pool bot does not keep the last agent\'s identity', () => {
     db.prepare(`DELETE FROM memberships`).run();
     calls.length = 0;
 
-    await pool.provision({ agentId: 'a2', agentName: 'Tax Advisor', slug: 'tax' });
+    await pool.provision({ agentId: 'a2', agentName: 'Budget Tracker', slug: 'ledger' });
 
     const notice = calls.filter((c) => c.method === 'sendMessage');
     expect(notice).toHaveLength(1);
     expect(notice[0]!.body.chat_id).toBe('777');
-    expect(notice[0]!.body.text).toContain('Tax Advisor');
+    expect(notice[0]!.body.text).toContain('Budget Tracker');
     expect(notice[0]!.body.text).toMatch(/above this line|no longer applies/i);
     expect(notice[0]!.body.text).toMatch(/archived/i); // the buried-chat hint
     // The API-resettable surface is shed on lease; BotFather-only settings can't be.
@@ -403,13 +403,13 @@ describe('a rename that never reached Telegram is retried, then remembered', () 
 
   it('retries a transport failure and succeeds on a later attempt', async () => {
     const { state, fetchImpl } = flaky(2);
-    expect(await setTelegramDisplayName('tok', 'Art Advisor', fetchImpl, [0, 0])).toEqual({ ok: true });
+    expect(await setTelegramDisplayName('tok', 'Piano Practice', fetchImpl, [0, 0])).toEqual({ ok: true });
     expect(state.calls).toBe(3);
   });
 
   it('reports the CAUSE, not a bare "fetch failed"', async () => {
     const { fetchImpl } = flaky(99);
-    const res = await setTelegramDisplayName('tok', 'Art Advisor', fetchImpl, [0, 0]);
+    const res = await setTelegramDisplayName('tok', 'Piano Practice', fetchImpl, [0, 0]);
     expect(res.ok).toBe(false);
     expect(res.error).toContain('ECONNREFUSED'); // the live log said only "fetch failed"
   });
@@ -434,11 +434,11 @@ describe('a rename that never reached Telegram is retried, then remembered', () 
     const db = new Database(':memory:');
     const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl, renameBackoffMs: [0, 0] });
     await pool.addToPool('bot', 'tok');
-    await pool.provision({ agentId: 'a1', agentName: 'Art Advisor', slug: 'art' });
+    await pool.provision({ agentId: 'a1', agentName: 'Piano Practice', slug: 'piano' });
 
     // Rename lost, but not forgotten.
     const parked = db.prepare(`SELECT desired_name FROM telegram_pool WHERE username='bot'`).get() as any;
-    expect(parked.desired_name).toBe('Art Advisor');
+    expect(parked.desired_name).toBe('Piano Practice');
 
     state.calls = 99; // network is back
     // ...but the sweep waits for the deadline. Telegram answered a live rename
@@ -472,10 +472,10 @@ describe('an on-demand rename answers honestly', () => {
     const db = new Database(':memory:');
     const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl: limited, renameBackoffMs: [0, 0] });
     await pool.addToPool('bot', 'tok');
-    await pool.provision({ agentId: 'a1', agentName: 'Art Advisor', slug: 'art' });
+    await pool.provision({ agentId: 'a1', agentName: 'Piano Practice', slug: 'piano' });
 
     const pending = pool.pendingName('bot');
-    expect(pending!.name).toBe('Art Advisor');
+    expect(pending!.name).toBe('Piano Practice');
     // The deadline is Telegram's own number, not a constant of ours.
     const waitMs = Date.parse(pending!.retryAt!) - Date.now();
     expect(waitMs).toBeGreaterThan(11_000 * 1000);
@@ -486,12 +486,12 @@ describe('an on-demand rename answers honestly', () => {
     const calls: string[] = [];
     const fetchImpl = (async (url: any) => {
       calls.push(String(url).split('/').pop()!);
-      return new Response('{"ok":true,"result":{"first_name":"Art Advisor"}}',
+      return new Response('{"ok":true,"result":{"first_name":"Piano Practice"}}',
         { headers: { 'content-type': 'application/json' } });
     }) as unknown as typeof fetch;
     const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl });
     await pool.addToPool('bot', 'tok');
-    await pool.provision({ agentId: 'a1', agentName: 'Art Advisor', slug: 'art' });
+    await pool.provision({ agentId: 'a1', agentName: 'Piano Practice', slug: 'piano' });
     // No setMyName — the rename quota is untouched, which is the whole point
     // of checking first. (The lease also sheds the recycled-bot surface via
     // description/commands calls; those aren't quota-bearing.)

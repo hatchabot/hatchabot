@@ -118,9 +118,9 @@ async function world(opts: {
   const provider = new MockProvider();
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
   store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
-  const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'taco', workspace: { files: {}, configPatch: { agentId: 'taco', authMode: 'api-key' } as never }, env: {} } as never);
+  const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'recipe', workspace: { files: {}, configPatch: { agentId: 'recipe', authMode: 'api-key' } as never }, env: {} } as never);
   await provider.start(runtimeRef);
-  store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Taco', slug: 'taco', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef, persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+  store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Recipe', slug: 'recipe', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef, persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
   const token = randomBytes(16).toString('hex'); // made at run time: never a real-looking token in the repo
   db.prepare('UPDATE agents SET gateway_port = ?, gateway_token = ? WHERE id = ?').run(gw.port, token, 'a1');
   const now = new Date().toISOString();
@@ -209,7 +209,7 @@ describe('who may open the console, and what it is', () => {
     const { app, token } = await world();
     const as = (u: string) => app.inject({ method: 'GET', url: '/v1/agents/a1/console/access', headers: { 'x-hatchabot-owner': u } });
     expect((await as(OWNER)).json()).toEqual({ role: 'owner', console: 'identity' });
-    expect((await as(GUEST)).json()).toEqual({ role: 'guest', console: 'identity', session: guestConsoleSessionKey(token, 'taco', GUEST) });
+    expect((await as(GUEST)).json()).toEqual({ role: 'guest', console: 'identity', session: guestConsoleSessionKey(token, 'recipe', GUEST) });
     expect((await as(OTHER)).statusCode).toBe(404); // a member without web chat
     expect((await as('user-stranger')).statusCode).toBe(404);
   });

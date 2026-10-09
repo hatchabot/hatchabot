@@ -59,12 +59,12 @@ describe('agents a set does not cover', () => {
     const set = { date: '2026-09-28', startedAt: '2026-09-28T03:30:00Z', volumes: [{ name: 'kitchen-1-vol', file: 'hatchabot-kitchen-1-vol.tgz', sizeBytes: 1 }] };
     const agents = [
       { id: 'a1', name: 'Kitchen', runtimeRef: 'docker://hatchabot-kitchen-1', createdAt: '2026-09-01T00:00:00Z', hostId: 'local' },
-      { id: 'a2', name: 'Book Advisor', runtimeRef: 'docker://hatchabot-book-2', createdAt: '2026-09-05T00:00:00Z', hostId: 'runner' },
-      { id: 'a3', name: 'Picture Mash', runtimeRef: 'docker://hatchabot-pic-3', createdAt: '2026-09-28T09:00:00Z', hostId: 'local' },
+      { id: 'a2', name: 'Reading List', runtimeRef: 'docker://hatchabot-book-2', createdAt: '2026-09-05T00:00:00Z', hostId: 'runner' },
+      { id: 'a3', name: 'Photo Album', runtimeRef: 'docker://hatchabot-pic-3', createdAt: '2026-09-28T09:00:00Z', hostId: 'local' },
       { id: 'a4', name: 'Unprovisioned', createdAt: '2026-09-01T00:00:00Z', hostId: 'local' },
     ];
     const missing = agentsMissingFromSet(set, agents, (h) => (h === 'runner' ? 'Laptop runner' : undefined));
-    expect(missing).toEqual([{ agentId: 'a2', name: 'Book Advisor', host: 'Laptop runner' }]);
+    expect(missing).toEqual([{ agentId: 'a2', name: 'Reading List', host: 'Laptop runner' }]);
   });
 });
 
@@ -182,13 +182,13 @@ describe('scripts/backup-volumes.sh records how the run ended', () => {
   });
 
   it('a clean run says complete; a volume no agent uses is left out and named', () => {
-    const w = scriptWorld(['hatchabot-kitchen-1-vol', 'agentclaw-old-sophie'], ['docker://hatchabot-kitchen-1']);
+    const w = scriptWorld(['hatchabot-kitchen-1-vol', 'agentclaw-old-garden'], ['docker://hatchabot-kitchen-1']);
     const r = w.run();
     expect(r.status, r.stdout + r.stderr).toBe(0);
-    expect(r.stdout).toMatch(/agentclaw-old-sophie: no agent uses it — not backed up/);
-    expect(existsSync(join(w.setDir(), 'agentclaw-old-sophie.tgz'))).toBe(false);
+    expect(r.stdout).toMatch(/agentclaw-old-garden: no agent uses it — not backed up/);
+    expect(existsSync(join(w.setDir(), 'agentclaw-old-garden.tgz'))).toBe(false);
     expect(existsSync(join(w.setDir(), 'hatchabot-kitchen-1-vol.tgz'))).toBe(true);
-    expect(readSetStatus(w.setDir())).toMatchObject({ complete: true, orphans: ['agentclaw-old-sophie'], failedVolumes: [] });
+    expect(readSetStatus(w.setDir())).toMatchObject({ complete: true, orphans: ['agentclaw-old-garden'], failedVolumes: [] });
   });
 
   it('a failed volume leaves the set marked incomplete, naming it', () => {
@@ -228,11 +228,11 @@ describe('scripts/backup-volumes.sh records how the run ended', () => {
   });
 
   it('with no registry agents to match (unreadable or empty), every volume is taken', () => {
-    const w = scriptWorld(['hatchabot-kitchen-1-vol', 'agentclaw-old-sophie'], []);
+    const w = scriptWorld(['hatchabot-kitchen-1-vol', 'agentclaw-old-garden'], []);
     // No active agents but volumes exist: the old trust-the-disk rule holds.
     const r = w.run();
     expect(r.status, r.stdout + r.stderr).toBe(0);
-    expect(existsSync(join(w.setDir(), 'agentclaw-old-sophie.tgz'))).toBe(true);
+    expect(existsSync(join(w.setDir(), 'agentclaw-old-garden.tgz'))).toBe(true);
   });
 });
 

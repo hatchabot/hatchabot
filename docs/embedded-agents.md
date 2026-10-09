@@ -3,7 +3,7 @@
 **Status: design (2026-10-06).** Built so far: Hatchabot's own version — Report a
 problem, the manager's source tools, and its knowledge pack
 (docs/field-reports.md, docs/troubleshooting.md, docs/architecture-map.md).
-This document generalizes that to any tool, with **taxjson** (a local
+This document generalizes that to any tool, with **taxkit** (a local
 command-line tax calculator) as the first case.
 
 ## What it is for
@@ -32,21 +32,21 @@ What it has over a fresh Claude Code session on the user's side:
 ## The one principle: the pack belongs to the tool, the host is interchangeable
 
 ```
-  taxjson repo                                   hosts that can run it
+  taxkit repo                                    hosts that can run it
   ┌──────────────────────────────┐
   │ agent/                       │      ┌─ Hatchabot: an always-on agent, phone access,
   │   agent.toml   (manifest)    │──────┤   memory, Report a problem, the feedback loop
   │   AGENT.md     (instructions)│      │
   │   knowledge/   (the pack)    │      ├─ Claude Code / Claude Desktop / any MCP client:
-  │   (optional) MCP server      │      │   `tjs agent serve` (also covers Windows,
+  │   (optional) MCP server      │      │   `tk agent serve` (also covers Windows,
   └──────────────────────────────┘      │   where Hatchabot does not run)
-       versioned with each release      └─ any assistant: `tjs agent context` prints
+       versioned with each release      └─ any assistant: `tk agent context` prints
                                             the instructions + pack index to paste in
 ```
 
 The tool's author writes **one pack**. It works with Hatchabot for people who
-run Hatchabot, and without it for everyone else. Most taxjson users will never
-install Hatchabot (it needs Docker; taxjson needs only Python, and runs on
+run Hatchabot, and without it for everyone else. Most taxkit users will never
+install Hatchabot (it needs Docker; taxkit needs only Python, and runs on
 Windows), so the second path matters as much as the first.
 
 ## The pack
@@ -61,12 +61,12 @@ it is installed beside.
 schema = "hatchabot-agent-pack/1"
 
 [agent]
-tool = "taxjson"
-name = "taxjson helper"
+tool = "taxkit"
+name = "taxkit helper"
 instructions = "AGENT.md"            # persona and rules, always loaded
 knowledge = "knowledge/"             # the pack, searched on demand
-version = ["tjs", "--version"]       # how a host learns the installed version
-reports = "github:taxjson/taxjson"   # where Report a problem files issues
+version = ["tk", "--version"]        # how a host learns the installed version
+reports = "github:example/taxkit"    # where Report a problem files issues
 docs = ["README.md", "docs/", "KNOWN_ISSUES.md", "REFERENCES.md"]  # also readable, read-only
 
 [privacy]
@@ -85,21 +85,21 @@ mask = [
 # the person chose. Each declares its data tier; the host enforces it.
 [[tools]]
 name = "checklist"
-run = ["tjs", "checklist", "--json"]
+run = ["tk", "checklist", "--json"]
 cwd = "{project}"
 tier = "summary"
 about = "Where this year's filing stands: each step, done or not, and why."
 
 [[tools]]
 name = "find_missing_history"
-run = ["tjs", "find-missing-history", "--json"]
+run = ["tk", "find-missing-history", "--json"]
 cwd = "{project}"
 tier = "summary"
 about = "Sales with no purchase found: which symbols, which accounts, since when."
 
 [[tools]]
 name = "explain"
-run = ["tjs", "explain", "{symbol}"]
+run = ["tk", "explain", "{symbol}"]
 args = { symbol = '^[A-Z0-9.:-]{1,15}$' }
 cwd = "{project}"
 tier = "full"
@@ -107,7 +107,7 @@ about = "How one symbol's gains were computed, lot by lot."
 
 [[tools]]
 name = "synthetic_repro"
-run = ["tjs", "redact", "--synthetic", "--symbol", "{symbol}", "--out", "{tmp}"]
+run = ["tk", "redact", "--synthetic", "--symbol", "{symbol}", "--out", "{tmp}"]
 args = { symbol = '^[A-Z0-9.:-]{1,15}$' }
 cwd = "{project}"
 tier = "summary"
@@ -138,13 +138,13 @@ For Hatchabot this lives in `src/ops/opsAgent.ts`. A pack carries it as a file.
 
 The same shape as Hatchabot's own:
 
-| File | What | taxjson's source for it |
+| File | What | taxkit's source for it |
 |---|---|---|
 | `overview.md` | The mental model: the pipeline, the files, the words | README, docs/getting-started.md |
 | `troubleshooting.md` | Each entry gives the symptom, how to check, the cause, the fix, the release that fixed it, and the code | **KNOWN_ISSUES.md is already most of this**: each entry has Where / Current behavior / Why deferred / Workaround |
-| `architecture-map.md` | Where each feature's code is | `src/taxjson/bin/*` (one file per command), `lib/brokerages/*` |
+| `architecture-map.md` | Where each feature's code is | `src/taxkit/bin/*` (one file per command), `lib/brokerages/*` |
 | `domain.md` | The rules the tool implements, with citations (ACB, s.40(2)(g), §1091, T1135, holding periods) | REFERENCES.md, the rule docstrings |
-| `settings.md` | Every `taxjson.toml` key: meaning, default, when to change it | the config parser and docs |
+| `settings.md` | Every `taxkit.toml` key: meaning, default, when to change it | the config parser and docs |
 | `faq.md` | The questions people actually ask, answered | issues, field reports |
 
 **Checked in the tool's CI**, as Hatchabot's are (test/knowledgePack.test.ts):
@@ -164,20 +164,20 @@ everywhere. A Claude Code session on the user's side never gets that.
 ### In Hatchabot: `hatchabot attach`
 
 ```
-hatchabot attach taxjson --project ~/taxes/2025
+hatchabot attach taxkit --project ~/taxes/2025
 ```
 
 1. **Find the pack.** It is read from the installed tool, for example
-   `$(tjs agent path)`, or from a repo URL. The manifest is validated against
+   `$(tk agent path)`, or from a repo URL. The manifest is validated against
    the schema.
-2. **Make or reuse the agent.** It gets its own agent ("taxjson helper"), or
+2. **Make or reuse the agent.** It gets its own agent ("taxkit helper"), or
    the pack joins an existing one (the manager, for a household with one
    agent).
 3. **Load the instructions.** `AGENT.md` becomes a managed section of the
    agent's AGENTS.md. This is the mechanism the manager's notes use
    (`OPS_MANAGED_HEADINGS`): replaced on each sync, never duplicated.
 4. **Load the knowledge.** `knowledge/` is copied read-only into the agent's
-   workspace under `memory/packs/taxjson/`, where the agent's memory search
+   workspace under `memory/packs/taxkit/`, where the agent's memory search
    indexes it. Only the overview and the playbook's index go into context; the
    rest is found by search when a question needs it.
 5. **Wire the tools.** Each declared tool becomes one tool on a project door,
@@ -190,17 +190,17 @@ hatchabot attach taxjson --project ~/taxes/2025
    again. "Fixed in" entries compare against the installed version, so the
    answer to an old bug is "upgrade to vX".
 7. **Point reports at the tool.** Report a problem from this agent files on
-   `reports`, with the marker `<!-- agent-report v1 tool=taxjson version=… -->`,
+   `reports`, with the marker `<!-- agent-report v1 tool=taxkit version=… -->`,
    the host's masks plus the manifest's, and the tool's facts (`version`,
    `checklist` summary), never Hatchabot's.
 
 ### Without Hatchabot
 
-- **`tjs agent context`** prints `AGENT.md` and an index of the pack. Pasted
+- **`tk agent context`** prints `AGENT.md` and an index of the pack. Pasted
   into Claude Code or any assistant, or saved as CLAUDE.md, it gives that
   assistant the head start. It can then read the knowledge files directly,
   since they are on disk with the install.
-- **`tjs agent serve`** is an MCP server over stdio, exposing:
+- **`tk agent serve`** is an MCP server over stdio, exposing:
   - the knowledge files as resources;
   - the declared tools, with the same tiers;
   - a `report_problem` prompt.
@@ -209,9 +209,9 @@ hatchabot attach taxjson --project ~/taxes/2025
   small Python module that reads `agent.toml` covers it, about a few hundred
   lines.
 
-## Privacy, for a tool like taxjson
+## Privacy, for a tool like taxkit
 
-taxjson's promise is that transaction data never leaves the computer. An agent
+taxkit's promise is that transaction data never leaves the computer. An agent
 must not quietly break that:
 
 - **Tiers.** `none` and `summary` are what a cloud model sees by default:
@@ -224,22 +224,22 @@ must not quietly break that:
     shown first.
 - **Reports never carry data.** A bug that depends on the person's rows is
   reproduced with `synthetic_repro`: a made-up CSV with the same pattern.
-  taxjson already has `taxjson_redact.py` and demo CSVs per broker to build
+  taxkit already has `taxkit_redact.py` and demo CSVs per broker to build
   on. The person reviews the report as in Hatchabot's Report a problem.
 - **No tax advice.** The agent explains what the tool computed and why, with
   citations from the pack. It does not say what to file.
 
 ## What each side builds
 
-**taxjson** (mostly writing; the knowledge already exists in another shape):
+**taxkit** (mostly writing; the knowledge already exists in another shape):
 1. `agent/agent.toml`, `agent/AGENT.md`, and `agent/knowledge/`, derived from
    README, getting-started, KNOWN_ISSUES and REFERENCES.
 2. `--json` on the commands the manifest declares, where they lack it. Several
    commands already have it, and `checklist` reads sub-commands' JSON
    internally.
-3. `tjs redact --synthetic` (or similar) for reproductions.
+3. `tk redact --synthetic` (or similar) for reproductions.
 4. A CI test for the pack, the Python twin of test/knowledgePack.test.ts.
-5. `tjs agent context` and `tjs agent path`, then later `tjs agent serve`
+5. `tk agent context` and `tk agent path`, then later `tk agent serve`
    (MCP).
 6. The label workflow and `/fix-field-report`, copied from Hatchabot.
 
@@ -268,19 +268,19 @@ must not quietly break that:
    For each, record whether the answer was right, how many steps it took, its
    tokens and its time. If the pack does not clearly win, fix the pack before
    building hosts.
-2. **taxjson's pack plus `tjs agent context`.** This needs no Hatchabot work,
-   helps every taxjson user who has any assistant, and gets the same eval on
-   taxjson questions.
+2. **taxkit's pack plus `tk agent context`.** This needs no Hatchabot work,
+   helps every taxkit user who has any assistant, and gets the same eval on
+   taxkit questions.
 3. **`hatchabot attach` and the project door,** for people who run both.
-4. **`tjs agent serve` (MCP),** once the tools and tiers have settled.
+4. **`tk agent serve` (MCP),** once the tools and tiers have settled.
 
 ## Decisions for the owner
 
-- **taxjson's default:** may a cloud model see `summary` data (counts, symbols
+- **taxkit's default:** may a cloud model see `summary` data (counts, symbols
   lacking history, steps not done), with `full` only on consent or a local
   model? The alternative is `none` by default.
-- **The manifest in TOML,** which matches `taxjson.toml`. JSON would be easier
+- **The manifest in TOML,** which matches `taxkit.toml`. JSON would be easier
   for Hatchabot to read, and TOML easier for Python tool authors to write.
-- **Which first:** the Claude Code path (`tjs agent context`, reaches every
-  taxjson user) or `hatchabot attach` (the full experience, for Hatchabot
+- **Which first:** the Claude Code path (`tk agent context`, reaches every
+  taxkit user) or `hatchabot attach` (the full experience, for Hatchabot
   users).

@@ -16,7 +16,7 @@ import { modelRefOf, THRESHOLDS } from './tokenHealth.js';
  * COMPACTION. Hatchabot runs `openclaw sessions compact <key> --agent <slug>
  * --timeout 1800000 --json` itself in the agent's container — the gateway's
  * sessions.compact RPC — not a /compact in chat, which is held to the chat
- * app's handler limit (2026-10-04: Stock Advisor's 446K summary outran the
+ * app's handler limit (2026-10-04: one agent's 446K summary outran the
  * 5-minute limit and was retried every ~5 minutes for hours). Two modes:
  *   - summarise: the model writes a summary; minutes on a large conversation.
  *   - lines: `--max-lines N`, keep the last N transcript lines; seconds.

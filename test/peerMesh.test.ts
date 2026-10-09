@@ -25,7 +25,7 @@ async function world() {
     store.insertAgent({ id, ownerId: owner, name, slug: id, state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
     store.setAgentState(id, state as any);
   };
-  add('stock', 'Stock'); add('tax', 'Tax'); add('legal', 'Legal'); add('cook', 'Cook');
+  add('stock', 'Stock'); add('ledger', 'Ledger'); add('legal', 'Legal'); add('cook', 'Cook');
   add('old', 'Old'); store.setAgentState('old', 'ARCHIVED');
   add('theirs', 'Theirs', 'user-other');
   const secrets = new MemSecrets();
@@ -39,33 +39,33 @@ describe('POST /v1/agent-peers/mesh', () => {
   it('connects three agents to each other: six grants, call tokens minted, all three flagged for rebuild', async () => {
     const { store, secrets, mesh } = await world();
     store.setAgentPeers('stock', ['cook']); // an existing grant outside the selection survives
-    const res = await mesh(['stock', 'tax', 'legal'], true);
+    const res = await mesh(['stock', 'ledger', 'legal'], true);
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ agents: 3, changed: 3, grants: 6 });
-    expect(store.listAgentPeers('stock').sort()).toEqual(['cook', 'legal', 'tax']);
-    expect(store.listAgentPeers('tax').sort()).toEqual(['legal', 'stock']);
-    expect(store.listAgentPeers('legal').sort()).toEqual(['stock', 'tax']);
-    expect(store.agentMayCall('tax', 'stock') && store.agentMayCall('legal', 'tax')).toBe(true);
-    for (const id of ['stock', 'tax', 'legal']) expect(store.hasAgentCallToken(id)).toBe(true);
+    expect(store.listAgentPeers('stock').sort()).toEqual(['cook', 'ledger', 'legal']);
+    expect(store.listAgentPeers('ledger').sort()).toEqual(['legal', 'stock']);
+    expect(store.listAgentPeers('legal').sort()).toEqual(['ledger', 'stock']);
+    expect(store.agentMayCall('ledger', 'stock') && store.agentMayCall('legal', 'ledger')).toBe(true);
+    for (const id of ['stock', 'ledger', 'legal']) expect(store.hasAgentCallToken(id)).toBe(true);
     expect(secrets.map.size).toBe(3);
-    expect(res.json().needRebuild.map((a: any) => a.name).sort()).toEqual(['Legal', 'Stock', 'Tax']);
+    expect(res.json().needRebuild.map((a: any) => a.name).sort()).toEqual(['Ledger', 'Legal', 'Stock']);
     // idempotent
-    expect((await mesh(['stock', 'tax', 'legal'], true)).json().changed).toBe(0);
+    expect((await mesh(['stock', 'ledger', 'legal'], true)).json().changed).toBe(0);
   });
 
   it('disconnects exactly the pairs inside the selection', async () => {
     const { store, mesh } = await world();
-    store.setAgentPeers('stock', ['tax', 'legal', 'cook']);
-    store.setAgentPeers('tax', ['stock']);
-    const res = await mesh(['stock', 'tax'], false);
+    store.setAgentPeers('stock', ['ledger', 'legal', 'cook']);
+    store.setAgentPeers('ledger', ['stock']);
+    const res = await mesh(['stock', 'ledger'], false);
     expect(res.json().changed).toBe(2);
     expect(store.listAgentPeers('stock').sort()).toEqual(['cook', 'legal']);
-    expect(store.listAgentPeers('tax')).toEqual([]);
+    expect(store.listAgentPeers('ledger')).toEqual([]);
   });
 
   it('skips archived agents, refuses other owners, too few agents and bad shapes', async () => {
     const { mesh } = await world();
-    const res = await mesh(['stock', 'tax', 'old'], true);
+    const res = await mesh(['stock', 'ledger', 'old'], true);
     expect(res.json().skipped).toEqual([{ name: 'Old', reason: 'archived' }]);
     expect(res.json().grants).toBe(2);
     expect((await mesh(['stock', 'old'], true)).statusCode).toBe(400);
@@ -83,16 +83,16 @@ describe('the call token: its secret and its hash always agree (2026-10-09)', ()
     const put = w.secrets.put.bind(w.secrets);
     let fail = true;
     w.secrets.put = async (r: string, v: string) => { if (fail) { fail = false; throw new Error('disk full'); } return put(r, v); };
-    expect((await peers(w, 'stock', ['tax'])).statusCode).toBe(500);
+    expect((await peers(w, 'stock', ['ledger'])).statusCode).toBe(500);
     expect(w.store.hasAgentCallToken('stock')).toBe(false);
-    expect((await peers(w, 'stock', ['tax'])).statusCode).toBe(200);
+    expect((await peers(w, 'stock', ['ledger'])).statusCode).toBe(200);
     expect(w.store.agentCallTokenIs('stock', w.secrets.map.get('agent-call-token/stock')!)).toBe(true);
   });
 
   it('a live hash whose secret is gone is minted again', async () => {
     const w = await world();
     w.store.createAgentCallToken('stock', OWNER); // the hash, with no secret written
-    expect((await peers(w, 'stock', ['tax'])).statusCode).toBe(200);
+    expect((await peers(w, 'stock', ['ledger'])).statusCode).toBe(200);
     expect(w.store.agentCallTokenIs('stock', w.secrets.map.get('agent-call-token/stock')!)).toBe(true);
   });
 
@@ -102,7 +102,7 @@ describe('the call token: its secret and its hash always agree (2026-10-09)', ()
     // The first write is slow: the second grant's mint would otherwise overtake it.
     let first = true;
     w.secrets.put = async (r: string, v: string) => { if (first) { first = false; await new Promise((res) => setTimeout(res, 20)); } return put(r, v); };
-    const [a, b] = await Promise.all([peers(w, 'stock', ['tax']), w.mesh(['stock', 'legal'], true)]);
+    const [a, b] = await Promise.all([peers(w, 'stock', ['ledger']), w.mesh(['stock', 'legal'], true)]);
     expect([a.statusCode, b.statusCode]).toEqual([200, 200]);
     expect(w.store.agentCallTokenIs('stock', w.secrets.map.get('agent-call-token/stock')!)).toBe(true);
   });

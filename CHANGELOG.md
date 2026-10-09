@@ -513,7 +513,7 @@ GitHub issues #7–#13, and the fixes from a deep review of the whole codebase (
 ## [2.120.1] — 2026-10-04
 
 ### Fixed
-- **A scheduled task that failed long ago, or that you switched off, is no longer reported as a loop.** The loop watcher counted a task's failure streak as still going for 7 days after its last run, even when the task was paused (Meeting Scheduler's watchdog, switched off a week ago, came up as "re-ran 3 times after errors"). A failing task now counts as a live loop only while it is switched on and has failed in the last 2 days; the old incident clears itself at the next check.
+- **A scheduled task that failed long ago, or that you switched off, is no longer reported as a loop.** The loop watcher counted a task's failure streak as still going for 7 days after its last run, even when the task was paused (Calendar Helper's watchdog, switched off a week ago, came up as "re-ran 3 times after errors"). A failing task now counts as a live loop only while it is switched on and has failed in the last 2 days; the old incident clears itself at the next check.
 - **Clearing an agent from Needs you now removes the flag.** It used to move to a "🔕 Cleared" group and keep its 🔁 or ⚑ mark on the tile. Now a cleared agent goes back with the fine ones and its tile looks normal, until something new happens to it.
 
 ## [2.120.0] — 2026-10-04
@@ -765,7 +765,7 @@ A check of every promise the app makes against what actually enforces it (docs/r
 - The Schedule tab, `hbt tasks add --help` and docs/features.md say where a result goes: your chat with the agent, or its console conversation when it is in no chat app.
 - **No rebuild, no config change.** Nothing in openclaw.json changes and nothing is added to the seed, so there is no new seed step and no skipIf. Everything is `openclaw cron` / `gateway call` at run time.
 - **Applies live once the release is deployed:**
-- **Existing quiet tasks stay quiet.** Hatchabot cannot tell a task the owner made quiet on purpose from one it made quiet because there was nowhere to post, so it does not change `delivery.mode: none` tasks. This includes **Lunch Agent's "Daily lunch suggestion"** (`64595047-78a9-4e73-a520-429e15687a41`, currently `isolated`, `delivery none`). To fix it, pick one:
+- **Existing quiet tasks stay quiet.** Hatchabot cannot tell a task the owner made quiet on purpose from one it made quiet because there was nowhere to post, so it does not change `delivery.mode: none` tasks. This includes **Lunch Picker's "Daily lunch suggestion"** (`64595047-78a9-4e73-a520-429e15687a41`, currently `isolated`, `delivery none`). To fix it, pick one:
 - **Before the deploy,** asking a web-only agent to set a reminder does create a task bound to the console conversation. The running prod sweep (v2.109.x) will still make it quiet at its next pass.
 - **OpenClaw 2026.7 agents** are unchanged: their tasks stay quiet. Their CLI knows only `--session main|isolated`, and the version comes from `provider.info`.
 - **Agents in a chat app** are unchanged. The owner's Telegram, else Discord or Slack, is used as before. If the owner's id there is not known, the task stays quiet, not the console: "last" in the shared main conversation is whoever wrote last.
@@ -841,7 +841,7 @@ The larger fixes from the full review, each approved first.
 
 ### Usage
 - **Usage now counts every call.** Requests used to come from OpenClaw's log, which records only calls slower than a second, so every request figure was 10–28% low. They now come from the transcripts, which have every call; the log still supplies refusals (429s) and failures.
-- **Usage now includes deleted and reset sessions.** OpenClaw moves a finished scheduled-task session into an archive hours after it runs, and Usage stopped seeing it: Retro Stock Picker showed 30M tokens where it had used 135M. The archives, sessions reset before the 2026.9 upgrade, and deleted-session files are all read now, each call counted once.
+- **Usage now includes deleted and reset sessions.** OpenClaw moves a finished scheduled-task session into an archive hours after it runs, and Usage stopped seeing it: Dividend Tracker showed 30M tokens where it had used 135M. The archives, sessions reset before the 2026.9 upgrade, and deleted-session files are all read now, each call counted once.
 - Because the counter now counts more, Usage's history is reset once on upgrade: each agent's first reading refills its last 8 days, so the hour to week views are right at once; the 30-day trend restarts.
 
 ### Sign-in
@@ -935,7 +935,7 @@ A full review (six reviewers across the whole codebase, every finding re-checked
 ## [2.99.1] — 2026-09-28
 
 ### Fixed
-- **Usage no longer counts an agent's whole history as new use after a zero reading.** A read that caught a container while it stopped (going to sleep) recorded a total of 0; the next reading then counted everything since the agent was made (Cooking Teacher showed 72K tokens on a day it did nothing). A zero right after a real reading is ignored, and a window never starts from one.
+- **Usage no longer counts an agent's whole history as new use after a zero reading.** A read that caught a container while it stopped (going to sleep) recorded a total of 0; the next reading then counted everything since the agent was made (Meal Planner showed 72K tokens on a day it did nothing). A zero right after a real reading is ignored, and a window never starts from one.
 
 ## [2.99.0] — 2026-09-28
 
@@ -1176,7 +1176,7 @@ A night review in six areas (provisioning, moves, the database, chat apps, the m
 ## [2.88.5] — 2026-09-27
 
 ### Fixed
-- **A file over 5 MB was dropped from an agent's reply, in silence, on Slack and Discord.** OpenClaw caps outbound media at 5 MB on every app; a 5.2 MB PDF went missing (Taco Agent, the first real Slack trial). The seed now sets each app's own ceiling: Telegram 50 MB, Discord 10 MB (a server without boosts), Slack 100 MB. The agent's Telegram, Discord and Slack tabs say the limit. An existing agent gets it at its next rebuild.
+- **A file over 5 MB was dropped from an agent's reply, in silence, on Slack and Discord.** OpenClaw caps outbound media at 5 MB on every app; a 5.2 MB PDF went missing (Recipe Box, the first real Slack trial). The seed now sets each app's own ceiling: Telegram 50 MB, Discord 10 MB (a server without boosts), Slack 100 MB. The agent's Telegram, Discord and Slack tabs say the limit. An existing agent gets it at its next rebuild.
 - **Slack's "every channel it is in" group mode was offered and then refused.** The sheet listed it, the server rejected it; the seed had supported it all along.
 
 ### Changed
@@ -1254,7 +1254,7 @@ A night review in six areas (provisioning, moves, the database, chat apps, the m
 ## [2.86.1] — 2026-09-27
 
 ### Fixed
-- **"Your model provider needs a new login" from an agent that switched to a setup token.** Before setup tokens a subscription agent ran its turns through the Claude Code CLI, and OpenClaw pinned that runtime on each of its conversations. The pin outlived the switch: the rebuild wrote the token profile, but the conversations kept asking for the CLI, which no longer had a login (Girlfriend Advisor and three others on the Spark, silent since 2026-09-11; noticed at a wake). Now a rebuild, a start, a wake and every boot clear any pin to a runtime the agent's settings no longer name, and the event trail says so.
+- **"Your model provider needs a new login" from an agent that switched to a setup token.** Before setup tokens a subscription agent ran its turns through the Claude Code CLI, and OpenClaw pinned that runtime on each of its conversations. The pin outlived the switch: the rebuild wrote the token profile, but the conversations kept asking for the CLI, which no longer had a login (Gift Ideas and three others on the Spark, silent since 2026-09-11; noticed at a wake). Now a rebuild, a start, a wake and every boot clear any pin to a runtime the agent's settings no longer name, and the event trail says so.
 
 ## [2.86.0] — 2026-09-26
 
@@ -1274,7 +1274,7 @@ A night review in six areas (provisioning, moves, the database, chat apps, the m
 ## [2.84.2] — 2026-09-26
 
 ### Fixed
-- **A woken agent went back to sleep after the next restart.** The grace after a wake and the bedtime mark lived in the server's memory; a deploy forgot them, and the next sweep put agents that had just been woken (Meeting Scheduler, Idea Advisor) straight back. Both are in the database now, and a wake restarts the whole idle period rather than a half-hour grace.
+- **A woken agent went back to sleep after the next restart.** The grace after a wake and the bedtime mark lived in the server's memory; a deploy forgot them, and the next sweep put agents that had just been woken (Calendar Helper, Weekend Plans) straight back. Both are in the database now, and a wake restarts the whole idle period rather than a half-hour grace.
 
 ## [2.84.1] — 2026-09-26
 
@@ -1474,7 +1474,7 @@ No changes: the release before the buttons landed.
 - **A Telegram group admits the people you admitted**, like a Discord server or a Slack channel: "one group" no longer opens that group to everyone in it, and a room with nobody admitted yet is written closed.
 - **Pushes to your phone are capped at six an hour** per owner; the sixth says so, and anything more waits under "Waiting for you" in the app.
 - **The manager can be on Discord.** Its bot may be attached under the Hatchabot agent's Discord tab; when the manager has no Telegram, pending knocks and confirmations reach you as a Discord DM from it instead.
-- **OpenClaw's own tasks show as "built into OpenClaw"** on the Schedule tab (its weekly skill review, memory dreaming) with no Edit, Disable or Delete: the gateway refuses to change them, which the app used to report as "it may no longer exist" (Genetic Algorithm Trading, 2026-09-25).
+- **OpenClaw's own tasks show as "built into OpenClaw"** on the Schedule tab (its weekly skill review, memory dreaming) with no Edit, Disable or Delete: the gateway refuses to change them, which the app used to report as "it may no longer exist" (Backtest Lab, 2026-09-25).
 - `hatchabot create` and `adopt` no longer take `--bot-token` on the command line (it sat in shell history): the token is typed unseen at the prompt, or given as `HATCHABOT_BOT_TOKEN` for a script.
 
 ## [2.75.4] — 2026-09-25
@@ -1586,7 +1586,7 @@ Security audit of Telegram and Discord (`docs/audit-2026-09-25.md`). Two majors,
 ## [2.69.0] — 2026-09-25
 
 ### Fixed
-- **Knocks and first messages work again on OpenClaw 2026.9.** That line keeps pairing requests and approvals in its state database; the credentials files Hatchabot read and edited are absent there, so a person who messaged a 2026.9 agent's bot got a pairing code and nothing else: no knock card, and the owner's own first message on a freshly connected Discord was never claimed (Taco Agent). Listing, turning away, admitting a known person and removing a member now use the database when the files are gone, so a removed member is really gone there too. The candidate gate checks the pairing store the same way.
+- **Knocks and first messages work again on OpenClaw 2026.9.** That line keeps pairing requests and approvals in its state database; the credentials files Hatchabot read and edited are absent there, so a person who messaged a 2026.9 agent's bot got a pairing code and nothing else: no knock card, and the owner's own first message on a freshly connected Discord was never claimed (Recipe Box). Listing, turning away, admitting a known person and removing a member now use the database when the files are gone, so a removed member is really gone there too. The candidate gate checks the pairing store the same way.
 
 ## [2.68.1] — 2026-09-24
 
@@ -1596,7 +1596,7 @@ Security audit of Telegram and Discord (`docs/audit-2026-09-25.md`). Two majors,
 ## [2.68.0] — 2026-09-24
 
 ### Fixed
-- **A bot moved to another agent no longer keeps answering from the old one.** Removing Telegram from an agent rebuilt it, but the bot's account stayed in its OpenClaw config on the volume, so once the bot was attached elsewhere both containers polled it and fought over its messages (Ethernet cable fix → Genetic Algorithm Trading). A build without a bot now turns Telegram off and empties its accounts, the same convergent removal Slack and Discord already had.
+- **A bot moved to another agent no longer keeps answering from the old one.** Removing Telegram from an agent rebuilt it, but the bot's account stayed in its OpenClaw config on the volume, so once the bot was attached elsewhere both containers polled it and fought over its messages (Router Helper → Backtest Lab). A build without a bot now turns Telegram off and empties its accounts, the same convergent removal Slack and Discord already had.
 - The Setup log no longer fills with "chat access policy applied" from the sweep that re-checks it every few minutes; only a change or a failure is recorded.
 
 ### Changed
@@ -1628,13 +1628,13 @@ Security audit of Telegram and Discord (`docs/audit-2026-09-25.md`). Two majors,
 
 ### Added
 - **A memory cap per agent and per class.** A container's cap is a ceiling, not a reservation, so the heavy agent can have 8 GB while the rest keep the fleet default. An agent's sheet (Runtime → Memory cap) and `hatchabot memory <agent> 6g` set an agent's own cap; Settings → Classes sets one for a class's agents. A change applies to the running container right away — no rebuild — and sticks across rebuilds. Members may go up to the machine's per-agent maximum (`HATCHABOT_AGENT_MEMORY_MAX`, default 8g); the machine's owner beyond it.
-- **The agent knows its budget.** `HATCHABOT_MEMORY_CAP` in its environment and a "Memory budget" section in AGENTS.md (refreshed when the cap changes) tell it to size jobs to fit and that a SIGKILL with no other reason was the memory cap. Genetic Algorithm Trading would have run four backtest workers instead of twelve.
+- **The agent knows its budget.** `HATCHABOT_MEMORY_CAP` in its environment and a "Memory budget" section in AGENTS.md (refreshed when the cap changes) tell it to size jobs to fit and that a SIGKILL with no other reason was the memory cap. Backtest Lab would have run four backtest workers instead of twelve.
 - **Needs attention when it hits the cap.** An agent that ran into its cap or had processes killed for memory is listed, with what its container runs with, and a **Give it 1 GB more** button on its sheet. Hits from before a raise are not counted again. Status → Resources warns when every container's peak at once would want more than 80% of the machine.
 
 ## [2.62.0] — 2026-09-24
 
 ### Added
-- **A container that restarts on its own is written up.** When an agent's OpenClaw process quits and Docker starts it again, nothing used to say so: the container log stops and the agent comes back. Hatchabot now notices the restart count going up and writes a Setup-log line with the exit code ("quit cleanly (exit 0) without saying why", "killed for memory (exit 137)") and the time, and the agent is listed under Needs attention with "its process quit and was started again" (Genetic Algorithm Trading, 2026-09-24). Restarts while Hatchabot itself was down are not noticed.
+- **A container that restarts on its own is written up.** When an agent's OpenClaw process quits and Docker starts it again, nothing used to say so: the container log stops and the agent comes back. Hatchabot now notices the restart count going up and writes a Setup-log line with the exit code ("quit cleanly (exit 0) without saying why", "killed for memory (exit 137)") and the time, and the agent is listed under Needs attention with "its process quit and was started again" (Backtest Lab, 2026-09-24). Restarts while Hatchabot itself was down are not noticed.
 - **Status → Resources shows memory peak and cap hits.** Beside each container's memory: the most it has used since it started, and how many times it ran into its memory cap (a process killed for memory is counted separately), read from the kernel where the daemon is local. Five agents on OpenClaw 2026.9 had hit a 2 GiB cap hundreds of times unseen.
 
 ### Changed
@@ -1654,12 +1654,12 @@ Security audit of Telegram and Discord (`docs/audit-2026-09-25.md`). Two majors,
 ## [2.60.4] — 2026-09-24
 
 ### Fixed
-- **"Approve this browser" is approved for you again on 2026.9 images.** OpenClaw 2026.9 keeps a browser's pairing request in its state database; the `devices/pending.json` file Hatchabot read first no longer exists, and a missing file was taken for "nobody waiting", so the console sat on OpenClaw's pairing screen (Cooking Teacher). The pending requests are now read from whichever store the version has — the file, else the database — and a store that cannot be read falls back to the CLI. A request a page keeps refreshing counts as fresh. The candidate gate checks the store the same way.
+- **"Approve this browser" is approved for you again on 2026.9 images.** OpenClaw 2026.9 keeps a browser's pairing request in its state database; the `devices/pending.json` file Hatchabot read first no longer exists, and a missing file was taken for "nobody waiting", so the console sat on OpenClaw's pairing screen (Meal Planner). The pending requests are now read from whichever store the version has — the file, else the database — and a store that cannot be read falls back to the CLI. A request a page keeps refreshing counts as fresh. The candidate gate checks the store the same way.
 
 ## [2.60.3] — 2026-09-24
 
 ### Fixed
-- **The OpenClaw console starts again on 2026.9 images.** OpenClaw 2026.9 serves its Control UI page with root-absolute asset links and an empty base path; reached through Hatchabot's console proxy those pointed at Hatchabot's own root, the app bundle never loaded, and the page reported "Control UI did not start" (Cooking Teacher, and every agent on 2026.9.6). The proxy now moves the page onto its prefix — base path, script and link addresses — before handing it to the browser, for any image and without a rebuild. Assets pass through untouched, compression included.
+- **The OpenClaw console starts again on 2026.9 images.** OpenClaw 2026.9 serves its Control UI page with root-absolute asset links and an empty base path; reached through Hatchabot's console proxy those pointed at Hatchabot's own root, the app bundle never loaded, and the page reported "Control UI did not start" (Meal Planner, and every agent on 2026.9.6). The proxy now moves the page onto its prefix — base path, script and link addresses — before handing it to the browser, for any image and without a rebuild. Assets pass through untouched, compression included.
 
 ### Added
 - **`hatchabot console <agent> [--check]`** prints the agent's console address; `--check` loads the page, its app script and its config through the proxy the way a browser does and says what would stop it. The candidate gate runs the same check, since 2026.9.6 passed the old "console answers" step and still failed in the browser.
@@ -1799,7 +1799,7 @@ Security audit of Telegram and Discord (`docs/audit-2026-09-25.md`). Two majors,
 ## [2.55.1] — 2026-09-24
 
 ### Fixed
-- Moving a big, older agent onto an OpenClaw 2026.8+ image failed with "seed failed: docker run timed out" (Taco Agent): the seed one-shot ran under the 60-second probe timeout while doctor migrated the volume and retried npm for a stale per-volume plugin against unreachable DNS. The seed now gets the long timeout (15 min, `HATCHABOT_DOCKER_IO_TIMEOUT_MS`), runs without a network (nothing in it needs one), and tells npm to give up at once.
+- Moving a big, older agent onto an OpenClaw 2026.8+ image failed with "seed failed: docker run timed out" (Recipe Box): the seed one-shot ran under the 60-second probe timeout while doctor migrated the volume and retried npm for a stale per-volume plugin against unreachable DNS. The seed now gets the long timeout (15 min, `HATCHABOT_DOCKER_IO_TIMEOUT_MS`), runs without a network (nothing in it needs one), and tells npm to give up at once.
 
 ## [2.55.0] — 2026-09-24
 
@@ -3092,7 +3092,7 @@ untouched.
   - **Expand** opens it as a full-height panel; Close or Esc puts it back.
   - **Answers are formatted:** lists, bold, code, tables and links. The renderer escapes everything first, and links must be http(s), so text the assistant quotes from logs or agents can't inject anything. A test holds that.
   - **You see what it did.** The steps of a turn ("Checking the runtime version", "Looking at base images", …) list live while it works and stay above the answer as a collapsible "3 steps".
-  - **Cards link to their panel.** "Open Stock Advisor →" opens the right tab (Schedule for a task, Messaging for Telegram, AI for a source change, …). Image cards open Base images or Derived images.
+  - **Cards link to their panel.** "Open Stock Watcher →" opens the right tab (Schedule for a task, Messaging for Telegram, AI for a source change, …). Image cards open Base images or Derived images.
 
 ## [1.24.0] — 2026-09-18
 
@@ -3716,7 +3716,7 @@ untouched.
 ## [0.139.0] — 2026-09-11
 
 ### Fixed
-- **Interval tasks couldn't be edited** (e.g. Meeting Scheduler's 90-second inbox poll): the task
+- **Interval tasks couldn't be edited** (e.g. Calendar Helper's 90-second inbox poll): the task
   list read the gateway's schedule with the wrong key names, so intervals showed nothing and the
   form was cron-expression-only. Tasks now show their interval, and the form has an **Every N
   minutes** mode (decimals allowed — 1.5 = every 90 s) for creating and editing them.
@@ -4376,8 +4376,8 @@ no critical/major defects; the UI diff had no XSS and no dead buttons.
   fields take no default (a default URL would bind every child to the same
   repo) and are excluded from Apply-values/push-definition resolution, so a
   required repo binding can't block later re-renders. The Condo pattern
-  end-to-end: declare `docs_repo` on the master, derive "Condo B Advisor",
-  paste Condo B's repo — the child arrives wired.
+  end-to-end: declare `docs_repo` on the master, derive "Building Two Helper",
+  paste Building Two's repo — the child arrives wired.
 
 ## [0.104.0] — 2026-09-04
 
@@ -4386,7 +4386,7 @@ no critical/major defects; the UI diff had no XSS and no dead buttons.
   carry agent-turn scheduled tasks as DECLARATIONS (name, cron/interval, tz,
   message — never scripts or state); an imported or derived copy recreates
   them the moment it reaches RUNNING (parked on the record until the gateway
-  exists; retried on the next provision if any fail). A derived Stock Broker
+  exists; retried on the next provision if any fail). A derived Portfolio Coach
   arrives with its briefings already scheduled.
 
 ## [0.103.0] — 2026-09-04
@@ -4468,7 +4468,7 @@ no critical/major defects; the UI diff had no XSS and no dead buttons.
   `BRAVE_API_KEY` env var gets OpenClaw's managed web_search enabled on its
   next rebuild (provider auto-detected from the key); removing the key
   converges it back off. Composes with env-target template fields — a shared
-  Stock Broker can ask for the search key at import and arrive with working
+  Portfolio Coach can ask for the search key at import and arrive with working
   live-data briefings.
 - **Proposal cards survive pane reloads**: 💬 Manage persists proposals into
   the session transcript; a reopened pane re-renders still-pending cards
@@ -4478,7 +4478,7 @@ no critical/major defects; the UI diff had no XSS and no dead buttons.
   the last untested internet-facing route): happy path, single-use, bad/
   missing codes, no-verifier token behavior.
 - `data/` is chmod 700 at boot; stale `data/tls` + `data/server.log`
-  artifacts removed. Field notes from the live Condo Adviser inspection
+  artifacts removed. Field notes from the live HOA Helper inspection
   recorded in connections-design.md (productization groundwork).
 
 ## [0.99.0] — 2026-09-04
@@ -4577,7 +4577,7 @@ Same-day fixes:
   echoed. Declaration-time guard: the derived NAME must pass the same
   reserved-name policy as the env route (a template cannot declare
   `{{anthropic_base_url}}`). Templates can now ship fully self-contained —
-  the Stock Broker can ask for its market-data key at import.
+  the Portfolio Coach can ask for its market-data key at import.
 - **The mgmt Telegram bot no longer blocks on a confirmed create** (audit
   backlog #1): authoring confirms execute detached; the card is the
   completion signal, and other messages/buttons process mid-build.
@@ -5107,7 +5107,7 @@ Same-day fixes:
 
 ### Fixed
 - **An agent messaged seconds after a restore no longer loses its conversation.**
-  Measured: Art Advisor reset its thread when messaged 11s, 15s and 35s after a
+  Measured: Piano Practice reset its thread when messaged 11s, 15s and 35s after a
   container came back, and kept it perfectly when messaged five minutes later —
   same session, Van Gogh exchange intact. The fault was ours: an agent was
   called live the moment its gateway answered a health check, while things a
@@ -5145,8 +5145,8 @@ Same-day fixes:
 ### Added
 - **The pool prefers a bot it can still rename.** Telegram's `setMyName` quota
   is per bot and measured in hours, so a bot renamed minutes ago cannot take a
-  new agent's name — and a bot serving "Tax Advisor" while Telegram still calls
-  it "Condo Adviser" is more confusing than a neutral one. Lease selection now
+  new agent's name — and a bot serving "Budget Tracker" while Telegram still calls
+  it "HOA Helper" is more confusing than a neutral one. Lease selection now
   sorts rate-limited bots last. When every free bot is limited this changes
   nothing; there is simply no better pick.
 - **The card explains a stale bot name** instead of leaving you to wonder. While
@@ -5192,7 +5192,7 @@ Same-day fixes:
   coincidental — the two prompt snapshots were 42 hours apart). OpenClaw's reset
   policy, with no `session` key configured, resolves to `mode: "daily",
   atHour: 4`: a session is stale if it *started* before the most recent 4am
-  boundary in the container's timezone, which is UTC. Both of Art Advisor's
+  boundary in the container's timezone, which is UTC. Both of Piano Practice's
   resets fit that rule exactly, and the second one landed 21 seconds after a
   restore purely because that was the next message. Documented as
   `docs/pre-production.md` §9 together with the fact that nothing checkpoints a
@@ -6549,7 +6549,7 @@ high, or XSS found — the auth model and escaping are sound. Fixed findings:
 
 ### Added
 - **Adopt an existing OpenClaw agent from the web app.** The `adopt` flow that
-  brought Tech Advisor and Stock Advisor in was CLI-only; now it's the front
+  brought Garden Advisor and Stock Watcher in was CLI-only; now it's the front
   door for anyone migrating. **New agent → "Already built one in OpenClaw? Bring
   it in →"** points at a workspace folder, shows a preview (files/size, what's
   skipped, the bot it already owns and whether taking it over is safe right

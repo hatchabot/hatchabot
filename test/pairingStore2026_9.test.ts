@@ -14,7 +14,7 @@ import { denyPairing, grantChannelAccess, revokeMember, scrubChannelAllowlist } 
  * the credentials files Hatchabot read and edited are simply absent. Every
  * script below is run for real against a temp volume that has ONLY the
  * database — the shape a 2026.9 agent has — and must find, delete, add and
- * scrub there. (Taco Agent's Discord knock was invisible and the owner's own
+ * scrub there. (One agent's Discord knock was invisible and the owner's own
  * first message was never claimed, 2026-09-24.)
  */
 const HOME = '/home/node/.openclaw';

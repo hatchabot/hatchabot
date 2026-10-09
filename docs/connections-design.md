@@ -8,7 +8,7 @@ rebuild enables OpenClaw's managed web_search for it (provider auto-detected
 from the key; removal converges the same way). Remaining design: OAuth
 brokering, the Connections tab, and `datasource:` template targets.*
 
-*Field notes from the live Condo Adviser (2026-09-04, productization
+*Field notes from the live HOA Helper (2026-09-04, productization
 groundwork): its Gmail/Drive run over `gog` with the keyring password kept at
 `~/.openclaw/connections/gog/` (the volume — survives rebuilds; the agent
 discovered this convention itself); its Jira creds lived at
@@ -23,13 +23,13 @@ patterns; (3) the condo template's future `datasource:` fields are gog-account
 + Jira-site bindings, with env-target fields carrying their tokens.*
 
 Most agents need no outside data — they organize conversations and carry
-training. But the advanced ones (the condo adviser reading board emails from
+training. But the advanced ones (the HOA helper reading board emails from
 Gmail and files from Drive) depend on three things Hatchabot doesn't manage
 yet: **tool binaries** in the runtime, **skills** teaching the agent to use
 them, and **credentials** (OAuth, not paste-a-key). This doc is the plan for
-those, grounded in the real condo-adviser setup.
+those, grounded in the real hoa-helper setup.
 
-## What the condo adviser actually depends on
+## What the HOA helper actually depends on
 
 | Dependency | Shape | Hard? |
 |---|---|---|
@@ -111,7 +111,7 @@ Hatchabot's role is to make that possible and visible, not to broker OAuth:
 ## Guardrails (phase 1 already needs these)
 
 - **Recommend purpose-bound accounts** in every connection surface — the
-  condo-adviser pattern. A personal Google account on a shared-memory agent
+  hoa-helper pattern. A personal Google account on a shared-memory agent
   gets a loud warning.
 - **Scopes minimal by default** — `gog auth add --services gmail` when only
   mail is needed, not the full six.
@@ -175,7 +175,7 @@ Install-image button/flow to arbitrary tags); update-available detection
 becomes per-image. Keep the default experience single-image — variants are
 an advanced pick, like everything else in this doc.
 
-## Adopt implications (the condo adviser's path in)
+## Adopt implications (the HOA helper's path in)
 
 Adopting an agent that uses host-side gog today means its tokens live in the
 host's `~/.config/gogcli`, not the workspace. The adopt flow should detect

@@ -280,7 +280,7 @@ OpenClaw's own formats:
    trust model refuses a LINKED Slack/Discord plugin anything keyed
    (`PluginTrustRefusalError: openKeyedStore is only available for trusted
    plugins… origin-path; --link and --force do not grant trusted plugin
-   state`) — found on Taco Agent. From v2.56.0 a 2026.8+ image bakes an npm
+   state`) — found on Recipe Box. From v2.56.0 a 2026.8+ image bakes an npm
    cache (`PLUGIN_INSTALL=npm`, label `org.hatchabot.plugin-install`) and the
    seed installs `@openclaw/<channel>@<baked version>` into the volume
    offline from it, which OpenClaw records as `trusted-official`. DuckDuckGo

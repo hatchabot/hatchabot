@@ -20,7 +20,7 @@ export interface ConnectorField {
 export interface VerifiedChannel {
   /** Slack: the bot's user id. Discord: the application id. */
   accountId: string;
-  /** "@Tax Advisor in Krueger Family" */
+  /** "@Budget Tracker in Example Household" */
   displayName: string;
   /** Opens a direct message with the bot. */
   deepLink: string;

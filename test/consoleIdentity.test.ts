@@ -32,10 +32,10 @@ describe('the names Hatchabot vouches for at a gateway', () => {
 
   it("a guest's own conversation key is agent-scoped and unguessable without the secret", () => {
     const s = secret();
-    const k = guestConsoleSessionKey(s, 'taco-agent', 'user-anna');
-    expect(k).toMatch(/^agent:taco-agent:guest:[0-9a-f]{16}$/);
-    expect(guestConsoleSessionKey(s, 'taco-agent', 'user-bob')).not.toBe(k);
-    expect(guestConsoleSessionKey(secret(), 'taco-agent', 'user-anna')).not.toBe(k);
+    const k = guestConsoleSessionKey(s, 'recipe-box', 'user-anna');
+    expect(k).toMatch(/^agent:recipe-box:guest:[0-9a-f]{16}$/);
+    expect(guestConsoleSessionKey(s, 'recipe-box', 'user-bob')).not.toBe(k);
+    expect(guestConsoleSessionKey(secret(), 'recipe-box', 'user-anna')).not.toBe(k);
   });
 
   it('only OpenClaw 2026.9 and later get it (named roles and identity profiles)', () => {
@@ -76,9 +76,9 @@ describe('the gateway settings of a console with identities', () => {
   });
 
   it('roles: everyone is a guest by default (own sessions only, no admin, this agent only)', () => {
-    const roles = consoleGatewayRoles('taco-agent') as any;
+    const roles = consoleGatewayRoles('recipe-box') as any;
     expect(roles.default).toBe(GUEST_ROLE);
-    expect(roles.definitions[GUEST_ROLE]).toEqual({ sessions: { others: 'none' }, agents: ['taco-agent'], scopes: ['operator.read', 'operator.write'] });
+    expect(roles.definitions[GUEST_ROLE]).toEqual({ sessions: { others: 'none' }, agents: ['recipe-box'], scopes: ['operator.read', 'operator.write'] });
     expect(roles.definitions[OWNER_ROLE].scopes).toEqual(['operator.admin']);
     expect(roles.definitions[OWNER_ROLE].sessions.others).toBe('write');
   });
@@ -86,7 +86,7 @@ describe('the gateway settings of a console with identities', () => {
 
 describe('the seed writes it (configWriter)', () => {
   const s = secret();
-  const base = { agentId: 'taco-agent', model: 'm', authMode: 'api-key' as const, openclawVersion: '2026.9.6', gatewayToken: s };
+  const base = { agentId: 'recipe-box', model: 'm', authMode: 'api-key' as const, openclawVersion: '2026.9.6', gatewayToken: s };
   const spec = { trustedProxies: ['172.18.0.1'], ownerIdentity: consoleIdentity(s, 'owner', 'o'), guestIdentities: [consoleIdentity(s, 'guest', 'g')] };
 
   it('three sets in the one batched CLI start, the auth marked sensitive, no token set', () => {

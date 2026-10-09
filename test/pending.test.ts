@@ -27,7 +27,7 @@ async function world() {
     store.insertChannel({ id: `c-${id}`, agentId: id, kind: 'telegram', accountId: `bot_${id}`, secretRef: `chan/${id}`, deepLink: `https://t.me/bot_${id}`, createdAt: 'now' });
   }
   await seed('a1', 'fam', 'Family', 'RUNNING');
-  await seed('a2', 'condo', 'Condo', 'RUNNING');
+  await seed('a2', 'hoa', 'HOA', 'RUNNING');
   // These agents are the open kind — the invite-only default (v2.13.0) is
   // covered on its own below, and every assertion here is about listing.
   store.setAllowKnocks('a1', true);
@@ -61,7 +61,7 @@ describe('GET /v1/pending (fleet-wide join requests)', () => {
     // Per-agent pairing lists (keyed by the --account slug in the argv).
     pairingByAgent(provider, store, {
       Family: [{ id: '555', code: 'CODEA', meta: { username: 'maria_k', firstName: 'Maria' } }],
-      Condo: [{ id: '777', code: 'CODEB', meta: { firstName: 'Jon' } }],
+      HOA: [{ id: '777', code: 'CODEB', meta: { firstName: 'Jon' } }],
     });
     const res = await f.inject({ method: 'GET', url: '/v1/pending', headers: as });
     expect(res.statusCode).toBe(200);
@@ -69,7 +69,7 @@ describe('GET /v1/pending (fleet-wide join requests)', () => {
     expect(body).toHaveLength(2);
     const byAgent = Object.fromEntries(body.map((r: any) => [r.agentName, r]));
     expect(byAgent.Family).toMatchObject({ agentId: 'a1', code: 'CODEA', username: 'maria_k', firstName: 'Maria', telegramId: '555' });
-    expect(byAgent.Condo).toMatchObject({ agentId: 'a2', code: 'CODEB', firstName: 'Jon' });
+    expect(byAgent.HOA).toMatchObject({ agentId: 'a2', code: 'CODEB', firstName: 'Jon' });
   });
 
   it('skips stopped agents and never includes another owner\'s agents', async () => {
@@ -125,7 +125,7 @@ describe('GET /v1/pending (fleet-wide join requests)', () => {
 
   it('one unreachable agent does not sink the whole list', async () => {
     const { store, provider, f } = await world();
-    const a2ref = store.listAllActiveAgents().find((a) => a.name === 'Condo')!.runtimeRef!;
+    const a2ref = store.listAllActiveAgents().find((a) => a.name === 'HOA')!.runtimeRef!;
     pairingByAgent(provider, store, { Family: [{ id: '555', code: 'CODEA', meta: {} }] });
     const okShell = provider.execShell.bind(provider);
     provider.execShell = (async (ref: string, script: string) => {

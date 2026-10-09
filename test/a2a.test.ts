@@ -20,7 +20,7 @@ async function world(provider: MockProvider = new MockProvider()) {
   const store = new Store(new Database(':memory:'));
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
   store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
-  for (const [id, slug, name] of [['x', 'investing', 'Investing'], ['y', 'tax', 'Tax']] as const) {
+  for (const [id, slug, name] of [['x', 'investing', 'Investing'], ['y', 'ledger', 'Ledger']] as const) {
     const { runtimeRef } = await provider.provision({ agentId: id, slug, workspace: { files: {}, configPatch: { agentId: slug, authMode: 'api-key' } as any }, env: {} });
     await provider.start(runtimeRef);
     store.insertAgent({ id, ownerId: OWNER, name, slug, state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
@@ -30,15 +30,15 @@ async function world(provider: MockProvider = new MockProvider()) {
   const secrets = new MemSecrets();
   const f = Fastify();
   await registerRoutes(f, { store, secrets, providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
-  // The Tax agent's turn returns a canned reply (prefix-matched on argv).
-  provider.execResponses.set('agent --agent tax', { code: 0, stdout: 'Harvest the losses; watch the wash-sale window.', stderr: '' });
+  // The Ledger agent's turn returns a canned reply (prefix-matched on argv).
+  provider.execResponses.set('agent --agent ledger', { code: 0, stdout: 'Harvest the losses; watch the wash-sale window.', stderr: '' });
   return { store, provider, secrets, f };
 }
 
 describe('agent-to-agent consult', () => {
   it('a granted agent consults its peer and gets the reply', async () => {
     const { store, f } = await world();
-    store.setAgentPeers('x', ['y']); // Investing may consult Tax
+    store.setAgentPeers('x', ['y']); // Investing may consult Ledger
     const token = store.createAgentCallToken('x', OWNER);
 
     const res = await f.inject({
@@ -107,11 +107,11 @@ describe('agent-to-agent consult', () => {
     const { store, provider, f } = await world();
     store.setAgentPeers('x', ['y']);
     const token = store.createAgentCallToken('x', OWNER);
-    provider.execResponses.set('agent --agent tax', { code: 1, stdout: '', stderr: 'auth profile missing: sk-...' });
+    provider.execResponses.set('agent --agent ledger', { code: 1, stdout: '', stderr: 'auth profile missing: sk-...' });
     let res = await f.inject({ method: 'POST', url: '/v1/agents/y/message', headers: { authorization: `Bearer ${token}` }, payload: { text: 'q' } });
     expect(res.statusCode).toBe(502);
     expect(JSON.stringify(res.json())).not.toContain('sk-'); // stderr never relayed
-    provider.execResponses.set('agent --agent tax', { code: 1, timedOut: true, stdout: '', stderr: 'docker exec timed out' } as any);
+    provider.execResponses.set('agent --agent ledger', { code: 1, timedOut: true, stdout: '', stderr: 'docker exec timed out' } as any);
     res = await f.inject({ method: 'POST', url: '/v1/agents/y/message', headers: { authorization: `Bearer ${token}` }, payload: { text: 'q' } });
     expect(res.statusCode).toBe(504);
   });

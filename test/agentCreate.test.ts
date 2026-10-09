@@ -46,22 +46,22 @@ describe('POST /v1/agents name collision', () => {
     // An agent parked mid-setup still holds the slug — this is exactly the
     // state a failed `hatchabot adopt` used to leave behind.
     store.insertAgent({
-      id: 'a1', ownerId: OWNER, name: 'Tech Advisor', slug: 'tech-advisor',
+      id: 'a1', ownerId: OWNER, name: 'Garden Advisor', slug: 'garden-advisor',
       state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '',
       sharedMemory: true, createdAt: 'now', updatedAt: 'now',
     });
 
     const res = await f.inject({
       method: 'POST', url: '/v1/agents', headers: as,
-      payload: { name: 'Tech Advisor', aiProfileId: 'p1', hostId: 'h1' },
+      payload: { name: 'Garden Advisor', aiProfileId: 'p1', hostId: 'h1' },
     });
     expect(res.statusCode).toBe(409);
-    expect(res.json().error).toContain('Tech Advisor');
+    expect(res.json().error).toContain('Garden Advisor');
     // Names differing only in punctuation/case still collide, because the slug
     // is what has to be unique.
     const res2 = await f.inject({
       method: 'POST', url: '/v1/agents', headers: as,
-      payload: { name: 'tech advisor', aiProfileId: 'p1', hostId: 'h1' },
+      payload: { name: 'garden advisor', aiProfileId: 'p1', hostId: 'h1' },
     });
     expect(res2.statusCode).toBe(409);
   });
@@ -69,7 +69,7 @@ describe('POST /v1/agents name collision', () => {
   it('still allows a name freed by deleting the old agent', async () => {
     const { store, f } = await world();
     store.insertAgent({
-      id: 'a1', ownerId: OWNER, name: 'Tech Advisor', slug: 'tech-advisor',
+      id: 'a1', ownerId: OWNER, name: 'Garden Advisor', slug: 'garden-advisor',
       state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '',
       sharedMemory: true, createdAt: 'now', updatedAt: 'now',
     });
@@ -77,7 +77,7 @@ describe('POST /v1/agents name collision', () => {
     store.setAgentState('a1', 'DELETED');
     const res = await f.inject({
       method: 'POST', url: '/v1/agents', headers: as,
-      payload: { name: 'Tech Advisor', aiProfileId: 'p1', hostId: 'h1' },
+      payload: { name: 'Garden Advisor', aiProfileId: 'p1', hostId: 'h1' },
     });
     expect(res.statusCode).toBe(202);
   });
@@ -91,25 +91,25 @@ describe('a refused bot token must not stay pending', () => {
     const channel = {
       pool: { availableCount: () => 0 },
       async submitToken(agentId: string) {
-        pending.set(agentId, 'williamsbot');
-        return { username: 'williamsbot' };
+        pending.set(agentId, 'chessclubbot');
+        return { username: 'chessclubbot' };
       },
       discardPending: (agentId: string) => void pending.delete(agentId),
     };
 
     const { store, f } = await world(channel);
     store.insertAgent({
-      id: 'william', ownerId: OWNER, name: 'William Video Games Agent', slug: 'william',
+      id: 'chess', ownerId: OWNER, name: 'Chess Club', slug: 'chess-club',
       state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '',
       sharedMemory: true, createdAt: 'now', updatedAt: 'now',
     });
     store.insertChannel({
-      id: 'c1', agentId: 'william', kind: 'telegram', accountId: 'williamsbot',
-      secretRef: 'telegram/bot/williamsbot', deepLink: 'https://t.me/williamsbot',
+      id: 'c1', agentId: 'chess', kind: 'telegram', accountId: 'chessclubbot',
+      secretRef: 'telegram/bot/chessclubbot', deepLink: 'https://t.me/chessclubbot',
       createdAt: 'now',
     });
     store.insertAgent({
-      id: 'tech', ownerId: OWNER, name: 'Tech Advisor', slug: 'tech-advisor',
+      id: 'tech', ownerId: OWNER, name: 'Garden Advisor', slug: 'garden-advisor',
       state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '',
       sharedMemory: true, createdAt: 'now', updatedAt: 'now',
     });
@@ -119,9 +119,9 @@ describe('a refused bot token must not stay pending', () => {
       payload: { token: '123:abc' },
     });
     expect(res.statusCode).toBe(400);
-    expect(res.json().error).toContain('William Video Games Agent');
+    expect(res.json().error).toContain('Chess Club');
     // The point: the rejected token is gone, so a later Retry cannot resume
-    // provisioning onto William's bot.
+    // provisioning onto Chess Club's bot.
     expect(pending.has('tech')).toBe(false);
   });
 
@@ -133,7 +133,7 @@ describe('adopting carries the people already allowed to talk', () => {
     const res = await f.inject({
       method: 'POST', url: '/v1/agents', headers: as,
       payload: {
-        name: 'Tech Advisor', aiProfileId: 'p1', hostId: 'h1',
+        name: 'Garden Advisor', aiProfileId: 'p1', hostId: 'h1',
         seedMembers: ['1000000001'],
       },
     });
@@ -168,7 +168,7 @@ describe('adopting carries the people already allowed to talk', () => {
     const res = await f.inject({
       method: 'POST', url: '/v1/agents', headers: as,
       payload: {
-        name: 'Stock Advisor', aiProfileId: 'p1', hostId: 'h1',
+        name: 'Stock Watcher', aiProfileId: 'p1', hostId: 'h1',
         seedMembers: ['1000000001', '222333'],
       },
     });

@@ -21,7 +21,7 @@ function fakeFetch(route: Route) {
 }
 
 const slackOk: Route = (url) => {
-  if (url.endsWith('/auth.test')) return { body: { ok: true, team: 'Krueger Family', team_id: 'T01', user: 'tax_advisor', user_id: 'U0BOT', bot_id: 'B01' }, headers: { 'x-oauth-scopes': 'chat:write,im:history,im:read,im:write,app_mentions:read,users:read' } };
+  if (url.endsWith('/auth.test')) return { body: { ok: true, team: 'Example Household', team_id: 'T01', user: 'budget_tracker', user_id: 'U0BOT', bot_id: 'B01' }, headers: { 'x-oauth-scopes': 'chat:write,im:history,im:read,im:write,app_mentions:read,users:read' } };
   if (url.includes('/bots.info')) return { body: { ok: true, bot: { app_id: 'A0APPID123' } } };
   if (url.endsWith('/apps.connections.open')) return { body: { ok: true, url: 'wss://x' } };
   return { status: 404, body: {} };
@@ -41,7 +41,7 @@ describe('Slack', () => {
   it('accepts a matching pair and says where it lives', async () => {
     const { f, calls } = fakeFetch(slackOk);
     const v = await slackConnector(f as never).verify({ botToken: BOT, appToken: APP });
-    expect(v).toMatchObject({ accountId: 'U0BOT', displayName: '@tax_advisor in Krueger Family', warnings: [] });
+    expect(v).toMatchObject({ accountId: 'U0BOT', displayName: '@budget_tracker in Example Household', warnings: [] });
     expect(v.deepLink).toBe('https://slack.com/app_redirect?app=A0APPID123&team=T01');
     expect(calls.find((c) => c.url.endsWith('/apps.connections.open'))?.auth).toBe(`Bearer ${APP}`);
     expect(calls.every((c) => new URL(c.url).hostname === 'slack.com')).toBe(true);
@@ -85,7 +85,7 @@ describe('Slack', () => {
 describe('Discord', () => {
   const ok: Route = (url) => {
     if (url.endsWith('/users/@me')) return { body: { id: '999000999000999000', username: 'taxbot', bot: true } };
-    if (url.endsWith('/applications/@me')) return { body: { id: '123456789012345678', name: 'Tax Advisor', flags: 1 << 19 } };
+    if (url.endsWith('/applications/@me')) return { body: { id: '123456789012345678', name: 'Budget Tracker', flags: 1 << 19 } };
     if (url.includes('/users/@me/guilds')) return { body: [{ id: '42', name: 'Krueger Home' }] };
     return { status: 404, body: {} };
   };
@@ -138,7 +138,7 @@ describe('Slack: the channels it is in, and a DM from the host (2026-09-25)', ()
   it('a Discord server listing that fails keeps the old list instead of emptying it; a busy Discord is not a refused token', async () => {
     const rateLimited: Route = (u) => {
       if (u.endsWith('/users/@me')) return { body: { id: '999000999000999000', username: 'taxbot', bot: true } };
-      if (u.endsWith('/applications/@me')) return { body: { id: '123456789012345678', name: 'Tax Advisor', flags: 1 << 19 } };
+      if (u.endsWith('/applications/@me')) return { body: { id: '123456789012345678', name: 'Budget Tracker', flags: 1 << 19 } };
       if (u.includes('/users/@me/guilds')) return { status: 429, body: { message: 'You are being rate limited.', retry_after: 2 } };
       return { status: 404, body: {} };
     };
@@ -171,7 +171,7 @@ describe('Discord bot names (2026-09-25)', () => {
   it('a username Discord accepts, or none', async () => {
     const { discordUsernameFor } = await import('../src/channels/discord.js');
     expect(discordUsernameFor('To Do Agent')).toBe('To Do Agent');
-    expect(discordUsernameFor('  Taco @home #1: yes  ')).toBe('Taco home 1 yes');
+    expect(discordUsernameFor('  Recipe @home #1: yes  ')).toBe('Recipe home 1 yes');
     expect(discordUsernameFor('x')).toBeUndefined();
     expect(discordUsernameFor('My Discord Helper')).toBeUndefined();
     expect(discordUsernameFor('everyone')).toBeUndefined();
@@ -189,10 +189,10 @@ describe('Discord bot names (2026-09-25)', () => {
     expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ username: 'To Do Agent' });
     expect(String((calls[0]!.init.headers as Record<string, string>).Authorization)).toBe('Bot tok-secret');
     answer = { status: 429, body: { message: 'You are being rate limited.', retry_after: 1800 } };
-    const limited = await conn.rename!('tok-secret', 'Taco');
+    const limited = await conn.rename!('tok-secret', 'Recipe');
     expect(limited.ok).toBe(false); expect(limited.note).toContain('30 min');
     answer = { status: 400, body: { message: 'Invalid Form Body', errors: { username: { _errors: [{ message: 'Username cannot contain "discord"' }] } } } };
-    const refused = await conn.rename!('tok-secret', 'Taco');
+    const refused = await conn.rename!('tok-secret', 'Recipe');
     expect(refused.ok).toBe(false); expect(refused.note).toContain('cannot contain');
     expect(refused.note).not.toContain('tok-secret');
     expect((await conn.rename!('tok-secret', 'x')).note).toContain('2–32');

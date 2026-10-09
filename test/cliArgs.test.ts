@@ -30,7 +30,7 @@ describe('CLI flags (audit: unknown flags swallowed the next argument)', () => {
 describe('<agent> matching (audit: any id prefix matched)', () => {
   const list = [
     { id: 'a1b2c3d4-0000', name: 'Kitchen Helper', slug: 'kitchen-helper' },
-    { id: 'abcdef00-1111', name: 'Tax', slug: 'tax' },
+    { id: 'abcdef00-1111', name: 'Ledger', slug: 'ledger' },
     { id: 'ffff0000-2222', name: 'abcd', slug: 'abcd-agent' },
   ];
   it('matches a name or slug exactly, then a name in any case', () => {
@@ -84,10 +84,10 @@ describe('tasks', () => {
 
 describe('--yes and its short forms', () => {
   it('-y, -f and --force all mean --yes: the y/N question of a destructive command is skipped', () => {
-    for (const argv of [['kick', 'Tax', 'u1', '--yes'], ['kick', 'Tax', 'u1', '-y'], ['kick', 'Tax', 'u1', '-f'], ['kick', 'Tax', 'u1', '--force']]) {
+    for (const argv of [['kick', 'Ledger', 'u1', '--yes'], ['kick', 'Ledger', 'u1', '-y'], ['kick', 'Ledger', 'u1', '-f'], ['kick', 'Ledger', 'u1', '--force']]) {
       const r = parseArgs(argv);
       expect(r.flags.get('yes'), argv.join(' ')).toBe('1');
-      expect(r.positional).toEqual(['kick', 'Tax', 'u1']);
+      expect(r.positional).toEqual(['kick', 'Ledger', 'u1']);
     }
   });
 });

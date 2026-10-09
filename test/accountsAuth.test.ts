@@ -539,7 +539,7 @@ describe('reset links', () => {
   it('lets the person choose their own new password; the old one works until they do', async () => {
     const { f } = await app();
     const owner = cookieOf(await bootstrap(f));
-    const made = await f.inject({ method: 'POST', url: '/v1/local-accounts', headers: { cookie: owner }, payload: { username: 'sophie' } });
+    const made = await f.inject({ method: 'POST', url: '/v1/local-accounts', headers: { cookie: owner }, payload: { username: 'member2' } });
     const claimCode = new URLSearchParams(made.json().claimPath.split('?')[1]).get('claim')!;
     await f.inject({ method: 'POST', url: '/v1/local-accounts/claim', payload: { code: claimCode, password: 'first-password' } });
 
@@ -549,15 +549,15 @@ describe('reset links', () => {
 
     // The page knows this is a reset, not a second invitation.
     const peek = await f.inject({ method: 'GET', url: `/v1/local-accounts/claim?code=${resetCode}` });
-    expect(peek.json()).toEqual({ username: 'sophie', reset: true, owner: false });
+    expect(peek.json()).toEqual({ username: 'member2', reset: true, owner: false });
 
     // Asking for a reset never locks anyone out on its own.
-    expect((await signIn(f, 'sophie', 'first-password')).statusCode).toBe(200);
+    expect((await signIn(f, 'member2', 'first-password')).statusCode).toBe(200);
 
     const used = await f.inject({ method: 'POST', url: '/v1/local-accounts/claim', payload: { code: resetCode, password: 'second-password' } });
     expect(used.statusCode).toBe(200);
-    expect((await signIn(f, 'sophie', 'first-password')).statusCode).toBe(401);
-    expect((await signIn(f, 'sophie', 'second-password')).statusCode).toBe(200);
+    expect((await signIn(f, 'member2', 'first-password')).statusCode).toBe(401);
+    expect((await signIn(f, 'member2', 'second-password')).statusCode).toBe(200);
     // Single use.
     expect((await f.inject({ method: 'POST', url: '/v1/local-accounts/claim', payload: { code: resetCode, password: 'third-password' } })).statusCode).toBe(404);
   });

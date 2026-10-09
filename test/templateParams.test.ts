@@ -25,7 +25,7 @@ const H = { 'x-hatchabot-owner': OWNER };
 
 const TEMPLATE = gzipSync(Buffer.from(JSON.stringify({
   format: 'hatchabot-template', version: 1, exportedAt: 'now',
-  agent: { name: 'Stock Advisor', persona: 'p', sharedMemory: false },
+  agent: { name: 'Stock Watcher', persona: 'p', sharedMemory: false },
   files: { 'SOUL.md': 'A {{style}} advisor.', 'AGENTS.md': '# A' },
   ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [],
   parameters: [
@@ -209,7 +209,7 @@ describe('env-target setup fields (sharing Phase 2b)', () => {
 describe('datasource-target setup fields (per-child repo bindings)', () => {
   const DS_TEMPLATE = gzipSync(Buffer.from(JSON.stringify({
     format: 'hatchabot-template', version: 1, exportedAt: 'now',
-    agent: { name: 'Condo Advisor', persona: 'p', sharedMemory: false },
+    agent: { name: 'HOA Advisor', persona: 'p', sharedMemory: false },
     files: { 'SOUL.md': 'A {{building}} advisor.', 'AGENTS.md': '# A' },
     ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [],
     parameters: [
@@ -300,7 +300,7 @@ describe('inbox with parameters', () => {
     // to the owner — the routes under test are list + accept.
     store.insertShare({
       id: 's1', fromOwner: 'user-other', fromEmail: 'other@example.com', toEmail: 'me@example.com',
-      toOwner: OWNER, agentName: 'Stock Advisor', message: 'try it', blob: TEMPLATE,
+      toOwner: OWNER, agentName: 'Stock Watcher', message: 'try it', blob: TEMPLATE,
       createdAt: new Date().toISOString(),
     });
 
@@ -460,10 +460,10 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     const { store, f } = await masterWorld();
     const res = await f.inject({
       method: 'POST', url: '/v1/agents/a1/derive', headers: H,
-      payload: { name: 'Condo B', values: { style: 'growth' } },
+      payload: { name: 'Building Two', values: { style: 'growth' } },
     });
     expect(res.statusCode).toBe(201);
-    const child = store.listAgents(OWNER).find((x) => x.name === 'Condo B')!;
+    const child = store.listAgents(OWNER).find((x) => x.name === 'Building Two')!;
     expect(child.parentAgentId).toBe('a1');
     expect(child.paramValues).toEqual({ style: 'growth' });
     expect(store.getAgentSeed(child.id)['SOUL.md']).toContain('growth advisor');
@@ -473,13 +473,13 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
 
   it('push-definition re-renders each child from the master, keeping child values; memory untouched', async () => {
     const { store, f, provider } = await masterWorld();
-    await f.inject({ method: 'POST', url: '/v1/agents/a1/derive', headers: H, payload: { name: 'Condo B', values: { style: 'growth' } } });
-    const child = store.listAgents(OWNER).find((x) => x.name === 'Condo B')!;
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/derive', headers: H, payload: { name: 'Building Two', values: { style: 'growth' } } });
+    const child = store.listAgents(OWNER).find((x) => x.name === 'Building Two')!;
     // bring the child up (background provision fails on the stub channel)
     await new Promise((r) => setTimeout(r, 30));
     const { runtimeRef } = await provider.provision({
-      agentId: child.id, slug: 'condo-b',
-      workspace: { files: {}, configPatch: { agentId: 'condo-b', authMode: 'api-key' } }, env: {},
+      agentId: child.id, slug: 'building-two',
+      workspace: { files: {}, configPatch: { agentId: 'building-two', authMode: 'api-key' } }, env: {},
     } as any);
     store.setAgentRuntimeRef(child.id, runtimeRef);
     if (store.getAgent(child.id)!.state === 'FAILED') store.setAgentState(child.id, 'PROVISIONING');
@@ -500,13 +500,13 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     const { store, f } = await masterWorld();
     const none = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
     expect(none.statusCode).toBe(400);
-    await f.inject({ method: 'POST', url: '/v1/agents/a1/derive', headers: H, payload: { name: 'Condo B', values: { style: 'value' } } });
-    const child = store.listAgents(OWNER).find((x) => x.name === 'Condo B')!;
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/derive', headers: H, payload: { name: 'Building Two', values: { style: 'value' } } });
+    const child = store.listAgents(OWNER).find((x) => x.name === 'Building Two')!;
     await new Promise((r) => setTimeout(r, 30)); // child stays non-RUNNING (stub provision failed)
     const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
     expect(res.statusCode).toBe(200);
     expect(res.json().pushed).toBe(0);
-    expect(res.json().results[0]).toMatchObject({ name: 'Condo B', ok: false });
+    expect(res.json().results[0]).toMatchObject({ name: 'Building Two', ok: false });
     expect(store.getAgent(child.id)!.paramValues).toEqual({ style: 'value' }); // untouched
   });
 });

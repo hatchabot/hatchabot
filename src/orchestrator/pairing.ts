@@ -4,7 +4,7 @@
  * the state database (`~/.openclaw/state/openclaw.sqlite`, table
  * `device_pairing_pending`), with no file at all. The old fast path took the
  * missing file for "nothing pending" and never asked the CLI, so a 2026.9
- * console sat on "Approve this browser" for good (Cooking Teacher, 2026-09-24).
+ * console sat on "Approve this browser" for good (one agent, 2026-09-24).
  */
 
 export interface PendingPairing {

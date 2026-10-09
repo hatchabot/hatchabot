@@ -44,7 +44,7 @@ export function colorFor(name: string): string {
 /** Ordered: the first matching row wins, so specific words sit above general ones. */
 const KEYWORDS: Array<[RegExp, string]> = [
   [/stock|invest|portfolio|trad(e|ing)|market|equit|dividend/, '📈'],
-  [/tax|account(ant|ing)|contador|bookkeep/, '🧾'],
+  [/tax|account(ant|ing)|contab|bookkeep/, '🧾'],
   [/legal|law|lawyer|contract/, '⚖️'],
   [/financ|budget|money|bank|mortgage|split corp/, '💰'],
   [/insur/, '☂️'],
@@ -56,7 +56,7 @@ const KEYWORDS: Array<[RegExp, string]> = [
   [/meeting|schedul|calendar/, '📅'],
   [/\bqa\b|test|review|check/, '✅'],
   [/to ?do|task|checklist/, '☑️'],
-  [/cook|recipe|chef|kitchen|taco|food|huevos/, '🍳'],
+  [/cook|recipe|chef|kitchen|taco|food|breakfast/, '🍳'],
   [/nutri|diet|trainer|fitness|workout|gym/, '🥗'],
   [/run|cross country|marathon/, '🏃'],
   [/health|doctor|medical|psychiat|therap/, '🩺'],
@@ -73,7 +73,7 @@ const KEYWORDS: Array<[RegExp, string]> = [
   [/idea|brainstorm|creativ/, '💡'],
   [/art|paint|draw|design/, '🎨'],
   [/music|song/, '🎵'],
-  [/girlfriend|dating|relationship|love|partner|rational male/, '💐'],
+  [/girlfriend|dating|relationship|love|partner|romance/, '💐'],
   [/kid|child|family|parent|mom|dad/, '🏡'],
   [/conference|event|talk/, '🎤'],
   [/news|write|writer|blog/, '📰'],
