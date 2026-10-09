@@ -76,7 +76,7 @@ export function subscriptionModelProblem(model: string, openclawVersion: string 
   if (!min || !openclawVersion || openclawAtLeast(openclawVersion, min)) return undefined;
   return `${model} needs OpenClaw ${min} or newer on a Claude subscription, and this agent runs ${openclawVersion}: `
     + 'Anthropic would refuse every message ("request format rejected, HTTP 400"). Try a newer runtime image on this agent '
-    + '(Settings → Images), or use an API-key source.';
+    + '(Settings → Advanced → Runtime images), or use an API-key source.';
 }
 
 export function modelKey(model: string): string {

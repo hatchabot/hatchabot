@@ -25,7 +25,7 @@ per-agent: an agent keeps its current image until you **Rebuild** it. (The catch
 once `:latest` moves, *any* Rebuild carries the new version — you can't rebuild an
 agent onto the old one.)
 
-Check where you stand — **⚙ Settings → Images**, or:
+Check where you stand — **⚙ Settings → Advanced → Runtime images**, or:
 
 ```
 hatchabot runtime         # image's OpenClaw version vs the latest stable on npm
@@ -48,7 +48,7 @@ version, memory kept.
 
 There is no form for this in the app: it's a slow, host-side, fleet-wide docker
 build. The Hatchabot agent can propose a candidate build (you confirm it), and
-⚙ Settings → Images promotes or discards the result; the CLI does the rest.
+⚙ Settings → Advanced → Runtime images promotes or discards the result; the CLI does the rest.
 
 ## Python libraries — per agent, on the volume
 

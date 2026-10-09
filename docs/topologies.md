@@ -10,7 +10,7 @@ is there one control plane plus dumb runners?**
 
 Every machine is a full, self-governing Hatchabot **node**: its own control
 plane, its own DB, its own login. Nodes are linked as **peers** (⚙ Settings →
-Cluster servers / `hatchabot servers add`) and agents move between them with **Rehost**,
+Advanced → Other Hatchabot servers / `hatchabot servers add`) and agents move between them with **Rehost**,
 which carries the agent's whole state (bot token, memory, members) and re-binds
 it to a vendor-matched AI profile on the destination.
 

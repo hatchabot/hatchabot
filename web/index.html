@@ -454,6 +454,8 @@
   .posture-hot b, .posture-hot .posture-level { color:var(--warn) }
   .v2card > h4:first-child, .v2card > label:first-child { margin-top:0 }
   .v2card > .sec-drawer:first-child { margin-top:0 }
+  /* Settings → Advanced: the drawer is the edge; its pane's sections need none of their own. */
+  #paneAdvanced > details .v2card { border:0; border-radius:0; padding:0; margin:12px 0 0; background:none }
   /* A card whose whole contents are hidden (an admin-only block, say) draws
      nothing rather than an empty box. */
   .v2card:not(:has(> *:not([hidden]))) { display:none }
@@ -1511,7 +1513,7 @@
         <button id="imageBtn" onclick="saveImagePin()">Pin &amp; rebuild</button>
       </div>
       <div class="sub" style="margin:-4px 0 4px">For trying a candidate or a derived image on this one agent
-        (build them in ⚙ Settings → Images). Rebuilds it onto the image right away, memory kept (a stopped agent
+        (they are in ⚙ Settings → Advanced). Rebuilds it onto the image right away, memory kept (a stopped agent
         moves when it starts); a pinned agent stops following fleet promotes until you pick <b>Fleet default</b> again.</div>
     </div>
   </section>
@@ -1650,12 +1652,12 @@
   <section id="paneHosts" role="tabpanel" hidden>
     <div class="sub">
       The machines this dashboard runs agents on. <b>This machine</b> is built in;
-      add a <b>runner</b> to run agents on another computer too.
-      <details style="margin-top:4px"><summary style="cursor:pointer">Runner or cluster?</summary>
+      to run agents on another computer too, add it as a <b>runner</b> — that is the way to add a machine.
+      <details style="margin-top:4px"><summary style="cursor:pointer">Runner or another Hatchabot?</summary>
       <div style="margin-top:4px">A <b>runner</b> is another machine under <i>this</i> Hatchabot: same dashboard,
-      same agent list, and <b>Move…</b> in an agent's Advanced tab shifts it between runners. A <b>cluster</b> is a
-      separate Hatchabot server with its own dashboard — <b>Move to another Hatchabot</b> (the agent's Advanced tab)
-      hands an agent over to one, and you manage it there afterwards. One caveat for runners: the desktop
+      same agent list, and <b>Move…</b> in an agent's Advanced tab shifts it between runners. A separate
+      Hatchabot server has its own dashboard and login — register it under <b>Settings → Advanced</b>; a household
+      needs none. One caveat for runners: the desktop
       <b>Claude Max</b> machine login only works on this machine, so a runner agent needs an API-key source
       or a Max setup-token (<code>claude setup-token</code>).</div></details>
     </div>
@@ -1827,6 +1829,7 @@
     <input type="text" id="peerName" placeholder="Name (e.g. Desktop)" maxlength="64">
     <input type="text" id="peerUrl" placeholder="http://desktop:8080">
     <input type="password" id="peerToken" placeholder="Access token from that server" autocomplete="off">
+    <div class="err" id="peerErr"></div>
     <div class="actions" style="justify-content:flex-start">
       <button class="primary" id="peerAddBtn" onclick="addPeer()">Add cluster server</button>
     </div>
@@ -2021,7 +2024,7 @@
     <div class="sub">
       For the <code>hatchabot</code> command line. For pairing this server with
       another one, make a <b>token for moving agents here</b> instead — it can
-      do that and nothing else — and paste it there under Hosts → Other Hatchabot servers.
+      do that and nothing else — and paste it there under Advanced → Other Hatchabot servers.
     </div>
     <div id="cliTokenOut" class="invite-link" style="display:none"></div>
     <div class="actions" style="justify-content:flex-start;flex-wrap:wrap">
@@ -2456,7 +2459,7 @@
   </div>
   <div id="faAtOnceRow" class="sub" style="display:none;align-items:center;gap:6px;margin-top:6px">
     Rebuild at once <select id="faAtOnce" style="width:auto" onchange="setRebuildAtOnce(this.value)"></select>
-    <span>— rebuilds beyond this wait their turn (the machine's setting, also under Settings → Images).</span>
+    <span>— rebuilds beyond this wait their turn (the machine's setting, also under Settings → Hosts).</span>
   </div>
   <div id="faPeersOpts" style="display:none;margin-top:6px">
     <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:6px 0 0">
@@ -3935,16 +3938,17 @@ const V2_SETTINGS = [
   ['discord', 'Discord', ['discord']],
   ['slack', 'Slack', ['slack']],
   ['conn', 'Connections', ['conn']],
-  ['machines', 'Hosts', ['hosts', 'servers']],
-  // One tab for every image on the machine: the fleet's own first, then the
-  // ones layered on top of it.
-  ['images', 'Images', ['runtime', 'derived']],
+  // Runners only: the household's way to add a machine. Other servers moved to Advanced (v2.157.0).
+  ['machines', 'Hosts', ['hosts']],
   ['backups', 'Backups', ['backups']],
   ['security', 'Security', ['security']],
+  // Last: what only several servers, or your own runtime images, need. Its
+  // parts are folded drawers (initSettingsAdvanced), shut until opened.
+  ['advanced', 'Advanced', ['advanced', 'servers', 'runtime', 'derived']],
 ];
-const V2_SETTINGS_HEAD = { access: 'Your account', operator: 'About you',
-  hosts: 'Machines that run agents', servers: 'Other Hatchabot servers',
-  runtime: 'Base images', derived: 'Derived images' };
+/** Tab names that are gone, and the pane they open now: old links keep working. */
+const V2_SETTINGS_ALIAS = { images: 'runtime' };
+const V2_SETTINGS_HEAD = { access: 'Your account', operator: 'About you' };
 let v2SettingsGroup = 'ai';
 /**
  * Wrap each heading-delimited run of a settings pane in a card, so a tab reads
@@ -3972,20 +3976,25 @@ function v2Sectionise(pane, isBreak = (kid) => kid.tagName === 'H4') {
 }
 
 function showTab(name) {
+  name = V2_SETTINGS_ALIAS[name] ?? name;
   const g = V2_SETTINGS.find(([k, , panes]) => k === name || panes.includes(name)) ?? V2_SETTINGS[0];
   v2SettingsGroup = g[0];
-  for (const pane of g[2]) { showTabPane(pane); v2Sectionise($(TABS[pane])); } // runs each pane's loader
+  // Each pane's loader; a folded Advanced drawer loads when it is opened.
+  for (const pane of g[2]) { if (!settingsAdvFolded(pane)) loadSettingsPane(pane); v2Sectionise($(TABS[pane])); }
   for (const [key, pane] of Object.entries(TABS)) $(pane).hidden = !g[2].includes(key);
   for (const h of document.querySelectorAll('.v2settingshead')) h.hidden = g[2].length < 2;
   $('v2SettingsTabs').innerHTML = V2_SETTINGS.filter(([k]) => k !== 'slack' || slackVisible()).map(([k, label]) =>
     `<button class="tab" role="tab" aria-selected="${k === g[0]}" onclick="showTab('${k}')">${label}</button>`).join('');
+  settingsAdvUnfold(name);
+  // On a phone the row scrolls: keep the open tab (Advanced is last) in sight —
+  // after the dialog has opened (openAiDlg shows the tab first).
+  setTimeout(() => $('v2SettingsTabs').querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }), 0);
 }
-function showTabPane(name) {
-  for (const [key, pane] of Object.entries(TABS)) $(pane).hidden = key !== name;
+function loadSettingsPane(name) {
   if (name === 'access') { void loadAccounts(); void loadSecondFactor(); void loadReach(true); }
   if (name === 'classes') loadClasses();
   if (name === 'conn') loadConnections();
-  if (name === 'hosts') { loadHosts(); loadEmbedder(); void loadEmbedFleet(); }
+  if (name === 'hosts') { loadHosts(); loadEmbedder(); void loadEmbedFleet(); loadRebuildSection(); }
   if (name === 'pool') loadPool();
   if (name === 'discord') void loadPoolPane('discord');
   if (name === 'slack') void loadPoolPane('slack');
@@ -3993,6 +4002,56 @@ function showTabPane(name) {
   if (name === 'runtime' || name === 'derived') loadRuntime(); // also fills the derived list
   if (name === 'security') { loadPosture(); void loadCliTokens(); }
   if (name === 'operator') loadOperator();
+}
+
+// ---- Settings → Advanced (v2.157.0) ------------------------------------------
+// What only several Hatchabot servers, or your own runtime images, need: one
+// tab, last, whose parts are folded drawers — shut until opened, and each
+// remembered per browser. A folded part does not load.
+const SETTINGS_ADV = [
+  ['servers', 'Other Hatchabot servers', 'separate servers, each with its own dashboard: move an agent to one'],
+  ['runtime', 'Runtime images', 'the OpenClaw your agents run: try a newer one on one agent, then promote it'],
+  ['derived', 'Derived images', 'the base image plus extra packages, for an agent that needs them'],
+];
+const SETTINGS_ADV_KEY = 'hb-settings-adv';
+function settingsAdvOpenSet() {
+  try { const v = JSON.parse(localStorage.getItem(SETTINGS_ADV_KEY) || '[]'); return new Set(Array.isArray(v) ? v : []); }
+  catch { return new Set(); }
+}
+/** True for an Advanced part that is folded: its loader waits until it is opened. */
+function settingsAdvFolded(pane) {
+  const d = $('advPart-' + pane);
+  return !!d && !d.open;
+}
+function settingsAdvToggled(d) {
+  const pane = d.dataset.pane, open = settingsAdvOpenSet();
+  if (d.open) open.add(pane); else open.delete(pane);
+  try { localStorage.setItem(SETTINGS_ADV_KEY, JSON.stringify([...open])); } catch { /* a private window */ }
+  if (d.open && v2SettingsGroup === 'advanced' && aiDlg.open) loadSettingsPane(pane);
+}
+/** A link to a part (openAiDlg('servers'), the old 'images' tab…) lands on it unfolded. */
+function settingsAdvUnfold(name) {
+  const d = $('advPart-' + name);
+  if (!d) return;
+  d.open = true; // its toggle event loads it (when it was folded) and remembers it
+  setTimeout(() => d.scrollIntoView?.({ block: 'nearest' }), 0);
+}
+function initSettingsAdvanced() {
+  const open = settingsAdvOpenSet();
+  $('paneOperator').insertAdjacentHTML('afterend', `<section id="paneAdvanced" role="tabpanel" hidden data-sectioned="1">
+    <div class="sub">For running several Hatchabot servers, and building your own runtime images. A household needs none of this.</div>
+    ${SETTINGS_ADV.map(([pane, title, what]) => `<details class="sec-drawer" id="advPart-${pane}" data-pane="${pane}"${open.has(pane) ? ' open' : ''} ontoggle="settingsAdvToggled(this)">
+      <summary><b>${title}</b> <span class="sub">— ${what}</span></summary></details>`).join('')}
+  </section>`);
+  for (const [pane] of SETTINGS_ADV) $('advPart-' + pane).append($(TABS[pane]));
+  TABS.advanced = 'paneAdvanced';
+  // Automatic rebuilds say when THIS machine rebuilds its agents — every owner's
+  // choice, not image building — so they sit with the machine, under Hosts, after
+  // Add a runner (which stays the first thing to do there). Its heading moves up a
+  // level so the section is a card of its own; both hide for everyone else.
+  const rb = $('rbSection'), head = rb.querySelector('h4');
+  head.id = 'rbHead'; head.hidden = rb.hidden;
+  $('paneHosts').append(head, rb);
 }
 
 /** What the server already has, so Save is offered only when there is something
@@ -4790,8 +4849,7 @@ async function loadRuntime() {
   loadRuntimeCaps();
   loadDerivedImages();
   $('rtPanel').hidden = !myAccount.hostOwner;
-  $('rbSection').hidden = !myAccount.hostOwner;
-  if (myAccount.hostOwner) { $('rtErr').textContent = ''; loadRuntimeImages(); pollBaseBuild(); loadRebuildPolicy(); }
+  if (myAccount.hostOwner) { $('rtErr').textContent = ''; loadRuntimeImages(); pollBaseBuild(); }
   const el = $('runtimeStatus');
   try {
     const r = await api('/v1/runtime');
@@ -6012,7 +6070,7 @@ function faRenderAction() {
   } else {
     $('faApplyBtn').disabled = !sel.length;
     const atOnce = Number(appConfig?.rebuildConcurrency) || 6;
-    note = action === 'rebuild' ? `Rebuilds each selected agent (memory kept, brief downtime), ${atOnce} at a time — the rest wait their turn (Settings → Images → Rebuild at once). Stopped agents are skipped.`
+    note = action === 'rebuild' ? `Rebuilds each selected agent (memory kept, brief downtime), ${atOnce} at a time — the rest wait their turn (Settings → Hosts → Rebuild at once). Stopped agents are skipped.`
       : action === 'image' ? `Pins each selected agent to the chosen image (Fleet default = unpin) and rebuilds the running ones onto it, ${atOnce} at a time, memory kept; stopped ones move when they start. A pinned agent stops following fleet promotes.`
       : action === 'stop' ? 'Stops each selected running agent. It keeps its bot.'
       : action === 'start' ? 'Starts each selected stopped agent.'
@@ -6231,14 +6289,16 @@ async function renderPeers() {
 
 async function addPeer() {
   const name = $('peerName').value.trim(), url = $('peerUrl').value.trim(), token = $('peerToken').value.trim();
-  if (!name || !url || !token) { $('aiErr').textContent = 'Name, URL and token are all needed.'; return; }
+  // Its own error line: aiErr sits in the AI tab, so these errors were never seen (v2.157.0).
+  $('peerErr').textContent = '';
+  if (!name || !url || !token) { $('peerErr').textContent = 'Name, URL and token are all needed.'; return; }
   $('peerAddBtn').disabled = true;
   try {
     await api('/v1/peers', { method: 'POST', body: { name, url, token } });
     $('peerName').value = ''; $('peerUrl').value = ''; $('peerToken').value = '';
     toast('Server added');
     await renderPeers();
-  } catch (e) { $('aiErr').textContent = e.message; }
+  } catch (e) { $('peerErr').textContent = e.message; }
   finally { $('peerAddBtn').disabled = false; }
 }
 
@@ -6263,7 +6323,7 @@ async function runsHere(id, name) {
 async function moveHostAgent(id, name) {
   const a = agents.find(x => x.id === id);
   const others = hosts.filter(h => h.id !== a?.hostId);
-  if (!others.length) return toast('There is no other runner to move to — add one in ⚙ Settings → Runners.', 8000);
+  if (!others.length) return toast('There is no other runner to move to — add one in ⚙ Settings → Hosts.', 8000);
   const list = others.map((h, i) => `${i + 1}. ${h.name}${h.kind === 'local' ? ' (this machine)' : ''}`).join('\n');
   const pick = prompt(`Move "${name}" to which runner?\n\n${list}\n\nEnter a number:`);
   if (pick === null) return;
@@ -6406,7 +6466,7 @@ async function newCliToken(scope) {
     out.style.display = '';
     out.textContent = t.token;
     toast('Copy it now — it is not shown again', 20000);
-    if (await copyText(t.token)) toast(scope ? 'Token copied — paste it on the other server, under Hosts → Other Hatchabot servers' : 'Token copied — run: hatchabot login', 20000);
+    if (await copyText(t.token)) toast(scope ? 'Token copied — paste it on the other server, under Settings → Advanced → Other Hatchabot servers' : 'Token copied — run: hatchabot login', 20000);
     void loadCliTokens();
   } catch (e) { $('aiErr').textContent = e.message; }
 }
@@ -10171,6 +10231,11 @@ const REBUILD_POLICY_TEXT = {
   auto: 'Required rebuilds happen once an agent is idle; the rest overnight (quiet hours).',
   manual: 'Nothing happens on its own — the cards say what needs a rebuild.',
 };
+/** Automatic rebuilds, under Settings → Hosts since v2.157.0: the machine owner's. */
+function loadRebuildSection() {
+  $('rbSection').hidden = $('rbHead').hidden = !myAccount.hostOwner;
+  if (myAccount.hostOwner) void loadRebuildPolicy();
+}
 async function loadRebuildPolicy() {
   void loadRebuildAtOnce();
   try {
@@ -12662,8 +12727,7 @@ function v2Pane(a, tab) {
       : row('Files', '<span>Nothing is built yet.</span>');
     case 'advanced': return `
       ${row('Machine', `<span>${esc(host ? (host.kind === 'local' ? (host.hostname || host.name) : host.name) : '—')}</span>
-        ${(run || a.state === 'STOPPED') && built && hosts.length > 1 ? B('Move…', `moveHostAgent('${id}','${n}')`) : ''}
-        ${(run || a.state === 'STOPPED') && built ? B('Move to another Hatchabot', `rehostAgent('${id}','${n}')`) : ''}`)}
+        ${(run || a.state === 'STOPPED') && built && hosts.length > 1 ? B('Move…', `moveHostAgent('${id}','${n}')`) : ''}`)}
       ${built ? row('Runtime', `${run || a.state === 'STOPPED' ? B('Rebuild', `rebuild('${id}')`, 'title="New container, memory kept"') : ''}
         ${run && a.hasGateway ? B('OpenClaw console', `v2Close();openGateway('${id}','${jsq(a.slug)}')`) : ''}
         <div data-v2slot="imagePinRow" style="flex-basis:100%"></div>
@@ -12680,6 +12744,8 @@ function v2Pane(a, tab) {
         <div class="sub" style="flex-basis:100%">A Chromium of its own that it can open pages in, click and fill forms — for sites it must use, not for looking things up (web search is far cheaper: one browsing question can take 300K tokens). It runs beside the agent, with none of its files, up to 1 GB; nothing it logs into is kept across a restart.</div>`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
+      ${(run || a.state === 'STOPPED') && built ? `<h4 class="v2sec" id="v2BetweenServers">Between servers</h4>${row('Another Hatchabot', `${B('Move to another Hatchabot', `rehostAgent('${id}','${n}')`)}
+        <span class="sub">Only for a second Hatchabot server with its own dashboard (⚙ Settings → Advanced). To run it on another computer under this one, add that computer as a runner and use <b>Move…</b> on its Machine row.</span>`)}` : ''}
       <div class="v2danger"><h4>Careful</h4><div class="v2v">
         ${a.archiving ? '<span class="sub">Archiving…</span>' : ''}
         ${['RUNNING', 'STOPPED', 'FAILED'].includes(a.state) && !a.archiving ? B('📥 Archive', `v2Close();archiveAgent('${id}','${n}','${a.state}')`, 'title="Keep it and its memory; hand its Telegram bot back"') : ''}
@@ -12752,7 +12818,7 @@ async function v2LoadChans(id) {
       }[kind];
       return `<div class="v2chan"><div class="v2chan-h">${mark}<b>${label}</b>
         ${can && canChange ? `<button onclick="${setup}">Set up…</button>` : ''}</div>
-        <div class="sub">${can ? blurb : `Its base image can't do ${label} yet. Promote a base image that includes it (Settings → Images), then Rebuild.`}</div>
+        <div class="sub">${can ? blurb : `Its base image can't do ${label} yet. Promote a base image that includes it (Settings → Advanced → Runtime images), then Rebuild.`}</div>
         ${kind === 'telegram' ? `<div id="v2TgToken" hidden style="flex-basis:100%;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <input type="text" id="v2TgTokenIn" placeholder="123456789:AA…" autocomplete="off" style="flex:1;min-width:200px">
           <button class="primary" onclick="v2AddTelegram('${jsq(id)}', true)">Connect</button>
@@ -13720,6 +13786,7 @@ function initV2() {
   void loadProposals();
 }
 initV2();
+initSettingsAdvanced();
 
 loadConfig(); // whoami + auth mode even when the cookie is already valid
 refresh(true);
