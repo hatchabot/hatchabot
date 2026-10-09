@@ -386,8 +386,9 @@ async function runProvisionStepsInner(
       .catch((err) => log('connection.sync_failed', { agentId, error: String(err).slice(0, 200) }));
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
     await syncInstallDocs(deps, agentId, runtimeRef, log);
-    // What it can reach, looked at in the new container (access overview) — read-only, best-effort.
-    await verifyAgentAccess({ store, secrets: deps.secrets, provider }, agentId, runtimeRef).catch(() => undefined);
+    // What it can reach, looked at in the new container (access overview) — read-only, best-effort,
+    // and not awaited: a slow probe must never hold up a build (2026-10-09).
+    void verifyAgentAccess({ store, secrets: deps.secrets, provider }, agentId, runtimeRef).catch(() => undefined);
     // Its context cap (compaction.ts), re-applied for the model it runs now.
     await syncContextCap({ store, provider, log: (e, d) => log(e, { agentId, ...d }) }, store.getAgent(agentId) ?? agent, runtimeRef)
       .catch((err) => log('token.context_cap_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
@@ -1124,8 +1125,9 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
       .catch((err) => log('connection.sync_failed', { agentId, error: String(err).slice(0, 200) }));
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
     await syncInstallDocs(deps, agentId, runtimeRef, log);
-    // What it can reach, looked at in the new container (access overview) — read-only, best-effort.
-    await verifyAgentAccess({ store, secrets: deps.secrets, provider }, agentId, runtimeRef).catch(() => undefined);
+    // What it can reach, looked at in the new container (access overview) — read-only, best-effort,
+    // and not awaited: a slow probe must never hold up a build (2026-10-09).
+    void verifyAgentAccess({ store, secrets: deps.secrets, provider }, agentId, runtimeRef).catch(() => undefined);
     // Its context cap (compaction.ts), re-applied for the model it runs now.
     await syncContextCap({ store, provider, log: (e, d) => log(e, { agentId, ...d }) }, store.getAgent(agentId) ?? agent, runtimeRef)
       .catch((err) => log('token.context_cap_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
