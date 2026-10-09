@@ -1,7 +1,7 @@
 import type { Agent } from '../domain/types.js';
 import type { Store, TokenIncidentRow } from '../store/store.js';
 import type { TokenHealthRaw } from './usage.js';
-import { consultPair, incidentWords, loopSignals, THRESHOLDS, type LoopSignal } from './tokenHealth.js';
+import { consultPair, incidentConcerns, incidentWords, loopSignals, THRESHOLDS, type LoopSignal } from './tokenHealth.js';
 
 /**
  * Hatchabot's own loop watcher (docs/features.md, "Token steward"). After each
@@ -118,4 +118,17 @@ export async function runTokenWatch(deps: WatchDeps, now = Date.now()): Promise<
 /** The chat message: what, where to look, and the fix. */
 export function incidentMessage(agentName: string | undefined, i: Pick<TokenIncidentRow, 'text' | 'fix'>): string {
   return `⚠️ Hatchabot: ${agentName ? `"${agentName}" — ` : ''}${i.text}.${i.fix ? `\nFix: ${i.fix}` : ''}\nIt is under Alerts; ask me to fix it.`;
+}
+
+/**
+ * One cause, one message a day (docs/recommendations-design.md, "Messages"):
+ * the open loop on this agent whose message covers anything else it causes —
+ * told in the last day, or open and about to be told (the hourly cap held it
+ * back). Undefined when no loop speaks for it. The spike warning asks this
+ * before it sends; budgets and "tell me every $X" do not (the owner set those).
+ */
+export function loopCovering(store: Store, agentId: string, now = Date.now()): TokenIncidentRow | undefined {
+  const dayAgo = now - 86_400_000;
+  return store.listTokenIncidents({ open: true, limit: 2000 })
+    .find((i) => incidentConcerns(i, agentId) && (!i.toldAt || Date.parse(i.toldAt) >= dayAgo));
 }

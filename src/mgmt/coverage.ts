@@ -41,6 +41,7 @@ export const COVERAGE: Record<string, string> = {
   'PUT /v1/agents/:id/budget': 'set_budget',
   'PUT /v1/agents/:id/spend-alert': 'set_spend_alert',
   'POST /v1/usage/alerts/dismiss': 'app: browser — clearing spike warnings off the Usage page',
+  'POST /v1/recommendations/:id/dismiss': 'app: browser — "Not now" on a Recommended item (the manager reads the list with list_recommendations; its own changes are cards)',
   'PUT /v1/spend-alert/machine': 'app: fleet-wide/irreversible — the machine-wide spending alert is the machine owner\'s, in the app (⚙ Settings → AI sources → Budgets)',
   // ---- Report a problem (problemReport.ts) ----
   'POST /v1/problem-reports': 'prepare_problem_report',

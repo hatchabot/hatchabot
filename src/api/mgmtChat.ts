@@ -1,3 +1,4 @@
+import { isCostCard } from '../orchestrator/recommendations.js';
 import { publicReplayHeaders } from './trust.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Store } from '../store/store.js';
@@ -142,6 +143,8 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       note: rec?.note,
       risk: rec?.risk ?? 'routine',
       expiresAtMs: rec?.expiresAtMs,
+      // A cost or model card: shown as a Usage → Recommended item (recommendations.ts), not in the cards list.
+      recommended: rec ? isCostCard(rec) : false,
       // set_model: the scorecard's evidence and a downgrade's risks, shown on the card.
       check: rec?.resolved.check ? { evidence: rec.resolved.check.evidence, warnings: rec.resolved.check.warnings, downgrade: rec.resolved.check.downgrade } : undefined,
       spec: rec?.resolved.spec

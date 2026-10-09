@@ -325,6 +325,13 @@ export class Store {
         tokens INTEGER NOT NULL, usual INTEGER NOT NULL, told INTEGER NOT NULL,
         PRIMARY KEY (agent_id, at)
       );
+      -- Recommended (recommendations.ts): an item the owner put away with
+      -- "Not now", and the fingerprint of its cause then — it comes back when
+      -- the cause changes (a new loop, a new month, a bigger conversation).
+      CREATE TABLE IF NOT EXISTS recommendation_dismissals (
+        owner_id TEXT NOT NULL, item_id TEXT NOT NULL, fingerprint TEXT NOT NULL, at TEXT NOT NULL,
+        PRIMARY KEY (owner_id, item_id)
+      );
       -- Each agent's API price per token at its own mix of input, output and
       -- cache (from its transcripts), so a window's cost needs no guessing.
       CREATE TABLE IF NOT EXISTS agent_token_rates (
@@ -1008,6 +1015,8 @@ export class Store {
       `ALTER TABLE budget_pauses ADD COLUMN replies TEXT`,
       // A spike warning the owner cleared from Usage (v2.125.1): kept, not shown.
       `ALTER TABLE usage_alerts ADD COLUMN dismissed_at TEXT`,
+      // A spike whose message a loop's message covered (v2.158.0): one cause, one message.
+      `ALTER TABLE usage_alerts ADD COLUMN covered TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -3935,16 +3944,30 @@ export class Store {
       : this.db.prepare(`SELECT MIN(at) at FROM token_samples`).get()) as { at: string | null } | undefined;
     return r?.at ?? undefined;
   }
-  addUsageAlert(a: { agentId: string; ownerId: string; at: string; tokens: number; usual: number; told: boolean }): void {
-    this.db.prepare(`INSERT OR REPLACE INTO usage_alerts (agent_id, owner_id, at, tokens, usual, told) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(a.agentId, a.ownerId, a.at, Math.round(a.tokens), Math.round(a.usual), a.told ? 1 : 0);
+  addUsageAlert(a: { agentId: string; ownerId: string; at: string; tokens: number; usual: number; told: boolean; covered?: string }): void {
+    this.db.prepare(`INSERT OR REPLACE INTO usage_alerts (agent_id, owner_id, at, tokens, usual, told, covered) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(a.agentId, a.ownerId, a.at, Math.round(a.tokens), Math.round(a.usual), a.told ? 1 : 0, a.covered ?? null);
   }
   /** Warnings at or after `sinceIso`, newest first; for one owner, or one agent. */
-  usageAlertsSince(sinceIso: string, by: { ownerId?: string; agentId?: string; dismissed?: boolean }): Array<{ agentId: string; at: string; tokens: number; usual: number; told: boolean }> {
+  usageAlertsSince(sinceIso: string, by: { ownerId?: string; agentId?: string; dismissed?: boolean }): Array<{ agentId: string; at: string; tokens: number; usual: number; told: boolean; covered?: string }> {
     const rows = this.db.prepare(
-      `SELECT agent_id, at, tokens, usual, told FROM usage_alerts WHERE at >= ? AND (? IS NULL OR owner_id = ?) AND (? IS NULL OR agent_id = ?) AND (? = 1 OR dismissed_at IS NULL) ORDER BY at DESC`,
-    ).all(sinceIso, by.ownerId ?? null, by.ownerId ?? null, by.agentId ?? null, by.agentId ?? null, by.dismissed ? 1 : 0) as Array<{ agent_id: string; at: string; tokens: number; usual: number; told: number }>;
-    return rows.map((r) => ({ agentId: r.agent_id, at: r.at, tokens: r.tokens, usual: r.usual, told: !!r.told }));
+      `SELECT agent_id, at, tokens, usual, told, covered FROM usage_alerts WHERE at >= ? AND (? IS NULL OR owner_id = ?) AND (? IS NULL OR agent_id = ?) AND (? = 1 OR dismissed_at IS NULL) ORDER BY at DESC`,
+    ).all(sinceIso, by.ownerId ?? null, by.ownerId ?? null, by.agentId ?? null, by.agentId ?? null, by.dismissed ? 1 : 0) as Array<{ agent_id: string; at: string; tokens: number; usual: number; told: number; covered: string | null }>;
+    return rows.map((r) => ({ agentId: r.agent_id, at: r.at, tokens: r.tokens, usual: r.usual, told: !!r.told, ...(r.covered ? { covered: r.covered } : {}) }));
+  }
+  /** Recommended's "Not now": the item's cause, as it was when put away (recommendations.ts). */
+  dismissRecommendation(ownerId: string, itemId: string, fingerprint: string, at: string): void {
+    this.db.prepare(`INSERT OR REPLACE INTO recommendation_dismissals (owner_id, item_id, fingerprint, at) VALUES (?, ?, ?, ?)`).run(ownerId, itemId, fingerprint, at);
+  }
+  recommendationDismissals(ownerId: string): Map<string, string> {
+    const rows = this.db.prepare(`SELECT item_id, fingerprint FROM recommendation_dismissals WHERE owner_id = ?`).all(ownerId) as Array<{ item_id: string; fingerprint: string }>;
+    return new Map(rows.map((r) => [r.item_id, r.fingerprint]));
+  }
+  /** Dismissals older than `beforeIso` whose item is gone are forgotten. */
+  pruneRecommendationDismissals(ownerId: string, keepIds: Set<string>, beforeIso: string): void {
+    for (const [id] of this.recommendationDismissals(ownerId)) {
+      if (!keepIds.has(id)) this.db.prepare(`DELETE FROM recommendation_dismissals WHERE owner_id = ? AND item_id = ? AND at < ?`).run(ownerId, id, beforeIso);
+    }
   }
   /** Clear spike warnings from view: one (agent and time), or every one of this owner's. Returns how many. */
   dismissUsageAlerts(ownerId: string, at: string, one?: { agentId: string; at: string }): number {
@@ -5505,7 +5528,7 @@ export interface TokenActionRow {
   kind: 'compaction' | 'context-cap' | 'budget';
   at: string;
   by: 'owner' | 'agent' | 'hatchabot';
-  via: 'app' | 'api' | 'proposal' | 'guard' | 'backfill' | 'budget';
+  via: 'app' | 'api' | 'proposal' | 'guard' | 'backfill' | 'budget' | 'recommendation';
   why?: string;
   proposalId?: string;
   /** compaction: mode, lines, session, before/after context; context-cap: from, to, model, before figures. */
@@ -5523,7 +5546,7 @@ export interface ModelChangeRow {
   profileId?: string;
   at: string;
   by: 'owner' | 'agent' | 'hatchabot';
-  via: 'app' | 'api' | 'proposal' | 'guard' | 'backfill' | 'budget';
+  via: 'app' | 'api' | 'proposal' | 'guard' | 'backfill' | 'budget' | 'recommendation';
   source: string;
   why?: string;
   proposalId?: string;

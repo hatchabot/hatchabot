@@ -401,8 +401,9 @@ the feed, kept in the agent's own timeline).
 
 A background pass every ten minutes reads each agent's model calls (from its
 transcripts and gateway log), stores per-hour figures, and then runs, in order:
-spike alerts, the model-change guard, the token steward (loop incidents) and
-budgets. Every dollar figure is tokens priced at list API prices. Right-size
+the model-change guard, the token steward (loop incidents), spike alerts (after
+the loops, so a loop told in the pass covers its spike) and budgets. Their
+advice comes together in one ranked list, Recommended. Every dollar figure is tokens priced at list API prices. Right-size
 (the model steward) keeps a ledger of model changes and judges each one later.
 
 - `src/api/routes.ts` — `runUsageSample`, `runTokenSteward`, `runBudgetPass`, `runModelGuard`: the background pass.
@@ -414,7 +415,9 @@ budgets. Every dollar figure is tokens priced at list API prices. Right-size
 - `src/orchestrator/budgets.ts` — `runBudgets`, `budgetView`, `stepView`, `pausedReplySweep`: monthly budgets, step alerts and the pause.
 - `src/orchestrator/usageAlerts.ts` — `runUsageAlerts`, `findUsageSpikes`: "much more than usual" warnings.
 - `src/orchestrator/tokenHealth.ts` — `buildTokenHealth`, `loopSignals`, `THRESHOLDS`: the token steward's evidence.
-- `src/orchestrator/tokenWatch.ts` — `runTokenWatch`, `incidentMessage`: open and clear loop incidents.
+- `src/orchestrator/tokenWatch.ts` — `runTokenWatch`, `incidentMessage`, `loopCovering`: open and clear loop incidents; one cause, one message a day.
+- `src/orchestrator/recommendations.ts` — `buildRecommendations`, `agentRecommendations`, `isCostCard`, `GROUP`: the Recommended list (one item per cause, ranked, with its action).
+- `src/api/routes.ts` — `'/v1/recommendations'`, `'/v1/agents/:id/recommendations'`, `'/v1/recommendations/:id/dismiss'`, `ledgerMeta`: the list, Not now, and via "recommendation" in the ledger.
 - `src/orchestrator/loopLines.ts` — `parseLoopLines`: loop lines in the gateway log.
 - `src/orchestrator/compaction.ts` — `compactAgent`, `syncContextCap`: compaction and the conversation cap.
 - `src/orchestrator/modelLedger.ts` — `recordChange`, `evaluateModelChanges`, `rightSizeSavings`, `fileGuardProposals`: the model-change ledger and quality guard.
@@ -423,6 +426,7 @@ budgets. Every dollar figure is tokens priced at list API prices. Right-size
 - `src/api/routes.ts` — `'/v1/costs'`, `'/v1/usage'`, `'/v1/usage/spend'`, `'/v1/agents/:id/usage'`, `'/v1/ai-profiles/usage'`, `'/v1/budgets'`, `'/v1/agents/:id/budget'`, `'/v1/token-health'`, `'/v1/token-incidents'`, `'/v1/agents/:id/compact'`, `'/v1/model-changes'`, `'/v1/model-prices'`: the routes behind the views.
 - `src/store/store.ts` — `agent_model_profiles`, `token_samples`, `model_call_hours`, `agent_cost_days`, `budgets`, `budget_pauses`, `spend_alerts`, `token_incidents`, `agent_token_health`, `model_changes`, `usage_alerts`: where it is stored.
 - `web/index.html` — `openUsage`, `openFleetUsage`, `renderFleetUsage`, `loadSpendCharts`, `openBudgets`, `v2LoadCosts`, `openModelPrices`, `savedByModels`: the Usage, Cost and Budgets screens.
+- `web/index.html` — `loadRecommended`, `recItemHTML`, `recAct`, `recNotNow`, `v2OpenRec`, `agentAttention`: Recommended on Usage and the agent's Usage tab, and the Alerts lines that link to it.
 
 ## Images
 

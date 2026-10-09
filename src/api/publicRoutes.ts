@@ -150,7 +150,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r('*', /^\/v1\/agents(\/.*)?$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),
   r(READ, /^\/v1\/(recent|costs)$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),
   r(READ, /^\/v1\/operations(\/:id)?$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),
-  r('*', /^\/v1\/(agent-classes|agent-todos|agent-peers|groups|inbox|proposals|pending|events|resources|usage|operator-profile)(\/.*)?$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),
+  r('*', /^\/v1\/(agent-classes|agent-todos|agent-peers|groups|inbox|proposals|pending|events|resources|usage|operator-profile|recommendations)(\/.*)?$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),
   r(READ, /^\/v1\/(ai-profiles|ai-profiles\/usage|ai-profiles\/:id\/available-models)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['POST'], /^\/v1\/ai-profiles\/usage\/sample$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(READ, /^\/v1\/(model-scorecard|model-options|model-changes|model-prices|token-health|token-incidents|budgets)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),

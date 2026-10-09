@@ -620,6 +620,15 @@
   .bg-tbl td.bg-l { text-align:left; white-space:normal }
   .bg-hi { color:var(--warn, #b7791f); font-weight:600 }
   .bg-form { display:flex; gap:8px; align-items:center; flex-wrap:wrap }
+  /* Recommended (recommendations.ts): the top of Usage, and each agent's Usage tab. */
+  .rec-list { display:grid; gap:8px; margin:0 0 14px }
+  .rec-item { border:1px solid var(--line); border-radius:10px; padding:8px 12px; font-size:14px; background:var(--panel) }
+  .rec-item.rec-now { border-color:color-mix(in srgb, var(--accent) 45%, var(--line)); background:color-mix(in srgb, var(--accent) 8%, var(--panel)) }
+  .rec-item.rec-focus { box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent) }
+  .rec-who { margin-top:2px }
+  .rec-ev { margin:4px 0 0; padding-left:18px; font-size:13px; color:var(--dim) }
+  .rec-effect { margin-top:4px; font-size:13px }
+  .rec-btns { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; margin-top:8px }
   .bg-form input { width:96px }
   .v2tg { position:absolute; right:-6px; bottom:-6px; width:20px; height:20px; border-radius:50%; background:#2aabee;
           display:grid; place-items:center; border:2px solid var(--bg); z-index:1 }
@@ -2253,6 +2262,7 @@
     <h3 style="margin:0">Usage</h3>
     <button class="hbtn" onclick="loadFleetUsage()">Refresh</button>
   </div>
+  <section id="fleetRecommended" aria-label="Recommended" style="margin-top:14px" hidden></section>
   <div id="fleetUsageBody" style="margin-top:14px">Loading…</div>
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
     <button class="primary" onclick="fleetUsageDlg.close()">Close</button>
@@ -2727,7 +2737,7 @@ const api = async (path, opts = {}) => {
     ...fetchOpts,
     // Only claim a JSON body when there is one: Fastify 400s a body-less
     // request (e.g. DELETE) that still carries the content-type header.
-    headers: opts.body ? { 'content-type': 'application/json' } : undefined,
+    headers: opts.body || opts.headers ? { ...(opts.body ? { 'content-type': 'application/json' } : {}), ...(opts.headers || {}) } : undefined,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
@@ -8714,7 +8724,7 @@ function usageHTML(u, agentId) {
   const big = n(u.lastContext) >= 150_000;
   const ctx = u.lastContext !== undefined ? `<div style="margin:2px 0"><b>Conversation size now:</b> ${fmtTokens(u.lastContext)} tokens a call${u.maxContext ? ` <span class="sub">(largest ever ${fmtTokens(u.maxContext)})</span>` : ''}</div>
     ${big ? `<div class="sub" style="margin:2px 0 6px">Every call carries this much in. A long-running conversation or a scheduled task that keeps adding to it is the usual cause; a fresh session makes each call far smaller.</div>` : ''}` : '';
-  const alerts = (u.alerts || []).map(x => `<div class="sub" style="display:flex;gap:6px;align-items:baseline"><span class="grow">⚠️ ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}</span>`
+  const alerts = (u.alerts || []).filter(recEarlierSpike).map(x => `<div class="sub" style="display:flex;gap:6px;align-items:baseline"><span class="grow">⚠️ ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}</span>`
     + `<button class="hbtn" style="padding:0 6px;font-size:12px" title="Clear this warning" aria-label="Clear this warning" onclick="dismissSpike('${jsq(x.agentId || agentId)}','${jsq(x.at)}').then(() => { this.closest('div').remove(); })">✕</button></div>`).join('');
   return `<div style="font-size:22px;font-weight:700">${fmtTokens(u.totalTokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">in all</span></div>
      <div class="sub" style="margin:2px 0 8px">${fmtN(n(u.calls))} call${u.calls === 1 ? '' : 's'} · ${u.sessions} session${u.sessions > 1 ? 's' : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(agentId, models)}</div>
@@ -8737,6 +8747,7 @@ async function dismissSpike(agentId, at) {
   } catch (e) { toast(e.message, 8000); }
 }
 async function loadFleetUsage() {
+  void loadRecommended('', true);
   if (!$('fleetUsageBody').childElementCount) $('fleetUsageBody').innerHTML = 'Loading…';
   try {
     // From the sampler's records, not the containers: it answers at once.
@@ -8770,9 +8781,11 @@ function renderFleetUsage(f) {
   // the chart narrows to any agents, and each agent's Usage tab has its own.
   const planStar = (f.pricing?.billing?.plan > 0) || (f.rightSize?.planUSD > 0);
   // Spike warnings of the last week (sent to Telegram when they happened); ✕ clears one, "Clear all" every one.
-  const alerts = (f.alerts || []).map((x) => `<div class="sub" style="margin:2px 0;display:flex;gap:6px;align-items:baseline"><span class="grow">⚠️ <b>${esc(x.name)}</b> used ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}${x.told ? '' : ' · not sent (no Telegram)'}</span>`
+  const earlier = (f.alerts || []).filter(recEarlierSpike);
+  const alerts = earlier.map((x) => `<div class="sub" style="margin:2px 0;display:flex;gap:6px;align-items:baseline"><span class="grow">⚠️ <b>${esc(x.name)}</b> used ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}${x.covered ? ' · told with its loop' : x.told ? '' : ' · not sent (no Telegram)'}</span>`
     + `<button class="hbtn" style="padding:0 6px;font-size:12px" title="Clear this warning" aria-label="Clear this warning" onclick="dismissSpike('${jsq(x.agentId)}','${jsq(x.at)}')">✕</button></div>`).join('')
-    + ((f.alerts || []).length > 1 ? `<div style="text-align:right;margin-top:2px"><button class="hbtn" style="font-size:12px" onclick="dismissSpike()">Clear all</button></div>` : '');
+    + (earlier.length ? `<div class="sub" style="margin-top:2px">Earlier this week. A spike in the last day is under Recommended, above.</div>` : '')
+    + (earlier.length > 1 ? `<div style="text-align:right;margin-top:2px"><button class="hbtn" style="font-size:12px" onclick="dismissSpike()">Clear all</button></div>` : '');
   // Requests that did not go through in the last 24 hours: one line, only when there were any (Chris, 2026-10-05).
   const bad = (a) => (a.limited || 0) + (a.failed || 0);
   const worst = (f.agents || []).filter((a) => bad(a) > 0).sort((x, y) => bad(y) - bad(x));
@@ -8789,6 +8802,108 @@ function renderFleetUsage(f) {
   void loadSpendCharts($('fleetUsageBody'));
 }
 
+
+// ---- Recommended (recommendations.ts, docs/recommendations-design.md) ------------
+// One ranked list of the cost, model and token advice: the top of Usage, and each
+// agent's items on its Usage tab. Each item: the concern, its evidence, the
+// expected effect, one button (the same route its card would use; the click is
+// the confirmation), Details and Not now (put away until its cause changes).
+// The list is the server's; nothing here judges an agent.
+/** A spike warning older than a day: today's is a Recommended item, not a second box. */
+const recEarlierSpike = (x) => Date.now() - Date.parse(x.at) >= 86_400_000;
+const v2RecItems = new Map();
+const v2RecCache = new Map();
+let v2RecFocus = null;
+async function loadRecommended(agentId = '', fresh = false) {
+  const box = () => (agentId ? ($('v2RecBody')?.dataset.agent === agentId ? $('v2RecBody') : null) : $('fleetRecommended'));
+  if (!box()) return;
+  const hit = v2RecCache.get(agentId);
+  let items;
+  if (!fresh && hit && Date.now() - hit.at < 30_000) items = hit.items;
+  else {
+    try {
+      const r = await api(agentId ? `/v1/agents/${encodeURIComponent(agentId)}/recommendations` : '/v1/recommendations');
+      items = Array.isArray(r?.items) ? r.items : [];
+    } catch (e) { const el = box(); if (el) { el.hidden = false; el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; } return; }
+    v2RecCache.set(agentId, { at: Date.now(), items });
+  }
+  const el = box(); if (!el) return; // the sheet moved on meanwhile
+  for (const it of items) v2RecItems.set(it.id, it);
+  el.hidden = !items.length && !!agentId;
+  el.innerHTML = recommendedHTML(items, agentId);
+  if (v2RecFocus && el.querySelector(`[data-rec="${CSS.escape(v2RecFocus)}"]`)) {
+    const it = el.querySelector(`[data-rec="${CSS.escape(v2RecFocus)}"]`);
+    it.classList.add('rec-focus'); it.scrollIntoView?.({ block: 'nearest' });
+    v2RecFocus = null;
+  }
+}
+function recommendedHTML(items, agentId) {
+  const head = `<h4 class="v2sec" style="margin-top:${agentId ? 6 : 0}px">Recommended${items.length ? ` · ${items.length}` : ''}</h4>`;
+  if (!items.length) return `${head}<div class="sub" style="margin:0 0 12px">Nothing to change right now: no loop, no budget near its limit, and no cheaper model with enough evidence behind it.</div>`;
+  return `${head}<div class="rec-list">${items.map((it) => recItemHTML(it, agentId)).join('')}</div>`;
+}
+function recItemHTML(it, agentId) {
+  const id = jsq(it.id);
+  const who = it.proposedBy === 'agent' ? 'Proposed by your Hatchabot agent' : it.proposedBy === 'guard' ? "Proposed by Hatchabot's quality guard" : '';
+  // On an agent's own Usage tab, "Details" that would open this same tab says nothing new.
+  const more = (it.secondary || []).map((a, i) => [a, i]).filter(([a]) => !(agentId && a.kind === 'open-usage' && a.agentId === agentId));
+  const evidence = Array.isArray(it.evidence) ? it.evidence : [];
+  return `<div class="rec-item${it.alert ? ' rec-now' : ''}" id="rec-${esc(it.id)}" data-rec="${esc(it.id)}">
+    <div class="rec-head"><b>${esc(it.title)}</b>${it.concern ? ` — ${esc(it.concern)}` : ''}</div>
+    ${who ? `<div class="rec-who sub">${who}</div>` : ''}
+    ${evidence.length ? `<ul class="rec-ev">${evidence.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}
+    ${it.effect?.text ? `<div class="rec-effect"><i>Expected effect:</i> ${esc(it.effect.text)}</div>` : ''}
+    <div class="rec-btns">${it.action ? `<button type="button" class="primary" onclick="recAct('${id}',-1,this)">${esc(it.action.label)}</button>` : ''}${more.map(([a, i]) => `<button type="button" onclick="recAct('${id}',${i},this)">${esc(a.label)}</button>`).join('')}<button type="button" onclick="recNotNow('${id}',this)">Not now</button></div>
+  </div>`;
+}
+/** After an action or a Not now: every list on the page asks again. */
+async function recReload() {
+  v2RecCache.clear();
+  if ($('fleetRecommended') && fleetUsageDlg.open) void loadRecommended('', true);
+  const ag = $('v2RecBody')?.dataset.agent;
+  if (ag) void loadRecommended(ag, true);
+}
+async function recAct(id, i, btn) {
+  const it = v2RecItems.get(id); if (!it) return;
+  const a = i < 0 ? it.action : it.secondary?.[i];
+  if (!a) return;
+  const go = (agentId, tab) => { if (fleetUsageDlg.open) fleetUsageDlg.close(); openV2Agent(agentId, tab); };
+  if (a.kind === 'open-agent') return go(a.agentId, 'overview');
+  if (a.kind === 'open-usage') return go(a.agentId, 'usage');
+  if (a.kind === 'open-sources') { if (fleetUsageDlg.open) fleetUsageDlg.close(); return void openAiDlg('ai'); }
+  if (a.kind === 'open-budgets') { if (fleetUsageDlg.open) fleetUsageDlg.close(); return void openBudgets(); }
+  if (!a.path) return;
+  if (a.confirm && !confirm(a.confirm)) return;
+  const row = btn?.closest('.rec-btns');
+  for (const b of row?.querySelectorAll('button') ?? []) b.disabled = true;
+  try {
+    const r = await api(a.path, { method: a.method || 'POST', body: a.body || {}, headers: { 'x-hatchabot-recommendation': it.id } });
+    toast(r?.message || r?.text || 'Done.', 6000);
+    await recReload();
+    void loadProposals(); void refresh(false);
+  } catch (e) {
+    for (const b of row?.querySelectorAll('button') ?? []) b.disabled = false;
+    toast(e.message, 8000);
+  }
+}
+async function recNotNow(id, btn) {
+  const it = v2RecItems.get(id); if (!it) return;
+  for (const b of btn?.closest('.rec-btns')?.querySelectorAll('button') ?? []) b.disabled = true;
+  try {
+    // A card behind it is cancelled, as its Cancel did (the agent hears so).
+    if (it.proposalId) await api(`/v1/proposals/${encodeURIComponent(it.proposalId)}/cancel`, { method: 'POST', body: {} }).catch(() => {});
+    await api(`/v1/recommendations/${encodeURIComponent(id)}/dismiss`, { method: 'POST', body: {} });
+    for (const el of document.querySelectorAll(`[data-rec="${CSS.escape(id)}"]`)) el.remove();
+    toast('Put away — it comes back if its cause changes.', 5000);
+    await recReload();
+    void refresh(false);
+  } catch (e) {
+    for (const b of btn?.closest('.rec-btns')?.querySelectorAll('button') ?? []) b.disabled = false;
+    toast(e.message, 8000);
+  }
+}
+/** From an Alerts line: the agent's Usage tab, with that item marked. */
+function v2OpenRec(agentId, recId) { v2RecFocus = recId; openV2Agent(agentId, 'usage'); }
 
 let healthAgentId = null;
 const HEALTH_BADGE = {
@@ -11258,7 +11373,7 @@ function agentAttention(a) {
   if (templateUnfilled(a)) out.push({ key: 'template', icon: '⚙', why: TEMPLATE_WHY });
   if (a.opsDrift) out.push({ key: 'opsDrift', icon: '🔒', why: `its safety settings were changed (${a.opsDrift}), so its access to Hatchabot is paused — Rebuild it to restore them` });
   if (a.migratedTo) out.push({ key: 'migrated', icon: '📦', why: `moved to ${a.migratedTo} — this is a leftover copy` });
-  if (sourceUsageOf(a.aiProfileId)?.status === 'limited') out.push({ key: 'limited', icon: '⛔', why: `its AI source is being rate-limited (since ${clock(sourceUsageOf(a.aiProfileId).limitedSince)})` });
+  // A rate-limited source is ONE Recommended item for the source (v2.158.0), not a line on each of its agents; the tile still says so.
   if (a.imageTrial) out.push({ key: 'trial:' + a.image, icon: '🧪', why: `on trial image ${a.image} (Runtime → ✕ to discard)` });
   const rebuild = [];
   if (a.pendingModel && a.pendingModel !== a.model) rebuild.push(`switches to ${a.pendingModel} on rebuild`);
@@ -11276,24 +11391,29 @@ function agentAttention(a) {
   const recovery = v2Mine(a) && a.state !== 'ARCHIVED' ? v2RecoveryOf(a.id) : null;
   if (recovery?.alert) out.push({ key: recovery.alert.key, icon: '💾', why: recovery.alert.why });
   // A loop Hatchabot's watcher found (tokenWatch.ts): what repeats, since when, and the fix.
-  if ((a.stuck || []).length) out.push({ key: 'stuck:' + a.stuck.map(x => x.id).sort().join(','), icon: '🔁', stuck: true,
+  if ((a.stuck || []).length) out.push({ key: 'stuck:' + a.stuck.map(x => x.id).sort().join(','), icon: '🔁', stuck: true, sev: 90, rec: 'loop:' + a.stuck[0].id,
     why: a.stuck.map(x => x.text + (x.fix ? `. Fix: ${x.fix}` : '')).join(' · ') });
+  // Today's spike (v2.158.0: spikes reach Alerts). A loop on it speaks for it: the server leaves it off then.
+  if (a.spike) out.push({ key: 'spike:' + a.spike.at, icon: '⚠', sev: 80, rec: 'spike:' + a.id,
+    why: `it used ${fmtTokens(a.spike.tokens)} tokens in the last 24 hours${a.spike.usual >= 1e6 ? ` — about ${Math.round(a.spike.tokens / a.spike.usual)}× its usual day` : ''} (Usage → Recommended)` });
   // Budgets (budgets.ts): from 80%, and a pause; keyed on the month, level and
   // amount, so a cleared line comes back at 100% or with a new budget.
-  if (a.budget?.line) out.push({ key: `budget:${a.budget.month}:${a.budget.level}:${a.budget.usd}${a.budget.paused ? ':p' : ''}`, icon: a.budget.paused ? '⏸' : '💵', why: a.budget.line + ' (Usage → Monthly budget)' });
-  // "Tell me every $X": keyed on the step passed, so a cleared line comes back at the next one.
+  // Only a budget at 100% (paused, moved, or over) is an Alert; 80% is a Recommended item (v2.158.0).
+  if (a.budget?.line && (a.budget.level === 100 || a.budget.paused || a.budget.downgraded)) out.push({ key: `budget:${a.budget.month}:${a.budget.level}:${a.budget.usd}${a.budget.paused ? ':p' : ''}`, icon: a.budget.paused ? '⏸' : '💵', sev: 85, rec: 'budget:' + a.id, why: a.budget.line + ' (Usage → Recommended)' });
   // It can still reach something it should not (access overview: Sharing → Access).
   if (a.accessAlert?.line) out.push({ key: a.accessAlert.key, icon: '🔑', why: a.accessAlert.line });
-  if (a.spendStep?.line) out.push({ key: `step:${a.spendStep.month}:${a.spendStep.passed}:${a.spendStep.every}`, icon: '🔔', why: a.spendStep.line });
-  if (a.machineStep?.line) out.push({ key: `mstep:${a.machineStep.month}:${a.machineStep.passed}:${a.machineStep.every}`, icon: '🔔', why: 'This Hatchabot (every agent): ' + a.machineStep.line.replace(/^Spent /, 'spent ') });
-  if (a.budgetPaused && !a.budget?.paused) out.push({ key: 'mbudget-pause:' + a.budgetPaused.at, icon: '⏸', why: "paused by this Hatchabot's monthly budget — it starts again on the 1st, when the machine's budget is raised, or when you start it" });
-  if (a.machineBudget?.line) out.push({ key: `mbudget:${a.machineBudget.month}:${a.machineBudget.level}:${a.machineBudget.usd}`, icon: '💵', why: 'This Hatchabot (every agent): ' + a.machineBudget.line.replace(/^Over /, 'over ').replace(/^Used /, 'used ') + ' (⚙ Settings → AI sources → Budgets)' });
+  // "Tell me every $X" steps are the information the owner asked for: their message, the tooltip and Usage say them, not Alerts (v2.158.0).
+  if (a.budgetPaused && !a.budget?.paused) out.push({ key: 'mbudget-pause:' + a.budgetPaused.at, icon: '⏸', sev: 85, why: "paused by this Hatchabot's monthly budget — it starts again on the 1st, when the machine's budget is raised, or when you start it" });
+  if (a.machineBudget?.line && a.machineBudget.level === 100) out.push({ key: `mbudget:${a.machineBudget.month}:${a.machineBudget.level}:${a.machineBudget.usd}`, icon: '💵', sev: 85, rec: 'budget:machine', why: 'This Hatchabot (every agent): ' + a.machineBudget.line.replace(/^Over /, 'over ').replace(/^Used /, 'used ') + ' (Usage → Recommended)' });
   if (a.ops && v2Mine(a)) out.push(...v2MachineAlerts());
   if (a.selfRestarts) out.push({ key: 'restart:' + a.selfRestarts, icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Resources shows its memory against the cap` });
   // Check all (this page's own finding; kept out of the Clear fingerprint).
   if (v2HealthBad(a)) out.push({ key: 'health', icon: '❤️', health: true, why: `Health check: ${v2Health[a.id].problems.join('; ')} (Overview → Check health has the detail)` });
-  return out;
+  // By severity — what blocks it, then money burning now — not by where the check sits above (v2.158.0); equal ones keep that order.
+  return out.map((x, i) => [x, i]).sort(([x, i], [y, j]) => (y.sev ?? V2_ATTN_SEV[y.key.split(':')[0]] ?? 40) - (x.sev ?? V2_ATTN_SEV[x.key.split(':')[0]] ?? 40) || i - j).map(([x]) => x);
 }
+/** Alerts severity by key: an operation waiting for a choice and a failure first, then a loop, a budget at 100% and a spike (their own sev), then the rest. */
+const V2_ATTN_SEV = { op: 100, failed: 95, pending: 70, opsDrift: 65, nobot: 50, unsynced: 50, template: 45, migrated: 45, rebuild: 42 };
 
 let agentTodos = null, pendingTodoName = null, todosBusy = false;
 /** The names of the agents that exist now, lower-cased: a plan carrying one of them is done. */
@@ -12480,6 +12600,7 @@ function v2RenderSheet() {
   if ($('v2Chans')) void v2LoadChans(a.id);
   if ($('v2UsageBody')) void v2LoadUsage(a.id);
   if ($('v2BudgetRow')) void v2LoadBudgetRow(a.id);
+  if ($('v2RecBody')) void loadRecommended(a.id);
   if ($('v2AppRow')) void v2LoadApp(a.id);
   if ($('v2Access')) void v2LoadAccess(a.id);
   if ($('v2RecoveryRow')) void v2PaintRecovery(a.id);
@@ -12928,6 +13049,8 @@ function v2Pane(a, tab) {
   const st = v2Status(a);
   // Overview's list of what is wrong, less what a notice above already says with its button.
   const whyList = st.why.filter(w => !(a.state === 'FAILED' && /^it failed/.test(w)) && !(w === TEMPLATE_WHY && a.state !== 'ARCHIVED'));
+  // A loop, a budget at 100% and a spike link to their Recommended item (the agent's Usage tab).
+  const recOf = new Map(v2Mine(a) ? agentAttention(a).filter(x => x.rec).map(x => [x.why, x.rec]) : []);
   const src = profiles.find(p => p.id === a.aiProfileId);
   const host = hosts.find(h => h.id === a.hostId);
   const groups = [...new Set(agents.filter(x => v2Mine(x) && x.group).map(x => x.group))].sort();
@@ -12941,7 +13064,7 @@ function v2Pane(a, tab) {
         <span class="sub">It goes on without this page — close it if you like; a message here says how it ended.</span>`) : ''}
       ${(a.state === 'REBUILDING' || a.state === 'PROVISIONING') && !v2OpGoing(a) ? row('Working on', `<span>${esc(a.progress?.step || (a.state === 'REBUILDING' ? 'rebuilding' : 'setting up'))}${a.progress?.at ? ` <span class="sub">· ${esc(ago(a.progress.at))}</span>` : ''}</span>${B('Setup log', `openSetupLog('${id}','${n}')`)}
         <span class="sub">Moving onto a new OpenClaw line runs its migrations and rebuilds the memory index — minutes on an agent with a long history.</span>`) : ''}
-      ${whyList.length ? `<ul class="v2why" style="margin:0 0 10px">${whyList.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
+      ${whyList.length ? `<ul class="v2why" style="margin:0 0 10px">${whyList.map(w => `<li>${esc(w)}${recOf.has(w) ? ` <button type="button" class="linkish" onclick="v2OpenRec('${id}','${jsq(recOf.get(w))}')">Recommended →</button>` : ''}</li>`).join('')}</ul>` : ''}
       ${row('Name &amp; icon', `<span>${esc(a.name)}</span>${B('Change icon', `openV2Icon('${id}')`)}${a.state !== 'ARCHIVED' ? B('Rename…', goto('personality')) : ''}
         ${a.persona ? `<span class="sub">${esc(a.persona)}</span>` : ''}`)}
       ${a.state !== 'ARCHIVED' ? row('AI', `<span>${esc(src?.name || 'unknown')}${a.model ? ' · ' + esc(a.model) : ''}</span>${B('Change…', goto('ai'))}`) : ''}
@@ -12997,7 +13120,8 @@ function v2Pane(a, tab) {
       ${slot('paneEditPeers')}
       ${built ? row('Access', `<div id="v2Access" data-agent="${esc(a.id)}" style="flex-basis:100%"><div class="sub">Loading…</div></div>`) : ''}`;
     }
-    case 'usage': return (v2Mine(a) && a.state !== 'ARCHIVED' ? row('Spending', `<div id="v2BudgetRow" data-agent="${esc(a.id)}" style="flex-basis:100%"><div class="sub">Loading…</div></div>`) : '')
+    case 'usage': return (v2Mine(a) && a.state !== 'ARCHIVED' ? `<div id="v2RecBody" data-agent="${esc(a.id)}" hidden></div>` : '')
+      + (v2Mine(a) && a.state !== 'ARCHIVED' ? row('Spending', `<div id="v2BudgetRow" data-agent="${esc(a.id)}" style="flex-basis:100%"><div class="sub">Loading…</div></div>`) : '')
       + (run ? `<div id="v2UsageBody" style="padding:4px 2px">Loading…</div>`
       : row('Usage', `<span>${v2NotRunning(a, 'its figures')} They are read from its container; Usage still counts what it used while running.</span>`));
     case 'schedule': return run ? slot('cronBody') : row('Scheduled tasks', `<span>${v2NotRunning(a, 'its tasks')}</span>`);
@@ -13968,10 +14092,12 @@ async function loadProposals() {
     .filter(x => Date.now() - (x.resolvedAtMs ?? 0) < 60 * 60_000)
     .filter(x => !v2PropDismissed.has(x.confirmId))
     .slice(0, 3);
+  // Cost and model cards (recommended: true) are Usage → Recommended items now, marked as the agent's (v2.158.0); the console still shows every card.
+  const cards = r.pending.filter(p => !p.recommended);
   const sig = [...r.pending.map(p => p.confirmId), ...failed.map(f => `f:${f.confirmId}`)].join(',');
-  $('v2Proposals').hidden = !(r.pending.length || failed.length || renderV2Joins());
-  $('v2PropCount').textContent = r.pending.length || '';
-  v2PendingCount = r.pending.length;
+  $('v2Proposals').hidden = !(cards.length || failed.length || renderV2Joins());
+  $('v2PropCount').textContent = cards.length || '';
+  v2PendingCount = cards.length;
   // While you talk to your management agent, what it prepares shows right
   // above the conversation — in Hatchabot's frame, which the agent can't draw in.
   const inConsole = $('consoleDlg').open && v2Find(consoleAgentId)?.ops;
@@ -13981,7 +14107,7 @@ async function loadProposals() {
   v2PropSig = sig; cp.__sig = inConsole ? sig : '';
   const list = $('v2PropList');
   list.innerHTML = ''; cp.innerHTML = '';
-  for (const p of r.pending) { mgmtProposalCard(p, list); if (inConsole) mgmtProposalCard(p, cp); }
+  for (const p of r.pending) { if (!p.recommended) mgmtProposalCard(p, list); if (inConsole) mgmtProposalCard(p, cp); }
   for (const f of failed) { mgmtFailedCard(f, list); if (inConsole) mgmtFailedCard(f, cp); }
 }
 
