@@ -303,7 +303,7 @@ set, or restore one agent's volume from a set.
 - `scripts/backup-volumes.sh` — `write_status`, `json_list`: the backup run itself.
 - `deploy/hatchabot-backup.timer` — `OnCalendar`: when it runs.
 - `deploy/hatchabot-backup.service` — `Type=oneshot`, `ExecStart`: what the timer starts (the backup script).
-- `src/orchestrator/backups.ts` — `listBackups`, `startBackup`, `pruneBackup`, `restoreAgentFromBackup`, `agentsMissingFromSet`, `keepDays`: reading and acting on backup sets.
+- `src/orchestrator/backups.ts` — `listBackups`, `startBackup`, `pruneBackup`, `restoreAgentFromBackup`, `agentsMissingFromSet`, `keepDays`, `restoreSafetyDir`: reading and acting on backup sets (`restoreSafetyDir` is where a restore that could not be undone keeps the pre-restore copy).
 - `scripts/restore-drill.sh` — `cleanup`: proves a backup set restores, without touching the live system.
 - `src/api/routes.ts` — `'/v1/backups'`, `'/v1/backups/run'`, `'/v1/backups/restore'`, `'/v1/agents/:id/backup'`, `'/v1/agents/restore'`: the backup panel, one-agent download and restore from a download.
 - `web/index.html` — `loadBackups`, `runBackupNow`, `pruneBackup`, `restoreFromBackup`, `downloadAgent`: the Backups panel.

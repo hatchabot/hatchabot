@@ -149,6 +149,24 @@ describe('restoreSnapshot', () => {
     expect(undo.files['MEMORY.md']).toBe('oops, everything deleted');
   });
 
+  it('a write failing partway says which files were already restored and where the way back is (issue #12)', async () => {
+    const w = fileWorld(SEED);
+    const good = await captureSnapshot(w.deps, 'a1', { label: 'before the mess' });
+    w.files['SOUL.md'] = 'garbage';
+    w.files['MEMORY.md'] = 'mangled';
+    const write = (w.provider as any).execShell;
+    (w.provider as any).execShell = async (ref: string, script: string) =>
+      script.includes('/MEMORY.md') && !script.startsWith('head -c') ? { code: 1, stdout: '', stderr: 'disk full' } : write(ref, script);
+    const order = Object.keys(w.store.getSnapshot('a1', good.id)!.files);
+    const before = order.slice(0, order.indexOf('MEMORY.md'));
+    const err = await restoreSnapshot(w.deps, 'a1', good.id).catch((e) => e);
+    expect(err).toBeInstanceOf(SnapshotError);
+    expect(err.userMessage).toContain("Couldn't write MEMORY.md: disk full");
+    expect(err.userMessage).toContain(before.length ? `${before.join(', ')} ${before.length === 1 ? 'was' : 'were'} already restored` : 'Nothing was changed');
+    expect(err.userMessage).toContain('"before restoring before the mess"');
+    expect(w.files['MEMORY.md']).toBe('mangled');
+  });
+
   it('rejects an unknown snapshot id and a stopped agent', async () => {
     const w = fileWorld(SEED);
     await expect(restoreSnapshot(w.deps, 'a1', 'nope')).rejects.toBeInstanceOf(SnapshotError);

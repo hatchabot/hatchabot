@@ -7,7 +7,7 @@
  * trigger a run or prune an old one.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { defaultBackupsDir } from '../envCompat.js';
 import { fileURLToPath } from 'node:url';
@@ -282,6 +282,31 @@ export function agentArchiveName(runtimeRef: string): string {
   return `${runtimeRef.replace(/^\w+:\/\//, '')}-vol.tgz`;
 }
 
+/**
+ * Where a restore keeps the copy it took of an agent's volume first, when
+ * neither the restore nor putting that copy back worked: the agent's only
+ * good state then lives in that file (issue #12). Beside the dated sets, but
+ * not one of them, so listBackups and the nightly prune never touch it.
+ */
+export function restoreSafetyDir(): string {
+  return join(backupsDir(), 'restore-safety');
+}
+
+/** Write the pre-restore copy to disk, owner-only (it holds the agent's secrets). */
+function keepSafetyCopy(runtimeRef: string, safety: Buffer): string {
+  const dir = restoreSafetyDir();
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const file = join(dir, `${agentArchiveName(runtimeRef).replace(/\.tgz$/, '')}-before-restore-${stamp}.tgz`);
+  writeFileSync(file, safety, { mode: 0o600 });
+  return file;
+}
+
+function short(err: unknown): string {
+  return String(err instanceof Error ? err.message : err).replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+
 export interface RestoreResult {
   date: string;
   /** whether the agent was running before, and was started again after */
@@ -296,8 +321,9 @@ export interface RestoreResult {
  * memory, so the agent is stopped for the swap and only restarted if it was
  * running before. A safety copy of the current volume is taken first and rolled
  * back if the extract fails, so a broken archive can't leave a half-written
- * volume. The caller is responsible for the busy guard and for gating this to
- * the machine's owner.
+ * volume. If that rollback fails too, the agent is left stopped and FAILED and
+ * the copy is written under restoreSafetyDir() for recovery. The caller is
+ * responsible for the busy guard and for gating this to the machine's owner.
  */
 export async function restoreAgentFromBackup(
   deps: {
@@ -314,7 +340,9 @@ export async function restoreAgentFromBackup(
 
   const agent = store.getAgent(agentId);
   if (!agent?.runtimeRef) throw new RestoreError('This agent has no runtime to restore into yet.');
-  if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
+  // FAILED too: a restore that could not be undone leaves the agent FAILED
+  // (below), and restoring a backup again is how it gets its memory back.
+  if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED' && agent.state !== 'FAILED') {
     throw new RestoreError(`Can't restore while the agent is ${agent.state}.`);
   }
 
@@ -357,21 +385,57 @@ export async function restoreAgentFromBackup(
     );
   }
 
+  /**
+   * Put the pre-restore copy back after `what` failed. Only a rollback that
+   * worked restarts the agent and may say it was left as it was. When the
+   * rollback fails too, the volume holds neither the old state nor the
+   * backup: booting it would run a half-written (and possibly too-open)
+   * config, and "left as it was" was false (issue #12). So the agent stays
+   * stopped and FAILED, the copy is kept on disk for recovery, and both
+   * failures are named.
+   */
+  const rollBack = async (what: string, cause: unknown, leftAsItWas: string): Promise<never> => {
+    let rollbackErr: unknown;
+    try {
+      await provider.importState(agent.runtimeRef!, safety!);
+    } catch (e) {
+      rollbackErr = e;
+      log('restore.rollback_failed', { agentId, error: String(e) });
+    }
+    if (rollbackErr === undefined) {
+      await restartIfWasRunning();
+      throw new RestoreError(leftAsItWas);
+    }
+    // A re-apply may have started it again; whatever is in its volume now must not run.
+    try { await provider.stop(agent.runtimeRef!); } catch (e) { log('restore.stop_failed', { agentId, error: String(e) }); }
+    let kept: string | undefined;
+    let keepErr: unknown;
+    try { kept = keepSafetyCopy(agent.runtimeRef!, safety!); } catch (e) { keepErr = e; log('restore.safety_keep_failed', { agentId, error: String(e) }); }
+    const where = kept
+      ? `The copy of how it was before the restore is kept at ${kept}.`
+      : `The copy of how it was before the restore could not be saved either (${short(keepErr)}).`;
+    store.setAgentState(
+      agentId,
+      'FAILED',
+      `A restore from the ${date} backup failed and could not be undone, so its memory may be half-restored. ${where} ` +
+        'Restore a backup again, or put that copy back by hand, before tapping Retry.',
+    );
+    log('restore.left_failed', { agentId, date, kept: kept ?? null });
+    throw new RestoreError(
+      `${what} (${short(cause)}), and putting it back as it was failed too (${short(rollbackErr)}). ` +
+        `The agent could not be put back: it is stopped and marked failed so it does not run on a half-restored memory. ${where} ` +
+        'Restore a backup again, or put that copy back by hand, before starting it.',
+    );
+  };
+
   forgetDmPolicy(agentId); // the restored config is whatever the archive held
   try {
     await provider.importState(agent.runtimeRef, data);
   } catch (err) {
-    // The volume may be half-overwritten. Put the pre-restore state back if we
-    // captured it, so a broken archive never corrupts a working agent.
-    if (safety) {
-      try {
-        await provider.importState(agent.runtimeRef, safety);
-      } catch (rollbackErr) {
-        log('restore.rollback_failed', { agentId, error: String(rollbackErr) });
-      }
-    }
-    await restartIfWasRunning();
-    throw new RestoreError("Restore failed — the agent was left as it was.");
+    // The volume may be half-overwritten. Put the pre-restore state back, so a
+    // broken archive never corrupts a working agent.
+    log('restore.import_failed', { agentId, error: String(err) });
+    await rollBack('Restore failed', err, 'Restore failed — the agent was left as it was.');
   }
 
   // The backup is that night's whole volume, config and approvals included.
@@ -415,14 +479,19 @@ export async function restoreAgentFromBackup(
   } catch (err) {
     // Never leave that night's access in force: back to how it was before.
     log('restore.reapply_failed', { agentId, error: String(err) });
-    if (safety) {
-      try { await provider.importState(agent.runtimeRef, safety); } catch (rollbackErr) { log('restore.rollback_failed', { agentId, error: String(rollbackErr) }); }
-    }
-    await restartIfWasRunning();
-    throw new RestoreError("The backup was read, but this agent's current settings could not be put back over it, so it was left as it was.");
+    await rollBack(
+      "The backup was read, but this agent's current settings could not be put back over it",
+      err,
+      "The backup was read, but this agent's current settings could not be put back over it, so it was left as it was.",
+    );
   }
 
   log('agent.restored', { agentId, date, undone: undone.length });
+  // A FAILED agent (an earlier restore that could not be undone) has its
+  // memory back now; Retry is what starts it.
+  if (store.getAgent(agentId)?.state === 'FAILED') {
+    store.setAgentState(agentId, 'FAILED', `Restored from the ${date} backup — tap Retry to start it.`);
+  }
   await restartIfWasRunning();
   // What it IS now, not what it was: a failed restart used to report "restarting".
   return { date, running: deps.store.getAgent(agentId)?.state === 'RUNNING', ...(undone.length ? { undone } : {}) };

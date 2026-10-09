@@ -225,7 +225,19 @@ export async function restoreSnapshot(
   const restored: string[] = [];
   for (const [name, content] of Object.entries(snapshot.files)) {
     if (!(CORE_FILES as readonly string[]).includes(name)) continue; // stored data is ours, but be strict
-    await writeCoreFile(provider, agent.runtimeRef, agent.slug, name, content);
+    try {
+      await writeCoreFile(provider, agent.runtimeRef, agent.slug, name, content);
+    } catch (err) {
+      // Each file is written whole (tmp + mv), but the set is not: files
+      // before this one are already the snapshot's. Say so, and where the
+      // way back is, rather than a bare write error (issue #12).
+      log('snapshot.restore_partial', { agentId, snapshotId, restored, failed: name, error: String(err) });
+      const why = err instanceof SnapshotError ? err.userMessage : String(err);
+      throw new SnapshotError(
+        `${why}${restored.length ? ` ${restored.join(', ')} ${restored.length === 1 ? 'was' : 'were'} already restored.` : ' Nothing was changed.'} ` +
+          `The snapshot "before restoring ${snapshot.label}" holds how its files were.`,
+      );
+    }
     restored.push(name);
   }
   log('snapshot.restored', { agentId, snapshotId, restored });
