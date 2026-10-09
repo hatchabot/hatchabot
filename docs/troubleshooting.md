@@ -471,6 +471,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `web/index.html` — `refresh`, `refreshNow`
 
+### After a failed move ("couldn't import it: proxy timed out"), the agent runs on both machines
+- **Check:** both servers list the agent RUNNING after a move that said "couldn't import it … Your agent is unchanged"; the error text is a proxy's timeout, not a Hatchabot reason; messages to the bot are answered twice, or the two copies alternate.
+- **Cause:** the import's reply was a proxy's 408 or 499 timeout with a JSON `error` body. It was read as the other server refusing, so the source restarted without asking whether the import had finished.
+- **Fix:** stop and delete one copy (usually the source). Upgrade so later moves ask the other server first.
+- **Fixed in:** `v2.153.1`
+- **Code:** `src/orchestrator/migrate.ts` — `isDefiniteRefusal`
+
+### An agent can still use a Google account right after it was attached and detached
+- **Check:** `gog auth list --json` in the agent still lists the account, but the agent's page shows no attachment and nothing is pending; an attach and a detach (or a delete) were done within a few seconds of each other.
+- **Cause:** the detach or delete ran while the attach was still importing the account: the removal ran first and cleared its record, then the import put the credential back.
+- **Fix:** upgrade. Then attach the account and detach it again, or rebuild the agent.
+- **Fixed in:** `v2.153.1`
+- **Code:** `src/orchestrator/googleConnections.ts` — `withConnectionLock`, `offAgainIfDetached`
+
+### An app update failed with "Its tasks are as they were", but its scheduled task no longer runs
+- **Check:** in the agent's console, `openclaw cron list` shows no job named `<app>-<task>` for the app, though its release is the previous one, and the update error mentioned "Could not take off the old task …" (often a timeout).
+- **Cause:** a removal of the old task took effect, but its reply was lost or timed out. The rollback trusted the reply, so it never re-added the task, and still reported the tasks as unchanged.
+- **Fix:** upgrade, then run **Update** again (or **Roll back**) so the tasks are synced again. From v2.153.1 the rollback checks the agent's actual jobs; if it can't confirm them, the error says "Its scheduled tasks could not be confirmed" and names what to check.
+- **Fixed in:** `v2.153.1`
+- **Code:** `src/orchestrator/apps.ts` — `syncTasks`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")

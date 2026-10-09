@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.153.1] — 2026-10-09
+
+GitHub issues #15–#17, from a re-audit of 2.153.0.
+
+### Fixed
+- **A proxy's timeout during a move to another Hatchabot could leave the agent running on both machines (#15).** A 408 or 499 answer with a JSON error was read as the other server refusing, so the agent was restarted here without asking whether it had arrived there. Only the refusals Hatchabot's own server sends (400, 401, 403, 404, 409, 413, 415, 422, 429) now count as "nothing happened"; any other answer makes the move ask the other server first.
+- **A Google account detached while it was still being attached could stay on the agent (#16).** Attaching and detaching now happen one at a time per agent; a detach that came in during an attach's import was undone by it, with nothing queued to clean up. An attach that arrives while its connection is being deleted is refused.
+- **A failed app update could lose a scheduled task and still say "Its tasks are as they were" (#17).** When a task's removal went through but its reply was lost, the old task was never put back. A rollback now puts the tasks back from the jobs the agent actually has, and checks them again; if it can't confirm them, the error says so and how to check them.
+
 ## [2.153.0] — 2026-10-09
 
 GitHub issues #7–#13, and the fixes from a deep review of the whole codebase (security, concurrency, the web app, the shell scripts, and the newest features).
