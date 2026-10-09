@@ -53,10 +53,14 @@ git -C "$NEW" checkout --quiet "$TAG"
 
 say "3. Env files"
 esc() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
-rewrite_env() { sed -e 's/^AGENTCLAW_/HATCHABOT_/' -e "s|$(esc "$HOME")/agentclaw-backups|$HOME/hatchabot-backups|g" -e "s|$(esc "$OLD")|$NEW|g" "$1" | grep -vE '^HATCHABOT_DB=' > "$2"; chmod 600 "$2"; }
+# The env files hold the secret key and tokens: made 600 from the start
+# (umask 077), not world-readable until the chmod after them (review, 2026-10-09).
+rewrite_env() { ( umask 077; sed -e 's/^AGENTCLAW_/HATCHABOT_/' -e "s|$(esc "$HOME")/agentclaw-backups|$HOME/hatchabot-backups|g" -e "s|$(esc "$OLD")|$NEW|g" "$1" | grep -vE '^HATCHABOT_DB=' > "$2" ); chmod 600 "$2"; }
 for f in .env .env.mgmt; do [ -f "$OLD/$f" ] && { rewrite_env "$OLD/$f" "$NEW/$f"; echo "   $NEW/$f"; }; done
 printf 'HATCHABOT_DB=%s\n' "$DATA/hatchabot.sqlite" >> "$NEW/.env"; echo "   HATCHABOT_DB=$DATA/hatchabot.sqlite"
-for f in .env .env.mgmt; do [ -f "$NEW/$f" ] && grep -oE "$NEW/[^ ]*\.(pem|crt|key)" "$NEW/$f" | while read -r p; do [ -e "$p" ] || echo "   ⚠ $f references $p which does not exist yet — copy it from $OLD before starting"; done; done
+# `{ grep || true; }`: an env file naming no certificate is the usual case, and
+# grep's "no match" under pipefail ended the migration here (found 2026-10-09).
+for f in .env .env.mgmt; do [ -f "$NEW/$f" ] || continue; { grep -oE "$NEW/[^ ]*\.(pem|crt|key)" "$NEW/$f" || true; } | while read -r p; do [ -e "$p" ] || echo "   ⚠ $f references $p which does not exist yet — copy it from $OLD before starting"; done; done
 
 say "4. Stop old units, move data + backups"
 systemctl --user stop agentclaw-mgmt-bot.service agentclaw.service agentclaw-backup.timer 2>/dev/null || true
@@ -90,7 +94,7 @@ mkdir -p "$HOME/.local/bin"
 printf '#!/usr/bin/env bash\ncd "%s" && exec node_modules/.bin/tsx src/cli.ts "$@"\n' "$NEW" > "$HOME/.local/bin/hatchabot"; chmod +x "$HOME/.local/bin/hatchabot"
 ln -sf "$HOME/.local/bin/hatchabot" "$HOME/.local/bin/agentclaw"
 if [ -f "$HOME/.config/agentclaw/env" ] && [ ! -f "$HOME/.config/hatchabot/env" ]; then
-  mkdir -p "$HOME/.config/hatchabot"; sed 's/^AGENTCLAW_/HATCHABOT_/' "$HOME/.config/agentclaw/env" > "$HOME/.config/hatchabot/env"; chmod 600 "$HOME/.config/hatchabot/env"; echo "   ~/.config/hatchabot/env"
+  mkdir -p "$HOME/.config/hatchabot"; ( umask 077; sed 's/^AGENTCLAW_/HATCHABOT_/' "$HOME/.config/agentclaw/env" > "$HOME/.config/hatchabot/env" ); chmod 600 "$HOME/.config/hatchabot/env"; echo "   ~/.config/hatchabot/env"
 fi
 
 say "7. Health"

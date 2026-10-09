@@ -34,7 +34,10 @@ New installs take **`stable`**, which names a release in `channels.json` on
 ./scripts/channels.sh                  # where every channel points, and the releases
 ```
 
-Promoting forward asks GitHub first: it refuses a release whose CI run failed
+Promote from a `main` that matches `origin/main` exactly (it refuses
+otherwise, so nothing unpushed rides along) and a tag on `main`. Promoting
+forward asks GitHub first: it refuses a release whose CI run for the push to
+`main` failed
 (naming the run), waits for one still running, and stops when there is no run
 or no `gh` — `HATCHABOT_PROMOTE_IGNORE_CI=1` goes on without the check. Moving
 a channel back (a rollback) is not held to it.
@@ -85,7 +88,10 @@ Any other install can follow a channel on its own — a hosted tenant on
 
 It upgrades through `upgrade.sh` (forward only; the previous release restored if
 the new one does not start). A release that failed is not retried until the
-channel names a newer one. So promoting is the rollout: every follower of that
+channel names a newer one. One whose install keeps failing (no network, a
+lockfile npm refuses) is retried less and less often — 10 minutes, 20, 40 … —
+and set aside after eight failures in a row; the service is never restarted
+for an install that failed. So promoting is the rollout: every follower of that
 channel moves within about ten minutes.
 
 So the rhythm is: tag and deploy to your own machines as often as you like;

@@ -52,8 +52,8 @@ the doctor command prints what is wrong with an install.
 - `scripts/install-service.sh` — `sed_escape`, `systemctl`: installs the systemd user service on Linux.
 - `scripts/ensure-deps.sh` — `npm ci`: installs dependencies only when the lockfile moved.
 - `scripts/upgrade.sh` — `rollback`, `restore_deps`, `vernewer`: the upgrade command (a channel or a tag), with rollback on failure.
-- `scripts/follow-channel.sh` — `--install`, `--uninstall`: optional timer that keeps an install on its channel.
-- `scripts/uninstall.sh` — `--purge`, `volumes`: removes an install, keeping data unless asked.
+- `scripts/follow-channel.sh` — `--install`, `--uninstall`, `MAX_TRIES`: optional timer that keeps an install on its channel (retries a failing install less often, then sets it aside).
+- `scripts/uninstall.sh` — `--purge`, `--installed`, `volumes`, `other_installs`: removes the install it lives in (or, with `--installed`, the one the service runs), keeping data unless asked.
 - `scripts/upgrade-check.sh` — `CREATE TABLE IF NOT EXISTS`: checks that databases from older releases still open.
 - `bin/hatchabot.mjs` — `tsx`, `process.argv`: the hatchabot command; runs the CLI under tsx.
 - `src/cli.ts` — `parseArgs`, `matchAgent`, `'upgrade'`, `'doctor'`, `'reach'`: every CLI command, dispatched by name.

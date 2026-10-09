@@ -81,18 +81,42 @@ else CUR="$(git describe --tags --exact-match 2>/dev/null || true)"; fi
 mkdir -p "$STATE"
 FAILED="$STATE/follow-channel-failed"
 if [ "$(cat "$FAILED" 2>/dev/null)" = "$TARGET" ]; then exit 0; fi
+# A release whose install keeps failing (exit 3: npm ci against a lockfile
+# that does not match, a driver that will not compile) is not tried every ten
+# minutes for ever: after each failure in a row the wait doubles (10 min,
+# 20, 40 … a day at most), and after MAX_TRIES it is set aside like a
+# release that did not start (review, 2026-10-09). "<release> <failures> <epoch>".
+TRIES="$STATE/follow-channel-tries"; MAX_TRIES=8
+T_TARGET=""; T_COUNT=0; T_LAST=0
+{ read -r T_TARGET T_COUNT T_LAST < "$TRIES"; } 2>/dev/null || true
+case "${T_COUNT:-}${T_LAST:-}" in ''|*[!0-9]*) T_COUNT=0; T_LAST=0 ;; esac
+if [ "$T_TARGET" = "$TARGET" ] && [ "$T_COUNT" -gt 0 ]; then
+  WAIT=$(( 10 * (1 << (T_COUNT - 1)) - 5 ))   # minutes, less 5 for the timer's own jitter: 5, 15, 35 …
+  [ "$WAIT" -le 1440 ] || WAIT=1440
+  [ $(( $(date +%s) - T_LAST )) -ge $(( WAIT * 60 )) ] || exit 0
+else
+  T_COUNT=0
+fi
 
 # upgrade.sh runs from its own copy (it checks out a different release of
-# itself), so calling it from here is safe.
-if bash "$DIR/scripts/upgrade.sh" "$CHANNEL"; then
-  rm -f "$FAILED"
+# itself), so calling it from here is safe. HATCHABOT_UPGRADE_BY_TIMER: it
+# leaves the remembered channel alone — someone may have switched it by hand.
+if HATCHABOT_UPGRADE_BY_TIMER=1 bash "$DIR/scripts/upgrade.sh" "$CHANNEL"; then
+  rm -f "$FAILED" "$TRIES"
 else
   rc=$?
-  # Exit 2 = refused (local changes), 3 = the install step failed: transient,
-  # tried again next time. Exit 1 = the release did not start.
+  # Exit 1 = the release did not start and was rolled back: set aside at once.
+  # 3 = it did not complete (the install step, the network): tried again, less
+  # and less often. 2 = refused (local changes), 4 = an upgrade was running.
   if [ "$rc" = 1 ]; then
-    echo "$TARGET" > "$FAILED"
+    echo "$TARGET" > "$FAILED"; rm -f "$TRIES"
     echo "Upgrading to $TARGET failed and was rolled back. It will not be retried; the channel's next release will be."
+  elif [ "$rc" = 3 ] && [ $((T_COUNT + 1)) -ge "$MAX_TRIES" ]; then
+    echo "$TARGET" > "$FAILED"; rm -f "$TRIES"
+    echo "Upgrading to $TARGET did not complete $MAX_TRIES times in a row. It will not be retried; the channel's next release will be (or run: hatchabot upgrade $CHANNEL)."
+  elif [ "$rc" = 3 ]; then
+    echo "$TARGET $((T_COUNT + 1)) $(date +%s)" > "$TRIES"
+    echo "Upgrading to $TARGET did not complete (see above); it will be tried again later ($((T_COUNT + 1)) of $MAX_TRIES)."
   else
     echo "Upgrading to $TARGET did not complete (see above); it will be tried again."
   fi

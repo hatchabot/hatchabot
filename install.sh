@@ -111,13 +111,25 @@ echo "   docker $(dk version --format '{{.Server.Version}}' 2>/dev/null) ($(dk v
 # ---- which release ---------------------------------------------------------------
 # Named releases live in channels.json on main, so promoting one is a one-line
 # commit and never a new tag.
+# A fetch that fails says so: under pipefail it used to end the installer
+# with no word at all. And an answer that is not a channels file (a captive
+# portal's sign-in page) is not "no stable release is named" — that read as
+# one and installed the NEWEST release instead (review, 2026-10-09).
+OFFLINE="Could not reach github.com to find which release to install — check the network, then re-run."
 newest_release() { curl -fsSL "https://api.github.com/repos/$SLUG/releases/latest" 2>/dev/null | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"(v[^"]+)".*/\1/p' | sed -n 1p; }
 case "$CHANNEL" in
   v[0-9]*) TAG="$CHANNEL" ;;
-  latest) TAG="$(newest_release)" ;;
+  latest) TAG="$(newest_release)" || die "$OFFLINE" ;;
   stable|beta)
-    TAG="$(curl -fsSL "$RAW/main/channels.json" 2>/dev/null | sed -nE "s/.*\"$CHANNEL\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | sed -n 1p)"
-    [ -n "$TAG" ] || { echo "   (no $CHANNEL release is named yet — using the newest)"; TAG="$(newest_release)"; } ;;
+    CHANNELS_JSON="$(curl -fsSL "$RAW/main/channels.json" 2>/dev/null)" || die "$OFFLINE"
+    printf '%s' "$CHANNELS_JSON" | tr -d '[:space:]' | grep -E '^\{.*"(stable|beta)":.*\}$' >/dev/null \
+      || die "The answer from github.com was not Hatchabot's channels file (a captive portal or a proxy?) — sign in to the network, then re-run."
+    TAG="$(printf '%s\n' "$CHANNELS_JSON" | sed -nE "s/.*\"$CHANNEL\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | sed -n 1p)"
+    if [ -z "$TAG" ]; then
+      # stable is what strangers install: never the newest by default.
+      [ "$CHANNEL" = beta ] || die "No stable release is named right now — try again later, or name a version: … | bash -s -- v2.30.3"
+      echo "   (no $CHANNEL release is named yet — using the newest)"; TAG="$(newest_release)" || die "$OFFLINE"
+    fi ;;
   *) die "Unknown channel '$CHANNEL' — use stable, beta, latest, or a version like v2.30.3." ;;
 esac
 [ -n "${TAG:-}" ] || die "Could not find which release to install (no network to github.com?)."
@@ -130,8 +142,9 @@ case "$OS-$(uname -m)" in
   Darwin-arm64) PLATFORM=darwin-arm64 ;;
 esac
 if [ "$OS" = Linux ] && [ -n "$PLATFORM" ]; then
-  GLIBC="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"
   # musl (Alpine) has no GNU_LIBC_VERSION; older glibc cannot load the bundle's driver.
+  # `|| true`: getconf fails on musl, and under pipefail that ended the installer silently.
+  GLIBC="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
   if [ -z "$GLIBC" ] || [ "$(printf '%s\n2.35\n' "$GLIBC" | sort -V | sed -n 1p)" != 2.35 ]; then PLATFORM=""; fi
 fi
 MODE=native
@@ -243,7 +256,18 @@ case "$MODE" in
     mkdir -p "$(dirname "$CHANNEL_FILE")"; printf '%s\n' "$CHANNEL" > "$CHANNEL_FILE"
     cd "$DIR"
     exec ./scripts/with-docker.sh ./scripts/upgrade.sh "$CHANNEL" ;;
-  native-existing) install_native ;;
+  native-existing)
+    # A clone that is already set up (it has its .env): an upgrade, with
+    # upgrade.sh's lock and rollback. Checking out the release and installing
+    # in place had neither — a failed npm ci left the install on a release it
+    # could not run (review, 2026-10-09). A clone never set up is a first install.
+    if [ -f "$DIR/.env" ]; then
+      mkdir -p "$(dirname "$CHANNEL_FILE")"; printf '%s\n' "$CHANNEL" > "$CHANNEL_FILE"
+      cd "$DIR"
+      [ -x scripts/with-docker.sh ] && exec ./scripts/with-docker.sh ./scripts/upgrade.sh "$CHANNEL"
+      exec ./scripts/upgrade.sh "$CHANNEL"
+    fi
+    install_native ;;
   bundle)
     if [ -e "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then die "$DIR already exists and is not a Hatchabot install — move it aside (or set HATCHABOT_DIR), then re-run."; fi
     rmdir "$DIR" 2>/dev/null || true
