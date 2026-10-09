@@ -527,6 +527,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.155.0`
 - **Code:** `src/orchestrator/appOperations.ts` — `resumeAppOperation`, `recoverAppOperation`
 
+### Alerts listed general alerts above failed agents, and people knocking near the bottom
+- **Check:** View by → Alerts; the order of its sections.
+- **Cause:** the view sorted its sections by label, so the emoji decided the order.
+- **Fix:** upgrade; the sections sort most urgent first, with "Waiting for your choice" at the top.
+- **Fixed in:** `v2.156.0`
+- **Code:** `web/index.html` — `v2ViewKey`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")
@@ -749,6 +756,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** click **Install image** (or **Update image**) on the runner's row again; copying is repeatable.
 - **Fixed in:** `v2.155.0`
 - **Code:** `src/orchestrator/operationsResume.ts` — `resumeOperations`
+
+### `hatchabot move`/`rehost`/`restore` (or the page) says the move started, then nothing seems to happen
+- **Check:** `hatchabot ops <agent>` (or the agent's tile and Working on line) shows it running with step n of m; `GET /v1/operations/<id>`.
+- **Cause:** since v2.156.0 these run on the server in the background; the request answers as soon as the operation begins.
+- **Fix:** wait and watch it there; one that waits for you needs `hatchabot ops recover <op-id> <action>` or the button under Alerts. Scripts that need the old blocking answer add `?wait=1`.
+- **Fixed in:** `v2.156.0`
+- **Code:** `src/orchestrator/operations.ts` — `runInBackground`
 
 ## Backups and restore
 

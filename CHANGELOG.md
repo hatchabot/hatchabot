@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.156.0] — 2026-10-09
+
+The last step of docs/operations-and-one-interface-design.md, Part A: long changes run in the background, and the page and the command line follow them.
+
+### Changed
+- **Moving an agent (to a runner or to another Hatchabot), importing a full copy, and restoring from a backup or a snapshot run on the server in the background.** You can close the page or the terminal and it carries on; refusals are still said at once. Scripts that need the old answer add `?wait=1`.
+- The agent's tile and its **Working on** line show the operation — "Moving to Laptop runner — step 4 of 10, made on the other machine · 2 min" — and a message says how it ended, even when it was started from the command line.
+- **Activity** shows each move, import or restore as one line ("Moved to Laptop runner · 3 min"; red if it failed, amber while it waits for you) that opens to its steps.
+- **Alerts** puts operations waiting for your choice first, in their own section that can't be cleared, and orders its sections most urgent first (failed agents were listed below general alerts).
+- New commands: `hatchabot ops` (what is under way: kind, status, step n/m, outcome, age), `hatchabot ops recover <op> <action>`, `hatchabot move <agent> <machine>`, `hatchabot backups` and `hatchabot backups restore <agent name> <date> --yes`. `move`, `rehost`, `restore`, `import` and `revert` print a line per step and exit non-zero if it failed, was undone or waits for a choice; `--no-wait` returns at once.
+- An imported file whose Telegram bot token is rejected, or that sets a forbidden variable, is refused before anything is made.
+
 ## [2.155.0] — 2026-10-09
 
 The next steps of docs/operations-and-one-interface-design.md: one interface, and every long change on record.
