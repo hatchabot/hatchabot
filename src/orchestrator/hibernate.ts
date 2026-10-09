@@ -17,7 +17,7 @@ import type { Agent } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
-import { whileBusy } from './busy.js';
+import { AgentBusyError, whileBusy } from './busy.js';
 import { agentMemoryLimits } from './swap.js';
 
 export interface HibernateDeps {
@@ -146,32 +146,47 @@ export async function wakeAgent(deps: HibernateDeps, a: Agent, why: string): Pro
   const inFlight = waking.get(a.id);
   if (inFlight) return inFlight;
   const p = (async () => {
-    const provider = deps.providerFor(a.hostId);
+    // Under the agent's lifecycle lock, judged again once it is held, as a
+    // Start is: an Archive or a move that took the lock during the docker
+    // start used to finish underneath it, and the wake then brought up an
+    // archived runtime whose bot had gone back (#10). Busy now = left alone.
+    let woken: Agent | undefined;
     try {
-      if (a.runtimeRef) {
-        // Its cap and swap allowance as they are now (swap.ts): the host may
-        // have gained or lost compressed swap, or a setting changed, while it slept.
-        const lim = agentMemoryLimits(deps.store, deps.store.getAgent(a.id) ?? a);
-        await provider.updateMemory?.(a.runtimeRef, lim.memory, lim.swap).catch(() => {});
-        await provider.start(a.runtimeRef);
-      }
-    } catch (err) {
-      const n = (wakeFailures.get(a.id) ?? 0) + 1;
-      wakeFailures.set(a.id, n);
-      if (n >= WAKE_GIVE_UP) {
-        // Not every twenty seconds for ever (the image pruned, its port taken):
-        // it is a stopped agent now, the reason on its trail, Start to retry.
+      woken = await whileBusy(a.id, async () => {
+        const now = deps.store.getAgent(a.id);
+        if (!now?.hibernatedAt || now.state !== 'STOPPED' || now.migratedTo) return undefined;
+        const provider = deps.providerFor(now.hostId);
+        try {
+          if (now.runtimeRef) {
+            // Its cap and swap allowance as they are now (swap.ts): the host may
+            // have gained or lost compressed swap, or a setting changed, while it slept.
+            const lim = agentMemoryLimits(deps.store, now);
+            await provider.updateMemory?.(now.runtimeRef, lim.memory, lim.swap).catch(() => {});
+            await provider.start(now.runtimeRef);
+          }
+        } catch (err) {
+          const n = (wakeFailures.get(a.id) ?? 0) + 1;
+          wakeFailures.set(a.id, n);
+          if (n >= WAKE_GIVE_UP) {
+            // Not every twenty seconds for ever (the image pruned, its port taken):
+            // it is a stopped agent now, the reason on its trail, Start to retry.
+            wakeFailures.delete(a.id);
+            deps.store.setHibernated(a.id, null);
+            deps.log(a.id)('hibernate.wake_abandoned', { error: err instanceof Error ? err.message : String(err), attempts: n });
+          }
+          throw err;
+        }
         wakeFailures.delete(a.id);
+        deps.store.setAgentState(a.id, 'RUNNING');
         deps.store.setHibernated(a.id, null);
-        deps.log(a.id)('hibernate.wake_abandoned', { error: err instanceof Error ? err.message : String(err), attempts: n });
-      }
+        deps.log(a.id)('agent.woken', { why });
+        return deps.store.getAgent(a.id)!;
+      });
+    } catch (err) {
+      if (err instanceof AgentBusyError) return deps.store.getAgent(a.id) ?? a;
       throw err;
     }
-    wakeFailures.delete(a.id);
-    deps.store.setAgentState(a.id, 'RUNNING');
-    deps.store.setHibernated(a.id, null);
-    deps.log(a.id)('agent.woken', { why });
-    const woken = deps.store.getAgent(a.id)!;
+    if (!woken) return deps.store.getAgent(a.id) ?? a;
     deps.afterWake?.(woken);
     return woken;
   })();

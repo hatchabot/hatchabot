@@ -93,12 +93,18 @@ export async function reconcileAgents(
       // The docker call above is its own staleness window — a Start, Rebuild or
       // Delete can begin and finish inside it. Anything that moved underneath
       // us is judged on the NEXT sweep, with a status that matches the row.
+      // The host and the row's last write count too: a move to another
+      // machine keeps the same runtimeRef and ends RUNNING again, so only
+      // those show that this status came from the host it LEFT — where the
+      // runtime is now rightly absent (#13).
       const now = store.getAgent(agent.id);
       if (
         !now ||
         isBusy(agent.id) ||
         now.state !== agent.state ||
+        now.hostId !== agent.hostId ||
         now.runtimeRef !== agent.runtimeRef ||
+        now.updatedAt !== agent.updatedAt ||
         !!now.pendingAction !== !!agent.pendingAction
       ) {
         continue;

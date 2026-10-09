@@ -2159,10 +2159,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           if (!now?.runtimeRef || isBusy(a.id)) return false;
           if (now.state === 'STOPPED' && now.hibernatedAt) { store.setHibernated(a.id, null); return true; }
           if (now.state !== 'RUNNING') return false;
-          await whileBusy(a.id, async () => { await providerFor(now.hostId).stop(now.runtimeRef!); });
-          store.setHibernated(a.id, null);
-          store.setAgentState(a.id, 'STOPPED');
-          return true;
+          // The record changes under the lock too, judged again once it is
+          // held: a Start or an Archive must not land between the two (#10).
+          return whileBusy(a.id, async () => {
+            const held = store.getAgent(a.id);
+            if (!held?.runtimeRef || held.state !== 'RUNNING') return false;
+            await providerFor(held.hostId).stop(held.runtimeRef);
+            store.setHibernated(a.id, null);
+            store.setAgentState(a.id, 'STOPPED');
+            return true;
+          }).catch((err) => { if (err instanceof AgentBusyError) return false; throw err; });
         },
         resume: async (a) => (await startStopped(a)).ok,
         // "Switch to a cheaper model" at the limit: the cheapest model its source
@@ -8752,26 +8758,43 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!agent.runtimeRef || (agent.state !== 'RUNNING' && agent.state !== 'STOPPED')) {
       return reply.code(409).send({ error: `Wait until it is running (it is ${agent.state.toLowerCase()}).` });
     }
-    if (isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy with another change — try again in a moment.' });
+    const BUSY = 'It is busy with another change — try again in a moment.';
+    if (isBusy(agent.id) || archiving.has(agent.id)) return reply.code(409).send({ error: BUSY });
     // Same order as archive: stop polling BEFORE the token goes back to the
     // pool, or the next agent to lease it would fight this one for messages.
+    // Under the lifecycle lock: a Start arriving between the stop and the
+    // release brought the container back up on a token going back to the
+    // pool (#10).
     const provider = providerFor(agent.hostId);
-    if (agent.state === 'RUNNING') {
-      await provider.stop(agent.runtimeRef);
-      store.setAgentState(agent.id, 'STOPPED');
+    let refused: string | undefined;
+    try {
+      refused = await whileBusy(agent.id, async () => {
+        const now = store.getAgent(agent.id);
+        if (!now?.runtimeRef || (now.state !== 'RUNNING' && now.state !== 'STOPPED') || now.hostId !== agent.hostId) return BUSY;
+        if (store.getChannelForAgent(agent.id)?.accountId !== row.accountId) return BUSY;
+        if (now.state === 'RUNNING') {
+          await provider.stop(now.runtimeRef);
+          store.setAgentState(agent.id, 'STOPPED');
+        }
+        const pool = (deps.channel as { pool?: { owns(u: string): boolean; addToPool(u: string, t: string, o?: string | null): Promise<void> } }).pool;
+        if (pool && !pool.owns(row.accountId)) {
+          try { await pool.addToPool(row.accountId, await secrets.get(row.secretRef), agent.ownerId); }
+          catch (err) { trace(agent.id)('channel.recycle_failed', { error: String(err).slice(0, 200) }); }
+        }
+        await deps.channel.release(row.accountId, { reason: 'detached', agentId: agent.id });
+        if (row.secretRef.startsWith('channel/')) await secrets.delete(row.secretRef).catch(() => {});
+        store.deleteChannelForAgent(agent.id);
+        store.expireInvitesFor(agent.id, 'agent-detached');
+        store.setAgentPendingAction(agent.id, null);
+        store.setAgentWebOnly(agent.id, true);
+        trace(agent.id)('channel.detached', { accountId: row.accountId });
+        return undefined;
+      });
+    } catch (err) {
+      if (err instanceof AgentBusyError) return reply.code(409).send({ error: BUSY });
+      throw err;
     }
-    const pool = (deps.channel as { pool?: { owns(u: string): boolean; addToPool(u: string, t: string, o?: string | null): Promise<void> } }).pool;
-    if (pool && !pool.owns(row.accountId)) {
-      try { await pool.addToPool(row.accountId, await secrets.get(row.secretRef), agent.ownerId); }
-      catch (err) { trace(agent.id)('channel.recycle_failed', { error: String(err).slice(0, 200) }); }
-    }
-    await deps.channel.release(row.accountId, { reason: 'detached', agentId: agent.id });
-    if (row.secretRef.startsWith('channel/')) await secrets.delete(row.secretRef).catch(() => {});
-    store.deleteChannelForAgent(agent.id);
-    store.expireInvitesFor(agent.id, 'agent-detached');
-    store.setAgentPendingAction(agent.id, null);
-    store.setAgentWebOnly(agent.id, true);
-    trace(agent.id)('channel.detached', { accountId: row.accountId });
+    if (refused) return reply.code(409).send({ error: refused });
     await scrubChannelAllowlist(
       { store, provider, log: trace(agent.id) },
       { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: 'telegram', accountId: row.accountId },
@@ -12150,35 +12173,81 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (agent.state !== 'RUNNING') {
       return reply.code(409).send({ error: `Cannot stop while ${agent.state}` });
     }
-    await providerFor(agent.hostId).stop(agent.runtimeRef);
-    return publicAgent(store.setAgentState(agent.id, 'STOPPED'));
+    // Under the agent's lifecycle lock, as Archive, Rebuild and Move are: an
+    // Archive or a Start arriving during the docker stop is refused as busy,
+    // instead of finishing underneath it (#10).
+    try {
+      return await whileBusy(agent.id, async () => {
+        const now = store.getAgent(agent.id);
+        if (!now?.runtimeRef || now.state !== 'RUNNING') {
+          return reply.code(409).send({ error: `Cannot stop while ${now?.state ?? 'DELETED'}` });
+        }
+        await providerFor(now.hostId).stop(now.runtimeRef);
+        return publicAgent(store.setAgentState(now.id, 'STOPPED'));
+      });
+    } catch (err) {
+      if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+      throw err;
+    }
   });
 
   /**
    * Start a STOPPED agent: the Start button, and a budget pause ending
    * (budgets.ts). One that needs a REQUIRED rebuild comes up rebuilt.
    */
-  const startStopped = async (agent: Agent): Promise<{ ok: boolean; rebuilding?: boolean; agent?: Agent }> => {
-    if (!agent.runtimeRef || agent.state !== 'STOPPED' || isBusy(agent.id) || agent.migratedTo) return { ok: false };
+  const BUSY_MSG = 'Another operation is already running on this agent.';
+  /** Why this agent may not be started now, or undefined when it may. */
+  const startRefusal = (a: Agent | undefined, holdingLock = false): string | undefined => {
+    if (!a || !a.runtimeRef) return 'Not found';
+    if (a.migratedTo) return `It moved to ${a.migratedTo}.`;
+    if ((!holdingLock && isBusy(a.id)) || archiving.has(a.id)) return BUSY_MSG;
+    if (a.state !== 'STOPPED') return `Cannot start while ${a.state}`;
+    return undefined;
+  };
+  const startStopped = async (agent: Agent): Promise<{ ok: boolean; rebuilding?: boolean; agent?: Agent; error?: string }> => {
+    { const why = startRefusal(agent); if (why) return { ok: false, error: why }; }
     // A stopped agent is never rebuilt on the machine's own initiative (a
     // rebuild starts it). Starting it is the moment: one that needs a
     // REQUIRED rebuild comes up rebuilt instead of as it was.
     if (rebuildPolicy() !== 'manual') {
       const need = await rebuildNeedOf(agent).then((r) => r?.need, () => undefined);
-      if (need?.level === 'required' && kickRebuild(agent.id)) {
-        trace(agent.id)('rebuild.on_start', { reasons: need.reasons });
-        return { ok: true, rebuilding: true, agent: store.getAgent(agent.id)! };
+      if (need?.level === 'required') {
+        // Judged again after that wait: an Archive or a Delete may have begun.
+        const why = startRefusal(store.getAgent(agent.id));
+        if (why) return { ok: false, error: why };
+        if (kickRebuild(agent.id)) {
+          trace(agent.id)('rebuild.on_start', { reasons: need.reasons });
+          return { ok: true, rebuilding: true, agent: store.getAgent(agent.id)! };
+        }
       }
     }
-    // Its cap and swap allowance as they are now, as a wake does (swap.ts).
-    const lim = agentMemoryLimits(store, agent);
-    await providerFor(agent.hostId).updateMemory?.(agent.runtimeRef, lim.memory, lim.swap).catch(() => {});
-    await providerFor(agent.hostId).start(agent.runtimeRef);
-    store.setHibernated(agent.id, null);
-    // After the store says RUNNING, as a wake does: what runs once it is up reads that.
-    const started = store.setAgentState(agent.id, 'RUNNING');
-    clearPinsWhenUp(started);
-    return { ok: true, agent: started };
+    // Under the agent's lifecycle lock, as Archive, Rebuild and Move are, and
+    // judged again once it is held. Without it an Archive could take the lock
+    // during the docker start, stop the container, give the bot back and mark
+    // it ARCHIVED — and then this start brought the runtime up, still holding
+    // the token of a bot another agent might lease next (#10).
+    let r: { ok: boolean; agent?: Agent; error?: string };
+    try {
+      r = await whileBusy(agent.id, async () => {
+        const now = store.getAgent(agent.id);
+        const why = startRefusal(now, true);
+        if (why) return { ok: false, error: why };
+        // Its cap and swap allowance as they are now, as a wake does (swap.ts).
+        const lim = agentMemoryLimits(store, now!);
+        const provider = providerFor(now!.hostId);
+        await provider.updateMemory?.(now!.runtimeRef!, lim.memory, lim.swap).catch(() => {});
+        await provider.start(now!.runtimeRef!);
+        store.setHibernated(agent.id, null);
+        return { ok: true, agent: store.setAgentState(agent.id, 'RUNNING') };
+      });
+    } catch (err) {
+      if (err instanceof AgentBusyError) return { ok: false, error: err.userMessage };
+      throw err;
+    }
+    // After the store says RUNNING and the lock is let go, as a wake does:
+    // what runs once it is up (the limits check among it) skips busy agents.
+    if (r.ok && r.agent) clearPinsWhenUp(r.agent);
+    return r;
   };
   app.post<{ Params: { id: string } }>('/v1/agents/:id/start', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
@@ -12189,7 +12258,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(409).send({ error: `Cannot start while ${agent.state}` });
     }
     const r = await startStopped(agent);
-    if (!r.ok || !r.agent) return reply.code(409).send({ error: 'It could not be started just now — try again shortly.' });
+    if (!r.ok || !r.agent) return reply.code(409).send({ error: r.error ?? 'It could not be started just now — try again shortly.' });
     // Started by hand while a budget has it paused: it runs on until the 1st (budgets.ts).
     const month = monthKey(Date.now(), machineTz());
     const pause = store.getBudgetPause(agent.id, month);
