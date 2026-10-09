@@ -1236,7 +1236,9 @@ const SCENARIOS = String.raw`(() => {
       window.open = (u) => { opened.push(u); return null; };
       try {
         location.hash = '#console=' + key;
-        await until(() => consoleDlg.open && consoleAgentId === A.id);
+        // Opening chains several awaited steps (wake, health, access): slower
+        // machines (GitHub's runners) need more than the usual 8 s (2026-10-09).
+        await until(() => consoleDlg.open && consoleAgentId === A.id, 20000);
         ok('the address opened its console', true);
         ok('the browser tab is named after it: ' + document.title, document.title.startsWith(A.name));
         document.getElementById('consoleNewTab').click();

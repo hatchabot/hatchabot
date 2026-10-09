@@ -12,11 +12,16 @@ import { publicConfig } from './safeguards.js';
 import { registerSecondFactorRoutes } from './secondFactor.js';
 import type { Store } from '../store/store.js';
 import {
+
   identityConfigFromEnv,
   IdentityError,
   IdentityVerifier,
   principalFor,
 } from './identity.js';
+import { routedPath } from './routedPath.js';
+
+/** The agent-to-agent consult (its caller's token is checked in the handler): only when the router matched that very route. */
+const isAgentMessageRoute = (req: FastifyRequest): boolean => req.method === 'POST' && req.routeOptions?.url === '/v1/agents/:id/message';
 
 /**
  * Optional allowlist for identity mode: HATCHABOT_ALLOWED_EMAILS="a@example.com, b@example.org".
@@ -478,7 +483,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
       req.principal = { ownerId: LOCAL_OWNER, via: 'password' };
       return;
     }
-    const path = req.url.split('?')[0] ?? '';
+    const path = routedPath(req.url);
     // /v1/config tells the login screen which mode to render — it must be
     // readable before anyone is authenticated.
     if (path === '/' || path === '/healthz' || path === '/v1/login' || path === '/v1/config') return;
@@ -499,7 +504,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     if (path === '/v1/connections/google/callback') return;
     // Agent-to-agent consult: authenticated by the CALLER AGENT's own call
     // token inside the handler (not a user session), so it's exempt here.
-    if (/^\/v1\/agents\/[^/]+\/message$/.test(path)) return;
+    if (isAgentMessageRoute(req)) return;
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {
       req.principal = { ownerId: cliOwner, via: 'identity', subject: cliOwner };
@@ -548,7 +553,7 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
 
   app.addHook('onRequest', async (req, reply) => {
     { const internal = internalPrincipal(req); if (internal) { req.principal = internal; return; } }
-    const path = req.url.split('?')[0] ?? '';
+    const path = routedPath(req.url);
     if (path === '/' || path === '/healthz' || path === '/v1/config') return;
     if (path === '/v1/login' || path === '/v1/logout') return;
     if (path === SIGNIN_LINK_PATH) return; // the link is the credential; the route checks it
@@ -568,7 +573,7 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
     if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
     if (path === '/privacy' || path === '/terms') return;
     if (path === '/v1/connections/google/callback') return;
-    if (/^\/v1\/agents\/[^/]+\/message$/.test(path)) return;
+    if (isAgentMessageRoute(req)) return;
 
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {
@@ -742,7 +747,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
 
   app.addHook('onRequest', async (req, reply) => {
     { const internal = internalPrincipal(req); if (internal) { req.principal = internal; return; } }
-    const path = req.url.split('?')[0] ?? '';
+    const path = routedPath(req.url);
     if (path === '/' || path === '/healthz' || path === '/v1/config') return;
     if (path === '/v1/session' || path === '/v1/logout') return;
     if (path === SIGNIN_LINK_PATH) return; // the link is the credential; the route checks it
@@ -761,7 +766,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (path === '/v1/connections/google/callback') return;
     // Agent-to-agent consult: authenticated by the CALLER AGENT's own call
     // token inside the handler (not a user session), so it's exempt here.
-    if (/^\/v1\/agents\/[^/]+\/message$/.test(path)) return;
+    if (isAgentMessageRoute(req)) return;
 
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {
@@ -851,7 +856,7 @@ function cliBearer(req: FastifyRequest, opts: AuthOptions): string | undefined {
   // agents, mint more tokens (26th audit). A scoped one opens three routes.
   const scope = opts.cliTokenScope?.(token);
   if (scope === 'rehost') {
-    const path = req.url.split('?')[0] ?? '';
+    const path = routedPath(req.url);
     const ok = REHOST_PATHS.has(path) && (path === '/v1/agents' ? req.method === 'GET' : req.method === 'POST');
     if (!ok) return undefined;
   }

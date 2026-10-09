@@ -70,6 +70,7 @@ recovery code, and an owner can send a reset link. A second factor (code app,
 passkey, backup codes) is required of owners before public access can be on.
 
 - `src/api/auth.ts` — `registerAuth`, `authModeFromEnv`, `bindHostFor`, `throttled`, `sessionTtlMs`: the auth hook on every request, login throttling, `'/v1/login'`, `'/v1/logout'`.
+- `src/api/routedPath.ts` — `routedPath`: the path as the router sees it (cut at `?` and `#`), for every check that decides on a path; exemptions use the matched route (`req.routeOptions.url`).
 - `src/api/accountsAuth.ts` — `registerAccountRoutes`, `hashPassword`, `newRecoveryCode`, `setupCode`, `'/v1/local-accounts/claim'`, `'/v1/local-accounts/recover-with-code'`: local accounts, first-account claim and recovery.
 - `src/api/identity.ts` — `IdentityVerifier`, `identityConfigFromEnv`: Google ID-token checks for identity mode.
 - `src/api/sessionCookie.ts` — `setSessionCookie`, `readSessionCookie`, `SESSION_COOKIE`: the session cookie.

@@ -1,3 +1,4 @@
+import { routedPath } from './routedPath.js';
 import type { FastifyInstance } from 'fastify';
 import type { RequestLike } from './sessionCookie.js';
 
@@ -116,7 +117,7 @@ export function foreignRead(method: string, path: string, headers: RequestLike['
 /** Every request through Fastify. (WebSocket upgrades never reach Fastify: the console proxy calls foreignRequest itself.) */
 export function registerOriginCheck(app: FastifyInstance): void {
   app.addHook('onRequest', async (req, reply) => {
-    const path = req.url.split('?')[0] ?? '';
+    const path = routedPath(req.url) ?? '';
     const why = READS.has(req.method) ? foreignRead(req.method, path, req.headers) : foreignRequest(req);
     if (!why) return;
     app.log.warn({ method: req.method, path, why }, 'request.foreign_refused');

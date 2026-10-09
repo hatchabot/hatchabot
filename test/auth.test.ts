@@ -189,13 +189,15 @@ describe('owner scoping on by-id routes', () => {
 });
 
 describe('agent-to-agent /message auth exemption (audit 2026-09-11)', () => {
-  // Exempt paths fall through to the router (404: appWith registers no agent
-  // routes); everything else is stopped by the password gate (401).
-  it('exempts exactly /v1/agents/<id>/message and nothing adjacent', async () => {
+  // Since 2.152.1 the exemption needs the router's own match of the real
+  // route (POST /v1/agents/:id/message): appWith registers no agent routes, so
+  // nothing here is exempt any more, a look-alike path included — the
+  // exempt case, with the route registered, is in authRoutedPath.test.ts.
+  it('exempts nothing that is not the registered route', async () => {
     const app = await appWith('pw');
     const status = async (url: string) => (await app.inject({ method: 'POST', url, payload: {} })).statusCode;
-    expect(await status('/v1/agents/abc/message')).toBe(404);          // exempt → router
-    expect(await status('/v1/agents/abc/message?x=1')).toBe(404);      // query ignored
+    expect(await status('/v1/agents/abc/message')).toBe(401);          // no such route here: not exempt
+    expect(await status('/v1/agents/abc/message?x=1')).toBe(401);
     expect(await status('/v1/agents/abc/messages')).toBe(401);
     expect(await status('/v1/agents/abc/message/extra')).toBe(401);
     expect(await status('/v1/agents/abc/model')).toBe(401);

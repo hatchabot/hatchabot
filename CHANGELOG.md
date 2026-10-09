@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.152.1] — 2026-10-09
+
+### Security
+- **A crafted address could skip the sign-in check.** The sign-in hooks exempt the agent-to-agent call (`POST /v1/agents/:id/message`, which checks its caller's own token) by testing the raw URL. The router stops at `#`, so a request such as `GET /v1/agents/<id>#/message` passed that test, skipped the sign-in check, and was served as `GET /v1/agents/<id>`. With no signed-in person the request counts as the built-in local owner: that owner owns nothing with accounts or Google sign-in, but **with the single shared password (password mode) it is the owner**, so any route could be reached without the password. Browsers never send `#`, so it took a hand-made request to the app's address.
+  - The exemption now requires the router's own match of that one route and method.
+  - Every path the hooks decide on is cut as the router cuts it.
+  - A test sends the raw requests to a real socket.
+  - Upgrade promptly, above all on password mode.
+
+### Fixed
+- **CI runs the real-browser click-through** (#14). Chrome's container can now read the test page on any machine, and the console scenario allows a slower machine more time.
+
 ## [2.152.0] — 2026-10-08
 
 ### Fixed

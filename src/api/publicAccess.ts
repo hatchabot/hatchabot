@@ -1,3 +1,4 @@
+import { routedPath } from './routedPath.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -446,7 +447,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     record('public.failure_burst', undefined, {
       bucket: key.endsWith('pub:all') ? 'all public sign-ins' : account ? `account ${account}` : `address ${approximateSource(publicClientAddress(req))}`,
       lockedUntil: new Date(until).toISOString(),
-      path: req.url.split('?')[0],
+      path: routedPath(req.url),
     });
   };
 
@@ -683,7 +684,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     reply.header('referrer-policy', 'no-referrer');
     reply.header('cross-origin-opener-policy', 'same-origin');
     reply.header('x-robots-tag', 'noindex, nofollow');
-    const path = req.url.split('?')[0] ?? '';
+    const path = routedPath(req.url) ?? '';
     // The OpenClaw console is another program's page with its own needs and its own framing rule.
     if (!CONSOLE_PATH.test(path)) {
       if (!reply.hasHeader('content-security-policy')) reply.header('content-security-policy', publicCsp(opts.mode));
