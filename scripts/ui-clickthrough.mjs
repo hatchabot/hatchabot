@@ -624,6 +624,142 @@ const SCENARIOS = String.raw`(() => {
       ok('it says where it went', document.getElementById('toast').textContent.includes('Moved to Laptop Hatchabot'));
       window.__promptAnswer = null; window.__answer = {}; delete window.__override['/v1/peers'];
     },
+    // v2.157.0: other servers and image building sit in Settings → Advanced, folded; runners stay on Hosts.
+    settingsAdvanced: async () => {
+      const el = (id) => document.getElementById(id);
+      // A closed <details> hides its content with content-visibility, which offsetParent does not see.
+      const seen = (e) => (e.checkVisibility ? e.checkVisibility() : e.offsetParent !== null);
+      const foldAll = async () => { for (const d of document.querySelectorAll('#paneAdvanced > details')) d.open = false; await sleep(60); try { localStorage.removeItem('hb-settings-adv'); } catch {} };
+      await foldAll();
+      await openAiDlg();
+      const tabs = [...document.querySelectorAll('#v2SettingsTabs .tab')].map((b) => b.textContent);
+      ok('Advanced is the last tab: ' + tabs.join(' | '), tabs.at(-1) === 'Advanced');
+      ok('no Images tab any more', !tabs.includes('Images') && tabs.includes('Hosts'));
+      const n0 = calls('GET', /\/v1\/runtime\/images$/).length;
+      byText('#v2SettingsTabs .tab', 'Advanced').click();
+      ok('the Advanced tab shows', !el('paneAdvanced').hidden);
+      ok('its one line says who it is for', el('paneAdvanced').textContent.includes('For running several Hatchabot servers, and building your own runtime images. A household needs none of this.'));
+      const parts = [...document.querySelectorAll('#paneAdvanced > details')];
+      eq('its parts', parts.map((d) => d.querySelector('summary b').textContent), ['Other Hatchabot servers', 'Runtime images', 'Derived images']);
+      ok('all folded by default', parts.every((d) => !d.open));
+      ok('a folded part shows nothing', !seen(el('peerAddBtn')) && !seen(el('rtList')));
+      await sleep(150);
+      eq('a folded part loads nothing', calls('GET', /\/v1\/runtime\/images$/).length, n0);
+      parts[1].querySelector('summary').click();
+      await until(() => calls('GET', /\/v1\/runtime\/images$/).length > n0);
+      ok('it opens', parts[1].open && seen(el('rtList')));
+      ok('remembered in this browser', JSON.parse(localStorage.getItem('hb-settings-adv') || '[]').includes('runtime'));
+      aiDlg.close();
+      await openAiDlg('advanced');
+      ok('still open next time, the others still shut', el('advPart-runtime').open && !el('advPart-servers').open && !el('advPart-derived').open);
+      // Runners: where they were, outside Advanced, and the way to add a machine.
+      byText('#v2SettingsTabs .tab', 'Hosts').click();
+      ok('runners are on Hosts, outside Advanced', !el('paneHosts').hidden && !el('paneAdvanced').contains(el('paneHosts')) && seen(el('hostAddBtn')));
+      ok('Hosts says a runner is the way to add a machine', el('paneHosts').textContent.includes('that is the way to add a machine'));
+      ok('other servers are not on Hosts', !seen(el('peerAddBtn')));
+      await until(() => !el('rbSection').hidden);
+      ok('automatic rebuilds sit on Hosts', el('paneHosts').contains(el('rbSection')) && seen(el('rbPolicy')));
+      aiDlg.close();
+      await foldAll();
+    },
+    advancedOldLinks: async () => {
+      const el = (id) => document.getElementById(id);
+      const foldAll = async () => { for (const d of document.querySelectorAll('#paneAdvanced > details')) d.open = false; await sleep(60); try { localStorage.removeItem('hb-settings-adv'); } catch {} };
+      for (const [link, part] of [['servers', 'servers'], ['images', 'runtime'], ['runtime', 'runtime'], ['derived', 'derived']]) {
+        await foldAll();
+        await openAiDlg(link);
+        ok(link + ' lands on Advanced', document.querySelector('#v2SettingsTabs .tab[aria-selected="true"]')?.textContent === 'Advanced');
+        await until(() => el('advPart-' + part).open);
+        ok(link + ' unfolds only ' + part, [...document.querySelectorAll('#paneAdvanced > details')].filter((d) => d.open).length === 1);
+        aiDlg.close();
+      }
+      for (const link of ['hosts', 'machines']) {
+        await openAiDlg(link);
+        ok(link + ' lands on Hosts', document.querySelector('#v2SettingsTabs .tab[aria-selected="true"]')?.textContent === 'Hosts');
+        aiDlg.close();
+      }
+      // The Hatchabot agent's image cards link to the old Images tab.
+      await foldAll();
+      mgmtCardPlace({ tool: 'build_image' }).go();
+      await until(() => aiDlg.open && el('advPart-runtime').open);
+      aiDlg.close();
+      // Move to another Hatchabot with no server yet sends you to register one.
+      await foldAll();
+      window.__override['/v1/peers'] = [];
+      await rehostAgent('a1', 'Homework Helper');
+      await until(() => aiDlg.open && el('advPart-servers').open);
+      ok('it says why', document.getElementById('toast').textContent.includes('Register the destination'));
+      aiDlg.close(); delete window.__override['/v1/peers'];
+      await foldAll();
+    },
+    advancedActions: async () => {
+      const el = (id) => document.getElementById(id);
+      // Other servers: an empty field is said under the form (it went to the AI tab's hidden line), then the add.
+      await openAiDlg('servers');
+      await until(() => el('advPart-servers').open);
+      el('peerName').value = 'Test Server'; el('peerUrl').value = ''; el('peerToken').value = '';
+      el('peerAddBtn').click();
+      ok('the missing field is said where you look', el('peerErr').textContent.includes('all needed') && el('peerErr').offsetParent !== null);
+      el('peerUrl').value = 'https://server.example.org'; el('peerToken').value = 'made-up-pairing-code';
+      el('peerAddBtn').click();
+      const post = await until(() => calls('POST', /\/v1\/peers$/)[0]);
+      eq('the add', post.body, { name: 'Test Server', url: 'https://server.example.org', token: 'made-up-pairing-code' });
+      aiDlg.close();
+      // Runtime images: Promote, from its new place.
+      window.__override['/v1/runtime/images'] = { unpinned: [], defaultInfo: { openclawVersion: '2026.9.8' }, tags: [
+        { tag: 'hatchabot-runtime:latest', exists: true, isDefault: true, openclawVersion: '2026.9.8', pinned: [], classes: [] },
+        { tag: 'hatchabot-runtime:2026.9.9', exists: true, relation: 'newer', openclawVersion: '2026.9.9', pinned: [], classes: [] } ] };
+      window.__answer = { 'POST /v1/runtime/images/promote': [{ status: 200, body: { promoted: 'hatchabot-runtime:2026.9.9', followers: [] } }] };
+      await openAiDlg('images');
+      const promote = await until(() => [...document.querySelectorAll('#rtList button')].find((b) => b.textContent.includes('Promote')));
+      promote.click();
+      const pr = await until(() => calls('POST', /\/v1\/runtime\/images\/promote$/)[0]);
+      eq('the promote', pr.body, { tag: 'hatchabot-runtime:2026.9.9' });
+      aiDlg.close();
+      // Derived images: delete one, from its new place.
+      window.__override['/v1/images'] = { images: [{ name: 'media-tools', tag: 'hatchabot-runtime:derived-media-tools', status: 'READY',
+        dockerfile: 'RUN apt-get install -y ffmpeg', base: 'hatchabot-runtime:latest', builtAt: '2026-10-01T00:00:00Z', pinnedBy: 0 }] };
+      await openAiDlg('derived');
+      const del = await until(() => [...document.querySelectorAll('#derivedList button')].find((b) => b.title === 'Delete this derived image'));
+      del.click();
+      await until(() => calls('DELETE', /\/v1\/images\/media-tools$/)[0]);
+      aiDlg.close();
+      // Automatic rebuilds: on Hosts now, saving as before.
+      window.__override['/v1/rebuild-policy'] = { policy: 'required-only', quietHours: '3-5' };
+      window.__override['/v1/rebuild-concurrency'] = { atOnce: 6, max: 12 };
+      await openAiDlg('hosts');
+      const pol = await until(() => el('rbPolicy').offsetParent !== null && el('rbPolicy'));
+      pol.value = 'manual'; pol.dispatchEvent(new Event('change', { bubbles: true }));
+      const put = await until(() => calls('PUT', /\/v1\/rebuild-policy$/)[0]);
+      eq('the policy', put.body, { policy: 'manual' });
+      aiDlg.close();
+      window.__answer = {};
+      for (const k of ['/v1/runtime/images', '/v1/images', '/v1/rebuild-policy', '/v1/rebuild-concurrency']) delete window.__override[k];
+      for (const d of document.querySelectorAll('#paneAdvanced > details')) d.open = false;
+      await sleep(60); try { localStorage.removeItem('hb-settings-adv'); } catch {}
+    },
+    sheetBetweenServers: async () => {
+      openV2Agent('a1', 'advanced');
+      const head = await until(() => document.getElementById('v2BetweenServers'));
+      const machine = [...document.querySelectorAll('.v2row')].find((r) => r.querySelector('.v2k')?.textContent === 'Machine');
+      ok('the Machine row is there', !!machine);
+      ok('the Machine row no longer holds it', ![...machine.querySelectorAll('button')].some((b) => b.textContent.includes('another Hatchabot')));
+      ok('it sits below the Machine row', !!(machine.compareDocumentPosition(head) & Node.DOCUMENT_POSITION_FOLLOWING));
+      eq('its heading', head.textContent, 'Between servers');
+      const rowEl = head.nextElementSibling;
+      ok('with a short note', rowEl.textContent.includes('second Hatchabot server with its own dashboard'));
+      const btn = [...rowEl.querySelectorAll('button')].find((b) => b.textContent === 'Move to another Hatchabot');
+      ok('the button', !!btn);
+      window.__override['/v1/peers'] = [{ id: 'p1', name: 'Test Server', url: 'https://server.example.org' }];
+      window.__promptAnswer = '1';
+      window.__answer = { 'POST /v1/agents/a1/rehost': [{ status: 200, body: { movedTo: 'Test Server', sourceState: 'STOPPED' } }] };
+      const before = calls('POST', /\/v1\/agents\/a1\/rehost$/).length;
+      btn.click();
+      await until(() => calls('POST', /\/v1\/agents\/a1\/rehost$/).length > before);
+      eq('the same rehost call', calls('POST', /\/v1\/agents\/a1\/rehost$/).at(-1).body, { peerId: 'p1' });
+      window.__promptAnswer = null; window.__answer = {}; delete window.__override['/v1/peers'];
+      v2Close();
+    },
     backupRestore: async () => {
       window.__override['/v1/backups'] = { dir: '/backups', keepDays: 7, run: { status: 'idle' }, backups: [
         { date: '2026-09-26', sizeBytes: 1024, hasDb: true, hasKey: true, volumes: [{ name: 'Homework Helper', agentId: 'a1', sizeBytes: 1024 }] }] };

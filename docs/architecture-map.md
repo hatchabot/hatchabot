@@ -174,7 +174,7 @@ per container.
 - `src/orchestrator/swap.ts` — `effectiveSwapAllowance`, `limitsDrift`, `parseSwapProbe`: compressed swap and the limits check.
 - `src/orchestrator/agentFiles.ts` — `listShell`, `tarArgv`, `uploadAllowed`: the Files pane (browse, download, upload).
 - `src/api/routes.ts` — `'/v1/hosts'`, `'/v1/runner-setup'`, `'/v1/hosts/:id/install-image'`, `'/v1/agents/:id/move-host'`, `'/v1/agents/:id/rehost'`, `'/v1/agents/:id/fs'`, `'/v1/resources'`: hosts, moves, files and resources.
-- `web/index.html` — `loadHosts`, `addHost`, `showRunnerSetup`, `moveHostAgent`, `rehostAgent`, `v2LoadFiles`, `openFleetResources`: the matching screens.
+- `web/index.html` — `loadHosts`, `addHost`, `showRunnerSetup`, `moveHostAgent`, `rehostAgent`, `v2LoadFiles`, `openFleetResources`: the matching screens. Other Hatchabot servers (`renderPeers`, `addPeer`) sit in Settings → Advanced (`SETTINGS_ADV`, `settingsAdvUnfold`; old links go through `V2_SETTINGS_ALIAS`).
 
 ## Apps in agents
 
@@ -415,7 +415,7 @@ build derived images (the base plus extra packages) for particular agents.
 - `src/providers/provider.ts` — `parseEmbedEngineLabel`, `parseChannelsLabel`: image labels read at build time.
 - `src/api/routes.ts` — `'/v1/runtime'`, `'/v1/runtime/images'`, `'/v1/runtime/build'`, `'/v1/runtime/images/promote'`, `'/v1/images'`, `'/v1/images/:name/rebuild'`, `'/v1/rebuild-policy'`, `buildBaseImage`: images and the automatic rebuild policy.
 - `src/store/store.ts` — `derived_images`: where it is stored.
-- `web/index.html` — `loadRuntimeImages`, `pollBaseBuild`, `runTryOnAgents`, `promoteImage`, `loadDerivedImages`: the Images panel (building a newer OpenClaw is the Hatchabot agent's job; the panel shows one line while a build runs).
+- `web/index.html` — `loadRuntimeImages`, `pollBaseBuild`, `runTryOnAgents`, `promoteImage`, `loadDerivedImages`, `initSettingsAdvanced`, `loadRebuildSection`: Settings → Advanced → Runtime images and Derived images, and Hosts → Automatic rebuilds (building a newer OpenClaw is the Hatchabot agent's job; the panel shows one line while a build runs).
 
 ## Reaching Hatchabot from elsewhere: Tailscale and public access
 

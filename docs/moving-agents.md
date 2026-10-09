@@ -115,10 +115,10 @@ with a single action — no files to shuttle.
 
 On the **destination**: ⚙ Settings → Security → **New token**, and copy it.
 
-On the **source**: ⚙ Settings → Hosts → Other Hatchabot servers → add its name, URL and that token.
+On the **source**: ⚙ Settings → Advanced → Other Hatchabot servers → add its name, URL and that token.
 Hatchabot checks the token works before saving it.
 
-Then use **Move to another Hatchabot** in the agent's Advanced tab, or:
+Then use **Move to another Hatchabot** in the agent's Advanced tab (under *Between servers*), or:
 
 ```sh
 hatchabot servers                      # list registered servers

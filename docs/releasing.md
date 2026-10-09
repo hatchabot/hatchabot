@@ -107,7 +107,7 @@ fetches it from the release `stable` names, not from `main`. A change to
 
 ## Trying a newer OpenClaw
 
-Build the candidate (Settings → Images, `hatchabot upgrade-image --candidate
+Build the candidate (Settings → Advanced → Runtime images, `hatchabot upgrade-image --candidate
 --version X`, or `OPENCLAW_VERSION=X NO_LATEST=1 ./scripts/build-runtime-image.sh`
 — 2026.8 and later come out engine-free and need the shared memory search
 service running), then run the gate on the host:

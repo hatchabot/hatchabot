@@ -1072,8 +1072,8 @@ Five distinct verbs, for five intents:
   the target host, and it starts there. Same agent record, same bot, same
   members; any failure rolls it back where it was. While it moves, its icon
   shows a spinning ring.
-- **Move to another Hatchabot** (the agent's Advanced tab) — send the agent to a different
-  Hatchabot server entirely (registered under ⚙ Settings → Hosts → Other Hatchabot servers,
+- **Move to another Hatchabot** (the agent's Advanced tab, under *Between servers*) — send the agent to a different
+  Hatchabot server entirely (registered under ⚙ Settings → Advanced → Other Hatchabot servers,
   with a token made on that server under Security → **Token for moving agents
   here** — it lets the other server move agents there, and nothing else).
   It transfers with memory, members, and Telegram identity, and is managed
@@ -1703,7 +1703,7 @@ and `dig`, so "can it reach that?" needs nothing extra.
 Need something else in it? Ask your Hatchabot agent: *"build a base candidate
 with tcpdump"*. It comes back as a card naming the packages; confirming builds
 a **candidate** with its own tag (`2026.9.6-plus-tcpdump`). Nothing changes
-for any agent until you try it on one from Settings → Images and then
+for any agent until you try it on one from Settings → Advanced → Runtime images and then
 promote it. At most eight packages, apt names only, and an image with extras is
 never built as the fleet default directly.
 
@@ -1729,10 +1729,10 @@ off, and an agent built onto such an image while the service is unavailable
 fails with the reason rather than running without memory search. Images for
 OpenClaw **2026.8 and later** are always built this way: their plugin no
 longer carries an engine to bake. The Images list says "shared memory search
-only" for such an image, and the OpenClaw line under Settings → Images says
+only" for such an image, and the OpenClaw line under Settings → Advanced → Runtime images says
 when the newest version needs the service.
 
-**Settings → Images** lists every image on the machine as one table — tag,
+**Settings → Advanced → Runtime images** lists every image on the machine as one table — tag,
 what it is (fleet default, candidate, older build, derived), what it carries
 ("with Slack and Discord · plus traceroute"), what uses it, and its actions.
 **🧪 Try** opens a picker: filter by name or group, tick as many agents as you
@@ -1936,7 +1936,11 @@ billing context. Advanced → Checks has **❤️ Health** (checks its gateway
 and chat connection, and when its AI source last answered) and **Logs**.
 
 **⚙ Settings → Hosts** manages the machines this cluster runs agents on
-("this machine" is the built-in runner). Adding one is a guided three-step
+("this machine" is the built-in runner) — the household way to add a
+machine: one control plane, optional runners. A separate Hatchabot server, and
+building your own runtime images, are under **⚙ Settings → Advanced** (three
+folded parts: Other Hatchabot servers, Runtime images, Derived images); a
+household needs none of it. Adding one is a guided three-step
 flow: enable SSH + Docker on the runner, paste one command there (it
 authorizes this server's dedicated key and fixes PATH quirks), then enter
 `ssh://user@host` — the SSH key, its config, and host-key acceptance are
@@ -2140,7 +2144,7 @@ of two levels:
 - **recommended**: it runs an older image than the default (never for a
   pinned agent), or a release marked its change recommended.
 
-**Rebuild at once** (⚙ Settings → Images → Automatic rebuilds, or
+**Rebuild at once** (⚙ Settings → Hosts → Automatic rebuilds, or
 `hatchabot rebuild-policy --at-once N`; `HATCHABOT_REBUILD_CONCURRENCY`, 1–12,
 default 6): how many rebuilds run at the same time on this machine — from a
 bulk action, Rebuild all, or the automatic ones; the rest wait their turn and
@@ -2148,7 +2152,7 @@ their cards say so. Fewer is gentler on the machine and on the shared memory
 engine: 2 or 3 while moving agents to a new OpenClaw line, which rebuilds
 each one's memory index. Changing it applies to what is already queued.
 
-What the machine does on its own is its owner's choice (⚙ Settings → Images →
+What the machine does on its own is its owner's choice (⚙ Settings → Hosts →
 **Automatic rebuilds**; or `hatchabot rebuild-policy`):
 - *Required ones on their own* (the default): a required rebuild happens once
   the agent has been idle for 10 minutes, up to the Rebuild-at-once setting

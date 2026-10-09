@@ -101,7 +101,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('agents', 'HATCHABOT_HIBERNATE_AFTER', null, 'Put agents to sleep after this long without use, e.g. 36h (90m, 6h, 2d). Unset: they never sleep.'),
   s('agents', 'HATCHABOT_REBUILD_POLICY', 'required-only', 'What the machine rebuilds on its own: required-only, auto (also recommended ones, in the quiet hours) or manual.'),
   s('agents', 'HATCHABOT_REBUILD_QUIET_HOURS', '3-5', 'Local hours for automatic rebuilds, "from-to" (wraps midnight).'),
-  s('agents', 'HATCHABOT_REBUILD_CONCURRENCY', '6', 'Rebuilds at once, 1 to 12 (also Settings → Images).'),
+  s('agents', 'HATCHABOT_REBUILD_CONCURRENCY', '6', 'Rebuilds at once, 1 to 12 (also Settings → Hosts → Automatic rebuilds).'),
   s('agents', 'HATCHABOT_CHECKPOINT_CONCURRENCY', '2', 'Conversations saved to memory at once before rebuilds.'),
   s('agents', 'HATCHABOT_A2A_MAX_CONCURRENT', '8', 'Agent-to-agent consults running at once.'),
   s('agents', 'HATCHABOT_A2A_PER_HOUR', '60', 'Consults one agent may start per hour.'),

@@ -5189,7 +5189,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!Number.isInteger(n) || n < 1 || n > MAX_REBUILD_CONCURRENCY) return reply.code(400).send({ error: `atOnce must be a whole number from 1 to ${MAX_REBUILD_CONCURRENCY}` });
     const envFile = process.env.HATCHABOT_ENV_FILE ?? join(process.cwd(), '.env');
     const wrote = await writeEnvVar(envFile, 'HATCHABOT_REBUILD_CONCURRENCY', String(n), () => true,
-      'Written by Hatchabot: how many agents rebuild at once (Settings → Images → Automatic rebuilds).')
+      'Written by Hatchabot: how many agents rebuild at once (Settings → Hosts → Automatic rebuilds).')
       .catch((err: unknown) => ({ ok: false, error: String(err) }));
     if (!wrote.ok) return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
     process.env.HATCHABOT_REBUILD_CONCURRENCY = String(n);
@@ -5206,7 +5206,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     const envFile = process.env.HATCHABOT_ENV_FILE ?? join(process.cwd(), '.env'); // (tests point it elsewhere)
     const wrote = await writeEnvVar(envFile, 'HATCHABOT_REBUILD_POLICY', policy, () => true,
-      'Written by Hatchabot: when agents are rebuilt on their own (Settings → Images → Automatic rebuilds).')
+      'Written by Hatchabot: when agents are rebuilt on their own (Settings → Hosts → Automatic rebuilds).')
       .catch((err: unknown) => ({ ok: false, error: String(err) }));
     if (!wrote.ok) return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
     process.env.HATCHABOT_REBUILD_POLICY = policy; // live: the sweep reads it each time
