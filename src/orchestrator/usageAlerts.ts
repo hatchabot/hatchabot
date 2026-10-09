@@ -113,7 +113,9 @@ export async function runUsageAlerts(deps: UsageAlertDeps, now = Date.now()): Pr
   const sent: UsageSpike[] = [];
   for (const s of findUsageSpikes(store, agents, rules, now)) {
     // Once per agent per 24 hours: the same spike is not news every ten minutes.
-    if (store.usageAlertsSince(new Date(now - DAY).toISOString(), { agentId: s.agent.id }).length) continue;
+    // Cleared warnings count too: clearing it on Usage re-armed the message
+    // while the spike lasted (2026-10-09).
+    if (store.usageAlertsSince(new Date(now - DAY).toISOString(), { agentId: s.agent.id, dismissed: true }).length) continue;
     const told = await deps.tell(s.agent.ownerId, s.agent, usageSpikeText(s)).catch(() => false);
     store.addUsageAlert({ agentId: s.agent.id, ownerId: s.agent.ownerId, at: new Date(now).toISOString(), tokens: s.tokens, usual: s.usual, told });
     deps.log?.('usage.spike', { agentId: s.agent.id, tokens: s.tokens, usual: s.usual, told });

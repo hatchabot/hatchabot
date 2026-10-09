@@ -74,4 +74,14 @@ describe('usage spikes', () => {
     expect(store.usageAlertsSince(new Date(NOW - D).toISOString(), { ownerId: OWNER })).toMatchObject([{ agentId: 'sched', tokens: 100e6, usual: 20e6, told: false }]);
     expect(store.usageAlertsSince(new Date(NOW - D).toISOString(), { ownerId: 'someone-else' })).toEqual([]);
   });
+
+  it('clearing the warning on Usage does not make it be told again the same day', async () => {
+    const store = world([{ id: 'sched', name: 'Scheduler', perDay: [100e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6] }]);
+    const told: string[] = [];
+    const tell = async (_o: string, _a: unknown, text: string) => { told.push(text.slice(0, 20)); return true; };
+    await runUsageAlerts({ store, tell, rules: RULES }, NOW);
+    store.dismissUsageAlerts(OWNER, new Date(NOW + 60_000).toISOString());
+    await runUsageAlerts({ store, tell, rules: RULES }, NOW + 10 * 60_000);
+    expect(told).toHaveLength(1);
+  });
 });

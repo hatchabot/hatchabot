@@ -301,7 +301,7 @@ export const OPS_MODEL_REVIEW_MESSAGE = [
   'get_model_changes, get_model_scorecard, get_model_options and get_budgets. File proposals only where the evidence supports them —',
   'compact_agent, set_context_cap, set_model, set_cron_enabled, set_budget — each with a why that states the evidence and the saving.',
   'Do not wake or look inside sleeping agents. Reply with a short digest: first the savings line from get_model_changes if there is one,',
-  'then any loops (open incidents), agents at 80% or more of a budget, the proposals you filed with the estimated monthly saving, last week\'s changes that went worse,',
+  'then any loops (open incidents), agents at 80% or more of a budget with why and what would bring them back (not the warning itself, which Hatchabot already sent), the proposals you filed with the estimated monthly saving, last week\'s changes that went worse,',
   'and the agents you left alone and why, one line each at most. If nothing should change, say so in one sentence.',
 ].join(' ');
 

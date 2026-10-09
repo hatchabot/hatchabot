@@ -255,9 +255,9 @@ its container was last built),
 read-only, remembered per device. **Alerts** bins by what wants you, most
 urgent first: Waiting for your choice (a move, import or restore a restart
 cut off, held until you choose — it cannot be cleared), Failed or changed by
-hand, Knocking, To read, To rebuild, Alerts, Fine — and **Cleared**: an
-agent you have taken out of the way with 🔕 (on the section's header for
-everyone in it, or on the agent's own sheet under its notices). Clearing
+hand, Knocking, To read, To rebuild, Alerts, Fine. An agent you have taken
+out of the way with 🔕 (on the section's header for everyone in it, or on the
+agent's own sheet under its notices) moves to Fine. Clearing
 remembers what was flagged, so the agent comes back the moment something
 new happens to it — a new restart, a new reason to rebuild, a failure —
 and **Show again** on its sheet brings it back by hand. Knocking and To
