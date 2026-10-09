@@ -32,7 +32,7 @@ host (local or a remote runner).
   remote Docker endpoint; the control plane stays sqlite-on-one-box until it
   needs to scale horizontally (then, and only then, Postgres).
 - **You see:** one dashboard for everything.
-- **Moving within the cluster:** **Move** on the agent card
+- **Moving within the cluster:** **Move…** in the agent's Advanced tab
   (`POST /v1/agents/:id/move-host`, `src/orchestrator/moveHost.ts`) relocates an
   agent between hosts on the same control plane — quiesce, snapshot the volume,
   recreate on the target, retire the source. Same agent record, same bot, same

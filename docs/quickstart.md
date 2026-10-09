@@ -86,7 +86,7 @@ AI sources is where you add an API key or a local Ollama server later.)
 
 1. Tap **+**. Give it a **name** and a one-paragraph **description** of who it is and what it's for — this becomes its personality file, which you can edit any time.
 2. Paste the **BotFather token** from step 1 when asked (or, if you've stocked the bot pool, it just takes one).
-3. Tap **Create**. Hatchabot builds its container, wires the bot, and shows a Telegram link on the card.
+3. Tap **Create**. Hatchabot builds its container, wires the bot, and its icon appears on the home screen; its Telegram tab has the link.
 
 ## 6. Say hi (30 s)
 
@@ -100,7 +100,7 @@ machine, survives restarts and rebuilds, and is yours to read and edit.
 ## Where to go next (all optional)
 
 - **Tell it who you are once** — ⚙ Settings → **👤 You**. Injected into every agent you make.
-- **Let family in** — **Invite…** on the card: a link or QR for chat-only access, or a full invite so they can also log into Hatchabot. Or make an agent a **group room**.
+- **Let family in** — **Invite…** in the agent's Sharing tab: a link or QR for chat-only access, or a full invite so they can also log into Hatchabot. Or make an agent a **group room**.
 - **Give it your Google account** — ⚙ Settings → Connections (Gmail, Calendar, Drive, Sheets). Per agent, with a "no send" option: sending is switched off in the agent's mail tool (a tool setting, not a Google permission — don't rely on it against someone determined).
 - **Give it data** — the agent's **Data** tab: a read-only folder, a writable one, or a git repo it commits to.
 - **Schedule it** — the agent's **Schedule** tab: a morning briefing, an inbox poll, a weekly digest.
@@ -149,7 +149,7 @@ when an upgrade needs anything more — see `CHANGELOG.md` → *Upgrading*.
 
 ## If something's off
 
-- **Agent card says FAILED** → the reason is on the card; **Retry** usually fixes a first-boot hiccup.
+- **An agent's icon says it failed** → the reason is in its tooltip and its Overview; **Retry** usually fixes a first-boot hiccup.
 - **"Couldn't reach the AI"** → check the AI source in ⚙ Settings; a setup token can expire — run `claude setup-token` again and paste the new one.
 - **Local model agents can't connect** → the model server must listen on an address containers can reach (not `localhost`); the README's "Running on your own hardware" section has the exact settings.
 - **Something looks stale** → the app is a PWA; pull to refresh or reopen it.

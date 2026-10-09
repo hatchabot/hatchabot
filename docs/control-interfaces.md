@@ -357,8 +357,8 @@ the model can grow more capable without ever growing more authority.
 
 ## C. Direct OpenClaw access (owner-only today)
 
-Each agent runs OpenClaw's own **Control UI** — reachable from the agent card's
-⋯ menu as *OpenClaw (debug)*. Hatchabot reverse-proxies it at
+Each agent runs OpenClaw's own **Control UI** — what opens when you click the
+agent's icon. Hatchabot reverse-proxies it at
 `/v1/agents/:id/ui/` (HTTP + WebSocket), authorized by the same session as every
 other route, so the gateway port stays bound to the host's loopback rather than
 being exposed to the LAN/tailnet.

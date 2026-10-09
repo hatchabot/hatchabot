@@ -103,7 +103,7 @@ On a Mac, Funnel needs the open-source Tailscale, not the App Store app.
 
 ## The OpenClaw console needs HTTPS
 
-Each agent's OpenClaw console (click the agent's icon; ⋯ → OpenClaw (debug) in the classic look) creates a device
+Each agent's OpenClaw console (click the agent's icon) creates a device
 identity with WebCrypto, which browsers only allow in a *secure context*: an
 `https://` page, or `http://localhost`. Tailscale encrypting the wire doesn't
 count — the browser judges by the URL scheme alone.

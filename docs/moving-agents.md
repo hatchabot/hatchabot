@@ -118,7 +118,7 @@ On the **destination**: ⚙ Settings → Security → **New token**, and copy it
 On the **source**: ⚙ Settings → Hosts → Other Hatchabot servers → add its name, URL and that token.
 Hatchabot checks the token works before saving it.
 
-Then use **Move to another Hatchabot** on the agent card, or:
+Then use **Move to another Hatchabot** in the agent's Advanced tab, or:
 
 ```sh
 hatchabot servers                      # list registered servers
@@ -165,8 +165,8 @@ hatchabot download kitchen-helper -o kitchen.hatchabot
 hatchabot restore kitchen.hatchabot
 ```
 
-The web app can do the same: **Download** on the agent card, then **Import** in
-the header — the one Import button takes any `.hatchabot` file, restoring a full
+The web app can do the same: **Download copy** in the agent's Advanced tab, then
+**New** → *open a .hatchabot file* — it takes any `.hatchabot` file, restoring a full
 backup as the same agent or standing a shared template up as a fresh one.
 
 ## Interrupted operations
@@ -219,8 +219,8 @@ the agent's `list_operations` and `recover_operation` tools.
 
 Download/Restore and Rehost move **the same agent** — same bot, same people, same
 memory. To hand someone a copy of an agent you *built and trained*, use a
-**template** instead (**Share** on the agent card's ⋯ menu; the same **Import**
-button in the header takes it, or `hatchabot share` / `import`).
+**template** instead (**Share** in the agent's Sharing tab, under Copy or share;
+**New** → *open a .hatchabot file* takes it, or `hatchabot share` / `import`).
 
 A template leaves out the agent's **identity** — but it is not safe to email
 unread. Agents write names, addresses and phone numbers into their own

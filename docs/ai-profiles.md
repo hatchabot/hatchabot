@@ -170,8 +170,9 @@ sharing where you can.
 Each source in **⚙ Settings → AI sources** shows what its agents have used:
 requests and tokens in the last 5 hours and the last 7 days, a 7-day chart
 (red bars mark hours where calls were refused), and the agents using it most.
-When the provider starts refusing calls, a red banner appears across the top of
-the page and the affected agents get ⛔ in the legend, until a call succeeds again.
+When the provider starts refusing calls, the affected agents' icons say their AI
+source is rate-limited (and they are listed under View by → Alerts), until a call
+succeeds again.
 
 Where the numbers come from: every ~10 minutes the control plane reads each
 running agent's own record of its model calls (its container log) and its token

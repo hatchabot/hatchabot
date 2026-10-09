@@ -61,11 +61,11 @@ back if the new release does not start. Details:
 
 ## The home screen
 
-Since 1.15.0 the app opens on the icon home screen. The older card view is
-still there: open the account menu (your initial, top right) and choose
-**Classic look**, or add `?ui=classic` to the address. The choice is
-remembered in that browser; **✨ New look** in the classic header, or
-`?ui=v2`, switches back. Both views drive the same actions.
+The app opens on the icon home screen, the only one since v2.155.0 (the
+older card view, the "classic look", is gone). A browser that had chosen the
+classic look is shown, once, a short map of where the card's buttons went —
+everything is in the agent's page now (click its icon; the sheet's tabs are
+below) — and `?ui=classic` or `?ui=v2` left in a bookmark is ignored.
 
 The header holds:
 - **Consoles** (a speech bubble, first; v2.139.0): back to the agent you were
@@ -90,7 +90,7 @@ The header holds:
 - **Settings**: this machine's settings, opened directly.
 - An inbox button, which appears only when someone has sent you an agent.
 - The account menu: who you're signed in as, light or dark appearance,
-  install as an app, help, the classic look, the version, and sign out.
+  install as an app, help, report a problem, the version, and sign out.
 
 - **No hub.** The Hatchabot agent is the first tile of the **Default** group,
   fixed in place (it cannot be dragged), and **Usage**, **Resources**, **Bulk
@@ -118,7 +118,7 @@ The header holds:
   step is ticked from live state, never from "you have seen this", so it is
   still honest a month later. **Setup** sits in the top bar next to Settings,
   with a badge counting what is left; there is also an entry in the account
-  menu, and a button in the classic look's toolbar.
+  menu.
 - **Alerts** collects what needs you: changes your manager prepared
   (Confirm / Cancel), the ones that were confirmed and then *failed*, with the
   reason, and **people knocking** — an *expected* join request (strangers
@@ -138,8 +138,8 @@ The header holds:
   My order). In My order each group's header also has **A→Z**: it puts that
   group in alphabetical order once and keeps it — press it again for Z→A —
   and dragging or Move earlier / later still rearrange it afterwards. My
-  order is the same order the classic look kept, so nothing you arranged
-  there is lost.
+  order is the order the classic look kept (removed in v2.155.0), so nothing
+  arranged there was lost.
 - **Agents are icons** in their groups. Drag one onto another group to move
   it, onto **Archived** to archive it, or onto one of the two
   strips that appear at the bottom while you drag: **start a new group**, or
@@ -203,7 +203,8 @@ The header holds:
   app's bot (connect, remove, rooms, re-check); **Sharing** holds members,
   invites and peers; **Data** is delineated into Folders, Git repos,
   Connections and History. The editors live right in those tabs, not
-  one panel deeper. Every button from the classic card is in one of them.
+  one panel deeper. Every button from the old classic card is in one of
+  them.
   A template agent whose Setup values were never filled in says so at the
   top of Overview, with **Fill its Setup values** to go straight to them; the
   Telegram tab has **Telegram Web** beside **Open in Telegram**, for a
@@ -978,8 +979,8 @@ relaxes the rule against handing over credentials. A consult runs the peer's
 whole turn inside `HATCHABOT_A2A_TIMEOUT_MS` (120 s by default) — raise it for
 tool-heavy work.
 
-Tap the **agent's name** on its card (it's the Telegram deep-link; Telegram
-Web lives in the ⋯ menu) and say hi. Your first-ever message claims
+Open the agent's **Telegram** tab and press **Open in Telegram** (or
+**Telegram Web**, for a computer without the app) and say hi. Your first-ever message claims
 the agent as yours; later agents recognize your Telegram account from birth
 and answer immediately. Send `/new` in Telegram to start a fresh
 conversation (file edits apply to new conversations).
@@ -990,10 +991,9 @@ knows).
 
 ## Training & memory
 
-To edit an agent's mind, open **⚙ Settings** on its card. The sheet's tabs are
+To edit an agent's mind, click its icon and open its settings sheet. The sheet's tabs are
 **Overview · Personality · AI · Data · Files · Telegram · Discord · Slack ·
-Sharing · Schedule · Advanced** (the classic look has Definition · Snapshots · AI · Data ·
-Telegram · Environment).
+Sharing · Schedule · Advanced**.
 
 - **Definition** — rename the agent, edit SOUL.md / AGENTS.md / MEMORY.md.
   Memory is shared: MEMORY.md is one log for everyone who talks to the agent
@@ -1021,7 +1021,7 @@ context survives a reset. The same checkpoint is offered as a checkbox when
 switching an agent's AI source (and on the bulk switch-and-rebuild), because
 a backend switch resets the live Telegram thread.
 
-**Rebuild** (on the card) replaces the container but keeps the volume —
+**Rebuild** (the agent's Overview) replaces the container but keeps the volume —
 containers are cattle, volumes are not. Only **Delete** purges, and it makes
 you type the agent's name.
 
@@ -1054,18 +1054,18 @@ Five distinct verbs, for five intents:
   phone numbers the copy mentions and shows where. The recipient uses
   **Import** (header) to stand up a fresh agent with their own bot, AI source,
   and people.
-- **Import** (header) — opens any `.hatchabot` file and auto-detects it: a
+- **Import** (New agent → *open a .hatchabot file*) — opens any `.hatchabot` file and auto-detects it: a
   full backup is restored as the *same* agent; a template becomes a *fresh*
   one.
-- **Download copy** (card ⋯ menu) — a complete private copy to a file (bot
+- **Download copy** (the agent's Advanced tab) — a complete private copy to a file (bot
   token, members, memory) for your own keeping; restore it anywhere with
   `hatchabot restore`. Don't share it.
-- **Move** (card, shown when more than one host exists) — relocate the agent
+- **Move…** (the agent's Advanced tab, shown when more than one host exists) — relocate the agent
   to another **runner in this cluster**: it stops, its volume is copied to
   the target host, and it starts there. Same agent record, same bot, same
-  members; any failure rolls it back where it was. While it moves the card
-  shows a pulsing **WORKING…** chip.
-- **Move to another Hatchabot** (card ⋯ menu) — send the agent to a different
+  members; any failure rolls it back where it was. While it moves, its icon
+  shows a spinning ring.
+- **Move to another Hatchabot** (the agent's Advanced tab) — send the agent to a different
   Hatchabot server entirely (registered under ⚙ Settings → Hosts → Other Hatchabot servers,
   with a token made on that server under Security → **Token for moving agents
   here** — it lets the other server move agents there, and nothing else).
@@ -1105,7 +1105,7 @@ children** re-renders every child's SOUL/AGENTS from the master's *current*
 files, keeping each child's own values (snapshot per child; MEMORY.md never
 touched). Lineage is also recorded when you Clone, or when a 📨 Send is
 accepted on the same server. Child→master distillation is built: a child's
-⋯ → **💡 Propose to master** (or `POST /v1/agents/:id/distill`) turns a
+Sharing → **💡 Propose to master** (or `POST /v1/agents/:id/distill`) turns a
 lesson into a proposal the master's owner confirms or cancels.
 
 **Web search is on for every agent** (keyless DuckDuckGo baseline; the
@@ -1163,7 +1163,7 @@ new bot slot.
 Details: [data-sources.md](data-sources.md). Changes apply on the next
 **Rebuild**.
 
-**The agent's Advanced tab** (Environment in the classic look) — per-agent environment variables for the
+**The agent's Advanced tab** (its Environment section) — per-agent environment variables for the
 agent's **own tools, not its AI**: when its scripts or scheduled tasks call
 an outside service (a market-data API, a home-automation hub), the key they
 read lands here. Most agents need none. Values are write-only — stored
@@ -1245,7 +1245,7 @@ tailnet with its owner present; that trial comes before anyone turns it on.
 
 ## Members & invites
 
-To let someone in, tap **Invite…** on the card:
+To let someone in, tap **Invite…** in the agent's Sharing tab:
 
 - **Invite link** — works once, expires in 48 hours; they join as a member:
   they can't change its settings here, but through chat they can use
@@ -1327,7 +1327,7 @@ Maria"* — with anyone invited but not yet linked marked as such, since they
 cannot reach it until they message the bot. Per agent, the same people are
 under ⚙ Settings → Sharing → **Members**, with Remove.
 
-Members show on the card (when there's more than one) and always under
+Members show in the agent's notices (when there's more than one) and always under
 ⚙ Settings → Sharing → **Members** — role, Telegram-link status, Remove,
 and Invite… in one place. CLI: `hatchabot invite`, `approve`, `deny`,
 `members`, `kick`.
@@ -1910,13 +1910,12 @@ Recent warnings show at the top of Usage and on the agent's Usage.
 Settings: `HATCHABOT_USAGE_ALERT_RATIO` (3), `HATCHABOT_USAGE_ALERT_MIN_TOKENS`
 (20000000), `HATCHABOT_USAGE_ALERT_NEW_TOKENS` (100000000).
 
-**View by → Source / Model** on the home screen (📊 Sources in the classic look) answers "who runs on what": each AI source with its
+**View by → Source / Model** on the home screen answers "who runs on what": each AI source with its
 credential kind, the agents on it and each agent's current model (pins and
-pending switches flagged), plus a models-in-use tally. The card's status line
-also names each agent's AI source (when more than one exists) alongside its
-model, bot, and host.
+pending switches flagged), plus a models-in-use tally. Each icon's tooltip
+names its model, and its sheet's AI tab its source.
 
-Per-agent, the sheet's **Usage** tab (and ⋯ → 📊 Usage) shows lifetime tokens and calls,
+Per-agent, the sheet's **Usage** tab (and Overview → Checks → 📊 Usage) shows lifetime tokens and calls,
 the last 24 hours, the conversation's size now — each call re-sends it — the
 split between new input, cache reads, cache writes and output, calls per model,
 billing context. Advanced → Checks has **❤️ Health** (checks its gateway
@@ -2058,7 +2057,7 @@ with people you trust with the underlying key. Full detail:
 ## Archiving — more agents than bots
 
 Telegram caps an account at roughly 20 bots, and every agent holds one whether
-it is busy or idle. **Archive** (⋯ menu on the card) breaks that ceiling: the
+it is busy or idle. **Archive** (the agent's Advanced tab, or drag its icon onto Archived) breaks that ceiling: the
 agent is kept whole — container, volume, memory, members, settings — and stops,
 but its bot goes back in the pool for another agent to lease. A pasted,
 hand-minted token is parked in the pool too; it burns the same BotFather slot,
@@ -2093,13 +2092,10 @@ the previous one is kept beside the new one as `<session>.jsonl.reset.<timestamp
 in the agent's session store.
 
 Archive from RUNNING, STOPPED, or FAILED — a broken agent still sits on a token
-somebody else could use. Archived agents collapse into a closed **Archived**
-drawer at the bottom of the fleet, out of the sections you actually run, with a
-single line in the jump legend.
+somebody else could use. Archived agents collapse into a folded **Archived**
+group at the bottom of the home screen, out of the sections you actually run.
 
-On the card, **Archive** sits where Stop used to; Stop moved into the ⋯ menu,
-since pausing an agent keeps its bot and that is rarely the point. The same slot
-becomes **Restore** once archived. From the CLI: `hatchabot archive <agent>` and
+An archived agent's page has **Restore** in its top bar. From the CLI: `hatchabot archive <agent>` and
 `hatchabot unarchive <agent>` — *not* `restore`, which already means "restore
 from a downloaded .hatchabot file".
 
@@ -2139,7 +2135,7 @@ engine: 2 or 3 while moving agents to a new OpenClaw line, which rebuilds
 each one's memory index. Changing it applies to what is already queued.
 
 What the machine does on its own is its owner's choice (⚙ Settings → Images →
-**Automatic rebuilds**; ⚙ → Runtime in the classic view; or `hatchabot rebuild-policy`):
+**Automatic rebuilds**; or `hatchabot rebuild-policy`):
 - *Required ones on their own* (the default): a required rebuild happens once
   the agent has been idle for 10 minutes, up to the Rebuild-at-once setting
   (default 6) together — never mid-reply,
@@ -2156,7 +2152,7 @@ still on the shared network.
 **Per-agent image pin** (an agent's ⚙ Advanced → Runtime, host owner only): pin one agent
 to a specific image — a candidate build under test, or a derived image with
 extra system packages — instead of promoting fleet-wide. Applies on the next
-rebuild; the card shows 📌 with the pinned tag; a pinned agent stops getting
+rebuild; its Runtime row shows the pinned tag; a pinned agent stops getting
 "update available" from fleet promotes, since it deliberately doesn't track
 `:latest`. Clearing the field returns it to the default.
 

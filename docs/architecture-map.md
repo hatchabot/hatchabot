@@ -342,7 +342,7 @@ is finished, undone or held by its kind's rule (docs/operations-and-one-interfac
 - `src/orchestrator/tokenWatch.ts` — `runTokenWatch`: loop incidents (see costs below).
 - `src/api/routes.ts` — `'/healthz'`, `'/v1/agents/:id/health'`, `'/v1/agents/:id/logs'`, `'/v1/agents/:id/events'`, `'/v1/events'`, `'/v1/security/posture'`, `diskSweep`, `limitsCheck`: health, logs, events and posture.
 - `src/store/store.ts` — `agent_events`, `recordEvent`, `listEvents`, `posture_snapshots`: where it is stored.
-- `web/index.html` — `openHealth`, `runFleetHealthChecks`, `openLogs`, `openSetupLog`, `openAudit`, `v2InlineHealth`: health and logs on screen.
+- `web/index.html` — `v2InlineHealth`, `loadHealth`, `renderHealth`, `openLogs`, `openSetupLog`, `openAudit`: health and logs on screen (an agent's Overview → Checks).
 - `web/index.html` — `v2CheckAll`, `v2HealthProblems`, `v2PaintCheckAll`: Check all on the home screen (every running agent, results as Alerts and a line above the agents).
 
 ## Costs, usage, budgets and the token steward
@@ -388,7 +388,7 @@ build derived images (the base plus extra packages) for particular agents.
 - `src/providers/provider.ts` — `parseEmbedEngineLabel`, `parseChannelsLabel`: image labels read at build time.
 - `src/api/routes.ts` — `'/v1/runtime'`, `'/v1/runtime/images'`, `'/v1/runtime/build'`, `'/v1/runtime/images/promote'`, `'/v1/images'`, `'/v1/images/:name/rebuild'`, `'/v1/rebuild-policy'`, `buildBaseImage`: images and the automatic rebuild policy.
 - `src/store/store.ts` — `derived_images`: where it is stored.
-- `web/index.html` — `loadRuntimeImages`, `startBaseBuild`, `runTryOnAgents`, `promoteImage`, `loadDerivedImages`: the Images panel.
+- `web/index.html` — `loadRuntimeImages`, `pollBaseBuild`, `runTryOnAgents`, `promoteImage`, `loadDerivedImages`: the Images panel (building a newer OpenClaw is the Hatchabot agent's job; the panel shows one line while a build runs).
 
 ## Reaching Hatchabot from elsewhere: Tailscale and public access
 
@@ -428,8 +428,8 @@ a draft. See `docs/field-reports.md`.
 ## The web app's main screens
 
 One page, `web/index.html`, served at the root with the version injected. The
-default look is the icon home screen (a "v2" prefix in function names); the
-classic look is behind the classic query option. Clicking an icon opens the
+only look is the icon home screen (a "v2" prefix in function names; the
+classic card look was removed in v2.155.0). Clicking an icon opens the
 agent sheet, whose tabs are rendered by v2Pane. All data comes from the /v1
 API through one fetch helper.
 
@@ -441,7 +441,8 @@ API through one fetch helper.
 - `web/index.html` — `v2TabKeys`, `v2AcctItems`: arrow keys for the View by and sheet tabs and the account menu.
 - `web/index.html` — `setupSteps`, `renderSetup`, `openSetupGuide`: the first-run guide.
 - `web/index.html` — `openCrons`, `renderCrons`, `openInspect`, `openGallery`, `openInbox`: scheduled tasks, archived-agent inspector, templates, shared agents.
-- `web/index.html` — `renderAgents`, `agentCard`: the classic look.
+- `web/index.html` — `takeClassicChoice`, `v2DismissClassicMap`: the one-time map for a browser that had the classic look (`hb-ui`), and a `?ui=` dropped from the address.
+- `web/index.html` — `agentNotices`, `prepareEdit`, `prepareCrons`: the notices and the editDlg / cronDlg sections the agent sheet borrows.
 - `src/api/routes.ts` — `'/'`, `'/v1/config'`, `'/v1/agents'`, `'/v1/agents/:id'`, `'/v1/recent'`, `'/v1/agents/:id/crons'`, `indexPage`: the page itself and the main reads behind it.
 - `src/orchestrator/recent.ts` — `RecentTracker`, `orderRecent`, `previewLine`: the Activity view and tile previews.
 - `src/orchestrator/crons.ts` — `listCrons`, `addCron`, `setCronEnabled`, `runCronNow`: scheduled tasks inside the agent.

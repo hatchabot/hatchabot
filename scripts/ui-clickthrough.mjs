@@ -74,6 +74,30 @@ const SCENARIOS = String.raw`(() => {
   const centre = (el) => { const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; };
   const pointer = (type, target, x, y) => target.dispatchEvent(new PointerEvent(type, { clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, bubbles: true, cancelable: true }));
   const T = {
+    classicMap: async () => {
+      // v2.155.0: the classic look is gone. This page was opened with hb-ui=classic stored and
+      // ?ui=classic in its address (the head below), as a browser that had chosen classic would be.
+      const map = document.getElementById('v2ClassicMap');
+      ok('the one-time map is shown', !!map && !map.hidden && map.textContent.includes('The classic look is gone'));
+      ok('it says where the card buttons went', ['Sharing', 'Advanced', 'Overview → Checks', 'Check all', 'Planned'].every((w) => map.textContent.includes(w)));
+      eq('the stored choice is cleared', localStorage.getItem('hb-ui'), null);
+      ok('?ui=classic is gone from the address: ' + location.search, !/[?&]ui=/.test(location.search));
+      ok('the account menu has no Classic look', !byText('#v2AcctPop button', 'Classic look'));
+      ok('no classic header, cards or legend', !document.getElementById('toc') && !document.getElementById('agents') && !document.getElementById('themeToggle') && !document.getElementById('activityCard'));
+      eq('the next load shows no map (nothing stored)', takeClassicChoice(), false);
+      // A ?ui= in a bookmark is dropped, the rest of the address kept; 'v2' is not a reason for the map either.
+      const prev = location.pathname + location.search + location.hash;
+      try {
+        localStorage.setItem('hb-ui', 'v2');
+        history.replaceState(null, '', location.pathname + '?ui=classic&keep=1#keep');
+        eq('?ui=classic in an address alone shows no map', takeClassicChoice(), false);
+        eq('the rest of the address stays', [location.search, location.hash], ['?keep=1', '#keep']);
+        eq('any stored look is cleared', localStorage.getItem('hb-ui'), null);
+      } finally { history.replaceState(null, '', prev); }
+      byText('#v2ClassicMap button', 'Got it').click();
+      ok('Got it puts it away', map.hidden);
+      ok('the keyboard stays on the home screen: ' + document.activeElement?.outerHTML.slice(0, 80), document.getElementById('v2home').contains(document.activeElement) && !map.contains(document.activeElement));
+    },
     home: async () => {
       const tiles = document.querySelectorAll('#v2groups .v2agent');
       ok('tiles rendered: ' + tiles.length, tiles.length === 14);
@@ -453,12 +477,13 @@ const SCENARIOS = String.raw`(() => {
       v2Close(); window.__crons = [];
     },
     keyboardLinks: async () => {
-      // The classic cards' link-looking actions are buttons: Tab reaches them, Enter presses them (review, 2026-10-09).
+      // The notices' link-looking actions are buttons: Tab reaches them, Enter presses them (review, 2026-10-09;
+      // ported from the classic card to the agent's notices when classic went, v2.155.0).
       const a = v2Find('a1');
-      const card = document.createElement('div');
-      card.innerHTML = agentCard({ ...a, persona: 'Helps {{child_name}} with homework' });
-      const fill = [...card.querySelectorAll('button')].find((b) => b.textContent.includes('fill its Setup values'));
-      ok('"fill its Setup values" is a button', !!fill && fill.type === 'button' && ![...card.querySelectorAll('a')].some((x) => x.textContent.includes('Setup values')));
+      const notices = document.createElement('div');
+      notices.innerHTML = agentNotices({ ...a, persona: 'Helps {{child_name}} with homework' }, { setupValues: true });
+      const fill = [...notices.querySelectorAll('button')].find((b) => b.textContent.includes('Fill its Setup values'));
+      ok('"Fill its Setup values" is a button', !!fill && fill.type === 'button' && ![...notices.querySelectorAll('a')].some((x) => x.textContent.includes('Setup values')));
       const prevMembers = members[a.id];
       members[a.id] = [{ role: 'owner', userId: 'u-owner' }, { role: 'member', userId: 'u-member-1', displayName: 'Sam' }];
       try {
@@ -477,11 +502,13 @@ const SCENARIOS = String.raw`(() => {
         const note = document.querySelector('#setupLogBody .sub:last-child').textContent;
         ok('the note is 200 characters of what was sent: ' + note.slice(0, 30), note === '— ' + '<'.repeat(200));
       } finally { delete window.__override['/v1/agents/a1/events']; setupLogDlg.close(); setupLogAgentId = null; }
-      // A stored link that is not https is not clickable.
+      // A stored link that is not https is not clickable: not on a member's page, not as a chat-app button.
       const a = v2Find('a1');
+      const bad = { ...a, role: 'user', state: 'RUNNING', botUsername: 'test_helper_bot', deepLink: 'javascript:alert(1)' };
       const box = document.createElement('div');
-      box.innerHTML = agentCard({ ...a, state: 'RUNNING', deepLink: 'javascript:alert(1)' });
-      ok('no javascript: link on the card', ![...box.querySelectorAll('a')].some((x) => /^javascript:/i.test(x.getAttribute('href') || '')));
+      box.innerHTML = v2MemberPane(bad);
+      ok('no javascript: link on the member\'s page', ![...box.querySelectorAll('a')].some((x) => /^javascript:/i.test(x.getAttribute('href') || '')));
+      eq('no chat-app link from it', agentChannelLinks(bad), []);
       eq('https passes, the rest does not', [httpsUrl('https://t.me/x'), httpsUrl('javascript:alert(1)'), httpsUrl('data:text/html,x'), httpsUrl(undefined)], ['https://t.me/x', '', '', '']);
       // A malformed console address is no agent, not an exception.
       const prevHash = location.hash;
@@ -1021,16 +1048,6 @@ const SCENARIOS = String.raw`(() => {
       }
       delete window.__override['/v1/agents'];
       await refresh(false);
-    },
-    limitBannerLive: async () => {
-      // The rate-limit banner counts the agents that could answer, not archived ones (night review #21).
-      const u = await (await fetch('/v1/ai-profiles/usage')).json();
-      window.__override['/v1/ai-profiles/usage'] = { ...u, sources: [{ ...u.sources[0], status: 'limited', limitedSince: new Date().toISOString(), agents: 5, liveAgents: 3 }] };
-      await loadSourceUsage();
-      const t = document.getElementById('limitBanner').textContent;
-      ok('three, not five: ' + t, t.includes('its 3 agents'));
-      delete window.__override['/v1/ai-profiles/usage'];
-      await loadSourceUsage();
     },
     notRunningWording: async () => {
       // A rebuilding agent is not "stopped — start it" (night review #22).
@@ -1680,19 +1697,23 @@ const SCENARIOS = String.raw`(() => {
         const hAgo = (h) => new Date(Date.now() - h * 3600000).toISOString();
         window.__override['/v1/agents/a1/health'] = { reachable: true, status: 'healthy', pluginErrors: [],
           aiSource: { name: 'Claude Max (household)', lastAnsweredAt: hAgo(5), refusingSince: hAgo(2), refusal: 'refused' } };
-        await openHealth('a1', 'Homework Helper');
+        // Overview → Checks → ❤️ Check health (the classic ⋯ → ❤️ Health went with the classic look, v2.155.0).
+        openV2Agent('a1', 'overview');
+        await until(() => document.getElementById('v2HealthSlot'));
+        byText('#v2AgentDlg button', 'Check health').click();
         const body = document.getElementById('healthBody');
+        ok('it opens in the Overview', document.getElementById('v2HealthSlot').contains(body) && !document.getElementById('v2HealthSlot').hidden);
         await until(() => body.textContent.includes('AI source'));
         ok('not "Responding" while its source refuses: ' + body.textContent.replace(/\s+/g, ' ').slice(0, 160), body.textContent.includes('Up, but its AI source is not answering') && !body.textContent.includes('Responding'));
         ok('refused since, and when it last answered', /refused \(rate-limited\) since 2h ago/.test(body.textContent) && body.textContent.includes('last answered 5h ago'));
-        ok('the dialog says what it checks', document.getElementById('healthDlg').textContent.includes('Checks its gateway and chat connection, and when its AI source last answered'));
+        ok('it says what it checks', document.getElementById('healthDlgBody').textContent.includes('Checks its gateway and chat connection, and when its AI source last answered'));
         window.__override['/v1/agents/a1/health'] = { reachable: true, status: 'healthy', pluginErrors: [], aiSource: { lastAnsweredAt: hAgo(2) } };
         await loadHealth();
         await until(() => body.textContent.includes('Responding'));
         ok('answering: last answered: ' + body.textContent.replace(/\s+/g, ' ').slice(0, 160), /AI source\s*last answered 2h ago/.test(body.textContent.replace(/\s+/g, ' ')));
       } finally {
         delete window.__override['/v1/agents/a1/health'];
-        if (healthDlg.open) healthDlg.close();
+        try { v2Close(); } catch {}
       }
     },
     // Chat → Memory (2026-09-30): a turn that changed nothing is not "Saved".
@@ -1706,9 +1727,10 @@ const SCENARIOS = String.raw`(() => {
         window.__answer = {};
       }
     },
-    // Settings promises (2026-09-30): what the AI source says about sharing and helper calls; the shared-source banner; the disk warning; an unpriced model.
+    // Settings promises (2026-09-30): what the AI source says about sharing and helper calls; the disk warning; an unpriced model.
+    // (The classic look's rate-limit banner went with it, v2.155.0: a limited source is on each of its agents' tiles.)
     sourcePromises: async () => {
-      const savedProfiles = profiles, savedUsage = sourceUsageData;
+      const savedProfiles = profiles;
       try {
         // The dialog paints from the page's own list (it is fetched with the fleet).
         window.__override['/v1/ai-profiles'] = profiles = [{ id: 'p1', name: 'Claude token', vendor: 'anthropic', kind: 'subscription', credential: 'setup-token', mine: true,
@@ -1722,22 +1744,9 @@ const SCENARIOS = String.raw`(() => {
         ok('it says their agents hold the key', list.textContent.includes('Their agents hold it, so someone determined can read it from their own agent'));
         ok('and how to take it back', list.textContent.includes('un-share, move their agents, and replace the token'));
         aiDlg.close();
-        // The rate-limit banner is the source's: a member hears about a shared source; the owner hears whose agents are stuck.
-        const since = new Date(Date.now() - 3600000).toISOString();
-        const src = { id: 'p9', name: 'House Claude', agents: 2, liveAgents: 2, status: 'limited', limitedSince: since };
-        sourceUsageData = { sources: [{ ...src, mine: false }] };
-        renderLimitBanner();
-        const banner = document.getElementById('limitBanner');
-        ok('a member sees it: ' + banner.textContent, !banner.hidden && banner.textContent.includes('Shared source House Claude is being rate-limited') && banner.textContent.includes("your 2 agents on it can't answer"));
-        sourceUsageData = { sources: [{ ...src, liveAgents: 3, mine: true, others: { agents: 2, liveAgents: 2, requests5h: 1, requests7d: 1 } }] };
-        renderLimitBanner();
-        ok('the owner hears about the other accounts: ' + banner.textContent, banner.textContent.includes("its 3 agents (and 2 on other accounts) can't answer") && !banner.textContent.includes('Shared source'));
-        sourceUsageData = { sources: [{ ...src, liveAgents: 0, agents: 0, mine: true, others: { agents: 1, liveAgents: 1, requests5h: 1, requests7d: 1 } }] };
-        renderLimitBanner();
-        ok('only other accounts stuck: still shown', !banner.hidden && banner.textContent.includes("its 1 agent on other accounts can't answer"));
       } finally {
         delete window.__override['/v1/ai-profiles'];
-        profiles = savedProfiles; sourceUsageData = savedUsage; renderLimitBanner();
+        profiles = savedProfiles;
         if (aiDlg.open) aiDlg.close();
       }
     },
@@ -3200,7 +3209,8 @@ try { new Function(SCENARIOS); } catch (err) {
 
 const work = mkdtempSync(join(tmpdir(), 'hb-ui-'));
 try {
-  const head = `<head><script>localStorage.setItem('theme','light')</script><script>${STUB.replace('__VERSION__', version)}</script><script>${RECORDER}</script>`;
+  // hb-ui=classic and ?ui=classic (below): opened as a browser that had chosen the classic look (scenario classicMap).
+  const head = `<head><script>localStorage.setItem('theme','light'); localStorage.setItem('hb-ui','classic')</script><script>${STUB.replace('__VERSION__', version)}</script><script>${RECORDER}</script>`;
   const tail = `<script>setTimeout(() => { ${SCENARIOS} }, 2500)</script></body>`;
   // Replacer functions: a bare string is a pattern to replace(), and `$'` inside the scenarios meant "the rest of the page".
   writeFileSync(join(work, 'page.html'), page.replace('<head>', () => head).replace('</body>', () => tail));
@@ -3215,7 +3225,7 @@ try {
       dom = execFileSync('docker', [
         'run', '--rm', '--shm-size=1g', '-v', `${work}:/w`, 'zenika/alpine-chrome',
         '--no-sandbox', '--headless', '--disable-gpu', '--disable-dev-shm-usage', '--hide-scrollbars',
-        '--window-size=1400,1000', '--virtual-time-budget=600000', '--dump-dom', 'file:///w/page.html',
+        '--window-size=1400,1000', '--virtual-time-budget=600000', '--dump-dom', 'file:///w/page.html?ui=classic',
       ], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] });
     } catch (err) { dom = String(err.stdout ?? ''); }
   }

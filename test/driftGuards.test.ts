@@ -136,19 +136,6 @@ describe('base image carries the OCR stack (silent-fail class)', () => {
   });
 });
 
-describe('agent list position pickers are filled where the cards render', () => {
-  // v1.5.6 wired fillPositionPickers() into the fleet-sources view instead of
-  // renderAgents(), so every picker stayed hidden and nothing failed. The
-  // pickers start `hidden`; only this call reveals them.
-  it('renderAgents() calls fillPositionPickers() after writing the list', () => {
-    const web = read('web/index.html');
-    const start = web.indexOf('\nfunction renderAgents()');
-    expect(start).toBeGreaterThan(0);
-    const body = web.slice(start, web.indexOf('\n}\n', start));
-    expect(body).toMatch(/el\.innerHTML = html;\s*\n\s*fillPositionPickers\(el\);/);
-  });
-});
-
 describe('the hatchabot CLI runs from any directory', () => {
   // The bin was `#!/usr/bin/env -S npx tsx`, which resolves tsx against the
   // CURRENT directory: the first `hatchabot ls` run from $HOME on a fresh
@@ -226,7 +213,7 @@ describe('action buttons never refuse in silence (UI audit 2026-09-17)', () => {
       const body = web.slice(start, start + 700);
       // Every early return in the guard block must carry a toast.
       const bareReturns = [...body.matchAll(/if \([^)]*\) \{? ?return;/g)]
-        .filter((m) => !/toast|renderAgents|\$\(/.test(body.slice(Math.max(0, m.index! - 90), m.index! + 12)));
+        .filter((m) => !/toast|renderV2|\$\(/.test(body.slice(Math.max(0, m.index! - 90), m.index! + 12)));
       expect(bareReturns.map((m) => m[0]), `${name} refuses silently`).toEqual([]);
     }
   });

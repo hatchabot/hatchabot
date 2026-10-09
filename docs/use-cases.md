@@ -18,7 +18,7 @@ regression or the candidate gate); **manual** = only a person has exercised it;
 | A5 | Follow the live-ticked setup guide | U | none (UI only) |
 | A6 | Put Hatchabot on my tailnet over HTTPS; phone QR | U A | auto (tailnet.test.ts, publicUrlWrite.test.ts, routeGaps2.test.ts) |
 | A7 | Install as a phone/desktop app (PWA) | U | none (UI only) |
-| A8 | Icon home screen vs Classic; light/dark | U | none (UI only; screenshots.mjs renders it) |
+| A8 | Icon home screen (the only look since v2.155.0; a browser that had Classic sees a one-time map); light/dark | U | auto (ui-clickthrough: classicMap) |
 | A9 | Uninstall; purge | C | none |
 | A10 | Two installations on one host; TLS directly | C (.env) | none — see S0 |
 | A11 | The isolated smoke test | C | auto (npm run smoke) |

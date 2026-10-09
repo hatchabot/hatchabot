@@ -61,33 +61,15 @@
   }
   .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 80px; }
   header { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
-  .hrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .hrow .spacer { margin-left: auto; }
-  h1 { font-size: 22px; margin: 0; letter-spacing: 0.3px; }
   .hbtn { background: none; border: 1px solid var(--line); border-radius: 8px;
           padding: 5px 12px; cursor: pointer; color: inherit; font: inherit; font-size: 13px; }
   .hbtn:hover { border-color: var(--dim); }
   .hbtn.accent { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
-  /* light/dark slider */
-  .switch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
-  .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
-  .switch-track { width: 38px; height: 22px; border-radius: 11px; background: var(--panel-2);
-                  border: 1px solid var(--line); position: relative; transition: background .15s; }
-  .switch-thumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
-                  background: var(--accent); transition: left .15s; }
-  .switch input:checked + .switch-track .switch-thumb { left: 18px; }
-  .switch-ico { font-size: 13px; color: var(--dim); }
-  h1 b { color: var(--accent); font-weight: 700; }
   .sub { color: var(--dim); font-size: 13px; }
   /* Which build this browser actually loaded — the answer to "is my fix live?" */
   .appver { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums;
     border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; align-self: center; }
-  /* Pool-ready status, right-aligned in the actions row — a quiet capacity chip. */
-  .pool-ready { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
-    border: 1px solid var(--line); border-radius: 999px; white-space: nowrap; }
-  .pool-ready[hidden] { display: none; }
   .pool-dot { color: var(--ok); font-size: 10px; line-height: 1; }
-  .rt-steps { margin:10px 0 4px; padding-left:20px; display:grid; gap:6px; font-size:13.5px }
   .rt-caps { margin-top:10px }
   .rt-caps > summary { cursor:pointer; font-size:13.5px; color:var(--text) }
   .cap-wrap { overflow-x:auto; margin-top:8px }
@@ -98,55 +80,7 @@
   .cap-ver { font-family:ui-monospace,monospace; white-space:nowrap }
   .pool-status { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin:10px 0 4px; padding:10px 12px;
     border:1px solid var(--line); border-radius:10px; background:var(--panel-2); font-size:14px }
-  /* Jump-to legend: fixed in the left margin, so it stays put while the cards
-     scroll. Wide screens PIN it open permanently and the page reserves a gutter
-     (body.has-toc padding) so it never covers a card. Narrow screens have no
-     room for a gutter, so there it stays an on-demand overlay from 📑 Jump. */
-  #toc { position: fixed; left: 16px; top: 16px; width: 216px;
-    max-height: calc(100vh - 32px); display: none; flex-direction: column;
-    background: var(--panel); border: 1px solid var(--line);
-    border-radius: var(--radius); padding: 10px 8px 8px; z-index: 40;
-    font-size: 13px; box-shadow: 0 4px 18px rgba(0,0,0,.18); }
-  #toc.open { display: flex; }
-  @media (min-width: 1200px) {
-    body.has-toc { padding-left: 244px; }   /* reserve the gutter, no overlap */
-    body.has-toc #toc { display: flex; }    /* always there, never toggled */
-    body.has-toc #toc .toc-toggle { display: none; } /* pinned: nothing to close */
-    /* Pinned it's part of the layout, not a floating overlay — drop the lift. */
-    body.has-toc #toc { box-shadow: none; }
-    #tocBtn { display: none !important; }   /* the button is a narrow-screen fallback */
-  }
-  .toc-head { display: flex; align-items: center; gap: 6px; padding: 0 4px 6px;
-    border-bottom: 1px solid var(--line); margin-bottom: 4px; }
-  .toc-head b { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); }
-  .toc-toggle { margin-left: auto; background: none; border: 0; color: var(--dim);
-    cursor: pointer; font-size: 13px; padding: 2px 4px; line-height: 1; }
-  #tocList { overflow-y: auto; overflow-x: hidden; }
-  .toc-group { cursor: pointer; }
-  .toc-group:hover { color: var(--text); }
-  .toc-group { font-weight: 600; color: var(--dim); font-size: 11px;
-    text-transform: uppercase; letter-spacing: .04em; margin: 8px 4px 2px; }
-  .toc-item { display: flex; align-items: center; gap: 7px; padding: 3px 6px;
-    border-radius: 6px; color: var(--text); text-decoration: none; cursor: pointer;
-    white-space: nowrap; overflow: hidden; }
-  .toc-item:hover { background: var(--panel-2); }
-  .toc-item .toc-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
-  .toc-item .toc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  /* "Someone is waiting to be let in" — driven by the live pairing poll, so it
-     clears itself as soon as the request is approved or denied. */
-  .inbox-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 16px;
-    height: 16px; margin-left: 5px; padding: 0 4px; border-radius: 8px; font-size: 11px;
-    font-weight: 700; background: var(--accent); color: var(--accent-ink); }
   #faFilters .hbtn.fa-on { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .toc-badge { flex: none; display: inline-flex; align-items: center; gap: 2px;
-    padding: 0 6px; height: 17px; border-radius: 999px; font-size: 11px;
-    font-weight: 700; color: var(--warn); border: 1px solid var(--warn);
-    animation: tocWait 2s ease-in-out infinite; }
-  @keyframes tocWait { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
-  @media (prefers-reduced-motion: reduce) { .toc-badge { animation: none; } }
-  /* Brief highlight on the card you jumped to. */
-  @keyframes tocFlash { from { box-shadow: 0 0 0 2px var(--accent); } to { box-shadow: 0 0 0 2px transparent; } }
-  .card.toc-flash { animation: tocFlash 1.2s ease-out; }
   .card {
     background: var(--panel); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
@@ -169,17 +103,6 @@
   .su-chart .peak { stroke:var(--line); stroke-width:1; stroke-dasharray:2 3 }
   .su-cap { display:flex; justify-content:space-between; gap:8px; font-size:11px; color:var(--dim) }
   .su-top { font-size:12px; color:var(--dim); margin-top:4px }
-  #limitBanner { background:color-mix(in srgb, var(--bad) 18%, transparent); border:1px solid var(--bad); color:var(--text); border-radius:10px; padding:10px 14px; margin:8px 0; font-size:14px }
-  /* drag bar under a scrolling pane (recent activity) */
-  .resize-bar { height:12px; margin:4px 0 -8px; cursor:ns-resize; touch-action:none; display:flex; align-items:center; justify-content:center }
-  .resize-bar::before { content:""; width:40px; height:4px; border-radius:2px; background:var(--line); transition:background .15s }
-  .resize-bar:hover::before, .resize-bar:focus-visible::before, .resize-bar.active::before { background:var(--accent) }
-  .resize-bar:focus-visible { outline:none }
-  /* card with a reorder rail: rail in its own full-height column at the far left */
-  .card.has-rail { display:flex; align-items:stretch; gap:14px; padding-left:10px }
-  .rail-col { flex:none; display:flex; align-items:flex-start; padding:2px 10px 0 0; border-right:1px solid var(--line) } /* top: stays beside the name as the card grows */
-  .card-body { flex:1; min-width:0 }
-  .rail-col { flex-direction:column; gap:8px }
   /* The OpenClaw console, embedded: most of the viewport, no page chrome. */
   .console-dlg { width:min(1200px, 96vw); height:min(900px, 92vh); max-width:none; padding:0; display:none; flex-direction:column; overflow:hidden }
   .console-dlg[open] { display:flex }
@@ -228,41 +151,6 @@
   #consoleCover { position:absolute; left:0; right:0; bottom:0; top:51px; z-index:2; background:var(--bg); display:flex; align-items:center; justify-content:center; gap:12px; color:var(--dim); font-size:15px }
   .console-spin { width:18px; height:18px; border-radius:50%; border:2px solid var(--line); border-top-color:var(--accent); animation:v2spin .8s linear infinite }
   @media (prefers-reduced-motion: reduce) { .console-spin { animation:none } }
-  .posdd { width:24px; height:22px; padding:0; margin:0; border:1px solid var(--line); border-radius:7px; background:transparent; color:var(--dim); font-size:11px; font-weight:600; text-align:center; text-align-last:center; appearance:none; -webkit-appearance:none; cursor:pointer; font-variant-numeric:tabular-nums }
-  .posdd:hover, .posdd:focus-visible { color:var(--text); border-color:var(--accent); outline:none }
-  .posdd option { color:var(--text); background:var(--panel) }
-  /* the reorder rail: one segmented control, dim until the card is hovered */
-  .movecol { display:flex; flex-direction:column; width:24px; flex:none; border:1px solid var(--line); border-radius:9px; overflow:hidden; opacity:.5; transition:opacity .15s }
-  .card:hover .movecol, .movecol:focus-within { opacity:1 }
-  @media (hover:none) { .movecol { opacity:1 } }
-  .movecol .mv { display:flex; align-items:center; justify-content:center; height:19px; margin:0; padding:0; border:0; border-radius:0; background:transparent; color:var(--dim); cursor:pointer; min-width:0 }
-  .movecol .mv:hover { background:var(--panel-2); color:var(--text) }
-  .movecol .mv:focus-visible { outline:2px solid var(--accent); outline-offset:-2px }
-  .movecol svg { width:12px; height:12px; display:block }
-  .movecol .grip { height:22px; cursor:grab; touch-action:none }
-  /* group header controls: the same look, laid out horizontally */
-  .seg { display:inline-flex; align-items:stretch; border:1px solid var(--line); border-radius:8px; overflow:hidden; margin-left:6px }
-  .seg .mv { display:flex; align-items:center; justify-content:center; height:22px; min-width:24px; margin:0; padding:0 7px; border:0; border-radius:0; background:transparent; color:var(--dim); font-size:11px; font-weight:600; letter-spacing:.02em; cursor:pointer }
-  .seg .mv + .mv { border-left:1px solid var(--line) }
-  .seg .mv:hover { background:var(--panel-2); color:var(--text) }
-  .seg svg { width:12px; height:12px; display:block }
-  .movebtn { padding: 0 7px; font-size: 10px; line-height: 1.35; color: var(--dim);
-             background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }
-  .movebtn:hover { color: var(--text); border-color: var(--accent); }
-  .group-header { display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700;
-                  letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); margin: 22px 2px 8px; }
-  .group-header:first-child { margin-top: 4px; }
-  /* Archived agents are still yours, but they're not the fleet you're running.
-     A closed drawer keeps them out of the way without hiding them. */
-  .archive-drawer { margin-top: 26px; border-top: 1px solid var(--line); padding-top: 6px; }
-  .archive-drawer > summary { cursor: pointer; list-style: none; display: flex; align-items: center;
-                  gap: 8px; font-size: 12px; font-weight: 700; letter-spacing: 0.08em;
-                  text-transform: uppercase; color: var(--dim); padding: 8px 2px; }
-  .archive-drawer > summary::-webkit-details-marker { display: none; }
-  .archive-drawer > summary::before { content: '▸'; font-size: 11px; }
-  .archive-drawer[open] > summary::before { content: '▾'; }
-  .archive-drawer > summary:hover { color: var(--text); }
-  .archive-note { color: var(--dim); font-size: 12px; margin: 2px 2px 10px; }
   /* Settings sections that are mostly prose: a bordered drawer keeps the tab
      scannable — controls visible, explainers one click away. */
   .sec-drawer { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 14px; }
@@ -274,11 +162,6 @@
   .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .grow { flex: 1; min-width: 0; }
   .name { font-weight: 650; font-size: 16px; }
-  /* The agent name doubles as the chat deep-link (tg://). It must LOOK
-     clickable: accent color, a Telegram-ish ↗ tail, underline on hover. */
-  a.name { color: var(--accent); text-decoration: none; }
-  a.name::after { content: " ↗"; font-size: 12px; font-weight: 400; opacity: .7; }
-  a.name:hover { text-decoration: underline; }
   .chip {
     font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
     padding: 3px 9px; border-radius: 99px; border: 1px solid transparent; white-space: nowrap;
@@ -291,11 +174,6 @@
   .chip.ARCHIVED { color: var(--dim); border-color: var(--dim); }
   @keyframes pulse { 50% { opacity: 0.3; } }
   .reason { color: var(--bad); font-size: 13px; margin-top: 8px; }
-  .persona { color: var(--dim); font-size: 13px; margin-top: 4px; overflow: hidden;
-             text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  .runtime { color: var(--dim); font-size: 12px; margin-top: 6px;
-             font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .runtime::before { content: "⬢ "; color: var(--off); }
   .actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
   button, .btn {
     font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
@@ -318,42 +196,9 @@
   }
   .tab:hover { color: var(--text); }
   .tab[aria-selected="true"] { color: var(--text); font-weight: 650; border-bottom-color: var(--accent); }
-  /* ⋯ overflow menu on agent cards */
-  details.menu { position: relative; display: inline-block; }
-  details.menu > summary {
-    list-style: none; cursor: pointer; user-select: none;
-    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
-    color: var(--text); font: inherit; font-size: 13px; padding: 6px 12px; line-height: 1.2;
-  }
-  details.menu > summary::-webkit-details-marker { display: none; }
-  details.menu[open] > summary { border-color: var(--accent); }
-  .menu-items {
-    /* z-index ABOVE the jump legend (#toc is z-40): the menu opens leftward
-       from the ⋯ button and its left edge slides under the pinned legend, which
-       otherwise renders on top and clips it. Opening rightward instead would
-       push it off the card's right edge (⋯ is the last action), so we bring it
-       forward rather than move it. */
-    position: absolute; right: 0; top: calc(100% + 4px); z-index: 60; min-width: 168px;
-    display: flex; flex-direction: column; gap: 2px; padding: 5px;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-    box-shadow: 0 8px 26px rgba(0,0,0,0.28);
-  }
-  .menu-items > button, .menu-items > a {
-    text-align: left; width: 100%; background: none; border: 0; border-radius: 6px;
-    color: var(--text); font: inherit; font-size: 13px; padding: 7px 10px; cursor: pointer;
-  }
-  .menu-items > button:hover, .menu-items > a:hover { background: var(--panel-2); }
   .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   .primary:hover { filter: brightness(1.08); }
   .danger { color: var(--bad); }
-  .fab {
-    position: fixed; right: 20px; bottom: 20px; width: 58px; height: 58px;
-    border-radius: 50%; font-size: 30px; line-height: 1;
-    background: var(--accent); color: var(--accent-ink); border: none;
-    box-shadow: 0 6px 20px rgba(0,0,0,0.45);
-  }
-  /* after .fab so its position wins: sits above the + button */
-  .fab-top { bottom: 90px; width: 44px; height: 44px; right: 27px; font-size: 20px; opacity: .85; }
   dialog {
     background: var(--panel); color: var(--text); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 20px; width: min(440px, 92vw);
@@ -416,20 +261,9 @@
     box-shadow: 0 6px 28px rgba(0,0,0,0.45);
   }
   .toast.progress::before { content: "⏳ "; }
-  /* drag to reorder: ⠿ grip on cards, whole row in the legend */
-  .grip { user-select:none }
-  body.dragging, body.dragging * { cursor:grabbing !important; user-select:none }
-  .drag-src { opacity:.45 }
-  .drop-line { position:fixed; height:3px; background:var(--accent); border-radius:2px; z-index:1000; pointer-events:none }
-  .drag-ghost { position:fixed; left:0; top:0; z-index:1001; pointer-events:none; background:var(--panel); color:var(--text); border:1px solid var(--accent); border-radius:8px; padding:4px 10px; font-size:13px; font-weight:600; box-shadow:0 6px 18px rgba(0,0,0,.35); white-space:nowrap }
-  .toc-item { user-select:none }
-
-  /* ---- UI v2 (?ui=v2): icon home screen, chat first, settings in a sheet ---- */
+  /* ---- the icon home screen: chat first, settings in a sheet (body.v2) ---- */
   .v2only { display:none }
   body.v2 .v2only { display:revert }
-  body.v2 header > .hrow + .hrow, body.v2 #agents, body.v2 #activityCard,
-  body.v2 #limitBanner, body.v2 #toc, body.v2 .fab, body.v2 #tocBtn, body.v2 #installBtn { display:none !important }
-  body.v2 .wrap > header:not(#v2Header) { display:none !important }
   /* One button look on the v2 screen (Chris, 2026-09-18: no mix of white and
      gold). Every button shares a surface; the main action on a panel is marked
      by accent-coloured text and a tinted edge rather than a gold fill. */
@@ -624,7 +458,7 @@
      nothing rather than an empty box. */
   .v2card:not(:has(> *:not([hidden]))) { display:none }
   /* The agent's settings sheet, in the same outlined sections as ⚙ Settings.
-     Its rows and the sections it borrows from the classic editor are drawn as
+     Its rows and the sections it borrows from editDlg are drawn as
      cards by CSS alone: the rows are regenerated on every render, and the
      borrowed sections go home again when the sheet closes, so neither is
      re-parented to get its outline. */
@@ -813,8 +647,6 @@
     .classrow { grid-template-columns:1fr 1fr }
     .classrow .cname, .classrow .cadd { grid-column:1 / -1 }
   }
-  .group-header.new-group-drop { display:none; border:2px dashed var(--accent); border-radius:10px; opacity:.85; margin-top:14px; justify-content:center }
-  body.dragging .group-header.new-group-drop { display:flex }
   .group-name.editing { outline:2px solid var(--accent); border-radius:6px; padding:0 4px; background:var(--bg) }
   .v2chan { border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin:10px 0; display:flex; flex-direction:column; gap:8px }
   .v2chan-h { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
@@ -942,8 +774,7 @@
   .rt-tbl td:last-child { white-space:nowrap }
   .rt-tbl td:last-child, .rt-tbl th:last-child { width:1% }
   .rt-under td { border-top:0; padding-top:0 }
-  /* Base images, v2: one sentence and the list. The long explanations stay in the classic view and the docs. */
-  body.v2 #rtIntro, body.v2 #rtIntro + .v2more, body.v2 #rtDerivedHint, body.v2 #runtimeSearch, body.v2 #rtImagesH, body.v2 #rtFleetNote { display:none }
+  /* Base images: one sentence and the list. The long explanations are in the docs. */
   body.v2 #paneRuntime:has(#rtPanel:not([hidden])) #runtimeStatus { display:none }
   body.v2 #rtBase { font-size:14.5px; color:var(--text); margin:2px 0 14px }
   body.v2 #rtBase b { font-weight:650 }
@@ -990,20 +821,20 @@
     .v2row { grid-template-columns:1fr; gap:4px }
     .v2grid { grid-template-columns:repeat(auto-fill, minmax(84px, 1fr)) }
   }
+  /* Shown once to someone who had the classic look (v2.155.0): where its buttons went. */
+  .v2classicmap { border:1px solid color-mix(in srgb, var(--accent) 55%, var(--line)); border-radius:14px; padding:14px 18px 16px; margin:0 0 18px;
+                  background:color-mix(in srgb, var(--accent) 8%, var(--panel)) }
+  .v2classicmap h2 { margin:0 0 4px; font-size:17px }
+  .v2classicmap p { margin:0 0 8px }
+  .v2classicmap dl { display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1.25fr); gap:4px 16px; margin:0 0 12px; font-size:13.5px }
+  .v2classicmap dt { color:var(--dim) }
+  .v2classicmap dd { margin:0 }
+  @media (max-width:560px) { .v2classicmap dl { grid-template-columns:1fr; gap:0 } .v2classicmap dd { margin-bottom:6px } }
   /* ?demo screenshot mode: personal details unreadable */
   .demo .pii { filter:blur(6px); user-select:none; pointer-events:none }
 </style>
 </head>
-<body>
-<nav id="toc" aria-label="Jump to agent">
-  <div class="toc-head">
-    <b>Agents</b><span class="sub" id="tocCount"></span>
-    <button class="movebtn" title="Sort the agents in every group A→Z, and keep them that way" onclick="sortAllGroups('name')" style="margin-left:auto">A→Z</button>
-    <button class="movebtn" title="Sort the agents in every group by last activity, most recent first" onclick="sortAllGroups('activity', true)">⏳</button>
-    <button class="toc-toggle" title="Close" onclick="closeToc()">✕</button>
-  </div>
-  <div id="tocList"></div>
-</nav>
+<body class="v2">
 <div class="wrap">
   <header id="v2Header" class="v2top v2only">
     <a class="v2brand" href="./" onclick="event.preventDefault(); scrollTo({ top: 0, behavior: 'smooth' })">
@@ -1030,7 +861,6 @@
         <button role="menuitem" onclick="v2CloseAccount(); openSetupGuide()">Setup guide</button>
         <button role="menuitem" onclick="v2CloseAccount(); helpDlg.showModal()">Help</button>
         <button role="menuitem" onclick="v2CloseAccount(); openReport()">Report a problem</button>
-        <button role="menuitem" onclick="location.search = '?ui=classic'">Classic look</button>
         <div class="v2popsep"></div>
         <button role="menuitem" class="v2signout" onclick="signOut()">Sign out or switch account</button>
         <button role="menuitem" id="v2SignOutAll" onclick="v2CloseAccount(); signOutEverywhere()" title="Ends your sessions on every phone, tablet and computer, this one included, and your command-line sign-ins">Sign out on every device</button>
@@ -1038,59 +868,36 @@
       </div>
     </div>
   </header>
-  <header>
-    <div class="hrow">
-      <h1>Hatcha<b>bot</b></h1>
-      <span class="appver" id="appVer" title="The build this browser is running. If it lags the server after a reload, something is serving you a cached page."></span>
-      <span class="spacer"></span>
-      <button id="installBtn" class="hbtn accent" title="Install Hatchabot as an app on this device" onclick="installApp()" hidden>⬇ Install app</button>
-      <button class="hbtn" onclick="location.search = '?ui=v2'" title="Switch to the new home screen">✨ New look</button>
-      <span class="sub" id="whoami"></span>
-      <label class="switch" title="Light / dark theme">
-        <span class="switch-ico">☀</span>
-        <input type="checkbox" id="themeToggle" onchange="setThemeFromToggle()">
-        <span class="switch-track"><span class="switch-thumb"></span></span>
-        <span class="switch-ico">🌙</span>
-      </label>
-      <button id="logoutBtn" class="hbtn" onclick="signOut()"
-              title="Sign out — then sign in as anyone: the Google chooser offers 'Use another account'. Tabs share one login; for two accounts AT ONCE, use another browser profile or a private window.">Sign out / switch</button>
-      <button id="logoutAllBtn" class="hbtn" onclick="signOutEverywhere()" title="Ends your sessions on every phone, tablet and computer, this one included, and your command-line sign-ins">Sign out everywhere</button>
-    </div>
-    <div class="hrow">
-      <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
-      <button id="fleetActionsBtn" class="hbtn" title="Apply an action (switch model, rebuild, stop/start) to a selection of agents — pick by AI source, group, host, or state" onclick="openFleetActions()" hidden>⚡ Bulk actions</button>
-      <button id="rebuildAllBtn" class="hbtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden>Rebuild all</button>
-      <button id="inboxBtn" class="hbtn" title="Agents other users have sent you" onclick="openInbox()">📥 Inbox<span id="inboxBadge" class="inbox-badge" hidden></span></button>
-      <button id="importBtn" class="hbtn" title="Open a .hatchabot file — a full backup is restored as the same agent; a shared template becomes a fresh agent you give your own bot" onclick="$('importFile').click()">Import</button>
-      <button id="galleryBtn" class="hbtn" title="Start a new agent from one you already have" onclick="openGallery()">📋 Templates</button>
-      <button id="fleetBtn" class="hbtn" title="Fleet health — states, activity, backups, and runtime at a glance" onclick="openFleetHealth()">📊 Health</button>
-      <button id="fleetUsageBtn" class="hbtn" title="Usage — every running agent ranked by tokens, and what it cost" onclick="openFleetUsage()">📊 Usage</button>
-      <button id="fleetSourcesBtn" class="hbtn" title="Which agents are on which AI source, and which models" onclick="openFleetSources()">📊 Sources</button>
-      <button id="setupGuideBtn" class="hbtn" title="The setup checklist — what is done, what is left" onclick="openSetupGuide()">⚑ Setup guide</button>
-      <button id="helpBtn" class="hbtn" title="Good to know — key concepts worth remembering" onclick="helpDlg.showModal()">❔ Help</button>
-      <button id="tocBtn" class="hbtn" title="Jump to an agent — a clickable table of contents" onclick="toggleToc()" hidden>📑 Jump</button>
-      <span class="spacer"></span>
-      <span class="sub pool-ready" id="poolInfo" hidden title="Bots parked in the pool — a new agent grabs one instantly, no BotFather trip. Manage them in ⚙ Settings → Bot pool."></span>
-    </div>
-    <input type="file" id="importFile" accept=".hatchabot,.agentclaw" hidden onchange="importAgentFile(this.files[0])">
-  </header>
+  <input type="file" id="importFile" accept=".hatchabot,.agentclaw" hidden onchange="importAgentFile(this.files[0])">
   <div id="setup"></div>
-  <div id="limitBanner" hidden></div>
   <div id="sfBlock" hidden style="background:color-mix(in srgb, var(--accent) 17%, transparent);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;margin:8px 0"></div>
   <div id="secNotice" hidden style="background:color-mix(in srgb, var(--accent) 17%, transparent);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;margin:8px 0"></div>
   <div id="noticeBanner" hidden style="background:color-mix(in srgb, var(--accent) 17%, transparent);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;margin:8px 0"></div>
 <div id="offlineBanner" hidden style="background:var(--bad);color:#fff;border-radius:10px;padding:10px 14px;margin:8px 0;font-weight:600">⚠ Can't reach Hatchabot — what you see may be an old cached copy. If you're away from home, check that <b>Tailscale</b> is connected on this device, then pull to refresh.</div>
-  <div class="card" id="activityCard" hidden>
-    <div class="row">
-      <span class="name grow">Recent activity</span>
-      <span class="sub" id="activityCount"></span>
-      <button onclick="openAudit()" title="Full audit log — filter by agent, see details">See all →</button>
-    </div>
-    <div id="activity" style="margin-top:8px;max-height:260px;overflow:auto"></div>
-    <div class="resize-bar" id="activityResize" role="separator" aria-orientation="horizontal" aria-label="Resize recent activity" tabindex="0" title="Drag to resize · double-click to reset"></div>
-  </div>
-  <div id="agents"><div class="hb-loading" aria-live="polite"><span class="hb-spin" aria-hidden="true"></span> Loading your agents…</div></div>
   <div id="v2home" class="v2only">
+    <section class="v2classicmap" id="v2ClassicMap" hidden aria-labelledby="v2ClassicMapTitle">
+      <h2 id="v2ClassicMapTitle">The classic look is gone — everything is in the agent's page now</h2>
+      <p class="sub">Click an agent's icon to open its page. Where the card's buttons went:</p>
+      <dl>
+        <dt>⚙ Settings, ⏰ Tasks</dt><dd>its page's tabs; tasks are under <b>Schedule</b></dd>
+        <dt>Invite…, the members list</dt><dd><b>Sharing</b></dd>
+        <dt>⧉ Clone, 📤 Share, 📨 Send, 👪 New child, Proposals, Push</dt><dd><b>Sharing → Copy or share</b></dd>
+        <dt>🏷 Sync name, Telegram Web</dt><dd><b>Telegram</b></dd>
+        <dt>📝 Chat → Memory, 📥 Recover context</dt><dd><b>Personality → Memory</b></dd>
+        <dt>💬 History</dt><dd><b>Data → History</b></dd>
+        <dt>Wake, Start, Retry, Sleep, Restore</dt><dd>the bar at the top of its page</dd>
+        <dt>Rebuild, 🏷 Group, its place in the group</dt><dd><b>Overview</b> (sort by <b>My order</b> to see your order)</dd>
+        <dt>Stop, 📊 Usage, ❤️ Health, Logs</dt><dd><b>Overview → Checks</b>, and <b>Usage</b></dd>
+        <dt>Move, Download copy, 📥 Archive, Delete</dt><dd><b>Advanced</b></dd>
+        <dt>OpenClaw (debug)</dt><dd>click the icon, or 💬 Chat</dd>
+        <dt>Import, 📋 Templates</dt><dd><b>New</b> → open a .hatchabot file / start from a template</dd>
+        <dt>📊 Health (all agents)</dt><dd><b>Bulk actions → ❤️ Check all</b></dd>
+        <dt>📊 Sources, 📑 Jump legend</dt><dd><b>View by</b> (Source, Alerts…)</dd>
+        <dt>Planned agents</dt><dd>the <b>Planned</b> group</dd>
+        <dt>Help, Install app, theme, sign out</dt><dd>your account menu, the round button at the top right</dd>
+      </dl>
+      <button type="button" class="primary" onclick="v2DismissClassicMap()">Got it</button>
+    </section>
     <section class="v2hub" aria-labelledby="v2HubTitle">
       <div class="v2hubmain">
         <div class="v2hubhead"><h2 id="v2HubTitle">Hatchabot</h2><span id="v2HubLlm"></span><span class="spacer"></span><span id="v2HubTools"></span></div>
@@ -1170,8 +977,8 @@
 </dialog>
 
 
-<button class="fab fab-top" id="topBtn" title="Back to top" hidden>↑</button>
-<button class="fab" id="fabBtn" title="New agent" hidden>+</button>
+<!-- Never shown: New agent, the setup guide and the gallery press it to open the create dialog. -->
+<button id="fabBtn" title="New agent" hidden>+</button>
 
 <dialog id="consoleDlg" class="console-dlg" aria-label="Agent console">
   <div class="console-bar">
@@ -1435,16 +1242,6 @@
 
 <dialog id="editDlg" style="width:min(720px,94vw)">
   <h3 style="margin:0 0 10px"><span id="editAgent"></span> — settings</h3>
-  <div class="tabs" role="tablist">
-    <button class="tab" id="tabDef" role="tab" aria-selected="true" onclick="showEditTab('def')">📖 Definition</button>
-    <button class="tab" id="tabEditSnap" role="tab" aria-selected="false" onclick="showEditTab('snap')">Snapshots</button>
-    <button class="tab" id="tabEditAi" role="tab" aria-selected="false" onclick="showEditTab('ai')">AI</button>
-    <button class="tab" id="tabEditData" role="tab" aria-selected="false" onclick="showEditTab('data')">Data</button>
-    <button class="tab" id="tabEditConn" role="tab" aria-selected="false" onclick="showEditTab('conn')">Connections</button>
-    <button class="tab" id="tabEditPeers" role="tab" aria-selected="false" onclick="showEditTab('peers')">🔗 Peers</button>
-    <button class="tab" id="tabEditTg" role="tab" aria-selected="false" onclick="showEditTab('tg')">Telegram</button>
-    <button class="tab" id="tabEditEnv" role="tab" aria-selected="false" onclick="showEditTab('env')">Environment</button>
-  </div>
 
   <section id="paneDef" role="tabpanel">
     <div class="sub" style="margin-bottom:10px">
@@ -1721,19 +1518,7 @@
 
 <dialog id="aiDlg" style="width:min(780px,94vw)">
   <h3 style="margin:0 0 10px">Settings</h3>
-  <div class="tabs" role="tablist">
-    <button class="tab" id="tabAi" role="tab" aria-selected="true" onclick="showTab('ai')">AI sources</button>
-    <button class="tab" id="tabOperator" role="tab" aria-selected="false" onclick="showTab('operator')">👤 You</button>
-    <button class="tab" id="tabConn" role="tab" aria-selected="false" onclick="showTab('conn')">Connections</button>
-    <button class="tab" id="tabPool" role="tab" aria-selected="false" onclick="showTab('pool')">Telegram</button>
-    <button class="tab" id="tabDiscord" role="tab" aria-selected="false" onclick="showTab('discord')">Discord</button>
-    <button class="tab" id="tabBackups" role="tab" aria-selected="false" onclick="showTab('backups')">Backups</button>
-    <button class="tab" id="tabRuntime" role="tab" aria-selected="false" onclick="showTab('runtime')">Runtime</button>
-    <button class="tab" id="tabSecurity" role="tab" aria-selected="false" onclick="showTab('security')">🛡 Security</button>
-    <button class="tab" id="tabAccess" role="tab" aria-selected="false" onclick="showTab('access')">Access</button>
-    <button class="tab" id="tabHosts" role="tab" aria-selected="false" onclick="showTab('hosts')">Hosts</button>
-    <button class="tab" id="tabServers" role="tab" aria-selected="false" onclick="showTab('servers')">Cluster servers</button>
-  </div>
+  <div class="tabs" role="tablist" id="v2SettingsTabs" aria-label="Settings"></div>
 
   <section id="paneAi" role="tabpanel">
     <div class="sub">
@@ -1862,8 +1647,8 @@
       add a <b>runner</b> to run agents on another computer too.
       <details style="margin-top:4px"><summary style="cursor:pointer">Runner or cluster?</summary>
       <div style="margin-top:4px">A <b>runner</b> is another machine under <i>this</i> Hatchabot: same dashboard,
-      same agent list, and <b>Move</b> on an agent's card shifts it between runners. A <b>cluster</b> is a
-      separate Hatchabot server with its own dashboard — <b>Move to another Hatchabot</b> (the card's ⋯ menu)
+      same agent list, and <b>Move…</b> in an agent's Advanced tab shifts it between runners. A <b>cluster</b> is a
+      separate Hatchabot server with its own dashboard — <b>Move to another Hatchabot</b> (the agent's Advanced tab)
       hands an agent over to one, and you manage it there afterwards. One caveat for runners: the desktop
       <b>Claude Max</b> machine login only works on this machine, so a runner agent needs an API-key source
       or a Max setup-token (<code>claude setup-token</code>).</div></details>
@@ -2028,7 +1813,7 @@
   <section id="paneServers" role="tabpanel" hidden>
     <div class="sub">
       Another Hatchabot server, with its own login and dashboard. Register one
-      and <b>Move to another Hatchabot</b> (the agent card's ⋯ menu) hands an agent
+      and <b>Move to another Hatchabot</b> (the agent's Advanced tab) hands an agent
       over in one step. Paste an access token minted on <i>that</i> server
       (its Settings → Security). Most setups never need this.
     </div>
@@ -2182,47 +1967,11 @@
   </section>
 
   <section id="paneRuntime" role="tabpanel" hidden>
-    <div class="sub" id="rtIntro">
-      The shared runtime image every agent runs; each agent picks up changes on its
-      next <b>Rebuild</b>. What agents can do is probed live from the image itself.
-      <details style="margin-top:4px"><summary style="cursor:pointer">What's baked in, and the upgrade rule</summary>
-      <div style="margin-top:4px">The image bakes in the OpenClaw version, the Claude CLI, the <b>gog</b> Google
-      Workspace CLI, the local embedding model (semantic memory search), the <b>PDF/OCR stack</b>
-      (tesseract, ocrmypdf, poppler, qpdf — so scanned pages are read, never silently skipped), and
-      <b>PDF creation</b> (pandoc + weasyprint — markdown/HTML into real PDFs). Upgrading the OpenClaw version is
-      a deliberate, separate command-line step — image packages can be rebuilt without touching it. Web search is
-      always on (keyless DuckDuckGo); one <b>Fleet search key</b> in AI sources upgrades everyone to Brave.</div></details>
-    </div>
     <div id="runtimeStatus" style="margin-top:12px">Loading…</div>
-    <div id="runtimeSearch" class="sub" style="margin-top:6px"></div>
     <div id="rtPanel" hidden>
-    <h4 style="margin:18px 0 4px" id="rtImagesH">Images on this machine</h4>
-    <div class="sub" style="margin-bottom:10px" id="rtFleetNote"> <b>Fleet default</b> is <code id="rtDefault"></code> — agents without a pin follow it on their next rebuild. Try a new image on <b>one agent</b> first; promote it when you're happy, or discard the trial.</div>
     <div id="rtBase" class="sub" style="margin-bottom:8px">Loading…</div>
-    <details id="rtBuild" class="sec-drawer" style="margin-bottom:12px">
-      <summary><b>🧪 Try a newer OpenClaw version, safely</b> <span class="sub">— build a candidate, test it on one agent, then promote</span></summary>
-      <ol class="rt-steps">
-        <li><b>Build a candidate.</b> Hatchabot builds a second copy of the runtime with the new OpenClaw version,
-          next to the current one. No agent changes. It takes a few minutes, and the log appears here.</li>
-        <li><b>Try it on one agent.</b> The candidate shows up in the list below. Press <b>Try on one agent…</b>,
-          pick a low-stakes agent, and use it for a while. Everything else stays on the current version.</li>
-        <li><b>Promote, or back out.</b> Happy? <b>Promote to fleet</b> makes it the default, and each agent moves over
-          on its next rebuild. Not happy? The <b>✕</b> by the agent's name puts it back, and you can delete the candidate.</li>
-      </ol>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
-        <input type="text" id="rtBuildVersion" placeholder="OpenClaw version, e.g. 2026.9.0 — blank = the newest" maxlength="64" style="flex:1;min-width:220px;font-family:ui-monospace,monospace">
-        <button class="primary" id="rtBuildBtn" onclick="startBaseBuild()">Build candidate</button>
-      </div>
-      <label style="display:flex;gap:6px;align-items:center;font-weight:400;margin-top:8px" class="sub">
-        <input type="checkbox" id="rtBuildCandidate" checked style="width:auto">
-        Keep it as a candidate (recommended). Untick to replace the fleet default directly, skipping the trial.</label>
-      <label style="display:flex;gap:6px;align-items:center;font-weight:400;margin-top:4px" class="sub">
-        <input type="checkbox" id="rtBuildLite" style="width:auto">
-        Without its own memory search engine (about 390 MB lighter; its agents use this machine's shared memory search service). OpenClaw 2026.8 and later are always built this way.</label>
-      <pre id="rtBuildLog" hidden style="margin-top:8px;max-height:240px;overflow:auto;font-size:11px;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px;white-space:pre-wrap"></pre>
-    </details>
+    <div class="sub" id="rtBuildLog" hidden style="margin:0 0 12px"></div>
     <div id="rtList">Loading…</div>
-    <div class="sub" id="rtDerivedHint" style="margin-top:10px">Need extra packages (apt) in an image? Ask the management agent — <a href="#" onclick="event.preventDefault();askMgmtForImage()">ask for a derived image…</a> — then pin it to an agent or a class here.</div>
     <div class="sub" id="rtErr" style="color:var(--bad);margin-top:6px"></div>
     </div>
     <div id="rbSection" hidden>
@@ -2340,23 +2089,6 @@
   </div>
 </dialog>
 
-<dialog id="fleetDlg" style="width:min(720px,96vw)">
-  <div style="display:flex;justify-content:space-between;align-items:baseline">
-    <h3 style="margin:0">Fleet health</h3>
-    <button class="hbtn" onclick="loadFleet()">Refresh</button>
-  </div>
-  <div id="fleetSummary" style="margin:12px 0"></div>
-  <div id="fleetAttention"></div>
-  <div id="fleetOps" style="display:flex;gap:24px;flex-wrap:wrap;margin:14px 0"></div>
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;border-top:1px solid var(--line);padding-top:10px">
-    <b>All agents</b>
-    <button class="hbtn" id="fleetHealthBtn" onclick="runFleetHealthChecks()">Run health checks</button>
-  </div>
-  <div id="fleetList" style="margin-top:6px"></div>
-  <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
-    <button onclick="fleetDlg.close()">Close</button>
-  </div>
-</dialog>
 
 <dialog id="logsDlg" style="width:min(720px,94vw)">
   <h3 style="margin:0 0 10px">Activity — <span id="logsAgent"></span></h3>
@@ -2619,18 +2351,6 @@
   </div>
 </dialog>
 
-<dialog id="fleetSourcesDlg" style="width:min(640px,96vw)">
-  <div style="display:flex;justify-content:space-between;align-items:baseline">
-    <h3 style="margin:0">AI sources</h3>
-  </div>
-  <div class="sub" style="margin:4px 0 0">
-    Which of your agents are on which AI source, and which model each runs now.
-  </div>
-  <div id="fleetSourcesBody" style="margin-top:14px"></div>
-  <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
-    <button class="primary" onclick="fleetSourcesDlg.close()">Close</button>
-  </div>
-</dialog>
 
 <dialog id="applyModelDlg" style="width:min(600px,96vw)">
   <h3 style="margin:0 0 4px">New default: <span id="applyModelName"></span></h3>
@@ -2752,7 +2472,7 @@
   <div class="sub" id="faErr" style="color:var(--bad);margin-top:8px"></div>
   <div id="faResults" class="sub" style="margin-top:8px"></div>
   <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-    <b>Rebuild everything</b><button onclick="rebuildAll()">Rebuild all</button>
+    <b>Rebuild everything</b><button onclick="rebuildAll(this)">Rebuild all</button>
     <span class="sub" style="flex-basis:100%">A new container for every running agent, memory kept. Picks up a new runtime image or network. Stopped and sleeping agents are rebuilt when they next start.</span>
   </div>
   <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -2855,18 +2575,6 @@
   <div id="choiceBtns" class="actions" style="justify-content:flex-end;gap:8px;flex-wrap:wrap"></div>
 </dialog>
 
-<dialog id="groupDlg" style="width:min(420px,94vw)">
-  <h3 style="margin:0 0 8px">Group <span id="groupDlgAgent"></span></h3>
-  <div class="sub" style="margin-bottom:8px">Pick an existing group or type a new one. Leave blank to ungroup.</div>
-  <div id="groupChips" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px"></div>
-  <input type="text" id="groupDlgInput" list="groupOptions" maxlength="48" placeholder="e.g. Finance" style="width:100%">
-  <datalist id="groupOptions"></datalist>
-  <div class="err" id="groupErr"></div>
-  <div class="actions" style="justify-content:flex-end">
-    <button onclick="groupDlg.close()">Cancel</button>
-    <button class="primary" onclick="saveGroup()">Save</button>
-  </div>
-</dialog>
 
 <dialog id="inviteDlg">
   <h3 style="margin:0 0 4px">Invite someone to <span id="invAgent"></span></h3>
@@ -2938,7 +2646,6 @@
 const $ = (id) => document.getElementById(id);
 // Stamped into the page by the server. Shown in the header so a stale tab is
 // obvious at a glance rather than something to argue about.
-try { $('appVer').textContent = 'v' + (window.HATCHABOT_VERSION ?? '?'); } catch {}
 let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editData = [];
 /** False until the first agent list arrives — the screen must not guess before then. */
 let agentsLoaded = false;
@@ -2963,13 +2670,32 @@ let availableModels = {}; // profile id -> string[] the source's runtime actuall
 let staleModels = {};     // profile id -> string[] it still lists but the runtime won't serve
 let availableSource = {}; // profile id -> 'runtime' | 'curated' — was the list PROBED live, or the offline fallback
 
-/** The home screen: v2 (icons, chat first) by default since 1.15.0. `?ui=classic`
- *  switches to the old cards and `?ui=v2` back; the choice is remembered. */
-const UI_V2 = (() => {
-  const q = new URLSearchParams(location.search).get('ui');
-  if (q === 'classic' || q === 'v2') { try { localStorage.setItem('hb-ui', q); } catch {} return q === 'v2'; }
-  try { return localStorage.getItem('hb-ui') !== 'classic'; } catch { return true; }
-})();
+/**
+ * The icon home screen is the only one since v2.155.0; the classic card look
+ * is gone. A browser that had chosen it (localStorage 'hb-ui' = 'classic')
+ * has the choice cleared, once, and is shown a short map of where the card's
+ * buttons went (#v2ClassicMap). A ?ui= left in a bookmark is taken out of the
+ * address and otherwise ignored.
+ */
+function takeClassicChoice() {
+  let was = false;
+  try { was = localStorage.getItem('hb-ui') === 'classic'; localStorage.removeItem('hb-ui'); } catch { /* a private window */ }
+  try {
+    const q = new URLSearchParams(location.search);
+    if (q.has('ui')) {
+      q.delete('ui');
+      const rest = q.toString();
+      history.replaceState(history.state, '', location.pathname + (rest ? '?' + rest : '') + location.hash);
+    }
+  } catch { /* the address stays as it was: nothing reads it */ }
+  return was;
+}
+const CLASSIC_WAS_ON = takeClassicChoice();
+function v2DismissClassicMap() {
+  $('v2ClassicMap').hidden = true;
+  // The button pressed is gone: keep the keyboard on the page, at the first thing on the home screen.
+  [...$('v2home').querySelectorAll('button, a[href], [tabindex="0"]')].find((el) => el.offsetParent !== null)?.focus({ preventScroll: true });
+}
 
 const api = async (path, opts = {}) => {
   const { _afterSecondFactor, ...fetchOpts } = opts;
@@ -3424,7 +3150,6 @@ async function loadConfig() {
     : 'Sign in with your account on this machine.';
   if (setup) $('loginDlg').querySelector('h3').textContent = 'Welcome to Hatchabot';
   if (claim) { $('loginDlg').querySelector('h3').textContent = 'Set your password'; void loadClaim(claim); }
-  renderWhoami();
   applyClaudePlanPolicy();
   if (identity) loadGoogleButton();
 }
@@ -3492,16 +3217,9 @@ async function startSession(idToken) {
   // The cookie only carries the subject — remember the email locally so the
   // header can say WHO this browser is signed in as (all tabs share it).
   if (out.email) localStorage.setItem('hatchabot_email', out.email);
-  renderWhoami();
   loginDlg.close();
   $('loginIdPw').value = '';
   await refresh(true);
-}
-
-function renderWhoami() {
-  const el = $('whoami');
-  if (el) el.textContent = appConfig.authMode === 'identity' && !DEMO
-    ? (localStorage.getItem('hatchabot_email') ?? '') : '';
 }
 
 async function signOut() {
@@ -4110,7 +3828,6 @@ function renderSetup() {
   // wizard, which tells them to run `claude setup-token` on a machine they
   // have no access to. Say what is actually true for them instead.
   if (!myAccount.hostOwner && profiles.length === 0) {
-    $('fabBtn').hidden = true;
     el.innerHTML = `<div class="card">
       <div class="name">Welcome 👋</div>
       <p class="sub" style="margin:6px 0">Your account is ready, but no AI source has been shared with it yet — agents need one to think with.</p>
@@ -4121,7 +3838,6 @@ function renderSetup() {
   }
   const steps = setupSteps();
   const aiDone = steps[0].done, firstAgent = steps[2].done;
-  $('fabBtn').hidden = !aiDone;
   // Until the first agent exists the guide shows itself; after that it is
   // opened on purpose, and says so in its heading.
   const left = steps.filter(s => !s.done && !s.optional).length; // optional steps never nag
@@ -4200,7 +3916,7 @@ async function createApiKeyProfileFromSetup() {
 const TABS = { ai: 'paneAi', classes: 'paneClasses', hosts: 'paneHosts', pool: 'panePool', discord: 'paneDiscord', slack: 'paneSlack', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime', security: 'paneSecurity', operator: 'paneOperator' };
 
 /**
- * v2 regroups the Settings panel's classic tabs by what people come to do:
+ * The Settings panel's tabs, grouped by what people come to do:
  * "You" joins the account and the operator profile; Hosts joins runners and
  * other servers; Images joins base and derived. Old deep links
  * (openAiDlg('hosts')) land on their group.
@@ -4250,24 +3966,16 @@ function v2Sectionise(pane, isBreak = (kid) => kid.tagName === 'H4') {
 }
 
 function showTab(name) {
-  if (UI_V2) {
-    const g = V2_SETTINGS.find(([k, , panes]) => k === name || panes.includes(name)) ?? V2_SETTINGS[0];
-    v2SettingsGroup = g[0];
-    for (const pane of g[2]) { showTabPane(pane); v2Sectionise($(TABS[pane])); } // runs each pane's loader
-    for (const [key, pane] of Object.entries(TABS)) $(pane).hidden = !g[2].includes(key);
-    for (const h of document.querySelectorAll('.v2settingshead')) h.hidden = g[2].length < 2;
-    $('v2SettingsTabs').innerHTML = V2_SETTINGS.filter(([k]) => k !== 'slack' || slackVisible()).map(([k, label]) =>
-      `<button class="tab" role="tab" aria-selected="${k === g[0]}" onclick="showTab('${k}')">${label}</button>`).join('');
-    return;
-  }
-  showTabPane(name);
+  const g = V2_SETTINGS.find(([k, , panes]) => k === name || panes.includes(name)) ?? V2_SETTINGS[0];
+  v2SettingsGroup = g[0];
+  for (const pane of g[2]) { showTabPane(pane); v2Sectionise($(TABS[pane])); } // runs each pane's loader
+  for (const [key, pane] of Object.entries(TABS)) $(pane).hidden = !g[2].includes(key);
+  for (const h of document.querySelectorAll('.v2settingshead')) h.hidden = g[2].length < 2;
+  $('v2SettingsTabs').innerHTML = V2_SETTINGS.filter(([k]) => k !== 'slack' || slackVisible()).map(([k, label]) =>
+    `<button class="tab" role="tab" aria-selected="${k === g[0]}" onclick="showTab('${k}')">${label}</button>`).join('');
 }
 function showTabPane(name) {
-  for (const [key, pane] of Object.entries(TABS)) {
-    const on = key === name;
-    $(pane).hidden = !on;
-    $('tab' + key[0].toUpperCase() + key.slice(1))?.setAttribute('aria-selected', String(on)); // v2-only panes have no classic tab
-  }
+  for (const [key, pane] of Object.entries(TABS)) $(pane).hidden = key !== name;
   if (name === 'access') { void loadAccounts(); void loadSecondFactor(); void loadReach(true); }
   if (name === 'classes') loadClasses();
   if (name === 'conn') loadConnections();
@@ -5070,10 +4778,6 @@ async function loadRuntime() {
   loadDerivedImages();
   $('rtPanel').hidden = !myAccount.hostOwner;
   $('rbSection').hidden = !myAccount.hostOwner;
-  // Web search provider is decided per agent by the fleet key, not by the image — say which one applies.
-  if (myAccount.hostOwner) api('/v1/search-key').then(k => { $('runtimeSearch').innerHTML = k.set
-    ? '🔎 Web search: <b>Brave</b> — the fleet search key is set and injected into every agent at provision/rebuild (agents built before the key was set stay on DuckDuckGo until rebuilt).'
-    : '🔎 Web search: <b>DuckDuckGo</b> (keyless baseline). A <b>Fleet search key</b> in AI sources upgrades every agent to Brave on its next rebuild.'; }).catch(() => {});
   if (myAccount.hostOwner) { $('rtErr').textContent = ''; loadRuntimeImages(); pollBaseBuild(); loadRebuildPolicy(); }
   const el = $('runtimeStatus');
   try {
@@ -5461,28 +5165,11 @@ async function assignClass() {
 let sourceUsageData = null; // { sampledAt, sources: [...] } from /v1/ai-profiles/usage
 async function loadSourceUsage() {
   try { sourceUsageData = await api('/v1/ai-profiles/usage'); } catch { return; }
-  renderLimitBanner();
   if ($('aiList')?.childElementCount) renderAiList();
 }
 function sourceUsageOf(id) { return sourceUsageData?.sources?.find(x => x.id === id); }
 const fmtN = (n) => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'k' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
 const clock = (iso) => new Date(iso).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
-function renderLimitBanner() {
-  const el = $('limitBanner'); if (!el) return;
-  // Archived agents can't answer anyway: count the live ones (an older server sends only `agents`).
-  const live = (s) => s.liveAgents ?? s.agents;
-  // The status is the source's, from every account's agents on it
-  // (2026-09-30): a member on a shared source hears about it too, and the
-  // owner hears whose agents are stuck.
-  const theirs = (s) => s.mine === false ? 0 : (s.others?.liveAgents ?? 0);
-  const limited = (sourceUsageData?.sources || []).filter(s => s.status === 'limited' && (live(s) || theirs(s)));
-  const pl = (n) => `${n} agent${n === 1 ? '' : 's'}`;
-  const who = (s) => s.mine === false ? `your ${pl(live(s))} on it can't answer`
-    : live(s) && theirs(s) ? `its ${pl(live(s))} (and ${theirs(s)} on other accounts) can't answer`
-    : live(s) ? `its ${pl(live(s))} can't answer` : `its ${pl(theirs(s))} on other accounts can't answer`;
-  el.hidden = !limited.length;
-  el.innerHTML = limited.map(s => `⛔ ${s.mine === false ? 'Shared source ' : ''}<b>${esc(s.name)}</b> is being rate-limited (since ${esc(clock(s.limitedSince))}) — ${who(s)} until it recovers. <a href="#" onclick="event.preventDefault();openAiDlg('ai')">See usage</a>`).join('<br>');
-}
 function sourceUsagePanel(p) {
   // The request counts, most-use and other-accounts lines are gone (Chris, 2026-10-07): the Costs chart below
   // carries spend, tokens and refusals. Left: a source being refused RIGHT NOW, when its agents are failing.
@@ -5923,20 +5610,13 @@ function faAgents() {
 let rtData = null, rtBuildTimer = null;
 async function loadRuntimeImages() {
   try {
-    const [rt, imgs] = await Promise.all([api('/v1/runtime'), api('/v1/runtime/images')]);
+    const imgs = await api('/v1/runtime/images');
     rtData = imgs;
-    $('rtDefault').textContent = imgs.default;
-    const sharedNote = rt.upgradeNeedsSharedEmbedder ? ` <span class="sub">An image for it carries no memory search engine of its own: its agents use the shared memory search service${rt.upgradeBuildable ? '' : ', which is off — start it first (Settings → Hosts)'}.</span>` : '';
-    if ($('rtBuild')) $('rtBuild').hidden = !!appConfig?.managed; // trying a newer OpenClaw is the provider's job on a hosted Hatchabot
-    $('rtBase').innerHTML = rt.npmLatest ? (rt.upgradeAvailable && !appConfig?.managed ? `⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable OpenClaw (the default runs ${esc(rt.imageVersion || '?')}). ${UI_V2 ? '' : `<a href="#" onclick="event.preventDefault();$('rtBuild').open=true;$('rtBuild').scrollIntoView({behavior:'smooth'})">Try it safely →</a>`}${sharedNote}` : `✓ The fleet default runs the latest stable OpenClaw (${esc(rt.imageVersion || '?')}).`) : '';
-    if (rt.upgradeAvailable && rt.npmLatest && !$('rtBuildVersion').value) $('rtBuildVersion').value = rt.npmLatest;
-    if (UI_V2) {
-      // Only what asks something of you: agents that still need a Rebuild.
-      // Versions and upgrades are the Hatchabot agent's to talk about.
-      const lag = (agents ?? []).filter(a => a.rebuild).length;
-      $('rtBase').textContent = lag ? `${lag} agent${lag > 1 ? 's' : ''} still need${lag > 1 ? '' : 's'} a Rebuild (each card says why).` : '';
-      $('rtBase').hidden = !lag;
-    }
+    // Only what asks something of you: agents that still need a Rebuild.
+    // Versions, upgrades and building a newer OpenClaw are the Hatchabot agent's.
+    const lag = (agents ?? []).filter(a => a.rebuild).length;
+    $('rtBase').textContent = lag ? `${lag} agent${lag > 1 ? 's' : ''} still need${lag > 1 ? '' : 's'} a Rebuild (each one's Overview says why).` : '';
+    $('rtBase').hidden = !lag;
     renderRuntimeList();
   } catch (e) { $('rtList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
@@ -6093,9 +5773,7 @@ async function runTryOnAgents() {
   else tryDlg.close();
   updateTryBtn();
   if (ok) {
-    toast(UI_V2
-      ? `${ok} agent${ok === 1 ? '' : 's'} rebuilding on ${tag}${ok > 1 ? ' (a few at a time)' : ''}. The spinning ring on the home screen clears when each is back.`
-      : `${ok} agent${ok === 1 ? '' : 's'} rebuilding on ${tag} — 🧪 in the legend while on trial.`, 9000);
+    toast(`${ok} agent${ok === 1 ? '' : 's'} rebuilding on ${tag}${ok > 1 ? ' (a few at a time)' : ''}. The spinning ring on the home screen clears when each is back.`, 9000);
   }
   await refresh(false); await loadRuntimeImages();
 }
@@ -6124,27 +5802,15 @@ async function promoteImage(tag) {
     }
   } catch (e) { $('rtErr').textContent = e.message; }
 }
-async function startBaseBuild() {
-  const version = $('rtBuildVersion').value.trim();
-  const candidate = $('rtBuildCandidate').checked;
-  const engine = $('rtBuildLite')?.checked ? 'none' : undefined;
-  if (!candidate && !confirm('Build straight to :latest? Every agent will show "newer image available" as soon as it finishes. Safer: build a candidate and try it on one agent first.')) return;
-  $('rtBuildBtn').disabled = true; $('rtErr').textContent = '';
-  try { await api('/v1/runtime/build', { method: 'POST', body: { version: version || undefined, candidate, engine } }); $('rtBuildLog').hidden = false; pollBaseBuild(); }
-  catch (e) { $('rtErr').textContent = e.message; $('rtBuildBtn').disabled = false; }
-}
 async function pollBaseBuild() {
   clearTimeout(rtBuildTimer);
   if (!aiDlg.open) return;
   try {
     const b = await api('/v1/runtime/build');
-    // New look: no build log here. The Hatchabot agent runs builds and reads
-    // their log; the tab shows one line while one is running, nothing after.
-    if (UI_V2) {
-      $('rtBuildLog').hidden = !b.running;
-      if (b.running) $('rtBuildLog').textContent = `Building an image for OpenClaw ${b.version || '(default version)'}…`;
-    } else if (b.running || b.log) { $('rtBuildLog').hidden = false; $('rtBuildLog').textContent = (b.running ? `⏳ building ${b.version || '(default version)'}${b.candidate ? ' as a candidate' : ''}…\n\n` : (b.ok === false ? `✗ ${b.error || 'failed'}\n\n` : b.ok ? '✓ done\n\n' : '')) + (b.log || ''); $('rtBuildLog').scrollTop = 1e9; }
-    $('rtBuildBtn').disabled = !!b.running;
+    // No build log here: the Hatchabot agent runs builds and reads their log;
+    // the tab shows one line while one is running, nothing after.
+    $('rtBuildLog').hidden = !b.running;
+    if (b.running) $('rtBuildLog').textContent = `Building an image for OpenClaw ${b.version || '(default version)'}…`;
     if (b.running) rtBuildTimer = setTimeout(pollBaseBuild, 3000); else if (b.ok) loadRuntimeImages();
   } catch { /* not host owner / transient */ }
 }
@@ -6392,7 +6058,7 @@ async function faApply() {
           catch (e) { $('faErr').textContent = `${a.name}: ${e.message}`; }
         }
         if (rebuilt) bits.push(`rebuilding ${rebuilt} (a few at a time)`);
-      } else if (todo.length) bits.push(`${todo.length} need a rebuild — the legend marks them`);
+      } else if (todo.length) bits.push(`${todo.length} need a rebuild — their icons say so`);
       if (!r.changed) bits.push('nothing to change — already set');
       $('faResults').innerHTML = `✓ ${esc(bits.join(' · '))}.`;
     } catch (e) { $('faErr').textContent = e.message; $('faResults').innerHTML = ''; }
@@ -6783,8 +6449,6 @@ async function addAiProfile() {
 
 // ---- agent creation ---------------------------------------------------------
 
-$('topBtn').onclick = () => window.scrollTo({ top: 0, behavior: 'smooth' });
-window.addEventListener('scroll', () => { $('topBtn').hidden = window.scrollY < 400; }, { passive: true });
 $('fabBtn').onclick = () => {
   $('createErr').textContent = '';
   // Show usage against the per-account cap up front, so hitting it isn't a
@@ -7192,32 +6856,8 @@ async function runAdopt() {
   } finally { $('adoptBtn').disabled = false; }
 }
 
-// ---- agent cards ------------------------------------------------------------
+// ---- an agent's notices -----------------------------------------------------
 
-function memberCard(a) {
-  return `
-  <div class="card" id="card-${a.id}">
-    <div class="row">
-      <div class="grow">
-        ${httpsUrl(a.deepLink) && a.state === 'RUNNING'
-          ? `<a class="name" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open this agent's chat in the Telegram app">${esc(a.name)}</a>`
-          : `<span class="name">${esc(a.name)}</span>`}
-        ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
-      </div>
-      <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
-    </div>
-    <div class="sub" style="margin-top:8px">
-      You're a member of this agent — its memory is shared with everyone who uses it, so what you tell it may come up with them.
-    </div>
-    <div class="actions">
-      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>` : ''}
-    </div>
-  </div>`;
-}
-
-// The card's status line: one row, always the same order, only the facts that
-// are true — so cards line up instead of each showing a different ragged subset.
-// Debug detail (container name, OpenClaw version) moves to the hover tooltip.
 /**
  * The Telegram bot's display name, when it isn't simply correct.
  *
@@ -7249,115 +6889,6 @@ function botNameNote(a) {
   return '';
 }
 
-function agentMeta(a) {
-  if (!a.runtimeRef) return '';
-  const host = hosts.find(h => h.id === a.hostId);
-  const bits = [];
-  // Name the AI source, then the model of it — only when more than one source
-  // exists, since with a single source it's the same for every agent and just
-  // noise. Reads "Household Claude · claude-opus-4-8".
-  const src = profiles.find(p => p.id === a.aiProfileId);
-  if (src && profiles.length > 1) bits.push(esc(src.name));
-  if (a.model) bits.push(esc(a.model));
-  // The bot IS the agent's identity — name it right after the model.
-  if (a.botUsername) bits.push(`@${esc(a.botUsername)}`);
-  // Always name where it runs, and name it concretely: the box's own hostname
-  // locally, the runner's name in Cluster mode. "this machine" was ambiguous
-  // the moment a second host existed — and on a phone, "this machine" reads as
-  // the phone. The local host's stored NAME is a label ("This machine
-  // (studio-mini)"); `hostname` is the machine, served live by GET /v1/hosts.
-  if (host) bits.push(`on ${esc(host.kind === 'local' ? (host.hostname || host.name) : host.name)}`);
-  if (a.lastActiveAt) bits.push(`active ${ago(a.lastActiveAt)}`);
-  if (a.modelWarm === false) bits.push('warming up');
-  if (a.dataSummary) bits.push(esc(a.dataSummary));
-  if (a.className) bits.push(`🏷 ${esc(a.className)}`);
-  if (a.image) bits.push(`📌 ${esc(a.image)}`);
-  const debug = esc(a.runtimeRef.replace('docker://', '')) + (a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : '');
-  return `<div class="runtime" title="${debug}">${bits.join(' · ') || '—'}</div>`;
-}
-
-function agentCard(a) {
-  // Members (role 'user') get a chat-only card: no lifecycle, no files, no
-  // members list. The server enforces this too — this just hides what would
-  // 404 anyway. (role is absent on older servers → treat as owner.)
-  if (a.role === 'user') return memberCard(a);
-  return `
-  <div class="card has-rail" id="card-${a.id}"${a.state !== 'ARCHIVED' ? ` data-agent-id="${a.id}" data-group="${esc(a.group || '')}" data-name="${esc(a.name)}"` : ''}>
-    <div class="rail-col">
-      <div class="movecol" role="group" aria-label="Reorder ${esc(a.name)}">
-        <button class="mv" title="Up 5 (Shift-click: to the top)" aria-label="Move up 5" onclick="moveAgentBy('${a.id}',-5,event)">${MV_ICON.up5}</button>
-        <button class="mv" title="Up one (Shift-click: to the top)" aria-label="Move up" onclick="moveAgentBy('${a.id}',-1,event)">${MV_ICON.up}</button>
-        ${a.state !== 'ARCHIVED' ? `<span class="mv grip" title="Drag to move — drop it on another agent, even in another group" aria-hidden="true">${MV_ICON.grip}</span>` : ''}
-        <button class="mv" title="Down one (Shift-click: to the bottom)" aria-label="Move down" onclick="moveAgentBy('${a.id}',1,event)">${MV_ICON.down}</button>
-        <button class="mv" title="Down 5 (Shift-click: to the bottom)" aria-label="Move down 5" onclick="moveAgentBy('${a.id}',5,event)">${MV_ICON.down5}</button>
-      </div>
-      <select class="posdd" hidden aria-label="Position in its group" title="Position in its group — pick 1 to move it to the top" onchange="moveToPosition('${a.id}', +this.value)"></select>
-    </div>
-    <div class="card-body">
-      <div class="row">
-        <div class="grow">
-          ${httpsUrl(a.deepLink) && a.state === 'RUNNING'
-            ? `<a class="name" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open this agent's chat in the Telegram app">${esc(a.name)}</a>`
-            : `<span class="name">${esc(a.name)}</span>`}
-          ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
-          ${a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona) ? `<div class="sub" style="color:var(--warn)">⚙ Template not configured — <button type="button" class="linkish" onclick="openEdit('${a.id}','${jsq(a.name)}','def')">fill its Setup values</button> to complete the description.</div>` : ''}
-        </div>
-        <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
-      </div>
-      ${agentMeta(a)}
-      ${agentNotices(a)}
-      <div class="actions">
-        <!-- "Telegram App" button retired: the agent NAME is the deep-link now;
-             Telegram Web stays in the ⋯ menu. -->
-        ${a.state === 'RUNNING' && !a.ops ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>` : ''}${a.state === 'RUNNING' ? `
-          <button onclick="openEdit('${a.id}', '${jsq(a.name)}')" title="Persona & memory, AI, data, bot, environment">⚙ Settings</button>
-          <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="Scheduled tasks">⏰ Tasks</button>` : ''}
-        ${a.state === 'RUNNING' && a.botUsername ? (
-          a.botDisplayName === a.name
-            ? `<button disabled title="The bot's Telegram display name already matches ('${esc(a.name)}') — nothing to sync.">🏷 Sync name</button>`
-            : `<button onclick="syncBotName('${a.id}', '${jsq(a.name)}')" ${a.botDisplayName ? `style="border-color:var(--warn)" title="Bot is currently named '${esc(a.botDisplayName)}' — press to rename it to '${esc(a.name)}'. Members get a one-line heads-up DM."` : `title="Rename the Telegram bot's display name to match this agent."`}>🏷 Sync name</button>`
-        ) : ''}
-        ${a.state === 'RUNNING' ? `<button onclick="checkpointAgent('${a.id}', '${jsq(a.name)}')" title="Have the agent write the current conversation's key facts into MEMORY.md now (~20s), so they survive a reset or backend switch">📝 Chat → Memory</button>` : ''}
-        ${a.runtimeRef && ['RUNNING', 'STOPPED', 'ARCHIVED'].includes(a.state) ? `<button onclick="downloadHistory('${a.id}', '${jsq(a.name)}')" title="Download this agent's full chat history as a file — every conversation, including ones from before a reset (read from the agent's own transcripts; Telegram can't export bot chats)">💬 History</button>` : ''}
-        ${a.state === 'RUNNING' ? `<button onclick="recoverContext('${a.id}', '${jsq(a.name)}')" title="Lost context after a reset? Restore the agent's earlier conversations into its workspace and have it save the important parts to memory — no copy-pasting">📥 Recover context</button>` : ''}
-        <!-- copy / move: duplicate here · back up for me · share a copy · move server -->
-        ${a.state === 'RUNNING' ? `<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>` : ''}
-        ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="A copy of its instructions and scheduled tasks, without its bot, members or conversations. Read it before you send it: an agent may have written names or addresses into its instructions.">📤 Share</button>` : ''}
-        ${a.state === 'RUNNING' && appConfig.authMode === 'identity' ? `<button onclick="openSendAgent('${a.id}', '${jsq(a.name)}')" title="Send a trained copy to another user on this server — lands in their inbox">📨 Send</button>` : ''}
-        ${a.state === 'RUNNING' && a.parameters?.length && !a.parentAgentId ? `<button onclick="deriveChild('${a.id}', '${jsq(a.name)}')" title="Create a child agent from this master: same training, its own setup values and bot, fresh memory. Children nest under this card.">👪 New child</button>` : ''}
-        ${a.state === 'RUNNING' && agents.some(k => k.parentAgentId === a.id) ? `<button onclick="openProposals('${a.id}', '${jsq(a.name)}')" title="Distilled learnings proposed by this master's children, awaiting your review">📥 Proposals</button><button onclick="pushDefinition('${a.id}', '${jsq(a.name)}')" title="Re-render every child's SOUL/AGENTS from THIS master's current files, keeping each child's own setup values. Snapshot taken per child; memories untouched.">⬇ Push to children</button>` : ''}
-        ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef && hosts.length > 1
-          ? `<button onclick="moveHostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another runner in this cluster — same bot, same members, only the machine changes">Move</button>` : ''}
-        <!-- lifecycle -->
-        ${a.state === 'STOPPED' && a.hibernatedAt ? `<button class="primary" onclick="act('${a.id}','wake')" title="Asleep — start it now">💤 Wake</button>` : ''}
-        ${a.state === 'STOPPED' && !a.hibernatedAt ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
-        ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
-          ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>` : ''}
-        ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
-        <!-- Archive sits where Stop used to. On a fleet bounded by how many bots
-             Telegram lets you own, putting away an agent you're done with matters
-             more than pausing one, and Stop keeps the bot anyway. Stop moved to
-             the ⋯ menu. The SAME slot becomes Restore once archived, so the
-             button that put an agent away is the button that brings it back. -->
-        ${a.archiving ? `<button disabled class="busy" title="${esc(a.archiving.step)}">📥 Archiving…</button>`
-          : a.state === 'RUNNING' || a.state === 'STOPPED' || a.state === 'FAILED'
-          ? `<button onclick="archiveAgent('${a.id}', '${jsq(a.name)}', '${a.state}')" title="Keep the agent and its memory; hand its Telegram bot back for another agent to use">📥 Archive</button>` : ''}
-        ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="restoreAgent('${a.id}', '${jsq(a.name)}')" title="Bring it back — it keeps its memory, but gets a NEW bot with a new link">📤 Restore</button>` : ''}
-        ${a.state === 'ARCHIVED' ? `<button onclick="openInspect('${a.id}', '${jsq(a.name)}')" title="Read its memory, key files, and chat history — without restoring it or its bot">🔍 Inspect</button>` : ''}
-        <button onclick="openGroupDlg('${a.id}')" title="Put this agent in a group / section">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
-        ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
-        ${cardMenu(a)}
-      </div>
-    </div>
-  </div>`;
-}
-
-/**
- * Everything on an agent that tells you something or waits on you — rebuild
- * prompts, sync errors, a bot token to paste, people asking to be let in, the
- * members list. One builder, so the classic card and the v2 settings sheet
- * can never disagree about what needs doing.
- */
 /** A template agent whose description still has {{placeholders}}: its Setup values were never filled in. */
 const templateUnfilled = (a) => !!a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona);
 const TEMPLATE_WHY = 'template setup values not filled in';
@@ -7374,9 +6905,11 @@ function goSetupValues(id, name) {
   }, 150);
 }
 /**
- * The notices above an agent's settings. opts: skipFailure / skipTokenForm (the
- * sheet shows those itself), setupValues (the sheet's "fill its Setup values";
- * the classic card says it in its own line).
+ * Everything on an agent that tells you something or waits on you — rebuild
+ * prompts, sync errors, a bot token to paste, people asking to be let in, the
+ * members list — shown above its settings in the agent's sheet. opts:
+ * skipFailure / skipTokenForm (the sheet shows those itself), setupValues (the
+ * "fill its Setup values" notice).
  */
 function agentNotices(a, opts = {}) {
   const pending = a.pendingAction?.type === 'bot_token';
@@ -7435,45 +6968,6 @@ function agentNotices(a, opts = {}) {
         </div>` : ''}`;
 }
 
-/** The ⋯ overflow menu: observational and occasional actions, state-gated. */
-function cardMenu(a) {
-  const items = [];
-  // Stop lives here now — it pauses an agent while it keeps holding its bot,
-  // which is rarely what you want when bots are the scarce thing. Archive took
-  // its place on the card.
-  if (a.state === 'RUNNING') {
-    items.push(`<button onclick="act('${a.id}','stop')" title="Pause it. Keeps its Telegram bot — use Archive to hand that back.">Stop</button>`);
-    // Only where it can sleep: not the manager, not an agent on Discord or Slack (nothing queues their messages).
-    if (!a.ops && !v2ChannelKinds(a).some(k => k !== 'telegram')) items.push(`<button onclick="act('${a.id}','hibernate')" title="Stop it with its volume kept; a Telegram message, its console or an ask wakes it">💤 Sleep</button>`);
-  }
-  if (a.state === 'RUNNING') {
-    items.push(`<button onclick="openUsage('${a.id}', '${jsq(a.name)}')">📊 Usage</button>`);
-    items.push(`<button onclick="openHealth('${a.id}', '${jsq(a.name)}')">❤️ Health</button>`);
-  }
-  if (a.state === 'RUNNING' || a.runtimeRef) {
-    items.push(`<button onclick="openLogs('${a.id}', '${jsq(a.name)}')">Logs</button>`);
-  }
-  if (a.state === 'RUNNING' && a.parentAgentId) {
-    items.push(`<button onclick="distillToMaster('${a.id}', '${jsq(a.name)}')" title="The agent writes up its most valuable generalizable lesson (no names or specifics) as a proposal for its master's playbook — you review before anything merges">💡 Propose to master</button>`);
-  }
-  if (a.state === 'RUNNING' && a.hasGateway) {
-    items.push(`<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')">OpenClaw (debug)</button>`);
-  }
-  if (a.deepLink && a.state === 'RUNNING') {
-    items.push(`<a href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>`);
-  }
-  // Occasional copy/move actions, off the main row: Download (an off-machine
-  // private copy — server-side Backups cover the routine case) and the
-  // cross-cluster move (to a whole other Hatchabot server; within this
-  // cluster, Move on the card is the everyday path).
-  if ((a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef) {
-    items.push(`<button onclick="downloadAgent('${a.id}', '${jsq(a.name)}')" title="Download a complete private copy (bot token, members, memory) — for your own keeping, don't share it">Download copy</button>`);
-    items.push(`<button onclick="rehostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to a different Hatchabot server — its own cluster, login, and dashboard">Move to another Hatchabot</button>`);
-  }
-  if (!items.length) return '';
-  return `<details class="menu"><summary>⋯</summary><div class="menu-items" onclick="this.parentElement.open=false">${items.join('')}</div></details>`;
-}
-
 /** The pool is empty and there is no spare token: finish the agent without a bot. */
 async function skipTelegram(id, name) {
   if (!confirm(`Finish "${name}" without Telegram?\n\nYou talk to it here in Hatchabot; a bot can be attached later from its Telegram tab.`)) return;
@@ -7523,24 +7017,13 @@ function ago(iso) {
 
 let editAgentId = null, logsAgentId = null;
 
-// Tab-button ids are explicit (tabEdit*) — the Settings dialog already owns
-// ids like tabAi, and duplicate DOM ids break both dialogs silently.
+// The sections of editDlg, which the agent sheet borrows.
 const EDIT_TABS = {
-  def: { btn: 'tabDef', pane: 'paneDef' },
-  snap: { btn: 'tabEditSnap', pane: 'paneEditSnap' },
-  ai: { btn: 'tabEditAi', pane: 'paneEditAi' },
-  data: { btn: 'tabEditData', pane: 'paneEditData' },
-  conn: { btn: 'tabEditConn', pane: 'paneEditConn' },
-  peers: { btn: 'tabEditPeers', pane: 'paneEditPeers' },
-  tg: { btn: 'tabEditTg', pane: 'paneEditTg' },
-  env: { btn: 'tabEditEnv', pane: 'paneEditEnv' },
+  def: 'paneDef', snap: 'paneEditSnap', ai: 'paneEditAi', data: 'paneEditData',
+  conn: 'paneEditConn', peers: 'paneEditPeers', tg: 'paneEditTg', env: 'paneEditEnv',
 };
 function showEditTab(name) {
-  for (const [key, t] of Object.entries(EDIT_TABS)) {
-    const on = key === name;
-    $(t.pane).hidden = !on;
-    $(t.btn).setAttribute('aria-selected', String(on));
-  }
+  for (const [key, pane] of Object.entries(EDIT_TABS)) $(pane).hidden = key !== name;
   // Lazy: listing connections is a container exec — only pay for it when the
   // tab is actually opened, not on every Settings open.
   if (name === 'conn' && editAgentId) void renderConnections();
@@ -7781,17 +7264,12 @@ async function disconnectAccount(email) {
   } catch (e) { toast(e.message, 10000); }
 }
 
-async function openEdit(id, name, tab = 'def') {
-  // v2: an agent's settings are one sheet; its tabs hold these same sections.
-  if (UI_V2) return openV2Agent(id, V2_TAB_FOR_EDIT[tab] ?? 'personality');
-  prepareEdit(id, name, tab);
-  editDlg.showModal();
-  await loadEditFile();
-  await loadSnapshots();
+/** An agent's settings are one sheet; its tabs hold the editDlg sections. */
+function openEdit(id, name, tab = 'def') {
+  return openV2Agent(id, V2_TAB_FOR_EDIT[tab] ?? 'personality');
 }
 
-/** Fill the edit sections for this agent — wherever they currently sit (the
- *  classic dialog, or the v2 agent sheet, which borrows them). */
+/** Fill the edit sections for this agent (the agent sheet borrows them from editDlg). */
 function prepareEdit(id, name, tab = 'def') {
   editAgentId = id;
   $('editAgent').textContent = name;
@@ -8329,52 +7807,6 @@ const EVENT_WORDS = {
   'reconcile.marked_stopped': 'found stopped', 'reconcile.marked_running': 'found running',
   'import.rolled_back': 'import undone',
 };
-
-// Recent activity: drag the bar under the list to make it taller or shorter
-// (mouse or touch); double-click resets; arrow keys nudge. Remembered per browser.
-(function activityResizer() {
-  const box = $('activity'), bar = $('activityResize');
-  if (!box || !bar) return;
-  const KEY = 'hatchabot_activity_h', DEF = 260, MIN = 80;
-  const clamp = (h) => Math.max(MIN, Math.min(Math.round(innerHeight * 0.85), Math.round(h)));
-  const set = (h) => { box.style.maxHeight = `${clamp(h)}px`; };
-  const save = () => { try { localStorage.setItem(KEY, String(parseInt(box.style.maxHeight, 10))); } catch { /* private mode */ } };
-  try { set(Number(localStorage.getItem(KEY)) || DEF); } catch { set(DEF); }
-  let start = null;
-  bar.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    // Start from what's on screen: a short list under a tall limit would otherwise "stick".
-    start = { y: e.clientY, h: box.getBoundingClientRect().height, id: e.pointerId };
-    bar.setPointerCapture(e.pointerId); bar.classList.add('active'); e.preventDefault();
-  });
-  bar.addEventListener('pointermove', (e) => { if (start && e.pointerId === start.id) set(start.h + e.clientY - start.y); });
-  const end = (e) => { if (!start || e.pointerId !== start.id) return; start = null; bar.classList.remove('active'); save(); };
-  bar.addEventListener('pointerup', end);
-  bar.addEventListener('pointercancel', end);
-  bar.addEventListener('dblclick', () => { set(DEF); save(); });
-  bar.addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
-    e.preventDefault(); set(box.getBoundingClientRect().height + (e.key === 'ArrowDown' ? 40 : -40)); save();
-  });
-})();
-
-async function loadActivity() {
-  try {
-    const evs = await api('/v1/events?limit=40');
-    const card = $('activityCard');
-    card.hidden = evs.length === 0;
-    $('activityCount').textContent = evs.length ? `last ${evs.length}` : '';
-    $('activity').innerHTML = evs.map(e => {
-      const what = EVENT_WORDS[e.event] ?? e.event.replace(/[._]/g, ' ');
-      const bad = /fail|missing|unhealthy|rolled_back/.test(e.event);
-      return `<div style="display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--line);font-size:13px">
-        <span style="color:var(--dim);white-space:nowrap;min-width:74px">${ago(e.at)}</span>
-        <span style="min-width:0;flex:1"><b>${esc(e.agentName ?? 'agent')}</b>
-          <span style="color:${bad ? 'var(--bad)' : 'var(--dim)'}">${esc(what)}</span></span>
-      </div>`;
-    }).join('');
-  } catch { /* the feed is never worth breaking the page for */ }
-}
 
 // ---- the home screen's foot: Activity and the machine line (Status retired, 2026-10-05) ----
 // Activity: the newest events, read with the list poll at most every 30 s;
@@ -8985,13 +8417,6 @@ const HEALTH_BADGE = {
   degraded: ['var(--warn)', 'Degraded'],
   unreachable: ['var(--bad)', 'Not answering'],
 };
-async function openHealth(id, name) {
-  healthAgentId = id;
-  $('healthAgent').textContent = name;
-  $('healthBody').innerHTML = 'Checking…';
-  healthDlg.showModal();
-  await loadHealth();
-}
 async function loadHealth() {
   if (!healthAgentId) return;
   $('healthBody').innerHTML = 'Checking…';
@@ -9001,21 +8426,6 @@ async function loadHealth() {
   } catch (e) { $('healthBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 
-// ---- fleet health dashboard -------------------------------------------------
-// A view over data already loaded (agents) + the backups/runtime endpoints.
-// Deep per-agent health probes are lazy (they exec into containers).
-
-let fleetHealth = {}; // agentId -> { status } from an on-demand /health probe
-const STALE_MS = 14 * 86400000;
-
-function openFleetHealth() {
-  fleetHealth = {};
-  fleetDlg.showModal();
-  loadFleet();
-}
-
-/** 📊 Sources: which of your agents are on which AI source, and which model
- *  each runs now. Mirrors `hatchabot sources`. */
 // Memory search across the fleet (Settings → Hosts, under the service): what new agents get, and moving the rest.
 async function loadEmbedFleet() {
   const row = $('embedFleetRow'), el = $('embedFleetBody');
@@ -9115,181 +8525,6 @@ async function openFleetResources() {
   }, 5000);
 }
 
-async function openFleetSources() {
-  fleetSourcesDlg.showModal();
-  const el = $('fleetSourcesBody');
-  el.innerHTML = '<div class="sub">Loading…</div>';
-  try {
-    [profiles, agents] = await Promise.all([api('/v1/ai-profiles'), api('/v1/agents')]);
-  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; return; }
-
-  const owned = agents.filter(a => !a.role || a.role === 'owner');
-  const credLabel = p =>
-    p.credential === 'setup-token' ? 'subscription · setup-token'
-    : p.credential === 'machine-login' ? 'subscription · machine-login'
-    : p.vendor === 'local' ? 'local' : `api key · ${vendorLabel(p.vendor)}`;
-
-  const bySource = new Map();
-  for (const a of owned) {
-    if (!bySource.has(a.aiProfileId)) bySource.set(a.aiProfileId, []);
-    bySource.get(a.aiProfileId).push(a);
-  }
-
-  let html = '';
-  for (const p of profiles) {
-    const ags = (bySource.get(p.id) ?? []).sort((x, y) => x.name.localeCompare(y.name));
-    html += `<div style="padding:10px 0;border-top:1px solid var(--line)">
-      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
-        <b>${esc(p.name)}</b>
-        <span class="sub">${esc(credLabel(p))}${p.mine === false ? ' · shared' : ''}</span>
-        <span style="flex:1"></span>
-        <span class="sub">${ags.length} agent${ags.length === 1 ? '' : 's'}</span>
-      </div>`;
-    if (ags.length) {
-      html += ags.map(a => {
-        const pin = a.modelOverride ? ' <span class="sub">(pinned)</span>' : '';
-        const soon = a.pendingModel && a.pendingModel !== a.model
-          ? ` <span class="sub" style="color:var(--warn)">→ ${esc(a.pendingModel)} on rebuild</span>` : '';
-        return `<div style="display:flex;gap:8px;margin:4px 0 0 12px;align-items:baseline">
-          <span>${esc(a.name)}</span>
-          <code style="font-size:12px;color:var(--dim)">${esc(a.model ?? '(no model)')}</code>${pin}${soon}
-        </div>`;
-      }).join('');
-    }
-    html += '</div>';
-  }
-  // A source that was deleted while agents still point at it must not vanish
-  // from the tally — that's exactly the misconfiguration this view exists to catch.
-  for (const [id, ags] of bySource) {
-    if (profiles.some(p => p.id === id)) continue;
-    html += `<div style="padding:10px 0;border-top:1px solid var(--line);color:var(--warn)">
-      ⚠ unknown source <code>${esc(id.slice(0, 8))}</code> — ${ags.length} agent${ags.length === 1 ? '' : 's'}: ${ags.map(a => esc(a.name)).join(', ')}</div>`;
-  }
-
-  const byModel = new Map();
-  for (const a of owned) byModel.set(a.model ?? '(none)', (byModel.get(a.model ?? '(none)') ?? 0) + 1);
-  const pending = owned.filter(a => a.pendingModel && a.pendingModel !== a.model).length;
-  html += `<div style="padding:10px 0;border-top:1px solid var(--line)">
-    <b class="sub">Models in use now</b>
-    ${[...byModel.entries()].sort((x, y) => y[1] - x[1]).map(([m, c]) =>
-      `<div style="margin:4px 0 0 12px"><code style="font-size:12px">${esc(m)}</code> <span class="sub">× ${c}</span></div>`).join('')}
-    ${pending ? `<div class="sub" style="margin-top:6px">${pending} will change on next rebuild</div>` : ''}
-  </div>`;
-  el.innerHTML = html;
-}
-
-async function loadFleet() {
-  try { agents = await api('/v1/agents'); agentsLoaded = true; } catch { /* keep last-known */ }
-  renderFleet();
-  renderFleetOps();
-}
-
-function fleetStale(a) {
-  return a.state === 'RUNNING' && a.lastActiveAt && (Date.now() - Date.parse(a.lastActiveAt)) > STALE_MS;
-}
-
-function renderFleet() {
-  const n = s => agents.filter(a => a.state === s).length;
-  const working = agents.filter(a => a.state === 'PROVISIONING' || a.state === 'REBUILDING').length;
-  const attention = agents.filter(a => a.state === 'FAILED' || a.pendingAction?.type === 'bot_token' || fleetStale(a));
-
-  const stat = (v, label, color) => `<div style="text-align:center;min-width:64px">
-    <div style="font-size:26px;font-weight:700;color:${color || 'var(--text)'}">${v}</div>
-    <div class="sub">${label}</div></div>`;
-  $('fleetSummary').innerHTML = `<div style="display:flex;gap:18px;flex-wrap:wrap">
-    ${stat(agents.length, 'agents')}
-    ${stat(n('RUNNING'), 'running', 'var(--ok)')}
-    ${n('STOPPED') ? stat(n('STOPPED'), 'stopped', 'var(--dim)') : ''}
-    ${n('ARCHIVED') ? stat(n('ARCHIVED'), 'archived', 'var(--dim)') : ''}
-    ${n('FAILED') ? stat(n('FAILED'), 'failed', 'var(--bad)') : ''}
-    ${working ? stat(working, 'working') : ''}
-    ${attention.length ? stat(attention.length, 'need attention', 'var(--warn)') : ''}
-  </div>`;
-
-  $('fleetAttention').innerHTML = attention.length
-    ? `<div style="border:1px solid var(--warn);border-radius:8px;padding:10px;margin-top:6px">
-        <b>Alerts</b>
-        ${attention.map(a => {
-          const why = a.state === 'FAILED' ? `failed — ${esc(a.stateReason || 'unknown')}`
-            : a.pendingAction?.type === 'bot_token' ? 'waiting for a Telegram bot'
-            : `no activity in ${Math.floor((Date.now() - Date.parse(a.lastActiveAt)) / 86400000)} days`;
-          return `<div class="pair" style="padding:3px 0"><span class="grow"><b>${esc(a.name)}</b> <span class="sub">— ${why}</span></span></div>`;
-        }).join('')}
-      </div>`
-    : `<div class="sub" style="margin-top:6px;color:var(--ok)">✓ Everything looks healthy.</div>`;
-
-  $('fleetList').innerHTML = [...agents].sort((a, b) => a.name.localeCompare(b.name)).map(a => {
-    const hb = fleetHealth[a.id];
-    const badge = HEALTH_BADGE[hb?.status];
-    const dot = hb ? ` <span style="color:${badge?.[0] || 'var(--dim)'}" title="${esc(badge?.[1] || hb.status)}">●</span>` : '';
-    // Config lint (doctor): the silent-degradation catcher — a disabled search
-    // provider or missing key never trips the gateway probe, only this.
-    const df = hb?.doctor?.findings ?? [];
-    const lint = df.length
-      ? ` <span class="sub" style="color:var(--warn)" title="${esc(df.slice(0, 4).map(f => f.message).join('\n'))}">⚠ ${df.length} config warning${df.length > 1 ? 's' : ''}</span>`
-      : '';
-    return `<div class="pair" style="padding:4px 0"><span class="grow">
-      <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>${dot} <b>${esc(a.name)}</b>
-      <span class="sub">${a.model ? esc(a.model) + ' · ' : ''}active ${a.lastActiveAt ? ago(a.lastActiveAt) : 'never'}</span>${lint}
-    </span></div>`;
-  }).join('') || '<div class="sub">No agents yet.</div>';
-}
-
-// Backups + runtime are host-owner-only; a 403 just hides that tile.
-async function renderFleetOps() {
-  const ops = $('fleetOps');
-  ops.innerHTML = '';
-  // Hosts tile: this machine + any runners, with live reachability for runners.
-  try {
-    const hs = await api('/v1/hosts');
-    const runners = hs.filter(h => h.kind !== 'local');
-    const rows = hs.map(h => {
-      const local = h.kind === 'local';
-      const id = `fleethost-${h.id}`;
-      return `<div class="sub">${local ? '🖥️' : '☁️'} ${esc(h.name)} · ${h.agentCount ?? 0} agent${h.agentCount === 1 ? '' : 's'}${local ? '' : ` <span id="${id}" style="color:var(--dim)">· checking…</span>`}</div>`;
-    }).join('');
-    ops.innerHTML += `<div><b class="sub">Runners</b>${rows}</div>`;
-    // Ping each runner in the background and paint its dot.
-    for (const h of runners) {
-      api(`/v1/hosts/${h.id}/ping`).then(r => {
-        const el = $(`fleethost-${h.id}`);
-        if (el) { el.style.color = r.reachable ? 'var(--ok)' : 'var(--warn)'; el.textContent = r.reachable ? '· ✓ reachable' : `· ⚠ unreachable`; }
-      }).catch(() => {});
-    }
-  } catch { /* not the host owner */ }
-  try {
-    const b = await api('/v1/backups');
-    const latest = b.backups?.[0];
-    if (latest) {
-      const ageDays = Math.floor((Date.now() - Date.parse(latest.date + 'T00:00:00')) / 86400000);
-      const warn = ageDays > 2 || !latest.hasKey || latest.complete === false || (b.missing ?? []).length > 0;
-      ops.innerHTML += `<div><b class="sub">Backups</b>
-        <div style="color:${warn ? 'var(--warn)' : 'var(--ok)'}">${warn ? '⚠ ' : '✓ '}latest ${esc(latest.date)} · ${ageDays}d ago${latest.complete === false ? ' · incomplete' : ''}${(b.missing ?? []).length ? ` · ${b.missing.length} agent${b.missing.length === 1 ? '' : 's'} not covered` : ''}</div>
-        <div class="sub">${b.backups.length} set${b.backups.length === 1 ? '' : 's'} · kept ${b.keepDays}d${latest.hasKey ? '' : ' · ⚠ no key'}</div></div>`;
-    } else {
-      ops.innerHTML += `<div><b class="sub">Backups</b><div style="color:var(--warn)">⚠ none yet</div><div class="sub">nightly job runs at 03:30</div></div>`;
-    }
-  } catch { /* not the host owner */ }
-  try {
-    const r = await api('/v1/runtime');
-    const cur = r.imageVersion ? esc(r.imageVersion) : 'unknown';
-    ops.innerHTML += `<div><b class="sub">Runtime</b>
-      <div style="color:${r.upgradeAvailable ? 'var(--warn)' : 'var(--ok)'}">${r.upgradeAvailable ? `⬆ ${esc(r.npmLatest)} available` : `✓ OpenClaw ${cur}`}</div></div>`;
-  } catch { /* not the host owner */ }
-}
-
-async function runFleetHealthChecks() {
-  const btn = $('fleetHealthBtn');
-  btn.disabled = true; btn.textContent = 'Checking…';
-  // Only RUNNING agents answer a health probe; do them one at a time and paint
-  // each dot as it lands (an exec per agent — keep it gentle).
-  for (const a of agents.filter(x => x.state === 'RUNNING')) {
-    try { fleetHealth[a.id] = await api(`/v1/agents/${a.id}/health?doctor=1`); }
-    catch { fleetHealth[a.id] = { status: 'unreachable' }; }
-    renderFleet();
-  }
-  btn.disabled = false; btn.textContent = 'Re-check';
-}
 function healthRow(label, ok, detail) {
   const dot = ok === null ? 'var(--dim)' : ok ? 'var(--ok)' : 'var(--bad)';
   return `<div class="pair"><span class="grow"><span style="color:${dot}">●</span> ${esc(label)}</span>
@@ -9624,12 +8859,8 @@ function cronScheduleLabel(c) {
   if (c.scheduleKind === 'at' && c.atMs) return 'once at ' + new Date(c.atMs).toLocaleString();
   return c.scheduleKind || 'schedule';
 }
-async function openCrons(id, name) {
-  if (UI_V2) return openV2Agent(id, 'schedule'); // v2: the tasks live in the agent's Schedule tab
-  prepareCrons(id, name);
-  cronDlg.showModal();
-  await loadCrons();
-}
+/** The tasks live in the agent's Schedule tab. */
+function openCrons(id) { return openV2Agent(id, 'schedule'); }
 function prepareCrons(id, name) {
   cronAgentId = id;
   $('cronTriggers').checked = !!(agents.find(x => x.id === id) || {}).cronTriggers;
@@ -9969,7 +9200,7 @@ async function rebuild(id) {
   } catch (e) { toast(e.message); }
 }
 
-async function rebuildAll() {
+async function rebuildAll(btn) {
   const list = rebuildableAgents();
   if (!list.length) { toast('Nothing to rebuild right now.'); return; }
   const atOnce = Number(appConfig?.rebuildConcurrency) || 6;
@@ -9983,7 +9214,7 @@ async function rebuildAll() {
     `You can close this page — it carries on.`
   )) return;
 
-  const btn = $('rebuildAllBtn'); btn.disabled = true;
+  if (btn) btn.disabled = true;
   let started = 0, skipped = 0;
   // Immediate feedback — the POSTs now return fast (the snapshot moved into the
   // background task server-side), but say so up front so the row never sits
@@ -9998,7 +9229,7 @@ async function rebuildAll() {
       started++;
     } catch { skipped++; }
   }
-  btn.disabled = false;
+  if (btn) btn.disabled = false;
   toast(`Rebuilding ${started} agent${started === 1 ? '' : 's'}, ${atOnce} at a time — about ${minutes} minute${minutes === 1 ? '' : 's'}${skipped ? `. ${skipped} skipped (busy or already changing)` : ''}. Memory is kept.`, 12000);
   await refresh(false);
 }
@@ -10196,7 +9427,7 @@ function consoleFromHash() {
   // A malformed address (#console=%E0) is no agent, not an exception (review, 2026-10-09).
   let key = '';
   try { key = decodeURIComponent(/(?:^#|&)console=([^&]+)/.exec(location.hash)?.[1] || ''); } catch { key = ''; }
-  if (!key || !UI_V2) return;
+  if (!key) return;
   const a = (agents || []).find(x => (x.slug === key || x.id === key) && consoleOpenable(x));
   if (!a) { consoleUnmark(); toast(`No agent of yours called "${key}" to open.`); return; }
   if ($('consoleDlg').open && consoleAgentId === a.id) return;
@@ -10312,7 +9543,7 @@ $('consoleDlg')?.addEventListener('click', (e) => { if (!$('consoleSwitcher').hi
 function consoleKeys(e) {
   if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'k') return;
   if ($('consoleDlg').open) { if (consoleGuest) return; e.preventDefault(); openConsoleSwitcher(); return; }
-  if (!UI_V2 || document.querySelector('dialog[open]')) return; // another panel is in front
+  if (document.querySelector('dialog[open]')) return; // another panel is in front
   e.preventDefault(); openConsoleHome(true);
 }
 /**
@@ -10349,7 +9580,7 @@ let consoleAgentId = null, consoleUrl = null, consoleGuest = false;
 function markConsoleSeen(id) {
   if (!id || consoleGuest) return;
   const a = (agents || []).find(x => x.id === id);
-  if (a?.unread) { a.unread = false; renderAgents(); }
+  if (a?.unread) { a.unread = false; renderV2(); }
   api(`/v1/agents/${id}/seen`, { method: 'POST' }).catch(() => {});
 }
 // Not while the browser tab is hidden: nobody is reading it then (review, 2026-10-09).
@@ -10657,9 +9888,7 @@ async function dismissShare(id) {
   catch (e) { toast(e.message); }
 }
 function updateInboxBadge(n) {
-  const b = $('inboxBadge');
-  if (n > 0) { b.textContent = n; b.hidden = false; } else { b.hidden = true; }
-  // v2: the header's inbox button only exists while something is waiting.
+  // The header's inbox button only shows while something is waiting.
   $('v2InboxBtn').hidden = !(n > 0);
   $('v2InboxCount').textContent = n > 0 ? String(n) : '';
 }
@@ -10964,7 +10193,7 @@ async function confirmArchive() {
   archiveDlg.close();
   archivingHere.set(id, { at: new Date().toISOString(), step: checkpoint ? 'archiving — saving its conversation to memory first' : 'archiving — stopping it and handing its bot back' });
   markArchiving(agents);
-  renderAgents();
+  renderV2();
   toast(checkpoint ? `Archiving "${name}" — saving its conversation to memory first (about 20 seconds)…` : `Archiving "${name}"…`, 30000, 'progress');
   try {
     const r = await api(`/v1/agents/${id}/archive`, { method: 'POST', body: { checkpoint } });
@@ -11124,7 +10353,7 @@ async function loadMasterProposals() {
           <button onclick="resolveProposal('${jsq(p.id)}','merge',false)">Merge</button>
           <button class="primary" onclick="resolveProposal('${jsq(p.id)}','merge',true)">Merge + Push to children</button>
         </div>
-      </div>`).join('') : '<div class="sub">No pending proposals. On a child card, ⋯ → 💡 Propose to master creates one.</div>';
+      </div>`).join('') : '<div class="sub">No pending proposals. On a child agent, Sharing → Copy or share → 💡 Propose to master creates one.</div>';
   } catch (e) { $('proposalsList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 async function resolveProposal(pid, action, push) {
@@ -11358,83 +10587,6 @@ async function checkpointAgent(id, name) {
   } catch (e) { toast(e.message); }
 }
 
-/** Line icons for the reorder rail — SVG so they render identically everywhere. */
-const MV_ICON = (() => {
-  const svg = (d, extra = '') => `<svg viewBox="0 0 12 12" aria-hidden="true"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"${extra}/></svg>`;
-  const dots = [[4, 3], [8, 3], [4, 6], [8, 6], [4, 9], [8, 9]].map(([x, y]) => `<circle cx="${x}" cy="${y}" r="1.1" fill="currentColor"/>`).join('');
-  return {
-    up5: svg('M2.5 5.5 6 2l3.5 3.5M2.5 10 6 6.5l3.5 3.5'),
-    up: svg('M2.5 7.8 6 4.3l3.5 3.5'),
-    down: svg('M2.5 4.2 6 7.7l3.5-3.5'),
-    down5: svg('M2.5 2 6 5.5 9.5 2M2.5 6.5 6 10l3.5-3.5'),
-    grip: `<svg viewBox="0 0 12 12" aria-hidden="true">${dots}</svg>`,
-  };
-})();
-
-/**
- * Move an agent `delta` places among the cards you can SEE in its group (Shift:
- * all the way). Counting visible cards — not stored rows — matters: archived
- * and child agents share the group in storage but show elsewhere, so a stored
- * one-step swap could hop an invisible sibling and look like nothing happened.
- */
-async function moveAgentBy(id, delta, ev) {
-  if (ev?.shiftKey) delta = delta < 0 ? -Infinity : Infinity;
-  const card = document.getElementById('card-' + id);
-  const group = card?.dataset.group ?? '';
-  const order = [...document.querySelectorAll('#agents [data-agent-id]')]
-    .filter(el => !el.closest('.kids') && (el.dataset.group ?? '') === group)
-    .map(el => el.dataset.agentId);
-  const i = order.indexOf(id);
-  if (i < 0) return moveAgent(id, delta < 0 ? 'up' : 'down', ev); // not in the visible list: old behaviour
-  const j = Math.max(0, Math.min(order.length - 1, i + delta));
-  if (j === i) { toast(delta < 0 ? 'Already at the top of its group' : 'Already at the bottom of its group', 1800); return; }
-  const rest = order.filter(x => x !== id);
-  const before = rest[j] ?? null; // inserting at j of the list without it
-  try {
-    await api(`/v1/agents/${id}/move`, { method: 'POST', body: before ? { before } : { before: null, group } });
-    await refresh(false);
-  } catch (e) { toast(e.message); }
-}
-
-/** Number the position pickers: 1..n among the cards visible in each group. */
-function fillPositionPickers(root) {
-  const byGroup = new Map();
-  for (const card of root.querySelectorAll('[data-agent-id]')) {
-    if (card.closest('.kids')) continue;
-    const g = card.dataset.group ?? '';
-    (byGroup.get(g) ?? byGroup.set(g, []).get(g)).push(card);
-  }
-  for (const cards of byGroup.values()) {
-    const opts = cards.map((_, i) => `<option value="${i + 1}">${i + 1}</option>`).join('');
-    cards.forEach((card, i) => {
-      const sel = card.querySelector('.posdd');
-      if (!sel || cards.length < 2) return; // alone in its group: nothing to pick
-      sel.innerHTML = opts; sel.value = String(i + 1); sel.hidden = false;
-      sel.title = `Position ${i + 1} of ${cards.length} in its group — pick 1 to move it to the top`;
-    });
-  }
-}
-
-/** Move an agent to a 1-based position among the visible cards of its group. */
-function moveToPosition(id, pos) {
-  const card = document.getElementById('card-' + id);
-  const group = card?.dataset.group ?? '';
-  const order = [...document.querySelectorAll('#agents [data-agent-id]')]
-    .filter(el => !el.closest('.kids') && (el.dataset.group ?? '') === group).map(el => el.dataset.agentId);
-  const i = order.indexOf(id);
-  if (i < 0 || !pos || pos - 1 === i) return; // unchanged: nothing to do
-  document.activeElement?.blur(); // let the refresh after the move re-render
-  return moveAgentBy(id, pos - 1 - i);
-}
-
-async function moveAgent(id, dir, ev) {
-  if (ev?.shiftKey) dir = dir === 'up' ? 'top' : 'bottom'; // Shift-click: all the way
-  try {
-    await api(`/v1/agents/${id}/move`, { method: 'POST', body: { dir } });
-    await refresh(false);
-  } catch (e) { toast(e.message); }
-}
-
 /**
  * Sorting a group is a one-shot, and the same button reverses it — the way a
  * table column does. Which way "again" means is read off the order on screen
@@ -11456,14 +10608,6 @@ function sortedAscending(g, mode) {
   return mine.every((a, i) => i === 0 || cmp(mine[i - 1], a) <= 0);
 }
 
-/** The A→Z / ⏳ pair for one group section. */
-function sortBtns(g, cls = '') {
-  const b = (mode, label, title) =>
-    `<button class="${cls}" title="${esc(title)}" onclick="sortGroup('${jsq(g ?? '')}','${mode}')">${label}</button>`;
-  return b('name', 'A→Z', 'Sort this group A→Z — again for Z→A')
-       + b('activity', '⏳', 'Sort this group by last activity: quietest first — again for most recently active first');
-}
-
 async function sortGroup(g, mode = 'name') {
   const desc = sortedAscending(g, mode); // already that way? then the other way
   try {
@@ -11473,127 +10617,6 @@ async function sortGroup(g, mode = 'name') {
   } catch (e) { toast(e.message); }
 }
 
-async function sortAllGroups(mode = 'name', desc = false) {
-  if (!confirm(`Sort the agents in every group ${SORT_LABEL[desc ? `${mode}-desc` : mode]}?\n\nThis replaces the order you arranged by hand (the groups themselves stay where they are).`)) return;
-  try {
-    await api('/v1/groups/sort', { method: 'POST', body: { all: true, mode, desc } });
-    toast(`Every group sorted ${SORT_LABEL[desc ? `${mode}-desc` : mode]}`);
-    await refresh(false);
-  } catch (e) { toast(e.message); }
-}
-
-// ---- drag to reorder ---------------------------------------------------------
-// Cards drag by their ⠿ grip (works with touch); legend rows drag anywhere on the
-// row (a plain click still jumps). Drop on an agent to go just above or below it —
-// in another group moves it into that group; drop on a group header for its top.
-const drag = { st: null, line: null, ghost: null, raf: 0, x: 0, y: 0, suppressClick: false };
-function dragCandidates(root) {
-  return [...root.querySelectorAll('[data-agent-id], [data-drop-group]')].filter(el =>
-    el !== drag.st.item && !el.dataset.child && !el.closest('.kids') && el.getClientRects().length);
-}
-function dragTarget(root, x, y) {
-  const cands = dragCandidates(root);
-  let best = null, bestD = Infinity;
-  for (const el of cands) {
-    const r = el.getBoundingClientRect();
-    const d = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
-    if (d < bestD) { bestD = d; best = { el, r }; }
-  }
-  if (!best) return null;
-  const { el, r } = best;
-  const itemsOf = (group) => cands.filter(c => c.dataset.agentId && (c.dataset.group ?? '') === group);
-  if (el.dataset.dropGroup !== undefined) {
-    const group = el.dataset.dropGroup;
-    const after = cands.slice(cands.indexOf(el) + 1).find(c => c.dataset.agentId && (c.dataset.group ?? '') === group);
-    return { before: after ? after.dataset.agentId : null, group, y: r.bottom + 2, left: r.left, width: r.width };
-  }
-  const group = el.dataset.group ?? '';
-  if (y < r.top + r.height / 2) return { before: el.dataset.agentId, group, y: r.top - 3, left: r.left, width: r.width };
-  const items = itemsOf(group), next = items[items.indexOf(el) + 1];
-  return { before: next ? next.dataset.agentId : null, group, y: r.bottom + 1, left: r.left, width: r.width };
-}
-function dragPlace() {
-  const st = drag.st; if (!st?.active) return;
-  const t = dragTarget(st.root, drag.x, drag.y); st.target = t;
-  drag.line.hidden = !t;
-  if (t) Object.assign(drag.line.style, { top: `${t.y}px`, left: `${t.left}px`, width: `${t.width}px` });
-  drag.ghost.textContent = st.name + (t && t.group !== st.group ? `  → ${t.group === NEW_GROUP_DROP ? 'a new group' : (t.group || 'Default')}` : '');
-  drag.ghost.style.transform = `translate(${drag.x + 14}px, ${drag.y + 12}px)`;
-}
-function dragAutoScroll() {
-  const st = drag.st; if (!st?.active) return;
-  const sc = st.scroller();
-  const box = sc === window ? { top: 0, bottom: innerHeight } : sc.getBoundingClientRect();
-  const edge = 56, y = drag.y;
-  const dy = y < box.top + edge ? -Math.ceil((box.top + edge - y) / 3) : y > box.bottom - edge ? Math.ceil((y - box.bottom + edge) / 3) : 0;
-  if (dy) { if (sc === window) window.scrollBy(0, dy); else sc.scrollTop += dy; dragPlace(); }
-  drag.raf = requestAnimationFrame(dragAutoScroll);
-}
-function dragEnd() {
-  cancelAnimationFrame(drag.raf);
-  drag.st?.item.classList.remove('drag-src');
-  document.body.classList.remove('dragging');
-  drag.line?.remove(); drag.ghost?.remove();
-  drag.line = drag.ghost = null; drag.st = null;
-}
-function dragStartOn(root, needGrip, scroller) {
-  root.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || drag.st) return;
-    const item = e.target.closest('[data-agent-id]');
-    if (!item || !root.contains(item) || item.dataset.child || item.closest('.kids')) return;
-    if (needGrip && !e.target.closest('.grip')) return;
-    drag.st = { root, item, scroller, id: item.dataset.agentId, group: item.dataset.group ?? '', name: item.dataset.name || '',
-      x0: e.clientX, y0: e.clientY, pid: e.pointerId, active: false, target: null };
-    if (needGrip) e.preventDefault();
-  });
-}
-window.addEventListener('pointermove', (e) => {
-  const st = drag.st; if (!st || e.pointerId !== st.pid) return;
-  drag.x = e.clientX; drag.y = e.clientY;
-  if (!st.active) {
-    if (Math.hypot(drag.x - st.x0, drag.y - st.y0) < 6) return;
-    st.active = true;
-    st.item.classList.add('drag-src');
-    document.body.classList.add('dragging');
-    drag.line = Object.assign(document.createElement('div'), { className: 'drop-line' });
-    drag.ghost = Object.assign(document.createElement('div'), { className: 'drag-ghost' });
-    document.body.append(drag.line, drag.ghost);
-    drag.raf = requestAnimationFrame(dragAutoScroll);
-  }
-  e.preventDefault();
-  dragPlace();
-}, { passive: false });
-window.addEventListener('pointerup', async (e) => {
-  const st = drag.st; if (!st || e.pointerId !== st.pid) return;
-  const { active, target: t, id, group, name } = st;
-  dragEnd();
-  if (!active) return; // a plain click on a legend row still jumps
-  drag.suppressClick = true; setTimeout(() => { drag.suppressClick = false; }, 0); // only the click this same release produces
-  if (!t) return;
-  try {
-    if (t.group === NEW_GROUP_DROP) {
-      // A fresh group with a placeholder name, then straight into renaming it.
-      const taken = new Set(agents.map(a => a.group).filter(Boolean));
-      let fresh = 'New group'; for (let i = 2; taken.has(fresh); i++) fresh = `New group ${i}`;
-      await api(`/v1/agents/${id}`, { method: 'PATCH', body: { group: fresh } });
-      await refresh(false);
-      const header = document.querySelector(`.group-header[data-group="${CSS.escape(fresh)}"] .group-name`);
-      if (header) { header.scrollIntoView({ block: 'center' }); editGroupName(header); }
-      return;
-    }
-    const r = await api(`/v1/agents/${id}/move`, { method: 'POST', body: t.before ? { before: t.before } : { before: null, group: t.group } });
-    if ((r.group ?? '') !== group) toast(`${name} moved to ${r.group || 'Default'}`);
-    await refresh(false);
-  } catch (err) { toast(err.message); }
-});
-window.addEventListener('pointercancel', (e) => { if (drag.st && e.pointerId === drag.st.pid) { dragEnd(); renderAgents(); } });
-window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && drag.st?.active) { dragEnd(); renderAgents(); } });
-window.addEventListener('click', (e) => { if (drag.suppressClick) { e.preventDefault(); e.stopPropagation(); drag.suppressClick = false; } }, true);
-dragStartOn($('agents'), true, () => window);
-dragStartOn($('tocList'), false, () => $('tocList'));
-// ---- end drag to reorder ------------------------------------------------------
-
-const NEW_GROUP_DROP = '__new_group__';
 /** Rename a group where it stands: the name becomes editable; Enter saves, Escape puts it back. */
 function editGroupName(el) {
   if (!el || el.isContentEditable) return;
@@ -11632,142 +10655,9 @@ async function moveGroup(name, dir) {
   } catch (e) { toast(e.message); }
 }
 
-let groupAgentId = null;
-function openGroupDlg(id) {
-  groupAgentId = id;
-  const a = agents.find(x => x.id === id);
-  $('groupDlgAgent').textContent = a?.name || '';
-  $('groupDlgInput').value = a?.group || '';
-  const groups = [...new Set(agents.map(x => x.group).filter(Boolean))];
-  $('groupOptions').innerHTML = groups.map(g => `<option value="${esc(g)}">`).join('');
-  $('groupChips').innerHTML = groups.length
-    ? groups.map(g => `<button class="btn" onclick="pickGroupChip('${jsq(g)}')">${esc(g)}</button>`).join('')
-    : '<span class="sub">No groups yet — type one below.</span>';
-  $('groupErr').textContent = '';
-  groupDlg.showModal();
-  $('groupDlgInput').focus();
-}
-function pickGroupChip(g) { $('groupDlgInput').value = g; }
-async function saveGroup() {
-  const g = $('groupDlgInput').value.trim();
-  try {
-    await api(`/v1/agents/${groupAgentId}`, { method: 'PATCH', body: { group: g } });
-    groupDlg.close();
-    toast(g ? `Grouped under “${g}”` : 'Removed from group');
-    await refresh(false);
-  } catch (e) { $('groupErr').textContent = e.message; }
-}
-
 /** The fleet you're actually running, and the ones parked. */
 function liveAgents() { return agents.filter(a => a.state !== 'ARCHIVED'); }
 function archivedAgents() { return agents.filter(a => a.state === 'ARCHIVED'); }
-/** Survives re-renders (see the drawer's ontoggle), not reloads — a fresh page
- *  should open with the archive shut. */
-let archiveOpen = false;
-
-function renderAgents() {
-  if (UI_V2) return renderV2();
-  if (!agentsLoaded) return; // keep the "Loading…" line until the first list arrives
-  const el = $('agents');
-  // Show "Rebuild all" only when there's more than one agent to rebuild.
-  $('rebuildAllBtn').hidden = rebuildableAgents().length < 2;
-  $('fleetActionsBtn').hidden = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED').length < 2;
-  if ($('v2BulkBtn')) { $('v2BulkBtn').hidden = $('fleetActionsBtn').hidden; }
-  renderToc(); // keep the jump-to legend in sync with the list
-  if (profiles.length && agents.length === 0) {
-    el.innerHTML = `<div class="empty">No agents yet.<br>Tap <b>+</b> to create your first one.</div>`;
-    return;
-  }
-  // The poll re-renders this whole list; without care that wipes anything the
-  // user is typing (e.g. a bot token). Save input values + focus, re-render,
-  // restore.
-  const saved = {};
-  el.querySelectorAll('input').forEach((i) => { if (i.value) saved[i.id] = i.value; });
-  const focusedId = document.activeElement?.closest('#agents') ? document.activeElement.id : null;
-  const caret = focusedId ? document.activeElement.selectionStart : null;
-
-  // Agents arrive already ordered (ungrouped first, then groups A→Z, each by the
-  // owner's manual order). Insert a header when a named group begins.
-  // Archived ones come out of that flow entirely — they hold no bot and do no
-  // work, so mixing them into the sections you actually run just adds noise.
-  let html = '', lastGroup = null;
-  const live = liveAgents();
-  const liveIds = new Set(live.map(x => x.id));
-  // Lineage renders RECURSIVELY: a clone of a child is a grandchild, and the
-  // old direct-children-only pass skipped it entirely — a running agent with
-  // no card and no way to manage it (10th audit). `emitted` doubles as the
-  // cycle guard and feeds the orphan sweep below.
-  const emitted = new Set();
-  const renderKids = (id) => {
-    const kids = live.filter(k => k.parentAgentId === id && !emitted.has(k.id));
-    if (!kids.length) return '';
-    kids.forEach(k => emitted.add(k.id));
-    return `<div class="kids" style="margin-left:26px;border-left:3px solid var(--line);padding-left:10px">
-      ${kids.map(k => agentCard(k) + renderKids(k.id)).join('')}</div>`;
-  };
-  for (const a of live) {
-    // A child renders INDENTED under its master, not in the main flow —
-    // lineage is the visual grouping (Chris, condo-fleet pattern).
-    if (a.parentAgentId && liveIds.has(a.parentAgentId)) continue;
-    emitted.add(a.id);
-    const g = a.group || '';
-    // Ungrouped agents get a "Default" header too, so every section reads the
-    // same as the legend (no move buttons: ungrouped always come first).
-    if (!g && lastGroup === null) html += `<div class="group-header" data-group="Default" data-drop-group=""><span class="grow">Default</span>
-      <span class="seg">${sortBtns('', 'mv')}</span></div>`;
-    if (g && g !== lastGroup) html += `<div class="group-header" data-group="${esc(g)}" data-drop-group="${esc(g)}">
-      <span class="grow group-name" tabindex="0" title="Double-click to rename" ondblclick="editGroupName(this)" onkeydown="if (event.key === 'Enter' && !this.isContentEditable) { event.preventDefault(); editGroupName(this); }">${esc(g)}</span>
-      <button class="mv" title="Rename this group" aria-label="Rename group" onclick="editGroupName(this.closest('.group-header').querySelector('.group-name'))">✏️</button>
-      <span class="seg">${sortBtns(g, 'mv')}<button class="mv" title="Move this group up" aria-label="Move group up" onclick="moveGroup('${jsq(g)}','up')">${MV_ICON.up}</button><button class="mv" title="Move this group down" aria-label="Move group down" onclick="moveGroup('${jsq(g)}','down')">${MV_ICON.down}</button></span>
-    </div>`;
-    lastGroup = g;
-    html += agentCard(a) + renderKids(a.id);
-  }
-  // Belt-and-suspenders: anything still unemitted (a lineage cycle from bad
-  // data) renders flat rather than vanishing.
-  for (const a of live) if (!emitted.has(a.id)) html += agentCard(a);
-  // Shown only while an icon is being dragged: drop it here to start a group
-  // (named on the spot, in place).
-  if (live.length) html += `<div class="group-header new-group-drop" data-group="${NEW_GROUP_DROP}" data-drop-group="${NEW_GROUP_DROP}"><span class="grow">＋ New group — drop here</span></div>`;
-  const parked = archivedAgents();
-  if (parked.length) {
-    // `open` is restored from the last render: this list re-renders on every
-    // poll, and a drawer that slammed shut every few seconds while you were
-    // reading it would be unusable.
-    html += `<details class="archive-drawer" id="archiveDrawer" ${archiveOpen ? 'open' : ''}
-        ontoggle="archiveOpen = this.open">
-      <summary>Archived</summary>
-      <div class="archive-note">Kept whole — memory, members, settings — but not running, and their
-        Telegram bots went back for other agents to use. Restore gives one a new bot.</div>
-      ${parked.map(agentCard).join('')}
-    </details>`;
-  }
-  el.innerHTML = html;
-  fillPositionPickers(el);
-
-  for (const [id, v] of Object.entries(saved)) { const i = $(id); if (i) i.value = v; }
-  if (focusedId) {
-    const i = $(focusedId);
-    if (i) { i.focus(); if (caret != null) try { i.setSelectionRange(caret, caret); } catch {} }
-  }
-}
-
-// ---- jump-to legend (table of contents) ---------------------------------------
-
-/** Above this width the legend is PINNED open and the page reserves a gutter
- *  for it (see the matching CSS media query); below it, it's an overlay the
- *  📑 Jump button toggles. Keep the two in sync. */
-const TOC_PIN_PX = 1200;
-function tocDotColor(a) {
-  if (a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING') return 'var(--warn)';
-  return { RUNNING: 'var(--ok)', STOPPED: 'var(--dim)', ARCHIVED: 'var(--dim)', FAILED: 'var(--bad)' }[a.state] || 'var(--off)';
-}
-/**
- * Every status on an agent that wants the owner's attention, as {icon, why} —
- * one entry per KIND (same-kind reasons merged), in priority order. The single
- * source for the Jump legend's icons (and the Bulk "Alerts" filter),
- * so a new card warning only has to be added here to surface everywhere.
- */
 /**
  * True while an operation that RE-CHECKS an agent's rebuild-fixable statuses is
  * in flight (a rebuild marks the agent busy from the moment it's triggered; the
@@ -11885,6 +10775,12 @@ async function clearAttentionSection(key) {
   toast(`Cleared ${n} agent${n === 1 ? '' : 's'} from Alerts — they come back if something new happens.`);
   await refresh(false);
 }
+/**
+ * Every status on an agent that wants the owner's attention, as {icon, why} —
+ * one entry per KIND, in priority order. The single source for the tiles'
+ * status, View by → Alerts and the Bulk "Alerts" filter, so a new warning only
+ * has to be added here to surface everywhere.
+ */
 function agentAttention(a) {
   const out = [];
   // The reason is printed beside the status; the list only says there is one,
@@ -11932,106 +10828,6 @@ function agentAttention(a) {
   return out;
 }
 
-function renderToc() {
-  const nav = $('toc');
-  // Shown from the FIRST agent, not the second: the legend doubles as the
-  // status/pairing rail, and hiding it on small fleets made a one-agent
-  // account look like a different app than a thirty-agent one.
-  const enough = agents && agents.length >= 1;
-  // `has-toc` both shows the pinned legend and reserves its gutter, so the two
-  // can never disagree (a gutter with no legend, or a legend over the cards).
-  document.body.classList.toggle('has-toc', enough);
-  $('tocBtn').hidden = !enough;
-  if (!enough) { nav.classList.remove('open'); return; }
-  $('tocCount').textContent = liveAgents().length;
-  // Mirror the main list's order and group headers exactly.
-  let html = '', lastGroup = null;
-  // Mirror the card view's lineage nesting: children indent under their
-  // master, never interleaved alphabetically above it.
-  const liveL = liveAgents();
-  const liveIdsL = new Set(liveL.map(x => x.id));
-  const ordered = [];
-  // Recursive, like the card view: grandchildren indent one level deeper
-  // instead of vanishing; `seen` guards against lineage cycles.
-  const seen = new Set();
-  const pushKids = (id, depth) => {
-    for (const k of liveL.filter(x => x.parentAgentId === id && !seen.has(x.id))) {
-      seen.add(k.id);
-      ordered.push({ ...k, __depth: depth });
-      pushKids(k.id, depth + 1);
-    }
-  };
-  for (const a of liveL) {
-    if (a.parentAgentId && liveIdsL.has(a.parentAgentId)) continue;
-    seen.add(a.id);
-    ordered.push(a);
-    pushKids(a.id, 1);
-  }
-  for (const a of liveL) if (!seen.has(a.id)) ordered.push(a); // cycle fallback
-  for (const a of ordered) {
-    const g = a.group || '';
-    // Ungrouped agents get a "Default" header so every section reads the same
-    // (the Planned launchpad above them now makes a header-less run look odd).
-    const label = g || 'Default';
-    if (label !== lastGroup && !a.__depth) html += `<div class="toc-group" data-drop-group="${esc(g)}" onclick="jumpToGroup('${jsq(label)}')" title="Jump to ${esc(label)}">${esc(label)}</div>`;
-    // Children keep the surrounding group context: their own (usually empty)
-    // group must not reset the dedupe, or the next master in the same group
-    // prints a duplicate header (10th audit).
-    if (!a.__depth) lastGroup = label;
-    // Someone knocking on this agent (pairing request), or the agent itself
-    // waiting on a bot token — either way it needs you, so flag it here.
-    const waiting = (pairings[a.id] ?? []).length;
-    const badge = waiting
-      ? `<span class="toc-badge">👤${waiting > 1 ? waiting : ''}</span>`
-      : '';
-    // Every attention-worthy status the card shows, as compact icons — one per
-    // kind, the tooltip spelling out each reason. Single source: agentAttention().
-    const flags = agentAttention(a);
-    const flagIcons = flags.map(f => `<span class="toc-badge" title="${esc(a.name + ' — ' + f.why)}">${f.icon}</span>`).join('');
-    const reasons = [...(waiting ? [`${waiting} ${waiting > 1 ? 'people are' : 'person is'} waiting to be let in`] : []), ...flags.map(f => f.why)];
-    const tip = reasons.length ? `${a.name} — ${reasons.join('; ')}` : a.name;
-    const mine = !a.role || a.role === 'owner';
-    const dragAttrs = mine ? ` data-agent-id="${a.id}" data-group="${esc(g)}" data-name="${esc(a.name)}"${a.__depth ? ' data-child="1"' : ''}` : '';
-    html += `<a class="toc-item"${dragAttrs} ${a.__depth ? `style="padding-left:${6 + 12 * a.__depth}px"` : ''} onclick="jumpToCard('${a.id}')" title="${esc(tip)}${mine && !a.__depth ? ' · drag to reorder' : ''}">
-      <span class="toc-dot" style="background:${tocDotColor(a)}"></span>
-      <span class="toc-name">${a.__depth ? '↳ ' : ''}${esc(a.name)}</span>${badge}${flagIcons}</a>`;
-  }
-  // Archived agents keep their own names in the legend, under a section header
-  // like any group. Collapsing them into a single counted line meant an agent
-  // vanished from the legend the moment you archived it — which is exactly when
-  // you go looking for it. jumpToCard opens the drawer on the way.
-  const parked = archivedAgents();
-  if (parked.length) {
-    html += `<div class="toc-group" onclick="jumpToGroup('Archived')" title="Jump to Archived">Archived</div>`;
-    for (const a of parked) {
-      html += `<a class="toc-item" onclick="jumpToCard('${a.id}')" title="${esc(a.name)} — archived">
-        <span class="toc-dot" style="background:${tocDotColor(a)}"></span>
-        <span class="toc-name">${esc(a.name)}</span></a>`;
-    }
-  }
-  // Planned agents — a launchpad. Click a name to start creating it (the name
-  // is pre-filled); it drops off the list once an agent with that name exists.
-  if (agentTodos === null) { agentTodos = []; void loadTodos(); }
-  let planned = `<div class="toc-group" title="Agents you plan to create later">Planned</div>`;
-  for (const t of agentTodos) {
-    planned += `<a class="toc-item" onclick="createFromTodo('${t.id}')" title="${esc('Create "' + t.name + '" now' + (t.note ? ' — ' + t.note : ''))}">
-      <span class="toc-dot" style="background:var(--off);border:1px dashed var(--dim)"></span>
-      <span class="toc-name">${esc(t.name)}</span>
-      <span class="toc-badge" style="animation:none;cursor:pointer" title="Remove from the plan" onclick="event.stopPropagation(); removeTodo('${t.id}', '${jsq(t.name)}')">✕</span></a>`;
-  }
-  planned += `<div class="toc-item" style="cursor:default;gap:4px">
-    <input id="todoNew" placeholder="Plan an agent…" maxlength="64" style="flex:1;min-width:0;font-size:12px;padding:2px 6px" onkeydown="if (event.key === 'Enter') addTodo('todoNew')">
-    <button class="hbtn" style="padding:1px 7px" title="Add to the plan" onclick="addTodo('todoNew')">+</button></div>`;
-  // Every poll rebuilds this list; keep what was being typed in "Plan an
-  // agent…" (and the focus) instead of wiping it every few seconds.
-  const typing = $('todoNew'), draft = typing?.value ?? '', focused = !!typing && document.activeElement === typing;
-  const caret = focused ? typing.selectionStart : null;
-  $('tocList').innerHTML = planned + html; // launchpad sits at the TOP of the stack
-  const box = $('todoNew');
-  if (box && draft) box.value = draft;
-  if (box && focused) { box.focus(); if (caret !== null) box.setSelectionRange(caret, caret); }
-}
-
 let agentTodos = null, pendingTodoName = null, todosBusy = false;
 /** The names of the agents that exist now, lower-cased: a plan carrying one of them is done. */
 const todoMadeNames = () => new Set(agents.filter(a => a.state !== 'DELETED').map(a => a.name.trim().toLowerCase()));
@@ -12047,8 +10843,7 @@ async function loadTodos() {
       agentTodos = agentTodos.filter(x => x.id !== t.id);
     }
   } finally { todosBusy = false; }
-  // The home screen's Planned group, or the classic legend; each has its own "Plan an agent…" box.
-  if (UI_V2) renderV2(); else renderToc();
+  renderV2(); // the home screen's Planned group
 }
 /** A planned agent was made (from its ghost tile, or by hand) since the plans were read: retire it. */
 function retireMadeTodos() {
@@ -12056,14 +10851,14 @@ function retireMadeTodos() {
   const live = todoMadeNames();
   if (agentTodos.some(t => live.has(t.name.trim().toLowerCase()))) void loadTodos();
 }
-async function addTodo(boxId = UI_V2 ? 'v2TodoNew' : 'todoNew') {
+async function addTodo(boxId = 'v2TodoNew') {
   const name = ($(boxId)?.value || '').trim();
   if (!name) return;
   try {
     await api('/v1/agent-todos', { method: 'POST', body: { name } });
     if ($(boxId)) $(boxId).value = ''; // the list keeps a draft across redraws; an added one is done
     await loadTodos();
-    if (UI_V2) $(boxId)?.focus(); // ready for the next one
+    $(boxId)?.focus(); // ready for the next one
   } catch (e) { toast(e.message); }
 }
 async function removeTodo(id, name) {
@@ -12071,7 +10866,7 @@ async function removeTodo(id, name) {
   try {
     await api(`/v1/agent-todos/${id}`, { method: 'DELETE' });
     await loadTodos();
-    if (UI_V2) $('v2TodoNew')?.focus(); // the button pressed is gone: keep the keyboard in the group
+    $('v2TodoNew')?.focus(); // the button pressed is gone: keep the keyboard in the group
   } catch (e) { toast(e.message); }
 }
 function createFromTodo(id) {
@@ -12080,35 +10875,6 @@ function createFromTodo(id) {
   pendingTodoName = t.name;
   $('fabBtn').click(); // opens the create dialog; the name is pre-filled there
 }
-
-/** Legend section header → the matching section in the card list. */
-function jumpToGroup(label) {
-  let el = document.querySelector(`.group-header[data-group="${CSS.escape(label)}"]`);
-  if (!el && label === 'Archived') {
-    el = document.querySelector('.archive-drawer');
-    if (el && !el.open) { el.open = true; archiveOpen = true; }
-  }
-  // "Default" is the header-less run of ungrouped agents, always first in the list.
-  if (!el && label === 'Default') el = document.querySelector('#agents [id^="card-"]');
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-function jumpToCard(id) {
-  const card = document.getElementById('card-' + id);
-  if (!card) return;
-  // A card inside a closed <details> has no layout, so scrollIntoView would
-  // land on nothing. Open the drawer first.
-  const drawer = card.closest('.archive-drawer');
-  if (drawer && !drawer.open) { drawer.open = true; archiveOpen = true; }
-  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  // Restart the flash even if the same card is clicked twice.
-  card.classList.remove('toc-flash'); void card.offsetWidth; card.classList.add('toc-flash');
-  setTimeout(() => card.classList.remove('toc-flash'), 1300);
-  // Only in overlay mode does the legend cover the cards — there, get out of the
-  // way once the jump is made. Pinned, it just stays.
-  if (window.innerWidth < TOC_PIN_PX) closeToc();
-}
-function toggleToc() { $('toc').classList.toggle('open'); }
-function closeToc() { $('toc').classList.remove('open'); }
 
 // ---- polling ------------------------------------------------------------------
 
@@ -12177,7 +10943,7 @@ function mgmtProposalCard(p, into) {
     card.appendChild(note);
   }
   // Where to see (or double-check) the thing this card changes.
-  const place = UI_V2 ? mgmtCardPlace(p) : null;
+  const place = mgmtCardPlace(p);
   if (place) {
     const a = document.createElement('a');
     a.href = '#'; a.className = 'mgmt-open'; a.textContent = `${place.label} →`;
@@ -12211,7 +10977,7 @@ function mgmtProposalCard(p, into) {
     try {
       const r = await api(`/v1/proposals/${encodeURIComponent(p.confirmId)}/${verb}`, { method: 'POST', body: {} });
       done(r.text, verb === 'confirm');
-      if (UI_V2) { setTimeout(loadProposals, 2500); void refresh(false); }
+      setTimeout(loadProposals, 2500); void refresh(false);
     } catch (e) { done(`⚠ ${e.message}`, false); }
   };
   const cancel = document.createElement('button');
@@ -12274,11 +11040,6 @@ async function refreshNow(withMeta, seq) {
       poolAvail = p.availableBots;
       api('/v1/discord-bots').then(d => { discordPoolAvail = (d.bots || []).filter(b => !b.archivedFor).length; }).catch(() => {});
       api('/v1/slack-apps').then(d => { slackPoolAvail = (d.bots || []).filter(b => !b.archivedFor).length; }).catch(() => {});
-      const el = $('poolInfo');
-      el.hidden = false; // always shown — "0 instant bots ready" is useful too
-      const n = p.availableBots;
-      // Green dot when there's stock, muted when the pool is empty.
-      el.innerHTML = `<span class="pool-dot"${n > 0 ? '' : ' style="color:var(--off)"'}>●</span> ${n} instant bot${n === 1 ? '' : 's'} ready`;
     }).catch(() => {});
     const list = await api('/v1/agents');
     if (seq !== refreshSeq) { await refreshLatest; return; } // a newer refresh has it, and polls on
@@ -12289,11 +11050,11 @@ async function refreshNow(withMeta, seq) {
     if ($('consoleDlg')?.open && !consoleGuest) renderConsoleTabs(); // the new-reply dots
     if (location.hash.includes('report=')) reportFromHash();
     if (location.hash.includes('console=') && !consoleHashTried) { consoleHashTried = true; consoleFromHash(); }
-    if (UI_V2) void v2LoadRecent(); // each agent's last line, for its tooltip (at most every 30 s)
-    if (UI_V2) void v2LoadCosts(); // the cost badges (at most every 5 minutes)
+    void v2LoadRecent(); // each agent's last line, for its tooltip (at most every 30 s)
+    void v2LoadCosts(); // the cost badges (at most every 5 minutes)
     $('offlineBanner').hidden = true; // reached the server: any earlier warning is stale
-    // The classic Activity card; v2 has its own at the foot of the home screen, with the machine line.
-    if (!UI_V2) loadActivity(); else { void v2LoadActivity(); void v2LoadMachine(); }
+    // Activity, at the foot of the home screen, with the machine line.
+    void v2LoadActivity(); void v2LoadMachine();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
     if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); loadFleetKeys(); void loadSecurityNotices(); }
@@ -12306,17 +11067,9 @@ async function refreshNow(withMeta, seq) {
       const results = await Promise.allSettled(running.map(a => api(`/v1/agents/${a.id}/pairing`)));
       pairings = {};
       results.forEach((r, i) => { if (r.status === 'fulfilled') pairings[running[i].id] = r.value; });
-      // Members show only on the classic cards; v2 reads them when a sheet
-      // opens (renderEditMembers). Archived agents have nobody to show.
-      if (!UI_V2) {
-        const live = agents.filter(a => a.state !== 'ARCHIVED');
-        const mres = await Promise.allSettled(live.map(a => api(`/v1/agents/${a.id}/members`)));
-        members = {};
-        mres.forEach((r, i) => { if (r.status === 'fulfilled') members[live[i].id] = r.value; });
-      }
+      // Members are read when an agent's sheet opens (renderEditMembers).
     }
-    // Don't re-render out from under a drag, or an open position picker (it would close).
-    renderSetup(); if (!drag.st?.active && !document.activeElement?.classList?.contains('posdd')) renderAgents();
+    renderSetup(); renderV2(); // renderV2 itself waits out a drag
   } catch (e) {
     console.error(e);
     // A failed refresh with a stale shell showing is silent and misleading (the
@@ -12353,12 +11106,11 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// ---- UI v2 (?ui=v2) -----------------------------------------------------------
+// ---- the home screen (v2) -----------------------------------------------------
 // The icon home screen: agents as icons in groups, a click opens the agent to
 // talk to (OpenClaw's own console), and every other control lives in one
-// settings sheet. It drives the same functions and dialogs as the classic
-// cards, so nothing here is a second implementation of an action — only a
-// different way in. Ships dark behind the flag until it replaces the cards.
+// settings sheet. The only home screen since v2.155.0 (the classic cards are
+// gone); the sheet borrows the editDlg / cronDlg / healthDlg sections.
 
 /** Same palette and hash as src/orchestrator/agentIcons.ts, so an agent with
  *  no stored colour shows the one the server would give it. */
@@ -13122,10 +11874,10 @@ function v2Open(id) {
 // ---- the settings sheet ----------------------------------------------------------------
 let v2AgentId = null, v2Tab = 'overview';
 const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Data'], ['files', 'Files'], ['messaging', 'Telegram'], ['channels', 'Discord'], ['slack', 'Slack'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['usage', 'Usage'], ['advanced', 'Advanced']];
-/** Where each classic edit tab now lives in the sheet (so every old deep link,
+/** Where each editDlg section lives in the sheet (so every old deep link,
  *  e.g. "fill its Setup values", still lands in the right place). */
 const V2_TAB_FOR_EDIT = { def: 'personality', snap: 'personality', ai: 'ai', data: 'knowledge', conn: 'knowledge', peers: 'sharing', tg: 'messaging', env: 'advanced' };
-/** The classic edit sections each sheet tab embeds, with a heading for each. */
+/** The editDlg sections each sheet tab embeds, with a heading for each. */
 const V2_EMBED = {
   personality: [['paneDef', ''], ['paneEditSnap', 'Snapshots']],
   ai: [['paneEditAi', '']],
@@ -13141,13 +11893,12 @@ let v2EditFor = null;
 /** [block id, the pane it lives in when parked] */
 const V2_MOVED = [['tgMembersBlock', 'paneEditTg'], ['imagePinRow', 'paneEditEnv'], ['embedModeRow', 'paneEditEnv'], ['memoryCapRow', 'paneEditEnv']];
 function v2ParkPanes() {
-  // Blocks that live in one classic pane but belong in a different place here:
+  // Blocks that live in one editDlg pane but belong in a different place here:
   // members under Sharing (people, not plumbing), the image picker inside the
   // Runtime row (one place to say what an agent runs).
   for (const [blockId, home] of V2_MOVED) {
     const el = $('v2Pane').querySelector('#' + blockId);
-    // Parked = out of sight: its home pane shows it in the classic view, but
-    // here it belongs only to the tab that borrows it (it appeared twice —
+    // Parked = out of sight in its home pane: it belongs only to the tab that borrows it (it appeared twice —
     // members under both Telegram and Sharing, 2026-09-20).
     if (el) { el.hidden = true; $(home).append(el); }
   }
@@ -14705,7 +13456,7 @@ async function askOpsSuggest(el) {
   toast('Asking your Hatchabot agent — it reads your fleet first, so give it about half a minute.', 8000);
   try {
     const r = await api('/v1/ops-agent/suggest', { method: 'POST', body: {} });
-    if (UI_V2) v2Close();
+    v2Close();
     openGateway(r.agentId, r.slug);
   } catch (e) { toast(e.message, 9000); }
   finally { if (el) { delete el.dataset.busy; el.textContent = "Ask Hatchabot what you're missing"; } }
@@ -14725,7 +13476,6 @@ async function v2SetupOps(btn) {
  *  restarts; whatever prepared them (today the chat, later an agent). */
 let v2PropSig = '';
 async function loadProposals() {
-  if (!UI_V2) return;
   let r; try { r = await api('/v1/proposals'); } catch { return; }
   if (!Array.isArray(r?.pending)) r = { pending: [] }; // an older server mid-deploy
   // A change that failed when you confirmed it used to vanish with its card,
@@ -14779,10 +13529,9 @@ function v2DismissProp(id) {
   v2PropDismissed.add(id);
   try { localStorage.setItem('hb-prop-dismissed', JSON.stringify([...v2PropDismissed].slice(-50))); } catch { /* private window */ }
 }
-setInterval(() => { if (UI_V2 && $('consoleDlg').open && v2Find(consoleAgentId)?.ops) void loadProposals(); }, 4000);
+setInterval(() => { if ($('consoleDlg').open && v2Find(consoleAgentId)?.ops) void loadProposals(); }, 4000);
 
 function initV2() {
-  document.body.classList.add('v2');
   $('v2Ver').textContent = `Hatchabot v${window.HATCHABOT_VERSION ?? '?'}${DEV ? ' · dev' : ''}`;
   $('v2AppVer').textContent = `v${window.HATCHABOT_VERSION ?? '?'}`;
   v2SyncTheme();
@@ -14819,18 +13568,7 @@ function initV2() {
     more.addEventListener('click', () => { const open = el.classList.toggle('v2open'); more.textContent = open ? 'Less' : 'More'; });
     el.after(more);
   }
-  // Settings: swap the ten-tab strip for the grouped one, and head each pane
-  // so a merged tab reads as sections.
-  const strip = aiDlg.querySelector('.tabs');
-  strip.hidden = true;
-  strip.insertAdjacentHTML('afterend', '<div class="tabs" role="tablist" id="v2SettingsTabs"></div>');
-  // Base images: building is the management agent's job here, not a form.
-  // The tab keeps what you act on (try on one agent, promote, delete) and a
-  // one-line note while a build runs (no log: the agent reads that).
-  $('rtBuild').hidden = true;
-  $('rtBuild').after($('rtBuildLog'));
-  $('rtBuildLog').className = 'sub';
-  $('rtBuildLog').setAttribute('style', 'font-family:inherit;white-space:normal;margin:0 0 12px');
+  // Settings: head each pane so a merged tab reads as sections.
   // Derived images get their own tab: move their section into a pane of its own.
   $('paneRuntime').insertAdjacentHTML('afterend', '<section id="paneV2Derived" role="tabpanel" hidden><div class="sub v2ownernote">Derived images are managed by the account that set up this machine.</div></section>');
   $('paneV2Derived').append($('derivedSection'));
@@ -14838,11 +13576,12 @@ function initV2() {
   for (const [key, text] of Object.entries(V2_SETTINGS_HEAD)) {
     $(TABS[key])?.insertAdjacentHTML('afterbegin', `<h4 class="v2sec v2settingshead" hidden>${esc(text)}</h4>`);
   }
+  $('v2ClassicMap').hidden = !CLASSIC_WAS_ON;
   $('consoleGearBtn').hidden = false;
   $('consoleGearBtn').onclick = () => { const id = consoleAgentId; closeConsole(); openV2Agent(id); };
   void loadProposals();
 }
-if (UI_V2) initV2();
+initV2();
 
 loadConfig(); // whoami + auth mode even when the cookie is already valid
 refresh(true);
@@ -14854,27 +13593,17 @@ refresh(true);
     window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
   }
 
-  // In-app install. Chrome/Edge/Android fire beforeinstallprompt; we stash it
-  // and reveal the header button. iOS Safari has no such event, so we surface
-  // the button proactively there and explain the manual gesture on tap.
+  // In-app install (the account menu's "Install as an app"). Chrome/Edge/Android
+  // fire beforeinstallprompt; we stash it for the dialog's one-tap button. iOS
+  // Safari has no such event, so the dialog explains the manual gesture.
   let deferredInstall = null;
-  const installBtn = document.getElementById('installBtn');
-  const standalone =
-    window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
   const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
 
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
     deferredInstall = e; // enables the one-tap path in installApp()
-    if (installBtn && !standalone) installBtn.hidden = false;
   });
-  window.addEventListener('appinstalled', () => {
-    deferredInstall = null;
-    if (installBtn) installBtn.hidden = true;
-  });
-  // Always offer "Get the app" unless already installed — the dialog carries the
-  // QR + per-browser steps, so it's useful even where there's no one-tap prompt.
-  if (installBtn && !standalone) installBtn.hidden = false;
+  window.addEventListener('appinstalled', () => { deferredInstall = null; });
 
   function installSteps() {
     const ua = navigator.userAgent;
@@ -14935,7 +13664,6 @@ refresh(true);
     const { outcome } = await deferredInstall.userChoice;
     deferredInstall = null;
     if (outcome === 'accepted') {
-      if (installBtn) installBtn.hidden = true;
       installDlg.close();
       toast('Installed — Hatchabot is on this computer now.');
     } else {
@@ -14946,20 +13674,12 @@ refresh(true);
   window.installHere = installHere;
 
   // Light/dark theme. The <head> script set the initial theme before paint;
-  // here we keep the toggle button label (showing the OTHER mode) and the PWA
-  // theme-color in sync, and persist the choice.
+  // v2SetTheme (the account menu) switches it; this keeps the PWA
+  // theme-color in step.
   function syncThemeChrome() {
     const dark = document.documentElement.dataset.theme !== 'light';
-    const toggle = document.getElementById('themeToggle');
-    if (toggle) toggle.checked = dark; // slider right = dark
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute('content', dark ? '#14161a' : '#ffffff');
-  }
-  function setThemeFromToggle() {
-    const next = document.getElementById('themeToggle').checked ? 'dark' : 'light';
-    document.documentElement.dataset.theme = next;
-    localStorage.setItem('theme', next);
-    syncThemeChrome();
   }
   syncThemeChrome();
 
@@ -14972,13 +13692,6 @@ refresh(true);
       setTimeout(() => b.classList.remove('pressed'), 200);
     }
   }, true);
-
-  // Close any open ⋯ card menu when clicking elsewhere.
-  document.addEventListener('click', (e) => {
-    document.querySelectorAll('details.menu[open]').forEach((d) => {
-      if (!d.contains(e.target)) d.open = false;
-    });
-  });
 
   // Click the backdrop (outside the panel) to dismiss any open dialog — like
   // Escape already does. A click on a child bubbles up with that child as the

@@ -227,7 +227,7 @@ Then open **http://localhost:8080** on that machine — with accounts you create
    yours. Then just chat. (Only your first-ever agent needs this claim — later
    agents recognize your Telegram account from birth and answer immediately.)
 
-To let others in, use **Invite…** on the agent card — send the link, or have
+To let others in, use **Invite…** in the agent's Sharing tab — send the link, or have
 them scan the QR, or (if they're not on your network) send the agent's Telegram
 link and approve them when they message it.
 
