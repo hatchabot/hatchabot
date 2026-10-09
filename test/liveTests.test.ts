@@ -23,7 +23,8 @@ describe('the register', () => {
     for (const t of tests) {
       expect(existsSync(t.cmd[1] ?? ''), `${t.name}: ${t.cmd[1]}`).toBe(true);
       expect(doc, t.name).toContain(`| \`${t.name}\` |`);
-      expect(t.area.length, t.name).toBeGreaterThan(0);
+      // A test for every release (privacy) has no files of its own.
+      if (!(t as { everyRelease?: boolean }).everyRelease) expect(t.area.length, t.name).toBeGreaterThan(0);
     }
     const rows = [...doc.matchAll(/^\| `([a-z0-9-]+)` \|/gm)].map((m) => m[1]);
     expect(rows.sort()).toEqual(tests.map((t) => t.name).sort());
@@ -68,6 +69,12 @@ describe('when a live test is due', () => {
   });
   it('only files outside its area changed: not due', () => {
     expect(dueFor('v3', [run('v2')], T1, repo())).toEqual([]);
+  });
+  it('a test for every release (privacy): due on each new one, whatever changed', () => {
+    const every = [{ name: 'alpha', cmd: ['node', 'a.mjs'], area: [], everyRelease: true }];
+    const dir = repo();
+    expect(dueFor('v3', [run('v2')], every, dir)).toEqual([{ test: 'alpha', why: expect.stringMatching(/every release/) }]);
+    expect(dueFor('v3', [run('v3')], every, dir)).toEqual([]);
   });
   it('a failed or skipped run does not count; a pass on a LATER release does not cover an earlier one', () => {
     const r = repo();

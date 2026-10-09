@@ -155,10 +155,43 @@ management agent stays pinned and moves last.
    ```
    Push the one tag by name, never `--tags`: a checkout can hold tags that
    must not be public (the pre-1.0 history's `v0.*` tags reached GitHub that
-   way, found 2026-10-09).
-4. Create the GitHub Release from the tag with the CHANGELOG section as its
-   notes: `gh release create vX.Y.Z --notes-from-tag` (or paste).
+   way, found 2026-10-09). The privacy check's hook refuses such a push.
+4. Create the GitHub Release with the CHANGELOG section as its notes, after
+   checking them — the notes are published apart from the code, so the push
+   hook never sees them:
+   ```sh
+   awk '/^## \[X.Y.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md > notes.md
+   node scripts/privacy-check.mjs --text notes.md && gh release create vX.Y.Z -F notes.md -t vX.Y.Z
+   ```
 5. Deploy it (below).
+
+## The privacy check
+
+The repository is public. `scripts/privacy-check.mjs` keeps this household's
+private values out of it: every agent's name and slug, people's names, ids and
+emails, bot usernames, machine, tailnet and IP names, and the secret values in
+`.env`. It reads them from the live install each time it runs (the script and
+`scripts/privacy-ignore.txt` hold nothing private) and prints a hit masked.
+A pattern scanner cannot do this: a real agent's name is just words.
+
+- **Every push** from a clone with the hook (`node scripts/privacy-check.mjs
+  --install-hook`, once per clone) checks the lines and commit messages being
+  published, and refuses a `v0.*` tag or a tag off `main`. On a machine with no
+  install it warns and lets the push through.
+- **Every release note**, with `--text` (step 4 above).
+- **Every promote**: the `privacy` live test (`--public`) reads everything
+  GitHub serves, so a push from another machine, a web edit or a merged pull
+  request is caught before `stable` moves.
+
+A hit: replace the value with a made-up one — examples come from the invented
+household in `docs/deck/shot-data.mjs`. A generic word that is only by chance
+an agent's name ("Test") goes in `scripts/privacy-ignore.txt`. The history up
+to the 2026-10-09 scrub still names real agents (kept, not rewritten);
+`--public` checks what came after it.
+
+GitHub's side: secret scanning and push protection are on; rulesets refuse
+force-pushes and deletion of `main`, `v0.*` tags, and moving or deleting a
+release tag; CI runs gitleaks on every push and pull request.
 
 ## Deploying — run releases, not the working tree
 

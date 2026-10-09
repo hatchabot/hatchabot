@@ -165,6 +165,7 @@ per container.
 - `src/orchestrator/runnerSetup.ts` — `ensureRunnerKey`, `runnerSetupSnippet`, `installRuntimeImage`: adding a runner machine.
 - `scripts/runner-scenarios.mjs` — `scenario`, `recalls`: real moves between this machine and a runner on a live install (old and new images, memory recalled by meaning).
 - `scripts/live.mjs` — `LIVE_TESTS`, `dueFor`, `touches`, `committedRuns`, `readRuns`, `resultOf`: the live tests' register, what is due for a release (`touches`: a change to a big shared file counts only near the test's own routes), and the record (the gate reads the committed one) (`docs/live-tests.md`, `docs/live-test-runs.md`); `scripts/promote.sh` — `live_gate`.
+- `scripts/privacy-check.mjs` — `privateValues`, `scan`, `mask`, `ACCEPTED_HISTORY`: the privacy check (the household's private values read from the live install; the pre-push hook and tag guard, `--text` for release notes, `--public` for the `privacy` live test); `scripts/privacy-ignore.txt` (generic words). `scripts/make-debian-test-image.sh`: the local Debian 12 VM image for `clean-install-debian-12`.
 - `src/orchestrator/moveHost.ts` — `moveAgentToHost`: moving an agent between this install's machines.
 - `src/orchestrator/migrate.ts` — `migrateAgent`, `preflight`: moving an agent to another Hatchabot.
 - `src/orchestrator/transfer.ts` — `exportAgent`, `importAgent`: the whole-agent archive behind download, moving to another Hatchabot, and restore from a download.

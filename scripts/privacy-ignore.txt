@@ -1,0 +1,20 @@
+# Generic words that happen to be the name of an agent, a machine or a person
+# on some install, and appear in Hatchabot's own text for other reasons.
+# scripts/privacy-check.mjs never treats these as private. One per line, any
+# case. Nothing private belongs here: this file is public.
+Hatchabot
+Test
+Tester
+Test Agent
+test-agent
+To Do
+To Do Agent
+to-do-agent
+Laptop
+Laptop runner
+localhost
+crypto
+Default
+Family
+Household
+Money

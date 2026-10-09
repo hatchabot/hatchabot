@@ -33,6 +33,7 @@ on a machine that can; it does not hold the gate here.
 
 | Test | Proves | Needs | Time | AI turns |
 |---|---|---|---|---|
+| `privacy` | Nothing GitHub serves names this household's private values (agents, people, bots, machines, `.env` secrets): main's files, every commit and tag since the 2026-10-09 scrub, release notes, issues; and no tag is from before 1.0 or off `main` ([privacy check](releasing.md#the-privacy-check)). Due on every release | This machine's install and `gh` signed in | 1–3 min | none |
 | `runner-scenarios` | Moves and rebuilds between this machine and a runner, across OpenClaw versions; each machine's memory search; Install image ([runner-test-runs.md](runner-test-runs.md)) | A runner: `-- --runner "<name>"`, plus `--old-image <a pre-2026.8 image on it>` once it is current (without it phase A is a SKIP). `--old-image` points the runner's default image at the old one until A1 is done (back on Ctrl-C too): run it when nobody is creating or rebuilding agents there | 20–40 min | none |
 | `transfer` | Clone, a template shared with its memory and imported, and download → delete → restore: each copy runs web-only and still finds its notes by meaning | Room for 3 agents under the account's limit; Hatchabot 2.150.0+ | 10–15 min | none |
 | `apps` | An app installs into an agent (its tests run there), its scheduled command runs by itself, an update keeps its config, a release with failing tests is refused, rollback and stop work | Room for 1 agent | 10–15 min | none |

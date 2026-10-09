@@ -1,0 +1,15 @@
+# gitleaks (the CI "secrets" job): its default rules, minus test fixtures whose
+# values say they are made up. A real secret never contains these markers.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "made-up fixtures"
+regexTarget = "match"
+regexes = [
+  '''(?i)fake|example|made-?up|madeUpKey|not-a-real|0123456789|1234567890|abcdefghij''',
+  '''dGhlIHNhbXBsZSBub25jZQ==''',   # RFC 6455's sample WebSocket key
+  '''GEZDGNBVGY3TQOJQ''',           # RFC 6238's test seed, in base32
+  '''gw-SECRET''',                  # the gateway-token fixture
+  '''secretRef: 'telegram/''',      # a secret-store reference name, not a secret
+]

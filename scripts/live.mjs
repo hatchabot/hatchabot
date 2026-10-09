@@ -37,6 +37,12 @@ const STORE = 'src/store/store.ts';
 const LIB = 'scripts/live-lib.mjs';
 export const LIVE_TESTS = [
   {
+    name: 'privacy', cmd: ['node', 'scripts/privacy-check.mjs', '--public'], against: 'install', minutes: '1–3', aiTurns: false, everyRelease: true,
+    needs: 'this machine\'s install (its private values: agents, people, bots, machines, .env secrets) and gh signed in',
+    proves: 'nothing GitHub serves — the files, every commit and tag since the 2026-10-09 scrub, release notes, issues — names a private value, and no tag is from before 1.0 or off main',
+    area: [],
+  },
+  {
     name: 'runner-scenarios', cmd: ['node', 'scripts/runner-scenarios.mjs'], against: 'install', minutes: '20–40', aiTurns: false,
     needs: 'a runner (Settings → Hosts); pass -- --runner "<name>", and --old-image <a pre-2026.8 image on it> once it is current',
     proves: 'moves and rebuilds between this machine and a runner across OpenClaw versions; each machine\'s memory search; Install image',
@@ -206,6 +212,9 @@ export function dueFor(tag, runs, tests = LIVE_TESTS, cwd = ROOT, arch = process
     // The latest pass: the release nearest the one being promoted.
     const last = passes.reduce((a, b) => (atOrBefore(a.release, b.release) ? b : a));
     if (last.release === tag) continue;
+    // Not tied to files: what it checks (everything GitHub serves) changes
+    // with every release.
+    if (t.everyRelease) { out.push({ test: t.name, why: `it runs on every release (last passed on ${last.release})`, ...manual }); continue; }
     const paths = t.area.filter((x) => typeof x === 'string');
     const changed = paths.length
       ? git('diff', '--name-only', last.release, tag, '--', ...paths).stdout.trim().split('\n').filter(Boolean)

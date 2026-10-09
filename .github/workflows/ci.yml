@@ -55,6 +55,31 @@ jobs:
   # the whole suite and then throws on every real install. v2.14.0 shipped that
   # and took the Telegram approve flow down. This builds a database with the old
   # tag's own code and opens it with this one.
+  # gitleaks on the commits a push or pull request adds: generic secrets in
+  # anyone's change, pull requests included, which never pass the maintainer's
+  # own hooks (docs/releasing.md, "The privacy check"). .gitleaks.toml lets
+  # through test fixtures whose values say they are made up.
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: gitleaks on the new commits
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          V=8.28.0
+          curl -fsSL -o gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v$V/gitleaks_${V}_linux_x64.tar.gz"
+          echo "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb  gl.tgz" | sha256sum -c -
+          tar -xzf gl.tgz gitleaks
+          FROM="${BASE:-$BEFORE}"
+          if [ -n "$FROM" ] && ! echo "$FROM" | grep -qE '^0+$' && git cat-file -e "$FROM^{commit}" 2>/dev/null; then RANGE="$FROM..$HEAD_SHA"; else RANGE="-1 $HEAD_SHA"; fi
+          ./gitleaks git --log-opts="$RANGE" --config .gitleaks.toml --redact --no-banner --exit-code 1
+
   upgrade:
     runs-on: ubuntu-latest
     timeout-minutes: 10
