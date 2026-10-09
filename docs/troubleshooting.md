@@ -43,6 +43,48 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/doctor.ts` — `runtimeImage`; `scripts/build-runtime-image.sh`
 
+### uninstall.sh says "The service runs from …, but this script is in …"
+- **Check:** `grep WorkingDirectory ~/.config/systemd/user/hatchabot.service` names a different folder from the one you ran it in.
+- **Cause:** the service belongs to another checkout. Uninstall now refuses rather than remove that other install's service and agents (before v2.153.0 it purged it).
+- **Fix:** run `<that folder>/scripts/uninstall.sh`, or add `--installed`. To drop only the clone, `rm -rf` it.
+- **Fixed in:** `v2.153.0`
+- **Code:** `scripts/uninstall.sh` — `--installed`
+
+### The channel timer says a release "will not be retried", or the service restarts every ten minutes
+- **Check:** `journalctl --user -u hatchabot-follow-channel` (or `-u hatchabot-follow-latest`); `cat ~/.local/state/hatchabot/follow-channel-failed follow-channel-tries`.
+- **Cause:** before v2.153.0 a network failure counted as "release failed", so a release was set aside without being tried. An install that always failed rolled back and restarted the service on every tick.
+- **Fix:** upgrade by hand (`hatchabot upgrade stable`), then `rm ~/.local/state/hatchabot/follow-channel-failed`. From v2.153.0 a failing install is retried with growing waits, set aside after 8 failures in a row, and never restarts the service.
+- **Fixed in:** `v2.153.0`
+- **Code:** `scripts/follow-channel.sh` — `MAX_TRIES`; `scripts/upgrade.sh` — `rollback`
+
+### `hatchabot upgrade beta` is undone: the channel file says stable again
+- **Check:** `cat ~/.config/hatchabot/channel` against `systemctl --user cat hatchabot-follow-channel` (its ExecStart channel).
+- **Cause:** the timer's own upgrade saved its channel over the one chosen by hand.
+- **Fix:** upgrade, then run `hatchabot upgrade beta` again (or reinstall the timer with `follow-channel.sh --install beta`).
+- **Fixed in:** `v2.153.0`
+- **Code:** `scripts/upgrade.sh` — `HATCHABOT_UPGRADE_BY_TIMER`
+
+### The installer stops with no message, or installs a newer release than stable
+- **Check:** run it again with `HATCHABOT_DRY_RUN=1`. Check `getconf GNU_LIBC_VERSION` (fails on musl/Alpine) and `curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main/channels.json` (an HTML page means a captive portal).
+- **Cause:** under pipefail, a failed fetch or getconf ended it silently, and a portal's page was read as "stable is not named", which gave the newest release.
+- **Fix:** sign in to the network, or name a version (`… | bash -s -- vX.Y.Z`). From v2.153.0 it says what is wrong.
+- **Fixed in:** `v2.153.0`
+- **Code:** `install.sh` — `OFFLINE`; `scripts/release-target.sh` — `is_channels`
+
+### Service setup stops right after writing the units (rootless Docker / Podman)
+- **Check:** `getent group docker` prints nothing, or `echo $USER` is empty.
+- **Cause:** `getent` found no docker group (or `$USER` was unset) and set -e/pipefail ended `install-service.sh`, so the CLI was never linked.
+- **Fix:** upgrade, then re-run `scripts/install-service.sh`. On older releases, run `groupadd docker` or export USER.
+- **Fixed in:** `v2.153.0`
+- **Code:** `scripts/install-service.sh` — `DOCKER_GID`
+
+### Re-running the installer on a clone install left it on a release it cannot run
+- **Check:** `git -C ~/hatchabot describe --tags` shows the new tag, but the service fails on import, or `node_modules` is missing.
+- **Cause:** the installer checked out and installed in place, with no lock and no rollback.
+- **Fix:** `hatchabot upgrade <previous tag>`. From v2.153.0 re-running the installer goes through `upgrade.sh`.
+- **Fixed in:** `v2.153.0`
+- **Code:** `install.sh` — `native-existing`
+
 ## Sign-in and accounts
 
 ### Password mode: requests to the app's address were served without the password
@@ -86,6 +128,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** `hatchabot login` once (or Settings → Security → New token, then paste it). Newer releases say exactly that.
 - **Fixed in:** `v2.33.3`
 - **Code:** `src/cli.ts` — `uses per-person accounts`
+
+### Two accounts both have owner rights after first-run setup
+- **Check:** Settings → Accounts (or `GET /v1/local-accounts`) lists more than one host owner, all created within seconds of each other on a fresh install.
+- **Cause:** before v2.153.0, two first-account requests sent at the same moment both passed the "no accounts yet" check while their passwords were being hashed, and both became host owners.
+- **Fix:** upgrade. Then, as the owner you mean to keep, remove the extra account (or run `hatchabot accounts disable <user>`) and check the security record for what it did.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/api/accountsAuth.ts` — `'/v1/local-accounts/bootstrap'`
+
+### A recovery code reset the password twice, or the password you just chose does not work
+- **Check:** two "account.recovered_with_code" log lines for one account at nearly the same time, or two pages each showed a new recovery code.
+- **Cause:** before v2.153.0, the code was spent in a separate step after the new password was stored, so two requests with the same code could both succeed; the later one's password and recovery code won.
+- **Fix:** upgrade. Then sign in with the password from the page that answered last (or use the newest recovery code shown), and make a new recovery code under "Your account".
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/api/accountsAuth.ts` — `'/v1/local-accounts/recover-with-code'`; `src/store/store.ts` — `recoverLocalAccount`
+
+### After a second-factor reset, an old sign-in at the public address works again without the new factor
+- **Check:** after the owner reset someone's factors (`hatchabot second-factor reset <user>`) and that person added a new one, a browser or copied cookie signed in before the reset reaches the public address, or opens a console there, without being asked for the new factor.
+- **Cause:** before v2.153.0, the public pass's "second factor given" mark was not tied to the person's set of factors; resetting closed open consoles but the mark counted again once any factor existed.
+- **Fix:** upgrade. Passes now carry a factor generation that a reset, a removed factor or a replaced authenticator app moves on, so older proofs ask for the new factor. On an older version, "Sign out on every device" for that person ends the old sign-ins.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/api/publicAccess.ts` — `factorAt`, `secondFactorsChanged`; `src/store/store.ts` — `second_factor_generations`
 
 ## AI sources and Claude login
 
@@ -266,6 +329,34 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.109.1`
 - **Code:** `src/openclaw/configWriter.ts` — `commands.ownerAllowFrom`
 
+### Two agents answer on one Telegram bot after "Change bot", or the new agent's bot gets no messages
+- **Check:** the agent's trail has `channel.stop_failed` near `channel.swapped`, or two agents' containers both poll the same `@bot` (Telegram 409 Conflict in the gateway log).
+- **Cause:** the swap put a pasted bot back in the pool before the agent stopped, and swapped the row even when the stop failed; a Start could also boot the old container before its rebuild.
+- **Fix:** upgrade. Then stop the agent still holding the old bot and rebuild it.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/api/routes.ts` — `rebuildAfterHandover`, `'/v1/agents/:id/channel/swap'`
+
+### After "Change bot" the agent stays stopped
+- **Check:** the trail shows `rebuild.skipped` with why "stopped by its owner" right after `channel.swapped`.
+- **Cause:** a rebuild already queued skipped itself once the swap had stopped the agent, and no new one was started.
+- **Fix:** upgrade, or press Rebuild.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/api/routes.ts` — `rebuildAfterHandover`
+
+### A removed member can still message the agent
+- **Check:** the member was removed while the agent was moving, rebuilding or being restored (the trail shows `member.revoked` inside that operation).
+- **Cause:** the removal scrubbed a volume that the move had already copied, or that the rebuild or restore then rewrote.
+- **Fix:** upgrade, then remove them again.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/orchestrator/members.ts` — `revokeMember`
+
+### A pool bot serving an agent is renamed "Hatchabot (unassigned)"
+- **Check:** in Settings → Telegram, the bot is leased but its pending name is "Hatchabot (unassigned)".
+- **Cause:** the release parked the idle name after another agent had already leased the bot.
+- **Fix:** upgrade, then Sync name on the agent.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/channels/telegramPool.ts` — `release`
+
 ## Agents, builds and rebuilds
 
 ### A rebuild or setup fails with `seed failed at "<step>": …`
@@ -317,6 +408,69 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/doctor.ts` — `sharedNetwork`
 
+### A detached or deleted Google account still works in an agent
+- **Check:** in the agent, `gog auth list --json` still names the account after it was detached, or after its connection was deleted under ⚙ Settings → Connections; the trail may show `connection.remove_failed`.
+- **Cause:** before v2.153.0, removing an account from an agent was fire-and-forget: a failed `gog auth remove` was logged as removed and its pending record cleared, and a detach while the agent was stopped saved no record, so deleting the connection afterwards lost the only note of the email. A connection sync running during a detach could also import the account again from a list read before it.
+- **Fix:** upgrade. Removals are now recorded before anything is deleted and retried at every start, wake or rebuild until gog confirms the account is gone. On an older version, run `~/.local/bin/gog auth remove --force -- "<email>"` in the agent's shell; to cut access everywhere, also revoke the app at myaccount.google.com → Security → Third-party access.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/orchestrator/googleConnections.ts` — `dematerializeConnection`, `removeQueuedNow`, `syncConnections`
+
+### An archived agent is still running (or a pooled bot answers as two agents)
+- **Check:** the agent shows Archived but `docker ps` still lists its container, or a new agent leased from the pool gets replies from two gateways; its trail has `agent.archived` just after a Start or a wake.
+- **Cause:** Start, Stop and wake did not hold the agent's lifecycle lock, so an Archive pressed during a Start or wake stopped the container and gave the bot back, and then the start brought the container up again. Telegram detach had the same gap.
+- **Fix:** upgrade. Then stop the leftover container (`docker stop` on the archived agent's container) and Rebuild any agent that now shares that bot. A clashing request now gets "Another operation is already running on this agent."
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/api/routes.ts` — `startStopped`, `startRefusal`; `src/orchestrator/hibernate.ts` — `wakeAgent`
+
+### Agent-to-agent consults always fail with an unauthorized caller
+- **Check:** the agent has peers, yet `/message` calls from it are refused; the stored `agent-call-token/<id>` secret does not match the live hash.
+- **Cause:** the token's hash was saved before its secret; a failed write or two grants at once left them different, and nothing repaired it.
+- **Fix:** upgrade, change the agent's peers once (that mints a fresh token), then rebuild it.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/api/routes.ts` — `ensureAgentCallToken`
+
+### An agent's browser keeps disappearing, or a test install removed it
+- **Check:** another Hatchabot (a second install, or a smoke test with its own `HATCHABOT_PREFIX`) uses the same Docker, and the Setup log shows "its browser removed".
+- **Cause:** each install's sweep listed every browser on the daemon and removed those it didn't know.
+- **Fix:** upgrade both installs; the sweep starts the browser again within a minute.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `listBrowsers`
+
+### "its browser did not start" every minute for every agent
+- **Check:** the Setup log repeats "browser image build failed".
+- **Cause:** every sweep tried the build again for every agent, and slow builds overlapped.
+- **Fix:** upgrade (one sweep per machine, with back-off), then fix what the build error names, such as disk space or network.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/orchestrator/browser.ts` — `browserSweep`
+
+### `hbt import --no-telegram` brought the agent's bot back
+- **Check:** the file was a full copy (a Download); the CLI said "restored".
+- **Cause:** "no Telegram" applies only to templates and was silently ignored for full copies.
+- **Fix:** a full copy always brings its bot. For a new agent with no bot, export a template and import that.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agents/import'`
+
+### "New agent from a repo" says the name is taken after a failed first try
+- **Check:** an agent with the app's name exists and is still being made or has failed, with no app installed (its App row is empty, or shows a pending install).
+- **Cause:** the agent was created, a later step (model, account, install) failed, and the half-made agent kept the name.
+- **Fix:** upgrade. Until then, delete the half-made agent and try again.
+- **Fixed in:** `v2.153.0`
+- **Code:** `web/index.html` — `appGo`
+
+### A failed app install or update shows no test output
+- **Check:** the error says the tests failed, but no output appears under it.
+- **Cause:** `api()` dropped the server's `test.output`.
+- **Fix:** upgrade, or run `hbt app status` / `hbt app update` on the machine to see the output.
+- **Fixed in:** `v2.153.0`
+- **Code:** `web/index.html` — `api`, `appGo`, `v2AppUpdate`
+
+### A deleted agent reappears for a few seconds on the home screen
+- **Check:** right after deleting or archiving, the tile comes back and then goes away again.
+- **Cause:** two overlapping refreshes, with the older answer arriving last.
+- **Fix:** upgrade. Otherwise it corrects itself on the next refresh.
+- **Fixed in:** `v2.153.0`
+- **Code:** `web/index.html` — `refresh`, `refreshNow`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")
@@ -353,6 +507,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade; on a machine moving many agents, raise `HATCHABOT_EMBEDDER_MEMORY` (2g default) and run fewer rebuilds at once.
 - **Fixed in:** `v2.60.2`
 - **Code:** `src/providers/localDockerProvider.ts` — `MALLOC_ARENA_MAX`; `src/config/envCatalog.ts` — `HATCHABOT_EMBEDDER_MEMORY`
+
+### Recover context started (or Share saved) although I pressed Cancel
+- **Check:** after Cancel or Esc on the second question, the job started or the file was saved anyway.
+- **Cause:** the second question was a `confirm()` whose Cancel meant "the other option".
+- **Fix:** upgrade. The question now has its own Cancel.
+- **Fixed in:** `v2.153.0`
+- **Code:** `web/index.html` — `askChoice`, `recoverContext`, `shareTemplate`
 
 ## Console and web chat
 
@@ -397,6 +558,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** give the second one its own port: `HATCHABOT_EMBED_PORT=<another port>` in its `.env`, then restart it. Before v2.149.0 the message only said the door could not start.
 - **Fixed in:** `v2.149.0`
 - **Code:** `src/providers/localDockerProvider.ts` — `port is already allocated`
+
+### Web chat: Send stays greyed out after switching to another agent
+- **Check:** one agent's reply is still "…thinking", and in the other agent's chat Send is disabled.
+- **Cause:** a single sending lock was shared by every agent.
+- **Fix:** upgrade, or wait for the first reply. A reply that arrived after you switched is in that agent's chat when you reopen it.
+- **Fixed in:** `v2.153.0`
+- **Code:** `web/index.html` — `webChatSend`, `openWebChatPanel`
 
 ## Runners
 
@@ -456,6 +624,55 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.152.0`
 - **Code:** `src/orchestrator/migrate.ts` — `isDefiniteRefusal`, `migrateAgent`
 
+### "The agent runtime is missing — tap Retry to rebuild it." right after a move to another machine
+- **Check:** the agent was just moved, its container runs on the new machine, but it shows failed with that message; its trail has `reconcile.runtime_missing` just after the move finished.
+- **Cause:** a reconcile sweep asked the old machine for the agent's status, and the move finished while that question was pending; the old machine's "not here" was taken as current.
+- **Fix:** upgrade. On an older version the agent is fine on its new machine: Retry or Rebuild clears it.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/orchestrator/reconcile.ts` — `reconcileAgents`
+
+### A move or snapshot "succeeded" but the agent's memory is empty
+- **Check:** the agent's volume on the machine it was exported from does not exist (`docker volume inspect <slug>-vol`).
+- **Cause:** exporting a missing volume created an empty one and copied that.
+- **Fix:** upgrade; restore from a snapshot or backup.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `exportState`; `src/orchestrator/moveHost.ts` — `moveInner`
+
+### Memory search returns 401 for an agent after a failed move
+- **Check:** the move said "rolled back", and the agent's recall or memory index fails with 401 from the memory search door.
+- **Cause:** the move made keys for the target machine, and the rollback restarted the source container with its old key, which the source's door no longer listed.
+- **Fix:** upgrade; until then, rebuild the agent.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/orchestrator/moveHost.ts` — `moveAgentToHost`
+
+### Agents built on a runner die with "exec format error" after Install image
+- **Check:** `docker info --format '{{.Architecture}}'` differs between this machine and the runner.
+- **Cause:** Install image copied this machine's image, built for its own CPU, to a runner with a different CPU.
+- **Fix:** upgrade and run Install image again; the runner pulls the published multi-arch image. If no image is published for that version, update OpenClaw to a released version first.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/orchestrator/runnerSetup.ts` — `installRuntimeImage`
+
+### Install image fails with "The copy stopped moving" near the end
+- **Check:** the progress had reached about the full size before the failure.
+- **Cause:** the 3-minute stall timer kept running while the runner unpacked the last layers after the send ended.
+- **Fix:** upgrade, then Install image again.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/orchestrator/runnerSetup.ts` — `installRuntimeImage`
+
+### After removing a runner, its containers are still running on it
+- **Check:** `docker ps` on that machine shows `<prefix>-embedder`, `<prefix>-embed-door` or `…-browser`.
+- **Cause:** before this fix, removing a runner only deleted its record. Now it cleans up when the runner answers, and warns when it can't.
+- **Fix:** on that machine, `docker rm -f` those containers, then `docker volume rm <prefix>-embed-model <prefix>-embed-keys` and `docker network rm <prefix>-embed`.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/api/routes.ts` — `'/v1/hosts/:id'`
+
+### Runner agents can't reach the embedding server set in HATCHABOT_EMBED_URL
+- **Check:** `HATCHABOT_EMBED_URL` is set and memory search fails only on runner agents.
+- **Cause:** runner agents were handed this machine's external server address.
+- **Fix:** upgrade and rebuild them; they use the runner's own service.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/api/routes.ts` — `embedderForProvision`
+
 ## Backups and restore
 
 ### `hatchabot doctor`: "No backup set in … yet", "Last backup set is N days old", or "… is incomplete"
@@ -492,6 +709,55 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: runner agents are archived over their connections; a runner that is asleep is skipped and named in `skipped`.
 - **Fixed in:** `v2.152.0`
 - **Code:** `scripts/backup-volumes.sh` — `registry`
+
+### "Restore failed … and putting it back as it was failed too": agent marked failed after a backup restore
+- **Check:** the agent shows failed with "A restore from the YYYY-MM-DD backup failed and could not be undone…"; the log shows `restore.left_failed`; a file `restore-safety/<container>-vol-before-restore-<time>.tgz` exists in the backups folder.
+- **Cause:** a restore overwrote the agent's volume, then failed, and putting back the copy taken just before also failed (usually a full disk). Before v2.153.0 the agent was restarted on the half-written volume and the message said "left as it was".
+- **Fix:** free disk space (`df -h`, `docker system df`). Then restore a backup again from Settings → Backups (allowed on a failed agent), or put the kept copy back by hand while the agent is stopped: `docker run --rm -i -v <container>-vol:/vol alpine sh -c 'find /vol -mindepth 1 -delete && tar xz -C /vol && chown -R 1000:1000 /vol' < <kept file>`. Then tap Retry. Keep the `restore-safety` file until the agent works; Hatchabot never deletes it.
+- **Fixed in:** `v2.153.0`
+- **Code:** `src/orchestrator/backups.ts` — `restoreAgentFromBackup`, `restoreSafetyDir`
+
+### A backup set says incomplete: a runner agent's volume failed or is missing
+- **Check:** the set's `backup-status.json` lists the volume in `failedVolumes` (and in `missing` if the runner has no volume by that name); the run's log says "on <runner> failed (exit N)" or "that runner has no volume by that name".
+- **Cause:** the runner answered but its archive failed (tar error, torn gzip, no `alpine` image), or the agent's volume is not on that runner. Before v2.153.0 the first was recorded as skipped and the set said complete; the second made an empty archive and an empty volume on the runner.
+- **Fix:** check the runner (`docker -H <host> volume ls`, `docker -H <host> pull alpine`), then run `scripts/backup-volumes.sh` again. If the volume is gone, restore the agent from its newest set (nothing is pruned while it is missing).
+- **Fixed in:** `v2.153.0`
+- **Code:** `scripts/backup-volumes.sh` — `failed_list`, `missing_list`
+
+### An old backup set is still there past the retention ("kept <date> past N days")
+- **Check:** the run's log says "kept <date> past N days: the newest copy of <volume>"; that agent's runner was skipped (asleep) in the newer sets.
+- **Cause:** since v2.153.0 a set is kept while it holds the newest copy of an active agent's volume. Before that, an agent on a runner that was always asleep at backup time lost every backup once the sets aged out.
+- **Fix:** keep the runner awake at 03:30 (or run a backup while it is up). The old set goes once a newer set holds that agent.
+- **Fixed in:** `v2.153.0`
+- **Code:** `scripts/backup-volumes.sh` — `newer_vols`
+
+### A backup run stops with "Another backup run (pid N) is writing …"
+- **Check:** `ps -p N`; `<backup dir>/<today>/.backup-lock/pid`.
+- **Cause:** the nightly run and "Back up now" (or two installs sharing one backups folder) ran at once. Before v2.153.0 both wrote the same files.
+- **Fix:** wait for the other run to finish; its record says how it went. A lock left by a killed run is taken over by the next run. Give each install its own `HATCHABOT_BACKUP_DIR`.
+- **Fixed in:** `v2.153.0`
+- **Code:** `scripts/backup-volumes.sh` — `release_lock`
+
+### Others lost access to a shared backups folder (NAS) after a backup run
+- **Check:** `ls -ld "$HATCHABOT_BACKUP_DIR"` shows `drwx------` on a folder others use.
+- **Cause:** before v2.153.0 every run chmod'ed the base folder to 700.
+- **Fix:** upgrade, then put the folder's mode back (e.g. `chmod 755`). Each dated set stays 700.
+- **Fixed in:** `v2.153.0`
+- **Code:** `scripts/backup-volumes.sh` — `BASE`
+
+### A restore rolled an agent that lives on a runner back to the day it moved
+- **Check:** this machine still has a `hatchabot-<agent>-vol` volume although the agent lives on a runner; backup sets from before v2.153.0 hold that copy under the agent's name.
+- **Cause:** a move whose clean-up failed left the old volume here, and the nightly run archived it under the agent's name.
+- **Fix:** upgrade; the run now names it as a leftover ("its agent lives on another machine now"). Remove it after a look (`docker volume rm <name>`); restore from a set taken on v2.153.0 or later.
+- **Fixed in:** `v2.153.0`
+- **Code:** `scripts/backup-volumes.sh` — `orphans`
+
+### `restore-drill.sh` fails with only "find: … No such file or directory", or passes on a partial set
+- **Check:** `ls "$HATCHABOT_BACKUP_DIR"`; the newest set's `backup-status.json` state.
+- **Cause:** before v2.153.0 the drill ran find on a missing folder under pipefail, and drilled the newest set even when its run was incomplete.
+- **Fix:** upgrade; it now says there is no backups folder, and drills the newest complete set, naming those it passes over.
+- **Fixed in:** `v2.153.0`
+- **Code:** `scripts/restore-drill.sh` — `set_state`
 
 ## Usage, costs and budgets
 
@@ -561,6 +827,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** fix each ✗ line as it says, or `hatchabot reach off`.
 - **Fixed in:** —
 - **Code:** `src/doctor.ts` — `publicAccessLines`; `src/api/safeguards.ts` — `evaluateSafeguards`
+
+### At the public address, Download / Import / Share a copy / Upload fails with "second factor required"
+- **Check:** the page is opened at the public address, and the toast or upload note says "second factor required" (an HTTP 401 with `secondFactor: "step-up"`).
+- **Cause:** these file transfers used plain `fetch()`, which skipped the second-factor prompt that every other action shows.
+- **Fix:** upgrade. Until then, do these from the private address, or do any other sensitive action first (it asks for the factor, which then counts for 10 minutes).
+- **Fixed in:** `v2.153.0`
+- **Code:** `web/index.html` — `sfFetch`, `sfLink`
 
 ## The Hatchabot agent
 

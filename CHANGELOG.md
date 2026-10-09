@@ -2,6 +2,85 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.153.0] — 2026-10-09
+
+GitHub issues #7–#13, and the fixes from a deep review of the whole codebase (security, concurrency, the web app, the shell scripts, and the newest features).
+
+### Security
+- First-run setup: two first-account requests at the same moment can no longer both become host owners (#7).
+- A recovery code can be used only once, even by two requests at the same moment (#8).
+- After someone's second factor is reset, removed or replaced, sign-ins made before at the public address must give the new factor; re-enrolling no longer makes an old cookie count as verified again (#9).
+- Only the machine owner can add a local model server. Its address check could otherwise be used by any account to probe the home network.
+
+### Fixed — agents, bots and the lifecycle
+- **Archive during a Start, Stop or wake could leave an archived agent running on a bot back in the pool (#10).** Start, Stop, wake, the budget pause and Telegram detach now hold the agent's lifecycle lock and check the agent again inside it; a clash gets "Another operation is already running on this agent."
+- **A detached or deleted Google account could stay on an agent (#11).** Removals are recorded before anything is deleted and retried at every start, wake or rebuild until gog confirms the account is gone; a shared grant is still not revoked.
+- **A restore that failed and could not be undone restarted the agent on a half-written volume (#12).** It now stops the agent, marks it failed with what happened, and keeps the copy taken before the restore under `restore-safety/` in the backups folder; restoring again is allowed on a failed agent. A snapshot restore that fails partway says which files it already wrote.
+- **Reconcile could mark an agent failed right after a move (#13)** when a status question to the old machine was answered after the move finished.
+- Changing an agent's Telegram bot can no longer leave two agents polling the same bot. The whole handover is one operation. A pasted bot goes back to the pool only after the agent has stopped. If the agent won't stop, it keeps its bot and you're asked to try again. A rebuild always follows, even when one was already queued.
+- Start waits while a rebuild is under way or queued, so it no longer boots a container still holding a bot it just gave back.
+- Removing a member while a move, rebuild or restore is running now says "busy" instead of scrubbing a volume that change would then undo.
+- A model change made during a move, restore or rebuild is saved and applied with that change. It no longer edits the volume underneath it or retires its memory-search key early.
+- Two compactions of one agent can no longer start at the same moment.
+- An app install or update checks the agent again after fetching the release: if it was stopped, moved or updated meanwhile, it stops and says so.
+- Agent-to-agent call tokens: a failed save or two grants at once can no longer leave an agent with a token that never works. A mismatched token is minted again on the next grant.
+- A pool bot leased during another agent's farewell is no longer renamed "Hatchabot (unassigned)" later.
+- Detaching a Google account while the agent's connections are syncing no longer puts the account back.
+- Moving an agent refuses if it moved elsewhere meanwhile, and exporting a volume that doesn't exist fails clearly instead of copying an empty one.
+
+### Fixed — runners, memory search and browsers
+- A move to or from a runner that failed and rolled back no longer leaves the agent's memory search refusing it (401) until its next rebuild.
+- Install image: a runner with a different CPU from this machine now gets the published image of the same OpenClaw version instead of a copy that cannot run there. If no such image exists, it is refused with a clear message.
+- Install image: a copy is no longer stopped as "stalled" while the runner is still unpacking the last layers.
+- Each agent's own browser: a second Hatchabot on the same Docker no longer removes this one's browsers. Sweeps no longer overlap. A browser image build that fails is retried after a minute, then twice as long each time up to an hour, instead of every minute for every agent.
+- Switching an agent's browser while a rebuild is already under way now says the switch may not be applied, instead of claiming it is rebuilding.
+- Removing a runner now also removes its memory search service (containers, volumes, network), its browsers, and its key and state on this machine. If the runner doesn't answer, you are told what is left on it.
+- An external embedding server (`HATCHABOT_EMBED_URL`) is used only for this machine's agents; runner agents use the runner's own service.
+- Copying the memory search files to a runner no longer puts a cut-short file in place.
+- Importing a full copy (a Download) with "no Telegram" is now refused with an explanation, instead of restoring its bot anyway.
+
+### Fixed — backups
+- Backups: a runner agent's newest backup is never pruned, even when its runner has been asleep at backup time for longer than the retention.
+- Backups: an archive that fails on a runner that answers now marks the set incomplete instead of being skipped.
+- Backups: a runner volume that is missing is reported as missing, and is no longer auto-created as an empty archive and an empty volume on the runner.
+- Backups: the copy a move left on this machine is no longer backed up under the agent's name, where a restore could roll its memory back to the day it moved; it is named as a leftover.
+- Backups: the nightly run and "Back up now" no longer write the same set at once; a failed archive never leaves a torn file under the real name.
+- Backups: an existing backup folder (a shared NAS folder) keeps its permissions; each dated set is still private.
+- `restore-drill.sh` drills the newest complete set and says so when there is no backups folder.
+
+### Fixed — install, upgrade, uninstall and promote
+- **Uninstall** acts on the install it is run from. If the service runs from another checkout it stops and names both; `--installed` removes that one instead. Before, running it from a test or dev clone could purge the real install's agents, data and `.env`.
+- `uninstall.sh --backups` deletes only Hatchabot's dated backup sets and keeps the folder if anything else is in it. `--purge` no longer deletes a backup folder that sits inside the data folder.
+- `uninstall.sh --purge` keeps runtime images and the agents' network while another Hatchabot install on the same Docker still has containers. It checks image use by ID, and uses the network name from `.env`. A bundle install's `hatchabot`/`hbt` commands are removed too.
+- Automatic upgrades no longer give up on a release they never tried: no network now means "try again". A release whose install keeps failing is retried less and less often, then set aside after 8 failures in a row, and the service is no longer restarted for an install that failed.
+- An upgrade or deploy that stops part-way puts the previous release and its dependencies back.
+- The channel timer no longer switches a machine back to its own channel after `hatchabot upgrade beta`.
+- The installer says when it cannot reach GitHub. Behind a captive portal it stops instead of installing the newest release, and stable never falls back to the newest. Re-running it on an existing clone install upgrades safely (with rollback). On Alpine/musl it no longer stops silently.
+- Service setup works without a `docker` group (rootless Docker, Podman, Docker Desktop for Linux) and without `$USER`.
+- Upgrade locks and the database-driver build log are per user (shared hosts).
+- Production deploys install dependencies the same way upgrades do (database driver compiled where needed).
+- `promote.sh` publishes only the promote: it requires local main to match origin/main and the tag to be on main, takes CI only from the push to main, and undoes its commit if the push is refused.
+- Rebuilding a runtime image under an existing tag that fails its version check gives the tag back to the previous image.
+
+### Fixed — the web app
+- Settings → Budgets: Save takes the values beside it. An agent's Usage tab left a hidden copy of the same controls in the page, and Save could read and store that copy's old values.
+- People an agent is shared with no longer see Wake, Start, Retry, Inspect or Restore buttons that would only fail.
+- At the public address, downloading or importing an agent, sharing a copy, uploading files and downloading a folder now ask for your second factor and then carry on, instead of failing.
+- "New agent from a repo": when a step after creating the agent fails, the half-made agent is removed, so Create works again without "name taken". A failed app install or update now shows its tests' output.
+- Your Hatchabot agent no longer offers "Let them in" to strangers (it is yours alone).
+- Recover context and Share a copy now have a real Cancel: Esc or Cancel no longer starts the job or saves the file.
+- An agent's console no longer marks replies as read while the browser tab is hidden.
+- A deleted agent no longer briefly reappears when two refreshes overlap.
+- Web chat: you can talk to another agent while one is still thinking, and its late reply is announced instead of lost.
+- The Inspect dialog no longer shows one agent's file or conversation under another.
+- Discarding a problem-report draft asks first.
+- The schedule's "cancel", a member's remove × and "fill its Setup values" can now be reached and pressed from the keyboard.
+- Safer handling of links and text from the server: https-only chat links (the join page too), and long notes shown whole. A malformed `#console=` address no longer causes an error.
+
+### Tests and live tests
+- Live tests: a run that tested nothing fails, and a run that skipped a part is recorded as a skip; `runner-scenarios --old-image` points the runner's default image back on Ctrl-C; the console test always removes its signed-in Chrome; the promote gate counts only committed runs and names tests due on another kind of machine; tests are due when the routes and commands they use change.
+- The click-through gate's stub answers backups like the real server, and the run has more time; with about 100 scenarios it no longer fits the old budget.
+
 ## [2.152.1] — 2026-10-09
 
 ### Security

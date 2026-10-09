@@ -2912,7 +2912,7 @@ try {
       dom = execFileSync('docker', [
         'run', '--rm', '--shm-size=1g', '-v', `${work}:/w`, 'zenika/alpine-chrome',
         '--no-sandbox', '--headless', '--disable-gpu', '--disable-dev-shm-usage', '--hide-scrollbars',
-        '--window-size=1400,1000', '--virtual-time-budget=120000', '--dump-dom', 'file:///w/page.html',
+        '--window-size=1400,1000', '--virtual-time-budget=600000', '--dump-dom', 'file:///w/page.html',
       ], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] });
     } catch (err) { dom = String(err.stdout ?? ''); }
   }

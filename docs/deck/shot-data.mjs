@@ -130,7 +130,10 @@ export const STUB = `(() => {
     '/v1/media-key': { set: false },
     '/v1/search-key': { set: true },
     '/v1/connections': { connections: [] },
-    '/v1/backups': { sets: [] },
+    // A healthy machine: last night's complete set. (The old { sets: [] } read
+    // as "no backups yet" and put the manager under Alerts whenever the page
+    // reloaded the machine's status mid-run, 2026-10-09.)
+    '/v1/backups': { backups: [{ date: now.slice(0, 10), hasKey: true, complete: true }], keepDays: 14, missing: [] },
     '/v1/security': { checks: [] },
   };
   window.fetch = async (input) => {
