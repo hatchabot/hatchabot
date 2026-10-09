@@ -412,6 +412,51 @@ describe('issue #1: an HTTP error from the import is not proof it rolled back', 
     expect(w.store.getAgent('a1')!.state).toBe('STOPPED');
   });
 
+  // Issue #15: a proxy's timeout with a JSON `error` body was read as
+  // Hatchabot refusing, so the source restarted next to a running copy.
+  it.each([
+    ['408', 408, 'Request Timeout'],
+    ['499', 499, ''],
+  ])('a JSON %s timeout with the agent RUNNING on the destination: checked, source stays stopped and marked moved', async (code, status, statusText) => {
+    const w = await world();
+    const calls = importFailsWith(
+      { status, statusText, body: JSON.stringify({ error: 'proxy timed out' }), contentType: 'application/json' },
+      [[{ slug: 'kitchen', state: 'RUNNING' }]],
+    );
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(
+      new RegExp(`Desktop answered ${code}[A-Za-z ]*, but the agent DID arrive and is running there`),
+    );
+    expect(calls.list).toBe(1);
+    const src = w.store.getAgent('a1')!;
+    expect(src.state).toBe('STOPPED');
+    expect(src.migratedTo).toContain('Desktop');
+  });
+
+  it('a JSON 499 timeout with the agent absent from the destination: checked, then the source restarts', async () => {
+    const w = await world();
+    const calls = importFailsWith(
+      { status: 499, body: JSON.stringify({ error: 'proxy timed out' }), contentType: 'application/json' },
+      [[{ slug: 'other', state: 'RUNNING' }]],
+    );
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/The transfer to Desktop failed \(it answered 499\)\. Your agent is unchanged\./);
+    expect(calls.list).toBe(1);
+    expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
+  it.each([
+    [409, JSON.stringify({ error: 'needs a build', code: 'image_decision', problem: 'only the owner may build' }), /doesn't have the image/],
+    [429, JSON.stringify({ error: 'agent cap reached' }), /couldn't import it: agent cap reached\. Your agent is unchanged\./],
+  ])('a genuine %s refusal from Hatchabot still restarts the source without asking', async (status, body, msg) => {
+    const w = await world();
+    w.store.setAgentImage('a1', 'hatchabot-derived:test');
+    const calls = importFailsWith({ status, body, contentType: 'application/json' }, [[{ slug: 'kitchen', state: 'RUNNING' }]]);
+    const err = await migrateAgent(w.deps as any, 'a1', PEER).catch((e) => e);
+    expect(err).toBeInstanceOf(MigrateError);
+    expect(err.message).toMatch(msg);
+    expect(calls.list).toBe(0);
+    expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
   it('a success status with no agent in the body is checked, not taken as an answer', async () => {
     const w = await world();
     const calls = importFailsWith(
@@ -435,7 +480,7 @@ describe('issue #1: an HTTP error from the import is not proof it rolled back', 
     expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
   });
 
-  it('isDefiniteRefusal: only a 4xx with Hatchabot\'s JSON error body', () => {
+  it('isDefiniteRefusal: only a refusal status with Hatchabot\'s JSON error body', () => {
     expect(isDefiniteRefusal(400, { error: 'disk full' })).toBe(true);
     expect(isDefiniteRefusal(409, { error: 'needs a build', code: 'image_decision' })).toBe(true);
     expect(isDefiniteRefusal(429, { error: 'cap reached' })).toBe(true);
@@ -444,6 +489,9 @@ describe('issue #1: an HTTP error from the import is not proof it rolled back', 
     expect(isDefiniteRefusal(500, { error: 'Something went wrong on the server' })).toBe(false);
     expect(isDefiniteRefusal(408, undefined)).toBe(false);
     expect(isDefiniteRefusal(400, { message: 'not ours' })).toBe(false);
+    // Issue #15: timeouts are never a refusal, JSON body or not.
+    for (const s of [408, 421, 425, 499]) expect(isDefiniteRefusal(s, { error: 'proxy timed out' })).toBe(false);
+    for (const s of [401, 403, 404, 413, 415, 422]) expect(isDefiniteRefusal(s, { error: 'no' })).toBe(true);
   });
 });
 

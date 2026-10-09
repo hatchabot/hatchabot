@@ -216,20 +216,35 @@ async function destinationHasAgent(
 }
 
 /**
- * Is this failed import a definite "no" from Hatchabot itself? Only a 4xx
- * carrying Hatchabot's own JSON error body is: the restore route sends those
- * when it refuses, after its own rollback, so nothing is left over there.
- * Anything else — a proxy's 502/503/504 page, any 5xx, a 408 or 499 from
- * something in between — may come while (or after) the destination commits
- * the agent, so the caller must ask before restarting the source.
+ * The statuses a refused import can come back with, and nothing else. Each is
+ * either what our restore route, its auth or its body parser sends when it
+ * says no before anything is committed (400 bad file / TransferError, 401/403
+ * token, 404 no such route, 409 image decision, 413 too big, 415 wrong type,
+ * 422 validation, 429 cap reached) or what a proxy sends INSTEAD of passing
+ * the request on, so either way nothing reached the import. A timeout (408,
+ * nginx's 499), 421, 425 or any other status is not on the list: a proxy
+ * sends those while the import may still be running over there. A positive
+ * list rather than "any 4xx", because a proxy's JSON timeout carries an
+ * `error` string too and was taken for a refusal (issue #15, 2026-10-09).
+ * Status only, no new marker, so older destinations keep working.
+ */
+const REFUSAL_STATUSES = new Set([400, 401, 403, 404, 409, 413, 415, 422, 429]);
+
+/**
+ * Is this failed import a definite "no" from Hatchabot itself? Only a refusal
+ * status (above) carrying Hatchabot's own JSON error body is: the restore
+ * route sends those when it refuses, after its own rollback, so nothing is
+ * left over there. Anything else — a proxy's 502/503/504 page, any 5xx, a 408
+ * or 499 from something in between, with or without a JSON body — may come
+ * while (or after) the destination commits the agent, so the caller must ask
+ * before restarting the source.
  */
 export function isDefiniteRefusal(
   status: number,
   body: unknown,
 ): body is { error: string; code?: string; problem?: string } {
   return (
-    status >= 400 &&
-    status < 500 &&
+    REFUSAL_STATUSES.has(status) &&
     typeof body === 'object' &&
     body !== null &&
     typeof (body as { error?: unknown }).error === 'string'
@@ -397,7 +412,8 @@ async function migrateAgentInner(
     if (!isDefiniteRefusal(res.status, body)) {
       // A 502/503/504 is usually a proxy giving up while the destination is
       // still importing, and a 5xx from Hatchabot itself may come after the
-      // agent was committed. Neither proves a rollback (issue #1).
+      // agent was committed. Neither proves a rollback (issue #1); nor does a
+      // 408 or 499 timeout, even one with a JSON error body (issue #15).
       return settleUnanswered(`HTTP ${status}`, status);
     }
     // A real answer from the destination: it refused and rolled back.
