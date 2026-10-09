@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { connect, type Socket } from 'node:net';
 import { Jar, PUBLIC_HOST, PUBLIC_URL, publicApp, type PublicApp } from './helpers/publicApp.js';
 import { SoftAuthenticator } from './helpers/softAuthenticator.js';
-import { totp } from '../src/api/totp.js';
+import { base32Decode, totp } from '../src/api/totp.js';
 import { parseFunnelStatus, targetsPort } from '../src/ops/tailnet.js';
 import { evaluateSafeguards, failingSafeguards } from '../src/api/safeguards.js';
 import { verifyAssertion, verifyRegistration, WebAuthnError } from '../src/api/webauthn.js';
@@ -374,6 +374,89 @@ describe('an open console socket ends when what let it in ends', () => {
     try { expect(h.app.consoleSockets!.revalidate()).toBe(1); } finally { (h.app as unknown as { principalFromCookieHeader: unknown }).principalFromCookieHeader = real; }
     expect(await closedSoon(s1)).toBe(true);
   }, 30_000);
+});
+
+/**
+ * Issue #9: a reset closed the person's open consoles, but their public pass
+ * kept its "second factor given" mark, which counted again the moment a new
+ * factor was added. The pass now carries the generation of the person's
+ * factors it was given under; a reset or a removed factor bumps it.
+ */
+describe('a second factor given before a reset or a removal', () => {
+  /** Enrol a new authenticator app at the private address, as the person does after a reset. */
+  const enrolAt = async (app: PublicApp, cookie: string, password: string): Promise<Buffer> => {
+    const start = (await app.app.inject({ method: 'POST', url: '/v1/second-factor/totp', headers: { cookie }, payload: { current: password } })).json() as { id: string; secret: string };
+    const secret = base32Decode(start.secret);
+    const done = await app.app.inject({ method: 'POST', url: '/v1/second-factor/totp/confirm', headers: { cookie }, payload: { id: start.id, code: totp(secret) } });
+    expect(done.statusCode, done.body).toBe(200);
+    return secret;
+  };
+  const privCookie = async (app: PublicApp, username: string, password: string) =>
+    String((await app.app.inject({ method: 'POST', url: '/v1/login', payload: { username, password } })).headers['set-cookie']).split(';')[0]!;
+
+  it('before a reset: an old cookie is not verified again by re-enrolment; a fresh proof with the new factor is', async () => {
+    h = await publicApp();
+    const owner = await h.addAccount('owner', { owner: true });
+    const dana = await h.addAccount('dana', { totp: true });
+    await h.app.publicAccess!.evaluate();
+    const old = await h.signIn('dana', dana.password, { totpSecret: dana.totpSecret });
+    expect((await h.pub('/v1/agents', { jar: old })).status).toBe(200);
+    const reset = await h.app.inject({ method: 'POST', url: `/v1/second-factor/reset/${dana.id}`, headers: { cookie: await privCookie(h, 'owner', owner.password) }, payload: {} });
+    expect(reset.statusCode, reset.body).toBe(200);
+    expect(h.store.secondFactorGeneration(dana.id)).toBe(1);
+    expect((await h.pub('/v1/agents', { jar: old })).json.secondFactor).toBe('enrol-link');
+    // She adds a new authenticator app at the private address.
+    const fresh = await enrolAt(h, await privCookie(h, 'dana', dana.password), dana.password);
+    expect(h.app.publicAccess!.secondFactorNeed(dana.id)).toBe('yes');
+    // The cookie verified with the factor that was reset is not verified now.
+    const r = await h.pub('/v1/agents', { jar: old });
+    expect(r.status).toBe(401);
+    expect(r.json.secondFactor).toBe('required');
+    expect((await h.pub('/v1/second-factor', { jar: old })).json.hidden).toBe(true);
+    // The old app's code is no factor of hers; the new one's is.
+    expect((await h.pub('/v1/second-factor/verify', { jar: old, body: { code: totp(dana.totpSecret!, Date.now() + 30_000) } })).status).toBe(401);
+    expect((await h.pub('/v1/second-factor/verify', { jar: old, body: { code: totp(fresh, Date.now() + 30_000) } })).status).toBe(200);
+    expect((await h.pub('/v1/agents', { jar: old })).status).toBe(200);
+  }, 30_000);
+
+  it('removing a factor at the public address voids the other sign-ins\' proof; the one that removed it keeps its own', async () => {
+    h = await publicApp();
+    await h.addAccount('owner', { owner: true });
+    const dana = await h.addAccount('dana', { totp: true });
+    const { _sealForTest } = await import('../src/api/secondFactor.js');
+    h.store.insertSecondFactor({ id: 'sf-spare', ownerId: dana.id, kind: 'totp', label: 'Spare', data: _sealForTest(h.secret, Buffer.alloc(20, 6)) });
+    await h.app.publicAccess!.evaluate();
+    const here = await h.signIn('dana', dana.password, { totpSecret: dana.totpSecret });
+    const elsewhere = await signInAgain(h, 'dana', dana.password, dana.totpSecret!);
+    expect((await h.pub('/v1/agents', { jar: elsewhere })).status).toBe(200);
+    expect((await h.pub('/v1/second-factor/sf-spare', { jar: here, method: 'DELETE' })).status).toBe(200);
+    expect((await h.pub('/v1/agents', { jar: here })).status).toBe(200);
+    const r = await h.pub('/v1/agents', { jar: elsewhere });
+    expect(r.status).toBe(401);
+    expect(r.json.secondFactor).toBe('required');
+  }, 30_000);
+
+  it('consoles: the old cookie cannot open one after reset and re-enrolment, and an open one is closed when the generation moves', async () => {
+    const { h, owner, dana, privLogin } = await consoleWorld();
+    const old = await h.signIn('dana', dana.password, { totpSecret: dana.totpSecret });
+    const s1 = await openConsole(h.port, 'd1', old.header());
+    expect(await alive(s1)).toBe(true);
+    expect((await h.app.inject({ method: 'POST', url: `/v1/second-factor/reset/${dana.id}`, headers: { cookie: await privLogin('owner', owner.password) }, payload: {} })).statusCode).toBe(200);
+    expect(await closedSoon(s1)).toBe(true);
+    const fresh = await enrolAt(h, await privLogin('dana', dana.password), dana.password);
+    // Re-enrolled: the old cookie still opens nothing.
+    const s2 = await openConsole(h.port, 'd1', old.header());
+    expect(s2.state.got).not.toContain('101');
+    expect(await closedSoon(s2)).toBe(true);
+    // A fresh proof with the new factor, on the same sign-in: it opens.
+    expect((await h.pub('/v1/second-factor/verify', { jar: old, body: { code: totp(fresh, Date.now() + 30_000) } })).status).toBe(200);
+    const s3 = await openConsole(h.port, 'd1', old.header());
+    expect(await alive(s3)).toBe(true);
+    // The generation moving by any road (here, as another process would) closes it at the next judgement.
+    h.store.bumpSecondFactorGeneration(dana.id);
+    expect(h.app.consoleSockets!.revalidate()).toBe(1);
+    expect(await closedSoon(s3)).toBe(true);
+  }, 40_000);
 });
 
 describe('what a stranger can hold open', () => {

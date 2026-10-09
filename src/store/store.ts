@@ -769,6 +769,16 @@ export class Store {
         id TEXT PRIMARY KEY,
         until INTEGER NOT NULL
       );
+      -- A person's second-factor generation (publicAccess.ts): a public pass
+      -- records the generation its second factor was given under, and counts
+      -- it only while that is still current. Resetting or removing factors
+      -- bumps it, so a cookie verified with a factor that is gone stays
+      -- unverified after a new one is added (#9). No row = generation 0.
+      CREATE TABLE IF NOT EXISTS second_factor_generations (
+        owner_id TEXT PRIMARY KEY,
+        gen INTEGER NOT NULL,
+        bumped_at TEXT NOT NULL
+      );
     `);
     // Windows that were open when this version arrived move to the per-seat
     // table once; the old table is then left empty (its ALTER below still runs).
@@ -1946,6 +1956,22 @@ export class Store {
     this.db.prepare(`UPDATE local_accounts SET pw_hash = ?, pw_salt = ?, claim_code = NULL, claim_expires = NULL WHERE id = ?`).run(pwHash, pwSalt, id);
   }
 
+  /**
+   * Recovery with a code, as one compare-and-swap: the new password and the
+   * new recovery code are stored only if the code that was checked is still
+   * the account's (and the account is not disabled), and that spends it. Two
+   * requests with one code at once: exactly one gets true (#8).
+   */
+  recoverLocalAccount(id: string, spentRecoveryHash: string, pw: { hash: string; salt: string }, recovery: { hash: string; salt: string }): boolean {
+    return this.db
+      .prepare(
+        `UPDATE local_accounts SET pw_hash = ?, pw_salt = ?, claim_code = NULL, claim_expires = NULL,
+           recovery_hash = ?, recovery_salt = ?, recovery_created = ?
+         WHERE id = ? AND recovery_hash = ? AND disabled = 0`,
+      )
+      .run(pw.hash, pw.salt, recovery.hash, recovery.salt, new Date().toISOString(), id, spentRecoveryHash).changes === 1;
+  }
+
   /** Replace (or, with null, remove) an account's recovery code hash. */
   setLocalAccountRecovery(id: string, hash: string | null, salt: string | null): void {
     this.db
@@ -2045,6 +2071,23 @@ export class Store {
   deleteSecondFactors(ownerId: string, kind?: SecondFactorKind, opts: { unconfirmedOnly?: boolean } = {}): number {
     return this.db.prepare(`DELETE FROM second_factors WHERE owner_id = ?${kind ? ' AND kind = ?' : ''}${opts.unconfirmedOnly ? ' AND confirmed_at IS NULL' : ''}`)
       .run(...(kind ? [ownerId, kind] : [ownerId])).changes;
+  }
+
+  /** The generation of this person's second factors a public pass must carry; 0 until the first bump. */
+  secondFactorGeneration(ownerId: string): number {
+    const row = this.db.prepare(`SELECT gen FROM second_factor_generations WHERE owner_id = ?`).get(ownerId) as { gen: number } | undefined;
+    return row?.gen ?? 0;
+  }
+  /** Their factors were reset or one was removed: every second factor given before now stops counting. Returns the new generation. */
+  bumpSecondFactorGeneration(ownerId: string): number {
+    const row = this.db
+      .prepare(
+        `INSERT INTO second_factor_generations (owner_id, gen, bumped_at) VALUES (?, 1, ?)
+         ON CONFLICT(owner_id) DO UPDATE SET gen = second_factor_generations.gen + 1, bumped_at = excluded.bumped_at
+         RETURNING gen`,
+      )
+      .get(ownerId, new Date().toISOString()) as { gen: number };
+    return row.gen;
   }
 
   /** A public sign-in was signed out: remember its pass until no session cookie could still carry it. */

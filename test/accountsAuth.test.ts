@@ -77,6 +77,23 @@ describe('first run', () => {
     expect(store.getAIProfile('p1')!.ownerId).toBe(id);
   });
 
+  it('two first-run requests at once make exactly one host owner (#7)', async () => {
+    const { f, store } = await app();
+    // Both pass the "no accounts yet" check before either has finished hashing its password.
+    const [a, b] = await Promise.all([bootstrap(f, 'first-person', 'made-up-pass-1'), bootstrap(f, 'second-person', 'made-up-pass-2')]);
+    expect([a.statusCode, b.statusCode].sort()).toEqual([201, 403]);
+    const loser = a.statusCode === 403 ? a : b;
+    expect(loser.json().error).toBe('This installation already has accounts — sign in instead.');
+    expect(loser.cookies.find((c: { name: string }) => c.name === 'hatchabot_session')).toBeUndefined();
+    const owners = store.listLocalAccounts().filter((x) => x.hostOwner);
+    expect(owners).toHaveLength(1);
+    expect(store.countLocalAccounts()).toBe(1);
+    // The winner's account is whole: its recovery code was stored in the same step.
+    const winner = (a.statusCode === 201 ? a : b).json();
+    expect(owners[0]!.id).toBe(winner.id);
+    expect(owners[0]!.recoveryHash).toBeTruthy();
+  });
+
   it('rejects a short password and a malformed username', async () => {
     const { f } = await app();
     expect((await bootstrap(f, 'chris', 'short')).statusCode).toBe(400);
@@ -590,6 +607,30 @@ describe('recovery codes (beta blocker #3: the host owner with no Telegram)', ()
     _resetLoginThrottle();
     expect((await recover(f, { username: 'chris', code, password: 'another-password' })).statusCode).toBe(401);
     expect((await recover(f, { username: 'chris', code: fresh, password: 'another-password' })).statusCode).toBe(200);
+  });
+
+  it('one code, two resets at once: exactly one succeeds; the other is answered as a used code (#8)', async () => {
+    const { f, store } = await app();
+    const code: string = (await bootstrap(f, 'first-person', 'made-up-pass-1')).json().recoveryCode;
+    const [a, b] = await Promise.all([
+      recover(f, { username: 'first-person', code, password: 'made-up-new-pass-a' }),
+      recover(f, { username: 'first-person', code, password: 'made-up-new-pass-b' }),
+    ]);
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 401]);
+    const [won, lost] = a.statusCode === 200 ? [a, b] : [b, a];
+    expect(lost.json().error).toBe('That username and recovery code do not match.');
+    expect(lost.json().recoveryCode).toBeUndefined();
+    expect(lost.cookies.find((c: { name: string }) => c.name === 'hatchabot_session')).toBeUndefined();
+    // The winner's password is the one that holds, and the winner's new code is the one stored.
+    const winnerPw = won === a ? 'made-up-new-pass-a' : 'made-up-new-pass-b';
+    const loserPw = won === a ? 'made-up-new-pass-b' : 'made-up-new-pass-a';
+    _resetLoginThrottle();
+    expect((await signIn(f, 'first-person', loserPw)).statusCode).toBe(401);
+    expect((await signIn(f, 'first-person', winnerPw)).statusCode).toBe(200);
+    const acct = store.localAccountByUsername('first-person')!;
+    expect(await verifyPassword(String(won.json().recoveryCode).replace(/-/g, ''), acct.recoveryHash!, acct.recoverySalt!)).toBe(true);
+    // The spent code stays spent.
+    expect((await recover(f, { username: 'first-person', code, password: 'made-up-new-pass-c' })).statusCode).toBe(401);
   });
 
   it('answers the same for an unknown user, a wrong code, and an account without one', async () => {

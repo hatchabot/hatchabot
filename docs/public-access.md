@@ -197,6 +197,12 @@ has no second factor yet, so the owner can send each a reset link.
   anyone's factors (`hatchabot second-factor reset <user>`). Clearing the
   factors of someone with owner rights pauses public access at once, until
   they add one again.
+- **A factor reset or removed takes its proofs with it.** Every second factor
+  that person gave at the public address before the reset (or the removal, or
+  an authenticator app replaced by a new one) stops counting, on every copy of
+  every cookie: adding a new factor afterwards does not make an old sign-in
+  verified again, it is asked for the new one. Someone who removes a factor at
+  the public address keeps the proof they gave moments before (the step-up).
 - **A password reset does not get around it.** A reset link or recovery code
   used at the public address gives a session that is still asked for the
   second factor.
@@ -245,8 +251,11 @@ the device was new.
 
 A sign-in made at the public address is given a second cookie,
 `__Host-hatchabot_pub`: signed, bound to that session, carrying when it was
-last used and when the second factor was last given. Without a valid one the
-public address answers "sign in". So:
+last used and when the second factor was last given, under which generation
+of the person's factors (`second_factor_generations`: a reset, a removed
+factor or a replaced authenticator app moves it on, and a second factor given
+under an older one no longer counts). Without a valid one the public address
+answers "sign in". So:
 
 - a session from the private address does not carry over to the public one
   (cookies are shared between ports of one host, so the cookie itself would);

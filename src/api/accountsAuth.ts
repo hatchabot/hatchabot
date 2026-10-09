@@ -230,6 +230,7 @@ export function signInLocalByLink(store: Store, secret: Buffer, req: FastifyRequ
  */
 /** The throttle bucket for the first-run setup code: one for the code, whoever asks. */
 const SETUP_BUCKET = '*first-run-setup*';
+const HAS_ACCOUNTS = 'This installation already has accounts — sign in instead.';
 /** Compared against when there is no usable account, so every login pays for one scrypt. */
 const DUMMY_HASH = '00'.repeat(32);
 const DUMMY_SALT = 'no-account';
@@ -253,10 +254,14 @@ export function registerAccountRoutes(
    */
   const guessSlot = (req: FastifyRequest, who?: string): (() => void) | undefined =>
     guard.reserve ? guard.reserve(req, who) : guard.throttled(req, who) ? undefined : () => {};
+  /** A new recovery code, hashed but not yet stored: for a step that must store it without awaiting. */
+  const prepareRecoveryCode = async (): Promise<{ code: string; hash: string; salt: string }> => {
+    const code = newRecoveryCode();
+    return { code, ...(await hashPassword(normalizeRecoveryCode(code))) };
+  };
   /** A new recovery code for an account: stored as a hash, returned once. */
   const issueRecoveryCode = async (id: string): Promise<string> => {
-    const code = newRecoveryCode();
-    const { hash, salt } = await hashPassword(normalizeRecoveryCode(code));
+    const { code, hash, salt } = await prepareRecoveryCode();
     store.setLocalAccountRecovery(id, hash, salt);
     return code;
   };
@@ -306,9 +311,7 @@ export function registerAccountRoutes(
       // A machine is never claimed from the internet, setup code or not. The
       // public route table refuses this route already; this is the second lock.
       if (isPublic(req)) return reply.code(403).send({ error: 'The first account is created on the machine itself or its private address.' });
-      if (store.countLocalAccounts() > 0) {
-        return reply.code(403).send({ error: 'This installation already has accounts — sign in instead.' });
-      }
+      if (store.countLocalAccounts() > 0) return reply.code(403).send({ error: HAS_ACCOUNTS });
       if (!onThisMachine(req) && (req.body?.setupCode ?? '').trim() !== SETUP_CODE) {
         // One bucket for the code itself as well as the client's: a forged
         // forwarded-for only escapes the client's (night review).
@@ -327,25 +330,37 @@ export function registerAccountRoutes(
       const problem = usernameProblem(username) ?? passwordProblem(password);
       if (problem) return reply.code(400).send({ error: problem });
       const { hash, salt } = await hashPassword(password);
-      const id = `acct-${randomUUID()}`;
-      store.insertLocalAccount({
-        id,
-        username,
-        displayName: req.body?.displayName?.trim() || undefined,
-        pwHash: hash,
-        pwSalt: salt,
-        hostOwner: true,
-        disabled: false,
-        createdAt: new Date().toISOString(),
-      });
-      // An install that ran in password mode has rows under the local owner;
-      // account #1 adopts them, exactly as the first identity sign-in does.
-      const adopted = store.adoptLocalOwnerData(id);
-      store.recordAccount(id, username.includes('@') ? username : undefined);
-      if (adopted > 0) app.log.warn({ ownerId: id, rows: adopted }, 'first account adopted this installation\'s data');
       // The host owner is the one person nobody can send a reset link to: give
       // them their way back in now, while they are here to write it down.
-      const recoveryCode = await issueRecoveryCode(id);
+      // Hashed here, before the step below, which must not await.
+      const recovery = await prepareRecoveryCode();
+      const id = `acct-${randomUUID()}`;
+      // "No accounts yet" was checked before the hashing; two requests at once
+      // both passed it and both became host owners (#7). So it is checked
+      // again, and account #1 made, in one synchronous transaction: the
+      // second request finds the first one's account and is refused.
+      const adopted = store.transact((): number | undefined => {
+        if (store.countLocalAccounts() > 0) return undefined;
+        store.insertLocalAccount({
+          id,
+          username,
+          displayName: req.body?.displayName?.trim() || undefined,
+          pwHash: hash,
+          pwSalt: salt,
+          hostOwner: true,
+          disabled: false,
+          createdAt: new Date().toISOString(),
+        });
+        // An install that ran in password mode has rows under the local owner;
+        // account #1 adopts them, exactly as the first identity sign-in does.
+        const rows = store.adoptLocalOwnerData(id);
+        store.recordAccount(id, username.includes('@') ? username : undefined);
+        store.setLocalAccountRecovery(id, recovery.hash, recovery.salt);
+        return rows;
+      });
+      if (adopted === undefined) return reply.code(403).send({ error: HAS_ACCOUNTS });
+      if (adopted > 0) app.log.warn({ ownerId: id, rows: adopted }, 'first account adopted this installation\'s data');
+      const recoveryCode = recovery.code;
       setSessionCookie(reply, req, mintSession(secret, id, hash, Date.now() + TTL_MS, store.sessionEpoch(id)));
       return reply.code(201).send({ ok: true, id, username, hostOwner: true, adopted, recoveryCode });
     },
@@ -504,22 +519,30 @@ export function registerAccountRoutes(
     const hash = account?.recoveryHash ?? '00'.repeat(32);
     const salt = account?.recoverySalt ?? 'no-account';
     const match = (await verifyPassword(code, hash, salt).catch((err: unknown) => { release(); throw err; })) && !!account?.recoveryHash && !account.disabled && code.length === 20;
-    if (!account || !match) {
-      guard.noteFailure(req);
-      release();
+    const noMatch = async () => {
       const left = 900 - (Date.now() - started);
       if (left > 0) await new Promise((r) => setTimeout(r, left));
       return reply.code(401).send({ error: 'That username and recovery code do not match.' });
+    };
+    if (!account || !match) {
+      guard.noteFailure(req);
+      release();
+      return noMatch();
     }
     release();
     // Said only to someone who gave the right code (so it tells a stranger nothing), and the code is not spent.
     if (ownerRecoveryFromPublic(req, account)) return reply.code(403).send({ error: OWNER_RECOVERY_PRIVATE_ONLY, privateOnly: true });
+    // Both hashes first; then the code is spent, and the new password and the
+    // new code stored, in one compare-and-swap on the code that was checked.
+    // Spending it in a later step let two requests with one code both reset
+    // the password (#8). The one that loses is answered as a used code is.
     const pw = await hashPassword(password);
-    store.transact(() => {
-      store.setLocalAccountPassword(account.id, pw.hash, pw.salt);
-      store.setLocalAccountClaim(account.id, null, null); // a pending reset link is moot now
-    });
-    const recoveryCode = await issueRecoveryCode(account.id);
+    const recovery = await prepareRecoveryCode();
+    if (!store.recoverLocalAccount(account.id, account.recoveryHash!, pw, recovery)) {
+      guard.noteFailure(req);
+      return noMatch();
+    }
+    const recoveryCode = recovery.code;
     revokeCliTokensOf(account.id);
     // Recovered: the lock-out someone may have run up on this account ends.
     guard.clearFailures?.(account.username);

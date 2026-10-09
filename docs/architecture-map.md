@@ -388,7 +388,7 @@ a separate port, sign-in limits and automatic upgrades on the stable channel.
 - `src/api/reachRoutes.ts` — `registerReachRoutes`, `'/v1/public-access'`, `'/v1/public-access/on'`, `'/v1/security/devices'`: turning it on and off, devices and the security log.
 - `src/ops/publicIntent.ts` — `writePublicIntent`, `readPublicIntent`: remembers the intent across restarts.
 - `src/api/routes.ts` — `'/v1/tailscale'`, `'/v1/tailscale/serve'`, `'/v1/tailscale/use-for-links'`, `appUrlFor`: Tailscale status and link addresses.
-- `src/store/store.ts` — `known_devices`, `security_log`, `public_pass_revocations`: where it is stored.
+- `src/store/store.ts` — `known_devices`, `security_log`, `public_pass_revocations`, `second_factor_generations`: where it is stored.
 - `web/index.html` — `tailnetStepBody`, `turnOnServe`, `loadReach`, `reachTurnOn`, `reachTurnOff`: the screens.
 
 ## Report a problem
