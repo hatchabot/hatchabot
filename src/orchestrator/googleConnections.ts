@@ -329,6 +329,44 @@ export async function removeQueuedNow(
 }
 
 /**
+ * One connection change at a time per agent (issue #16, 2026-10-09). Attach,
+ * detach, a deleted connection's removal and syncConnections each read the
+ * attachments, then await a docker exec: interleaved, a detach could take the
+ * account off and clear its record while an attach's import was still in
+ * flight, and the import then put it back with nothing left to undo it. A
+ * promise chain, not the lifecycle lock: these wait their turn (seconds)
+ * rather than refuse, and a start or rebuild must not be blocked by them.
+ * Process-wide, keyed by agent id, so the routes and provisioning share it.
+ */
+const connectionChains = new Map<string, Promise<void>>();
+export function withConnectionLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+  const run = (connectionChains.get(agentId) ?? Promise.resolve()).then(fn);
+  const tail = run.then(() => {}, () => {});
+  connectionChains.set(agentId, tail);
+  void tail.then(() => { if (connectionChains.get(agentId) === tail) connectionChains.delete(agentId); });
+  return run;
+}
+
+/**
+ * After an import: if the connection was detached meanwhile (by a path
+ * outside the lock), take the account off again — unless another attached
+ * connection names the same email — and remember it when that fails.
+ */
+export async function offAgainIfDetached(
+  deps: ConnectionSyncDeps,
+  agent: { id: string; runtimeRef: string },
+  connectionId: string,
+  email: string | undefined,
+): Promise<boolean> {
+  const now = deps.store.listAgentConnections(agent.id);
+  if (!email || now.some((x) => x.connectionId === connectionId)) return false;
+  if (now.some((x) => deps.store.getConnection(x.connectionId)?.email === email)) return false;
+  const r = await dematerializeConnection(deps, agent, email);
+  if (!r.ok) deps.store.addConnectionRemoval(agent.id, email);
+  return true;
+}
+
+/**
  * Provision-time sync (step 7.6): every ATTACHED connection lands on the
  * volume before the agent goes RUNNING. Best-effort per connection — a
  * Google outage must not fail a rebuild; failures are logged and retried on
@@ -336,7 +374,15 @@ export async function removeQueuedNow(
  * for that email with the vault's token (--force; without it gog refused
  * every account it already held — review, 2026-09-29).
  */
-export async function syncConnections(
+export function syncConnections(
+  deps: ConnectionSyncDeps,
+  agentId: string,
+  runtimeRef: string,
+): Promise<void> {
+  return withConnectionLock(agentId, () => syncConnectionsNow(deps, agentId, runtimeRef));
+}
+
+async function syncConnectionsNow(
   deps: ConnectionSyncDeps,
   agentId: string,
   runtimeRef: string,
@@ -392,10 +438,6 @@ export async function syncConnections(
     await materializeConnection(deps, { id: agentId, slug: agent.slug, runtimeRef }, a.connectionId);
     // Detached during the import: its live removal may have run before the
     // import landed. Off again, and remembered if that fails.
-    const email = emailOf.get(a.connectionId);
-    if (email && !stillAttached(a.connectionId) && !attachedEmailsNow().has(email)) {
-      const r = await dematerializeConnection(deps, { id: agentId, runtimeRef }, email);
-      if (!r.ok) deps.store.addConnectionRemoval(agentId, email);
-    }
+    await offAgainIfDetached(deps, { id: agentId, runtimeRef }, a.connectionId, emailOf.get(a.connectionId));
   }
 }
