@@ -492,6 +492,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.1`
 - **Code:** `src/orchestrator/apps.ts` — `syncTasks`
 
+### A move to another Hatchabot "could not be confirmed"; the agent stays stopped and Start is refused
+- **Check:** `GET /v1/operations?agentId=<id>` shows `kind: "migrate"`, `status: "held"`.
+- **Cause:** the import's answer was lost (a restart, a dropped connection, a proxy timeout) and the other server hasn't said whether the agent arrived; starting this copy could leave two copies polling one bot.
+- **Fix:** wait (it asks again every 10 minutes), or check the other server and choose "It is running on … — keep this copy stopped" or "It is not on … — keep it here".
+- **Fixed in:** `v2.154.0`
+- **Code:** `src/orchestrator/migrate.ts` — `resumeMigrate`, `recoverMigrate`
+
+### After a restart, an agent you were importing is gone: "Import interrupted — import the file again"
+- **Check:** the agent's operation is `kind: "import"`, `status: "rolled_back"`.
+- **Cause:** the restart cut the import off before the agent was running; a half-imported agent is removed, never started.
+- **Fix:** import the same file again.
+- **Fixed in:** `v2.154.0`
+- **Code:** `src/orchestrator/transfer.ts` — `resumeImport`, `rollbackImport`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")
@@ -693,6 +707,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade and rebuild them; they use the runner's own service.
 - **Fixed in:** `v2.153.0`
 - **Code:** `src/api/routes.ts` — `embedderForProvision`
+
+### Start says "… was interrupted, and … isn't answering. Choose what to do on its page first (Alerts)."
+- **Check:** the agent is under Alerts with ⏸; `GET /v1/operations?agentId=<id>` shows an operation with `status: "held"`.
+- **Cause:** a move to another machine was cut off by a restart after the agent was recorded on the target, and the target didn't answer when Hatchabot came back. It won't guess with a machine it can't see.
+- **Fix:** bring the other machine back and press "Try again when … is back", or press "Put it back on …" (refused while the copy there may already be running).
+- **Fixed in:** `v2.154.0`
+- **Code:** `src/orchestrator/moveHost.ts` — `resumeMoveHost`, `recoverMoveHost`
+
+### An agent's Setup log says "moved to another host" instead of the machine's name
+- **Check:** the `agent.moved` event has `to` but no `toName`.
+- **Cause:** the label read `toHost`, which the event never carried.
+- **Fix:** upgrade; moves made from v2.154.0 on name the machine. Older lines still say "another host".
+- **Fixed in:** `v2.154.0`
+- **Code:** `src/orchestrator/eventLabels.ts` — `eventLabel`
 
 ## Backups and restore
 

@@ -2,6 +2,31 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.154.0] — 2026-10-09
+
+The first steps of docs/operations-and-one-interface-design.md: long changes that survive a restart, and a home screen with everything the classic look still had (the classic look goes in the next release).
+
+### Added — changes that survive a restart
+- **Moves and imports survive a restart.** Each step is written down as it happens, so when Hatchabot restarts in the middle (an automatic upgrade, a crash, a reboot) it finishes or undoes the change itself where the right direction is certain, instead of leaving the agent stopped or half-made (docs/operations-and-one-interface-design.md).
+- **A half-finished import is removed after a restart, never started.** Before, Retry started an agent with an empty memory but the imported bot and members; now you import the file again.
+- **A move to another Hatchabot whose outcome is unknown** (a restart, a dropped connection, a proxy timeout) is settled by asking that server whether the agent arrived. Until it answers, the copy here stays stopped and Start is refused, so two copies can never answer one bot; it asks again every 10 minutes, or you choose under Alerts.
+- When a machine Hatchabot needs isn't answering after a restart, the agent shows under Alerts with its choices, e.g. "Try again when Laptop runner is back" or "Put it back on This machine".
+- Start, Rebuild, Archive, Move, Delete and Wake say why they must wait while a move or import is under way or waiting for your choice.
+- New `GET /v1/operations`, `GET /v1/operations/:id` and `POST /v1/operations/:id/recover`; the Hatchabot agent can list operations and make the choice (`list_operations`, `recover_operation`).
+- The Setup log says which machine an agent moved to (it always said "another host").
+- The startup and periodic check's findings ("found stopped", "its container is gone") appear in the agent's Activity and Setup log, not only the service log.
+
+### Added — the home screen
+- The home screen has a **Planned** group: plan an agent by name, make it with one click (New agent opens with the name filled in), and the plan leaves once the agent exists. A plan can be removed by keyboard.
+- **My order**, beside Age · Name · Activity, arranges agents the way you put them: drag an icon within its group, use **Move earlier / Move later** on the agent's Overview, or press a group's **A→Z** to put it in order and keep it.
+- **Check all** (at the foot of Bulk actions, and on the machine line) runs a health check, including the settings check, on every running agent; problems show on the agent's icon and under Alerts, and a line above the agents says how it went.
+- An agent's Overview now says when a template's Setup values were never filled in, with a button to them.
+- The Telegram tab has a **Telegram Web** link beside **Open in Telegram**.
+- Keyboard and screen readers: the agent page's selects have real labels; its icon is a real button; the View by and agent-page tabs move with the arrow keys; the account menu is a proper menu with arrow keys; the drag-only strips say where the keyboard does the same.
+
+### Also
+- A privacy check keeps this household's private values out of the public repository: on every push (`scripts/privacy-check.mjs --install-hook`), on release notes before they are published, and as the `privacy` live test before a promote. CI runs gitleaks on every push and pull request (docs/releasing.md, "The privacy check").
+
 ## [2.153.1] — 2026-10-09
 
 GitHub issues #15–#17, from a re-audit of 2.153.0.
