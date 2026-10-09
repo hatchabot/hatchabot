@@ -489,3 +489,41 @@ describe('an import with no source chosen takes the ⭐ Default', () => {
     expect((await withHouse(true)).aiProfileId).toBe('p-house');
   });
 });
+
+// Issue #20: the archive's OpenClaw version against the runtime it would land
+// on. Only DOWN across the 2026.8 line is refused (moveCrossesDown); the old
+// guard had both directions the wrong way round.
+describe('issue #20: an archive import checks the version the right way round', () => {
+  async function archiveFrom(version: string | undefined) {
+    const src = await installation();
+    const ref = await seedSourceAgent(src);
+    src.provider.infoOverride.set(ref, { openclawVersion: version });
+    return (await exportAgent(src.deps, 'a1')).data;
+  }
+  async function importOnto(data: Buffer, runtime: string | undefined) {
+    const dst = await installation('importer');
+    if (runtime === undefined) dst.provider.currentImageInfo = async () => { throw new Error('no such image'); };
+    else dst.provider.imageOpenclawVersion = runtime;
+    return { dst, result: importAgent(dst.deps, data, { ownerId: 'importer' }) };
+  }
+
+  it('archive 2026.9.1 onto runtime 2026.7.1 is refused before anything is made', async () => {
+    const { dst, result } = await importOnto(await archiveFrom('2026.9.1'), '2026.7.1');
+    await expect(result).rejects.toThrow(/saved by OpenClaw 2026\.9\.1; this machine would run it on 2026\.7\.1, which cannot read it/);
+    expect(dst.store.listAllActiveAgents()).toHaveLength(0);
+  });
+
+  it('archive 2026.7.1 onto runtime 2026.9.1 (the upgrade) is accepted and runs', async () => {
+    const { result } = await importOnto(await archiveFrom('2026.7.1'), '2026.9.1');
+    expect((await result).state).toBe('RUNNING');
+  });
+
+  it.each([
+    ['same side of the line', '2026.9.1', '2026.9.6'],
+    ['archive version unknown', undefined, '2026.7.1'],
+    ['runtime version unknown', '2026.9.1', undefined],
+  ])('%s: accepted, as moveCrossesDown says', async (_name, archive, runtime) => {
+    const { result } = await importOnto(await archiveFrom(archive), runtime);
+    expect((await result).state).toBe('RUNNING');
+  });
+});

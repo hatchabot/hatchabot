@@ -60,7 +60,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r('*', /^\/app-qr\.svg$/, 'never', 'The private address as a QR code'),
   r('*', /^\/v1\/tailscale(\/.*)?$/, 'never', 'Tailscale set-up (private address, HTTPS, links)'),
   r('*', /^\/v1\/public-access\/on$/, 'never', 'Turning public access on'),
-  r('*', /^\/v1\/(agents\/preflight|agents\/restore)$/, 'never', 'Another Hatchabot moving an agent here (token calls; tokens are refused at the public address)'),
+  r('*', /^\/v1\/(agents\/preflight|agents\/restore|moves\/:id)$/, 'never', 'Another Hatchabot moving an agent here (token calls; tokens are refused at the public address)'),
   r('*', /^\/v1\/peers(\/.*)?$/, 'never', 'Linking another Hatchabot'),
   r('*', /^\/v1\/second-factor\/reset\/:id$/, 'never', 'Resetting someone\'s second factor'),
 

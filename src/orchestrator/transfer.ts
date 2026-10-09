@@ -1,4 +1,4 @@
-import { needsPortHeal } from '../openclaw/configWriter.js';
+import { moveCrossesDown } from '../openclaw/configWriter.js';
 import { validIcon, validIconColor } from './agentIcons.js';
 import { randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
@@ -582,10 +582,13 @@ async function importAgentInner(
   const image = manifest.image ? await settleImage(deps, manifest.image, opts, host.kind === 'local' ? 'this machine' : host.name) : {};
   // Data written by 2026.8+ cannot be read by 2026.7: refused before anything
   // is made, not discovered when the agent fails to start (night review).
-  if (manifest.openclawVersion && !needsPortHeal(manifest.openclawVersion)) {
+  // One rule with a move between machines, moveCrossesDown: this check had
+  // both directions the wrong way round, refusing 2026.7 → 2026.9 (the
+  // normal upgrade) and letting 2026.9 → 2026.7 through (issue #20, 2026-10-09).
+  if (manifest.openclawVersion) {
     // The image it will run: its pin, or — when one is to be built — the recipe's base.
     const here = await deps.provider.currentImageInfo(image.pin && !image.build ? image.pin : image.build?.base ?? image.pin).catch(() => ({} as { openclawVersion?: string }));
-    if (here.openclawVersion && needsPortHeal(here.openclawVersion)) {
+    if (moveCrossesDown(manifest.openclawVersion, here.openclawVersion)) {
       throw new TransferError(`This copy was saved by OpenClaw ${manifest.openclawVersion}; this machine would run it on ${here.openclawVersion}, which cannot read it. Update this machine's image first.`);
     }
   }

@@ -135,6 +135,37 @@ describe('importing a full copy', () => {
     expect(r.json()).toMatchObject({ state: 'RUNNING', slug: 'kitchen' });
   });
 
+  // Issue #19: the agent row comes after the import has looked at the image;
+  // GET /v1/moves/:id answers for the move from the request's first moment.
+  it('a move id on the restore is answered for before the agent row exists, then as landed or failed', async () => {
+    const file = await fileOf();
+    const dst = await makeWorld('owner-b');
+    let release!: () => void;
+    let reached!: () => void;
+    const atImage = new Promise<void>((r) => { reached = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const info = dst.provider.currentImageInfo.bind(dst.provider);
+    dst.provider.currentImageInfo = async (image?: string) => { reached(); await gate; return info(image); };
+    const move = (id: string, owner = 'owner-b') =>
+      dst.f.inject({ method: 'GET', url: `/v1/moves/${id}`, headers: as(owner) }).then((r) => r.json().state);
+    const posting = dst.f.inject({ method: 'POST', url: '/v1/agents/restore', headers: { ...octet('owner-b'), 'x-hatchabot-move': 'move-test-0001' }, payload: file });
+    await atImage;
+    // No row yet: the list is empty, but the move is known and still going.
+    const list = (await dst.f.inject({ method: 'GET', url: '/v1/agents', headers: as('owner-b') })).json() as Array<{ slug: string }>;
+    expect(list.some((a) => a.slug === 'kitchen')).toBe(false);
+    expect(await move('move-test-0001')).toBe('running');
+    // Someone else's token, or an id never sent: unknown.
+    expect(await move('move-test-0001', 'owner-c')).toBe('unknown');
+    expect(await move('move-test-9999')).toBe('unknown');
+    release();
+    expect((await posting).statusCode).toBe(201);
+    expect(await move('move-test-0001')).toBe('landed');
+    // The same file again is refused (the agent lives here now): that move failed.
+    const again = await dst.f.inject({ method: 'POST', url: '/v1/agents/restore', headers: { ...octet('owner-b'), 'x-hatchabot-move': 'move-test-0002' }, payload: file });
+    expect(again.statusCode).toBe(400);
+    expect(await move('move-test-0002')).toBe('failed');
+  });
+
   it('the CLI asks ?async=1 on /restore, and the app imports through /import: both 202 with the operation and the new agent', async () => {
     const file = await fileOf();
     for (const url of ['/v1/agents/restore?async=1', '/v1/agents/import']) {

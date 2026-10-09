@@ -4,7 +4,8 @@ import { exportAgent, TransferError } from './transfer.js';
 import { existsSync } from 'node:fs';
 import type { ProvisionDeps } from './provision.js';
 import { whileBusy } from './busy.js';
-import { beginOperation, handleFor, rethrowIfCrash, stepReached, type OpHandle } from './operations.js';
+import { beginOperation, currentBootId, handleFor, rethrowIfCrash, stepReached, type OpHandle } from './operations.js';
+import { randomUUID } from 'node:crypto';
 
 /**
  * Move an agent to another Hatchabot installation in one action.
@@ -182,23 +183,111 @@ async function peerFetch(
 }
 
 /**
+ * The header a move's restore request carries: an id the destination records
+ * from the request's first moment (receiveMove), so the mover can later ask
+ * about THAT import (GET /v1/moves/:id) instead of reading the agent list.
+ * The list says nothing until the import has made its agent row, which comes
+ * after it has looked at the image — so an empty list was taken for "it rolled
+ * back" while the import was still on its way to RUNNING (issue #19, 2026-10-09).
+ */
+export const MOVE_HEADER = 'x-hatchabot-move';
+
+/** A move id as the header may carry it; anything else is ignored, never refused. */
+export function moveIdFrom(v: unknown): string | undefined {
+  return typeof v === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(v) ? v : undefined;
+}
+
+export type MoveState = 'running' | 'landed' | 'failed' | 'unknown';
+
+/**
+ * Destination side: record an announced move before the import awaits
+ * anything (a store write is synchronous), then follow the import to its end.
+ * Without an id (an older Hatchabot sending) it records nothing.
+ */
+export function receiveMove(store: Store, moveId: string | undefined, ownerId: string) {
+  if (moveId) store.insertMoveReceipt({ id: moveId, ownerId, bootId: currentBootId() });
+  return {
+    /** The import's operation, once its agent row exists. */
+    operation: (opId: string) => { if (moveId) store.updateMoveReceipt(moveId, { opId }); },
+    finished: (outcome: 'landed' | 'failed') => { if (moveId) store.updateMoveReceipt(moveId, { outcome }); },
+  };
+}
+
+/**
+ * Destination side: what became of an announced move, definitively where it
+ * can be. `running` is the only answer that is not one: the import is still
+ * on its way (or its own undo is held), so the mover keeps waiting.
+ *  - its operation decides once there is one: done → landed; undone → failed,
+ *    but only when its agent row is really gone;
+ *  - before that: the request's own outcome (refused before any row → failed);
+ *  - neither, and the process that took it is gone: a restart cut it off
+ *    before any row, so nothing was made and nothing will be → failed;
+ *  - never received (or someone else's): unknown.
+ */
+export function moveState(store: Store, moveId: string, ownerId: string): MoveState {
+  const r = store.getMoveReceipt(moveId);
+  if (!r || r.ownerId !== ownerId) return 'unknown';
+  const op = r.opId ? store.getOperation(r.opId) : undefined;
+  if (op) {
+    if (op.status === 'succeeded') return 'landed';
+    if (op.status === 'rolled_back' || op.status === 'failed') {
+      const a = op.agentId ? store.getAgent(op.agentId) : undefined;
+      return !a || a.state === 'DELETED' ? 'failed' : 'running';
+    }
+    return 'running';
+  }
+  if (r.outcome) return r.outcome;
+  // An operation that existed and was pruned (90 days) would have left an outcome.
+  return r.bootId === currentBootId() && !r.opId ? 'running' : 'failed';
+}
+
+/** Source side: ask the destination about our move. undefined: no answer; 'unsupported': an older Hatchabot. */
+async function askAboutMove(
+  deps: Pick<MigrateDeps, 'secrets'>,
+  peer: Peer,
+  moveId: string,
+): Promise<MoveState | 'unsupported' | undefined> {
+  try {
+    const res = await peerFetch(deps, peer, `/v1/moves/${encodeURIComponent(moveId)}`, { method: 'GET', signal: AbortSignal.timeout(20_000) });
+    // The route answers every id it is asked about, so a 404 is a server without it.
+    if (res.status === 404) return 'unsupported';
+    if (!res.ok) return undefined;
+    const state = ((await res.json()) as { state?: unknown })?.state;
+    return state === 'running' || state === 'landed' || state === 'failed' || state === 'unknown' ? state : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Did the agent actually arrive at the destination? Consulted only when the
  * import call itself gave no answer. Three-state on purpose, like
  * botPollState: "couldn't ask" must never read as "it isn't there".
  *
- * A slug still PROVISIONING means the import is mid-flight over there — its
- * own rollback will either finish it or remove it, so wait it out rather
- * than guess.
+ * With a move id the destination answers about that import itself
+ * (moveState): landed → yes, failed → no, running → wait. Its agent list is
+ * the fallback (an older Hatchabot, or an id it never received): a slug
+ * RUNNING there is yes, PROVISIONING is wait — and an ABSENT slug is no
+ * answer at all, because the import makes its row only after it has looked
+ * at the image (issue #19). It is "no" only for an id the destination says it
+ * never received, asked twice 15 s apart (or on a later re-ask), and with the
+ * slug not in its list: the request never reached its import.
  */
 export async function destinationHasAgent(
   deps: Pick<MigrateDeps, 'secrets' | 'sleep'>,
   peer: Peer,
   slug: string,
   attempts = 12,
+  moveId?: string,
 ): Promise<'yes' | 'no' | 'unknown'> {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let neverReceived = 0;
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt > 0) await sleep(15_000);
+    const told = moveId ? await askAboutMove(deps, peer, moveId) : 'unsupported';
+    if (told === 'landed') return 'yes';
+    if (told === 'failed') return 'no';
+    // Otherwise its list too: a slug RUNNING there is an answer whatever else is.
     let agents: Array<{ slug?: string; state?: string }>;
     try {
       // Bounded: a server that is down must not hold the question (or a
@@ -210,11 +299,11 @@ export async function destinationHasAgent(
       continue;
     }
     const found = agents.find((a) => a.slug === slug);
-    // A rolled-back import deletes its agent, so "not in the active list" is
-    // a real answer: nothing landed.
-    if (!found) return 'no';
-    if (found.state === 'RUNNING') return 'yes';
+    if (found?.state === 'RUNNING') return 'yes';
     // Mid-import — keep waiting for its own success-or-rollback to resolve.
+    if (found) continue;
+    if (told === 'unknown' && (++neverReceived >= 2 || attempts === 1)) return 'no';
+    // Absent from an older Hatchabot's list: maybe not made YET. Keep asking.
   }
   return 'unknown';
 }
@@ -289,6 +378,12 @@ interface MigrateParams {
   wasRunning: boolean;
   runtimeRef: string;
   slept?: { at: string; mark?: number };
+  /**
+   * Sent with the restore (MOVE_HEADER) so the other server can be asked
+   * about this import itself. Absent on a move begun before 2026-10-09: that
+   * one was never announced, so only its agent list can be read.
+   */
+  moveId?: string;
 }
 
 /** Put the source back as it was found: asleep again, or started if it ran. */
@@ -380,6 +475,7 @@ async function migrateAgentInner(
   const p: MigrateParams = {
     peerId: peer.id, peerName: peer.name, ownerId: agent.ownerId, slug: agent.slug, accountId: channel.accountId,
     wasRunning: agent.state === 'RUNNING', runtimeRef: agent.runtimeRef, ...(slept ? { slept } : {}),
+    moveId: randomUUID(),
   };
   const op = beginOperation(store, 'migrate', agentId, { ...p }, { requestedBy: opts.requestedBy });
   opts.onOperation?.(op.id);
@@ -463,7 +559,7 @@ async function migrateSteps(
    * without it the wording is the lost-connection one.
    */
   const settleUnanswered = async (why: string, status?: string): Promise<never> => {
-    const landed = await destinationHasAgent(deps, peer, agent.slug);
+    const landed = await destinationHasAgent(deps, peer, agent.slug, 12, p.moveId);
     if (landed === 'no') {
       await undo(`transfer failed: ${why}`);
       const e = new MigrateError(
@@ -505,7 +601,7 @@ async function migrateSteps(
   try {
     res = await peerFetch(deps, peer, `/v1/agents/restore${imageChoice ? `?image=${imageChoice}` : ''}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/octet-stream' },
+      headers: { 'content-type': 'application/octet-stream', ...(p.moveId ? { [MOVE_HEADER]: p.moveId } : {}) },
       body: new Uint8Array(data),
     });
   } catch (err) {
@@ -601,7 +697,7 @@ export async function resumeMigrate(deps: MigrateDeps, opId: string, attempts = 
     );
     return;
   }
-  const landed = await destinationHasAgent(deps, peer, p.slug, attempts);
+  const landed = await destinationHasAgent(deps, peer, p.slug, attempts, p.moveId);
   if (landed === 'yes') {
     await settleArrived(deps, agent.id, peer.name, p.accountId);
     deps.log?.('migrate.done', { agentId: agent.id, peer: peer.name, afterRestart: true });

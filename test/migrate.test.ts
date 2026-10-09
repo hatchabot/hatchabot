@@ -1,6 +1,8 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { isDefiniteRefusal, migrateAgent, MigrateError, preflight } from '../src/orchestrator/migrate.js';
+import { isDefiniteRefusal, migrateAgent, MigrateError, moveIdFrom, moveState, preflight, receiveMove, resumeMigrate } from '../src/orchestrator/migrate.js';
+import { importAgent } from '../src/orchestrator/transfer.js';
+import { beginOperation, newBootForTests } from '../src/orchestrator/operations.js';
 import { isBusy } from '../src/orchestrator/busy.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
@@ -178,20 +180,47 @@ describe('migrateAgent', () => {
 
   it('restarts the source when the destination confirms nothing landed', async () => {
     const w = await world();
-    // The import call dies, but the destination is reachable and its agent
-    // list has no "kitchen" — the import really did roll back over there.
+    // The import call dies, but the destination is reachable and says THIS
+    // move (the id the restore carried) failed and was undone over there.
+    const sent: string[] = [];
+    const asked: string[] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init?: any) => {
       const u = String(url);
       if (u.endsWith('/preflight')) {
         return new Response(JSON.stringify({ ok: true, reasons: [] }), { status: 200 });
       }
+      if (u.includes('/v1/moves/')) {
+        asked.push(u.split('/v1/moves/')[1]!);
+        return new Response(JSON.stringify({ state: 'failed' }), { status: 200 });
+      }
+      if (u.endsWith('/v1/agents') && (init?.method ?? 'GET') === 'GET') {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      sent.push(init?.headers?.['x-hatchabot-move']);
+      throw new Error('ECONNRESET');
+    });
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/unchanged/);
+    expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
+    expect(sent[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(asked).toEqual([sent[0]]);
+  });
+
+  it('an empty agent list from an older destination (no move answers) is not proof: the source stays stopped', async () => {
+    const w = await world();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init?: any) => {
+      const u = String(url);
+      if (u.endsWith('/preflight')) {
+        return new Response(JSON.stringify({ ok: true, reasons: [] }), { status: 200 });
+      }
+      if (u.includes('/v1/moves/')) return new Response('{}', { status: 404 });
       if (u.endsWith('/v1/agents') && (init?.method ?? 'GET') === 'GET') {
         return new Response(JSON.stringify([]), { status: 200 });
       }
       throw new Error('ECONNRESET');
     });
-    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/unchanged/);
-    expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/couldn't confirm/);
+    expect(w.store.getAgent('a1')!.state).toBe('STOPPED');
+    expect(w.store.listOperations(['a1'])[0]).toMatchObject({ kind: 'migrate', status: 'held' });
   });
 
   it('never restarts the source when it cannot confirm the agent did not land', async () => {
@@ -278,19 +307,29 @@ describe('migrateAgent', () => {
  * The import comes back as an HTTP error (`restore`), and the destination's
  * agent list answers as `list` says: an array, or 'unreachable' (the list
  * call throws), or a status number (the list call fails with it). Counts the
- * list calls so a test can tell whether the destination was asked.
+ * list calls so a test can tell whether the destination was asked. `moves`:
+ * what GET /v1/moves/:id says, in turn (the last repeats); 404 by default, an
+ * older Hatchabot without it.
  */
 function importFailsWith(
   restore: { status: number; statusText?: string; body: string; contentType?: string },
   list: Array<Array<{ slug: string; state: string }>> | 'unreachable' | number,
+  moves: string[] | 404 = 404,
 ) {
-  const calls = { list: 0 };
+  const calls = { list: 0, moves: 0, moveIds: [] as string[] };
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init?: any) => {
     const u = String(url);
     if (u.endsWith('/v1/agents/preflight')) {
       return new Response(JSON.stringify({ ok: true, reasons: [] }), { status: 200 });
     }
+    if (u.includes('/v1/moves/')) {
+      calls.moves++;
+      calls.moveIds.push(u.split('/v1/moves/')[1]!);
+      if (moves === 404) return new Response(JSON.stringify({ message: 'Route not found' }), { status: 404 });
+      return new Response(JSON.stringify({ state: moves[Math.min(calls.moves - 1, moves.length - 1)] }), { status: 200 });
+    }
     if (u.includes('/v1/agents/restore')) {
+      calls.moveIds.push(String(init?.headers?.['x-hatchabot-move']));
       return new Response(restore.body, {
         status: restore.status,
         statusText: restore.statusText ?? '',
@@ -360,15 +399,38 @@ describe('issue #1: an HTTP error from the import is not proof it rolled back', 
   it.each([
     ['504', GATEWAY_TIMEOUT],
     ['502', BAD_GATEWAY],
-  ])('%s with the agent absent from the destination: source restarted, agent unchanged', async (code, restore) => {
+  ])('%s and the destination says the move failed there: source restarted, agent unchanged', async (code, restore) => {
     const w = await world();
-    const calls = importFailsWith(restore, [[{ slug: 'other', state: 'RUNNING' }]]);
+    const calls = importFailsWith(restore, [[{ slug: 'other', state: 'RUNNING' }]], ['failed']);
     await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(
       new RegExp(`The transfer to Desktop failed \\(it answered ${code} [A-Za-z ]+\\)\\. Your agent is unchanged\\.`),
     );
-    expect(calls.list).toBe(1);
+    expect(calls.moves).toBe(1);
     const src = w.store.getAgent('a1')!;
     expect(src.state).toBe('RUNNING');
+    expect(src.migratedTo).toBeUndefined();
+  });
+
+  it('504, the destination never received the move (asked twice) and the agent is absent: source restarted', async () => {
+    const w = await world();
+    const calls = importFailsWith(GATEWAY_TIMEOUT, [[]], ['unknown']);
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/Your agent is unchanged/);
+    expect(calls.moves).toBe(2);
+    expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
+  // Issue #19: an older destination can only show its agent list, and the
+  // import makes its row after looking at the image — absent is not "no".
+  it.each([
+    ['504', GATEWAY_TIMEOUT],
+    ['502', BAD_GATEWAY],
+  ])('%s with the agent absent from an older destination: source stays stopped, move held', async (_code, restore) => {
+    const w = await world();
+    const calls = importFailsWith(restore, [[{ slug: 'other', state: 'RUNNING' }]]);
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/couldn't confirm whether the agent arrived/);
+    expect(calls.list).toBe(12);
+    const src = w.store.getAgent('a1')!;
+    expect(src.state).toBe('STOPPED');
     expect(src.migratedTo).toBeUndefined();
   });
 
@@ -432,14 +494,15 @@ describe('issue #1: an HTTP error from the import is not proof it rolled back', 
     expect(src.migratedTo).toContain('Desktop');
   });
 
-  it('a JSON 499 timeout with the agent absent from the destination: checked, then the source restarts', async () => {
+  it('a JSON 499 timeout, and the destination says the move failed: checked, then the source restarts', async () => {
     const w = await world();
     const calls = importFailsWith(
       { status: 499, body: JSON.stringify({ error: 'proxy timed out' }), contentType: 'application/json' },
       [[{ slug: 'other', state: 'RUNNING' }]],
+      ['failed'],
     );
     await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/The transfer to Desktop failed \(it answered 499\)\. Your agent is unchanged\./);
-    expect(calls.list).toBe(1);
+    expect(calls.moves).toBe(1);
     expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
   });
 
@@ -530,5 +593,149 @@ describe('review, 2026-09-29: a failed move of a sleeping agent', () => {
     peerResponds({});
     await migrateAgent(w.deps as any, 'a1', PEER);
     expect(w.store.getAgent('a1')!.hibernatedAt ?? null).toBeNull();
+  });
+});
+
+// Issue #19: the destination's import awaits the image lookup before it makes
+// its agent row, so for that while its agent list is empty. Real migrateAgent
+// on one store and provider, real importAgent on another; the restore's
+// answer is lost to a proxy 504 while the import is still waiting.
+describe('issue #19: an empty agent list is not proof the import aborted', () => {
+  const DEST_OWNER = 'dest-owner';
+  const PIN = 'hatchabot-derived:test';
+
+  async function destination() {
+    const store = new Store(new Database(':memory:'));
+    const secrets = new MemSecrets();
+    const provider = new MockProvider();
+    store.insertHost({ id: 'dh1', ownerId: DEST_OWNER, kind: 'local', provider: 'mock', name: 'desk box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({
+      id: 'dp1', ownerId: DEST_OWNER, name: 'Claude', vendor: 'anthropic', kind: 'api_key',
+      model: 'claude-opus-4-8', secretRef: 'ai/dp1', createdAt: 'now',
+    });
+    await secrets.put('ai/dp1', 'made-up-key');
+    provider.tags.push({ tag: PIN, imageId: 'derived-image' });
+    // The image lookup the import awaits BEFORE its agent row: held until released.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const tags = provider.listImageTags.bind(provider);
+    provider.listImageTags = async () => { await gate; return tags(); };
+    const deps = { store, secrets, provider, channel: channelStub, sleep: async () => {} };
+    return { store, provider, deps, release };
+  }
+
+  /** The destination's HTTP surface over its real store, the way routes.ts wires it. */
+  function wire(dst: Awaited<ReturnType<typeof destination>>) {
+    const seen = { importing: undefined as Promise<unknown> | undefined };
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init?: any) => {
+      const u = String(url);
+      const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { 'content-type': 'application/json' } });
+      if (u.endsWith('/v1/agents/preflight')) return json(preflight(dst.store, DEST_OWNER, JSON.parse(init.body)));
+      if (u.includes('/v1/agents/restore')) {
+        const receipt = receiveMove(dst.store, moveIdFrom(init.headers['x-hatchabot-move']), DEST_OWNER);
+        seen.importing = importAgent(dst.deps as any, Buffer.from(init.body), {
+          ownerId: DEST_OWNER, hostId: 'dh1', image: 'build', mayBuild: true, onOperation: (id) => receipt.operation(id),
+        }).then((a) => { receipt.finished('landed'); return a; }, (e) => { receipt.finished('failed'); throw e; });
+        seen.importing.catch(() => {});
+        // The proxy gives up while the import is still looking at the image.
+        return new Response('<html>504 Gateway Timeout</html>', { status: 504, statusText: 'Gateway Timeout' });
+      }
+      if (u.includes('/v1/moves/')) return json({ state: moveState(dst.store, u.split('/v1/moves/')[1]!, DEST_OWNER) });
+      if (u.endsWith('/v1/agents')) return json(dst.store.listAllActiveAgents().map((a) => ({ slug: a.slug, state: a.state })));
+      throw new Error(`unexpected fetch ${u}`);
+    });
+    return seen;
+  }
+
+  it('a timeout before the row: the source never restarts, and the move settles as arrived once the import is RUNNING', async () => {
+    const w = await world();
+    w.store.setAgentImage('a1', PIN);
+    const ref = w.store.getAgent('a1')!.runtimeRef!;
+    const dst = await destination();
+    const seen = wire(dst);
+    let checkedEmpty = false;
+    // Between the source's questions the import is let go, and finishes.
+    (w.deps as any).sleep = async () => {
+      if (!checkedEmpty) {
+        checkedEmpty = true;
+        // The issue's step 4: the destination's list really is empty now.
+        expect(dst.store.listAllActiveAgents()).toEqual([]);
+        expect(w.provider.runtimes.get(ref)!.phase).not.toBe('running');
+        dst.release();
+        await seen.importing;
+      }
+    };
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/answered 504 Gateway Timeout, but the agent DID arrive/);
+    expect(checkedEmpty).toBe(true);
+    expect(dst.store.listAllActiveAgents().map((a) => [a.slug, a.state])).toEqual([['kitchen', 'RUNNING']]);
+    const src = w.store.getAgent('a1')!;
+    expect(src.state).toBe('STOPPED');
+    expect(src.migratedTo).toContain('Desktop');
+    expect(w.provider.runtimes.get(ref)!.phase).not.toBe('running');
+  });
+
+  it('still waiting when the source stops asking: held, the source stays stopped, and a later ask settles it', async () => {
+    const w = await world();
+    w.store.setAgentImage('a1', PIN);
+    const ref = w.store.getAgent('a1')!.runtimeRef!;
+    const dst = await destination();
+    const seen = wire(dst);
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/couldn't confirm whether the agent arrived/);
+    const op = w.store.listOperations(['a1'])[0]!;
+    expect(op).toMatchObject({ kind: 'migrate', status: 'held' });
+    expect(w.store.getAgent('a1')!.state).toBe('STOPPED');
+    // The import goes on over there, to RUNNING; nothing here started meanwhile.
+    dst.release();
+    await seen.importing;
+    expect(dst.store.listAllActiveAgents().map((a) => a.state)).toEqual(['RUNNING']);
+    expect(w.provider.runtimes.get(ref)!.phase).not.toBe('running');
+    // Hatchabot's next ask (every 10 minutes) hears that it landed.
+    w.store.insertPeer({ ...PEER, ownerId: 'o', createdAt: 'now' });
+    await resumeMigrate(w.deps as any, op.id, 1);
+    expect(w.store.getOperation(op.id)!.status).toBe('succeeded');
+    expect(w.store.getAgent('a1')!.migratedTo).toContain('Desktop');
+    expect(w.provider.runtimes.get(ref)!.phase).not.toBe('running');
+  });
+
+  it('moveState: a restart before any row means nothing was made; an undone import counts only once its row is gone', async () => {
+    const store = new Store(new Database(':memory:'));
+    receiveMove(store, 'move-test-0001', DEST_OWNER);
+    expect(moveState(store, 'move-test-0001', DEST_OWNER)).toBe('running');
+    newBootForTests();
+    expect(moveState(store, 'move-test-0001', DEST_OWNER)).toBe('failed');
+    // With an operation, it decides: undone, but the row still there → not yet an answer.
+    store.insertAgent({
+      id: 'd1', ownerId: DEST_OWNER, name: 'Test Agent', slug: 'test-agent', state: 'PROVISIONING',
+      aiProfileId: 'dp1', hostId: 'dh1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now',
+    });
+    const r = receiveMove(store, 'move-test-0002', DEST_OWNER);
+    const op = beginOperation(store, 'import', 'd1', { slug: 'test-agent' });
+    r.operation(op.id);
+    expect(moveState(store, 'move-test-0002', DEST_OWNER)).toBe('running');
+    op.rolledBack('Import failed.');
+    expect(moveState(store, 'move-test-0002', DEST_OWNER)).toBe('running');
+    store.setAgentState('d1', 'DELETING');
+    store.setAgentState('d1', 'DELETED');
+    expect(moveState(store, 'move-test-0002', DEST_OWNER)).toBe('failed');
+  });
+
+  it('an import refused before its row answers failed, and the source is put back', async () => {
+    const w = await world();
+    const dst = await destination();
+    dst.release();
+    // The bot is already wired to an agent there: the import refuses before any row.
+    dst.store.insertAgent({
+      id: 'd1', ownerId: DEST_OWNER, name: 'Test Agent', slug: 'test-agent', state: 'RUNNING',
+      aiProfileId: 'dp1', hostId: 'dh1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now',
+    });
+    dst.store.insertChannel({ id: 'dc1', agentId: 'd1', kind: 'telegram', accountId: 'kitchenbot', secretRef: 'x', deepLink: 'https://t.me/kitchenbot', createdAt: 'now' });
+    const seen = wire(dst);
+    // Preflight would say no; let it through to reach the import's own refusal.
+    const wired = (globalThis.fetch as any).getMockImplementation();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init?: any) =>
+      String(url).endsWith('/preflight') ? new Response(JSON.stringify({ ok: true, reasons: [] }), { status: 200 }) : wired(url, init));
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/Your agent is unchanged/);
+    await expect(seen.importing).rejects.toThrow(/already wired/);
+    expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
   });
 });

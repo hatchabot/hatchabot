@@ -181,7 +181,7 @@ import { doorScript as embedDoorScript } from '../embedder/door.js';
 import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, wakeAgent, wakeSweep, type HibernateDeps } from '../orchestrator/hibernate.js';
 import { clearStaleRuntimePinsWhenUp } from '../orchestrator/runtimePins.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
-import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
+import { migrateAgent, MigrateError, MOVE_HEADER, moveIdFrom, moveState, preflight, receiveMove } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
 import { BACKGROUND_KINDS, beginOperation, currentBootId, handleFor, KIND_LABEL, operationRefusal, operationSummary, publicOperation, rethrowIfCrash, runInBackground, spanWords, STATUS_EVENT, type OpHandle } from '../orchestrator/operations.js';
 import { recoverOperation, RecoverError, resumeOperations, startOperationRetryLoop, type ResumeContext } from '../orchestrator/operationsResume.js';
@@ -11173,12 +11173,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         }
       }
       let operation: string | undefined;
+      // A move from another Hatchabot names itself: recorded now, before the
+      // import awaits anything, so GET /v1/moves/:id can answer for it while
+      // it has no agent row yet (issue #19, 2026-10-09).
+      const receipt = receiveMove(store, moveIdFrom(req.headers[MOVE_HEADER]), ownerId);
       const run = (onOperation?: (id: string) => void) => importAgent(
         // No id yet — trace() picks it up from the orchestrator's log detail.
         { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
         body,
         { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId), verifyToken: deps.verifyImportedToken,
-          onOperation: (id) => { operation = id; onOperation?.(id); } },
+          onOperation: (id) => { operation = id; receipt.operation(id); onOperation?.(id); } },
+      ).then(
+        (agent) => { receipt.finished('landed'); return agent; },
+        (err: unknown) => { receipt.finished('failed'); throw err; },
       );
       try {
         if (req.query.async === '1') {
@@ -11195,6 +11202,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     },
   );
+
+  // The other Hatchabot's question after a move's restore gave no answer:
+  // what became of THAT import (moveState). Read-only, and every id gets an
+  // answer — `unknown` for one never received — so a 404 means a server
+  // older than this route (the mover then reads the agent list instead).
+  app.get<{ Params: { id: string } }>('/v1/moves/:id', async (req) => {
+    const id = moveIdFrom(req.params.id);
+    return { move: id ?? null, state: id ? moveState(store, id, ownerIdOf(req)) : 'unknown' };
+  });
 
   // ---- shareable template (Export / Import) -------------------------------
   // A copy of its instructions and scheduled tasks, without its bot, members
