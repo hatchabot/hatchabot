@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -167,6 +167,84 @@ describe('restoreAgentFromBackup', () => {
       .rejects.toBeInstanceOf(RestoreError);
     expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('current-memory');
     expect(store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
+  /** importState that writes part of what it was given, then fails — a disk
+   *  failing mid-extract. Calls `failFrom`..`failTo` (1-based) fail. */
+  function tornImports(provider: MockProvider, runtimeRef: string, failFrom: number, failTo = Infinity) {
+    let calls = 0;
+    provider.importState = async (ref: string, data: Buffer) => {
+      calls += 1;
+      if (calls < failFrom || calls > failTo) { provider.stateStore.set(ref, data); return; }
+      provider.stateStore.set(runtimeRef, Buffer.concat([data.subarray(0, 4), Buffer.from('<torn>')]));
+      throw new Error(`simulated disk failure #${calls}`);
+    };
+  }
+
+  it('import fails and the rollback works: restarted and left as it was (issue #12)', async () => {
+    const { store, provider, runtimeRef } = await runningAgent();
+    mkdirSync(join(rbase, '2026-08-25'), { recursive: true });
+    writeFileSync(join(rbase, '2026-08-25', agentArchiveName(runtimeRef)), 'that-night');
+    tornImports(provider, runtimeRef, 1, 1); // the restore tears; the rollback lands
+    const err = await restoreAgentFromBackup({ store, provider }, 'a1', '2026-08-25').catch((e) => e);
+    expect(err).toBeInstanceOf(RestoreError);
+    expect(err.userMessage).toBe('Restore failed — the agent was left as it was.');
+    expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('current-memory');
+    expect(store.getAgent('a1')!.state).toBe('RUNNING');
+    expect((await provider.status(runtimeRef)).phase).toBe('running');
+    expect(existsSync(join(rbase, 'restore-safety'))).toBe(false); // nothing to keep
+  });
+
+  it('import AND rollback fail: stays stopped and failed, names both failures, keeps the copy (issue #12)', async () => {
+    const { store, provider, runtimeRef } = await runningAgent();
+    mkdirSync(join(rbase, '2026-08-26'), { recursive: true });
+    writeFileSync(join(rbase, '2026-08-26', agentArchiveName(runtimeRef)), 'that-night');
+    tornImports(provider, runtimeRef, 1);
+    const err = await restoreAgentFromBackup({ store, provider }, 'a1', '2026-08-26').catch((e) => e);
+    expect(err).toBeInstanceOf(RestoreError);
+    expect(err.userMessage).not.toMatch(/left as it was/);
+    expect(err.userMessage).toContain('simulated disk failure #1');
+    expect(err.userMessage).toContain('simulated disk failure #2');
+    expect(err.userMessage).toMatch(/could not be put back/);
+    const kept = /kept at (\S+\.tgz)/.exec(err.userMessage)?.[1];
+    expect(kept && kept.startsWith(join(rbase, 'restore-safety'))).toBe(true);
+    expect(readFileSync(kept!, 'utf8')).toBe('current-memory'); // how it was before the restore
+    expect(statSync(kept!).mode & 0o777).toBe(0o600);
+    // Not booted on the torn volume, and the record says why.
+    expect((await provider.status(runtimeRef)).phase).toBe('stopped');
+    const a = store.getAgent('a1')!;
+    expect(a.state).toBe('FAILED');
+    expect(a.stateReason).toContain(kept!);
+    // The safety copy is not one of the dated sets.
+    expect(listBackups().map((b) => b.date)).not.toContain('restore-safety');
+
+    // Restoring a backup again is the way back, and leaves it for Retry.
+    provider.importState = async (ref, data) => { provider.stateStore.set(ref, data); };
+    const r = await restoreAgentFromBackup({ store, provider }, 'a1', '2026-08-26');
+    expect(r.running).toBe(false);
+    expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('that-night');
+    expect(store.getAgent('a1')!.state).toBe('FAILED');
+    expect(store.getAgent('a1')!.stateReason).toMatch(/Restored from the 2026-08-26 backup — tap Retry/);
+    expect(existsSync(kept!)).toBe(true); // never deleted for them
+  });
+
+  it('settings re-apply AND rollback fail: stays stopped and failed, keeps the copy (issue #12)', async () => {
+    const { store, provider, runtimeRef } = await runningAgent();
+    mkdirSync(join(rbase, '2026-08-27'), { recursive: true });
+    writeFileSync(join(rbase, '2026-08-27', agentArchiveName(runtimeRef)), 'that-night');
+    tornImports(provider, runtimeRef, 2); // the restore lands; the rollback tears
+    provider.execResponses.set('sh-volume', { code: 1, stdout: '', stderr: 'disk full' });
+    // A re-apply that started the container before failing.
+    const reapply = async (ref: string) => { await provider.start(ref); throw new Error('no build'); };
+    const err = await restoreAgentFromBackup({ store, provider, reapply }, 'a1', '2026-08-27').catch((e) => e);
+    expect(err).toBeInstanceOf(RestoreError);
+    expect(err.userMessage).not.toMatch(/left as it was/);
+    expect(err.userMessage).toContain('dropping the old bot failed');
+    expect(err.userMessage).toContain('simulated disk failure #2');
+    const kept = /kept at (\S+\.tgz)/.exec(err.userMessage)?.[1];
+    expect(readFileSync(kept!, 'utf8')).toBe('current-memory');
+    expect((await provider.status(runtimeRef)).phase).toBe('stopped');
+    expect(store.getAgent('a1')!.state).toBe('FAILED');
   });
 
   it('refuses when the set has no tarball for this agent, leaving it untouched', async () => {
