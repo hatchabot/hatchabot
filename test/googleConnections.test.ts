@@ -6,7 +6,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ExecResult, RuntimeProvider } from '../src/providers/provider.js';
-import { OAuthStateJar, googleAuthUrl, parseOAuthClient, syncConnections } from '../src/orchestrator/googleConnections.js';
+import { OAuthStateJar, googleAuthUrl, materializeConnection, parseOAuthClient, syncConnections } from '../src/orchestrator/googleConnections.js';
 
 /** The browser-binding cookie the start route set (night review, 2026-09-28). */
 const nonceOf = (res: { cookies: Array<{ name: string; value: string }> }) => res.cookies.find((c) => c.name === 'hb_oauth')?.value ?? '';
@@ -539,6 +539,50 @@ describe('attach / detach / remove', () => {
     expect(w.store.connectionRemovals('a1')).toEqual([]);
     expect(w.googleCalls.some((c) => c.url.includes('/revoke'))).toBe(false);
     expect(w.store.getConnection('c-other')).toBeTruthy();
+  });
+
+  it('a sync while a delete waits on the vault does not import the connection again (shared grant, issue #18)', async () => {
+    const w = await connectedWorld('shared-box@example.org');
+    // Another account holds the same Google account: no revocation backs up the removal.
+    w.store.insertConnection({ id: 'c-other', ownerId: 'user-other', kind: 'google', email: 'shared-box@example.org', services: [], secretRef: 'connection/c-other' });
+    const g = gogBarrier(w.provider, '\u0000never');
+    expect((await attachReq(w)).json()).toMatchObject({ attached: true, live: true });
+    // Pause the delete at its secret read: the credential is off and its record cleared.
+    const secretRef = w.store.getConnection(w.connId)!.secretRef;
+    const realGet = w.secrets.get.bind(w.secrets);
+    let entered!: () => void;
+    let release!: () => void;
+    const inside = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    let once = true;
+    w.secrets.get = async (ref: string) => {
+      if (once && ref === secretRef) { once = false; entered(); await gate; }
+      return realGet(ref);
+    };
+    const deleting = w.f.inject({ method: 'DELETE', url: `/v1/connections/${w.connId}`, headers: H });
+    await inside;
+    expect(g.held.has('shared-box@example.org')).toBe(false);
+    // Provisioning (rebuild, start, wake) syncs this agent meanwhile.
+    await syncConnections({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.store.getAgent('a1')!.runtimeRef!);
+    release();
+    expect((await deleting).json()).toMatchObject({ removed: true, pendingOn: 0 });
+    expect(g.events).toEqual(['import', 'remove']);
+    expect(g.held.has('shared-box@example.org')).toBe(false);
+    expect(w.store.listAgentConnections('a1')).toHaveLength(0);
+    expect(w.store.getConnection(w.connId)).toBeUndefined();
+    expect(w.googleCalls.some((c) => c.url.includes('/revoke'))).toBe(false);
+  });
+
+  it('materializeConnection refuses a connection no longer attached to the agent (issue #18)', async () => {
+    const w = await connectedWorld('mailbox@example.org');
+    const g = gogBarrier(w.provider, '\u0000never');
+    expect((await attachReq(w)).json()).toMatchObject({ attached: true, live: true });
+    expect((await detachReq(w)).json()).toMatchObject({ detached: true, removed: true });
+    const r = await materializeConnection({ store: w.store, secrets: w.secrets, provider: w.provider },
+      { id: 'a1', slug: 'mailer', runtimeRef: w.store.getAgent('a1')!.runtimeRef! }, w.connId);
+    expect(r.ok).toBe(false);
+    expect(g.events).toEqual(['import', 'remove']);
+    expect(g.held.size).toBe(0);
   });
 
   it('deleting a connection nobody else holds revokes it at Google (unchanged)', async () => {

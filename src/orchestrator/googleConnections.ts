@@ -201,6 +201,10 @@ export async function materializeConnection(
   const attach = store
     .listAgentConnections(agent.id)
     .find((a) => a.connectionId === connectionId);
+  // Only what is attached lands on a volume: a detach, or a delete (which
+  // detaches before it lets the agent's turn go), is the record of intent,
+  // and no caller may import past it (issue #18, 2026-10-09).
+  if (!attach) return { ok: false, error: 'not attached to this agent' };
   const clientRaw = await secrets.get(GOOGLE_CLIENT_REF).catch(() => null);
   const client = clientRaw ? parseOAuthClient(clientRaw) : null;
   if (!client) return { ok: false, error: 'Google OAuth client not configured' };

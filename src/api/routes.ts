@@ -10097,7 +10097,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       for (const a of holders) store.addConnectionRemoval(a.id, conn.email);
       for (const a of holders) {
         // In that agent's connection turn, so an import in flight lands first.
+        // Detached inside the turn, in the database: the vault row stays until
+        // the revocation below, and a sync (rebuild, start, wake) in that gap
+        // saw the attachment still there and imported the account again, with
+        // its record already cleared — under a shared grant nothing else ends
+        // that access (issue #18, 2026-10-09).
         const off = await withConnectionLock(a.id, async () => {
+          store.detachConnection(a.id, conn.id);
           const now = store.getAgent(a.id);
           return !!now && removeQueuedNow(connSyncDeps(now.hostId), now, conn.email);
         });
