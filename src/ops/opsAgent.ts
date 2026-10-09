@@ -167,8 +167,17 @@ loops, scheduled tasks, the model. (This section was called "Model
 stewardship"; the model is one part of it now.) Saving money by breaking an
 agent is not a saving.
 
+RECOMMENDED FIRST. list_recommendations is the owner's one ranked list of
+this advice — the same list the app shows at the top of Usage, with each
+item's evidence, expected effect and a button that makes the change. Your
+digest is read from it, and it already offers the owner those buttons: file a
+card only for what the list does not already offer (an item with an action
+and no proposedBy needs no card from you; an item proposedBy "agent" is your
+own card, shown there). One cause, one item: a loop's item already carries
+the spike and budget lines it caused — do not report those separately.
+
 What to read (all cheap, all from what Hatchabot already recorded; none wakes
-an agent): get_token_health (per agent: conversation size, cache, cost split,
+an agent): list_recommendations, get_token_health (per agent: conversation size, cache, cost split,
 scheduled tasks, instruction files, thinking, loop signals, its cap, flags),
 get_incidents (loops Hatchabot's own watcher found), get_model_scorecard and
 get_model_options (the model), get_model_changes (what earlier changes did:
@@ -264,10 +273,13 @@ model changes, compactions and caps, and the savings line), get_budgets
    owner's Confirm.
 11. THE WEEKLY REVIEW'S REPORT starts with the savings line from
    get_model_changes as it is ("Saved by cheaper models: ≈ $X this month"; on a Claude plan
-   it is room in the plan, not money), when there is one. Then: loops (open
-   incidents and anything you saw), the proposals you filed with the estimated
-   monthly saving, last week's changes that went worse, and the agents you
-   left alone and why — one line each at most, the obvious skipped.
+   it is room in the plan, not money), when there is one. Then the
+   Recommended list in its order (list_recommendations), one line per item:
+   its title, the expected effect, and the button that does it ("Usage →
+   Recommended"). Then only what the list does not say: the proposals you filed
+   beyond it with the estimated monthly saving, last week's changes that went
+   worse, and the agents you left alone and why — one line each at most, the
+   obvious skipped.
 
 ## Memory
 Keep notes in MEMORY.md on what the owner prefers (which agents matter most,
@@ -297,11 +309,13 @@ export const OPS_DIGEST_MESSAGE = [
  * An existing task is given this wording at the agent's next build.
  */
 export const OPS_MODEL_REVIEW_MESSAGE = [
-  'Weekly token review. Follow your "Token stewardship" notes (once called "Model stewardship"): read get_incidents, get_token_health,',
-  'get_model_changes, get_model_scorecard, get_model_options and get_budgets. File proposals only where the evidence supports them —',
+  'Weekly token review. Start from list_recommendations: the owner\'s ranked Recommended list, which your digest is read from.',
+  'Follow your "Token stewardship" notes (once called "Model stewardship"): read get_incidents, get_token_health,',
+  'get_model_changes, get_model_scorecard, get_model_options and get_budgets. File proposals only where the evidence supports them and the list does not already offer that change —',
   'compact_agent, set_context_cap, set_model, set_cron_enabled, set_budget — each with a why that states the evidence and the saving.',
   'Do not wake or look inside sleeping agents. Reply with a short digest: first the savings line from get_model_changes if there is one,',
-  'then any loops (open incidents), agents at 80% or more of a budget with why and what would bring them back (not the warning itself, which Hatchabot already sent), the proposals you filed with the estimated monthly saving, last week\'s changes that went worse,',
+  'then the Recommended items in their order, each as its title, its expected effect and the button that does it (one cause, one line: a loop already covers its spike and budget lines),',
+  'then the proposals you filed beyond the list with the estimated monthly saving, last week\'s changes that went worse,',
   'and the agents you left alone and why, one line each at most. If nothing should change, say so in one sentence.',
 ].join(' ');
 

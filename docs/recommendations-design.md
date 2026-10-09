@@ -1,6 +1,6 @@
 # Design: one recommendations view
 
-Status: **accepted 2026-10-09; being built.** From an outside review:
+Status: **accepted 2026-10-09; built in v2.158.0** (see *As built*, at the end). From an outside review:
 "consolidate model steward, token steward, spend alerts and budget advice into
 one prioritized recommendations view; keep their specialized checks
 internally; show one understandable decision with evidence and expected
@@ -117,3 +117,49 @@ messages you set keep coming.
    about one cause, one message a day (a loop's message covers its spike).
 4. **Cheaper-model items:** only when the scorecard's evidence is "ok" (≥10
    turns over ≥3 days).
+
+## As built (v2.158.0)
+
+- **Code:** `src/orchestrator/recommendations.ts` — `buildRecommendations`
+  calls each check as it is (`tokenHealth`/`tokenWatch` incidents,
+  `budgetView`, the recorded spikes, `summarizeSourceUsage`, the guard's
+  cards, `buildScorecard` + `assessModelChange`, `buildTokenHealth` flags,
+  `costsFor` + `suggestBudget`) and re-implements no threshold. Routes:
+  `GET /v1/recommendations`, `GET /v1/agents/:id/recommendations`,
+  `POST /v1/recommendations/:id/dismiss`; the manager's `list_recommendations`.
+- **Ranking:** the design's groups, then money a month within a group. A
+  rate-limited source is not in the design's list; it sits after "a spike
+  today" (it is happening now, and costs nothing to fix but capacity).
+- **Thresholds the list adds** (each a judgement about showing, not a new
+  check): a cheaper model from **$5 a month** saved (the steward's own "under
+  about $5: leave it"); never for the Hatchabot agent itself, nor while the
+  agent's last model change awaits its verdict, nor while a budget has moved
+  it; an 80% budget only while **under half** the month has gone; no budget
+  suggested under **$20 a month** at this week's pace.
+- **Expected effect:** a loop's per-day burn is its cost since it began (at
+  most the last 24 hours) scaled to a day; a big conversation's saving is the
+  tokens per call above the cap's compaction point × calls a month, priced at
+  the model's **cache-read** rate (a lower bound); a cheaper model's is the
+  scorecard's own `savingUSD`. On a Claude plan, tokens or "at API prices —
+  room in the plan, not money".
+- **One cause, one item:** a loop absorbs its agents' spike, budget-limit and
+  budget-pace items and names their "tell me every $X" steps; a loop stuck
+  compacting also absorbs the conversation item. A card that proposes the
+  same change as an item merges into it (its button confirms the card); other
+  cost cards are items of their own.
+- **Not now** stores the item's fingerprint (`recommendation_dismissals`). On a
+  card's item the page cancels the card first; on a spike the warning is
+  cleared too.
+- **Actions:** the page calls the item's route with
+  `x-hatchabot-recommendation: <id>`; `ledgerMeta` then records `via:
+  "recommendation"` (model changes and token actions), and an `onResponse`
+  hook writes a `recommendation.acted` line on the agent's timeline. A card's
+  item confirms through `/v1/proposals/:id/confirm` (still step-up at the
+  public address); the ledger then says the card's `via`.
+- **Messages:** the background pass runs the loop watcher before the spike
+  check; `loopCovering` (tokenWatch.ts) skips a spike's message when a loop on
+  that agent was told in the last day or is waiting to be told
+  (`usage_alerts.covered`).
+- **Alerts:** keeps a live loop, a budget at 100% (agent or machine) and
+  today's spike; drops the 80% budget, the step lines and the per-agent
+  rate-limit line. Lines are ordered by severity (`sev`, `V2_ATTN_SEV`).

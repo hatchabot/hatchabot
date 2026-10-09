@@ -25,7 +25,9 @@ and says so once on Telegram; a conversation grown large gets a compaction or
 a per-agent conversation cap proposed as a card; and the "Weekly token review"
 checks the prompt cache and what scheduled tasks cost. An agent, or the whole
 machine, can have a monthly budget: you hear at 80% and 100%, and an agent can
-be paused at its limit until the 1st. See [Right-size](#right-size-the-model-steward),
+be paused at its limit until the 1st. All of that advice comes together in one
+ranked list, **Recommended**, at the top of Usage. See [Recommended](#recommended-one-list-of-cost-advice),
+[Right-size](#right-size-the-model-steward),
 [Token steward](#token-steward), [Cost badges](#cost-badges),
 [Model prices](#model-prices) and [Budgets](#budgets).
 
@@ -125,7 +127,8 @@ The header holds:
   with a badge counting what is left; there is also an entry in the account
   menu.
 - **Alerts** collects what needs you: changes your manager prepared
-  (Confirm / Cancel), the ones that were confirmed and then *failed*, with the
+  (Confirm / Cancel; its cost and model changes are items under Usage →
+  Recommended since v2.158.0), the ones that were confirmed and then *failed*, with the
   reason, and **people knocking** — an *expected* join request (strangers
   never get this far; see *Members & invites*) with **Let them in**,
   **That's me** and **Not now**, which is where someone is admitted now that
@@ -431,6 +434,78 @@ server's own table), so the page and the server cannot disagree; a test
 fails if a model the app offers (modelOptions' catalog) has no price, or a
 different one, in pricing.ts.
 
+### Recommended: one list of cost advice
+
+Since v2.158.0 the cost, model and token advice is **one ranked list**,
+**Recommended**, at the top of **Usage** (the header's Usage button), and each
+agent's own items at the top of its **Usage** tab (docs/recommendations-design.md).
+Each item is one decision: the concern in a sentence, its **evidence** (counts,
+dates, the scorecard's evidence level), the **expected effect** in dollars a
+month (on a Claude plan: tokens, or the API-price equivalent, said so), one
+button that does it, **Details**, and **Not now**.
+
+What it lists, in this order (then by money a month):
+
+1. **A loop happening now** (the watcher's incident): what it burns a day at
+   its pace since it began. *Pause the task* for a failing scheduled task,
+   *Compact it now (keep the last 200 lines)* when it is stuck compacting.
+2. **A budget at 100%** (paused, moved to a cheaper model, or over): what
+   leaving it so means, and *Raise it to $X*.
+3. **A spike today** (far above its usual day): *See it by the hour*.
+4. **A rate-limited AI source**: one item for the source, naming your agents
+   on it — not a line on every one of them.
+5. **A budget past 80% before the month is half gone**: *Raise it to $X*.
+6. **A switch that went worse** (the quality guard's switch-back card).
+7. Savings: **a cheaper model** (only with evidence "ok" — at least 10 turns on
+   its model over 3 days — and $5 a month or more, priced on the agent's own
+   token mix; never for the Hatchabot agent itself), **a big conversation**
+   (*Compact it now* over 250K, else *Cap it at 150K*; the saving is the tokens
+   per call above the cap's compaction point × its calls a month, priced as
+   cache reads — a lower bound), and **an agent over about $20 a month with no
+   budget** (*Set a $X budget*, the suggested figure; it only warns).
+
+**One cause, one item.** A loop stands for its agent's spike, its budget line
+and its "tell me every $X" steps ("…which is also why it passed its budget and
+passed $50 this month"), and for its conversation when it is stuck compacting.
+
+**The buttons** make the change through the same route the Hatchabot agent's
+card would — the model route (so the model ledger and the quality guard see
+it; the ledger says *via recommendation*), compact, the context cap, the
+budget, the scheduled task — and the click is the confirmation. Each one is a
+line on the agent's Setup log ("done from Recommended"). A route that asks for
+your second factor again at the public address still does.
+
+**The Hatchabot agent's cards** for cost and model changes (`set_model`,
+`compact_agent`, `set_context_cap`, `set_budget`, `set_spend_alert`, and
+`set_cron_enabled` turning a task off) are items in this list now, marked
+*Proposed by your Hatchabot agent* with its reason; when one proposes the same
+change as an item, they are one item and its button confirms the card. Other
+cards stay in the home screen's list. Its weekly review reads this list
+(`list_recommendations`) and sends its digest from it.
+
+**Not now** puts an item away until its cause changes — a new loop, a new
+month or budget amount, a different suggested model or figure, a bigger
+conversation (`POST /v1/recommendations/:id/dismiss`). On an item that is the
+agent's card it cancels the card, as its Cancel did. On a spike it also clears
+that warning.
+
+**What moved out of Alerts.** Alerts keeps what needs you now, one line each,
+linking to its item (**Recommended →** on the agent's Overview): a live loop,
+a budget at 100%, and — new — today's spike. A budget at 80%, a "tell me every
+$X" step and a rate-limited source are no longer Alerts lines (the step
+messages still come, and the tile still says when its source is rate-limited).
+An agent's Alerts lines are ordered by severity — what blocks it, then money
+burning now — not by where the check sits in the code.
+
+**Messages** keep what triggers them, with one shared rule: about one cause,
+one message a day. A spike on an agent whose loop was told today (or is about
+to be) is recorded and shown, not sent again ("told with its loop" on Usage).
+Budget and step messages are as you set them.
+
+`GET /v1/recommendations` (the machine owner's includes the machine's own
+budget), `GET /v1/agents/:id/recommendations`. Built from what Hatchabot
+already recorded: nothing is read from a container and nothing is woken.
+
 ### Budgets
 
 **Tell me every $X** (v2.125.0, Chris: "warned each time the spend increases
@@ -438,7 +513,8 @@ by $100"): give an agent a step — $5 for a quiet one, $100 for a busy one —
 and each time its spend this month passes the next multiple ($100, $200,
 $300 …) you get a message on your Hatchabot agent's chat ("💵 "Stock Watcher"
 has spent $212 in October — you hear every $100. On pace for $750.") and a
-🔔 line under Alerts (cleared until the next step). At most one message an
+line in the tile's tooltip (until v2.158.0 also a 🔔 line under Alerts; a loop's
+Recommended item now names the steps it caused). At most one message an
 hour per agent: steps passed meanwhile come as one, with the latest total. It
 counts from when you set it — steps already passed this month are not told —
 and starts again on the 1st. Set it in the agent's Usage tab (Spending → Tell
@@ -458,9 +534,11 @@ sources → 💵 **Budgets** (every agent of yours in one table: this month, las
 month, a month at its pace now, and a suggested budget about 1.25× that,
 rounded), or ask the Hatchabot agent (`set_budget`, a card you confirm).
 
-- **At 80% and at 100%**: a line under Alerts ("Used 84% of its $50 budget
-  for October ($42.10) — on pace for $63") and one message on your Hatchabot
-  agent's chat. Each is said once a month per budget amount; a new amount
+- **At 80% and at 100%**: one message on your Hatchabot agent's chat; at 100%
+  a line under Alerts, and before mid-month an 80% budget is a
+  [Recommended](#recommended-one-list-of-cost-advice) item ("Used 84% of its
+  $50 budget for October ($42.10) — on pace for $63"). Until v2.158.0 80% was
+  an Alerts line too. Each is said once a month per budget amount; a new amount
   warns afresh.
 - **At the limit** — your choice per budget: **warn me** (the default: it keeps
   working), **cheaper model**, or **pause it**. *Cheaper model* (v2.124.0)
@@ -1914,7 +1992,9 @@ trailing `+` means a model had no known price and was left out. On the CLI,
 `hatchabot usage` (no agent name) prints the lifetime ranked table with cost;
 `hatchabot usage <agent>` shows one agent's breakdown by model.
 
-**Spike warnings.** After each usage pass Hatchabot compares every agent's
+**Spike warnings.** (Since v2.158.0 a spike of the last day is a line under
+Alerts and a Recommended item; the box on Usage keeps the earlier ones, and a
+spike on an agent whose loop was told today is not messaged again.) After each usage pass Hatchabot compares every agent's
 last 24 hours with its usual day (the average of the measured days before,
 over the last week). At 3× usual and at least 20M tokens — or 100M for an
 agent with under 3 measured days — it sends you one Telegram message (from

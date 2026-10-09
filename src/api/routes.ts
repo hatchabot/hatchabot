@@ -78,6 +78,7 @@ import { agentUsage } from '../orchestrator/usage.js';
 import { runUsageAlerts } from '../orchestrator/usageAlerts.js';
 import { buildTokenHealth, modelRefOf, THRESHOLDS as TOKEN_THRESHOLDS } from '../orchestrator/tokenHealth.js';
 import { runTokenWatch } from '../orchestrator/tokenWatch.js';
+import { agentRecommendations, buildRecommendations } from '../orchestrator/recommendations.js';
 import { MACHINE, MAX_BUDGET, MIN_BUDGET, budgetLine, budgetView, machineTz, monthKey, monthSpend, pausedReplySweep, prevMonth, primeSpendAlert, runBudgets, stepLine, stepView, suggestBudget, type BudgetView, type StepView } from '../orchestrator/budgets.js';
 import { compactAgent, CompactError, syncContextCap, type CompactMode } from '../orchestrator/compaction.js';
 import type { TokenHealthRaw } from '../orchestrator/usage.js';
@@ -530,6 +531,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // whose address carries a code (/join/…, a reset link) never sends that
   // address to another site as a Referer. Set only when a route hasn't: the
   // console proxy sets its own framing rule.
+  // A Recommended item's button (recommendations.ts) calls the same route its
+  // card would; each one that went through is a line on the agent's timeline.
+  app.addHook('onResponse', async (req, reply) => {
+    const rec = req.headers['x-hatchabot-recommendation'];
+    if (typeof rec !== 'string' || !rec || reply.statusCode >= 400 || req.method === 'GET') return;
+    const route = req.routeOptions?.url ?? '';
+    const params = (req.params ?? {}) as { id?: string };
+    const agentId = route.startsWith('/v1/agents/:id') ? params.id
+      : route === '/v1/proposals/:id/:verb' ? store.getMgmtProposal<PendingConfirm>(String(params.id ?? ''))?.resolved?.agentId
+      : undefined;
+    trace(agentId || 'admin')('recommendation.acted', { item: rec.slice(0, 200), route: `${req.method} ${route}`, ...(agentId ? { agentId } : {}) });
+  });
   app.addHook('onSend', async (_req, reply, payload) => {
     if (!reply.hasHeader('x-frame-options')) reply.header('x-frame-options', 'SAMEORIGIN');
     if (!reply.hasHeader('x-content-type-options')) reply.header('x-content-type-options', 'nosniff');
@@ -1829,6 +1842,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     const auth = req.headers.authorization;
     const why = (req.body as { why?: unknown } | undefined)?.why;
+    // A click on a Recommended item (recommendations.ts): the owner's own
+    // change, through the same route, marked so the ledger says where from.
+    const rec = req.headers['x-hatchabot-recommendation'];
+    if (typeof rec === 'string' && rec) return { by: 'owner', via: 'recommendation', source, why: typeof why === 'string' && why.trim() ? why : `From Recommended (${rec.slice(0, 120)})` };
     return { by: 'owner', via: typeof auth === 'string' && /^bearer\s/i.test(auth) ? 'api' : 'app', source, ...(typeof why === 'string' && why.trim() ? { why } : {}) };
   };
   /** Record each agent whose model moved since `before` (snapshotModels). Never fails the change it follows. */
@@ -2314,9 +2331,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (usageSampling) return usageSampling;
     usageSampling = sampleSourceUsage({ store, providerFor, log: (e, d) => app.log.info(d, e) })
       .then(async (r) => { usageSampledAt = new Date().toISOString(); if (r.limited) app.log.info(r, 'usage.sample_rate_limits_seen'); try { snapshotUsageFromSamples(); } catch (err) { app.log.warn({ err: String(err) }, 'usage.snapshot_failed'); }
-        await runUsageAlerts({ store, tell: tellUsageSpike, log: (e, d) => app.log.info(d, e) }).catch((err) => app.log.warn({ err: String(err) }, 'usage.alerts_failed'));
         runModelGuard();
+        // The loop watcher before the spike check: a loop told in this pass
+        // covers the spike it causes (one cause, one message; usageAlerts.ts).
         await runTokenSteward();
+        await runUsageAlerts({ store, tell: tellUsageSpike, log: (e, d) => app.log.info(d, e) }).catch((err) => app.log.warn({ err: String(err) }, 'usage.alerts_failed'));
         await runBudgetPass();
         return r; })
       .catch((err) => app.log.warn({ err: String(err) }, 'usage.sample_failed'))
@@ -5336,6 +5355,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const machineStep = stepRows.has(MACHINE) && ownsLocalHost(req) ? stepOf(MACHINE) : undefined;
     // Paused by the machine's budget: the agent's own tile says so.
     const machinePaused = new Map(store.listBudgetPauses({ open: true, month: budgetMonth }).filter((p) => p.scope === MACHINE).map((p) => [p.agentId, p.pausedAt]));
+    // Today's spike (usageAlerts.ts), owner only: an Alerts line linking to its
+    // Recommended item. A loop on the agent speaks for it (one cause, one line).
+    const spikeBy = new Map<string, { at: string; tokens: number; usual: number }>();
+    for (const x of store.usageAlertsSince(new Date(budgetNow - 86_400_000).toISOString(), { ownerId: ownerIdOf(req) })) {
+      if (!spikeBy.has(x.agentId) && !stuckBy.has(x.agentId)) spikeBy.set(x.agentId, { at: x.at, tokens: x.tokens, usual: x.usual });
+    }
     // What it can reach that it should not (access overview): two fleet-wide reads, the overview only for those with findings.
     const accessFindings = agentsWithAccessFindings(store, budgetNow);
     return Promise.all(
@@ -5410,6 +5435,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           ...(role === 'owner' && budgetOf(a) ? { budget: { ...budgetOf(a)!, ...(budgetOf(a)!.level ? { line: budgetLine(budgetOf(a)!, 'it') } : {}) } } : {}),
           ...(role === 'owner' && machinePaused.has(a.id) ? { budgetPaused: { scope: 'machine', at: machinePaused.get(a.id) } } : {}),
           ...(role === 'owner' && stepOf(a.id) ? { spendStep: stepOf(a.id) } : {}),
+          /** It used far more than its usual day in the last 24 hours (owner only): an Alerts line. */
+          ...(role === 'owner' && spikeBy.has(a.id) ? { spike: spikeBy.get(a.id) } : {}),
           /** It can still reach something it should not (access overview), owner only: Alerts. */
           ...(role === 'owner' && accessFindings.has(a.id) ? (() => { const al = accessAlertOf(accessOverview(store, a, budgetNow)); return al ? { accessAlert: al } : {}; })() : {}),
           ...(a.ops && machineStep ? { machineStep } : {}),
@@ -8198,8 +8225,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       savings: rightSizeSavings(store, ownerId),
       notes: [
         `outcome: pending until ${VERDICT_DAYS} days after the change (or ${EARLY_TURNS_N} turns on the new model); then kept-ok, worse (error rates up: failed turns, malformed tool calls, tool failures) or not-enough-data.`,
-        'by: owner (by hand), agent (your card, the owner confirmed), hatchabot (the quality guard\'s switch-back, the owner confirmed). via: app, api, proposal, guard, backfill.',
-        'A worse change gets one switch-back card from Hatchabot in "Alerts"; it never switches by itself.',
+        'by: owner (by hand), agent (your card, the owner confirmed), hatchabot (the quality guard\'s switch-back, the owner confirmed). via: app, api, proposal, guard, backfill, recommendation (a Recommended item\'s button).',
+        'A worse change gets one switch-back card from Hatchabot (an item under Usage → Recommended); it never switches by itself.',
       ],
     };
   });
@@ -8592,6 +8619,32 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const one = typeof b.agentId === 'string' && typeof b.at === 'string' ? { agentId: b.agentId, at: b.at } : undefined;
     const cleared = store.dismissUsageAlerts(ownerId, new Date().toISOString(), one);
     return { cleared };
+  });
+
+  /**
+   * Recommended (recommendations.ts, docs/recommendations-design.md): one
+   * ranked list of the cost, model and token advice, one item per cause, each
+   * with its evidence, expected effect and the button that does it. The
+   * machine owner's list includes the machine's own budget. Stored data only.
+   */
+  app.get('/v1/recommendations', async (req) => buildRecommendations(store, ownerIdOf(req), { machineOwner: ownsLocalHost(req) }));
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/recommendations', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const list = buildRecommendations(store, ownerIdOf(req), { machineOwner: ownsLocalHost(req) });
+    return { ...list, items: agentRecommendations(list, agent.id) };
+  });
+  /** "Not now": the item stays away until its cause changes (a new loop, month, size …). A spike's warning is cleared with it. */
+  app.post<{ Params: { id: string } }>('/v1/recommendations/:id/dismiss', async (req, reply) => {
+    const ownerId = ownerIdOf(req);
+    const list = buildRecommendations(store, ownerId, { machineOwner: ownsLocalHost(req), includeDismissed: true });
+    const it = list.items.find((x) => x.id === req.params.id);
+    if (!it) return reply.code(404).send({ error: 'That recommendation is gone — its cause has changed or ended.' });
+    const nowIso = new Date().toISOString();
+    store.dismissRecommendation(ownerId, it.id, it.fingerprint, nowIso);
+    if (it.kind === 'spike' && it.agents[0]) store.dismissUsageAlerts(ownerId, nowIso, { agentId: it.agents[0].id, at: it.fingerprint });
+    trace(it.agents[0]?.id ?? 'admin')('recommendation.dismissed', { item: it.id, kind: it.kind, ...(it.agents[0] ? { agentId: it.agents[0].id } : {}) });
+    return { ok: true, id: it.id };
   });
 
   /**

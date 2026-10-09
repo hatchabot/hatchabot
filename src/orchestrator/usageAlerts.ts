@@ -1,5 +1,6 @@
 import type { Store } from '../store/store.js';
 import type { Agent } from '../domain/types.js';
+import { loopCovering } from './tokenWatch.js';
 
 /**
  * "Token use went up and I don't know where it's from" (Chris, 2026-09-28).
@@ -116,9 +117,13 @@ export async function runUsageAlerts(deps: UsageAlertDeps, now = Date.now()): Pr
     // Cleared warnings count too: clearing it on Usage re-armed the message
     // while the spike lasted (2026-10-09).
     if (store.usageAlertsSince(new Date(now - DAY).toISOString(), { agentId: s.agent.id, dismissed: true }).length) continue;
-    const told = await deps.tell(s.agent.ownerId, s.agent, usageSpikeText(s)).catch(() => false);
-    store.addUsageAlert({ agentId: s.agent.id, ownerId: s.agent.ownerId, at: new Date(now).toISOString(), tokens: s.tokens, usual: s.usual, told });
-    deps.log?.('usage.spike', { agentId: s.agent.id, tokens: s.tokens, usual: s.usual, told });
+    // One cause, one message: a loop on this agent told today (or about to be)
+    // is why it used so much, and its message already said so. Recorded all
+    // the same — Usage and Recommended show the spike, as part of the loop.
+    const loop = loopCovering(store, s.agent.id, now);
+    const told = loop ? false : await deps.tell(s.agent.ownerId, s.agent, usageSpikeText(s)).catch(() => false);
+    store.addUsageAlert({ agentId: s.agent.id, ownerId: s.agent.ownerId, at: new Date(now).toISOString(), tokens: s.tokens, usual: s.usual, told, ...(loop ? { covered: loop.id } : {}) });
+    deps.log?.('usage.spike', { agentId: s.agent.id, tokens: s.tokens, usual: s.usual, told, ...(loop ? { coveredBy: loop.kind } : {}) });
     sent.push(s);
   }
   return sent;

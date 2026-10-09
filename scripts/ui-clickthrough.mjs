@@ -37,7 +37,7 @@ const RECORDER = `(() => {
     const path = url.split('?')[0];
     const method = (init.method || 'GET').toUpperCase();
     let body; try { body = init.body ? JSON.parse(init.body) : undefined; } catch { body = init.body; }
-    window.__calls.push({ method, path, url, body });
+    window.__calls.push({ method, path, url, body, headers: init.headers || {} });
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
     // Scripted answers: window.__answer['POST /v1/x'] = [{ status, body }, …], taken in order.
     const q = (window.__answer || {})[method + ' ' + path];
@@ -833,9 +833,18 @@ const SCENARIOS = String.raw`(() => {
         { confirmId: 'g1', tool: 'set_model', agentId: 'a2', risk: 'disruptive', source: 'guard',
           summary: '↩ Switch "Piano Practice" back to claude-sonnet-5\nHatchabot\'s quality guard: since "Piano Practice" moved from claude-sonnet-5 to claude-haiku-4-5 …\nBefore (claude-sonnet-5, 30 days): 120 turns, failed 0%\nAfter (claude-haiku-4-5, 7 days): 30 turns, failed 13.3%\nWorse: failed turns 0% → 13.3% of turns (4 on claude-haiku-4-5).' } ], recent: [] };
       window.__answer = { 'POST /v1/proposals/g1/confirm': [{ status: 200, body: { text: '✅ Switched back.' } }] };
+      // v2.158.0: cost and model cards come marked recommended — they are Usage → Recommended items, not cards in the home list.
+      const marked = window.__override['/v1/proposals'];
+      marked.pending = marked.pending.map((p) => ({ ...p, recommended: true }));
       v2PropSig = '';
       await loadProposals();
-      const cards = await until(() => { const l = [...document.querySelectorAll('#v2PropList > div')]; return l.length === 2 ? l : null; });
+      eq('no cost or model card in the home list', document.querySelectorAll('#v2PropList > div').length, 0);
+      ok('and no section for them alone', document.getElementById('v2Proposals').hidden);
+      // The card itself still renders where every card shows (the Hatchabot agent's console).
+      const holder = document.createElement('div');
+      document.body.appendChild(holder);
+      for (const p of marked.pending) mgmtProposalCard(p, holder);
+      const cards = [...holder.children];
       ok('the headline is the first line only', cards[0].firstElementChild.nextElementSibling.textContent.startsWith('Set "Homework Helper" model: claude-sonnet-5 → claude-haiku-4-5') && !cards[0].textContent.includes('4 turns …'));
       ok('the evidence is on the card', cards[0].querySelector('.prop-evidence')?.textContent.includes('3.5 tools per turn'));
       eq('each risk is marked', [...cards[0].querySelectorAll('.prop-risks > div')].map((d) => d.textContent.slice(0, 16)), ['⚠ Thin evidence:', '⚠ Heavy tool use']);
@@ -844,6 +853,7 @@ const SCENARIOS = String.raw`(() => {
       [...cards[1].querySelectorAll('button')].find((b) => b.textContent.includes('Confirm')).click();
       await until(() => cards[1].textContent.includes('✅ Switched back.'));
       eq('confirm sent', calls('POST', /\/g1\/confirm$/).length, 1);
+      holder.remove();
       window.__answer = {}; delete window.__override['/v1/proposals'];
     },
     headerDoors: async () => {
@@ -929,14 +939,16 @@ const SCENARIOS = String.raw`(() => {
       window.__override['/v1/agents/a1/usage'] = { totalTokens: 1_000_000_000, input: 7e6, output: 2e6, cacheRead: 851e6, cacheWrite: 140e6, calls: 4700, sessions: 12,
         lastActive: new Date().toISOString(), lastDay: { calls: 400, tokens: 109e6 }, lastContext: 395_000, maxContext: 410_000,
         byModel: [{ model: 'claude-opus-4-8', tokens: 1e9, calls: 4700, sessions: 12, maxContext: 410_000, input: 7e6, output: 2e6, cacheRead: 851e6, cacheWrite: 140e6 }],
-        alerts: [{ agentId: 'a1', at: new Date().toISOString(), tokens: 109e6, usual: 20e6, told: true }] };
+        alerts: [{ agentId: 'a1', at: new Date(Date.now() - 30 * 3600e3).toISOString(), tokens: 109e6, usual: 20e6, told: true },
+          { agentId: 'a1', at: new Date().toISOString(), tokens: 121e6, usual: 11e6, told: true }] };
       await openUsage('a1', 'Homework Helper');
       const body = await until(() => { const t = document.getElementById('usageBody').textContent; return t.includes('Last 24 hours') ? t : null; });
       ok('the last day: ' + body.slice(0, 200), /Last 24 hours:\s*109M tokens · 400 calls/.test(body));
       ok('the conversation size, and why it matters', body.includes('Conversation size now:') && body.includes('395K') && body.includes('Every call carries this much in'));
       ok('the split', body.includes('cache reads 851M (85%)'));
       ok('calls per model', body.includes('4.7k calls'));
-      ok('its warning', body.includes('about 5× its usual day'));
+      ok('its warning of earlier this week', body.includes('about 5× its usual day'));
+      ok("today's is a Recommended item, not a second warning here", !body.includes('about 11× its usual day'));
       usageDlg.close();
       // The same page as a tab on the agent's sheet.
       try {
@@ -989,23 +1001,25 @@ const SCENARIOS = String.raw`(() => {
       const fl = await until(() => document.getElementById('usageFailed'));
       ok('one line with what did not go through: ' + fl.textContent, fl.textContent.includes('12 refused (rate limits) · 1 failed — Homework Helper 10 · Soccer Schedule 3'));
       fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
-      // A spike warning of the last week shows at the top.
+      // A spike warning of the last week shows at the top; one of the last day is a Recommended item instead (v2.158.0).
       window.__override['/v1/usage/periods'] = { period: 'day', from: at(1440), to: new Date(now).toISOString(), bucketMinutes: 60, buckets: [],
         agents: [], totals: { tokens: 0, requests: 0, limited: 0 }, byBilling: {}, cost: null,
-        alerts: [{ agentId: 'a1', name: 'Homework Helper', at: new Date(now - 3600000).toISOString(), tokens: 100e6, usual: 20e6, told: true },
-          { agentId: 'a2', name: 'Soccer Schedule', at: new Date(now - 7200000).toISOString(), tokens: 60e6, usual: 20e6, told: true }],
+        alerts: [{ agentId: 'a1', name: 'Homework Helper', at: new Date(now - 26 * 3600000).toISOString(), tokens: 100e6, usual: 20e6, told: true },
+          { agentId: 'a2', name: 'Soccer Schedule', at: new Date(now - 27 * 3600000).toISOString(), tokens: 60e6, usual: 20e6, told: true },
+          { agentId: 'a3', name: 'Piano Practice', at: new Date(now - 3600000).toISOString(), tokens: 70e6, usual: 10e6, told: true }],
         pricing: { hours: 24, total: 123.4, monthly: 3702, parts: { cacheWrite: 82.1, output: 16.3, cacheRead: 20, input: 5 }, billing: { api: 0, plan: 123.4 },
           models: [{ model: 'claude-sonnet-5', cost: 100 }, { model: 'claude-opus-4-8', cost: 23.4 }], agents: {} } };
       openFleetUsage();
       await until(() => document.getElementById('fleetUsageBody').textContent.includes('about 5× its usual day'));
       const body2 = document.getElementById('fleetUsageBody');
+      ok("the last day's spike is not in the box (it is under Recommended)", !body2.textContent.includes('Piano Practice') && body2.textContent.includes('Earlier this week'));
       ok('no intro paragraph', !fleetUsageDlg.textContent.includes('Usage, not a bill'));
       ok('a plan is a footnote, not a paragraph', body2.textContent.includes('* Claude plan use priced at API rates — not money you pay.') && !body2.textContent.includes('the room it takes'));
       ok('the title is Usage', fleetUsageDlg.querySelector('.v2ptitle, h3').textContent.trim().startsWith('Usage'));
       const mark = window.__calls.length;
       body2.querySelector('button[aria-label="Clear this warning"]').click();
       const one = await until(() => window.__calls.slice(mark).find((c) => c.method === 'POST' && c.path === '/v1/usage/alerts/dismiss'));
-      eq('clears that one', one.body, { agentId: 'a1', at: new Date(now - 3600000).toISOString() });
+      eq('clears that one', one.body, { agentId: 'a1', at: new Date(now - 26 * 3600000).toISOString() });
       byText('#fleetUsageBody button', 'Clear all').click();
       const all = await until(() => window.__calls.slice(mark).filter((c) => c.path === '/v1/usage/alerts/dismiss')[1]);
       eq('Clear all clears every one', all.body, {});
@@ -2709,19 +2723,19 @@ const SCENARIOS = String.raw`(() => {
         const t = tile('Stock Watcher');
         ok('the paused tile says why: ' + t.getAttribute('aria-label'), t.getAttribute('aria-label').includes('monthly budget is used up'));
         ok('its tooltip has the line', tipText('Stock Watcher').includes('Paused: it used its $20 budget'));
-        ok('the 80% line is in the tooltip', tipText('Meal Planner').includes('Used 82% of its $50 budget'));
+        ok('the 80% line is not an Alert (it is a Recommended item now)', !agentAttention(agents.find((x) => x.name === 'Meal Planner')).some((x) => x.key.startsWith('budget:')));
+        ok('a budget at 100% is, and links to its item', agentAttention(agents.find((x) => x.name === 'Stock Watcher')).find((x) => x.key.startsWith('budget:'))?.rec === 'budget:' + agents.find((x) => x.name === 'Stock Watcher').id);
         await withAgents((a) => a.name === 'Grocery Runner' ? { ...a, spendStep: { every: 100, month, spent: 212, passed: 2, next: 300, line: 'Spent $212.00 in this month — you hear every $100 (next at $300)' } } : undefined);
-        ok('a step passed is an Alert', tipText('Grocery Runner').includes('you hear every $100 (next at $300)'));
-        ok('its key names the step', attentionFingerprint(agents.find((x) => x.name === 'Grocery Runner')).includes('step:' + month + ':2:100'));
+        ok('a step passed is not an Alert: the owner asked for that information, and its message says it', !agentAttention(agents.find((x) => x.name === 'Grocery Runner')).some((x) => x.key.startsWith('step:')));
         delete window.__override['/v1/agents'];
         await withAgents((a) => a.name === 'Stock Watcher' ? { ...a, state: 'STOPPED', budget: { scope: a.id, usd: 20, atLimit: 'pause', month, spent: 23.5, pct: 118, level: 100, resetsOn: 'next 1st', paused: { at: new Date().toISOString() }, line: 'Paused: it used its $20 budget for this month ($23.50). It starts again on the 1st — or raise the budget, or start it now' } }
           : a.name === 'Meal Planner' ? { ...a, budget: { scope: a.id, usd: 50, atLimit: 'warn', month, spent: 41.1, pct: 82, level: 80, resetsOn: 'next 1st', line: 'Used 82% of its $50 budget for this month ($41.10)' } } : undefined);
         byText('.v2views button', 'Alerts').click(); await sleep(50);
         const sec = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Alerts'));
         const names = [...sec.querySelectorAll('.v2agent .v2name')].map((n) => n.textContent);
-        ok('both are under Alerts: ' + names, names.includes('Stock Watcher') && names.includes('Meal Planner'));
+        ok('the paused one is under Alerts, the 80% one is not: ' + names, names.includes('Stock Watcher') && !names.includes('Meal Planner'));
         const meal = agents.find((x) => x.name === 'Meal Planner');
-        ok('the clear key names month, level and amount', attentionFingerprint(meal).includes('budget:' + month + ':80:50'));
+        ok('the clear key names month, level and amount', attentionFingerprint(agents.find((x) => x.name === 'Stock Watcher')).includes('budget:' + month + ':100:20:p'));
         // The Usage tab: its budget, set in place.
         window.__override['/v1/budgets'] = { month, tz: 'UTC', agents: [
           { id: meal.id, name: 'Meal Planner', state: 'RUNNING', billing: 'api', spent: 41.1, lastMonth: 38, monthlyNow: 52, suggested: 75, budget: meal.budget },
@@ -3646,6 +3660,121 @@ const SCENARIOS = String.raw`(() => {
         ok('it opens that agent on its Sharing tab', v2AgentDlg.open && v2AgentId === 'a1' && v2Tab === 'sharing' && !aiDlg.open);
         v2Close();
       } finally { delete window.__override['/v1/access']; if (aiDlg.open) aiDlg.close(); if (v2AgentDlg.open) v2Close(); }
+    },
+    recommended: async () => {
+      // Recommended at the top of Usage (made-up items, in the server's order).
+      const loop = { id: 'loop:ti_9', kind: 'loop', agents: [{ id: 'a1', name: 'Homework Helper' }], title: 'Homework Helper is stuck in a loop',
+        concern: 'Scheduled task "Quiz" failed 9 runs in a row (last 08:19) — which is also why it passed $50 this month',
+        evidence: ['9 times since 06:10', '≈ $6.00 in the last 4 hours at API prices'], effect: { text: 'stops ≈ $36 a day', usdPerDay: 36, billing: 'api' },
+        action: { kind: 'pause-task', label: 'Pause the task', method: 'PATCH', path: '/v1/agents/a1/crons/job-9', body: { enabled: false } },
+        secondary: [{ kind: 'open-agent', label: 'Details', agentId: 'a1' }], alert: true, rank: { group: 1, money: 1080 }, fingerprint: 'ti_9' };
+      const card = { id: 'cheaper:a9', kind: 'cheaper-model', agents: [{ id: 'a9', name: 'Stock Watcher' }], title: 'Stock Watcher could use a cheaper model',
+        concern: '412 turns in 30 days, 0.3 tools per turn, no errors: claude-haiku-4-5 would cost ≈ $31 a month less on its own mix',
+        evidence: ['Evidence: ok — 412 turns on claude-sonnet-5 over 30 days', 'Its reason: “mostly price lookups”'], effect: { text: '≈ $31 a month', usdPerMonth: 31, billing: 'api' },
+        action: { kind: 'confirm-card', label: 'Switch to claude-haiku-4-5', method: 'POST', path: '/v1/proposals/c9/confirm', body: {} },
+        secondary: [{ kind: 'open-agent', label: 'Details', agentId: 'a9' }], proposedBy: 'agent', proposalId: 'c9', rank: { group: 6, money: 31 }, fingerprint: 'x' };
+      const conv = { id: 'conversation:a8', kind: 'big-conversation', agents: [{ id: 'a8', name: 'Budget Tracker' }], title: "Budget Tracker's conversation is 310K tokens",
+        concern: 'every call carries all of it', evidence: ['300 calls in 30 days'], effect: { text: '≈ 58% fewer tokens per call: ≈ $12 a month', billing: 'api' },
+        action: { kind: 'compact', label: 'Compact it now', method: 'POST', path: '/v1/agents/a8/compact', body: { mode: 'summarise' }, confirm: 'Compact it now?' },
+        secondary: [{ kind: 'context-cap', label: 'Cap it at 150K', method: 'PUT', path: '/v1/agents/a8/context-cap', body: { tokens: 150000 } }], rank: { group: 6, money: 12 }, fingerprint: 'now:6:0' };
+      window.__override['/v1/recommendations'] = { items: [loop, card, conv], dismissed: 0 };
+      window.__answer = { 'POST /v1/proposals/c9/confirm': [{ status: 200, body: { done: true, text: '✅ Switched.' } }] };
+      try {
+        openFleetUsage();
+        const sec = await until(() => document.querySelector('#fleetRecommended .rec-item') && document.getElementById('fleetRecommended'));
+        ok('above the figures', !sec.hidden && (sec.compareDocumentPosition(document.getElementById('fleetUsageBody')) & Node.DOCUMENT_POSITION_FOLLOWING));
+        ok('a heading with the count', sec.querySelector('h4').textContent.includes('Recommended · 3'));
+        const items = [...sec.querySelectorAll('.rec-item')];
+        eq('in the server\'s order', items.map((x) => x.dataset.rec), ['loop:ti_9', 'cheaper:a9', 'conversation:a8']);
+        ok('the concern, the evidence and the expected effect', items[0].textContent.includes('Homework Helper is stuck in a loop') && items[0].textContent.includes('9 times since 06:10') && items[0].querySelector('.rec-effect').textContent.includes('Expected effect: stops ≈ $36 a day'));
+        ok('what needs you now stands out', items[0].classList.contains('rec-now') && !items[1].classList.contains('rec-now'));
+        ok("the agent's proposal says so", items[1].textContent.includes('Proposed by your Hatchabot agent') && items[1].textContent.includes('Its reason: “mostly price lookups”'));
+        eq('one primary button, Details, Not now', [...items[0].querySelectorAll('button')].map((b) => [b.textContent, b.classList.contains('primary')]), [['Pause the task', true], ['Details', false], ['Not now', false]]);
+        // The loop's button: the cron route, marked as the recommendation's.
+        let mark = window.__calls.length;
+        items[0].querySelector('button.primary').click();
+        const patch = await until(() => window.__calls.slice(mark).find((c) => c.method === 'PATCH' && c.path === '/v1/agents/a1/crons/job-9'));
+        eq('the task is turned off', patch.body, { enabled: false });
+        eq('the request says which item', patch.headers['x-hatchabot-recommendation'], 'loop:ti_9');
+        // A card item's button confirms the card.
+        mark = window.__calls.length;
+        document.querySelector('#fleetRecommended [data-rec="cheaper:a9"] button.primary').click();
+        const conf = await until(() => window.__calls.slice(mark).find((c) => c.method === 'POST' && c.path === '/v1/proposals/c9/confirm'));
+        eq('the same click, marked', conf.headers['x-hatchabot-recommendation'], 'cheaper:a9');
+        // A compaction asks first; No sends nothing.
+        window.__confirmAnswer = false;
+        mark = window.__calls.length;
+        document.querySelector('#fleetRecommended [data-rec="conversation:a8"] button.primary').click();
+        await sleep(100);
+        ok('asked before compacting', window.__confirms.at(-1) === 'Compact it now?');
+        ok('and No sent nothing', !window.__calls.slice(mark).some((c) => c.path === '/v1/agents/a8/compact'));
+        window.__confirmAnswer = true;
+        // Not now on the card item: the card is cancelled and the item put away.
+        mark = window.__calls.length;
+        const nn = [...document.querySelectorAll('#fleetRecommended [data-rec="cheaper:a9"] button')].find((b) => b.textContent === 'Not now');
+        nn.click();
+        await until(() => window.__calls.slice(mark).some((c) => c.method === 'POST' && c.path === '/v1/recommendations/' + encodeURIComponent('cheaper:a9') + '/dismiss'));
+        ok('its card cancelled first', window.__calls.slice(mark).some((c) => c.method === 'POST' && c.path === '/v1/proposals/c9/cancel'));
+        // Details: the agent's sheet.
+        window.__override['/v1/recommendations'] = { items: [loop], dismissed: 1 };
+        await loadRecommended('', true);
+        [...document.querySelectorAll('#fleetRecommended [data-rec="loop:ti_9"] button')].find((b) => b.textContent === 'Details').click();
+        await until(() => v2AgentDlg.open);
+        ok('Details opens the agent', v2AgentId === 'a1' && !fleetUsageDlg.open);
+        v2Close();
+        // Nothing to recommend: one quiet line.
+        window.__override['/v1/recommendations'] = { items: [], dismissed: 0 };
+        openFleetUsage();
+        await until(() => document.getElementById('fleetRecommended').textContent.includes('Nothing to change right now'));
+        fleetUsageDlg.close();
+        // The agent's own items on its Usage tab; its "Details" there would only reopen the same tab.
+        window.__override['/v1/agents/a1/recommendations'] = { items: [{ ...loop, secondary: [{ kind: 'open-usage', label: 'Details', agentId: 'a1' }] }] };
+        openV2Agent('a1', 'usage');
+        const tab = await until(() => document.querySelector('#v2RecBody .rec-item') && document.getElementById('v2RecBody'));
+        ok('its items on its Usage tab', !tab.hidden && tab.textContent.includes('Homework Helper is stuck in a loop'));
+        eq('no Details back to the same tab', [...tab.querySelectorAll('button')].map((b) => b.textContent), ['Pause the task', 'Not now']);
+        v2Close();
+      } finally {
+        if (fleetUsageDlg.open) fleetUsageDlg.close(); if (v2AgentDlg.open) v2Close();
+        window.__answer = {}; window.__confirmAnswer = true;
+        delete window.__override['/v1/recommendations']; delete window.__override['/v1/agents/a1/recommendations']; v2RecCache.clear();
+      }
+    },
+    alertsOrder: async () => {
+      // Alerts keeps a live loop, a budget at 100% and today's spike — one line each, linked to its item — and orders an agent's lines by severity.
+      const month = new Date().toISOString().slice(0, 7);
+      try {
+        await withAgents((a) => a.id === 'a1' ? { ...a, memoryCapHits: 3, diskOver: { bytes: 12e9, warnBytes: 10e9 },
+            stuck: [{ id: 'ti_7', kind: 'task-failing', text: 'Scheduled task "Quiz" failed 9 runs in a row' }],
+            spike: { at: new Date().toISOString(), tokens: 120e6, usual: 20e6 },
+            budget: { scope: a.id, usd: 50, atLimit: 'warn', month, spent: 41, pct: 82, level: 80, resetsOn: 'next 1st', line: 'Used 82% of its $50 budget for this month ($41.00)' },
+            spendStep: { every: 25, month, spent: 41, passed: 1, next: 50, line: 'Spent $41.00 in this month — you hear every $25 (next at $50)' } }
+          : a.id === 'a2' ? { ...a, spike: { at: new Date().toISOString(), tokens: 60e6, usual: 10e6 } } : undefined);
+        const keys = agentAttention(agents.find((x) => x.id === 'a1')).map((x) => x.key.split(':')[0]);
+        eq('the loop first, then the spike, then the rest — not code order', keys, ['stuck', 'spike', 'memory', 'disk']);
+        ok('the tooltip leads with the loop', tipText('Homework Helper').indexOf('Scheduled task "Quiz"') < tipText('Homework Helper').indexOf('120M tokens'));
+        // A spike alone puts an agent under Alerts (spikes never reached Alerts before).
+        const spike = agentAttention(agents.find((x) => x.id === 'a2'));
+        ok("today's spike is an Alert: " + JSON.stringify(spike.map((x) => x.why)), spike.length === 1 && spike[0].why.includes('60M tokens in the last 24 hours') && spike[0].why.includes('about 6× its usual day') && spike[0].rec === 'spike:a2');
+        v2SetView('attention'); await sleep(50);
+        const sec = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Alerts'));
+        ok('Soccer Schedule is under Alerts for its spike', [...sec.querySelectorAll('.v2agent .v2name')].some((n) => n.textContent === 'Soccer Schedule'));
+        // With the budget at 100% it is an Alert, after the loop and before the spike.
+        await withAgents((a) => a.id === 'a1' ? { ...a, stuck: [{ id: 'ti_7', kind: 'task-failing', text: 'Scheduled task "Quiz" failed 9 runs in a row' }],
+          spike: { at: new Date().toISOString(), tokens: 120e6, usual: 20e6 }, memoryCapHits: 3,
+          budget: { scope: a.id, usd: 50, atLimit: 'warn', month, spent: 55, pct: 110, level: 100, resetsOn: 'next 1st', line: 'Over its $50 budget for this month: $55.00 so far' } } : undefined);
+        eq('loop, budget at 100%, spike, the rest', agentAttention(agents.find((x) => x.id === 'a1')).map((x) => x.key.split(':')[0]), ['stuck', 'budget', 'spike', 'memory', 'disk']);
+        // The Overview's line links to the item, on the agent's Usage tab.
+        window.__override['/v1/agents/a1/recommendations'] = { items: [{ id: 'loop:ti_7', kind: 'loop', agents: [{ id: 'a1', name: 'Homework Helper' }], title: 'Homework Helper is stuck in a loop', concern: 'Scheduled task "Quiz" failed 9 runs in a row', evidence: [], secondary: [], alert: true, rank: { group: 1, money: 0 }, fingerprint: 'ti_7' }] };
+        openV2Agent('a1', 'overview');
+        const link = await until(() => [...document.querySelectorAll('.v2why li')].find((li) => li.textContent.includes('Scheduled task "Quiz"'))?.querySelector('button'));
+        ok('a Recommended link beside the loop line', link.textContent.includes('Recommended'));
+        ok('none beside the memory line', ![...document.querySelectorAll('.v2why li')].find((li) => li.textContent.includes('memory cap'))?.querySelector('button'));
+        link.click();
+        const item = await until(() => document.querySelector('#v2RecBody [data-rec="loop:ti_7"]'));
+        ok('it opens the Usage tab with the item marked', v2Tab === 'usage' && item.classList.contains('rec-focus'));
+        v2Close();
+      } finally { if (v2AgentDlg.open) v2Close(); delete window.__override['/v1/agents/a1/recommendations']; v2RecCache.clear(); await agentsCleanup(); }
     },
     accessAlerts: async () => {
       const line = 'It can still reach what it should not: old@example.org: removal still pending since 2026-10-01 (Sharing → Access)';

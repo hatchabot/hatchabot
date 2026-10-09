@@ -470,6 +470,21 @@ export const REST_TOOLS: RestTool[] = [
     call: () => ({ method: 'GET', path: '/v1/budgets' }),
   },
   {
+    name: 'list_recommendations', tier: 'read',
+    description:
+      "Recommended: the owner's ONE ranked list of cost, model and token advice, the same list the app shows at the top of Usage (docs/recommendations-design.md). "
+      + 'Each item: id, kind (loop, budget-limit, spike, rate-limit, budget-pace, switch-back, cheaper-model, big-conversation, no-budget, proposal), agents, title and concern, '
+      + 'evidence lines, the expected effect (dollars a month at API prices; on a Claude plan an equivalent), the action its button takes, proposedBy "agent" when it is your own card, '
+      + 'and alert when it is also a line under Alerts. Ranked: a live loop, a budget at 100%, a spike today, a rate-limited source, a budget past 80% before mid-month, a switch that '
+      + 'went worse, then savings by money a month. One cause, one item: a loop already carries its spike and budget lines. Items the owner put away with Not now are left out. '
+      + "Built from what Hatchabot already recorded: cheap, wakes nothing. With agent: only that agent's items.",
+    input_schema: obj({ agent: { ...agentRef, description: "Optional: only this agent's items." } }),
+    call: async ({ input, resolve }) => {
+      const a = input.agent ? await resolve(input.agent) : undefined;
+      return { method: 'GET', path: a ? `/v1/agents/${encodeURIComponent(a.id)}/recommendations` : '/v1/recommendations' };
+    },
+  },
+  {
     name: 'set_budget', tier: 'mutate', agentArg: true,
     description:
       "Set an agent's monthly budget in US dollars at API prices (the cost badges' figures). At 80% and 100% the owner gets a line under Alerts and one message. "

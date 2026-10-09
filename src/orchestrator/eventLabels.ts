@@ -224,6 +224,9 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'token.incident_told': (d) => d.told ? 'told the owner about the loop on the manager\'s chat' : 'the loop is under Alerts (no chat to tell)',
   'token.compaction_started': (d) => d.mode === 'lines' ? 'compacting its conversation (keeping the last lines)' : `compacting its conversation (a summary${d.retryLoop ? ', after its stuck message\'s next retry' : ''})`,
   'token.compaction_done': (d) => d.outcome === 'ok' ? `conversation compacted${d.afterK !== undefined ? ` to ${String(d.afterK)}K tokens` : ''}` : `compaction ${String(d.outcome ?? 'failed')}`,
+  // Recommended (recommendations.ts): a button pressed on an item, and Not now.
+  'recommendation.acted': (d) => `done from Recommended (${String(d.route ?? 'a change').replace(/^\w+ \/v1\/(agents\/:id\/)?/, '').replace(/\/:\w+/g, '') || 'a change'})`,
+  'recommendation.dismissed': (d) => `a recommendation put away until its cause changes (${String(d.kind ?? 'advice')})`,
   'budget.set': (d) => d.usd ? `monthly budget set to $${d.usd}${d.atLimit === 'pause' ? ', pausing at the limit' : ''}` : 'monthly budget removed',
   'budget.machine_set': (d) => d.usd ? `the machine's monthly budget set to $${d.usd}${d.atLimit === 'pause' ? ', pausing at the limit' : ''}` : "the machine's monthly budget removed",
   'budget.started_by_hand': () => 'started by hand while its budget had it paused — it runs on until the 1st',
