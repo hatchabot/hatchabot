@@ -258,7 +258,10 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     }
     const first = real(ownerId).length === 0;
     // One authenticator app at a time: the new one replaces the old.
-    for (const old of real(ownerId).filter((f) => f.kind === 'totp')) store.deleteSecondFactor(ownerId, old.id);
+    let replaced = 0;
+    for (const old of real(ownerId).filter((f) => f.kind === 'totp')) if (store.deleteSecondFactor(ownerId, old.id)) replaced++;
+    // The old app is gone: what was proved with it elsewhere stops counting (this request's own pass is stamped anew below).
+    if (replaced) api.secondFactorsChanged(ownerId);
     store.confirmSecondFactor(row.id);
     store.advanceTotpStep(row.id, step);
     app.log.warn({ ownerId }, 'second_factor.totp_added');
@@ -340,6 +343,9 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     if (!(await proveManage(req, reply, ownerId, (req.body as { current?: string } | null)?.current))) return reply;
     store.deleteSecondFactor(ownerId, row.id);
     if (real(ownerId).length === 0) store.deleteSecondFactors(ownerId, 'backup');
+    // What was proved with the old set of factors is void on every pass, not
+    // only on the consoles open now; the person removing it keeps their own (#9).
+    api.secondFactorsChanged(ownerId, { req, reply });
     app.log.warn({ ownerId, kind: row.kind }, 'second_factor.removed');
     recordChange(req, 'second_factor.removed', ownerId, row.kind);
     // What was proved with the old set of factors is void: consoles opened at the public address close.
@@ -369,6 +375,10 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     // every other change of your factors.
     if (target === ownerId && !(await proveManage(req, reply, ownerId, req.body?.current))) return reply;
     const removed = store.deleteSecondFactors(target);
+    // Every second factor that person gave at the public address stops
+    // counting: closing their consoles was not enough, as the old cookies
+    // were verified again the moment a new factor was added (#9).
+    api.secondFactorsChanged(target);
     try { store.recordSecurity('second_factor.reset', target, { by: ownerId, removed }); } catch { /* best effort */ }
     app.log.warn({ by: ownerId, target, removed }, 'second_factor.reset');
     // A reset is for a lost phone or a suspicion: either way, that person's open public consoles end now.

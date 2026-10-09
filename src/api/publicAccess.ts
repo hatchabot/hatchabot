@@ -25,7 +25,8 @@ import { adminAccounts, evaluateSafeguards, failingSafeguards, hostOf, publicCon
  *   -- the sign-in hook runs (auth.ts) --
  *   4. The public pass: a second cookie, handed out only by a sign-in made AT
  *      the public address and bound to that session, carrying when it was
- *      last used and when the second factor was last given. No pass, or one
+ *      last used and when the second factor was last given (and under which
+ *      generation of the person's factors: a reset or a removal voids it). No pass, or one
  *      idle too long: sign in again. So a session from the private address
  *      does not carry over, and a public session ends after an idle time far
  *      shorter than the cookie's 30 days.
@@ -82,8 +83,12 @@ export interface PublicStatus {
 
 export type SecondFactorNeed = 'no' | 'yes' | 'missing' | 'guest';
 
-/** `en`: until when this sign-in may add the person's FIRST second factor (0: it may not; see FIRST_FACTOR_PROOF). */
-interface Pass { sess: string; minted: number; seen: number; sfAt: number; used: boolean; en: number }
+/**
+ * `en`: until when this sign-in may add the person's FIRST second factor (0: it may not; see FIRST_FACTOR_PROOF).
+ * `g`: the generation of the person's factors `sfAt` was given under (store.secondFactorGeneration). A reset or a
+ * removed factor bumps it, and a second factor given before that no longer counts (#9).
+ */
+interface Pass { sess: string; minted: number; seen: number; sfAt: number; used: boolean; en: number; g: number }
 
 export interface PublicAccessApi {
   config(): PublicConfig;
@@ -101,6 +106,15 @@ export interface PublicAccessApi {
   failureBurst(req: FastifyRequest, key: string, until: number): void;
   /** The second factor was just given by the signed-in person: note it on their public pass. */
   secondFactorPassed(req: FastifyRequest, reply: FastifyReply): void;
+  /**
+   * This person's factors were reset or one was removed: every second factor
+   * given at the public address before now stops counting, on every copy of
+   * every pass (open consoles included, when they are next judged). Called
+   * right after the change, with no await between. With `keep`, the request
+   * that made the change keeps its own proof (it gave the factor moments ago,
+   * the gate's step-up).
+   */
+  secondFactorsChanged(ownerId: string, keep?: { req: FastifyRequest; reply: FastifyReply }): void;
   /**
    * Does this person have to give a second factor at the public address?
    * `yes`: they have one and are asked for it. `missing`: they must and have
@@ -339,7 +353,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
   // ---- the pass ------------------------------------------------------------
 
   const encodePass = (p: Pass): string => {
-    const body = `1.${p.sess}.${p.minted}.${p.seen}.${p.sfAt}.${p.used ? 1 : 0}.${p.en}`;
+    const body = `1.${p.sess}.${p.minted}.${p.seen}.${p.sfAt}.${p.used ? 1 : 0}.${p.en}.${p.g}`;
     return `${body}.${sign(body)}`;
   };
   const decodePass = (raw: string | undefined): Pass | undefined => {
@@ -348,11 +362,13 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     if (i < 0) return undefined;
     const body = raw.slice(0, i), sig = raw.slice(i + 1), want = sign(body);
     if (sig.length !== want.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(want))) return undefined;
-    const [v, sess, minted, seen, sfAt, used, en] = body.split('.');
+    // (A pass from before generations has no `g`: generation 0, which is every
+    // person's until their factors are first reset or one is removed.)
+    const [v, sess, minted, seen, sfAt, used, en, g = '0'] = body.split('.');
     if (v !== '1' || !sess) return undefined;
-    const n = [minted, seen, sfAt, en].map(Number);
+    const n = [minted, seen, sfAt, en, g].map(Number);
     if (n.some((x) => !Number.isFinite(x) || x < 0)) return undefined;
-    return { sess, minted: n[0]!, seen: n[1]!, sfAt: n[2]!, used: used === '1', en: n[3]! };
+    return { sess, minted: n[0]!, seen: n[1]!, sfAt: n[2]!, used: used === '1', en: n[3]!, g: n[4]! };
   };
   const cookieHeaderOf = (req: { headers: Record<string, string | string[] | undefined> }): string | undefined => {
     const h = req.headers.cookie;
@@ -389,6 +405,16 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
   const setPass = (reply: FastifyReply, p: Pass): void => {
     reply.setCookie(PASS_COOKIE, encodePass(p), { ...cookieOpts, maxAge: Math.floor(publicConfig().idleMs / 1000) });
   };
+  /** The generation of this person's factors a second factor given now is recorded under. */
+  const factorGen = (ownerId: string): number => store?.secondFactorGeneration(ownerId) ?? 0;
+  /**
+   * When this pass's second factor was given, if it still counts for this
+   * person (0: not given, or given before their factors were reset or one was
+   * removed). Every check of the second factor reads it through here: a
+   * cookie verified with a factor that is gone stayed verified once a new one
+   * was added (#9).
+   */
+  const factorAt = (pass: Pass, ownerId: string): number => (pass.sfAt > 0 && pass.g === factorGen(ownerId) ? pass.sfAt : 0);
 
   const sessionMinted = (req: FastifyRequest, reply: FastifyReply, value: string): void => {
     if (!isPublic(req)) return;
@@ -397,14 +423,16 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     // already given on the old one carries over. Nowhere else: a sign-in as
     // someone else must never inherit it.
     let sfAt = 0;
+    let g = 0;
     // A sign-in made with something sent out of band may add the person's first factor for a while.
     let en = FIRST_FACTOR_PROOF.test(req.routeOptions?.url ?? '') ? now + FIRST_FACTOR_WINDOW_MS : 0;
     if (req.principal && req.routeOptions?.url === '/v1/local-accounts/:id/password') {
       const old = passOf(req, sessionValue(req));
-      sfAt = old?.sfAt ?? 0;
+      sfAt = old ? factorAt(old, req.principal.ownerId) : 0;
+      g = factorGen(req.principal.ownerId);
       en = old?.en ?? 0;
     }
-    setPass(reply, { sess: sha(value), minted: now, seen: now, sfAt, used: sfAt > 0, en });
+    setPass(reply, { sess: sha(value), minted: now, seen: now, sfAt, used: sfAt > 0, en, g });
     if (!cookieFromHeader(cookieHeaderOf(req), DEVICE_COOKIE)) {
       reply.setCookie(DEVICE_COOKIE, randomBytes(16).toString('base64url'), { ...cookieOpts, maxAge: 400 * 86_400 });
     }
@@ -423,15 +451,26 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
 
   const secondFactorGiven = (req: FastifyRequest): boolean => {
     if (!isPublic(req)) return true;
+    const ownerId = req.principal?.ownerId;
     const pass = passOf(req, sessionValue(req));
-    return !!pass && pass.sfAt > 0;
+    return !!pass && !!ownerId && factorAt(pass, ownerId) > 0;
   };
 
   const secondFactorPassed = (req: FastifyRequest, reply: FastifyReply): void => {
     if (!isPublic(req)) return;
+    const ownerId = req.principal?.ownerId;
     const pass = passOf(req, sessionValue(req));
-    if (!pass) return;
-    setPass(reply, { ...pass, seen: Date.now(), sfAt: Date.now() });
+    if (!pass || !ownerId) return;
+    setPass(reply, { ...pass, seen: Date.now(), sfAt: Date.now(), g: factorGen(ownerId) });
+  };
+
+  const secondFactorsChanged = (ownerId: string, keep?: { req: FastifyRequest; reply: FastifyReply }): void => {
+    if (!store) return;
+    // The request that made the change: its own proof, read under the generation it was given in.
+    const mine = keep && isPublic(keep.req) && keep.req.principal?.ownerId === ownerId ? passOf(keep.req, sessionValue(keep.req)) : undefined;
+    const kept = mine ? factorAt(mine, ownerId) : 0;
+    const g = store.bumpSecondFactorGeneration(ownerId);
+    if (mine && kept && keep) setPass(keep.reply, { ...mine, sfAt: kept, g });
   };
 
   // ---- the record and the notices -------------------------------------------
@@ -612,7 +651,8 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
         if (pass.en > now) return reply.code(403).send({ error: MUST_ENROL_NOW, secondFactor: 'enrol' });
         return reply.code(403).send({ error: MUST_ENROL_NEEDS_LINK, secondFactor: 'enrol-link' });
       }
-      if (need === 'yes' && pass.sfAt === 0) {
+      const sfAt = factorAt(pass, principal.ownerId);
+      if (need === 'yes' && sfAt === 0) {
         return reply.code(401).send({ error: 'second factor required', secondFactor: 'required' });
       }
       if (rule.cls === 'step-up') {
@@ -621,7 +661,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
           if (rule.firstFactorOk) return;
           return reply.code(403).send({ error: 'This needs a second factor at the public address. Add one under Settings → You → Second factor, or use the private address.', secondFactor: 'missing' });
         }
-        if (now - pass.sfAt > publicConfig().stepUpMs) {
+        if (now - sfAt > publicConfig().stepUpMs) {
           return reply.code(401).send({ error: 'second factor required', secondFactor: 'step-up' });
         }
       }
@@ -642,7 +682,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       const becomesGuest = !!o.acceptingWebChat && publicConfig().guestsWithoutSecondFactor && !!store?.localAccount(ownerId) && !hasOwnerRights(ownerId) && !!store?.ownsNothing(ownerId);
       if (!becomesGuest) return 'no second factor';
     }
-    if (need === 'yes' && pass.sfAt === 0) return 'second factor not given';
+    if (need === 'yes' && factorAt(pass, ownerId) === 0) return 'second factor not given';
     return undefined;
   };
 
@@ -654,7 +694,8 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     if (secondFactorNeed(principal.ownerId) !== 'yes') { // (a guest let in without one included)
       return { code: 403, body: { error: 'This needs a second factor at the public address. Add one under Settings → You → Second factor, or use the private address.', secondFactor: 'missing' } };
     }
-    if (pass.sfAt === 0 || Date.now() - pass.sfAt > publicConfig().stepUpMs) return { code: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
+    const sfAt = factorAt(pass, principal.ownerId);
+    if (sfAt === 0 || Date.now() - sfAt > publicConfig().stepUpMs) return { code: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
     return undefined;
   };
 
@@ -667,7 +708,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     if (Date.now() - lastActive > publicConfig().idleMs) return 'idle';
     const need = secondFactorNeed(ownerId);
     if (need === 'missing') return 'no second factor';
-    if (need === 'yes' && pass.sfAt === 0) return 'second factor not given';
+    if (need === 'yes' && factorAt(pass, ownerId) === 0) return 'second factor not given';
     return undefined;
   };
 
@@ -777,7 +818,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
   const api: PublicAccessApi = {
     config: publicConfig, status, evaluate,
     setProbes: (p) => { probes = { ...probes, ...p }; },
-    syncListener, stopListener, sessionMinted, sessionCleared, failureBurst, secondFactorPassed, secondFactorNeed, secondFactorGiven, hasOwnerRights,
+    syncListener, stopListener, sessionMinted, sessionCleared, failureBurst, secondFactorPassed, secondFactorsChanged, secondFactorNeed, secondFactorGiven, hasOwnerRights,
     refuseSession, refuseOpenSocket, stepUpRefusal, rpId, origins, afterSignIn, throttle: opts.throttle, secret,
   };
   app.decorate('publicAccess', api);
