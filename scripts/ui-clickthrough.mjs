@@ -2877,6 +2877,47 @@ const SCENARIOS = String.raw`(() => {
       await v2SetBrowser('a1', true, null);
       await until(() => toastText().includes('Browser on — rebuilding'));
     },
+    // A move a restart cut off while the other machine was away (operations.ts):
+    // held, under Alerts, and the sheet's Overview offers its two choices.
+    heldOperation: async () => {
+      const toastText = () => document.getElementById('toast').textContent;
+      const outcome = "The move to Laptop was interrupted, and Laptop isn't answering.";
+      const op = {
+        id: 'op_test1', agentId: 'a1', kind: 'move-host', kindLabel: 'Move to another machine', status: 'held', outcome,
+        step: 'host-flipped', stepLabel: 'recorded on the other machine', stepN: 6, steps: 10, updatedAt: new Date().toISOString(),
+        recovery: { actions: [{ action: 'retry', label: 'Try again when Laptop is back' }, { action: 'put-back', label: 'Put it back on This machine' }], recommended: 'retry' },
+      };
+      try {
+        await withAgents((a) => a.id === 'a1' ? { ...a, state: 'STOPPED', operation: op } : undefined);
+        const a = agents.find((x) => x.id === 'a1');
+        ok('its Alerts key names the operation', attentionFingerprint(a).includes('op:op_test1'));
+        ok('its tile says it waits for a choice: ' + tile(a.name).getAttribute('aria-label'), /waiting for your choice/.test(tile(a.name).getAttribute('aria-label')));
+        byText('.v2views button', 'Alerts').click(); await sleep(50);
+        const sec = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3').textContent.includes('Alerts'));
+        ok('it is under Alerts', !!sec && [...sec.querySelectorAll('.v2agent .v2name')].some((n) => n.textContent === a.name));
+        ok('the tooltip gives the outcome', tipText(a.name).includes(outcome));
+        openV2Agent('a1', 'overview');
+        const box = await until(() => document.querySelector('#v2AgentDlg .oprecover'));
+        ok('the notice says where it stopped: ' + box.textContent, box.textContent.includes('Move to another machine is waiting for your choice') && box.textContent.includes('recorded on the other machine (6 of 10)'));
+        const btns = [...box.querySelectorAll('button')];
+        eq('its two choices', btns.map((b) => b.textContent.trim()), ['Try again when Laptop is back', 'Put it back on This machine']);
+        ok('the recommended one is primary', btns[0].classList.contains('primary') && !btns[1].classList.contains('primary'));
+        // A refusal is said, and the button can be pressed again.
+        window.__answer = window.__answer || {};
+        window.__answer['POST /v1/operations/op_test1/recover'] = [
+          { status: 409, body: { error: 'Its copy on Laptop may already be running, so it can\'t be put back until Laptop answers.' } },
+          { status: 200, body: { operation: { ...op, status: 'rolled_back', outcome: 'Put back on This machine and running.', recovery: undefined } } },
+        ];
+        btns[1].click();
+        await until(() => toastText().includes("can't be put back until Laptop answers"));
+        await until(() => { const b = [...document.querySelectorAll('#v2AgentDlg .oprecover button')][1]; return b && !b.disabled; });
+        delete window.__override['/v1/agents'];
+        [...document.querySelectorAll('#v2AgentDlg .oprecover button')][1].click();
+        await until(() => toastText().includes('Put back on This machine and running.'));
+        eq('the choice was sent', calls('POST', /^\/v1\/operations\/op_test1\/recover$/).map((c) => c.body), [{ action: 'put-back' }, { action: 'put-back' }]);
+        v2Close();
+      } finally { await agentsCleanup(); }
+    },
   });
   // One interface, step 1 (2026-10-09): what only the classic look had, on the home screen,
   // and the keyboard fixes before classic goes (docs/operations-and-one-interface-design.md, Part B).

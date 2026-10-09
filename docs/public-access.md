@@ -326,6 +326,7 @@ has no rule.
 | signed-in | Apps in agents: which app an agent runs |
 | step-up | Apps in agents: install, update, roll back or remove (reads this machine's folders and git login) |
 | step-up | Moving an agent to another machine |
+| step-up | Choosing how an interrupted move or import ends (put it back, try again, it arrived) |
 | step-up | Creating the management agent |
 | step-up | Bot pools (they hold bot tokens) |
 | step-up | Confirming a change the management agent proposed |

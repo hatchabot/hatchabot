@@ -166,9 +166,9 @@ per container.
 - `scripts/runner-scenarios.mjs` — `scenario`, `recalls`: real moves between this machine and a runner on a live install (old and new images, memory recalled by meaning).
 - `scripts/live.mjs` — `LIVE_TESTS`, `dueFor`, `touches`, `committedRuns`, `readRuns`, `resultOf`: the live tests' register, what is due for a release (`touches`: a change to a big shared file counts only near the test's own routes), and the record (the gate reads the committed one) (`docs/live-tests.md`, `docs/live-test-runs.md`); `scripts/promote.sh` — `live_gate`.
 - `scripts/privacy-check.mjs` — `privateValues`, `scan`, `mask`, `ACCEPTED_HISTORY`: the privacy check (the household's private values read from the live install; the pre-push hook and tag guard, `--text` for release notes, `--public` for the `privacy` live test); `scripts/privacy-ignore.txt` (generic words). `scripts/make-debian-test-image.sh`: the local Debian 12 VM image for `clean-install-debian-12`.
-- `src/orchestrator/moveHost.ts` — `moveAgentToHost`: moving an agent between this install's machines.
-- `src/orchestrator/migrate.ts` — `migrateAgent`, `preflight`: moving an agent to another Hatchabot.
-- `src/orchestrator/transfer.ts` — `exportAgent`, `importAgent`: the whole-agent archive behind download, moving to another Hatchabot, and restore from a download.
+- `src/orchestrator/moveHost.ts` — `moveAgentToHost`, `completeOnTarget`, `putBack`, `resumeMoveHost`, `recoverMoveHost`: moving an agent between this install's machines, and finishing or undoing one a restart cut off.
+- `src/orchestrator/migrate.ts` — `migrateAgent`, `preflight`, `destinationHasAgent`, `resumeMigrate`, `recoverMigrate`: moving an agent to another Hatchabot; after a restart, asking that server whether it arrived.
+- `src/orchestrator/transfer.ts` — `exportAgent`, `importAgent`, `rollbackImport`, `resumeImport`: the whole-agent archive behind download, moving to another Hatchabot, and restore from a download; an import a restart cut off is undone.
 - `src/orchestrator/hibernate.ts` — `hibernateSweep`, `wakeSweep`, `wakeAgent`, `hibernateBlocker`: idle agents sleep and wake on demand (off unless HATCHABOT_HIBERNATE_AFTER is set).
 - `src/orchestrator/memoryCap.ts` — `effectiveMemoryCap`, `parseMemoryCap`: per-agent memory limits.
 - `src/orchestrator/swap.ts` — `effectiveSwapAllowance`, `limitsDrift`, `parseSwapProbe`: compressed swap and the limits check.
@@ -319,7 +319,23 @@ removes containers). A health check asks the agent's own gateway whether it is
 really working. Every notable step is recorded as an agent event, shown in the
 Setup log and Activity.
 
-- `src/orchestrator/reconcile.ts` — `reconcileAgents`, `startReconcileLoop`: registry versus Docker.
+- `src/orchestrator/reconcile.ts` — `reconcileAgents`, `startReconcileLoop`, `reconcileEventLog`: registry versus Docker; its findings about an agent go to that agent's timeline too. It leaves alone an agent whose operation is not over (`activeOperationFor`).
+
+### Durable operations (moves and imports that survive a restart)
+
+A long change records itself in the `operations` table as it goes: what was
+asked, the last step done, the outcome, and what the owner may do next. An
+agent whose operation is running, was interrupted by a restart, or is held for
+a choice is busy on disk: Start, Rebuild, Archive, Move, Delete, Wake and Retry
+refuse with its line. At boot, after the first reconcile, each interrupted one
+is finished, undone or held by its kind's rule (docs/operations-and-one-interface-design.md, docs/moving-agents.md).
+
+- `src/orchestrator/operations.ts` — `beginOperation`, `STEPS`, `operationRefusal`, `activeOperation`, `markInterrupted`, `publicOperation`, `currentBootId`: the record, each kind's steps, and the on-disk busy check.
+- `src/orchestrator/operationsResume.ts` — `resumeOperations`, `recoverOperation`, `retryHeldOperations`, `startOperationRetryLoop`: settling interrupted operations at boot, the owner's choices, and the 10-minute question to another Hatchabot.
+- `src/store/store.ts` — `operations`, `insertOperation`, `updateOperation`, `activeOperationFor`, `pruneOperations`: the table (kept 90 days, at least 50 per agent).
+- `src/api/routes.ts` — `'/v1/operations'`, `'/v1/operations/:id'`, `'/v1/operations/:id/recover'`, `busyNow`, `startRefusal`: the API and the guards.
+- `src/mgmt/restTools.ts` — `list_operations`, `recover_operation`: the Hatchabot agent's tools for them.
+- `web/index.html` — `opNotice`, `recoverOp`, `agentAttention`: a held operation in the sheet's Overview and under Alerts.
 - `src/orchestrator/health.ts` — `agentHealth`, `aiSourceHealth`, `doctorLint`: the live health check and OpenClaw config lint.
 - `src/orchestrator/posture.ts` — `computePosture`, `runPostureSweep`, `measureAgentDisks`: the daily security and disk posture.
 - `src/orchestrator/eventLabels.ts` — `eventLabel`: plain words for event names.

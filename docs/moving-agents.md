@@ -169,6 +169,32 @@ The web app can do the same: **Download** on the agent card, then **Import** in
 the header — the one Import button takes any `.hatchabot` file, restoring a full
 backup as the same agent or standing a shared template up as a fresh one.
 
+## Interrupted operations
+
+A move takes minutes, and Hatchabot can restart in the middle of one: an
+automatic upgrade, a crash, the machine rebooting. Since v2.154.0 every move
+and every import writes down each step as it is done, so after a restart
+Hatchabot knows exactly where it stopped and puts it right on purpose:
+
+| What was interrupted | What Hatchabot does after the restart |
+|---|---|
+| A move to another machine, before the agent was recorded there | Undoes it: removes the half-made copy there (if that machine answers), and starts the agent again where it was if it was running |
+| A move to another machine, after it was recorded there | Finishes it: starts it there, settles its skills and memory index, then removes the old copy |
+| An import (a file, or a move arriving from another Hatchabot) | Undoes it completely — a half-imported agent never starts. Import the file again |
+| A move to another Hatchabot, after the agent was packed up | Asks the other server whether it arrived: yes — this copy stays stopped, marked as moved; no — it is started here again |
+
+When Hatchabot cannot tell which way is right — the other machine or the other
+server is not answering — it does not guess. The agent stays **stopped**, shows
+under **Alerts**, and its page offers the choices, for example **Try again when
+Laptop is back** or **Put it back on This machine**. A move to another Hatchabot
+is asked about again every 10 minutes by itself. Until one of these is settled,
+Start, Rebuild, Archive, Move and Delete say why they must wait, so two copies
+can never answer the same bot.
+
+The Activity list and the agent's Setup log show each step. The command line
+and the Hatchabot agent can read them too: `GET /v1/operations?agentId=…`, and
+the agent's `list_operations` and `recover_operation` tools.
+
 ## Rules of the road
 
 - **The file is a credential.** It contains the agent's Telegram bot token

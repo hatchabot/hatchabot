@@ -127,7 +127,20 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'agent.adopted_workspace': 'workspace adopted',
   'agent.derived': (d) => `derived from ${String(d.masterName ?? d.master ?? 'its master')}`,
   'agent.imported': 'imported',
-  'agent.moved': (d) => `moved to ${String(d.toHost ?? d.host ?? 'another host')}`,
+  // The event carries `to` (a host id) and, since v2.154.0, `toName`; this
+  // read `toHost`, which nothing sends, so it always said "another host".
+  'agent.moved': (d) => `moved to ${String(d.toName ?? d.toHost ?? 'another host')}`,
+  'move.leftover': 'a copy that never started may be left on the other machine',
+  // Durable operations (operations.ts): a move or an import, step by step.
+  'op.started': (d) => `${String(d.label ?? 'an operation')} started`,
+  'op.step': (d) => `${String(d.label ?? d.step ?? 'a step')}${d.n ? ` (step ${String(d.n)} of ${String(d.of)})` : ''}`,
+  'op.done': (d) => String(d.outcome ?? 'done'),
+  'op.failed': (d) => `failed: ${String(d.outcome ?? '')}`.trim(),
+  'op.rolled_back': (d) => `undone: ${String(d.outcome ?? '')}`.trim(),
+  'op.held': (d) => `waiting for your choice: ${String(d.outcome ?? '')}`.trim(),
+  'op.interrupted': 'interrupted by a restart — being put right',
+  'op.recover': (d) => `you chose "${String(d.action ?? '')}"`,
+  'op.resume_failed': (d) => `putting it right after a restart failed: ${String(d.error ?? '')}`.trim(),
   'agent.restored': 'restored from a backup',
   'agentsmd.sync_error': 'AGENTS.md did not sync',
   'agentsmd.sync_failed': 'AGENTS.md did not sync',

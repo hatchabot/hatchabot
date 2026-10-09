@@ -692,6 +692,30 @@ export class Store {
         json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      -- Long changes (a move, an import…), recorded as they go so a restart
+      -- in the middle is recovered on purpose (orchestrator/operations.ts,
+      -- docs/operations-and-one-interface-design.md). params and recovery are
+      -- JSON and never hold a secret. A 'running' row from another boot_id was
+      -- interrupted.
+      CREATE TABLE IF NOT EXISTS operations (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT,
+        host_id TEXT,
+        kind TEXT NOT NULL,
+        requested_by TEXT,
+        requested_at TEXT NOT NULL,
+        params TEXT NOT NULL,
+        step TEXT,
+        step_at TEXT,
+        status TEXT NOT NULL,
+        outcome TEXT,
+        recovery TEXT,
+        boot_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        finished_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS operations_agent ON operations (agent_id, requested_at DESC);
+      CREATE INDEX IF NOT EXISTS operations_status ON operations (status);
       -- Hourly limits that must survive a restart (web chat per person,
       -- consults per agent): one row per counted event, pruned after an hour.
       -- They lived in memory and every deploy reset them (2026-09-30).
@@ -2591,8 +2615,105 @@ export class Store {
     }));
   }
 
+  /** The agent's newest timeline line, if any. */
+  lastEventFor(agentId: string): { at: string; event: string } | undefined {
+    return this.db
+      .prepare(`SELECT at, event FROM agent_events WHERE agent_id = ? ORDER BY id DESC LIMIT 1`)
+      .get(agentId) as { at: string; event: string } | undefined;
+  }
+
   deleteEventsFor(agentId: string): void {
     this.db.prepare(`DELETE FROM agent_events WHERE agent_id = ?`).run(agentId);
+  }
+
+  // ---- Operations (orchestrator/operations.ts) ----------------------------
+
+  insertOperation(op: OperationRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO operations (id, agent_id, host_id, kind, requested_by, requested_at, params, step, step_at,
+           status, outcome, recovery, boot_id, updated_at, finished_at)
+         VALUES (@id, @agentId, @hostId, @kind, @requestedBy, @requestedAt, @params, @step, @stepAt,
+           @status, @outcome, @recovery, @bootId, @updatedAt, @finishedAt)`,
+      )
+      .run({
+        ...op,
+        agentId: op.agentId ?? null, hostId: op.hostId ?? null, requestedBy: op.requestedBy ?? null,
+        params: JSON.stringify(op.params ?? {}), step: op.step ?? null, stepAt: op.stepAt ?? null,
+        outcome: op.outcome ?? null, recovery: op.recovery ? JSON.stringify(op.recovery) : null,
+        finishedAt: op.finishedAt ?? null,
+      });
+    this.pruneOperations(op.agentId ?? null);
+  }
+
+  /** Change some columns of an operation; `updated_at` follows. */
+  updateOperation(
+    id: string,
+    patch: Partial<Pick<OperationRow, 'step' | 'stepAt' | 'status' | 'outcome' | 'recovery' | 'params' | 'bootId' | 'finishedAt'>>,
+  ): OperationRow | undefined {
+    const cols: string[] = [];
+    const vals: unknown[] = [];
+    const set = (col: string, v: unknown) => { cols.push(`${col} = ?`); vals.push(v); };
+    if ('step' in patch) set('step', patch.step ?? null);
+    if ('stepAt' in patch) set('step_at', patch.stepAt ?? null);
+    if ('status' in patch) set('status', patch.status);
+    if ('outcome' in patch) set('outcome', patch.outcome ?? null);
+    if ('recovery' in patch) set('recovery', patch.recovery ? JSON.stringify(patch.recovery) : null);
+    if ('params' in patch) set('params', JSON.stringify(patch.params ?? {}));
+    if ('bootId' in patch) set('boot_id', patch.bootId);
+    if ('finishedAt' in patch) set('finished_at', patch.finishedAt ?? null);
+    set('updated_at', new Date().toISOString());
+    this.db.prepare(`UPDATE operations SET ${cols.join(', ')} WHERE id = ?`).run(...vals, id);
+    return this.getOperation(id);
+  }
+
+  getOperation(id: string): OperationRow | undefined {
+    const r = this.db.prepare(`SELECT * FROM operations WHERE id = ?`).get(id);
+    return r ? operationFromRow(r) : undefined;
+  }
+
+  /** Newest first: one agent's, or those of these agents. */
+  listOperations(agentIds: string[], limit = 50): OperationRow[] {
+    if (!agentIds.length) return [];
+    const marks = agentIds.map(() => '?').join(',');
+    return (
+      this.db
+        .prepare(`SELECT * FROM operations WHERE agent_id IN (${marks}) ORDER BY requested_at DESC, rowid DESC LIMIT ?`)
+        .all(...agentIds, limit) as unknown[]
+    ).map(operationFromRow);
+  }
+
+  /** Rows in these statuses, oldest first. */
+  operationsWithStatus(statuses: OperationRow['status'][]): OperationRow[] {
+    if (!statuses.length) return [];
+    const marks = statuses.map(() => '?').join(',');
+    return (
+      this.db.prepare(`SELECT * FROM operations WHERE status IN (${marks}) ORDER BY requested_at, rowid`).all(...statuses) as unknown[]
+    ).map(operationFromRow);
+  }
+
+  /** The agent's operation that is not over (queued, running, interrupted or held), if any. */
+  activeOperationFor(agentId: string): OperationRow | undefined {
+    const r = this.db
+      .prepare(`SELECT * FROM operations WHERE agent_id = ? AND status IN ('queued', 'running', 'interrupted', 'held') ORDER BY requested_at DESC, rowid DESC LIMIT 1`)
+      .get(agentId);
+    return r ? operationFromRow(r) : undefined;
+  }
+
+  /**
+   * Kept 90 days, and at least the last 50 per agent. Rows that are not over
+   * are never pruned: they are what keeps the agent from being started.
+   */
+  pruneOperations(agentId: string | null, now = Date.now()): void {
+    const cutoff = new Date(now - 90 * 86_400_000).toISOString();
+    const over = `status NOT IN ('queued', 'running', 'interrupted', 'held')`;
+    if (agentId === null) {
+      this.db.prepare(`DELETE FROM operations WHERE agent_id IS NULL AND ${over} AND requested_at < ? AND id NOT IN (
+        SELECT id FROM operations WHERE agent_id IS NULL ORDER BY requested_at DESC LIMIT 50)`).run(cutoff);
+      return;
+    }
+    this.db.prepare(`DELETE FROM operations WHERE agent_id = ? AND ${over} AND requested_at < ? AND id NOT IN (
+      SELECT id FROM operations WHERE agent_id = ? ORDER BY requested_at DESC LIMIT 50)`).run(agentId, cutoff, agentId);
   }
 
   // ---- Peers (other Hatchabot servers) ------------------------------------
@@ -5155,6 +5276,39 @@ function rowToChannel(r: any): Channel {
     deepLink: r.deep_link,
     createdAt: r.created_at,
     ...(settings ? { settings } : {}),
+  };
+}
+
+/** One row of `operations` (orchestrator/operations.ts has the meaning of each field). */
+export interface OperationRow {
+  id: string;
+  agentId: string | null;
+  hostId?: string | null;
+  kind: string;
+  requestedBy?: string | null;
+  requestedAt: string;
+  params: Record<string, unknown>;
+  step?: string | null;
+  stepAt?: string | null;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'rolled_back' | 'interrupted' | 'held';
+  outcome?: string | null;
+  recovery?: { actions: Array<{ action: string; label: string }>; recommended?: string } | null;
+  bootId: string;
+  updatedAt: string;
+  finishedAt?: string | null;
+}
+
+function operationFromRow(r: any): OperationRow {
+  const parse = (t: string | null) => {
+    if (!t) return undefined;
+    try { return JSON.parse(t); } catch { return undefined; }
+  };
+  return {
+    id: r.id, agentId: r.agent_id ?? null, hostId: r.host_id ?? null, kind: r.kind,
+    requestedBy: r.requested_by ?? null, requestedAt: r.requested_at,
+    params: parse(r.params) ?? {}, step: r.step ?? null, stepAt: r.step_at ?? null,
+    status: r.status, outcome: r.outcome ?? null, recovery: parse(r.recovery) ?? null,
+    bootId: r.boot_id, updatedAt: r.updated_at, finishedAt: r.finished_at ?? null,
   };
 }
 
