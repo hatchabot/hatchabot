@@ -15,8 +15,8 @@
  * area changed between the release it last passed on and that one.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { appendFileSync, createWriteStream, existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -37,7 +37,7 @@ const STORE = 'src/store/store.ts';
 const LIB = 'scripts/live-lib.mjs';
 export const LIVE_TESTS = [
   {
-    name: 'privacy', cmd: ['node', 'scripts/privacy-check.mjs', '--public'], against: 'install', minutes: '1–3', aiTurns: false, everyRelease: true,
+    name: 'privacy', cmd: ['node', 'scripts/privacy-check.mjs', '--public'], against: 'install', minutes: '1–3', aiTurns: false, everyRelease: true, parallel: true,
     needs: 'this machine\'s install (its private values: agents, people, bots, machines, .env secrets) and gh signed in',
     proves: 'nothing GitHub serves — the files, every commit and tag since the 2026-10-09 scrub, release notes, issues — names a private value, and no tag is from before 1.0 or off main',
     area: [],
@@ -95,7 +95,7 @@ export const LIVE_TESTS = [
     area: ['scripts/backup-volumes.sh', 'scripts/restore-drill.sh', 'src/orchestrator/backups.ts', 'src/orchestrator/drills.ts', 'src/orchestrator/transfer.ts'],
   },
   {
-    name: 'upgrade-check', cmd: ['bash', 'scripts/upgrade-check.sh'], against: 'checkout', minutes: '2–5', aiTurns: false,
+    name: 'upgrade-check', cmd: ['bash', 'scripts/upgrade-check.sh'], against: 'checkout', minutes: '2–5', aiTurns: false, parallel: true,
     needs: 'nothing (temporary databases)',
     proves: 'databases made by older releases open with this one',
     area: ['src/store', 'scripts/upgrade-check.sh'],
@@ -107,19 +107,19 @@ export const LIVE_TESTS = [
     area: ['src/orchestrator/adopt.ts', 'src/orchestrator/cronImport.ts', 'scripts/smoke.sh', 'scripts/smoke-adopt-full.ts'],
   },
   {
-    name: 'clean-install', cmd: ['bash', 'scripts/clean-install-test.sh'], against: 'checkout', minutes: '20–40', aiTurns: 'one',
+    name: 'clean-install', cmd: ['bash', 'scripts/clean-install-test.sh'], against: 'checkout', minutes: '20–40', aiTurns: 'one', parallel: true,
     needs: 'LXD on this machine; pass -- --ai-source "<an AI source name>"; stop the VM afterwards',
     proves: 'a stranger\'s install on a brand-new Linux machine, and the first things a new owner does',
     area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'package.json', 'package-lock.json'],
   },
   {
-    name: 'clean-install-ubuntu-2204', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'ubuntu:22.04'], against: 'checkout', minutes: '20–40', aiTurns: 'one',
+    name: 'clean-install-ubuntu-2204', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'ubuntu:22.04'], against: 'checkout', minutes: '20–40', aiTurns: 'one', parallel: true,
     needs: 'as clean-install; the oldest glibc the bundle supports (2.35)',
     proves: 'the clean install on Ubuntu 22.04 (a glibc bug broke stable there once)',
     area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'package.json', 'package-lock.json'],
   },
   {
-    name: 'clean-install-debian-12', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'hb-debian-12'], against: 'checkout', minutes: '5–40', aiTurns: 'one',
+    name: 'clean-install-debian-12', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'hb-debian-12'], against: 'checkout', minutes: '5–40', aiTurns: 'one', parallel: true,
     // LXD's image server has no arm64 Debian 12 VM image; Debian's own cloud
     // image, prepared once into a local LXD image, runs on either CPU (2026-10-09).
     needs: 'as clean-install, plus the local LXD image hb-debian-12 (scripts/make-debian-test-image.sh, once)',
@@ -273,6 +273,20 @@ function checkoutVersion() {
   return `v${JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version}`;
 }
 
+/**
+ * The order to run what is due: tests flagged `parallel` touch none of the
+ * live install's agents (privacy reads GitHub, upgrade-check uses temporary
+ * databases, the clean installs their own throwaway VMs), so they run
+ * alongside the rest. Everything else runs one at a time: they make test
+ * agents on the live install (its agent limit), share its Docker, and the
+ * runner test points the runner's default image at an old one while it runs.
+ */
+export function planRun(due, tests = LIVE_TESTS) {
+  const byName = new Map(tests.map((t) => [t.name, t]));
+  const names = due.filter((d) => !d.manual).map((d) => d.test);
+  return { parallel: names.filter((n) => byName.get(n)?.parallel), serial: names.filter((n) => !byName.get(n)?.parallel) };
+}
+
 // ---- the commands --------------------------------------------------------------
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
@@ -306,6 +320,33 @@ async function main() {
     if (cmd === 'gate') process.exit(1);
     return;
   }
+  if (cmd === 'run-due') {
+    // Every test due for this release: the parallel ones alongside the one-at-a-time chain.
+    // --args <name>="<its arguments>" passes a test its own (e.g. the runner test's --old-image).
+    const extra = new Map();
+    for (let i = 0; i < rest.length; i++) if (rest[i] === '--args') { const [n, ...v] = String(rest[++i] ?? '').split('='); extra.set(n, v.join('=').split(/\s+/).filter(Boolean)); }
+    const tag = rest.find((a, i) => !a.startsWith('--') && rest[i - 1] !== '--args') || (await installVersion()).version;
+    if (!tag || !tagExists(tag)) { console.error(`usage: live.mjs run-due [<tag>] [--args <name>="<args>"]… (no tag ${tag ?? ''} here)`); process.exit(2); }
+    const { parallel, serial } = planRun(dueFor(tag, runs));
+    if (!parallel.length && !serial.length) { console.log(`✓ No live test is due for ${tag}.`); return; }
+    const logs = mkdtempSync(join(tmpdir(), 'hb-live-'));
+    console.log(`${parallel.length + serial.length} due for ${tag} — alongside: ${parallel.join(', ') || 'none'}; one at a time: ${serial.join(', ') || 'none'}. Logs: ${logs}/<test>.log`);
+    const one = (name) => new Promise((resolve) => {
+      const out = createWriteStream(join(logs, `${name}.log`));
+      const args = extra.get(name);
+      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'run', name, ...(args ? ['--', ...args] : [])], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+      child.stdout.pipe(out, { end: false }); child.stderr.pipe(out, { end: false });
+      const t0 = Date.now();
+      console.log(`▶ ${name}`);
+      child.on('close', (code) => { out.end(); const m = Math.max(1, Math.round((Date.now() - t0) / 60_000)); console.log(`${code === 0 ? '✓' : '✗'} ${name} (${m} min)`); resolve({ name, code: code ?? 1 }); });
+      child.on('error', () => { out.end(); resolve({ name, code: 127 }); });
+    });
+    const serialRun = (async () => { const r = []; for (const n of serial) r.push(await one(n)); return r; })();
+    const results = [...(await Promise.all(parallel.map(one))), ...(await serialRun)];
+    const bad = results.filter((r) => r.code !== 0);
+    console.log(bad.length ? `✗ ${bad.length} failed: ${bad.map((r) => r.name).join(', ')} — see their logs` : `✓ all ${results.length} passed or were recorded (commit docs/live-test-runs.md)`);
+    process.exit(bad.length ? 1 : 0);
+  }
   if (cmd === 'run') {
     const name = rest[0];
     const t = LIVE_TESTS.find((x) => x.name === name);
@@ -337,7 +378,7 @@ async function main() {
     console.log(`\n${result === 'pass' ? '✓' : result === 'skip' ? '–' : '✗'} ${t.name}: ${result} (${minutes} min). Recorded in docs/live-test-runs.md — commit it.`);
     process.exit(code === 0 ? 0 : 1);
   }
-  console.error('usage: live.mjs list | due [<tag>] | run <name> [--note <text>] [-- args] | gate <tag>');
+  console.error('usage: live.mjs list | due [<tag>] | run <name> [--note <text>] [-- args] | run-due [<tag>] [--args <name>="<args>"]… | gate <tag>');
   process.exit(2);
 }
 

@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 // @ts-expect-error — a plain .mjs script, no types
-import { LIVE_TESTS, committedRuns, dueFor, readRuns, resultOf, touches } from '../scripts/live.mjs';
+import { LIVE_TESTS, committedRuns, dueFor, planRun, readRuns, resultOf, touches } from '../scripts/live.mjs';
 
 /**
  * The live tests' register (scripts/live.mjs): every test names a script that
@@ -35,6 +35,19 @@ describe('the register', () => {
     expect(runs.length).toBeGreaterThan(0);
     for (const r of runs) expect(tests.map((t) => t.name)).toContain(r.test);
     expect(readRuns('| 2026-10-08 | x | maybe | v1 | 3 | |\n| not a row |')).toEqual([]);
+  });
+});
+
+describe('running what is due', () => {
+  it('runs the tests that touch no agent alongside the rest, and the rest one at a time', () => {
+    const due = ['privacy', 'transfer', 'clean-install', 'runner-scenarios', 'upgrade-check'].map((test) => ({ test, why: '' }));
+    const plan = planRun([...due, { test: 'clean-install-debian-12', why: '', manual: 'elsewhere' }]);
+    expect(plan.parallel).toEqual(['privacy', 'clean-install', 'upgrade-check']);
+    expect(plan.serial).toEqual(['transfer', 'runner-scenarios']);
+  });
+  it('flags as parallel only tests that make no agent on the live install', () => {
+    const parallel = LIVE_TESTS.filter((t) => (t as { parallel?: boolean }).parallel).map((t) => t.name).sort();
+    expect(parallel).toEqual(['clean-install', 'clean-install-debian-12', 'clean-install-ubuntu-2204', 'privacy', 'upgrade-check']);
   });
 });
 

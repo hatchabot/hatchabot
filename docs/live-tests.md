@@ -11,7 +11,8 @@ They run **before a release reaches anyone else**:
    `latest`), so the live install now runs the new release.
 2. `node scripts/live.mjs due` lists the live tests due for what the install
    runs, and why.
-3. Run each: `node scripts/live.mjs run <name> [-- its own arguments]`. The
+3. Run them all: `node scripts/live.mjs run-due [--args runner-scenarios="--old-image <image>"]`
+   (or one: `node scripts/live.mjs run <name> [-- its own arguments]`). Each
    result is added to [live-test-runs.md](live-test-runs.md); commit it.
 4. Promote. `scripts/promote.sh` refuses while any test is due for the tag
    (`HATCHABOT_PROMOTE_IGNORE_LIVE=1` overrides it, as
@@ -51,9 +52,15 @@ on a machine that can; it does not hold the gate here.
 
 **No live test uses a Telegram bot.** Bots are scarce (about 20 per Telegram
 account), so every test agent is web-only. One found with a bot is deleted at
-once, which hands the bot back to the pool, and its test fails. Run the tests
-one at a time: several make agents at once, and an account near its agent
-limit (`HATCHABOT_MAX_AGENTS_PER_ACCOUNT`) has room for few.
+once, which hands the bot back to the pool, and its test fails.
+
+Tests that make agents on the live install run **one at a time**: an account
+near its agent limit (`HATCHABOT_MAX_AGENTS_PER_ACCOUNT`) has room for few,
+they share its Docker, and the runner test points the runner's default image
+at an old one while it runs. Tests flagged `parallel` in the register touch
+no agent — `privacy` (reads GitHub), `upgrade-check` (temporary databases)
+and the three clean installs (their own throwaway VMs) — and `run-due` runs
+them alongside the others, each test's output in its own log file.
 
 Not automated (check by hand before a release that touches them): Telegram
 end to end (only a person can message a bot), Google connections
