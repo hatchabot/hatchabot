@@ -16,7 +16,7 @@
  * <html>, read from Chrome's --dump-dom.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -2620,6 +2620,11 @@ try {
   const tail = `<script>setTimeout(() => { ${SCENARIOS} }, 2500)</script></body>`;
   // Replacer functions: a bare string is a pattern to replace(), and `$'` inside the scenarios meant "the rest of the page".
   writeFileSync(join(work, 'page.html'), page.replace('<head>', () => head).replace('</body>', () => tail));
+  // Chrome's container runs as its own user (uid 1000); a private temp folder
+  // owned by another uid (GitHub's runner is 1001) left it a blank page, and
+  // "the page never reported" (2026-10-09). The page holds only test data.
+  chmodSync(work, 0o755);
+  chmodSync(join(work, 'page.html'), 0o644);
   let dom = '';
   for (let tries = 1; !dom.includes('data-ui-results') && tries <= 3; tries++) {
     try {
