@@ -1,6 +1,6 @@
 # Design: one recommendations view
 
-Status: **proposal, for review** (2026-10-09). From an outside review:
+Status: **accepted 2026-10-09; being built.** From an outside review:
 "consolidate model steward, token steward, spend alerts and budget advice into
 one prioritized recommendations view; keep their specialized checks
 internally; show one understandable decision with evidence and expected
@@ -105,13 +105,15 @@ Unchanged in what triggers them; one shared rule added: about one cause, one
 message a day (a loop's message covers its spike). The step and budget
 messages you set keep coming.
 
-## Questions for review
+## Decisions (2026-10-09)
 
-1. **Where:** Recommended at the top of **Usage** (proposed), or as its own
-   view under **View by**, or under Alerts?
-2. **Buttons:** act at once on your click (your click is the confirmation),
-   or keep every change as a card you confirm, as now?
-3. **Messages:** keep each feature's Telegram messages (with "one cause, one
-   message a day"), or one morning summary of the list instead?
-4. **Cheaper-model items:** offer them only when the evidence is "ok" (≥10
-   turns over ≥3 days), or also when "thin", marked as such?
+1. **Where:** Recommended at the top of the **Usage** panel, and each agent's
+   items on its Usage tab. Alerts keeps only what needs you now (a live loop,
+   a budget at 100%, today's spike), one line each, linking to the item.
+2. **Buttons:** act on the owner's click — the click is the confirmation. The
+   Hatchabot agent's cards become items in the same list (marked as its
+   proposal); confirming one is the same click.
+3. **Messages:** each feature's Telegram messages stay, with one shared rule:
+   about one cause, one message a day (a loop's message covers its spike).
+4. **Cheaper-model items:** only when the scorecard's evidence is "ok" (≥10
+   turns over ≥3 days).
