@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { ExecResult, RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
+import { beginOperation, handleFor, rethrowIfCrash } from './operations.js';
 
 /**
  * Version history for what makes an agent *itself*: SOUL.md (who it is),
@@ -35,6 +36,8 @@ export interface SnapshotDeps {
   store: Store;
   provider: RuntimeProvider;
   log?: (event: string, detail: Record<string, unknown>) => void;
+  /** Who asked, for a restore's operation record. */
+  requestedBy?: string;
 }
 
 export class SnapshotError extends Error {
@@ -200,6 +203,11 @@ export async function restoreSnapshot(
   const snapshot = store.getSnapshot(agentId, snapshotId);
   if (!snapshot) throw new SnapshotError('That snapshot no longer exists.');
 
+  // Recorded as it goes (operations.ts): a restart part-way through the
+  // files holds the agent for its owner — finish, or revert to the snapshot
+  // taken just before (resumeSnapshotRestore).
+  const op = beginOperation(store, 'restore-snapshot', agentId, { snapshotId, label: snapshot.label }, { requestedBy: deps.requestedBy });
+
   // A restore is itself destructive — capture the current state first so an
   // unwanted rollback is one more rollback away, not a loss.
   let safetySnapshotId: string | undefined;
@@ -211,6 +219,7 @@ export async function restoreSnapshot(
       })
     ).id;
   } catch (err) {
+    rethrowIfCrash(err);
     log('snapshot.safety_failed', { agentId, error: String(err) });
     // No copy, no restore: the app promises "this is undoable", and a file too
     // big for a snapshot (MEMORY.md past 256 KB) would have been overwritten
@@ -219,8 +228,11 @@ export async function restoreSnapshot(
     // changed nothing here (the restore still refuses) and cannot work for an
     // agent too big to download (review, 2026-09-29).
     const why = err instanceof SnapshotError ? ` (${err.userMessage.split(' — ')[0]!.replace(/\.$/, '')})` : '';
-    throw new SnapshotError(`Its current files could not be snapshotted first${why}, so the restore would not be undoable — nothing was changed. Trim its largest file, then try again.`);
+    const msg = `Its current files could not be snapshotted first${why}, so the restore would not be undoable — nothing was changed. Trim its largest file, then try again.`;
+    op.rolledBack(msg);
+    throw new SnapshotError(msg);
   }
+  op.step('safety-taken', { safetySnapshotId });
 
   const restored: string[] = [];
   for (const [name, content] of Object.entries(snapshot.files)) {
@@ -228,20 +240,108 @@ export async function restoreSnapshot(
     try {
       await writeCoreFile(provider, agent.runtimeRef, agent.slug, name, content);
     } catch (err) {
+      rethrowIfCrash(err);
       // Each file is written whole (tmp + mv), but the set is not: files
       // before this one are already the snapshot's. Say so, and where the
       // way back is, rather than a bare write error (issue #12).
       log('snapshot.restore_partial', { agentId, snapshotId, restored, failed: name, error: String(err) });
       const why = err instanceof SnapshotError ? err.userMessage : String(err);
-      throw new SnapshotError(
+      const msg =
         `${why}${restored.length ? ` ${restored.join(', ')} ${restored.length === 1 ? 'was' : 'were'} already restored.` : ' Nothing was changed.'} ` +
-          `The snapshot "before restoring ${snapshot.label}" holds how its files were.`,
-      );
+        `The snapshot "before restoring ${snapshot.label}" holds how its files were.`;
+      if (restored.length) op.fail(msg);
+      else op.rolledBack(msg);
+      throw new SnapshotError(msg);
     }
     restored.push(name);
+    op.step('file-written', { restored: [...restored] });
   }
+  op.step('written');
   log('snapshot.restored', { agentId, snapshotId, restored });
+  op.done(`Restored its files from "${snapshot.label}".`);
   return { restored, safetySnapshotId };
+}
+
+/** The files a snapshot holds that a restore writes (only the core files, ever). */
+function coreFilesOf(files: Record<string, string>): string[] {
+  return Object.keys(files).filter((n) => (CORE_FILES as readonly string[]).includes(n));
+}
+
+/** Write a snapshot's core files; with `blankOthers`, the core files it lacks are emptied (how they were: absent or empty). */
+async function writeSnapshotFiles(
+  deps: SnapshotDeps, runtimeRef: string, slug: string, files: Record<string, string>, blankOthers: string[] = [],
+): Promise<void> {
+  for (const name of coreFilesOf(files)) await writeCoreFile(deps.provider, runtimeRef, slug, name, files[name]!);
+  for (const name of blankOthers) if (!(name in files)) await writeCoreFile(deps.provider, runtimeRef, slug, name, '');
+}
+
+const SNAPSHOT_CHOICES = {
+  actions: [
+    { action: 'finish', label: 'Finish' },
+    { action: 'revert', label: 'Revert to the copy taken before' },
+  ],
+  recommended: 'finish',
+};
+
+/**
+ * A snapshot restore a restart cut off part-way through its files (the
+ * design's restore-snapshot row). What the files hold now decides: all the
+ * snapshot's → done; all as before → nothing was changed; a mix (or they
+ * cannot be read) → held for the owner, with [Finish] and [Revert to the copy
+ * taken before] — that snapshot is already saved.
+ */
+export async function resumeSnapshotRestore(deps: SnapshotDeps, opId: string): Promise<void> {
+  const op = handleFor(deps.store, opId);
+  const row = op.get();
+  const p = row.params as { snapshotId?: string; safetySnapshotId?: string; label?: string };
+  const agent = row.agentId ? deps.store.getAgent(row.agentId) : undefined;
+  if (!agent?.runtimeRef || agent.state === 'DELETED') { op.fail('Interrupted by a restart; the agent is gone.'); return; }
+  const label = p.label ?? 'a snapshot';
+  if (!row.step) {
+    op.rolledBack(`The restore of "${label}" was interrupted by a restart before any file was written — nothing was changed.`);
+    return;
+  }
+  const snapshot = p.snapshotId ? deps.store.getSnapshot(agent.id, p.snapshotId) : undefined;
+  const safety = p.safetySnapshotId ? deps.store.getSnapshot(agent.id, p.safetySnapshotId) : undefined;
+  if (row.step === 'written') { op.done(`Restored its files from "${label}".`); return; }
+  let now: Record<string, string> | undefined;
+  try { now = await readCoreFiles(deps.provider, agent.runtimeRef, agent.slug); } catch { now = undefined; }
+  if (now && snapshot) {
+    const names = coreFilesOf(snapshot.files);
+    if (names.every((n) => now![n] === snapshot.files[n])) { op.done(`Restored its files from "${label}".`); return; }
+    if (safety && names.every((n) => (now![n] ?? '') === (safety.files[n] ?? ''))) {
+      op.rolledBack(`The restore of "${label}" was interrupted by a restart before any file was written — nothing was changed.`);
+      return;
+    }
+  }
+  op.hold(
+    `Restoring "${label}" was interrupted by a restart part-way through its files, so they are a mix of before and after.`,
+    safety ? SNAPSHOT_CHOICES : { actions: [SNAPSHOT_CHOICES.actions[0]!], recommended: 'finish' },
+  );
+}
+
+/** The owner's choice on a held snapshot restore. */
+export async function recoverSnapshotRestore(deps: SnapshotDeps, opId: string, action: string): Promise<void> {
+  const op = handleFor(deps.store, opId);
+  const row = op.get();
+  const p = row.params as { snapshotId?: string; safetySnapshotId?: string; label?: string };
+  const agent = row.agentId ? deps.store.getAgent(row.agentId) : undefined;
+  if (!agent?.runtimeRef) throw new SnapshotError('The agent is gone.');
+  if (agent.state !== 'RUNNING') throw new SnapshotError('Start the agent first: its files are written while it runs.');
+  const label = p.label ?? 'a snapshot';
+  if (action === 'revert') {
+    const safety = p.safetySnapshotId ? deps.store.getSnapshot(agent.id, p.safetySnapshotId) : undefined;
+    if (!safety) throw new SnapshotError('The snapshot taken before the restore is gone, so there is nothing to revert to. Finish instead.');
+    const snapshot = p.snapshotId ? deps.store.getSnapshot(agent.id, p.snapshotId) : undefined;
+    await writeSnapshotFiles(deps, agent.runtimeRef, agent.slug, safety.files, snapshot ? coreFilesOf(snapshot.files) : []);
+    op.rolledBack(`Reverted its files to how they were before restoring "${label}".`);
+    return;
+  }
+  const snapshot = p.snapshotId ? deps.store.getSnapshot(agent.id, p.snapshotId) : undefined;
+  if (!snapshot) throw new SnapshotError(`The snapshot "${label}" no longer exists, so the restore cannot be finished. Revert instead.`);
+  await writeSnapshotFiles(deps, agent.runtimeRef, agent.slug, snapshot.files);
+  op.step('written');
+  op.done(`Restored its files from "${label}".`);
 }
 
 function defaultLabel(reason: SnapshotReason): string {

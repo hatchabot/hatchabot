@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +9,8 @@ import type { ExecResult } from '../src/providers/provider.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
+import { clearBusy } from '../src/orchestrator/busy.js';
+import { newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/operations.js';
 import {
   AppError, fieldsToAsk, hostGit, installRelease, mergeConfig, parseManifest, parseSource, repoFor, resolveRelease, switchTo, type AgentFacts,
 } from '../src/orchestrator/apps.js';
@@ -600,5 +602,139 @@ describe('the app routes', () => {
     store.setAgentState('a1', 'STOPPED');
     const stopped = await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: repo(), values: { mailbox: 'x@example.org' } } });
     expect(stopped.statusCode).toBe(409);
+  });
+});
+
+// ---- durable operations (appOperations.ts): an install, update or roll back cut off by a restart ----
+describe('an app change cut off by a restart (kill at every step)', () => {
+  const OWNER = 'owner-1';
+  const hdr = { 'x-hatchabot-owner': OWNER };
+  afterEach(() => setStepHookForTests(undefined));
+  const crashAt = (key: string) => setStepHookForTests((_op, k) => { if (k === key) throw new SimulatedCrash(); });
+  const reboot = () => { setStepHookForTests(undefined); clearBusy('a1'); newBootForTests(); };
+  async function world() {
+    const store = new Store(new Database(':memory:'));
+    const provider = new FakeAgent();
+    provider.jobs = [];
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
+    store.insertAIProfile({ id: 'p', ownerId: OWNER, name: 'Plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-sonnet-5', secretRef: 'ai/p', createdAt: 'now' } as never);
+    store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Demo', slug: 'demo-agent', state: 'RUNNING', runtimeRef: 'mock://a1', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    const f = Fastify();
+    const routes = await registerRoutes(f, { store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} }, providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0, list: () => [] } } } as never);
+    const dir = repo();
+    const install = (payload: Record<string, unknown> = { source: dir, values: { mailbox: 'demo@example.org' } }) =>
+      f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: hdr, payload });
+    /** The record, the `current` link and the tasks say the same release. */
+    const agrees = () => {
+      const rec = store.getAgentApp('a1');
+      const live = provider.live('mock://a1');
+      expect(live.current).toBe(rec ? `releases/${rec.sha.slice(0, 12)}` : null);
+      const m = rec?.manifest as { tasks: Array<{ name: string }> } | undefined;
+      expect(provider.jobs.filter((j) => j.name.startsWith('demoapp-')).map((j) => j.name).sort())
+        .toEqual((m?.tasks ?? []).map((t) => `demoapp-${t.name}`).sort());
+      return rec;
+    };
+    return { store, provider, f, routes, dir, install, agrees };
+  }
+  const opOf = (store: Store) => store.listOperations(['a1'])[0]!;
+  const SECOND = { ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['python3', '-m', 'demo', 'tick'] }] };
+
+  for (const key of ['unpacked', 'configured', 'tested', 'switching', 'switched', 'tasks', '#succeeded']) {
+    const before = ['unpacked', 'configured', 'tested', 'switching'].includes(key);
+    it(`an update, at "${key}": ${before ? 'nothing live changed — undone' : key === '#succeeded' ? 'done' : 'held, then either choice leaves the record and the agent agreeing'}`, async () => {
+      const w = await world();
+      expect((await w.install()).statusCode).toBe(200);
+      const first = w.agrees()!;
+      const config = readFileSync(w.provider.configFile('mock://a1'), 'utf8');
+      commit(w.dir, SECOND);
+      crashAt(key);
+      const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: { values: { mailbox: 'other@example.org' } } });
+      expect(res.statusCode).toBeGreaterThanOrEqual(500);
+      reboot();
+      await w.routes.resumeOperations();
+      const op = opOf(w.store);
+      expect(op.kind).toBe('app-update');
+      if (before) {
+        expect(op.status).toBe('rolled_back');
+        expect(w.agrees()!.sha).toBe(first.sha);
+        expect(readFileSync(w.provider.configFile('mock://a1'), 'utf8')).toBe(config);
+        expect(w.provider.live('mock://a1').staging).toBe(false);
+        return;
+      }
+      if (key === '#succeeded') {
+        expect(op.status).toBe('succeeded');
+        expect(w.agrees()!.sha).not.toBe(first.sha);
+        expect(w.provider.live('mock://a1').staging).toBe(false);
+        return;
+      }
+      expect(op.status).toBe('held');
+      expect(op.recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+      // Held: the app routes (and Start, Rebuild…) refuse with its line.
+      const again = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: {} });
+      expect(again.statusCode).toBe(409);
+      expect(again.json().error).toMatch(/interrupted by a restart/);
+      // Either choice, through the API.
+      const which = key === 'switched' ? 'go-back' : 'use-new';
+      const rec = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: which } });
+      expect(rec.statusCode).toBe(200);
+      const now = w.agrees()!;
+      expect(w.provider.live('mock://a1').staging).toBe(false);
+      if (which === 'go-back') {
+        expect(rec.json().operation.status).toBe('rolled_back');
+        expect(now.sha).toBe(first.sha);
+        expect(readFileSync(w.provider.configFile('mock://a1'), 'utf8')).toBe(config);
+      } else {
+        expect(rec.json().operation.status).toBe('succeeded');
+        expect(now.sha).not.toBe(first.sha);
+        expect(now.previousSha).toBe(first.sha);
+        expect(JSON.parse(readFileSync(w.provider.configFile('mock://a1'), 'utf8')).mailbox).toBe('other@example.org');
+        expect(w.provider.every('demoapp-tick')).toEqual(['5m']);
+      }
+    });
+  }
+
+  for (const key of ['switching', 'tasks', '#succeeded']) {
+    it(`a roll back, at "${key}"`, async () => {
+      const w = await world();
+      expect((await w.install()).statusCode).toBe(200);
+      commit(w.dir, SECOND);
+      expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: {} })).statusCode).toBe(200);
+      const newer = w.agrees()!;
+      crashAt(key);
+      await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/rollback', headers: hdr });
+      reboot();
+      await w.routes.resumeOperations();
+      const op = opOf(w.store);
+      expect(op.kind).toBe('app-rollback');
+      if (key === 'switching') { expect(op.status).toBe('rolled_back'); expect(w.agrees()!.sha).toBe(newer.sha); return; }
+      if (key === '#succeeded') { expect(op.status).toBe('succeeded'); expect(w.agrees()!.sha).toBe(newer.previousSha); return; }
+      expect(op.status).toBe('held');
+      const rec = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'go-back' } });
+      expect(rec.json().operation.status).toBe('rolled_back');
+      expect(w.agrees()!.sha).toBe(newer.sha);
+    });
+  }
+
+  it('a first install held after the switch: "Go back" leaves no app at all; the record never claimed one', async () => {
+    const w = await world();
+    crashAt('tasks');
+    expect((await w.install()).statusCode).toBeGreaterThanOrEqual(500);
+    reboot();
+    await w.routes.resumeOperations();
+    const op = opOf(w.store);
+    expect(op).toMatchObject({ kind: 'app-install', status: 'held' });
+    expect(w.store.getAgentApp('a1')).toBeUndefined();
+    const rec = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'go-back' } });
+    expect(rec.statusCode).toBe(200);
+    expect(w.agrees()).toBeUndefined();
+  });
+
+  it('an app waiting for its new agent goes in after a restart (there was no boot sweep)', async () => {
+    const w = await world();
+    w.store.setAppPending('a1', { source: w.dir, ref: 'HEAD', values: { mailbox: 'demo@example.org' } });
+    await w.routes.resumeOperations();
+    expect(w.store.getAppPending('a1')).toBeUndefined();
+    expect(w.agrees()!.app).toBe('demoapp');
+    expect(opOf(w.store)).toMatchObject({ kind: 'app-install', status: 'succeeded' });
   });
 });

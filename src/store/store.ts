@@ -2518,6 +2518,11 @@ export class Store {
       .run(agentId, p.source, p.ref, JSON.stringify(p.values), new Date().toISOString());
   }
 
+  /** Agents with an app waiting to go in that has not failed (the boot sweep runs them). */
+  listAppPendingAgents(): string[] {
+    return (this.db.prepare(`SELECT agent_id FROM agent_app_pending WHERE error IS NULL`).all() as Array<{ agent_id: string }>).map((r) => r.agent_id);
+  }
+
   setAppPendingError(agentId: string, error: string | null): void {
     this.db.prepare(`UPDATE agent_app_pending SET error = ? WHERE agent_id = ?`).run(error, agentId);
   }
@@ -2692,12 +2697,31 @@ export class Store {
     ).map(operationFromRow);
   }
 
-  /** The agent's operation that is not over (queued, running, interrupted or held), if any. */
+  /**
+   * The agent's operation that is not over (queued, running, interrupted or
+   * held), if any: what keeps it from being started. A rebuild or a setup
+   * queued or running in this process is not one: its guard is in memory
+   * (the rebuild queue, the busy flag), as it always was — only one a restart
+   * cut off (interrupted) counts here (operations.ts, BACKGROUND_KINDS).
+   */
   activeOperationFor(agentId: string): OperationRow | undefined {
     const r = this.db
-      .prepare(`SELECT * FROM operations WHERE agent_id = ? AND status IN ('queued', 'running', 'interrupted', 'held') ORDER BY requested_at DESC, rowid DESC LIMIT 1`)
+      .prepare(`SELECT * FROM operations WHERE agent_id = ? AND (status IN ('interrupted', 'held')
+          OR (status IN ('queued', 'running') AND kind NOT IN ('rebuild', 'provision')))
+        ORDER BY requested_at DESC, rowid DESC LIMIT 1`)
       .get(agentId);
     return r ? operationFromRow(r) : undefined;
+  }
+
+  /** A machine's own operations (no agent: an image copy, a backup run), newest first. */
+  listMachineOperations(hostIds: string[], limit = 50): OperationRow[] {
+    if (!hostIds.length) return [];
+    const marks = hostIds.map(() => '?').join(',');
+    return (
+      this.db
+        .prepare(`SELECT * FROM operations WHERE agent_id IS NULL AND host_id IN (${marks}) ORDER BY requested_at DESC, rowid DESC LIMIT ?`)
+        .all(...hostIds, limit) as unknown[]
+    ).map(operationFromRow);
   }
 
   /**

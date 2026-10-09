@@ -1172,6 +1172,19 @@ export function recordApplied(store: Store, agentId: string): void {
   }
 }
 
+/**
+ * This installation's settings (bot, members, model) written over a volume
+ * whose config came from elsewhere — a backup restored, or a restore finished
+ * after a restart: the same second provision Import and Move use.
+ */
+export async function reapplyCurrentSettings(deps: ProvisionDeps, agentId: string): Promise<void> {
+  // A build that was never accepted: its memory-search decision must not be
+  // stamped by a later model change (2026-10-09).
+  try { await deps.provider.provision(await buildRuntimeSpec(deps, agentId)); }
+  catch (err) { forgetEmbedDecision(agentId); throw err; }
+  recordApplied(deps.store, agentId);
+}
+
 /** A build that never got accepted: its decision must not be applied later (27th audit). */
 export function forgetEmbedDecision(agentId: string): void {
   embedDecision.delete(agentId);

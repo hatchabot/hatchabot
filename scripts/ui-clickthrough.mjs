@@ -114,6 +114,8 @@ const SCENARIOS = String.raw`(() => {
       window.__override['/v1/events'] = [
         { id: 2, agentId: 'a1', agentName: 'Homework Helper', at: iso(5), event: 'agent.rebuilt', detail: {} },
         { id: 1, agentId: 'a2', agentName: 'Soccer Schedule', at: iso(50), event: 'provision.failed', detail: {} },
+        // A machine's own operation (v2.155.0): no agent; the server says it in words.
+        { agentId: null, agentName: 'Laptop runner', at: iso(70), event: 'op.failed', detail: { kind: 'install-image' }, label: 'Image install: failed: The image copy was interrupted by a restart — install it again.' },
       ];
       window.__override['/v1/hosts'] = [
         { id: 'h1', name: 'This machine', kind: 'local', hostname: 'home-box', agentCount: 12 },
@@ -128,6 +130,8 @@ const SCENARIOS = String.raw`(() => {
         ok('an Activity section at the foot', !act.hidden && act.textContent.includes('Homework Helper') && act.textContent.includes('Soccer Schedule'));
         ok('below the agents', document.getElementById('v2groups').compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING);
         ok('a failure in red', !!act.querySelector('.v2actrow .bad'));
+        ok("a machine's operation reads in words, not its event name: " + act.textContent.slice(0, 300),
+          act.textContent.includes('Laptop runner') && act.textContent.includes('Image install: failed: The image copy was interrupted') && !act.textContent.includes('op failed'));
         byText('#v2Activity button', 'See all').click();
         await until(() => auditDlg.open); ok('See all opens the full log', auditDlg.open); auditDlg.close();
         byText('#v2Activity button', 'Hide').click();

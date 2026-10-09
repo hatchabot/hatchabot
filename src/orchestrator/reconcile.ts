@@ -1,6 +1,7 @@
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
-import type { Host } from '../domain/types.js';
+import type { Agent, Host } from '../domain/types.js';
+import type { RuntimeStatus } from '../providers/provider.js';
 import { isBusy } from './busy.js';
 
 /**
@@ -114,11 +115,7 @@ export async function reconcileAgents(
       if (!provider) continue;
 
       if (!agent.runtimeRef) {
-        // Parked on a human step (bot token) is a legitimate resting state.
-        if (agent.state === 'PROVISIONING' && !agent.pendingAction) {
-          store.setAgentState(agent.id, 'FAILED', 'Setup was interrupted — tap Retry.');
-          log('reconcile.interrupted', { agentId: agent.id });
-        }
+        applyReconcileRule(store, agent, undefined, log);
         continue;
       }
 
@@ -143,52 +140,77 @@ export async function reconcileAgents(
       ) {
         continue;
       }
-      const s = agent.state;
-
-      // Docker unreachable: leave every agent exactly as it is. Guessing here
-      // is how a healthy fleet gets marked FAILED after a reboot.
-      if (status.phase === 'unknown') {
-        log('reconcile.host_unreachable', { agentId: agent.id });
-        continue;
-      }
-
-      if (
-        status.phase === 'absent' &&
-        (s === 'RUNNING' || s === 'STOPPED' || s === 'PROVISIONING' || s === 'REBUILDING')
-      ) {
-        store.setAgentState(agent.id, 'FAILED', 'The agent runtime is missing — tap Retry to rebuild it.');
-        log('reconcile.runtime_missing', { agentId: agent.id, was: s });
-      } else if (status.phase === 'running' && s === 'STOPPED') {
-        store.setAgentState(agent.id, 'RUNNING');
-        log('reconcile.marked_running', { agentId: agent.id });
-      } else if (status.phase === 'running' && s === 'REBUILDING') {
-        // Rebuild finished but the control plane died before recording it.
-        store.setAgentState(agent.id, 'RUNNING');
-        log('reconcile.marked_running', { agentId: agent.id, was: s });
-      } else if (status.phase === 'running' && s === 'PROVISIONING' && !agent.pendingAction) {
-        // Provisioning finished but the control plane died before recording it.
-        store.setAgentState(agent.id, 'RUNNING');
-        log('reconcile.marked_running', { agentId: agent.id, was: s });
-      } else if (status.phase === 'stopped' && s === 'RUNNING') {
-        store.setAgentState(agent.id, 'STOPPED');
-        log('reconcile.marked_stopped', { agentId: agent.id });
-      } else if (status.phase === 'stopped' && s === 'REBUILDING') {
-        store.setAgentState(agent.id, 'FAILED', 'The rebuild was interrupted — tap Retry.');
-        log('reconcile.interrupted', { agentId: agent.id, was: s });
-      } else if (status.phase === 'stopped' && s === 'PROVISIONING' && !agent.pendingAction) {
-        store.setAgentState(agent.id, 'FAILED', 'Setup was interrupted — tap Retry.');
-        log('reconcile.interrupted', { agentId: agent.id });
-      } else if (status.phase === 'running' && s === 'RUNNING' && !status.healthy) {
-        // The container is up but its gateway isn't answering — the way an
-        // agent actually dies. Previously invisible: the chip stayed green
-        // and only "last active" quietly stopped moving.
-        log('reconcile.unhealthy', { agentId: agent.id });
-      } else if (status.phase === 'error' && s === 'RUNNING') {
-        store.setAgentState(agent.id, 'FAILED', `The runtime reported an error: ${status.message}`);
-        log('reconcile.runtime_error', { agentId: agent.id, message: status.message });
-      }
+      applyReconcileRule(store, agent, status, log);
     } catch (err) {
       log('reconcile.error', { agentId: agent.id, error: String(err) });
     }
   }
+}
+
+/**
+ * Reconcile's rules for one agent, given what its machine reports
+ * (`undefined`: it has no runtime yet). Also how an interrupted rebuild or
+ * setup is settled after a restart (operationsResume.ts): the same rules,
+ * applied on purpose, with the outcome recorded on the operation. Returns
+ * 'unknown' when the machine does not answer (nothing is judged).
+ */
+export function applyReconcileRule(
+  store: Store,
+  agent: Agent,
+  status: RuntimeStatus | undefined,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): 'judged' | 'unknown' {
+  const s = agent.state;
+  if (!status) {
+    // Parked on a human step (bot token) is a legitimate resting state.
+    if (s === 'PROVISIONING' && !agent.pendingAction) {
+      store.setAgentState(agent.id, 'FAILED', 'Setup was interrupted — tap Retry.');
+      log('reconcile.interrupted', { agentId: agent.id });
+    }
+    return 'judged';
+  }
+
+  // Docker unreachable: leave every agent exactly as it is. Guessing here
+  // is how a healthy fleet gets marked FAILED after a reboot.
+  if (status.phase === 'unknown') {
+    log('reconcile.host_unreachable', { agentId: agent.id });
+    return 'unknown';
+  }
+
+  if (
+    status.phase === 'absent' &&
+    (s === 'RUNNING' || s === 'STOPPED' || s === 'PROVISIONING' || s === 'REBUILDING')
+  ) {
+    store.setAgentState(agent.id, 'FAILED', 'The agent runtime is missing — tap Retry to rebuild it.');
+    log('reconcile.runtime_missing', { agentId: agent.id, was: s });
+  } else if (status.phase === 'running' && s === 'STOPPED') {
+    store.setAgentState(agent.id, 'RUNNING');
+    log('reconcile.marked_running', { agentId: agent.id });
+  } else if (status.phase === 'running' && s === 'REBUILDING') {
+    // Rebuild finished but the control plane died before recording it.
+    store.setAgentState(agent.id, 'RUNNING');
+    log('reconcile.marked_running', { agentId: agent.id, was: s });
+  } else if (status.phase === 'running' && s === 'PROVISIONING' && !agent.pendingAction) {
+    // Provisioning finished but the control plane died before recording it.
+    store.setAgentState(agent.id, 'RUNNING');
+    log('reconcile.marked_running', { agentId: agent.id, was: s });
+  } else if (status.phase === 'stopped' && s === 'RUNNING') {
+    store.setAgentState(agent.id, 'STOPPED');
+    log('reconcile.marked_stopped', { agentId: agent.id });
+  } else if (status.phase === 'stopped' && s === 'REBUILDING') {
+    store.setAgentState(agent.id, 'FAILED', 'The rebuild was interrupted — tap Retry.');
+    log('reconcile.interrupted', { agentId: agent.id, was: s });
+  } else if (status.phase === 'stopped' && s === 'PROVISIONING' && !agent.pendingAction) {
+    store.setAgentState(agent.id, 'FAILED', 'Setup was interrupted — tap Retry.');
+    log('reconcile.interrupted', { agentId: agent.id });
+  } else if (status.phase === 'running' && s === 'RUNNING' && !status.healthy) {
+    // The container is up but its gateway isn't answering — the way an
+    // agent actually dies. Previously invisible: the chip stayed green
+    // and only "last active" quietly stopped moving.
+    log('reconcile.unhealthy', { agentId: agent.id });
+  } else if (status.phase === 'error' && s === 'RUNNING') {
+    store.setAgentState(agent.id, 'FAILED', `The runtime reported an error: ${status.message}`);
+    log('reconcile.runtime_error', { agentId: agent.id, message: status.message });
+  }
+  return 'judged';
 }

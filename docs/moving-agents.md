@@ -173,8 +173,10 @@ backup as the same agent or standing a shared template up as a fresh one.
 
 A move takes minutes, and Hatchabot can restart in the middle of one: an
 automatic upgrade, a crash, the machine rebooting. Since v2.154.0 every move
-and every import writes down each step as it is done, so after a restart
-Hatchabot knows exactly where it stopped and puts it right on purpose:
+and every import writes down each step as it is done, and since v2.155.0 so do
+restores, archives, rebuilds, app installs and a runner's image copy. After a
+restart Hatchabot knows exactly where each one stopped and puts it right on
+purpose:
 
 | What was interrupted | What Hatchabot does after the restart |
 |---|---|
@@ -182,18 +184,31 @@ Hatchabot knows exactly where it stopped and puts it right on purpose:
 | A move to another machine, after it was recorded there | Finishes it: starts it there, settles its skills and memory index, then removes the old copy |
 | An import (a file, or a move arriving from another Hatchabot) | Undoes it completely — a half-imported agent never starts. Import the file again |
 | A move to another Hatchabot, after the agent was packed up | Asks the other server whether it arrived: yes — this copy stays stopped, marked as moved; no — it is started here again |
+| A restore from a backup, before the copy of how it was had been saved | Undoes it: nothing was changed, and the agent is started again if it was running |
+| A restore from a backup, after that copy was saved (to `restore-safety/` beside the backups) | Its memory may be half-restored, so it stays **stopped** and waits for you: **Finish the restore** or **Put back the copy from before**. (If only the restart itself was left, it finishes by itself.) |
+| A restore of a snapshot, part-way through its files | Waits for you: **Finish** or **Revert to the copy taken before** (the snapshot taken just before the restore). If none of its files had changed yet, or all had, it settles by itself |
+| An archive, before its bot was given back | Undoes it: started again if it was running |
+| An archive, after its bot was given back | Finishes it: archived, its container left stopped. Going back would need a new bot |
+| A rebuild waiting its turn | Puts it back in the queue (unless the agent moved, stopped or was archived meanwhile) |
+| A rebuild or a setup under way | As before: running again → marked running; stopped → **"The rebuild was interrupted — tap Retry"** (or "Setup was interrupted"). The outcome is now on its record |
+| An app install, update or roll back, before the switch | Nothing live changed: undone. Install or update again |
+| An app install, update or roll back, during or after the switch | Compares the release the agent runs with Hatchabot's record: the same → done; different → waits for you: **Use the new release** or **Go back to the previous one** |
+| Copying the runtime image to a runner | Marked failed: **Install image** again (Settings → Hosts says "interrupted", not idle) |
 
 When Hatchabot cannot tell which way is right — the other machine or the other
-server is not answering — it does not guess. The agent stays **stopped**, shows
-under **Alerts**, and its page offers the choices, for example **Try again when
+server is not answering, or only you know which outcome you wanted — it does
+not guess. The agent waits (stopped, except during a snapshot restore, where it
+keeps running), shows under **Alerts**, and its page offers the choices, for example **Try again when
 Laptop is back** or **Put it back on This machine**. A move to another Hatchabot
 is asked about again every 10 minutes by itself. Until one of these is settled,
 Start, Rebuild, Archive, Move and Delete say why they must wait, so two copies
 can never answer the same bot.
 
-The Activity list and the agent's Setup log show each step. The command line
-and the Hatchabot agent can read them too: `GET /v1/operations?agentId=…`, and
-the agent's `list_operations` and `recover_operation` tools.
+The Activity list and the agent's Setup log show each step. A machine's own
+operations — copying the image to a runner, **Back up now** — show in the
+Activity list too, to that machine's owner. The command line and the Hatchabot
+agent can read them: `GET /v1/operations?agentId=…`, and the agent's
+`list_operations` and `recover_operation` tools.
 
 ## Rules of the road
 
