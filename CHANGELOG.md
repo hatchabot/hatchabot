@@ -2,6 +2,34 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.157.0] — 2026-10-09
+
+From an outside review: can each agent be recovered, what can each agent reach, and the multi-server controls out of a household's way.
+
+### Added — recovery readiness
+- Each agent's page has a **Recovery** row (Advanced): "Recoverable from <date> · last drill <date> passed", or the problem in plain words (left out of recent backups because its runner was asleep, its archive failed, or its volume was missing). **Restore…** walks you through it: pick the backup, see what it holds and what will be undone, then confirm with the agent's name.
+- **Settings → Backups** shows, for every agent, its latest usable backup, how many recent backups left it out, its last drill and a status.
+- An agent whose newest usable backup is more than 2 days old, or that no backup holds, shows under **Alerts** when the rest of the machine was backed up; the machine's own backup alert no longer names it twice. A failed restore drill is a machine alert.
+- **Restore drills are isolated and recorded.** Each agent's copy is restored into its own throwaway volume, with no network, memory and CPU limits, and only that archive mounted — the drill used to mount the whole backup set (its saved key included) and check only one agent. Each run writes a record under `<backups>/drills/` and shows in Activity.
+- **Automatic restore drills, opt-in:** Settings → Backups → Restore drills: Weekly or Daily (or `HATCHABOT_DRILL_EVERY`), between 05:00 and 07:00 after that night's backup; **Run a drill now** runs one by hand. Off by default.
+- An incomplete backup set counts as a restore point for the agents it captured whole.
+
+### Added — what each agent can reach
+- **What each agent can reach:** its page's **Sharing → Access** lists Google accounts, chat bots, folders and repos (with their keys), environment variable names, its AI source, the agents it may consult, and people — what Hatchabot gave it next to what was last found inside the running agent (✓ / ⚠ / ?), with the time, removals still pending, and a read-only **Verify now**.
+- **⚙ Settings → Security → What your agents can reach** lists every agent at once, the ones with a problem first.
+- An agent that can still reach something it should not shows under **Alerts**: a detached account still on it, a bot it was moved off, a different bot token running, a removed variable or folder still there, a removed member still let in, or a removal pending for more than a day.
+- What Hatchabot checks inside an agent is looked at again after every start, wake and rebuild. What the agent set up for itself (keys in its files, accounts it added to gog, people approved in OpenClaw's own console) is shown as **not managed** or listed as not checked — never as verified.
+
+### Changed — an Advanced area
+- Settings has a new last tab, **Advanced**, for running several Hatchabot servers and building your own runtime images: Other Hatchabot servers, Runtime images and Derived images, folded until you open them. A household needs none of it.
+- Settings → **Hosts** holds only your machines and runners — the way to add a machine. **Automatic rebuilds** moved there from the old Images tab.
+- In an agent's Advanced tab, **Move to another Hatchabot** sits under its own **Between servers** heading, below Move… (another machine).
+- Adding another Hatchabot server with a field left empty now says what is missing; before, the button seemed to do nothing.
+
+### Fixed
+- Clearing a usage spike warning on Usage no longer makes its Telegram message come again while the spike lasts.
+- The Hatchabot agent's weekly review gives the reason an agent is near its budget, not the warning again.
+
 ## [2.156.0] — 2026-10-09
 
 The last step of docs/operations-and-one-interface-design.md, Part A: long changes run in the background, and the page and the command line follow them.

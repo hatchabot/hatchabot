@@ -534,6 +534,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.156.0`
 - **Code:** `web/index.html` — `v2ViewKey`
 
+### Alerts says "It can still reach what it should not: <account>: still there"
+- **Check:** open the agent → Sharing → Access → Verify now; the ⚠ line names the account, bot, folder, variable or person, and when it was found.
+- **Cause:** the last look inside the running agent found something Hatchabot no longer gives it — a Google account detached while the removal failed, a bot it was moved off still in its OpenClaw settings, a variable or folder removed but the agent not rebuilt yet.
+- **Fix:** rebuild the agent (it writes its settings again and takes detached accounts off), then Verify now. For a Google account, detach it again while the agent runs.
+- **Fixed in:** `v2.157.0`
+- **Code:** `src/orchestrator/accessOverview.ts` — `verifyAgentAccess`
+
+### Access shows "removal pending over a day" for a Google account
+- **Check:** Sharing → Access shows the account with ⚠ and "removal pending since …"; is the agent stopped, asleep, or on a runner that is off?
+- **Cause:** a removal runs only inside a running agent: it waits for the next start, wake or rebuild — or gog's remove kept failing.
+- **Fix:** start or wake the agent (the removal runs then), then Verify now; if it stays, rebuild it.
+- **Fixed in:** `v2.157.0`
+- **Code:** `src/orchestrator/googleConnections.ts` — `syncConnections`
+
+### Access shows "a different token is running" on the Telegram bot
+- **Check:** Sharing → Access → Verify now; the Telegram line has ⚠ "a different token is running".
+- **Cause:** the bot token in the agent's `openclaw.json` is not the one Hatchabot holds for its channel (a hand edit, or a restore from an older backup).
+- **Fix:** rebuild the agent: Hatchabot writes its bot settings again.
+- **Fixed in:** `v2.157.0`
+- **Code:** `src/orchestrator/accessOverview.ts` — `accessProbeScript`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")
@@ -764,6 +785,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.156.0`
 - **Code:** `src/orchestrator/operations.ts` — `runInBackground`
 
+### Adding another Hatchabot server does nothing
+- **Check:** a name, address or token field is empty, and no message appears.
+- **Cause:** the form wrote its error into the AI tab's error line, which is hidden on that tab.
+- **Fix:** fill in all three fields, or upgrade. The form is now under Settings → Advanced → Other Hatchabot servers and shows its errors under it.
+- **Fixed in:** `v2.157.0`
+- **Code:** `web/index.html` — `addPeer`
+
 ## Backups and restore
 
 ### `hatchabot doctor`: "No backup set in … yet", "Last backup set is N days old", or "… is incomplete"
@@ -856,6 +884,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** choose **Finish the restore** (that night's copy, with today's members and bot) or **Put back the copy from before**. The copy stays in `restore-safety/` beside the backups until you choose.
 - **Fixed in:** `v2.155.0`
 - **Code:** `src/orchestrator/backups.ts` — `resumeBackupRestore`, `recoverBackupRestore`
+
+### An agent's Recovery row says "left out of the last N backups: its machine was asleep or offline"
+- **Check:** Settings → Backups, the "Left out of" column; the machine line shows the runner "not answering"; `<set>/backup-status.json` lists the volume under `skipped`.
+- **Cause:** the agent lives on a runner that did not answer at the 03:30 backup, so its volume was skipped (not failed); retention keeps its last copy.
+- **Fix:** keep the runner awake at backup time, or run **Back up now** while it is; meanwhile **Download copy** keeps a copy by hand.
+- **Fixed in:** `v2.157.0`
+- **Code:** `src/orchestrator/recoveryReadiness.ts` — `computeReadiness`
+
+### The last restore drill failed (Alerts: "the last restore drill (<date>) failed")
+- **Check:** the drill line in Settings → Backups; the newest `<backups>/drills/*.json`, whose `volumes[].note` is unreadable, layout, extract, timeout or nodocker, and its `database` and `key` fields.
+- **Cause:** an archive is torn or holds no OpenClaw files, did not extract into a fresh volume, took over 15 minutes, or Docker did not answer; or the database copy or the saved key did not pass.
+- **Fix:** for an archive, **Back up now** and drill again; for nodocker, start Docker; for the key, compare `secret-key.env` in the set with your `.env`.
+- **Fixed in:** `v2.157.0`
+- **Code:** `scripts/restore-drill.sh` — `write_record`
+
+### `restore-drill.sh` stops at once with "Another restore drill (pid N) is running"
+- **Check:** `<backups>/drills/.lock/pid`, and whether that process is alive.
+- **Cause:** one drill at a time — a scheduled drill, Run a drill now, or the live test is already running.
+- **Fix:** wait for it; a lock left by a killed drill is taken over by the next one.
+- **Fixed in:** `v2.157.0`
+- **Code:** `scripts/restore-drill.sh` — `take_lock`
 
 ## Usage, costs and budgets
 
