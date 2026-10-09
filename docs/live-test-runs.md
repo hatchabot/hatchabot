@@ -47,3 +47,14 @@ tests that run on their own.
 | 2026-10-08 | restore-drill | pass | v2.152.0 | 1 | OpenClaw 2026.9.8 |
 | 2026-10-08 | clean-install | pass | v2.152.0 | 8 |  |
 | 2026-10-08 | clean-install-ubuntu-2204 | pass | v2.152.0 | 8 |  |
+| 2026-10-09 | upgrade-check | pass | v2.153.0 | 1 |  |
+| 2026-10-09 | restore-drill | pass | v2.153.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-10-09 | console | pass | v2.153.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-09 | browser | pass | v2.153.0 | 4 | OpenClaw 2026.9.8 |
+| 2026-10-09 | apps | pass | v2.153.0 | 5 | OpenClaw 2026.9.8 |
+| 2026-10-09 | transfer | pass | v2.153.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-10-09 | runner-scenarios | skip | v2.153.0 | 4 | OpenClaw 2026.9.8 |
+| 2026-10-09 | candidate-gate | pass | v2.153.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-09 | regress-autonomous | pass | v2.153.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-10-09 | clean-install | pass | v2.153.0 | 2 |  |
+| 2026-10-09 | clean-install-ubuntu-2204 | pass | v2.153.0 | 1 |  |
