@@ -58,3 +58,7 @@ tests that run on their own.
 | 2026-10-09 | regress-autonomous | pass | v2.153.0 | 6 | OpenClaw 2026.9.8 |
 | 2026-10-09 | clean-install | pass | v2.153.0 | 2 |  |
 | 2026-10-09 | clean-install-ubuntu-2204 | pass | v2.153.0 | 1 |  |
+| 2026-10-09 | clean-install-debian-12 | fail | v2.153.1 | 1 |  |
+| 2026-10-09 | apps | pass | v2.153.1 | 4 | OpenClaw 2026.9.8 |
+| 2026-10-09 | clean-install-debian-12 | pass | v2.153.1 | 1 |  |
+| 2026-10-09 | runner-scenarios | pass | v2.153.1 | 10 | OpenClaw 2026.9.8 |

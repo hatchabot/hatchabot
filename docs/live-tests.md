@@ -45,7 +45,7 @@ on a machine that can; it does not hold the gate here.
 | `smoke-adopt` | Switching to Hatchabot: an OpenClaw agent is found and adopted web-only on a throwaway control plane; its workspace and tasks arrive, its console answers, its data folder mounts | Nothing (its own ports); `-- --with-telegram` takes over a bot from `.env.smoke` instead | 2–5 min | none |
 | `clean-install` | A stranger's install on a brand-new Linux machine, and a new owner's first steps | LXD here; `-- --ai-source "<name>"`; stop the VM after | 20–40 min | one |
 | `clean-install-ubuntu-2204` | The clean install on Ubuntu 22.04, the oldest glibc the bundle supports (a glibc bug broke stable there once) | As `clean-install` | 20–40 min | one |
-| `clean-install-debian-12` | The clean install on Debian 12 | As `clean-install`, on an **x86** machine: LXD has no arm64 Debian 12 VM image, so on an arm64 one it is listed as due elsewhere and does not hold the gate | 20–40 min | one |
+| `clean-install-debian-12` | The clean install on Debian 12 | As `clean-install`, plus the local LXD image `hb-debian-12`, made once with `scripts/make-debian-test-image.sh` from Debian's own cloud image (LXD's image server has no arm64 Debian VM image). It runs on either CPU | 5–40 min | one |
 | `shared-host` | Two tenants on one machine cannot reach each other | Test VMs. On hold with Hatchabot Cloud: never due | 30+ min | none |
 
 **No live test uses a Telegram bot.** Bots are scarce (about 20 per Telegram

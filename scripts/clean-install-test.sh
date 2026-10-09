@@ -85,6 +85,11 @@ case "$IMAGE" in images:*)
     case "$(uname -m)" in aarch64|arm64) IMAGE="$IMAGE/arm64" ;; x86_64) IMAGE="$IMAGE/amd64" ;; esac
   fi ;;
 esac
+# The Debian 12 image is made here once from Debian's own (LXD's server has
+# none for arm64): say how when it is missing.
+case "$IMAGE" in hb-debian-*)
+  L image info "$IMAGE" >/dev/null 2>&1 </dev/null || { bad "no local image $IMAGE — make it once with scripts/make-debian-test-image.sh"; exit 1; } ;;
+esac
 timeout 600 bash -c "$(declare -f L); L launch $IMAGE $VM --vm -c limits.cpu=4 -c limits.memory=8GiB -d root,size=40GiB" </dev/null >"$OUT/launch.log" 2>&1 \
   || { bad "launch a fresh $IMAGE VM ($(tail -1 "$OUT/launch.log"))"; exit 1; }
 # Wait for cloud-init where the image has it (Ubuntu's, debian/12/cloud); a
@@ -141,7 +146,11 @@ ok "installed from $INSTALLER_URL ($INSTALLED run$([ "$INSTALLED" = 1 ] || echo 
 # One prerequisite: a bundle install brings its own Node — none from the system.
 if vm 'test -f ~/hatchabot/BUNDLE.json'; then
   ok "bundle install: $(vm 'cat ~/hatchabot/BUNDLE.json' | grep -oE '"platform":"[^"]+"|"node":"[^"]+"' | tr '\n' ' ')"
-  GAINED=""; for t in node git gcc; do case " $BEFORE " in *" $t "*) ;; *) vm "command -v $t" >/dev/null 2>&1 && GAINED="$GAINED $t" ;; esac; done
+  # Docker's own packages recommend git, so on an image without it (Debian's)
+  # the Docker step brings it: count only what came in another apt run
+  # (/var/log/apt/history.log names each run's command, 2026-10-09).
+  FROM_DOCKER="$(L exec "$VM" -- sh -c "awk '/^Commandline:/{d=/docker-ce/} /^Install:/&&d' /var/log/apt/history.log 2>/dev/null" </dev/null)"
+  GAINED=""; for t in node git gcc; do case " $BEFORE " in *" $t "*) ;; *) vm "command -v $t" >/dev/null 2>&1 && ! printf '%s' "$FROM_DOCKER" | grep -qE "[ ,]$t:" && GAINED="$GAINED $t" ;; esac; done
   [ -z "$GAINED" ] && ok "the system gained no Node, git or compiler (had: ${BEFORE:-none})" || bad "the system gained:$GAINED"
 fi
 grep -q "Open Hatchabot:" "$OUT/install-$INSTALLED.log" && ok "it ends with the link: $(sed 's/\r//g' "$OUT/install-$INSTALLED.log" | grep -oE 'Open Hatchabot: +[^ ]+' | sed -n 1p | sed 's/#setup=.*/#setup=…/')" || bad "no link at the end of the install"

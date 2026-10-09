@@ -113,12 +113,12 @@ export const LIVE_TESTS = [
     area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'package.json', 'package-lock.json'],
   },
   {
-    name: 'clean-install-debian-12', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'images:debian/12/cloud'], against: 'checkout', minutes: '20–40', aiTurns: 'one',
-    // LXD's image server has Debian 12 VM images for x86 only (2026-10-08).
-    arch: 'x64',
-    needs: 'as clean-install, on an x86 machine (there is no arm64 Debian 12 VM image)',
+    name: 'clean-install-debian-12', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'hb-debian-12'], against: 'checkout', minutes: '5–40', aiTurns: 'one',
+    // LXD's image server has no arm64 Debian 12 VM image; Debian's own cloud
+    // image, prepared once into a local LXD image, runs on either CPU (2026-10-09).
+    needs: 'as clean-install, plus the local LXD image hb-debian-12 (scripts/make-debian-test-image.sh, once)',
     proves: 'the clean install on Debian 12',
-    area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'package.json', 'package-lock.json'],
+    area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'scripts/make-debian-test-image.sh', 'package.json', 'package-lock.json'],
   },
   {
     name: 'shared-host', cmd: ['bash', 'scripts/shared-host-test.sh'], against: 'checkout', minutes: '30+', aiTurns: false,
