@@ -332,6 +332,29 @@ export class EmbedderService {
     });
   }
 
+  /**
+   * A runner removed from this Hatchabot (2026-10-09): its containers,
+   * volumes and network there when `onMachine` (it answers, and is not this
+   * machine's Docker under another name), then its key and state here either
+   * way. Deleting a runner used to leave all of it. Says what could not be
+   * removed on the machine, if anything.
+   */
+  remove(onMachine: boolean): Promise<{ leftThere?: string }> {
+    return this.#serial(async () => {
+      if (!this.#o.hostId) throw new Error('This machine\'s own service is not removed.');
+      let leftThere: string | undefined;
+      if (onMachine) {
+        try { await this.#o.provider().removeEmbedder?.(); }
+        catch (err) { leftThere = (err instanceof Error ? err.message : String(err)).slice(0, 200); }
+      }
+      await this.#o.secrets.delete(`${EMBEDDER_KEY_REF}/${this.#o.hostId}`).catch(() => {});
+      rmSync(this.dir, { recursive: true, force: true });
+      this.#pushed = undefined;
+      this.#o.log?.('embedder.removed', { host: this.#o.hostId, onMachine, ...(leftThere ? { leftThere } : {}) });
+      return leftThere ? { leftThere } : {};
+    });
+  }
+
   /** Stop and start as ONE turn: a Stop that lands meanwhile is not undone by the start half (30th audit). */
   restart(): Promise<EmbedderView> {
     return this.#serial(async () => {

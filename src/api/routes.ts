@@ -2373,7 +2373,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * the copy goes on. POST starts it (or answers with the one under way);
    * GET says how far it has come. `wait: true` holds the request for scripts.
    */
-  type ImageCopy = { startedAt: string; bytes: number; total?: number; done: boolean; ok?: boolean; error?: string; finishedAt?: string };
+  type ImageCopy = { startedAt: string; bytes: number; total?: number; done: boolean; ok?: boolean; error?: string; finishedAt?: string; pulled?: string };
   const imageCopies = new Map<string, { job: ImageCopy; finished: Promise<ImageCopy> }>();
   app.get<{ Params: { id: string } }>('/v1/hosts/:id/install-image', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
@@ -2395,10 +2395,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         .find((t) => t.tag === image)?.size : undefined;
       const job: ImageCopy = { startedAt: new Date().toISOString(), bytes: 0, total: total ? parseByteSize(total) || undefined : undefined, done: false };
       trace()('host.image_copy_started', { host: host.id, image });
-      const finished = installRuntimeImage(dockerHost, { image, total: job.total, onProgress: (p) => { job.bytes = p.bytes; } })
+      // A runner on another CPU pulls the published image of the same OpenClaw instead (installRuntimeImage).
+      const version = local ? (await providerFor(local).currentImageInfo().catch(() => undefined))?.openclawVersion : undefined;
+      const published = version && /^\d{4}\.\d+\.\d+(?:-\d+)?$/.test(version)
+        ? { ref: `${process.env.HATCHABOT_IMAGE_REGISTRY ?? 'ghcr.io/hatchabot/runtime'}:${version}`, openclawVersion: version }
+        : undefined;
+      const finished = installRuntimeImage(dockerHost, { image, total: job.total, published, onProgress: (p) => { job.bytes = p.bytes; } })
         .then((r) => {
-          Object.assign(job, { done: true, ok: r.ok, error: r.ok ? undefined : `Image install failed: ${r.error}`, finishedAt: new Date().toISOString() });
-          trace()(r.ok ? 'host.image_copied' : 'host.image_copy_failed', { host: host.id, bytes: job.bytes, ...(r.ok ? {} : { error: r.error }) });
+          Object.assign(job, { done: true, ok: r.ok, error: r.ok ? undefined : `Image install failed: ${r.error}`, finishedAt: new Date().toISOString(), ...(r.pulled ? { pulled: r.pulled } : {}) });
+          trace()(r.ok ? 'host.image_copied' : 'host.image_copy_failed', { host: host.id, bytes: job.bytes, ...(r.pulled ? { pulled: r.pulled } : {}), ...(r.ok ? {} : { error: r.error }) });
           return job;
         });
       copy = { job, finished };
@@ -2477,9 +2482,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** What provisioning needs of the service: it up, and a key for the agent. (Exposed on app for tests.) */
   const embedderForProvision: NonNullable<ProvisionDeps['embedder']> = {
     async credentialsFor(agentId, hostArg) {
+      // The machine the build is for comes first: an external server is this
+      // machine's setting, and a runner's agent handed its address had no
+      // way to reach it (2026-10-09). A runner's agents use its own service.
+      const agent = store.getAgent(agentId);
+      const local = store.localHostId();
+      const hostId = hostArg ?? agent?.hostId ?? local;
       // A server the operator already runs (Ollama speaks the same API): its
       // address as given, its one key, its model — no container, no door.
-      if (embedder.external) {
+      if (embedder.external && (!hostId || hostId === local)) {
         return {
           baseUrl: embedder.external.replace(/\/$/, ''),
           token: process.env.HATCHABOT_EMBED_KEY?.trim() || '',
@@ -2495,9 +2506,6 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Settings → Hosts (the shared-host bed, 2026-09-25). Stopped on purpose
       // stays stopped for everyone.
       // The service of the machine the build is for: this one's, or the runner's own.
-      const agent = store.getAgent(agentId);
-      const local = store.localHostId();
-      const hostId = hostArg ?? agent?.hostId ?? local;
       const svc = embedderFor(hostId);
       if (!svc.enabled) {
         const ownersOwn = !!agent && !!hostId && store.getHost(hostId)?.ownerId === agent.ownerId;
@@ -2531,6 +2539,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       await svc.syncKeysNow();
       if (moved) embedderFor(before ?? local).syncKeys();
       return { baseUrl: `http://${doorAddress}/v1`, token, model: EMBED_MODEL_ALIAS };
+    },
+    async syncKeys(hostIds) {
+      for (const h of new Set(hostIds.map((x) => x ?? store.localHostId()))) {
+        await embedderFor(h ?? undefined).syncKeysNow()
+          .catch((err) => trace()('embed.keys_sync_failed', { host: h, error: String(err).slice(0, 200) }));
+      }
     },
   };
   (app as unknown as { embedderForProvision?: typeof embedderForProvision }).embedderForProvision = embedderForProvision;
@@ -3516,8 +3530,40 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         error: `${still.length} agent${still.length === 1 ? '' : 's'} still run on this host — move or delete them first.`,
       });
     }
+    // What it ran for this Hatchabot goes with it (2026-10-09): its memory
+    // search service and agents' browsers on the machine when it answers,
+    // and the service's key and state here either way. Not answering, they
+    // stay there, and the owner is told what to remove by hand.
+    const p = providerFor(host.id);
+    const answers = p.reachable ? await p.reachable().catch(() => false) : true;
+    // A runner row that is this machine's own Docker under another name (the
+    // move's cardinal hazard, moveHost.ts) holds THIS machine's service and
+    // browsers: nothing there is touched unless the daemons are known to differ.
+    const local = store.localHostId();
+    const sameDaemon = answers && local
+      ? await Promise.all([p.daemonId(), providerFor(local).daemonId()]).then(([a, b]) => a === b, () => undefined)
+      : false;
+    const reachable = answers && sameDaemon === false;
+    const left: string[] = [];
+    if (reachable && p.listBrowsers && p.stopBrowser) {
+      for (const b of await p.listBrowsers().catch(() => [])) {
+        await p.stopBrowser(b.agentContainer).catch(() => { left.push(b.name); });
+      }
+    }
+    const svc = runnerEmbedders.get(host.id) ?? embedderFor(host.id);
+    const emb = await svc.remove(reachable).catch((err) => ({ leftThere: String((err as Error)?.message ?? err).slice(0, 200) }));
+    runnerEmbedders.delete(host.id);
+    for (const k of [...remoteProviderCache.keys()]) if (k.startsWith(`${host.id}:`)) remoteProviderCache.delete(k);
     store.deleteHost(host.id);
-    return { ok: true };
+    const prefix = process.env.HATCHABOT_PREFIX || 'hatchabot';
+    const warning = sameDaemon === true ? undefined
+      : !reachable
+      ? `${host.name} ${answers ? 'could not be told apart from this machine\'s Docker' : 'did not answer'}, so what Hatchabot ran there is still on it: remove the containers and volumes named ${prefix}-embed… (and any …-browser) with docker on that machine.`
+      : emb.leftThere || left.length
+        ? `Some of what Hatchabot ran on ${host.name} could not be removed (${[emb.leftThere, ...left].filter(Boolean).join('; ')}): remove it with docker on that machine.`
+        : undefined;
+    trace()('host.removed', { host: host.id, reachable, ...(warning ? { leftThere: warning } : {}) });
+    return { ok: true, ...(warning ? { warning } : {}) };
   });
 
   /**
@@ -3768,6 +3814,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     let secretRef: string | undefined;
 
     if (body.kind === 'local') {
+      // Only the machine owner: checking the address fetches it from this
+      // machine, and any signed-in account could otherwise have it probe
+      // every port on the home network and the agents' docker network, the
+      // answers telling open from closed (2026-10-09). A model server on the
+      // network is the machine's, as runners and images are; the owner
+      // shares the source with the household.
+      if (!ownsLocalHost(req)) return reply.code(403).send({ error: 'Only the owner of this machine can add a local model server (they can share it with you).' });
       // No credential to store — which makes this the ONE profile kind where
       // the config is the only thing that can be wrong. Check it here, where
       // the error is fixable, instead of letting the agent provision green
@@ -5487,6 +5540,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
 
       let sameImage: boolean | undefined;
+      /** The browser switch was stored but no rebuild could start to apply it. */
+      let browserPending = false;
       if (parsed.data.image !== undefined) {
         // Which image runs on this box is the MACHINE owner's call, like host
         // paths: any local image is runnable by name, including ones that have
@@ -5708,8 +5763,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         store.setAgentBrowser(agent.id, parsed.data.browser);
         trace(agent.id)('browser.switched', { on: parsed.data.browser });
         // OpenClaw reads the browser profile at start: a rebuild writes it and
-        // the sweep then starts (or removes) the browser beside it.
-        if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) kickRebuild(agent.id);
+        // the sweep then starts (or removes) the browser beside it. A rebuild
+        // already under way may have read the old switch: the caller is told
+        // to rebuild once it is done, instead of hearing "rebuilding" for a
+        // rebuild that never came (2026-10-09).
+        const settled = agent.state === 'RUNNING' || agent.state === 'STOPPED';
+        if (agent.runtimeRef && (agent.state === 'REBUILDING' || (settled && !kickRebuild(agent.id)))) {
+          browserPending = true;
+          trace(agent.id)('browser.rebuild_pending', {});
+        }
       }
       if (parsed.data.cronTriggers !== undefined) {
         store.setAgentCronTriggers(agent.id, parsed.data.cronTriggers);
@@ -5810,7 +5872,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const classDetached = (switchingProfile || model !== undefined) && detachClassIfDrifted(agent.id);
       if (switchingProfile || model !== undefined) recordLedger(req, model !== undefined ? 'model' : 'source-switch', ledgerBefore);
 
-      return { ...publicAgent(store.getAgent(agent.id)!, { classDetached }), ...(sameImage !== undefined ? { sameImage } : {}) };
+      return {
+        ...publicAgent(store.getAgent(agent.id)!, { classDetached }), ...(sameImage !== undefined ? { sameImage } : {}),
+        ...(browserPending ? { browserPending: 'Saved. A rebuild was already under way and may have begun before this change: if its browser is not as you set it once that rebuild ends, rebuild the agent.' } : {}),
+      };
     },
   );
 
@@ -11230,6 +11295,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // Fresh agent → its own bot from the pool; none free → web-only, told in Alerts.
           kickProvision(agent.id, { webOnlyIfNoBot: true });
           return reply.code(201).send({ ...publicAgent(agent), kind: 'template', needs });
+        }
+        // A full copy restores the SAME agent with its bot (its members talk to
+        // it there): "no Telegram" was ignored and the bot came back anyway
+        // (2026-10-09). Refused, so nobody is surprised by a bot they turned down.
+        if (req.query.telegram === '0') {
+          return reply.code(400).send({ error: 'This file is a full copy (a Download): it brings the agent back with its own Telegram bot, so "no Telegram" does not apply. Import it without that option; to make a new agent without a bot from it, export it as a template instead.' });
         }
         const agent = await importAgent(
           { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },

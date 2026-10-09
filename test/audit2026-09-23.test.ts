@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { MockProvider } from '../src/providers/mockProvider.js';
@@ -151,6 +151,26 @@ describe('a local model server', () => {
     expect(isPrivateModelUrl('http://ollama.local:11434')).toBe(true);
     expect(isPrivateModelUrl('http://169.254.169.254/latest')).toBe(false);
     expect(isPrivateModelUrl('http://metadata.internal/v1')).toBe(false);
+  });
+});
+
+describe('a local model server is the machine owner\'s to add (2026-10-09)', () => {
+  it('another account cannot have this machine probe the network for it; the owner still can', async () => {
+    const b = await box();
+    const asked: string[] = [];
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: unknown) => {
+      asked.push(String(url));
+      return new Response(JSON.stringify({ models: [{ name: 'llama3' }] }), { status: 200 });
+    });
+    try {
+      const body = { kind: 'local', name: 'LAN', model: 'llama3', baseUrl: 'http://192.168.1.20:8080/v1' };
+      const member = await b.f.inject({ method: 'POST', url: '/v1/ai-profiles', headers: { 'x-hatchabot-owner': 'member' }, payload: body });
+      expect(member.statusCode).toBe(403);
+      expect(asked).toEqual([]); // nothing was fetched
+      const owner = await b.f.inject({ method: 'POST', url: '/v1/ai-profiles', headers: H, payload: { ...body, baseUrl: 'http://172.17.0.1:11434/v1' } });
+      expect(owner.statusCode).toBe(201);
+      expect(asked).toEqual(['http://172.17.0.1:11434/api/tags']);
+    } finally { spy.mockRestore(); }
   });
 });
 

@@ -145,6 +145,19 @@ describe('what a build on a runner is handed', () => {
     expect(forgot).toBe(1);
   });
 
+  it('an external server (this machine\'s setting) is for this machine\'s agents only; a runner\'s agent gets the runner\'s door', async () => {
+    process.env.HATCHABOT_EMBED_URL = 'http://embed.example.org:11434/v1';
+    try {
+      const w = await app();
+      expect((await w.adapter.credentialsFor('a1', 'local')).baseUrl).toBe('http://embed.example.org:11434/v1');
+      // Before 2026-10-09 the external check came before the machine was known: this was the URL above.
+      expect((await w.adapter.credentialsFor('a1', 'runner1')).baseUrl).toBe('http://host.docker.internal:8093/v1');
+      expect(w.store.embedTokenHost('a1')).toBe('runner1');
+    } finally {
+      delete process.env.HATCHABOT_EMBED_URL;
+    }
+  });
+
   it('Settings → Hosts reads and drives each machine\'s service; another account\'s runner is not found', async () => {
     const w = await app();
     const as = { 'x-hatchabot-owner': OWNER };
@@ -220,6 +233,98 @@ exit 0
     expect(door).toContain('-p 127.0.0.1:8093:8093');
     expect(lines.some((l) => l.startsWith('exec hatchabot-embed-door node -e '))).toBe(true);
     expect(fetched()).toBe(0);
+  });
+});
+
+describe('removing a runner (2026-10-09)', () => {
+  afterEach(() => { delete process.env.HATCHABOT_DB; });
+  async function app() {
+    const dbDir = mkdtempSync(join(tmpdir(), 'hb-embed-runner-rm-'));
+    process.env.HATCHABOT_DB = join(dbDir, 'hatchabot.sqlite');
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'local', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: '1' } as never);
+    store.insertHost({ id: 'runner1', ownerId: OWNER, kind: 'cloud', provider: 'mock-runner', name: 'laptop', settings: {}, createdAt: '2' } as never);
+    const home = new MockProvider();
+    const provider = new MockProvider();
+    const secrets = new MemSecrets();
+    const f = Fastify();
+    await registerRoutes(f, { store, secrets, providers: new Map([['mock', home], ['mock-runner', provider]]), channel: { kind: 'telegram', pool: { owns: () => false } } } as never);
+    const embedderFor = (f as unknown as { embedderFor: (h: string | undefined) => EmbedderService }).embedderFor;
+    const svc = embedderFor('runner1');
+    mkdirSync(svc.dir, { recursive: true });
+    writeFileSync(svc.keysFile, '{}');
+    await secrets.put(`${EMBEDDER_KEY_REF}/runner1`, 'made-up-engine-key');
+    provider.browsers.set('hatchabot-left-behind', true);
+    return { f, store, home, provider, secrets, svc, embedderFor };
+  }
+  it('takes its memory search service and browsers with it, there and here', async () => {
+    const w = await app();
+    const r = await w.f.inject({ method: 'DELETE', url: '/v1/hosts/runner1', headers: { 'x-hatchabot-owner': OWNER } });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().warning).toBeUndefined();
+    expect(w.store.getHost('runner1')).toBeUndefined();
+    expect(w.provider.embedderRemoved).toBe(true);
+    expect(w.provider.browsers.size).toBe(0);
+    expect(w.secrets.map.has(`${EMBEDDER_KEY_REF}/runner1`)).toBe(false);
+    expect(existsSync(w.svc.dir)).toBe(false);
+    expect(w.embedderFor('runner1')).not.toBe(w.svc); // the old service object is forgotten
+  });
+  it('a runner row that is this machine\'s own Docker: nothing there is touched (it is this machine\'s service)', async () => {
+    const w = await app();
+    w.provider.daemonId = w.home.daemonId.bind(w.home);
+    const r = await w.f.inject({ method: 'DELETE', url: '/v1/hosts/runner1', headers: { 'x-hatchabot-owner': OWNER } });
+    expect(r.statusCode).toBe(200);
+    expect(w.provider.embedderRemoved).toBe(false);
+    expect(w.provider.browsers.size).toBe(1);
+    expect(w.store.getHost('runner1')).toBeUndefined();
+  });
+  it('a runner that does not answer: removed here, and the owner is told what is left on it', async () => {
+    const w = await app();
+    w.provider.awake = false;
+    const r = await w.f.inject({ method: 'DELETE', url: '/v1/hosts/runner1', headers: { 'x-hatchabot-owner': OWNER } });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().warning).toMatch(/did not answer/);
+    expect(w.provider.embedderRemoved).toBe(false);
+    expect(w.secrets.map.has(`${EMBEDDER_KEY_REF}/runner1`)).toBe(false);
+    expect(existsSync(w.svc.dir)).toBe(false);
+  });
+});
+
+describe('a file copied into a volume on a runner (2026-10-09)', () => {
+  /** A docker whose `run … sh -c <script>` runs the script here, with /v a temp folder; `cut` sends only the first bytes. */
+  function volumeStub(cut?: number) {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-embed-vol-'));
+    mkdirSync(join(dir, 'v'));
+    const stub = join(dir, 'docker');
+    writeFileSync(stub, `#!/usr/bin/env bash
+script="\${@: -1}"
+script="\${script//\\/v\\//${dir}/v/}"
+${cut ? `head -c ${cut} | sh -c "$script"` : 'sh -c "$script"'}
+`, { mode: 0o755 });
+    chmodSync(stub, 0o755);
+    const provider = new LocalDockerProvider({ docker: stub, host: 'ssh://laptop.example.org', image: 'test-image:latest', reachProbe: async () => true });
+    const src = join(dir, 'src');
+    mkdirSync(src);
+    writeFileSync(join(src, 'keys.json'), JSON.stringify({ abc: 'agent-one', def: 'agent-two' }));
+    writeFileSync(join(src, 'server-key'), 'made-up-server-key\n');
+    const files = {
+      keysFile: join(src, 'keys.json'), serverKeyFile: join(src, 'server-key'), doorImage: 'test-image:latest',
+      uid: process.getuid!(), gid: process.getgid!(),
+    };
+    return { provider, files, volume: join(dir, 'v') };
+  }
+  it('lands whole', async () => {
+    const { provider, files, volume } = volumeStub();
+    await provider.pushEmbedKeys(files);
+    expect(readFileSync(join(volume, 'keys.json'), 'utf8')).toBe(readFileSync(files.keysFile, 'utf8'));
+  });
+  it('a copy cut short is not renamed into place, and its part is removed', async () => {
+    const { provider, files, volume } = volumeStub(5);
+    writeFileSync(join(volume, 'server-key'), 'the-copy-before\n');
+    await expect(provider.pushEmbedKeys(files)).rejects.toThrow(/Could not copy|copy server-key/);
+    expect(readFileSync(join(volume, 'server-key'), 'utf8')).toBe('the-copy-before\n');
+    const { readdirSync } = await import('node:fs');
+    expect(readdirSync(volume).filter((f) => f.endsWith('.part'))).toEqual([]);
   });
 });
 

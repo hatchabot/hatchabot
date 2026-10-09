@@ -34,10 +34,18 @@ first trial one question took 315,000 tokens (2026-10-08).
 - A sweep every minute keeps the browsers in step with the agents: it starts
   one for an agent that has it on and is running, replaces it when the agent
   restarts (a new network), and removes it when the agent stops, sleeps, is
-  switched off, archived or deleted.
+  switched off, archived or deleted. One sweep at a time per machine; it
+  touches only this install's browsers (labelled with its `HATCHABOT_PREFIX`),
+  never another Hatchabot's on the same Docker.
 - Its image (`hatchabot-browser:<hash>`, Chromium on Debian) is built on that
   machine the first time an agent there needs it (a minute or two); runners
-  build their own.
+  build their own. A build that fails is tried again after a minute, then
+  after twice as long each time (up to an hour): the Setup log says "its
+  browser did not start" once per try, with the build's error.
+- If you switch it while a rebuild is already under way, the switch is saved
+  and you are told it may not be applied: rebuild the agent once that rebuild
+  ends.
+- Removing a runner (Settings → Hosts) removes its browsers there too.
 
 ## Checking it
 

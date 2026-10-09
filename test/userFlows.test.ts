@@ -194,6 +194,17 @@ describe('Import router — POST /v1/agents/import auto-detects the file kind', 
     expect(res.json().state).toBe('RUNNING');
   });
 
+  it('a full backup with "no Telegram" is refused, not restored with its bot anyway (2026-10-09)', async () => {
+    const src = await makeWorld();
+    await seedRunningAgent(src);
+    const file = (await src.f.inject({ method: 'GET', url: '/v1/agents/a1/backup', headers: as() })).rawPayload;
+    const dst = await makeWorld('owner-b');
+    const res = await dst.f.inject({ method: 'POST', url: '/v1/agents/import?telegram=0', headers: octet('owner-b'), payload: file });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/full copy.*own Telegram bot/);
+    expect(dst.store.listAllActiveAgents().filter((a) => a.ownerId === 'owner-b')).toEqual([]);
+  });
+
   it('rejects garbage with a 400, not a 500', async () => {
     const dst = await makeWorld('owner-b');
     const res = await dst.f.inject({ method: 'POST', url: '/v1/agents/import', headers: octet('owner-b'), payload: Buffer.from('garbage') });

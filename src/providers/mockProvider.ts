@@ -330,6 +330,12 @@ export class MockProvider implements RuntimeProvider {
     if (this.failStopEmbedder) throw new Error('mock: docker would not stop the service');
     this.embedder = { embedder: 'absent', door: 'absent' };
   }
+  /** Tests: the service removed for good (its volumes and network too). */
+  embedderRemoved = false;
+  async removeEmbedder() {
+    await this.stopEmbedder();
+    this.embedderRemoved = true;
+  }
   /** What docker stats would say about the engine (tests set it). */
   embedderStatsRow: import('./provider.js').ContainerStats | undefined = undefined;
   async embedderStats() { return this.embedderStatsRow; }

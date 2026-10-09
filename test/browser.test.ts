@@ -71,12 +71,81 @@ describe('the sweep keeps each machine\'s browsers in step with its agents', () 
   });
 });
 
+describe('sweeps do not pile up (2026-10-09)', () => {
+  function world() {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: '1' } as never);
+    for (const id of ['one', 'two']) {
+      store.insertAgent({ id, ownerId: 'o', name: id, slug: id, state: 'RUNNING', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+      store.setAgentRuntimeRef(id, `docker://hatchabot-${id}`);
+      store.setAgentBrowser(id, true);
+    }
+    const p = new MockProvider();
+    const state = { sweeping: new Map(), buildFailed: new Map() };
+    let t = 1_000_000;
+    const logs: string[] = [];
+    const deps = { store, hostIds: () => ['h1'], providerFor: () => p, state, now: () => t, log: (_a: string | undefined, e: string) => { logs.push(e); } };
+    return { store, p, deps, logs, advance: (ms: number) => { t += ms; } };
+  }
+  it('a sweep that finds the last one still going on that machine leaves it be (no second build beside a slow one)', async () => {
+    const w = world();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let calls = 0;
+    w.p.ensureBrowser = async () => { calls++; await gate; return 'started' as const; };
+    const first = browserSweep(w.deps);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(await browserSweep(w.deps)).toEqual({ started: [], removed: [], failed: [] });
+    expect(calls).toBe(1);
+    release();
+    await first;
+    expect(calls).toBe(2);
+  });
+  it('an agent just started waits its turn instead of racing the sweep under way', async () => {
+    const w = world();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const order: string[] = [];
+    w.p.ensureBrowser = async (spec) => { order.push(spec.agentContainer); if (order.length === 1) await gate; return 'started' as const; };
+    const first = browserSweep(w.deps);
+    await new Promise((r) => setTimeout(r, 10));
+    const second = browserSweep(w.deps, 'two');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(order).toEqual(['hatchabot-one']);
+    release();
+    await Promise.all([first, second]);
+    expect(order).toEqual(['hatchabot-one', 'hatchabot-two', 'hatchabot-two']);
+  });
+  it('a failed image build backs off on that machine: one try and one line, not one per agent per minute', async () => {
+    const w = world();
+    let calls = 0;
+    w.p.ensureBrowser = async () => { calls++; throw new Error('browser image build failed: no space left on device'); };
+    await browserSweep(w.deps);
+    expect(calls).toBe(1);
+    expect(w.logs.filter((e) => e === 'browser.start_failed')).toHaveLength(1);
+    w.advance(30_000);
+    await browserSweep(w.deps);
+    expect(calls).toBe(1);
+    w.advance(31_000); // a minute after the failure
+    await browserSweep(w.deps);
+    expect(calls).toBe(2);
+    w.advance(61_000); // the second failure waits two minutes
+    await browserSweep(w.deps);
+    expect(calls).toBe(2);
+    w.p.ensureBrowser = async () => { calls++; return 'started' as const; };
+    w.advance(60_000);
+    const r = await browserSweep(w.deps);
+    expect(r.started).toEqual(['hatchabot-one', 'hatchabot-two']);
+  });
+});
+
 describe('switching it on or off', () => {
   it('stores it and rebuilds the agent; the manager may not have one', async () => {
     const w = await makeWorld();
     await seedRunningAgent(w);
     const on = await w.f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: as(), payload: { browser: true } });
     expect(on.statusCode).toBe(200);
+    expect(on.json().browserPending).toBeUndefined(); // a rebuild started: nothing to tell
     expect(w.store.getAgent('a1')!.browser).toBe(true);
     const st = await w.f.inject({ method: 'GET', url: '/v1/agents/a1/browser', headers: as() });
     expect(st.json()).toMatchObject({ on: true });
@@ -84,6 +153,16 @@ describe('switching it on or off', () => {
     (w.store as unknown as { db: Database.Database }).db.prepare(`UPDATE agents SET browser = 0 WHERE id = 'a1'`).run();
     const ops = await w.f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: as(), payload: { browser: true } });
     expect(ops.statusCode).toBe(400);
+  });
+  it('a switch while a rebuild is under way is saved, and the caller is told it may not be applied (2026-10-09)', async () => {
+    const w = await makeWorld();
+    await seedRunningAgent(w);
+    // Mid-rebuild: before, stored with no rebuild and nobody told.
+    (w.store as unknown as { db: Database.Database }).db.prepare(`UPDATE agents SET state = 'REBUILDING' WHERE id = 'a1'`).run();
+    const on = await w.f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: as(), payload: { browser: true } });
+    expect(on.statusCode).toBe(200);
+    expect(w.store.getAgent('a1')!.browser).toBe(true);
+    expect(on.json().browserPending).toMatch(/rebuild/);
   });
 });
 
@@ -120,7 +199,28 @@ exit 0
     expect(run).toContain('--cap-drop ALL');
     expect(run).toContain('--memory 1g');
     expect(run).toContain('hatchabot.browser-with=2026-10-08T10:00:00Z');
+    expect(run).toContain('hatchabot.browser-prefix=hatchabot');
     expect(run).not.toMatch(/-v |--volume|\/home\/node/); // nothing of the agent's
+  });
+  it('lists only this install\'s browsers: another install on the same Docker keeps its own (2026-10-09)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-browser-ps-'));
+    const bin = join(dir, 'docker');
+    writeFileSync(bin, `#!/usr/bin/env bash
+case "$*" in
+  "ps -a --filter label=hatchabot.role=browser "*)
+    echo "hatchabot-a1-browser|hatchabot-a1|running|hatchabot"
+    echo "aclawsmoke-b1-browser|aclawsmoke-b1|running|aclawsmoke"
+    echo "hatchabot-old-browser|hatchabot-old|running|"
+    echo "aclawsmoke-old-browser|aclawsmoke-old|exited|"
+    echo "agentclaw-legacy-browser|agentclaw-legacy|running|" ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    chmodSync(bin, 0o755);
+    const mine = new LocalDockerProvider({ docker: bin, image: 'test-image:latest' });
+    expect((await mine.listBrowsers()).map((b) => b.agentContainer)).toEqual(['hatchabot-a1', 'hatchabot-old', 'agentclaw-legacy']);
+    const smoke = new LocalDockerProvider({ docker: bin, image: 'test-image:latest', prefix: 'aclawsmoke' });
+    expect((await smoke.listBrowsers()).map((b) => b.agentContainer)).toEqual(['aclawsmoke-b1', 'aclawsmoke-old']);
   });
   it('kept while it shares the agent\'s current network; replaced once the agent restarted', async () => {
     const same = stub('2026-10-08T10:00:00Z', '2026-10-08T10:00:00Z');

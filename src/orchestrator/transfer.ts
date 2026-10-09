@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { Agent, MemberRole } from '../domain/types.js';
 import {
   buildRuntimeSpec,
+  forgetEmbedDecision,
   recordApplied,
   reindexMemoryIfSwitched,
   runRebuildHook,
@@ -751,6 +752,8 @@ async function importAgentInner(
         log('import.rollback_step_failed', { agentId: agent.id, error: String(e) });
       }
     };
+    // Its memory-search decision was never applied: dropped, as every other failed build does (2026-10-09).
+    forgetEmbedDecision(agent.id);
     if (runtimeRef) await provider.destroy(runtimeRef, { purge: true }).catch(() => {});
     await secrets.delete(secretRef).catch(() => {});
     for (const ref of envSecretRefs) await secrets.delete(ref).catch(() => {});

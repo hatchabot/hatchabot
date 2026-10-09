@@ -2647,6 +2647,24 @@ export class Store {
     const r = this.db.prepare(`SELECT host_id AS hostId FROM embed_tokens WHERE agent_id = ?`).get(agentId) as { hostId: string | null } | undefined;
     return r ? r.hostId : undefined;
   }
+  /** The agent's key row as it stands, for a move to put back if it rolls back. */
+  embedTokenRow(agentId: string): { tokenHash: string; prevTokenHash: string | null; hostId: string | null; createdAt: string } | undefined {
+    return this.db
+      .prepare(`SELECT token_hash AS tokenHash, prev_token_hash AS prevTokenHash, host_id AS hostId, created_at AS createdAt FROM embed_tokens WHERE agent_id = ?`)
+      .get(agentId) as { tokenHash: string; prevTokenHash: string | null; hostId: string | null; createdAt: string } | undefined;
+  }
+  /**
+   * Put a key row back as embedTokenRow read it (none: no key). A move that
+   * rolls back minted keys for the other machine; the container restarted on
+   * the source still holds its old key, which only this makes valid again.
+   */
+  restoreEmbedToken(agentId: string, row: ReturnType<Store['embedTokenRow']>): void {
+    if (!row) { this.deleteEmbedToken(agentId); return; }
+    this.db
+      .prepare(`INSERT INTO embed_tokens (agent_id, token_hash, created_at, prev_token_hash, host_id) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(agent_id) DO UPDATE SET token_hash = excluded.token_hash, created_at = excluded.created_at, prev_token_hash = excluded.prev_token_hash, host_id = excluded.host_id`)
+      .run(agentId, row.tokenHash, row.createdAt, row.prevTokenHash, row.hostId);
+  }
   /** The build was accepted: only the new key from here. */
   commitEmbedToken(agentId: string): void {
     this.db.prepare(`UPDATE embed_tokens SET prev_token_hash = NULL WHERE agent_id = ?`).run(agentId);

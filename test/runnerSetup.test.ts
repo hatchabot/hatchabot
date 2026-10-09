@@ -126,4 +126,49 @@ cat > /dev/null; exit 0
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/stopped moving/);
   });
+
+  it('a runner unpacking the last layers after the image is all sent is not "stalled" (2026-10-09)', async () => {
+    const docker = stub(`
+if [ "$1" = save ]; then echo image-bytes; exit 0; fi
+cat > /dev/null; sleep 1; exit 0  # load: still unpacking after save ended
+`);
+    const res = await installRuntimeImage('ssh://r@x', { docker, stallMs: 300 });
+    expect(res).toEqual({ ok: true });
+  });
+
+  describe('a runner on another CPU (2026-10-09)', () => {
+    const archStub = (dir: string, extra = '') => stub(`
+echo "$*" >> ${JSON.stringify(join(dir, 'calls'))}
+if [ "$1" = info ]; then echo aarch64; exit 0; fi
+if [ "$1" = -H ] && [ "$3" = info ]; then echo x86_64; exit 0; fi
+${extra}
+if [ "$1" = save ]; then echo image-bytes; exit 0; fi
+cat > /dev/null; exit 0
+`);
+    it('is not sent this machine\'s image (it would not run there)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
+      const res = await installRuntimeImage('ssh://r@x', { docker: archStub(dir) });
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/built for aarch64.*runner is x86_64/);
+      expect(readFileSync(join(dir, 'calls'), 'utf8')).not.toMatch(/^save /m);
+    });
+    it('pulls the published image of the same OpenClaw there and tags it as the runtime image', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
+      const docker = archStub(dir, `if [ "$3" = image ] && [ "$4" = inspect ]; then echo 2026.9.8; exit 0; fi`);
+      const res = await installRuntimeImage('ssh://r@x', { docker, published: { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' } });
+      expect(res).toEqual({ ok: true, pulled: 'registry.example.org/runtime:2026.9.8' });
+      const calls = readFileSync(join(dir, 'calls'), 'utf8');
+      expect(calls).toContain('-H ssh://r@x pull --quiet registry.example.org/runtime:2026.9.8');
+      expect(calls).toContain('-H ssh://r@x tag registry.example.org/runtime:2026.9.8 hatchabot-runtime:latest');
+      expect(calls).not.toMatch(/^save /m);
+    });
+    it('refuses a published image whose label says another OpenClaw', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
+      const docker = archStub(dir, `if [ "$3" = image ] && [ "$4" = inspect ]; then echo 2026.7.1; exit 0; fi`);
+      const res = await installRuntimeImage('ssh://r@x', { docker, published: { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' } });
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/carries OpenClaw 2026\.7\.1/);
+      expect(readFileSync(join(dir, 'calls'), 'utf8')).not.toMatch(/ tag /);
+    });
+  });
 });

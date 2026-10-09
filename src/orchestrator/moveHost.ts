@@ -132,6 +132,11 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
   //    second provision re-applies this install's config over openclaw.json.
   let newRef: string | undefined;
   let hostFlipped = false;
+  // The memory search key as it stands: the target's build mints keys for
+  // the target, and the source's door forgets the agent. A rollback restarts
+  // the source container with its OLD key, which must open the source's door
+  // again — it got 401 for every recall until the next rebuild (2026-10-09).
+  const keyBefore = store.embedTokenRow(agentId);
   try {
     const tdeps: ProvisionDeps = { ...deps, provider: target };
     const spec = await buildRuntimeSpec(tdeps, agentId, targetHost);
@@ -182,6 +187,11 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
     if (hostFlipped) {
       store.setAgentHost(agentId, sourceHost.id);
       store.setAgentRuntimeRef(agentId, oldRef);
+    }
+    if (deps.embedder && JSON.stringify(store.embedTokenRow(agentId)) !== JSON.stringify(keyBefore)) {
+      store.restoreEmbedToken(agentId, keyBefore);
+      await deps.embedder.syncKeys?.([sourceHost.id, targetHost.id])
+        .catch((e) => log('move.embed_keys_failed', { agentId, error: String(e).slice(0, 200) }));
     }
     if (targetOrphaned) {
       // Do NOT restart the source — leave it stopped and shout, so an operator

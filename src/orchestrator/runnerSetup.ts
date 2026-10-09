@@ -138,10 +138,36 @@ export interface ImageCopyProgress { bytes: number; total?: number }
  */
 export async function installRuntimeImage(
   endpoint: string,
-  opts: { image?: string; docker?: string; timeoutMs?: number; stallMs?: number; total?: number; onProgress?: (p: ImageCopyProgress) => void } = {},
-): Promise<{ ok: boolean; error?: string }> {
+  opts: {
+    image?: string; docker?: string; timeoutMs?: number; stallMs?: number; total?: number; onProgress?: (p: ImageCopyProgress) => void;
+    /** The published multi-arch image of the same OpenClaw, pulled there when the runner's CPU differs. */
+    published?: { ref: string; openclawVersion: string };
+  } = {},
+): Promise<{ ok: boolean; error?: string; pulled?: string }> {
   const docker = opts.docker ?? 'docker';
   const image = opts.image ?? 'hatchabot-runtime:latest';
+  // This machine's image runs on this machine's CPU only: copied to a runner
+  // of another kind (an arm64 box to an Intel laptop) it loads, and every
+  // agent built there dies with "exec format error" (2026-10-09). The two
+  // daemons say what they run on; when they differ the runner pulls the
+  // published image of the same OpenClaw (multi-arch) instead.
+  const [here, there] = await Promise.all([dockerArch(docker, []), dockerArch(docker, ['-H', endpoint])]);
+  if (here && there && here !== there) {
+    if (!opts.published) {
+      return { ok: false, error: `This machine's image is built for ${here}, and that runner is ${there}: a copy would not run there, and there is no published image of this version to pull instead.` };
+    }
+    const { ref, openclawVersion } = opts.published;
+    const pulled = await dockerRun(docker, ['-H', endpoint, 'pull', '--quiet', ref], opts.timeoutMs ?? 3 * 3600_000);
+    if (pulled.code !== 0) {
+      return { ok: false, error: `That runner is ${there} and this machine ${here}, so it needs the published image ${ref}, and pulling it there failed: ${pulled.stderr.slice(-300) || `exit ${pulled.code}`}` };
+    }
+    // The tag must hold the OpenClaw asked for (build-runtime-image.sh's rule: a pulled image proves its version by its label).
+    const has = (await dockerRun(docker, ['-H', endpoint, 'image', 'inspect', '--format', '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}', ref], 60_000)).stdout.trim();
+    if (has !== openclawVersion) return { ok: false, error: `The published image ${ref} carries OpenClaw ${has || 'unknown'}, not ${openclawVersion}; not using it.` };
+    const tagged = await dockerRun(docker, ['-H', endpoint, 'tag', ref, image], 60_000);
+    if (tagged.code !== 0) return { ok: false, error: `Tagging ${ref} as ${image} on the runner failed: ${tagged.stderr.slice(-300)}` };
+    return { ok: true, pulled: ref };
+  }
   return new Promise((resolve) => {
     const save = spawn(docker, ['save', image]);
     const load = spawn(docker, ['-H', endpoint, 'load']);
@@ -184,6 +210,11 @@ export async function installRuntimeImage(
     save.on('close', (code) => {
       saveCode = code;
       if (code !== 0) load.kill('SIGKILL');
+      // Everything is sent: the runner unpacks the last layers now, and on a
+      // slow disk that can take minutes with nothing moving here — it was
+      // killed as "stalled" just before it finished (2026-10-09). The overall
+      // limit still stands.
+      else clearTimeout(stall);
     });
     load.on('close', (code) => {
       opts.onProgress?.({ bytes, total: opts.total });
@@ -192,5 +223,27 @@ export async function installRuntimeImage(
     });
     save.on('error', (err) => { load.kill('SIGKILL'); finish({ ok: false, error: String(err.message).slice(0, 200) }); });
     load.on('error', (err) => { save.kill('SIGKILL'); finish({ ok: false, error: String(err.message).slice(0, 200) }); });
+  });
+}
+
+/** What CPU a Docker daemon runs on (`docker info`'s Architecture: x86_64, aarch64), or undefined when it does not say. */
+async function dockerArch(docker: string, conn: string[]): Promise<string | undefined> {
+  const r = await dockerRun(docker, [...conn, 'info', '--format', '{{.Architecture}}'], 30_000);
+  const a = r.stdout.trim();
+  return r.code === 0 && /^[A-Za-z0-9_-]{1,32}$/.test(a) ? a : undefined;
+}
+
+/** One docker call with no input, its output, and a time limit. */
+function dockerRun(docker: string, args: string[], timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(docker, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    timer.unref();
+    child.on('error', (err) => { clearTimeout(timer); resolve({ code: 1, stdout, stderr: String(err.message) }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code: code ?? 1, stdout, stderr }); });
   });
 }

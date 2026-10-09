@@ -176,6 +176,7 @@ Commands:
                                its own bot); prompts for the template's setup
                                fields ({{key}} placeholders) and prints what it
                                still needs. --no-telegram: web-only, no bot
+                               (a template only: a full copy brings its own bot)
   clone <agent> [new name] [--no-telegram]
                                Duplicate an agent here — a faithful copy (MEMORY.md,
                                its daily notes and USER.md) with its own bot and name.
@@ -2211,7 +2212,7 @@ async function main() {
         console.log(`restored "${j.name}" (${j.state})`);
         return;
       }
-      console.log(`imported "${j.name}" (${j.state}) — connect its Telegram bot to finish.`);
+      console.log(`imported "${j.name}" (${j.state})${flags.has('no-telegram') ? ' — no Telegram: talk to it in the web app.' : ' — connect its Telegram bot to finish.'}`);
       const ds = (j.needs?.dataSources ?? []).map((d: any) => `${d.kind} ${d.mountName}`);
       const env = j.needs?.envVars ?? [];
       if (ds.length || env.length) {

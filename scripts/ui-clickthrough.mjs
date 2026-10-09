@@ -2610,6 +2610,29 @@ const SCENARIOS = String.raw`(() => {
       } finally { await costCleanup(); await agentsCleanup(); }
     },
   });
+  // Runners and browsers (2026-10-09): what the server could not do is said, not dropped.
+  Object.assign(T, {
+    removeRunnerLeftovers: async () => {
+      const toastText = () => document.getElementById('toast').textContent;
+      window.__answer['DELETE /v1/hosts/h2'] = [{ status: 200, body: { ok: true, warning: 'Laptop did not answer, so what Hatchabot ran there is still on it.' } }];
+      await deleteHost('h2', 'Laptop');
+      ok('asked first', window.__confirms.some((c) => c.includes('Remove runner "Laptop"')));
+      await until(() => toastText().includes('Removed "Laptop". Laptop did not answer'));
+      window.__answer['DELETE /v1/hosts/h2'] = [{ status: 200, body: { ok: true } }];
+      await deleteHost('h2', 'Laptop');
+      await until(() => toastText() === 'Removed "Laptop"');
+    },
+    browserSwitchWhileBusy: async () => {
+      const toastText = () => document.getElementById('toast').textContent;
+      window.__answer['PATCH /v1/agents/a1'] = [{ status: 200, body: { id: 'a1', browser: true, browserPending: 'Saved. A rebuild was already under way and may have begun before this change.' } }];
+      await v2SetBrowser('a1', true, null);
+      await until(() => toastText().includes('A rebuild was already under way'));
+      ok('not the "rebuilding" line', !toastText().includes('Browser on'));
+      eq('one PATCH with the switch', calls('PATCH', /^\/v1\/agents\/a1$/).at(-1).body, { browser: true });
+      await v2SetBrowser('a1', true, null);
+      await until(() => toastText().includes('Browser on — rebuilding'));
+    },
+  });
   (async () => {
     for (const [name, run] of Object.entries(T)) {
       try { await run(); results.push({ name, ok: true }); }

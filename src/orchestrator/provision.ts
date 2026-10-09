@@ -123,6 +123,8 @@ export interface ProvisionDeps {
      *  external server configured, that server's address, key and model. */
     /** A key for the agent on the memory search service of the machine it is being built on (a runner has its own). */
     credentialsFor(agentId: string, hostId?: string): Promise<{ baseUrl: string; token: string; model: string }>;
+    /** Rewrite these machines' door key files from the store now (a move that rolled back put a key back). */
+    syncKeys?(hostIds: Array<string | null>): Promise<void>;
   };
   /** Post a line to the agent's chat (default: Telegram via notifyAgentChat).
    *  Injectable so tests stay off the network. */

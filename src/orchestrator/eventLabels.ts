@@ -18,12 +18,18 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'connection.sync_failed': (d) => `a connection did not sync: ${String(d.error ?? '')}`.trim(),
   'runtime.settling': 'waiting for its skills to settle',
   'browser.switched': (d) => d.on ? 'its browser switched on — rebuilding to give it one' : 'its browser switched off',
+  'browser.rebuild_pending': 'its browser switch is saved — a rebuild already under way may not apply it; rebuild once it is done',
   'browser.started': 'its browser started',
   'browser.removed': 'its browser removed',
   'browser.start_failed': (d) => `its browser did not start: ${String(d.error ?? '')}`.trim(),
   'host.image_copy_started': 'copying the runtime image to a runner',
   'host.image_copied': (d) => `runtime image copied to a runner (${(Number(d.bytes ?? 0) / 1e9).toFixed(1)} GB)`,
   'host.image_copy_failed': (d) => `copying the runtime image to a runner failed: ${String(d.error ?? '')}`.trim(),
+  'host.removed': (d) => d.leftThere ? `runner removed — ${String(d.leftThere)}` : 'runner removed, and what Hatchabot ran there with it',
+  'embedder.removed': (d) => d.leftThere ? `a runner's memory search service forgotten here; still on that machine (${String(d.leftThere)})`
+    : d.onMachine === false ? 'a runner\'s memory search service forgotten here (that machine was not touched)' : 'a runner\'s memory search service removed',
+  'embed.keys_sync_failed': (d) => `memory search keys not updated on a machine: ${String(d.error ?? '')}`.trim(),
+  'move.embed_keys_failed': (d) => `memory search keys not put back after the move failed: ${String(d.error ?? '')}`.trim(),
   'runtime.ready': (d) => d.settled === false ? 'skills did not settle in time — carrying on' : 'skills settled',
   'memory.reindex': (d) => d.why === 'index incomplete'
     ? 'rebuilding the memory index — it came up partial (minutes on a big memory)'

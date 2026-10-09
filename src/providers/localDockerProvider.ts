@@ -3,7 +3,7 @@ import { PassThrough, type Readable } from 'node:stream';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, connect } from 'node:net';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
-import { createReadStream, readdirSync, readFileSync } from 'node:fs';
+import { createReadStream, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir, cpus } from 'node:os';
 import { join, dirname } from 'node:path';
 import { promisify } from 'node:util';
@@ -1476,6 +1476,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     const run = await this.#docker([
       'run', '-d', '--name', name, '--network', `container:${agent}`,
       '--label', 'hatchabot.role=browser', '--label', `hatchabot.browser-of=${agent}`, '--label', `hatchabot.browser-with=${startedAt}`,
+      '--label', `hatchabot.browser-prefix=${this.prefix}`,
       '--read-only', '--tmpfs', '/tmp:size=256m', '--tmpfs', '/profile:size=512m,uid=1000,gid=1000',
       '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
       '--memory', spec.memory, '--pids-limit', '512', '--shm-size', '256m',
@@ -1488,12 +1489,25 @@ export class LocalDockerProvider implements RuntimeProvider {
     const r = await this.#docker(['rm', '-f', this.#browserName(agentContainer)]);
     if (r.code !== 0 && !/no such container/i.test(r.stderr)) throw new ProviderError(`docker rm browser: ${r.stderr.slice(-300)}`, "Couldn't stop the agent's browser.");
   }
+  /**
+   * This install's browsers only. Another Hatchabot on the same Docker (a
+   * shared-host tenant, a smoke test's install under its own prefix) has its
+   * own, and the sweep removes every browser it lists whose agent it does not
+   * know — it used to remove the other install's (2026-10-09). The prefix
+   * label is new in 2.153; one from before has none, and is told by its
+   * agent's container name instead.
+   */
   async listBrowsers(): Promise<Array<{ name: string; agentContainer: string; running: boolean }>> {
-    const r = await this.#docker(['ps', '-a', '--filter', 'label=hatchabot.role=browser', '--format', '{{.Names}}|{{ .Label "hatchabot.browser-of" }}|{{.State}}']);
+    const r = await this.#docker(['ps', '-a', '--filter', 'label=hatchabot.role=browser', '--format', '{{.Names}}|{{ .Label "hatchabot.browser-of" }}|{{.State}}|{{ .Label "hatchabot.browser-prefix" }}']);
     if (r.code !== 0) return [];
-    return r.stdout.trim().split('\n').filter(Boolean).map((l) => {
-      const [name = '', agentContainer = '', state = ''] = l.split('|');
-      return { name, agentContainer, running: state === 'running' };
+    const ours = (agentContainer: string, prefix: string): boolean => {
+      if (prefix && prefix !== '<no value>') return prefix === this.prefix;
+      return agentContainer.startsWith(`${this.prefix}-`)
+        || (this.prefix === DEFAULT_PREFIX && LEGACY_PREFIXES.some((p) => agentContainer.startsWith(`${p}-`)));
+    };
+    return r.stdout.trim().split('\n').filter(Boolean).flatMap((l) => {
+      const [name = '', agentContainer = '', state = '', prefix = ''] = l.split('|');
+      return ours(agentContainer, prefix.trim()) ? [{ name, agentContainer, running: state === 'running' }] : [];
     });
   }
 
@@ -1509,10 +1523,18 @@ export class LocalDockerProvider implements RuntimeProvider {
     if (!/^[A-Za-z0-9._-]+$/.test(name) || !/^\d+:\d+$/.test(owner) || !/^[0-7]{3}$/.test(mode)) throw new Error(`bad volume file ${name}`);
     // Its own aside name: two copies at once (a key minted during a start) each land whole.
     const part = `/v/.${name}.${randomBytes(4).toString('hex')}.part`;
+    // Renamed into place only at its full size: a stream that broke midway
+    // ends like a finished one for `cat`, and a cut-short model or keys file
+    // was moved in as if whole (2026-10-09). The part goes on any failure.
+    // A small file (the keys, replaced by rename at any moment) is read once,
+    // so the size checked is the size sent.
+    const size = statSync(src).size;
+    const body: Buffer | { file: string } = size < 1024 * 1024 ? readFileSync(src) : { file: src };
+    const want = Buffer.isBuffer(body) ? body.length : size;
     const res = await this.#runStdin([
       'run', '--rm', '-i', '--network', 'none', '--user', '0', '-v', `${volume}:/v`, '--entrypoint', 'sh', image,
-      '-c', `set -e; cat > ${part}; chown ${owner} ${part}; chmod ${mode} ${part}; mv -f ${part} /v/${name}`,
-    ], { file: src });
+      '-c', `set -e; trap 'rm -f ${part}' EXIT; cat > ${part}; [ "$(wc -c < ${part})" -eq ${want} ] || { echo "short copy: $(wc -c < ${part}) of ${want} bytes" >&2; exit 1; }; chown ${owner} ${part}; chmod ${mode} ${part}; mv -f ${part} /v/${name}`,
+    ], body);
     if (res.code !== 0) throw new ProviderError(`copy ${name} to the runner failed: ${res.stderr.slice(-300)}`, "Could not copy the memory search service's files to that machine.");
   }
   /**
@@ -1698,6 +1720,26 @@ export class LocalDockerProvider implements RuntimeProvider {
       if (r.code !== 0 && !/no such container/i.test(r.stderr)) {
         throw new ProviderError(`docker rm ${name}: ${r.stderr.slice(-300)}`, "Couldn't stop the memory search service. Try again in a moment.");
       }
+    }
+  }
+
+  /**
+   * The service gone for good: both containers, then the volumes holding a
+   * runner's copy of the model and keys, then its network (a runner being
+   * removed from this Hatchabot, 2026-10-09). Volumes that are not there (this
+   * machine keeps its files on disk) are no failure.
+   */
+  async removeEmbedder(): Promise<void> {
+    await this.stopEmbedder();
+    for (const v of [this.#embedModelVolume(), this.#embedKeysVolume()]) {
+      const r = await this.#docker(['volume', 'rm', '-f', v]);
+      if (r.code !== 0 && !/no such volume/i.test(r.stderr)) {
+        throw new ProviderError(`docker volume rm ${v}: ${r.stderr.slice(-300)}`, "Couldn't remove the memory search service's files on that machine.");
+      }
+    }
+    const n = await this.#docker(['network', 'rm', this.#embedNetwork()]);
+    if (n.code !== 0 && !/not found|no such network/i.test(n.stderr)) {
+      throw new ProviderError(`docker network rm: ${n.stderr.slice(-300)}`, "Couldn't remove the memory search service's network on that machine.");
     }
   }
 

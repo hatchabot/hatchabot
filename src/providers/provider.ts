@@ -363,6 +363,8 @@ export interface RuntimeProvider {
   ensureEmbedder?(spec: import('../embedder/embedder.js').EmbedderSpec): Promise<import('../embedder/embedder.js').EmbedderStatus>;
   embedderStatus?(): Promise<import('../embedder/embedder.js').EmbedderStatus>;
   stopEmbedder?(): Promise<void>;
+  /** The service gone for good, with its volumes and network (a runner being removed from this Hatchabot). */
+  removeEmbedder?(): Promise<void>;
   /** An agent's own browser (src/orchestrator/browser.ts): start it, or keep the one sharing the agent's current network. */
   ensureBrowser?(spec: import('../orchestrator/browser.js').BrowserSpec): Promise<'running' | 'started'>;
   stopBrowser?(agentContainer: string): Promise<void>;

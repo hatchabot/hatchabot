@@ -125,4 +125,51 @@ describe('moveAgentToHost — across two daemons', () => {
     (w.store as any).db.prepare(`UPDATE agents SET state = 'REBUILDING' WHERE id = ?`).run(id);
     await expect(moveAgentToHost(deps, id, 'h2')).rejects.toThrow(TransferError);
   });
+
+  describe('the memory search key (2026-10-09)', () => {
+    /** A stand-in for routes.ts's adapter: a new key per build, for the machine named. */
+    const keys = (w: World) => {
+      let n = 0;
+      const synced: Array<Array<string | null>> = [];
+      return {
+        synced,
+        credentialsFor: async (agentId: string, hostId?: string) => {
+          w.store.setEmbedToken(agentId, `hash-${++n}`, hostId ?? null);
+          return { baseUrl: 'http://door.example.org/v1', token: `t-${n}`, model: 'embeddinggemma' };
+        },
+        syncKeys: async (hosts: Array<string | null>) => { synced.push(hosts); },
+      };
+    };
+
+    it('a move that rolls back gives the source its old key back, and both doors are told', async () => {
+      const { w, target, deps } = await crossDaemonWorld();
+      const id = await seedRunningAgent(w);
+      w.store.setAgentEmbedMode(id, 'shared');
+      w.store.setEmbedToken(id, 'hash-old', 'h1');
+      w.store.commitEmbedToken(id);
+      const embedder = keys(w);
+      target.status = async () => ({ phase: 'stopped', healthy: false }); // never healthy → rollback
+      await expect(moveAgentToHost({ ...deps, embedder }, id, 'h2')).rejects.toThrow(/rolled back/);
+      expect(w.store.getAgent(id)!.hostId).toBe('h1');
+      // Before: host h2 and the old key only as a "previous" one — the source's door
+      // (which keeps only its own machine's keys) dropped the agent: 401 on every recall.
+      expect(w.store.embedTokenRow(id)).toMatchObject({ tokenHash: 'hash-old', prevTokenHash: null, hostId: 'h1' });
+      expect(embedder.synced).toEqual([['h1', 'h2']]);
+    });
+
+    it('a move that lands retires the old key (only the new one opens the door there)', async () => {
+      const { w, deps } = await crossDaemonWorld();
+      const id = await seedRunningAgent(w);
+      w.store.setAgentEmbedMode(id, 'shared');
+      w.store.setEmbedToken(id, 'hash-old', 'h1');
+      w.store.commitEmbedToken(id);
+      const embedder = keys(w);
+      await moveAgentToHost({ ...deps, embedder }, id, 'h2');
+      const row = w.store.embedTokenRow(id)!;
+      expect(row.hostId).toBe('h2');
+      expect(row.prevTokenHash).toBeNull();
+      expect(row.tokenHash).not.toBe('hash-old');
+      expect(embedder.synced).toEqual([]);
+    });
+  });
 });

@@ -4847,9 +4847,11 @@ async function drainHost(id, name) {
 async function deleteHost(id, name) {
   if (!confirm(`Remove runner "${name}"? Agents can no longer be placed there.`)) return;
   try {
-    await api(`/v1/hosts/${id}`, { method: 'DELETE' });
+    const r = await api(`/v1/hosts/${id}`, { method: 'DELETE' });
     await loadHosts();
-    toast(`Removed "${name}"`);
+    // What could not be removed on that machine (asleep, a docker refusal) is said, not dropped.
+    if (r?.warning) toast(`Removed "${name}". ${r.warning}`, 20000);
+    else toast(`Removed "${name}"`);
   } catch (e) { toast(e.message, 20000); }
 }
 
@@ -13706,8 +13708,10 @@ async function openChanSetup(id, kind) {
 async function v2SetBrowser(id, on, el) {
   if (!confirmRebuild(id, on ? 'Giving it a browser' : 'Taking its browser away')) { if (el) el.value = on ? 'off' : 'on'; return; }
   try {
-    await api(`/v1/agents/${id}`, { method: 'PATCH', body: { browser: on } });
-    toast(on ? 'Browser on — rebuilding; its browser starts once it is back.' : 'Browser off — rebuilding.', 8000);
+    const r = await api(`/v1/agents/${id}`, { method: 'PATCH', body: { browser: on } });
+    // Busy (a rebuild already under way): saved, but not applied — say so.
+    if (r?.browserPending) toast(r.browserPending, 12000);
+    else toast(on ? 'Browser on — rebuilding; its browser starts once it is back.' : 'Browser off — rebuilding.', 8000);
     await refresh(false);
   } catch (e) { toast(e.message, 8000); if (el) el.value = on ? 'off' : 'on'; }
 }
