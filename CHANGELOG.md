@@ -2,6 +2,21 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.155.0] — 2026-10-09
+
+The next steps of docs/operations-and-one-interface-design.md: one interface, and every long change on record.
+
+### Changed — one interface
+- **The classic card look is gone; the icon home screen is the only one** (about 1,300 lines fewer in the page). If you had chosen the classic look, Hatchabot shows you once a short map of where each card button went — everything is in the agent's page now: click its icon. A `?ui=classic` or `?ui=v2` left in a bookmark is ignored. Bulk actions → Rebuild all no longer depends on the old header.
+
+### Added — more changes that survive a restart
+- **A restore from a backup saves its copy of how the agent was to disk before it replaces anything.** If Hatchabot restarts in the middle, the agent stays stopped and its page offers **Finish the restore** or **Put back the copy from before**; before, that copy was lost with the restart.
+- A snapshot restore cut off part-way through its files waits for you: **Finish** or **Revert to the copy taken before** (all or none written settles by itself).
+- An archive cut off by a restart is finished if its bot had already been given back, and undone (started again) if not.
+- Rebuilds waiting their turn keep their place across a restart; an interrupted rebuild or setup says how it ended.
+- An app install, update or roll back cut off by a restart is checked against what the agent actually runs; if they differ, its page offers **Use the new release** or **Go back to the previous one**. An app waiting for its new agent's setup goes in after a restart too.
+- A runner's image copy cut off by a restart shows as interrupted, with Install image to try again, instead of nothing. Image copies and **Back up now** appear in the Activity list.
+
 ## [2.154.0] — 2026-10-09
 
 The first steps of docs/operations-and-one-interface-design.md: long changes that survive a restart, and a home screen with everything the classic look still had (the classic look goes in the next release).

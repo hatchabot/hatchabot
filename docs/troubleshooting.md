@@ -506,6 +506,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.154.0`
 - **Code:** `src/orchestrator/transfer.ts` — `resumeImport`, `rollbackImport`
 
+### "I used the classic look — where is X?" (no card, no ⋯ menu, no jump legend)
+- **Check:** the version is v2.155.0 or later, and the account menu has no "Classic look".
+- **Cause:** v2.155.0 removed the classic card view; its controls moved into each agent's page.
+- **Fix:** click the agent's icon. Settings → the page's tabs; Tasks → Schedule; Invite and members → Sharing; Clone, Share, Send, Proposals → Sharing → Copy or share; Sync name and Telegram Web → Telegram; Chat → Memory and Recover context → Personality → Memory; History → Data → History; Wake, Start, Retry, Restore → the bar at the top of the page; Rebuild, Group and order → Overview; Stop, Health and Logs → Overview → Checks; Move, Download copy, Archive and Delete → Advanced. Header items: Health (all) → Bulk actions → ❤️ Check all; Sources and the Jump legend → View by; Import and Templates → New. The one-time map on the home screen shows the same list.
+- **Fixed in:** `v2.155.0`
+- **Code:** `web/index.html` — `takeClassicChoice`, `v2DismissClassicMap`
+
+### "Restoring … was interrupted by a restart part-way through its files"
+- **Check:** a held `restore-snapshot` operation on the agent.
+- **Cause:** a restart while a snapshot's core files were being written; some are the snapshot's and some are not.
+- **Fix:** **Finish**, or **Revert to the copy taken before**. The agent must be running.
+- **Fixed in:** `v2.155.0`
+- **Code:** `src/orchestrator/snapshots.ts` — `resumeSnapshotRestore`
+
+### An app's page waits for a choice: "The … change to … was interrupted by a restart part-way through the switch"
+- **Check:** a held `app-install`, `app-update` or `app-rollback` operation; the agent's `apps/<app>/current` differs from the app record.
+- **Cause:** a restart during or after the switch, before Hatchabot recorded it.
+- **Fix:** **Use the new release** or **Go back to the previous one**; either leaves the release, its config, its scheduled tasks and the record in agreement.
+- **Fixed in:** `v2.155.0`
+- **Code:** `src/orchestrator/appOperations.ts` — `resumeAppOperation`, `recoverAppOperation`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")
@@ -722,6 +743,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.154.0`
 - **Code:** `src/orchestrator/eventLabels.ts` — `eventLabel`
 
+### A runner's image copy shows "interrupted by a restart"
+- **Check:** `GET /v1/hosts/<id>/install-image` returns `interrupted: true`.
+- **Cause:** Hatchabot restarted while copying the image; the copy's processes ended with it.
+- **Fix:** click **Install image** (or **Update image**) on the runner's row again; copying is repeatable.
+- **Fixed in:** `v2.155.0`
+- **Code:** `src/orchestrator/operationsResume.ts` — `resumeOperations`
+
 ## Backups and restore
 
 ### `hatchabot doctor`: "No backup set in … yet", "Last backup set is N days old", or "… is incomplete"
@@ -807,6 +835,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade; it now says there is no backups folder, and drills the newest complete set, naming those it passes over.
 - **Fixed in:** `v2.153.0`
 - **Code:** `scripts/restore-drill.sh` — `set_state`
+
+### Agent stopped after a restart: "The restore from the … backup was interrupted by a restart"
+- **Check:** the agent's page or Alerts shows a held "Restore from a backup"; `GET /v1/operations?agentId=…` returns status `held`, kind `restore-backup`.
+- **Cause:** Hatchabot restarted (an upgrade, a crash, a reboot) after the copy of how the agent was had been saved but before the restore finished, so its memory may be half-restored.
+- **Fix:** choose **Finish the restore** (that night's copy, with today's members and bot) or **Put back the copy from before**. The copy stays in `restore-safety/` beside the backups until you choose.
+- **Fixed in:** `v2.155.0`
+- **Code:** `src/orchestrator/backups.ts` — `resumeBackupRestore`, `recoverBackupRestore`
 
 ## Usage, costs and budgets
 
