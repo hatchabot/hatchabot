@@ -150,6 +150,22 @@ the host.
 - `web/index.html` — `addGitSource`: the agent sheet's "add a repo" form.
 - `docs/data-sources.md`: the design.
 
+## Google connections and what each agent can reach
+
+A Google account is connected once (the OAuth consent), kept in the vault,
+attached to agents, and imported into each agent's own `gog` with
+`gog auth import`. A detach or a deleted connection is recorded in
+`connection_removals` first and cleared only when `gog auth list` shows the
+account gone (issues #11, #16). The access overview (docs/access-overview-design.md)
+records what Hatchabot last found inside each running agent in `access_checks`
+and compares it with what it intends; mismatches become an Alerts line.
+
+- `src/orchestrator/googleConnections.ts` — `materializeConnection`, `dematerializeConnection`, `gogAccounts`, `recordGoogleSeen`, `syncConnections`, `withConnectionLock`, `offAgainIfDetached`: import, removal, the per-agent turn, and the checks they record.
+- `src/orchestrator/accessOverview.ts` — `verifyAgentAccess`, `accessProbeScript`, `accessOverview`, `accessAlertOf`, `agentsWithAccessFindings`: Verify now (read-only), the overview, and its Alerts line.
+- `src/store/store.ts` — `access_checks`, `recordAccessCheck`, `connectionRemovalsSince`: the records.
+- `src/api/routes.ts` — `'/v1/connections'`, `'/v1/agents/:id/connections/attach'`, `'/v1/agents/:id/connections/detach'`, `'/v1/access'`, `'/v1/agents/:id/access'`, `'/v1/agents/:id/access/verify'`, `accessAlert`: the vault, attach and detach, the overview and Verify now, the agent list's Alerts field.
+- `web/index.html` — `v2LoadAccess`, `v2VerifyAccess`, `loadAccessMap`, `accessRowsHTML`: the Sharing tab's Access row and Settings → Security → What your agents can reach.
+
 ## The runtime provider and Docker (local and runners)
 
 Every agent is a Docker container plus one named volume holding its OpenClaw

@@ -27,6 +27,7 @@ import { channelTimeoutEnv } from './channelTimeout.js';
 import { syncContextCap } from './compaction.js';
 import { clearStaleRuntimePins } from './runtimePins.js';
 import { syncConnections } from './googleConnections.js';
+import { verifyAgentAccess } from './accessOverview.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
 import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, removeInstallSections, operatorSection, peerToolsSection, removeSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING } from '../openclaw/workspace.js';
 import { effectiveMemoryCap, memoryBudgetSection } from './memoryCap.js';
@@ -385,6 +386,8 @@ async function runProvisionStepsInner(
       .catch((err) => log('connection.sync_failed', { agentId, error: String(err).slice(0, 200) }));
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
     await syncInstallDocs(deps, agentId, runtimeRef, log);
+    // What it can reach, looked at in the new container (access overview) — read-only, best-effort.
+    await verifyAgentAccess({ store, secrets: deps.secrets, provider }, agentId, runtimeRef).catch(() => undefined);
     // Its context cap (compaction.ts), re-applied for the model it runs now.
     await syncContextCap({ store, provider, log: (e, d) => log(e, { agentId, ...d }) }, store.getAgent(agentId) ?? agent, runtimeRef)
       .catch((err) => log('token.context_cap_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
@@ -1121,6 +1124,8 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
       .catch((err) => log('connection.sync_failed', { agentId, error: String(err).slice(0, 200) }));
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
     await syncInstallDocs(deps, agentId, runtimeRef, log);
+    // What it can reach, looked at in the new container (access overview) — read-only, best-effort.
+    await verifyAgentAccess({ store, secrets: deps.secrets, provider }, agentId, runtimeRef).catch(() => undefined);
     // Its context cap (compaction.ts), re-applied for the model it runs now.
     await syncContextCap({ store, provider, log: (e, d) => log(e, { agentId, ...d }) }, store.getAgent(agentId) ?? agent, runtimeRef)
       .catch((err) => log('token.context_cap_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));

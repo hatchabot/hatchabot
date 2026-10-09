@@ -1988,6 +1988,45 @@ agent is stopped or asleep takes effect when it starts or wakes; deleting one
 revokes it at Google unless another account here holds the same Google
 account.
 
+## What can my agent reach?
+
+Open an agent, **Sharing** tab, **Access** row. It lists what Hatchabot gave
+the agent, grouped: Google accounts, chat bots, folders and repos (with their
+deploy keys), environment variables (names only — never values), its AI
+source, the agents it may consult, and the people who can talk to it. Each
+line has a mark and the time it was last looked at:
+
+- **✓** — found inside the running agent, as intended (or, for something
+  removed, verified gone).
+- **⚠** — a mismatch: something it should no longer have is still there (an
+  account you detached, a bot it was moved off, a variable you deleted before
+  the rebuild), the bot token running is not the one Hatchabot holds, a
+  removal has waited more than a day, or something it should have was not
+  found (often: it applies at the next rebuild).
+- **?** — not checked yet, or not Hatchabot's to check.
+
+**Verify now** looks inside the running agent and changes nothing: it asks
+`gog` which Google accounts it holds, reads which bots its OpenClaw settings
+name (the token is compared by a fingerprint worked out inside the agent —
+it never leaves), checks that its folders, repos and keys are where Hatchabot
+put them, which variable names are set, and which chat ids it lets in. The
+same look happens after every start, wake and rebuild. A stopped or asleep
+agent, or one on a runner that is asleep, cannot be looked into: it says so,
+and the last results stay with their times.
+
+Anything it should no longer have (or a removal still pending after a day)
+also shows under **Alerts**. **⚙ Settings → Security → What your agents can
+reach** shows every agent at once, the ones with a problem first.
+
+**What it does not check.** Hatchabot only knows what it set up. Keys,
+passwords or accounts the agent saved for itself — pasted into a chat and
+written to its files, logged into with its own browser, kept in an app's own
+settings — are not checked, and the page says so. When the agent has added a
+Google account to `gog` itself, or OpenClaw lets in people who are not your
+members (approved in its own console), the list shows them marked **not
+managed**: Hatchabot sees them but did not put them there, and does not
+remove them. Ask the agent, or look in its Files, if you need to be sure.
+
 ## Backups & recovery
 
 Three layers, smallest to largest:

@@ -2044,6 +2044,10 @@
     <h4 style="margin:0 0 4px">Agent exposure</h4>
     <div class="sub">For each agent: who can message it, and what it can do. The higher both are, the more a stranger or a mistake could do through it.</div>
     <div id="exposureOut" style="margin-top:8px"></div>
+
+    <h4 style="margin:0 0 4px">What your agents can reach</h4>
+    <div class="sub">For each agent: the accounts, bots, folders, keys and people Hatchabot gave it, and whether the last look inside the running agent found them — ✓ found as intended, ⚠ something that should not be there (or should be and isn't), ? not checked. Agents with a problem come first. What an agent saved for itself — a key in its files, an account it logged into — is not checked.</div>
+    <div id="accessMapOut" style="margin-top:8px"></div>
   </section>
 
   <section id="paneOperator" role="tabpanel" hidden>
@@ -4000,7 +4004,7 @@ function loadSettingsPane(name) {
   if (name === 'slack') void loadPoolPane('slack');
   if (name === 'backups') loadBackups();
   if (name === 'runtime' || name === 'derived') loadRuntime(); // also fills the derived list
-  if (name === 'security') { loadPosture(); void loadCliTokens(); }
+  if (name === 'security') { loadPosture(); void loadCliTokens(); void loadAccessMap(); }
   if (name === 'operator') loadOperator();
 }
 
@@ -4080,6 +4084,82 @@ async function saveOperator() {
     toast(`Saved — applying to ${r.pushing} running agent${r.pushing === 1 ? '' : 's'} in the background${r.pushing === 0 ? ' (stopped agents get it on next start)' : ''}.`, 7000);
   } catch (e) { $('operatorErr').textContent = e.message; }
   finally { syncOperatorBtn(); }
+}
+
+// ---- What each agent can reach (docs/access-overview-design.md) ----------------------
+// The agent's Sharing tab (its Access row) and Settings → Security → What your agents can
+// reach. Hatchabot's intent against the last look inside the running agent, pending
+// removals, and what it cannot see — said in words.
+const ACCESS_MISMATCH_WORDS = { extra: 'should not be there', differs: 'a different token is running', 'stale-removal': 'removal pending over a day', missing: 'not found' };
+/** ✓ found as intended (or verified gone), ⚠ a mismatch, ? not checked / not Hatchabot's. */
+function accessMark(r) {
+  if (r.mismatch) return `<span class="warn" title="${esc(ACCESS_MISMATCH_WORDS[r.mismatch] || r.mismatch)}">⚠</span>`;
+  if (r.verified.status === 'enforced') return '<span title="Checked by Hatchabot on every call">✓</span>';
+  if (r.verified.status === 'present' && r.intended && r.managed) return '<span title="Found in the running agent">✓</span>';
+  if (r.verified.status === 'absent' && !r.intended) return '<span title="Verified gone">✓</span>';
+  if (r.pendingRemoval) return '<span title="Removal pending">…</span>';
+  return `<span class="sub" title="${r.managed ? 'Not checked yet' : 'Not managed by Hatchabot'}">?</span>`;
+}
+function accessRowsHTML(ov) {
+  if (!ov.groups.length) return '<div class="sub">Nothing: no accounts, bots, folders, variables or people beyond you.</div>';
+  return ov.groups.map(g => `<div class="v2accgroup" style="margin:6px 0 2px"><b>${esc(g.title)}</b>${g.rows.map(r => `
+      <div class="pair v2accrow" data-kind="${esc(r.kind)}" data-mismatch="${esc(r.mismatch || '')}" style="align-items:baseline;gap:6px;padding:2px 0">
+        ${accessMark(r)}
+        <span class="grow">${esc(r.label)}${r.managed ? '' : ' <span class="sub">· not managed</span>'}${r.mismatch ? ` <span class="warn">— ${esc(ACCESS_MISMATCH_WORDS[r.mismatch] || r.mismatch)}</span>` : ''}${r.pendingRemoval ? `<span class="sub"> · removal pending${r.pendingRemoval.since ? ` since ${esc(ago(r.pendingRemoval.since))}` : ''}</span>` : ''}${r.note ? `<span class="sub"> · ${esc(r.note)}</span>` : ''}</span>
+        <span class="sub">${r.verified.at ? esc(ago(r.verified.at)) : ''}</span>
+      </div>`).join('')}</div>`).join('');
+}
+function accessCheckedLine(ov) {
+  return ov.checkedAt ? `Last looked inside: ${esc(ago(ov.checkedAt))}.` : 'Not looked inside yet.';
+}
+// The sheet redraws on every refresh; a reading is reused for 30 s (Verify now reloads it).
+let v2AccessCache = null;
+async function v2LoadAccess(id, fresh = false, given = null) {
+  let ov = given || (!fresh && v2AccessCache && v2AccessCache.id === id && Date.now() - v2AccessCache.at < 30_000 ? v2AccessCache.ov : null);
+  if (!ov) {
+    try { ov = await api(`/v1/agents/${id}/access`); }
+    catch (e) { const el = $('v2Access'); if (el && v2AgentId === id) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; return; }
+  }
+  v2AccessCache = { id, at: Date.now(), ov };
+  const el = $('v2Access'); if (!el || v2AgentId !== id) return;
+  const s = ov.summary;
+  const head = [s.mismatches ? `<span class="warn">⚠ ${s.mismatches} it should not have</span>` : '', s.missing ? `<span class="warn">${s.missing} not found</span>` : '', s.pending ? `${s.pending} removal${s.pending === 1 ? '' : 's'} pending` : ''].filter(Boolean).join(' · ');
+  el.innerHTML = `<div class="pair" style="align-items:center;gap:8px;flex-wrap:wrap">
+      <span class="grow sub" id="v2AccessWhen">${accessCheckedLine(ov)}${head ? ` ${head}` : ''}</span>
+      <button id="v2AccessVerify" onclick="v2VerifyAccess('${jsq(id)}', this)" title="Look inside the running agent now: its Google accounts, bot, folders, keys, variable names and who it lets in. Nothing is changed.">Verify now</button>
+    </div>
+    <div id="v2AccessRows">${accessRowsHTML(ov)}</div>
+    <div class="sub" style="margin-top:6px">Not checked: ${ov.notChecked.map(esc).join(' ')}</div>`;
+}
+async function v2VerifyAccess(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  try {
+    const r = await api(`/v1/agents/${id}/access/verify`, { method: 'POST', body: {} });
+    if (r.result?.status === 'not-checkable') toast(`Not checked: ${r.result.reason}. The last results stay.`, 7000);
+    else toast(r.access?.summary?.mismatches ? `Checked — ${r.access.summary.mismatches} thing${r.access.summary.mismatches === 1 ? '' : 's'} it should not have.` : 'Checked — what it can reach matches what Hatchabot gave it.', 6000);
+    if (r.access) await v2LoadAccess(id, true, r.access); else await v2LoadAccess(id, true);
+    if (r.access?.summary?.mismatches) void refresh(false); // its Alerts line
+  } catch (e) { toast(e.message); }
+  finally { const b = $('v2AccessVerify'); if (b) { b.disabled = false; b.textContent = 'Verify now'; } }
+}
+/** Settings → Security: every agent, problems first, each opening to its rows. */
+async function loadAccessMap() {
+  const el = $('accessMapOut'); if (!el) return;
+  el.innerHTML = '<div class="sub">Loading…</div>';
+  let r;
+  try { r = await api('/v1/access'); } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; return; }
+  if (!r.agents.length) { el.innerHTML = '<div class="sub">No agents yet.</div>'; return; }
+  el.innerHTML = r.agents.map(ov => {
+    const s = ov.summary, bad = s.mismatches > 0;
+    const counts = ov.groups.map(g => `${g.rows.length} × ${esc(g.title.replace(/ \(names only\)$/, '').toLowerCase())}`).join(' · ');
+    return `<details class="v2accagent" data-agent="${esc(ov.agentId)}" style="border-top:1px solid var(--line);padding:6px 0"${bad ? ' open' : ''}>
+      <summary><span class="${bad || s.missing ? 'warn' : ''}">${bad || s.missing ? '⚠' : '✓'}</span> <b>${esc(ov.name)}</b>
+        <span class="sub">${bad ? `· ${s.mismatches} it should not have ` : ''}${s.missing ? `· ${s.missing} not found ` : ''}${s.pending ? `· ${s.pending} removal${s.pending === 1 ? '' : 's'} pending ` : ''}· ${ov.checkedAt ? `checked ${esc(ago(ov.checkedAt))}` : 'not checked yet'}${ov.ownerId ? " · someone else's" : ''}</span></summary>
+      <div class="sub" style="margin:2px 0 4px">${counts || 'nothing beyond its owner'}</div>
+      ${accessRowsHTML(ov)}
+      ${ov.ownerId ? '' : `<div style="margin-top:4px"><button onclick="aiDlg.close();openV2Agent('${jsq(ov.agentId)}','sharing')">Open its Sharing tab</button></div>`}
+    </details>`;
+  }).join('');
 }
 
 const POSTURE_DOT = { ok: '🟢', info: '🔵', warn: '🟡', critical: '🔴' };
@@ -11010,6 +11090,8 @@ function agentAttention(a) {
   // amount, so a cleared line comes back at 100% or with a new budget.
   if (a.budget?.line) out.push({ key: `budget:${a.budget.month}:${a.budget.level}:${a.budget.usd}${a.budget.paused ? ':p' : ''}`, icon: a.budget.paused ? '⏸' : '💵', why: a.budget.line + ' (Usage → Monthly budget)' });
   // "Tell me every $X": keyed on the step passed, so a cleared line comes back at the next one.
+  // It can still reach something it should not (access overview: Sharing → Access).
+  if (a.accessAlert?.line) out.push({ key: a.accessAlert.key, icon: '🔑', why: a.accessAlert.line });
   if (a.spendStep?.line) out.push({ key: `step:${a.spendStep.month}:${a.spendStep.passed}:${a.spendStep.every}`, icon: '🔔', why: a.spendStep.line });
   if (a.machineStep?.line) out.push({ key: `mstep:${a.machineStep.month}:${a.machineStep.passed}:${a.machineStep.every}`, icon: '🔔', why: 'This Hatchabot (every agent): ' + a.machineStep.line.replace(/^Spent /, 'spent ') });
   if (a.budgetPaused && !a.budget?.paused) out.push({ key: 'mbudget-pause:' + a.budgetPaused.at, icon: '⏸', why: "paused by this Hatchabot's monthly budget — it starts again on the 1st, when the machine's budget is raised, or when you start it" });
@@ -12206,6 +12288,7 @@ function v2RenderSheet() {
   if ($('v2UsageBody')) void v2LoadUsage(a.id);
   if ($('v2BudgetRow')) void v2LoadBudgetRow(a.id);
   if ($('v2AppRow')) void v2LoadApp(a.id);
+  if ($('v2Access')) void v2LoadAccess(a.id);
 }
 
 // ---- Apps in agents (docs/apps-in-agents.md): the agent page's App row ----------------
@@ -12717,7 +12800,8 @@ function v2Pane(a, tab) {
         ${a.parameters?.length && !a.parentAgentId ? B('👪 New child', `deriveChild('${id}','${n}')`) : ''}
         ${agents.some(k => k.parentAgentId === a.id) ? B('📥 Proposals', `openProposals('${id}','${n}')`) + B('⬇ Push to children', `pushDefinition('${id}','${n}')`) : ''}
         ${a.parentAgentId ? B('💡 Propose to master', `distillToMaster('${id}','${n}')`) : ''}`) : ''}
-      ${slot('paneEditPeers')}`;
+      ${slot('paneEditPeers')}
+      ${built ? row('Access', `<div id="v2Access" data-agent="${esc(a.id)}" style="flex-basis:100%"><div class="sub">Loading…</div></div>`) : ''}`;
     }
     case 'usage': return (v2Mine(a) && a.state !== 'ARCHIVED' ? row('Spending', `<div id="v2BudgetRow" data-agent="${esc(a.id)}" style="flex-basis:100%"><div class="sub">Loading…</div></div>`) : '')
       + (run ? `<div id="v2UsageBody" style="padding:4px 2px">Loading…</div>`

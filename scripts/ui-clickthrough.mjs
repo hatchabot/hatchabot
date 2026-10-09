@@ -3441,6 +3441,99 @@ const SCENARIOS = String.raw`(() => {
       } finally { await agentsCleanup(); }
     },
   });
+  // ---- What each agent can reach: the Sharing tab's Access row, Verify now, Settings → Security, Alerts (made-up data) ----
+  const accIso = (m) => new Date(Date.now() - m * 60000).toISOString();
+  const accOv = (fine = false) => ({
+    agentId: 'a1', name: 'Homework Helper', state: 'RUNNING', checkedAt: accIso(5),
+    groups: [
+      { key: 'google', title: 'Google accounts', rows: [
+        { kind: 'google', subject: 'school@example.org', label: 'school@example.org', intended: true, managed: true, verified: { status: 'present', at: accIso(5) }, note: 'gmail' },
+        ...(fine ? [] : [{ kind: 'google', subject: 'old@example.org', label: 'old@example.org', intended: false, managed: true, verified: { status: 'present', at: accIso(5) }, pendingRemoval: { since: accIso(3000) }, mismatch: 'stale-removal' }]),
+        { kind: 'google', subject: 'self@example.org', label: 'self@example.org', intended: false, managed: false, verified: { status: 'present', at: accIso(5) }, note: 'added inside the agent' },
+      ] },
+      { key: 'env', title: 'Environment variables (names only)', rows: [
+        { kind: 'env', subject: 'SEARCH_KEY', label: 'SEARCH_KEY', intended: true, managed: true, verified: fine ? { status: 'present', at: accIso(0) } : { status: 'unknown' } },
+      ] },
+    ],
+    notChecked: ['Keys, passwords or accounts the agent saved for itself in its workspace are not checked.'],
+    summary: { mismatches: fine ? 0 : 1, missing: 0, pending: fine ? 0 : 1, rows: fine ? 3 : 4 },
+  });
+  const accRows = () => [...document.querySelectorAll('#v2Access .v2accrow')];
+  const accRow = (label) => accRows().find((r) => r.textContent.includes(label));
+  Object.assign(T, {
+    accessSection: async () => {
+      window.__override['/v1/agents/a1/access'] = accOv();
+      v2AccessCache = null;
+      try {
+        openV2Agent('a1', 'sharing');
+        await until(() => accRows().length === 4);
+        eq('it asked for this agent\'s access', calls('GET', /^\/v1\/agents\/a1\/access$/).length >= 1, true);
+        const k = [...document.querySelectorAll('#v2Pane .v2k')].map((x) => x.textContent);
+        ok('one Access row on the Sharing tab: ' + k.join('|'), k.filter((x) => x === 'Access').length === 1);
+        ok('a stale removal is ⚠ with its words', accRow('old@example.org').querySelector('.warn')?.textContent === '⚠' && accRow('old@example.org').textContent.includes('removal pending over a day'));
+        ok('an account the agent added itself is "not managed", marked ?', accRow('self@example.org').textContent.includes('not managed') && !accRow('self@example.org').querySelector('.warn'));
+        ok('a found account is ✓ with its time', accRow('school@example.org').textContent.includes('✓') && accRow('school@example.org').textContent.includes('m ago'));
+        ok('a variable not checked yet is ?', accRow('SEARCH_KEY').textContent.includes('?'));
+        const box = document.getElementById('v2Access');
+        ok('the limits are said: ' + box.textContent.slice(0, 120), box.textContent.includes('Not checked:') && box.textContent.includes('saved for itself'));
+        ok('the summary line counts the problem', document.getElementById('v2AccessWhen').textContent.includes('1 it should not have'));
+        ok('Verify now is there', !!document.getElementById('v2AccessVerify'));
+        v2Close();
+      } finally { delete window.__override['/v1/agents/a1/access']; v2AccessCache = null; if (v2AgentDlg.open) v2Close(); }
+    },
+    accessVerifyNow: async () => {
+      const toastText = () => document.getElementById('toast').textContent;
+      window.__override['/v1/agents/a1/access'] = accOv();
+      window.__answer = window.__answer || {};
+      v2AccessCache = null;
+      try {
+        openV2Agent('a1', 'sharing');
+        await until(() => accRows().length === 4);
+        window.__answer['POST /v1/agents/a1/access/verify'] = [{ body: { result: { status: 'checked', at: accIso(0), checked: 3 }, access: accOv(true) } }];
+        document.getElementById('v2AccessVerify').click();
+        await until(() => accRows().length === 3);
+        eq('Verify now asked once', calls('POST', /^\/v1\/agents\/a1\/access\/verify$/).length, 1);
+        ok('the fresh result is drawn: no ⚠ left', !document.querySelector('#v2Access .v2accrow .warn'));
+        ok('the toast says it matches: ' + toastText(), toastText().includes('matches what Hatchabot gave it'));
+        // A stopped agent: not checkable, the reason said, the last results stay.
+        window.__answer['POST /v1/agents/a1/access/verify'] = [{ body: { result: { status: 'not-checkable', reason: 'it is stopped — start it to check' }, access: accOv(true) } }];
+        document.getElementById('v2AccessVerify').click();
+        await until(() => toastText().includes('Not checked: it is stopped'));
+        ok('the button comes back', await until(() => !document.getElementById('v2AccessVerify').disabled && document.getElementById('v2AccessVerify').textContent === 'Verify now'));
+        ok('the last results stay', accRows().length === 3);
+        v2Close();
+      } finally { delete window.__override['/v1/agents/a1/access']; delete window.__answer['POST /v1/agents/a1/access/verify']; v2AccessCache = null; if (v2AgentDlg.open) v2Close(); }
+    },
+    accessMachineView: async () => {
+      const fineB = { ...accOv(true), agentId: 'a2', name: 'Soccer Schedule' };
+      window.__override['/v1/access'] = { agents: [accOv(), fineB] };
+      try {
+        await openAiDlg('security');
+        const list = () => [...document.querySelectorAll('#accessMapOut details.v2accagent')];
+        await until(() => list().length === 2);
+        eq('problems first, as the server ordered', list().map((d) => d.dataset.agent), ['a1', 'a2']);
+        ok('the one with a problem is open, marked ⚠', list()[0].open && list()[0].querySelector('summary').textContent.includes('⚠') && list()[0].querySelector('summary').textContent.includes('1 it should not have'));
+        ok('the fine one is closed, marked ✓', !list()[1].open && list()[1].querySelector('summary').textContent.includes('✓'));
+        ok('its rows are inside', list()[0].querySelectorAll('.v2accrow').length === 4);
+        byText('#accessMapOut button', 'Open its Sharing tab').click();
+        ok('it opens that agent on its Sharing tab', v2AgentDlg.open && v2AgentId === 'a1' && v2Tab === 'sharing' && !aiDlg.open);
+        v2Close();
+      } finally { delete window.__override['/v1/access']; if (aiDlg.open) aiDlg.close(); if (v2AgentDlg.open) v2Close(); }
+    },
+    accessAlerts: async () => {
+      const line = 'It can still reach what it should not: old@example.org: removal still pending since 2026-10-01 (Sharing → Access)';
+      try {
+        await withAgents((a) => a.id === 'a1' ? { ...a, accessAlert: { key: 'access:google=old@example.org:stale-removal', line } } : undefined);
+        const a = agents.find((x) => x.id === 'a1');
+        const al = agentAttention(a).find((x) => x.key.startsWith('access:'));
+        ok('an Alerts line for it', !!al && al.why === line);
+        v2SetView('attention'); await sleep(50);
+        const fine = [...document.querySelectorAll('#v2groups .v2group')].find((g) => g.querySelector('h3')?.textContent.includes('Fine'));
+        ok('it is not among the fine ones', !fine || !fine.textContent.includes('Homework Helper'));
+        ok('it is under Alerts', [...document.querySelectorAll('#v2groups .v2group')].some((g) => !g.querySelector('h3')?.textContent.includes('Fine') && g.textContent.includes('Homework Helper')));
+      } finally { await agentsCleanup(); }
+    },
+  });
   (async () => {
     for (const [name, run] of Object.entries(T)) {
       try { await run(); results.push({ name, ok: true }); }

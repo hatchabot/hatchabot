@@ -285,6 +285,11 @@ has no rule.
 - **step-up**: as signed-in, and the second factor given again within `HATCHABOT_PUBLIC_STEPUP_MINUTES` (10).
 - **never**: refused there, whoever asks. Also the class of any route no rule names.
 
+What an agent can reach (`GET /v1/access`, `GET /v1/agents/:id/access`, and
+Verify now, `POST /v1/agents/:id/access/verify`) is **signed-in**: it shows
+names, addresses and times — never a token or a value — and Verify now only
+reads inside the agent (docs/access-overview-design.md).
+
 | Class | What |
 |---|---|
 | open | The app page and its static files |

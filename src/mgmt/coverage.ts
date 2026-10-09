@@ -80,6 +80,7 @@ export const COVERAGE: Record<string, string> = {
   'DELETE /v1/agents/:id/data-sources/:dsId': 'app: later — detach a data source',
   'POST /v1/agents/:id/connections/attach': 'app: later — attach a connected Google account',
   'POST /v1/agents/:id/connections/detach': 'app: later — detach a Google account',
+  'POST /v1/agents/:id/access/verify': 'app: later — Verify now (Sharing → Access): look inside the agent and record what it can reach; read-only',
   'DELETE /v1/agents/:id/connections/:email': 'app: later — detach a Google account',
   'POST /v1/agents/:id/env': 'app: secret — environment values are credentials',
   'DELETE /v1/agents/:id/env/:envId': 'app: later — remove an environment variable',

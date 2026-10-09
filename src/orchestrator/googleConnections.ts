@@ -250,12 +250,27 @@ export async function materializeConnection(
     return { ok: false, error };
   }
   store.markConnectionMaterialized(agent.id, connectionId);
+  // The import exited 0: gog holds it now (the access overview's last check).
+  store.recordAccessCheck(agent.id, 'google', conn.email.toLowerCase(), true);
   deps.log?.('connection.materialized', { agentId: agent.id, email: conn.email });
   return { ok: true };
 }
 
+/**
+ * What one `gog auth list` showed, as access checks (docs/access-overview-design.md):
+ * every account it names is present, and each of `also` it does not name is
+ * absent. Emails are kept lower-cased (Google's are case-insensitive).
+ */
+export function recordGoogleSeen(store: Store, agentId: string, held: string[], also: Iterable<string> = [], at = new Date().toISOString()): void {
+  const seen = new Set(held.map((e) => e.toLowerCase()));
+  for (const e of seen) store.recordAccessCheck(agentId, 'google', e, true, undefined, at);
+  for (const e of new Set([...also].map((x) => x.toLowerCase()))) {
+    if (!seen.has(e)) store.recordAccessCheck(agentId, 'google', e, false, undefined, at);
+  }
+}
+
 /** The accounts gog holds on the volume, or null when that can't be read. */
-async function gogAccounts(deps: ConnectionSyncDeps, runtimeRef: string): Promise<string[] | null> {
+export async function gogAccounts(deps: ConnectionSyncDeps, runtimeRef: string): Promise<string[] | null> {
   try {
     const res = await deps.provider.execShell(
       runtimeRef,
@@ -292,6 +307,7 @@ export async function dematerializeConnection(
       `~/.local/bin/gog auth remove --force -- "${email}" 2>/dev/null || gog auth remove --force -- "${email}"`,
     );
     if (res.code === 0) {
+      deps.store.recordAccessCheck(agent.id, 'google', email.toLowerCase(), false);
       deps.log?.('connection.removed_from_agent', { agentId: agent.id, email });
       return { ok: true };
     }
@@ -300,6 +316,7 @@ export async function dematerializeConnection(
     error = String((err as Error)?.message ?? err).slice(0, 300);
   }
   const held = await gogAccounts(deps, agent.runtimeRef);
+  if (held) recordGoogleSeen(deps.store, agent.id, held, [email]);
   if (held && !held.some((e) => e.toLowerCase() === email.toLowerCase())) {
     deps.log?.('connection.removed_from_agent', { agentId: agent.id, email, alreadyGone: true });
     return { ok: true };
@@ -439,5 +456,17 @@ async function syncConnectionsNow(
     // Detached during the import: its live removal may have run before the
     // import landed. Off again, and remembered if that fails.
     await offAgainIfDetached(deps, { id: agentId, runtimeRef }, a.connectionId, emailOf.get(a.connectionId));
+  }
+  // What the volume holds now, after all of the above: the access overview's
+  // last check for every account this agent's owner connected, attached or
+  // is removing, and for any other account gog names (one the agent added).
+  const held = await gogAccounts(deps, runtimeRef);
+  if (held) {
+    recordGoogleSeen(deps.store, agentId, held, [
+      ...attachedEmailsNow(),
+      ...deps.store.connectionRemovals(agentId),
+      ...deps.store.listConnections(agent.ownerId).map((c) => c.email),
+      ...deps.store.listAccessChecks(agentId).filter((c) => c.kind === 'google').map((c) => c.subject),
+    ]);
   }
 }
