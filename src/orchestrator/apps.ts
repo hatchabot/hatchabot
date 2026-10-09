@@ -376,7 +376,7 @@ export async function switchTo(d: InstallDeps, m: AppManifest, sha: string, from
 type Job = { id: string; name: string };
 
 /** The agent's jobs named "<app>-…"; throws when the list cannot be read (a sync must know what is there). */
-async function appJobs(d: InstallDeps, app: string): Promise<Job[]> {
+export async function appJobs(d: InstallDeps, app: string): Promise<Job[]> {
   const list = await d.provider.exec(d.runtimeRef, ['cron', 'list', '--json'], { timeoutMs: 60_000 });
   if (list.code !== 0) throw new AppError(`Could not read the agent's scheduled tasks: ${errText(list)}`);
   let jobs: unknown;

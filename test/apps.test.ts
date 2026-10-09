@@ -729,6 +729,45 @@ describe('an app change cut off by a restart (kill at every step)', () => {
     expect(w.agrees()).toBeUndefined();
   });
 
+  // Issue #22 (2026-10-09): replacing an app takes the old app's tasks off
+  // first. Cut off before the switch, the restart puts them back on; when that
+  // failed it was swallowed and the operation said "nothing changed".
+  it('replacing an app, cut off at "unpacked", and the old tasks cannot go back on: held with a retry, not "nothing changed"', async () => {
+    const w = await world();
+    expect((await w.install()).statusCode).toBe(200);
+    const first = w.agrees()!;
+    expect(w.provider.jobs.map((j) => j.name)).toEqual(['demoapp-tick']);
+    crashAt('unpacked');
+    const other = await w.install({ source: repo({ ...MANIFEST, app: 'otherapp' }), values: { mailbox: 'demo@example.org' }, allowShared: true });
+    expect(other.statusCode).toBeGreaterThanOrEqual(500);
+    expect(w.provider.jobs.filter((j) => j.name.startsWith('demoapp-'))).toEqual([]); // taken off before the unpack
+    reboot();
+    w.provider.failAdd = (n) => n === 'demoapp-tick';
+    await w.routes.resumeOperations();
+    const op = opOf(w.store);
+    expect(op).toMatchObject({ kind: 'app-install', status: 'held' });
+    expect(op.outcome).not.toMatch(/nothing changed/);
+    expect(op.outcome).toMatch(/demoapp-tick/);
+    expect(op.recovery!.actions).toEqual([{ action: 'put-tasks-back', label: 'Put its scheduled tasks back' }]);
+    expect(w.store.getAgentApp('a1')!.sha).toBe(first.sha);
+    // The guard holds: no other app change while its tasks are missing.
+    const again = await w.install();
+    expect(again.statusCode).toBe(409);
+    // Still failing: refused, still held, says what is missing.
+    const still = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'put-tasks-back' } });
+    expect(still.statusCode).toBeGreaterThanOrEqual(400);
+    expect(still.json().error).toMatch(/demoapp-tick/);
+    expect(opOf(w.store).status).toBe('held');
+    // Cron works again: the retry puts them back, confirmed, and only then rolled back.
+    w.provider.failAdd = () => false;
+    const ok = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'put-tasks-back' } });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().operation.status).toBe('rolled_back');
+    expect(w.agrees()!.sha).toBe(first.sha);
+    expect(w.provider.live('mock://a1').staging).toBe(false);
+    expect((await w.install()).statusCode).toBe(200);
+  });
+
   it('an app waiting for its new agent goes in after a restart (there was no boot sweep)', async () => {
     const w = await world();
     w.store.setAppPending('a1', { source: w.dir, ref: 'HEAD', values: { mailbox: 'demo@example.org' } });

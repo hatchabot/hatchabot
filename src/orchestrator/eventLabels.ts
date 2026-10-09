@@ -298,6 +298,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'restore.import_failed': 'the backup could not be written into its volume',
   'restore.rollback_failed': 'the restore could not be rolled back',
   'restore.stop_failed': 'it could not be stopped after a restore that could not be undone',
+  'restore.not_stopped': 'a restore could not confirm it was stopped, so its memory was not touched',
   'restore.safety_keep_failed': 'the pre-restore copy could not be saved to disk',
   'restore.left_failed': (d) => `a restore could not be undone; it is stopped and failed${d.kept ? `, its pre-restore copy kept at ${String(d.kept)}` : ''}`,
   'restore.safety_capture_failed': 'the pre-restore safety snapshot failed',

@@ -419,12 +419,6 @@ async function restoreSteps(
 ): Promise<RestoreResult> {
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
-  if (wasRunning) {
-    await provider.stop(runtimeRef);
-    store.setAgentState(agentId, 'STOPPED');
-  }
-  op.step('stopped');
-
   const restartIfWasRunning = () => restartAfterRestore(deps, agentId, runtimeRef, wasRunning);
   const nothingChanged = async (why: string): Promise<never> => {
     await restartIfWasRunning();
@@ -432,6 +426,21 @@ async function restoreSteps(
     op.rolledBack(why);
     throw new RestoreError(why);
   };
+
+  // Down whatever its record says, and checked (issue #21, 2026-10-09): only
+  // RUNNING used to be stopped, but a FAILED agent's container may still be up
+  // (a failed rebuild or health check leaves it so), and the copy and the
+  // import below then ran against a live agent writing to the same volume.
+  // Its record (wasRunning) still decides whether it starts again after.
+  const notDown = await confirmStopped(deps, agentId, runtimeRef);
+  if (notDown) {
+    return nothingChanged(
+      `Its runtime could not be confirmed stopped (${notDown}), so the restore did not begin — nothing was changed. ` +
+        'Try again in a moment; if its machine is asleep or off, wake it first.',
+    );
+  }
+  if (wasRunning) store.setAgentState(agentId, 'STOPPED');
+  op.step('stopped');
 
   // Safety net: capture the current volume so a failed extract can be undone.
   // No copy, no restore: the extract empties the volume first, so a failure
@@ -475,6 +484,9 @@ async function restoreSteps(
   const rollBack = async (what: string, cause: unknown, leftAsItWas: string): Promise<never> => {
     let rollbackErr: unknown;
     try {
+      // The import replaces the volume: never under a running agent (issue #21).
+      const notDown = await confirmStopped(deps, agentId, runtimeRef);
+      if (notDown) throw new Error(`its runtime could not be confirmed stopped (${notDown})`);
       await provider.importState(runtimeRef, safety);
     } catch (e) {
       rethrowIfCrash(e);
@@ -532,6 +544,31 @@ async function restoreSteps(
   }
   op.step('reapplied');
   return completeRestore(deps, op, agentId, runtimeRef, date, wasRunning, safetyFile, undone);
+}
+
+/**
+ * Stop the runtime and check that it is down before its volume is copied or
+ * replaced (issue #21, 2026-10-09). Undefined when it is confirmed stopped
+ * or gone; otherwise why not. A stop that fails on a container already gone
+ * is fine; one whose machine cannot be reached is not knowably down.
+ */
+async function confirmStopped(deps: RestoreDeps, agentId: string, runtimeRef: string): Promise<string | undefined> {
+  const log = deps.log ?? (() => {});
+  let stopErr: unknown;
+  try {
+    await deps.provider.stop(runtimeRef);
+  } catch (err) {
+    rethrowIfCrash(err);
+    stopErr = err;
+  }
+  const st = await deps.provider.status(runtimeRef).catch((err: unknown) => {
+    rethrowIfCrash(err);
+    return { phase: 'unknown' as const };
+  });
+  if (st.phase === 'stopped' || st.phase === 'absent') return undefined;
+  log('restore.not_stopped', { agentId, phase: st.phase, ...(stopErr ? { error: String(stopErr) } : {}) });
+  const why = stopErr ? `: ${short(stopErr)}` : '';
+  return st.phase === 'unknown' ? `its machine did not answer${why}` : `it is still ${st.phase}${why}`;
 }
 
 /** Start it again if the restore stopped it; a failed start is logged, not thrown (the result says what it is). */
@@ -668,6 +705,15 @@ export async function recoverBackupRestore(deps: RestoreDeps, opId: string, acti
   if (!agent?.runtimeRef) throw new RestoreError('The agent is gone.');
   const date = String(p.date ?? '');
   const ref = agent.runtimeRef;
+  // Either choice replaces the volume. The boot pass's stop was best effort,
+  // so it is checked down here, or the choice is refused and stays held (issue #21).
+  const notDown = await confirmStopped(deps, agent.id, ref);
+  if (notDown) {
+    throw new RestoreError(
+      `Its runtime could not be confirmed stopped (${notDown}), so nothing was changed and it stays held. ` +
+        'Try again in a moment; if its machine is asleep or off, wake it first.',
+    );
+  }
   if (action === 'put-back') {
     if (!p.safetyFile || !existsSync(p.safetyFile)) {
       throw new RestoreError('The copy from before the restore is no longer on disk, so it cannot be put back. Finish the restore, or restore another backup.');
