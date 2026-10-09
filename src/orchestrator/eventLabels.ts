@@ -155,6 +155,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'claim.window_closed': 'the first-contact window closed',
   'connection.attached': (d) => `connection ${String(d.name ?? d.kind ?? '')} attached`.trim(),
   'connection.detached': (d) => `connection ${String(d.name ?? d.kind ?? '')} detached`.trim(),
+  'access.verified': (d) => d.notCheckable ? `what it can reach not checked: ${String(d.notCheckable)}` : 'checked what it can reach',
   'connection.linked': (d) => `${String(d.kind ?? 'a')} account connected`,
   'connection.removed': (d) => `${String(d.kind ?? 'a')} account removed`,
   'connection.unlinked': (d) => `${String(d.kind ?? 'a')} account disconnected`,

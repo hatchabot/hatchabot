@@ -224,6 +224,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS connection_removals (
         agent_id TEXT NOT NULL, email TEXT NOT NULL, PRIMARY KEY (agent_id, email)
       );
+      -- What Hatchabot last found inside a running agent, per thing it can
+      -- reach (docs/access-overview-design.md): present 1/0, NULL = could not
+      -- check. The newest result only; checked_at says when.
+      CREATE TABLE IF NOT EXISTS access_checks (
+        agent_id TEXT NOT NULL, kind TEXT NOT NULL, subject TEXT NOT NULL,
+        present INTEGER, detail TEXT, checked_at TEXT NOT NULL,
+        PRIMARY KEY (agent_id, kind, subject)
+      );
       CREATE TABLE IF NOT EXISTS agent_connections (
         agent_id TEXT NOT NULL, connection_id TEXT NOT NULL,
         gmail_no_send INTEGER NOT NULL DEFAULT 0,
@@ -818,6 +826,8 @@ export class Store {
     // existed. Harmless when the column is already there.
     for (const alter of [
       `ALTER TABLE agents ADD COLUMN shared_memory INTEGER NOT NULL DEFAULT 0`,
+      // When a removal was first recorded: one pending for over a day is an Alerts line (access overview).
+      `ALTER TABLE connection_removals ADD COLUMN created_at TEXT`,
       `ALTER TABLE agents ADD COLUMN pending_action TEXT`,
       `ALTER TABLE memberships ADD COLUMN display_name TEXT`,
       `ALTER TABLE ai_profiles ADD COLUMN models TEXT`,
@@ -1191,7 +1201,7 @@ export class Store {
     // kept counting a deleted agent for days), claim windows (they carry an
     // invitee's @handle) and the lost-context note. Tables that may not exist
     // yet on an old database are skipped.
-    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset', 'connection_removals'] as const) {
+    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset', 'connection_removals', 'access_checks'] as const) {
       try { this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId); }
       catch (err) { if (!/no such table/.test(String(err))) throw err; }
     }
@@ -4131,7 +4141,41 @@ export class Store {
     return !!this.db.prepare(`SELECT 1 FROM connections WHERE kind = ? AND email = ? COLLATE NOCASE AND owner_id != ? LIMIT 1`).get(kind, email, ownerId);
   }
   addConnectionRemoval(agentId: string, email: string): void {
-    this.db.prepare(`INSERT OR IGNORE INTO connection_removals (agent_id, email) VALUES (?, ?)`).run(agentId, email);
+    // INSERT OR IGNORE: a removal recorded again keeps its first time.
+    this.db.prepare(`INSERT OR IGNORE INTO connection_removals (agent_id, email, created_at) VALUES (?, ?, ?)`).run(agentId, email, new Date().toISOString());
+  }
+  /** Pending removals with when each was first recorded (null: recorded before v2.157.0). */
+  connectionRemovalsSince(agentId: string): Array<{ email: string; since: string | null }> {
+    return (this.db.prepare(`SELECT email, created_at FROM connection_removals WHERE agent_id = ? ORDER BY email`).all(agentId) as Array<{ email: string; created_at: string | null }>)
+      .map((r) => ({ email: r.email, since: r.created_at }));
+  }
+  /** Every agent's pending removals (the agent list's Alerts read them once per request). */
+  allConnectionRemovals(): Array<{ agentId: string; email: string; since: string | null }> {
+    return (this.db.prepare(`SELECT agent_id, email, created_at FROM connection_removals`).all() as Array<{ agent_id: string; email: string; created_at: string | null }>)
+      .map((r) => ({ agentId: r.agent_id, email: r.email, since: r.created_at }));
+  }
+
+  // ---- access checks (orchestrator/accessOverview.ts) ----------------------
+
+  /** The newest result of one check: present true/false, or null when it could not run. */
+  recordAccessCheck(agentId: string, kind: string, subject: string, present: boolean | null, detail?: string, at = new Date().toISOString()): void {
+    this.db.prepare(
+      `INSERT INTO access_checks (agent_id, kind, subject, present, detail, checked_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id, kind, subject) DO UPDATE SET present = excluded.present, detail = excluded.detail, checked_at = excluded.checked_at`,
+    ).run(agentId, kind, subject, present === null ? null : present ? 1 : 0, detail ?? null, at);
+  }
+  listAccessChecks(agentId: string): Array<{ kind: string; subject: string; present: boolean | null; detail: string | null; checkedAt: string }> {
+    return (this.db.prepare(`SELECT * FROM access_checks WHERE agent_id = ? ORDER BY kind, subject`).all(agentId) as any[])
+      .map((r) => ({ kind: r.kind, subject: r.subject, present: r.present === null ? null : r.present === 1, detail: r.detail ?? null, checkedAt: r.checked_at }));
+  }
+  /** Checks that found something, every agent at once (the agent list's Alerts). */
+  presentAccessChecks(): Array<{ agentId: string; kind: string; subject: string; detail: string | null; checkedAt: string }> {
+    return (this.db.prepare(`SELECT agent_id, kind, subject, detail, checked_at FROM access_checks WHERE present = 1`).all() as any[])
+      .map((r) => ({ agentId: r.agent_id, kind: r.kind, subject: r.subject, detail: r.detail ?? null, checkedAt: r.checked_at }));
+  }
+  /** Forget one check (a thing no longer worth showing: absent and nobody intends it). */
+  forgetAccessCheck(agentId: string, kind: string, subject: string): void {
+    this.db.prepare(`DELETE FROM access_checks WHERE agent_id = ? AND kind = ? AND subject = ?`).run(agentId, kind, subject);
   }
   connectionRemovals(agentId: string): string[] {
     return (this.db.prepare(`SELECT email FROM connection_removals WHERE agent_id = ?`).all(agentId) as Array<{ email: string }>).map((r) => r.email);

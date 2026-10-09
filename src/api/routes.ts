@@ -151,6 +151,7 @@ import {
   exchangeGoogleCode, googleAuthUrl, materializeConnection, offAgainIfDetached, removeQueuedNow, syncConnections, withConnectionLock,
   parseOAuthClient, revokeGoogleToken, type OAuthClient,
 } from '../orchestrator/googleConnections.js';
+import { accessAlertOf, accessOverview, agentsWithAccessFindings, verifyAgentAccess } from '../orchestrator/accessOverview.js';
 import { INSPECTABLE_FILES, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
 import { computePosture, riskKeys, diffRisks, diskWarnBytes, measureAgentDisks } from '../orchestrator/posture.js';
 import { notifyAgentChat } from '../channels/notify.js';
@@ -2947,10 +2948,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Google accounts attached or detached while it was stopped or asleep take
     // effect now, not at its next rebuild: a detached account used to stay
     // usable after Start (night review, 2026-09-28). Only for owners who have any.
+    // Then what it can reach is looked at afresh (access overview): its
+    // last-verified times move on every start and wake, not only on Verify now.
+    const ref = a.runtimeRef;
+    const verifyLater = () => verifyAgentAccess(connSyncDeps(a.hostId), a.id, ref).then(() => undefined, () => undefined);
     if (store.listConnections(a.ownerId).length || store.connectionRemovals(a.id).length) {
-      const ref = a.runtimeRef;
-      void syncConnections(connSyncDeps(a.hostId), a.id, ref).catch((err: unknown) => trace(a.id)('connection.sync_failed', { error: String(err).slice(0, 200) }));
-    }
+      void syncConnections(connSyncDeps(a.hostId), a.id, ref).catch((err: unknown) => trace(a.id)('connection.sync_failed', { error: String(err).slice(0, 200) }))
+        .then(verifyLater);
+    } else void verifyLater();
   };
   // Hibernation: the idle sweep and the Telegram wake poll (hibernate.ts).
   const hibernateDeps: HibernateDeps = {
@@ -5329,6 +5334,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const machineStep = stepRows.has(MACHINE) && ownsLocalHost(req) ? stepOf(MACHINE) : undefined;
     // Paused by the machine's budget: the agent's own tile says so.
     const machinePaused = new Map(store.listBudgetPauses({ open: true, month: budgetMonth }).filter((p) => p.scope === MACHINE).map((p) => [p.agentId, p.pausedAt]));
+    // What it can reach that it should not (access overview): two fleet-wide reads, the overview only for those with findings.
+    const accessFindings = agentsWithAccessFindings(store, budgetNow);
     return Promise.all(
       agents.map(async (a) => {
         let openclawVersion: string | undefined;
@@ -5401,6 +5408,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           ...(role === 'owner' && budgetOf(a) ? { budget: { ...budgetOf(a)!, ...(budgetOf(a)!.level ? { line: budgetLine(budgetOf(a)!, 'it') } : {}) } } : {}),
           ...(role === 'owner' && machinePaused.has(a.id) ? { budgetPaused: { scope: 'machine', at: machinePaused.get(a.id) } } : {}),
           ...(role === 'owner' && stepOf(a.id) ? { spendStep: stepOf(a.id) } : {}),
+          /** It can still reach something it should not (access overview), owner only: Alerts. */
+          ...(role === 'owner' && accessFindings.has(a.id) ? (() => { const al = accessAlertOf(accessOverview(store, a, budgetNow)); return al ? { accessAlert: al } : {}; })() : {}),
           ...(a.ops && machineStep ? { machineStep } : {}),
           ...(a.ops && machineBudget ? { machineBudget: { ...machineBudget, ...(machineBudget.level ? { line: budgetLine(machineBudget, 'this Hatchabot') } : {}) } } : {}),
           /** Slack and Discord, for the icon marks and the Messaging row. */
@@ -10118,6 +10127,41 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return { detached: true, removed };
     },
   );
+
+  // ---- What each agent can reach (docs/access-overview-design.md) ---------
+  // Intended (Hatchabot's records) against the last check inside the running
+  // agent, pending removals, and what Hatchabot cannot see. Names, addresses
+  // and times only — never a secret. An agent's owner; the machine's owner
+  // sees every agent (as the agent list's ?all=1 does).
+  const accessAgent = (req: FastifyRequest, id: string): Agent | undefined => {
+    const a = store.getAgent(id);
+    if (!a || a.state === 'DELETED') return undefined;
+    return a.ownerId === ownerIdOf(req) || ownsLocalHost(req) ? a : undefined;
+  };
+  app.get('/v1/access', async (req) => {
+    const list = ownsLocalHost(req) ? store.listAllActiveAgents() : store.listAgents(ownerIdOf(req));
+    const now = Date.now();
+    const agents = list.filter((a) => a.state !== 'DELETED').map((a) => ({
+      ...accessOverview(store, a, now),
+      ...(a.ownerId !== ownerIdOf(req) ? { ownerId: a.ownerId } : {}),
+    }));
+    // Mismatches first, then what was not found, then by name.
+    agents.sort((x, y) => (y.summary.mismatches - x.summary.mismatches) || (y.summary.missing - x.summary.missing) || x.name.localeCompare(y.name));
+    return { agents };
+  });
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/access', async (req, reply) => {
+    const agent = accessAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    return accessOverview(store, agent);
+  });
+  /** Verify now: look inside the running agent (no side effects) and record what is there. */
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/access/verify', async (req, reply) => {
+    const agent = accessAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const result = await verifyAgentAccess(connSyncDeps(agent.hostId), agent.id);
+    trace(agent.id)('access.verified', result.status === 'checked' ? { checked: result.checked } : { notCheckable: result.reason });
+    return { result, access: accessOverview(store, store.getAgent(agent.id) ?? agent) };
+  });
 
   // ---- read-only inspection (archived / stopped agents) -------------------
   // Look back at what an agent knew and discussed WITHOUT running its
