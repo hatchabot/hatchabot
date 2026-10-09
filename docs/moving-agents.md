@@ -232,7 +232,7 @@ purpose:
 | An archive, after its bot was given back | Finishes it: archived, its container left stopped. Going back would need a new bot |
 | A rebuild waiting its turn | Puts it back in the queue (unless the agent moved, stopped or was archived meanwhile) |
 | A rebuild or a setup under way | As before: running again → marked running; stopped → **"The rebuild was interrupted — tap Retry"** (or "Setup was interrupted"). The outcome is now on its record |
-| An app install, update or roll back, before the switch | Nothing live changed: undone. Install or update again |
+| An app install, update or roll back, before the switch | Nothing live changed: undone. Install or update again. (An install replacing another app had taken that app's scheduled tasks off; when they cannot be put back and confirmed, it waits for you: **Put its scheduled tasks back**) |
 | An app install, update or roll back, during or after the switch | Compares the release the agent runs with Hatchabot's record: the same → done; different → waits for you: **Use the new release** or **Go back to the previous one** |
 | Copying the runtime image to a runner | Marked failed: **Install image** again (Settings → Hosts says "interrupted", not idle) |
 
