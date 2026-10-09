@@ -188,7 +188,7 @@ describe('Import router — POST /v1/agents/import auto-detects the file kind', 
     await seedRunningAgent(src);
     const file = (await src.f.inject({ method: 'GET', url: '/v1/agents/a1/backup', headers: as() })).rawPayload;
     const dst = await makeWorld('owner-b');
-    const res = await dst.f.inject({ method: 'POST', url: '/v1/agents/import', headers: octet('owner-b'), payload: file });
+    const res = await dst.f.inject({ method: 'POST', url: '/v1/agents/import?wait=1', headers: octet('owner-b'), payload: file });
     expect(res.statusCode).toBe(201);
     expect(res.json().kind).toBe('agent');
     expect(res.json().state).toBe('RUNNING');
@@ -234,7 +234,7 @@ describe('Rehost — POST /v1/agents/:id/rehost', () => {
     await seedRunningAgent(w);
     await registerPeer(w);
     peerResponds({});
-    const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/rehost', headers: as(), payload: { peerId: 'peer1' } });
+    const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/rehost?wait=1', headers: as(), payload: { peerId: 'peer1' } });
     expect(res.statusCode).toBe(200);
     // source retained but stopped — deleting it is a deliberate manual step
     const src = w.store.getAgent('a1')!;

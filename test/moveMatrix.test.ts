@@ -55,7 +55,7 @@ async function world() {
     if (v === OLD) w.store.setAgentEmbedApplied(id, 'baked');
     return id;
   };
-  const move = (id: string, hostId: string) => w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId } });
+  const move = (id: string, hostId: string) => w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as(), payload: { hostId } });
   return { w, runner, machine, serviceUp, serviceStoppedByOwner, agentOn, move };
 }
 

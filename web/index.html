@@ -489,6 +489,12 @@
   .v2actrow .t { color:var(--dim); white-space:nowrap; min-width:64px; font-variant-numeric:tabular-nums }
   .v2actrow .w { min-width:0; overflow-wrap:anywhere }
   .v2actrow .bad { color:var(--bad) }
+  .v2actrow .warn { color:var(--warn) }
+  /* An operation's row opens to its steps (a real button: Enter and Space work). */
+  .v2actopbtn { all:unset; cursor:pointer; border-radius:4px }
+  .v2actopbtn:focus-visible { outline:2px solid var(--accent, #e8a33d); outline-offset:2px }
+  .v2actsteps { margin:4px 0 2px 18px; padding:0; font-size:12px; color:var(--dim) }
+  .v2actsteps li { margin:1px 0 }
   .v2machine { display:flex; gap:6px 18px; flex-wrap:wrap; font-size:12px; color:var(--dim); padding:4px 4px 12px }
   .v2foothelp { padding:0 4px 16px } .v2foothelp .v2more { color:var(--dim) !important; font-weight:500; margin:0 } .v2foothelp .v2more:hover { color:var(--accent-text) !important }
   .v2machine .warn { color:var(--warn); font-weight:600 }
@@ -4736,8 +4742,15 @@ async function restoreFromBackup(agentId, date, name) {
   if (typed.trim() !== name) { toast('Name did not match — restore cancelled.', 8000); return; }
   try {
     const r = await api('/v1/backups/restore', { method: 'POST', body: { agentId, date } });
-    // Memory and files come back; who may use it and its bot stay as they are now, and it says what that undid.
-    toast(`Restored “${name}” from ${date}${r.running ? ' — restarting' : ''}.${(r.undone || []).map(u => ' ' + u).join('')}`, (r.undone || []).length ? 20000 : 12000);
+    // Since v2.156.0 it goes on on the server (202); how it ended — and what
+    // putting its current bot and members back undid — comes as a toast.
+    if (r?.operation?.id) {
+      v2FollowOp(r.operation);
+      toast(`Restoring “${name}” from ${date} — its tile shows each step.`, 8000);
+    } else {
+      // Memory and files come back; who may use it and its bot stay as they are now, and it says what that undid.
+      toast(`Restored “${name}” from ${date}${r.running ? ' — restarting' : ''}.${(r.undone || []).map(u => ' ' + u).join('')}`, (r.undone || []).length ? 20000 : 12000);
+    }
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
 }
@@ -6257,11 +6270,13 @@ async function moveHostAgent(id, name) {
   const host = others[Number(pick) - 1];
   if (!host) return toast('No such host');
   if (!confirm(`Move "${name}" to ${host.name}?\n\nIt stops, its memory is copied over, and it starts there. Same bot, same members — nothing else changes. If anything fails it stays where it is.`)) return;
-  toast(`Moving ${name} to ${host.name}… this takes a minute — the card shows WORKING until it's done.`, 180000, 'progress');
-  setTimeout(() => refresh(false), 800); // by then the POST is in flight — show WORKING without waiting for the next poll
   try {
-    await moveHostPost(id, host, name);
-    toast(`✅ ${name} now runs on ${host.kind === 'local' ? 'this machine' : host.name}.`, 10000);
+    const r = await moveHostPost(id, host, name);
+    // Since v2.156.0 the move goes on on the server (202): its tile shows the step, a toast the end.
+    if (r?.operation?.id) {
+      v2FollowOp(r.operation);
+      toast(`Moving ${name} to ${host.name} — its tile shows each step; this page can close.`, 8000);
+    } else toast(`✅ ${name} now runs on ${host.kind === 'local' ? 'this machine' : host.name}.`, 10000);
   } catch (e) { toast(`Move failed: ${e.message}`, 20000); }
   await refresh(false);
 }
@@ -6299,11 +6314,14 @@ async function rehostAgent(id, name) {
   const peer = peers[Number(pick) - 1];
   if (!peer) return toast('No such server');
   if (!confirm(`Move "${name}" to the cluster at ${peer.name}?${channelsLostOnExport(id)}\n\nIt stops here, transfers with its memory and members, and starts there — managed from that server's dashboard from now on. This copy stays STOPPED (not deleted) — never start both, they would fight over the same Telegram bot.`)) return;
-  toast(`Moving ${name} to ${peer.name}… this can take a minute — the card shows WORKING until it's done.`, 180000, 'progress');
-  setTimeout(() => refresh(false), 800); // by then the POST is in flight — show WORKING without waiting for the next poll
+  // Waits only for the other server's yes (its preflight); the move then goes on on the server (202).
+  toast(`Asking ${peer.name} whether it can take ${name}…`, 60000, 'progress');
   try {
     const res = await api(`/v1/agents/${id}/rehost`, { method: 'POST', body: { peerId: peer.id } });
-    toast(`✅ Moved to ${res.movedTo}. This copy is ${res.sourceState} — leave it that way.`, 30000);
+    if (res?.operation?.id) {
+      v2FollowOp(res.operation);
+      toast(`Moving ${name} to ${peer.name} — its tile shows each step; this page can close. This copy stays stopped once it has gone.`, 10000);
+    } else toast(`✅ Moved to ${res.movedTo}. This copy is ${res.sourceState} — leave it that way.`, 30000);
     await refresh(false);
   } catch (e) { toast(e.message, 30000); }
 }
@@ -7342,7 +7360,9 @@ async function revertSnapshot(snapId, label) {
   if (!confirm(`Revert to "${label}"? The agent's SOUL, AGENTS and MEMORY files go back to that point. Its current files are snapshotted first, so this is undoable. Applies to new conversations (send /new in Telegram).`)) return;
   try {
     const res = await api(`/v1/agents/${editAgentId}/snapshots/${snapId}/restore`, { method: 'POST', body: {} });
-    toast(`Reverted ${res.restored.join(', ')}`);
+    // Since v2.156.0 a 202 with its operation: followed, its end said in a toast.
+    if (res?.operation?.id) v2FollowOp(res.operation);
+    else toast(`Reverted ${res.restored.join(', ')}`);
     await loadEditFile();
     await loadSnapshots();
   } catch (e) { $('editErr').textContent = e.message; }
@@ -7837,15 +7857,47 @@ async function v2LoadActivity(force = false) {
     const box = $('v2Activity');
     box.hidden = !evs.length;
     $('v2ActCount').textContent = evs.length ? String(evs.length) : '';
-    $('v2ActList').innerHTML = evs.map(e => {
+    $('v2ActList').innerHTML = evs.map(e => e.op ? v2ActOpRow(e) : (() => {
       const what = EVENT_WORDS[e.event] ?? e.label ?? e.event.replace(/[._]/g, ' ');
       const bad = /fail|missing|unhealthy|rolled_back/.test(e.event);
       return `<div class="v2actrow"><span class="t" title="${esc(new Date(e.at).toLocaleString())}">${esc(ago(e.at))}</span>
         <span class="w"><b>${esc(e.agentName ?? 'agent')}</b> <span${bad ? ' class="bad"' : ''}>${esc(what)}</span></span></div>`;
-    }).join('');
+    })()).join('');
     v2PaintActivityFold();
   } catch { /* never worth breaking the page for */ }
   finally { v2ActBusy = false; v2ActAt = Date.now(); }
+}
+/**
+ * An operation in Activity (phase 3): ONE row — "Moved to Laptop runner · 3 min",
+ * red when it failed or was undone, amber while it waits for a choice — that
+ * opens, by mouse or keyboard (a real button, aria-expanded), to its steps.
+ * The steps stay in the agent's Setup log too.
+ */
+const v2ActOpen = new Set(); // which rows are open, across the 30-s reloads
+function v2ActOpRow(e) {
+  const op = e.op, id = `v2actop-${String(op.id).replace(/[^\w-]/g, '')}`;
+  const tone = op.status === 'failed' || op.status === 'rolled_back' ? ' class="bad"' : op.status === 'held' || op.status === 'interrupted' ? ' class="warn"' : '';
+  const steps = op.steps || [];
+  const open = v2ActOpen.has(op.id) && (steps.length || op.outcome);
+  const body = [
+    ...steps.map(s => `<li><span class="sub">${esc(clock(s.at))}</span> ${esc(s.label)}</li>`),
+    ...(!steps.length && op.outcome ? [`<li>${esc(op.outcome)}</li>`] : []),
+  ].join('');
+  const label = e.label || `${op.summary} · ${opSpan(op.durationMs || 0)}`;
+  const when = `<span class="t" title="${esc(new Date(e.at).toLocaleString())}">${esc(ago(e.at))}</span>`;
+  if (!body) return `<div class="v2actrow">${when}<span class="w"><b>${esc(e.agentName ?? 'agent')}</b> <span${tone}>${esc(label)}</span></span></div>`;
+  return `<div class="v2actrow v2actop">${when}<span class="w"><b>${esc(e.agentName ?? 'agent')}</b>
+      <button type="button" class="v2actopbtn" aria-expanded="${open ? 'true' : 'false'}" aria-controls="${id}" data-op="${esc(op.id)}" onclick="v2ToggleActOp(this)"
+        title="Its steps"><span${tone}>${esc(label)}</span> <span class="sub" aria-hidden="true">${open ? '▾' : '▸'}</span></button>
+      <ol id="${id}" class="v2actsteps"${open ? '' : ' hidden'}>${body}</ol></span></div>`;
+}
+function v2ToggleActOp(btn) {
+  const list = $(btn.getAttribute('aria-controls')); if (!list) return;
+  const open = btn.getAttribute('aria-expanded') !== 'true';
+  btn.setAttribute('aria-expanded', String(open));
+  list.hidden = !open;
+  btn.querySelector('[aria-hidden]').textContent = open ? '▾' : '▸';
+  if (open) v2ActOpen.add(btn.dataset.op); else v2ActOpen.delete(btn.dataset.op);
 }
 let v2Machine = null, v2MachineAt = 0, v2MachineBusy = false;
 async function v2LoadMachine(force = false) {
@@ -9794,6 +9846,10 @@ async function importAgentFile(file) {
       for (const n of (data.needs?.envVars ?? [])) needs.push(`env ${n}`);
       const tail = needs.length ? ` — set up in ⚙ Configuration: ${needs.join(', ')}` : '';
       toast(`Imported “${data.name}” — connect its Telegram bot, then it's yours${tail}`, 45000);
+    } else if (data.operation?.id) {
+      // A full copy goes on on the server (202, v2.156.0): its tile shows each step, a toast the end.
+      v2FollowOp(data.operation);
+      toast(`Importing “${data.agent?.name || file.name}” — its tile shows each step; this page can close.`, 8000);
     } else {
       toast(`${data.name} restored — booting`);
     }
@@ -10539,8 +10595,8 @@ async function downloadHistory(id, name) {
  * A long operation held for the owner's choice (operations.ts): a move
  * interrupted by a restart while the other machine was away, a move to
  * another Hatchabot that server has not confirmed. Its choices, as buttons.
- * Start, Rebuild and the rest refuse until one is made. (The full operation
- * view — Working on, Activity rows — comes with the page work, phase 3.)
+ * Start, Rebuild and the rest refuse until one is made. One under way is
+ * the Working on line instead (v2OpLine, below).
  */
 function opNotice(a) {
   const op = a.operation;
@@ -10555,8 +10611,80 @@ async function recoverOp(opId, action, btn) {
   try {
     const r = await api(`/v1/operations/${encodeURIComponent(opId)}/recover`, { method: 'POST', body: { action } });
     toast(r.operation?.outcome || 'Done.', 6000);
+    // A choice that starts the work again ("Try again") is followed like any other.
+    if (r.operation && V2_OP_GOING.has(r.operation.status)) v2FollowOp(r.operation);
   } catch (e) { toast(e.message, 8000); if (btn) btn.disabled = false; }
   await refresh(false);
+}
+
+// ---- long operations the page follows (operations.ts, phase 3) -----------------
+// A move, an import, a restore answers 202 { operation } and goes on on the
+// server. The page follows each one that is under way on an agent you own —
+// started here, from the CLI or by the Hatchabot agent — reading GET
+// /v1/operations/:id every 2 s: the tile's ring and the sheet's Working on
+// line say "Moving to Laptop runner — step 4 of 10, … · 2 min", and a toast
+// says how it ended.
+const V2_OP_GOING = new Set(['queued', 'running', 'interrupted']);
+/** How long, as people say it: "40 s", "3 min", "2 h 5 min". */
+function opSpan(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${Math.max(s, 1)} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  return h < 48 ? `${h} h${m % 60 ? ` ${m % 60} min` : ''}` : `${Math.round(h / 24)} days`;
+}
+/** The Working on words: "Moving to Laptop runner — step 4 of 10, made on the other machine · 2 min". */
+function v2OpLine(op) {
+  if (!op) return '';
+  const what = op.title || op.kindLabel || 'Working on it';
+  const where = op.stepN ? ` — step ${op.stepN} of ${op.steps}, ${op.stepLabel || op.step}`
+    : op.status === 'interrupted' ? ' — interrupted by a restart, being put right'
+    : op.status === 'queued' ? ' — waiting its turn' : op.steps ? ` — starting (${op.steps} steps)` : '';
+  return what + where + (op.requestedAt ? ` · ${opSpan(Date.now() - Date.parse(op.requestedAt))}` : '');
+}
+/** Under way on an agent of yours: what its tile and sheet say instead of "Working on it". */
+const v2OpGoing = (a) => !!(a?.operation && V2_OP_GOING.has(a.operation.status) && v2Mine(a));
+const v2Ops = new Map(); // op id → agent id
+let v2OpTimer = null;
+const v2OpSchedule = () => { if (v2Ops.size && !v2OpTimer && !window.__noAutoPoll) v2OpTimer = setTimeout(v2OpTick, 2000); };
+/** Follow an operation this page has just started (the 202's `operation`). */
+function v2FollowOp(op) {
+  if (!op?.id) return;
+  v2Ops.set(op.id, op.agentId || null);
+  const a = op.agentId && v2Find(op.agentId);
+  if (a && V2_OP_GOING.has(op.status)) { a.operation = op; renderV2(); }
+  v2OpSchedule();
+}
+/** After each list: follow whatever is under way on your agents (started anywhere). */
+function v2WatchOps() {
+  for (const a of agents) if (v2OpGoing(a) && a.operation.id && !v2Ops.has(a.operation.id)) v2Ops.set(a.operation.id, a.id);
+  v2OpSchedule();
+}
+/** How it ended, for the toast. */
+function v2OpOutcome(op) {
+  const who = v2Find(op.agentId)?.name;
+  const said = op.outcome || op.summary || op.status;
+  const lead = op.status === 'succeeded' ? '✅' : op.status === 'held' ? '⏸' : '⚠';
+  return `${lead} ${who ? `${who}: ` : ''}${said}${op.status === 'held' ? ' — choose what to do on its page (Alerts).' : ''}`;
+}
+/** One round: each followed operation read once; the ones that ended say so. */
+async function v2OpTick() {
+  clearTimeout(v2OpTimer); v2OpTimer = null;
+  let ended = false;
+  for (const [id, agentId] of [...v2Ops]) {
+    let op;
+    try { op = await api(`/v1/operations/${encodeURIComponent(id)}`); }
+    catch { v2Ops.delete(id); continue; } // gone, or no longer ours
+    const a = v2Find(op.agentId || agentId);
+    if (V2_OP_GOING.has(op.status)) { if (a) a.operation = op; continue; }
+    v2Ops.delete(id); ended = true;
+    if (a && a.operation?.id === id) a.operation = op.status === 'held' ? op : undefined;
+    toast(v2OpOutcome(op), op.status === 'succeeded' ? 9000 : 20000);
+  }
+  renderV2();
+  if (ended) { void v2LoadActivity(true); await refresh(false); }
+  v2OpSchedule();
 }
 
 async function dismissContextReset(id) {
@@ -10785,10 +10913,10 @@ function agentAttention(a) {
   const out = [];
   // The reason is printed beside the status; the list only says there is one,
   // so a long explanation isn't repeated twice on the same screen.
-  if (a.state === 'FAILED') out.push({ key: 'failed', icon: '❗', why: a.stateReason ? 'it failed — the reason is beside its status' : 'it failed', failure: true });
-  // A long operation held for the owner's choice (operations.ts): keyed on
-  // its id, so clearing it from Alerts holds only until the next one.
+  // A long operation held for the owner's choice (operations.ts), first of
+  // all: the agent refuses Start and the rest until it is chosen. Keyed on its id.
   if (a.operation?.status === 'held' && v2Mine(a)) out.push({ key: 'op:' + a.operation.id, icon: '⏸', why: a.operation.outcome || `${a.operation.kindLabel || 'An operation'} is waiting for your choice` });
+  if (a.state === 'FAILED') out.push({ key: 'failed', icon: '❗', why: a.stateReason ? 'it failed — the reason is beside its status' : 'it failed', failure: true });
   if (a.pendingAction) out.push({ key: 'pending', icon: '✋', why: a.pendingAction.type === 'bot_token' ? 'waiting for a Telegram bot token' : 'a step is waiting on you' });
   // No pool bot was free when it came back (or was cloned/imported): it went on web-only rather than wait.
   if (a.telegramSkipped) out.push({ key: 'nobot:' + a.telegramSkipped.at, icon: '📵', why: 'No Telegram bot was free — it is running in the web app; attach a bot later (its settings → Messaging → Telegram)' });
@@ -11047,6 +11175,7 @@ async function refreshNow(withMeta, seq) {
     markArchiving(agents); // an archive this page started, before the server's list shows it
     agentsLoaded = true;
     retireMadeTodos(); // a planned agent that now exists leaves Planned
+    v2WatchOps(); // a move, import or restore under way: followed every 2 s, its end said in a toast
     if ($('consoleDlg')?.open && !consoleGuest) renderConsoleTabs(); // the new-reply dots
     if (location.hash.includes('report=')) reportFromHash();
     if (location.hash.includes('console=') && !consoleHashTried) { consoleHashTried = true; consoleFromHash(); }
@@ -11079,7 +11208,7 @@ async function refreshNow(withMeta, seq) {
     // spin forever over a 500 or a proxy page (27th audit).
     if (!agentsLoaded) for (const el of document.querySelectorAll('.hb-loading')) el.textContent = `Couldn't load your agents: ${e.message || e}. Retrying…`;
   }
-  const busy = agents.some(a => a.busy || a.archiving || a.state === 'PROVISIONING' || a.state === 'REBUILDING' || a.state === 'DELETING');
+  const busy = agents.some(a => a.busy || a.archiving || v2OpGoing(a) || a.state === 'PROVISIONING' || a.state === 'REBUILDING' || a.state === 'DELETING');
   clearTimeout(pollTimer);
   // A tab nobody is looking at does not poll: it catches up the moment it is
   // shown again (below). Each poll costs the server about a second.
@@ -11138,6 +11267,8 @@ function v2Status(a) {
   else if (a.archiving) st = { cls: 'working', glyph: '↻', label: /saving/.test(a.archiving.step || '') ? 'Archiving — saving its conversation to memory' : 'Archiving' };
   else if (a.state === 'DELETING') st = { cls: 'working', glyph: '↻', label: 'Deleting' };
   else if (a.queuedForRebuild) st = { cls: 'working', glyph: '⋯', label: 'Waiting its turn to rebuild' };
+  // A move, an import, a restore under way (operations.ts): what, which step of how many, how long.
+  else if (v2OpGoing(a)) st = { cls: 'working', glyph: '↻', label: v2OpLine(a.operation) };
   else if (a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING') {
     st = { cls: 'working', glyph: '↻', label: a.state === 'PROVISIONING' ? 'Setting up' : a.state === 'REBUILDING' ? 'Rebuilding' : 'Working on it' };
   }
@@ -11328,6 +11459,9 @@ function v2ViewKey(a, view = v2View) {
     }
     // What wants a click from you, most urgent bin first; the rest are "Fine".
     case 'attention': {
+      // An operation held for your choice comes first, and cannot be cleared:
+      // the agent refuses Start and the rest until it is chosen (operations.ts).
+      if (a.operation?.status === 'held' && v2Mine(a)) return ['n:0', '⏸ Waiting for your choice'];
       if ((pairings[a.id]?.length ?? 0) > 0) return ['n:2', '🔑 Knocking'];
       if (v2Unread(a)) return ['n:3', '💬 To read'];
       // Cleared means gone (Chris, 2026-10-04): back with the fine ones until something new happens.
@@ -11549,7 +11683,9 @@ function renderV2() {
 
   // Time bins keep their own order (recent → old); other views go alphabetical. Shared and Archived last.
   // ...and Cost keeps its tiers in order, dearest first.
-  const timeView = v2View === 'activity' || v2View === 'rebuilt' || v2View === 'cost';
+  // Sections in their keys' order: time bins, and Alerts most urgent first (n:0 held for a choice, n:1 failed…).
+  // Alerts was ordered by its labels' emoji, which put "⚠ Alerts" above "❌ Failed" (2026-10-09).
+  const timeView = v2View === 'activity' || v2View === 'rebuilt' || v2View === 'cost' || v2View === 'attention';
   if (v2View !== 'group') sections.sort((x, y) => (x.key === 'shared' || x.key === 'archived') - (y.key === 'shared' || y.key === 'archived') || (y.key === V2_UNREAD) - (x.key === V2_UNREAD) || (timeView ? x.key.localeCompare(y.key) : x.label.localeCompare(y.label)));
   // Unread: newest reply first, whatever the sort.
   const newestFirst = (x, y) => String(y.lastActiveAt || '').localeCompare(String(x.lastActiveAt || '')) || x.name.localeCompare(y.name);
@@ -12459,7 +12595,9 @@ function v2Pane(a, tab) {
       ${a.pendingAction?.type === 'bot_token' ? row('Telegram bot', `<div class="grow"><span class="sub">The bot pool is empty, so this agent is waiting for a bot of its own — or it can go on without one.</span>${tokenForm(a)}</div>`) : ''}
       ${a.state === 'FAILED' && a.stateReason ? `<p class="sub" style="margin:0 0 8px">${esc(a.stateReason)}</p>` : ''}
       ${a.archiving ? row('Working on', `<span>${esc(a.archiving.step)}${a.archiving.at ? ` <span class="sub">· ${esc(ago(a.archiving.at))}</span>` : ''}</span>${B('Setup log', `openSetupLog('${id}','${n}')`)}`) : ''}
-      ${(a.state === 'REBUILDING' || a.state === 'PROVISIONING') ? row('Working on', `<span>${esc(a.progress?.step || (a.state === 'REBUILDING' ? 'rebuilding' : 'setting up'))}${a.progress?.at ? ` <span class="sub">· ${esc(ago(a.progress.at))}</span>` : ''}</span>${B('Setup log', `openSetupLog('${id}','${n}')`)}
+      ${!a.archiving && v2OpGoing(a) ? row('Working on', `<span id="v2OpWorking" data-op="${esc(a.operation.id || '')}">${esc(v2OpLine(a.operation))}</span>${B('Setup log', `openSetupLog('${id}','${n}')`)}
+        <span class="sub">It goes on without this page — close it if you like; a message here says how it ended.</span>`) : ''}
+      ${(a.state === 'REBUILDING' || a.state === 'PROVISIONING') && !v2OpGoing(a) ? row('Working on', `<span>${esc(a.progress?.step || (a.state === 'REBUILDING' ? 'rebuilding' : 'setting up'))}${a.progress?.at ? ` <span class="sub">· ${esc(ago(a.progress.at))}</span>` : ''}</span>${B('Setup log', `openSetupLog('${id}','${n}')`)}
         <span class="sub">Moving onto a new OpenClaw line runs its migrations and rebuilds the memory index — minutes on an agent with a long history.</span>`) : ''}
       ${whyList.length ? `<ul class="v2why" style="margin:0 0 10px">${whyList.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
       ${row('Name &amp; icon', `<span>${esc(a.name)}</span>${B('Change icon', `openV2Icon('${id}')`)}${a.state !== 'ARCHIVED' ? B('Rename…', goto('personality')) : ''}

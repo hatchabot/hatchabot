@@ -152,7 +152,21 @@ async function create(name, hostId) {
   if (r.status >= 300) throw new Error(`create ${name}: ${r.status} ${JSON.stringify(r.json)}`);
   return settle(r.json.id, 'RUNNING', 25);
 }
-const move = (id, hostId) => api(`/v1/agents/${id}/move-host`, { method: 'POST', body: { hostId } });
+/**
+ * A move answers 202 { operation } and goes on on the server (v2.156.0): follow
+ * it to its end. 200 when it moved; the operation's outcome otherwise. A
+ * refusal (409, 400) is still the answer itself.
+ */
+const move = async (id, hostId) => {
+  const r = await api(`/v1/agents/${id}/move-host`, { method: 'POST', body: { hostId } });
+  if (r.status !== 202 || !r.json.operation?.id) return r;
+  let op = r.json.operation;
+  for (let i = 0; i < 360 && ['queued', 'running', 'interrupted'].includes(op.status); i++) {
+    await sleep(5000);
+    op = (await api(`/v1/operations/${op.id}`)).json;
+  }
+  return { status: op.status === 'succeeded' ? 200 : 500, json: { ...op, error: op.status === 'succeeded' ? undefined : `${op.status}: ${op.outcome ?? ''}` } };
+};
 const rebuild = (id) => api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
 const eventsOf = async (id) => (await api(`/v1/agents/${id}/events?limit=200`)).json;
 

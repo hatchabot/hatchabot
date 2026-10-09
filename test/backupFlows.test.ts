@@ -4,7 +4,7 @@
  * with its path-traversal guard. The backup sets are faked on disk under a temp
  * HATCHABOT_BACKUP_DIR; the tarball name matches MockProvider's volume archive.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -79,6 +79,26 @@ describe('Backups list — GET /v1/backups', () => {
   });
 });
 
+describe('Backups restore — in the background (v2.156.0)', () => {
+  it('answers 202 with its operation and finishes after the answer; a date it cannot use is still a 400', async () => {
+    const w = await makeWorld();
+    await seedRunningAgent(w, { id: 'a1', memory: 'current' });
+    writeSet('2026-08-20', w, ['a1']);
+    const bad = await w.f.inject({ method: 'POST', url: '/v1/backups/restore', headers: as(), payload: { agentId: 'a1', date: '2026-08-21' } });
+    expect(bad.statusCode).toBe(400);
+    expect(w.store.listOperations(['a1'])).toEqual([]);
+    const res = await w.f.inject({ method: 'POST', url: '/v1/backups/restore', headers: as(), payload: { agentId: 'a1', date: '2026-08-20' } });
+    expect(res.statusCode).toBe(202);
+    expect(res.json().operation).toMatchObject({ kind: 'restore-backup', title: 'Restoring from the 2026-08-20 backup', steps: 4 });
+    const opId = res.json().operation.id;
+    await vi.waitFor(async () => {
+      const op = (await w.f.inject({ method: 'GET', url: `/v1/operations/${opId}`, headers: as() })).json();
+      expect(op).toMatchObject({ status: 'succeeded', summary: 'Restored from the 2026-08-20 backup' });
+    });
+    expect(w.provider.stateStore.get(w.store.getAgent('a1')!.runtimeRef!)!.toString()).toBe('backup-of-a1');
+  });
+});
+
 describe('Backups restore — POST /v1/backups/restore', () => {
   it('lets the host owner restore ANY agent on the box, overwriting its volume', async () => {
     const w = await makeWorld(); // OWNER owns the host
@@ -88,7 +108,7 @@ describe('Backups restore — POST /v1/backups/restore', () => {
     expect(w.provider.stateStore.get(ref)!.toString()).toBe('current');
 
     // OWNER (host owner), NOT owner-b, restores the other user's agent.
-    const res = await w.f.inject({ method: 'POST', url: '/v1/backups/restore', headers: as(), payload: { agentId: 'a2', date: '2026-08-20' } });
+    const res = await w.f.inject({ method: 'POST', url: '/v1/backups/restore?wait=1', headers: as(), payload: { agentId: 'a2', date: '2026-08-20' } });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ date: '2026-08-20', running: true });
     expect(w.provider.stateStore.get(ref)!.toString()).toBe('backup-of-a2');
@@ -102,7 +122,7 @@ describe('Backups restore — POST /v1/backups/restore', () => {
     expect(w.store.getAgent('a1')!.appliedEmbedMode).toBeUndefined();
     const provision = w.provider.provision.bind(w.provider);
     w.provider.provision = async () => { throw new Error('its AI source is gone'); };
-    const res = await w.f.inject({ method: 'POST', url: '/v1/backups/restore', headers: as(), payload: { agentId: 'a1', date: '2026-08-20' } });
+    const res = await w.f.inject({ method: 'POST', url: '/v1/backups/restore?wait=1', headers: as(), payload: { agentId: 'a1', date: '2026-08-20' } });
     expect(res.statusCode).toBe(200);
     w.provider.provision = provision;
     // A live model change records what is applied: not the never-accepted build's memory-search choice.
@@ -114,7 +134,7 @@ describe('Backups restore — POST /v1/backups/restore', () => {
     const w = await makeWorld();
     await seedRunningAgent(w, { id: 'a1' });
     writeSet('2026-08-20', w, []); // empty set
-    const res = await w.f.inject({ method: 'POST', url: '/v1/backups/restore', headers: as(), payload: { agentId: 'a1', date: '2026-08-20' } });
+    const res = await w.f.inject({ method: 'POST', url: '/v1/backups/restore?wait=1', headers: as(), payload: { agentId: 'a1', date: '2026-08-20' } });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toMatch(/doesn't contain/i);
   });

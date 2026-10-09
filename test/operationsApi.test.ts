@@ -4,7 +4,7 @@
  * operation was interrupted or is held for a choice refuses Start, Rebuild,
  * Archive, Move, Rehost, Delete, Wake and Retry with the operation's line.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { beginOperation } from '../src/orchestrator/operations.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
@@ -114,16 +114,19 @@ describe('POST /v1/operations/:id/recover', () => {
     expect(w.store.listEvents([id], 20).map((e) => e.event)).toContain('op.recover');
   });
 
-  it('a move through the route returns its operation id, and the record shows every step', async () => {
+  it('a move through the route answers 202 with its operation, and the record shows every step', async () => {
     const w = await makeWorld();
     const id = await seedRunningAgent(w, { name: 'Test Agent' });
     w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock2', name: 'Test Runner', settings: {}, createdAt: 'now' });
     w.providers.set('mock2', new MockProvider());
     const r = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h2' } });
-    expect(r.statusCode).toBe(200);
-    expect(r.json().operation).toMatch(/^op_/);
-    const op = (await w.f.inject({ method: 'GET', url: `/v1/operations/${r.json().operation}`, headers: as() })).json();
-    expect(op).toMatchObject({ kind: 'move-host', status: 'succeeded', step: 'source-removed', outcome: 'Moved to Test Runner.' });
+    expect(r.statusCode).toBe(202);
+    const opId = r.json().operation.id as string;
+    expect(opId).toMatch(/^op_/);
+    await vi.waitFor(async () => {
+      const op = (await w.f.inject({ method: 'GET', url: `/v1/operations/${opId}`, headers: as() })).json();
+      expect(op).toMatchObject({ kind: 'move-host', status: 'succeeded', step: 'source-removed', outcome: 'Moved to Test Runner.', summary: 'Moved to Test Runner' });
+    });
     expect(w.store.listEvents([id], 50).filter((e) => e.event === 'op.step')).toHaveLength(10);
   });
 });

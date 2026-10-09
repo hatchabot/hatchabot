@@ -350,6 +350,8 @@ export interface RestoreDeps {
   reapply?: (runtimeRef: string) => Promise<void>;
   /** Who asked, for the operation's record. */
   requestedBy?: string;
+  /** Told the operation's id once it begins (the route answers 202 with it). */
+  onOperation?: (id: string) => void;
 }
 
 export async function restoreAgentFromBackup(
@@ -381,6 +383,7 @@ export async function restoreAgentFromBackup(
   // copy is there to put back (resumeBackupRestore).
   const safetyFile = safetyCopyPath(runtimeRef);
   const op = beginOperation(store, 'restore-backup', agentId, { date, wasRunning, safetyFile }, { requestedBy: deps.requestedBy });
+  deps.onOperation?.(op.id);
   try {
     return await restoreSteps(deps, op, agentId, runtimeRef, date, data, wasRunning, safetyFile);
   } catch (err) {
@@ -586,7 +589,10 @@ async function completeRestore(
   dropSafetyCopy(safetyFile);
   // What it IS now, not what it was: a failed restart used to report "restarting".
   const running = store.getAgent(agentId)?.state === 'RUNNING';
-  op.done(`Restored from the ${date} backup${running ? '' : wasRunning ? '; it could not be started again' : ''}.`);
+  // What it undid rides the outcome: the request no longer waits for the
+  // answer that used to carry it (phase 3), so the outcome is what the page
+  // and the CLI show.
+  op.done(`Restored from the ${date} backup${running ? '' : wasRunning ? '; it could not be started again' : ''}.${undone.map((u) => ` ${u}`).join('')}`);
   return { date, running, ...(undone.length ? { undone } : {}) };
 }
 

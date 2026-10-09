@@ -589,6 +589,27 @@ async function importAgentInner(
       throw new TransferError(`This copy was saved by OpenClaw ${manifest.openclawVersion}; this machine would run it on ${here.openclawVersion}, which cannot read it. Update this machine's image first.`);
     }
   }
+  // The file's own refusals, before anything is made: the import now answers
+  // as soon as its operation begins and goes on in the background (phase 3),
+  // so a refusal found after the row would no longer be the request's answer.
+  // The archive is untrusted: the same reserved-name policy the web route
+  // enforces applies here — a crafted archive must not smuggle in a
+  // proxy/credential/loader variable. Refuse loudly rather than skip: a
+  // quietly dropped var is this bug in a new costume.
+  for (const v of manifest.envVars ?? []) {
+    const reserved = reservedEnvProblem(v.name);
+    if (reserved) {
+      throw new TransferError(`This archive sets env var "${v.name}", which is not allowed: ${reserved}`);
+    }
+  }
+  if (manifest.channel && opts.verifyToken) {
+    let username: string;
+    try { username = await opts.verifyToken(manifest.channel.botToken); }
+    catch { throw new TransferError('Telegram rejected the bot token in this file. Export the agent again, or import it and add a bot afterwards.'); }
+    if (username.toLowerCase() !== manifest.channel.accountId.toLowerCase()) {
+      throw new TransferError(`The token in this file belongs to @${username}, not @${manifest.channel.accountId}.`);
+    }
+  }
 
   const now = new Date().toISOString();
   const agent: Agent = {
@@ -673,14 +694,7 @@ async function importAgentInner(
     op.step('members');
 
     if (manifest.channel) {
-      if (opts.verifyToken) {
-        let username: string;
-        try { username = await opts.verifyToken(manifest.channel.botToken); }
-        catch { throw new TransferError('Telegram rejected the bot token in this file. Export the agent again, or import it and add a bot afterwards.'); }
-        if (username.toLowerCase() !== manifest.channel.accountId.toLowerCase()) {
-          throw new TransferError(`The token in this file belongs to @${username}, not @${manifest.channel.accountId}.`);
-        }
-      }
+      // Its token was checked with Telegram before the row was made (above).
       await secrets.put(secretRef, manifest.channel.botToken);
       store.insertChannel({
         id: randomUUID(),
@@ -698,16 +712,7 @@ async function importAgentInner(
 
     // Recreate the env vars BEFORE provisioning renders the runtime spec, so
     // the container boots with them (an agent without its env secrets is
-    // silently broken). The archive is untrusted: the same reserved-name
-    // policy the web route enforces applies here — a crafted archive must not
-    // smuggle in a proxy/credential/loader variable. Refuse loudly rather
-    // than skip: a quietly dropped var is this bug in a new costume.
-    for (const v of manifest.envVars ?? []) {
-      const reserved = reservedEnvProblem(v.name);
-      if (reserved) {
-        throw new TransferError(`This archive sets env var "${v.name}", which is not allowed: ${reserved}`);
-      }
-    }
+    // silently broken). Their names were checked before the row was made.
     for (const v of manifest.envVars ?? []) {
       const envId = randomUUID();
       const envRef = `agent-env/${envId}`;
