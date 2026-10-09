@@ -929,6 +929,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/orchestrator/budgets.ts` — `WARN_AT`; `web/index.html` — `monthly budget is used up`
 
+### A spike warning never arrived on Telegram, but Usage shows the spike
+- **Check:** Usage's spike line says "told with its loop", or the agent had an open loop (🔁) told that day.
+- **Cause:** one cause, one message a day: the loop's message already covered the spike.
+- **Fix:** none needed; the loop's item under Usage → Recommended carries the spike.
+- **Fixed in:** `v2.158.0`
+- **Code:** `src/orchestrator/usageAlerts.ts` — `runUsageAlerts`; `src/orchestrator/tokenWatch.ts` — `loopCovering`
+
+### A budget at 80% or a "tell me every $X" step no longer shows under Alerts
+- **Check:** the agent's Usage tab → Recommended, and the tile's tooltip.
+- **Cause:** since v2.158.0, Alerts keeps only a live loop, a budget at 100% and today's spike; an 80% budget before mid-month is a Recommended item; steps are still messaged and shown on the tile.
+- **Fix:** none needed; look under Usage → Recommended.
+- **Fixed in:** `v2.158.0`
+- **Code:** `src/orchestrator/recommendations.ts` — `buildRecommendations`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody

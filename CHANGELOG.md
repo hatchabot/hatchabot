@@ -2,6 +2,19 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.158.0] — 2026-10-09
+
+### Added — one recommendations view
+- **Recommended:** one ranked list of cost, model and token advice at the top of Usage and on each agent's Usage tab (docs/recommendations-design.md). Each item gives the concern, its evidence, the expected effect in dollars a month (on a Claude plan, an equivalent), one button that makes the change, Details, and Not now (put away until its cause changes). A cheaper model is offered only on solid evidence (≥10 turns over ≥3 days).
+- The Hatchabot agent's cost and model proposals appear as Recommended items, marked as its proposal; one click confirms them. Its weekly review reads the same list.
+- **Alerts** keeps a live loop, a budget at 100% and — new — today's spike, each linking to its Recommended item, ordered by severity. A budget at 80%, "tell me every $X" steps and a rate-limited source are no longer Alerts lines (steps are still messaged and shown on the tile).
+- **One cause, one message a day:** a spike on an agent whose loop was already told today is not messaged again.
+- A rate-limited AI source is one item for the source, not a line on each of its agents.
+- Budgets, step alerts, a budget's pause and cheaper-model enforcement, and cost badges are unchanged.
+
+### Fixed
+- The click-through's console-address scenario starts from a clean console and address (it failed 2 of 12 CI runs).
+
 ## [2.157.0] — 2026-10-09
 
 From an outside review: can each agent be recovered, what can each agent reach, and the multi-server controls out of a household's way.
