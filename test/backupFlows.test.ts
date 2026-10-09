@@ -95,6 +95,21 @@ describe('Backups restore — POST /v1/backups/restore', () => {
     expect(w.store.getAgent('a2')!.state).toBe('RUNNING');
   });
 
+  it('a re-apply that fails leaves no build decision for a later model change to stamp (2026-10-09)', async () => {
+    const w = await makeWorld();
+    await seedRunningAgent(w, { id: 'a1', memory: 'current' });
+    writeSet('2026-08-20', w, ['a1']);
+    expect(w.store.getAgent('a1')!.appliedEmbedMode).toBeUndefined();
+    const provision = w.provider.provision.bind(w.provider);
+    w.provider.provision = async () => { throw new Error('its AI source is gone'); };
+    const res = await w.f.inject({ method: 'POST', url: '/v1/backups/restore', headers: as(), payload: { agentId: 'a1', date: '2026-08-20' } });
+    expect(res.statusCode).toBe(200);
+    w.provider.provision = provision;
+    // A live model change records what is applied: not the never-accepted build's memory-search choice.
+    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/model', headers: as(), payload: { model: null } })).json().live).toBe(true);
+    expect(w.store.getAgent('a1')!.appliedEmbedMode).toBeUndefined();
+  });
+
   it('404s when the set has no tarball for that agent', async () => {
     const w = await makeWorld();
     await seedRunningAgent(w, { id: 'a1' });

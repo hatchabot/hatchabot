@@ -572,6 +572,27 @@ describe('compaction', () => {
     for (let i = 0; i < 50 && !told.length; i++) await new Promise((r) => setTimeout(r, 5));
     expect(told[0]).toMatch(/aborted .* last 200 lines/);
   });
+
+  it('two requests at the same moment start one compaction, not two (2026-10-09)', async () => {
+    const { store, provider } = await world();
+    const agent = store.getAgent('a2')!;
+    let runs = 0;
+    provider.exec = async (_ref, argv) => {
+      if (argv[0] === 'sessions') { runs++; return { code: 0, stdout: JSON.stringify({ ok: true, compacted: true, result: { tokensBefore: 90_000, tokensAfter: 20_000 } }), stderr: '' }; }
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    const meta = { by: 'owner' as const, via: 'app' as const };
+    const out = await Promise.allSettled([
+      compactAgent({ store, provider }, agent, { mode: 'lines', meta }),
+      compactAgent({ store, provider }, agent, { mode: 'lines', meta }),
+    ]);
+    expect(out.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
+    expect(String((out.find((o) => o.status === 'rejected') as PromiseRejectedResult).reason)).toMatch(/already running/);
+    expect(runs).toBe(1);
+    // Let go afterwards: the next one runs.
+    await compactAgent({ store, provider }, agent, { mode: 'lines', meta });
+    expect(runs).toBe(2);
+  });
 });
 
 // ---------------------------------------------------------------------------

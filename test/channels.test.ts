@@ -282,6 +282,36 @@ describe('a recycled pool bot does not keep the last agent\'s identity', () => {
     expect(Date.parse(parked.rename_after)).toBeGreaterThan(Date.now()); // deferred, not now
   });
 
+  it('a lease taken during the farewell keeps its name: the idle name is parked only on a free bot (2026-10-09)', async () => {
+    let inFarewell!: () => void;
+    let letGo!: () => void;
+    const entered = new Promise<void>((r) => { inFarewell = r; });
+    const gate = new Promise<void>((r) => { letGo = r; });
+    let farewellSeen = false;
+    const fetchImpl = (async (url: any) => {
+      // Only the farewell waits (the new lease's own notice to the same chat must not).
+      if (String(url).endsWith('/sendMessage') && !farewellSeen) { farewellSeen = true; inFarewell(); await gate; }
+      return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    const db = new Database(':memory:');
+    const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl });
+    await pool.addToPool('recycled', 'tok');
+    await pool.provision({ agentId: 'a1', agentName: 'Test Agent', slug: 'test' });
+    db.prepare(`CREATE TABLE IF NOT EXISTS memberships (id TEXT, agent_id TEXT, user_id TEXT, role TEXT, channel_user_id TEXT, status TEXT)`).run();
+    db.prepare(`INSERT INTO memberships VALUES ('m1','a1','u1','user','555','active')`).run();
+
+    const releasing = pool.release('recycled');
+    await entered;
+    // The lease is already cleared: another agent takes the bot meanwhile.
+    await pool.provision({ agentId: 'a2', agentName: 'Second Agent', slug: 'second' });
+    letGo();
+    await releasing;
+
+    const row = db.prepare(`SELECT leased_to, desired_name FROM telegram_pool WHERE username='recycled'`).get() as any;
+    expect(row.leased_to).toBe('a2');
+    expect(row.desired_name).not.toBe(TelegramPoolProvisioner.IDLE_NAME);
+  });
+
   it('warns prior chatters when the bot comes back as a different agent — even after the old rows are scrubbed', async () => {
     const { calls, fetchImpl } = recorder();
     const db = new Database(':memory:');
