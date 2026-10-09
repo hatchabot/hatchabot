@@ -555,6 +555,41 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.157.0`
 - **Code:** `src/orchestrator/accessOverview.ts` — `accessProbeScript`
 
+### After a failed move to another Hatchabot, the agent runs on both servers (two copies answer the same bot)
+- **Check:** the source's move said "The transfer to … failed (it answered 504 …). Your agent is unchanged.", yet the other server shows the agent RUNNING; the source runs a version older than v2.158.1.
+- **Cause:** the source read the destination's empty agent list as "the import rolled back" — but the import makes its agent row only after looking at the image, so it was still on its way to RUNNING.
+- **Fix:** upgrade both servers; stop one copy now (keep the one on the server you moved to).
+- **Fixed in:** `v2.158.1`
+- **Code:** `src/orchestrator/migrate.ts` — `destinationHasAgent`, `receiveMove`, `moveState`
+
+### Importing a downloaded copy says "This copy was saved by OpenClaw 2026.7…; this machine would run it on 2026.9…, which cannot read it"
+- **Check:** the copy's OpenClaw version is older than 2026.8 and this machine's image is 2026.8 or newer (the message names both).
+- **Cause:** the import's version check was inverted: it refused the normal upgrade and let a newer copy onto an older image.
+- **Fix:** upgrade Hatchabot and import again.
+- **Fixed in:** `v2.158.1`
+- **Code:** `src/orchestrator/transfer.ts` — `importAgentInner`
+
+### An app's scheduled tasks are missing after an interrupted app install ("Put its scheduled tasks back")
+- **Check:** the agent's app operation waits for you with this choice and names the missing jobs; `openclaw cron list` in the agent's console has no `<app>-…` jobs for the app on record.
+- **Cause:** installing an app over another takes the old app's tasks off first; a restart before the switch puts them back, and re-adding them failed (the gateway refused the job, or the list could not be read). Before v2.158.1 this was reported as "nothing changed".
+- **Fix:** once the agent's gateway is healthy, choose **Put its scheduled tasks back**; it stays held until every task is confirmed present.
+- **Fixed in:** `v2.158.1`
+- **Code:** `src/orchestrator/appOperations.ts` — `resumeAppOperation`, `putTasksBack`, `tasksBackAgain`
+
+### An agent still holds a Google account after its connection was deleted
+- **Check:** the agent's Sharing → Access (or `gog auth list --json` in the agent) still lists the deleted connection's email, but the connection is gone from Connections and the agent has no pending removal for it; usually the agent was rebuilt, started or woken around the delete, and the same Google account is connected under another person's account (so the grant was not revoked).
+- **Cause:** the delete took the account off each agent but left the agent attached until the end; a sync in that gap imported it again after its removal record was cleared.
+- **Fix:** upgrade; then remove the account inside the agent (`gog auth remove --force -- <email>`) or attach and delete again.
+- **Fixed in:** `v2.158.1`
+- **Code:** `src/orchestrator/googleConnections.ts` — `materializeConnection`
+
+### A removed member's "still lets them in" warning disappeared after Verify now, or Verify now says "people on telegram (pairing store: …)" was skipped
+- **Check:** Sharing → Access → Verify now; from v2.158.1 the skipped list names the unread source, e.g. `pairing store: EACCES`, `pairing store: ERR_SQLITE_ERROR`, `allowFrom file: not valid JSON`.
+- **Cause:** a source OpenClaw uses to admit chat users (`~/.openclaw/openclaw.json`, `credentials/*-allowFrom.json`, `state/openclaw.sqlite`) could not be read inside the agent — permissions, a node without `node:sqlite`, a schema change. Older releases took that to mean nobody was admitted.
+- **Fix:** upgrade so the warning is kept; then fix the named source (file permissions, or rebuild the agent on a current image) and Verify again — the person is shown as gone only after a complete read.
+- **Fixed in:** `v2.158.1`
+- **Code:** `src/orchestrator/accessOverview.ts` — `accessProbeScript`, `verifyAgentAccess`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")
@@ -905,6 +940,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** wait for it; a lock left by a killed drill is taken over by the next one.
 - **Fixed in:** `v2.157.0`
 - **Code:** `scripts/restore-drill.sh` — `take_lock`
+
+### Restore from a backup: "Its runtime could not be confirmed stopped … nothing was changed"
+- **Check:** the agent's operation says the restore was rolled back with this message; `docker inspect <agent container>` hangs or errors, or its runner is asleep or off.
+- **Cause:** a restore replaces the whole volume, so Hatchabot first stops the runtime and confirms it is down; it refuses when the machine doesn't answer or the container is still running after the stop.
+- **Fix:** wake the runner or bring Docker back, then restore again; for a held restore, choose Finish the restore or Put back the copy from before again.
+- **Fixed in:** `v2.158.1`
+- **Code:** `src/orchestrator/backups.ts` — `confirmStopped`, `recoverBackupRestore`
 
 ## Usage, costs and budgets
 

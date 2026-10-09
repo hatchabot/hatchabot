@@ -2,6 +2,20 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.158.1] — 2026-10-09
+
+GitHub issues #18–#24, from audits of v2.153.1 and v2.158.0.
+
+### Fixed
+- **Moving an agent to another Hatchabot: when the destination's answer is lost** (a dropped connection, a proxy's 504), Hatchabot asks the destination about that exact move, which it records the moment the request arrives (`GET /v1/moves/:id`). It no longer restarts your agent here because the agent wasn't in the other server's list yet — that could leave two copies answering the same bot (#19).
+- A destination older than v2.158.1 can only show its agent list: when the agent isn't in it yet, the copy here stays stopped and the move waits — Hatchabot asks again every 10 minutes, or you say on the agent's page whether it arrived.
+- **Importing a downloaded copy: the OpenClaw version check had both directions the wrong way round** (#20). A copy saved by OpenClaw 2026.7 imports onto 2026.8+ (the normal upgrade); a copy saved by 2026.8+ is refused on a 2026.7 machine with "Update this machine's image first".
+- **Restoring an agent from a backup stops it and confirms it is stopped first, whatever its state** (#21). An agent marked failed whose container was still running had its memory replaced while it ran. If it can't be confirmed stopped (its machine asleep or unreachable), the restore is refused and nothing is changed; **Finish the restore** and **Put back the copy from before** check the same.
+- **If a restart interrupts installing an app over another and the old app's scheduled tasks can't be put back, the change waits for you** with **Put its scheduled tasks back**, naming the missing tasks (#22). Before, it said "nothing changed" while the old app's tasks were gone.
+- **Deleting a Google connection can no longer be undone by an agent starting, waking or rebuilding while the delete finishes** (#18). Each agent is detached as its access is removed, and an account is only ever imported into an agent it is attached to. Before, the agent could keep the account although the delete said it was removed — and when another account held the same Google login, nothing revoked it.
+- **Access check (Sharing → Access): an unreadable list of admitted chat users is no longer taken to mean nobody is admitted** (#23). A removed member who is still let in stays flagged until a complete read shows them gone; the unread source (the pairing store, an allowFrom file or the agent's settings) is named in the skipped list. A folder or key that can't be looked at stays as last found instead of being marked gone. A malformed settings file is reported without quoting it (it holds bot tokens).
+- Tests: the public listener's connection-limit test no longer misses connections the server had already closed, which made it fail at random under load (#24).
+
 ## [2.158.0] — 2026-10-09
 
 ### Added — one recommendations view
