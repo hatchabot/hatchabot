@@ -218,8 +218,18 @@ const SCENARIOS = String.raw`(() => {
         ok("the agent's draft opens, marked as the agent's", $('reportRTitle').value === 'Telegram replies stop' && $('reportReviewNote').textContent.includes('Your Hatchabot agent wrote this'));
         ok('the link is gone from the address bar', !location.hash.includes('report='));
         ok('a known problem is flagged before anything is filed', !$('reportKnown').hidden && $('reportKnown').textContent.includes('Telegram replies stop after a long turn') && $('reportKnown').textContent.includes('v9.9.0'));
+        // Discard asks first; declined, nothing is deleted (review, 2026-10-09).
+        const dels = () => calls('DELETE', /^\/v1\/problem-reports\//).length, d0 = dels();
+        window.__confirmAnswer = false;
+        byText('#reportReview button', 'Discard').click(); await sleep(100);
+        ok('it asked: ' + window.__confirms.at(-1), (window.__confirms.at(-1) || '').includes('Discard the draft'));
+        eq('declined: kept', dels() - d0, 0);
+        ok('and still shown', !$('reportReview').hidden);
+        window.__confirmAnswer = true;
+        byText('#reportReview button', 'Discard').click();
+        await until(() => dels() - d0 === 1);
       } finally {
-        window.open = realOpen; window.__answer = {};
+        window.open = realOpen; window.__answer = {}; window.__confirmAnswer = true;
         delete window.__override['/v1/problem-reports']; delete window.__override['/v1/problem-reports/' + draftId];
         if (reportDlg.open) reportDlg.close();
       }
@@ -434,11 +444,52 @@ const SCENARIOS = String.raw`(() => {
       editCronJob('c1');
       eq('the form carries the task', [document.getElementById('cronName').value, document.getElementById('cronExpr').value, document.getElementById('cronMsg').value], ['Morning brief', '0 8 * * *', 'Good morning']);
       ok('the button says it replaces', document.getElementById('cronAddBtn').textContent.includes('Save changes'));
+      const cancelBtn = document.querySelector('#cronEditNote button');
+      ok('"cancel" is a real button a keyboard reaches (review, 2026-10-09)', !!cancelBtn && cancelBtn.type === 'button' && cancelBtn.textContent === 'cancel' && !document.querySelector('#cronEditNote a'));
       document.getElementById('cronName').value = 'Morning brief 2';
       document.getElementById('cronAddBtn').click();
       const posted = await until(() => calls('POST', /\/v1\/agents\/a1\/crons$/)[0]);
       ok('the edited task is sent', posted.body.name === 'Morning brief 2' && posted.body.cron === '0 8 * * *');
       v2Close(); window.__crons = [];
+    },
+    keyboardLinks: async () => {
+      // The classic cards' link-looking actions are buttons: Tab reaches them, Enter presses them (review, 2026-10-09).
+      const a = v2Find('a1');
+      const card = document.createElement('div');
+      card.innerHTML = agentCard({ ...a, persona: 'Helps {{child_name}} with homework' });
+      const fill = [...card.querySelectorAll('button')].find((b) => b.textContent.includes('fill its Setup values'));
+      ok('"fill its Setup values" is a button', !!fill && fill.type === 'button' && ![...card.querySelectorAll('a')].some((x) => x.textContent.includes('Setup values')));
+      const prevMembers = members[a.id];
+      members[a.id] = [{ role: 'owner', userId: 'u-owner' }, { role: 'member', userId: 'u-member-1', displayName: 'Sam' }];
+      try {
+        const box = document.createElement('div');
+        box.innerHTML = agentNotices(a);
+        const x = box.querySelector('.kick');
+        ok('the member\'s remove × is a button', !!x && x.tagName === 'BUTTON' && x.type === 'button' && x.getAttribute('aria-label') === 'Remove this member');
+      } finally { if (prevMembers === undefined) delete members[a.id]; else members[a.id] = prevMembers; }
+    },
+    untrustedText: async () => {
+      // Text and links from the server or an address are handled safely (review, 2026-10-09).
+      // A long note is cut before escaping: cut after, an entity broke in half and showed as "&am".
+      window.__override['/v1/agents/a1/events'] = { events: [{ at: new Date().toISOString(), label: 'Made-up step', note: '<'.repeat(300) }] };
+      try {
+        await openSetupLog('a1', 'Test Agent');
+        const note = document.querySelector('#setupLogBody .sub:last-child').textContent;
+        ok('the note is 200 characters of what was sent: ' + note.slice(0, 30), note === '— ' + '<'.repeat(200));
+      } finally { delete window.__override['/v1/agents/a1/events']; setupLogDlg.close(); setupLogAgentId = null; }
+      // A stored link that is not https is not clickable.
+      const a = v2Find('a1');
+      const box = document.createElement('div');
+      box.innerHTML = agentCard({ ...a, state: 'RUNNING', deepLink: 'javascript:alert(1)' });
+      ok('no javascript: link on the card', ![...box.querySelectorAll('a')].some((x) => /^javascript:/i.test(x.getAttribute('href') || '')));
+      eq('https passes, the rest does not', [httpsUrl('https://t.me/x'), httpsUrl('javascript:alert(1)'), httpsUrl('data:text/html,x'), httpsUrl(undefined)], ['https://t.me/x', '', '', '']);
+      // A malformed console address is no agent, not an exception.
+      const prevHash = location.hash;
+      history.replaceState(null, '', location.pathname + location.search + '#console=%E0');
+      let threw = null;
+      try { consoleFromHash(); } catch (e) { threw = e; }
+      history.replaceState(null, '', location.pathname + location.search + prevHash);
+      ok('#console=%E0 does not throw: ' + threw, !threw);
     },
     rebuildAsks: async () => {
       const before = calls('POST', /\/rebuild$/).length;
@@ -948,7 +999,10 @@ const SCENARIOS = String.raw`(() => {
       const base = list.find((a) => a.id === 'a1');
       window.__override['/v1/agents'] = [...list,
         { ...base, id: 'm1', name: 'Club Bot', role: 'member', ownerId: 'o2', botUsername: undefined, deepLink: undefined, otherChannels: [{ kind: 'discord', deepLink: 'https://discord.com/users/1' }] },
-        { ...base, id: 'm2', name: 'Nap Bot', role: 'member', ownerId: 'o2', state: 'STOPPED', hibernatedAt: new Date().toISOString() }];
+        { ...base, id: 'm2', name: 'Nap Bot', role: 'member', ownerId: 'o2', state: 'STOPPED', hibernatedAt: new Date().toISOString() },
+        { ...base, id: 'm3', name: 'Off Bot', role: 'member', ownerId: 'o2', state: 'STOPPED', hibernatedAt: undefined },
+        { ...base, id: 'm4', name: 'Broke Bot', role: 'member', ownerId: 'o2', state: 'FAILED' },
+        { ...base, id: 'm5', name: 'Old Bot', role: 'member', ownerId: 'o2', state: 'ARCHIVED' }];
       await refresh(false);
       openV2Agent('m1');
       let t = document.getElementById('v2Pane').textContent;
@@ -958,6 +1012,13 @@ const SCENARIOS = String.raw`(() => {
       t = document.getElementById('v2Pane').textContent;
       ok('asleep, with its link: ' + t.replace(/\s+/g, ' ').slice(0, 160), t.includes('Open in Telegram') && t.includes('a message wakes it') && !t.includes('Not running'));
       v2Close();
+      // Wake, Start, Retry, Inspect and Restore are the owner's: the server answers a member 404 (review, 2026-10-09).
+      for (const id of ['m2', 'm3', 'm4', 'm5']) {
+        openV2Agent(id);
+        const bar = [...document.querySelectorAll('#v2AgentBar button')].map((b) => b.textContent.trim());
+        ok(id + ': no lifecycle buttons for a member: ' + bar.join(' | '), !bar.some((l) => /Wake|Start|Retry|Inspect|Restore/.test(l)));
+        v2Close();
+      }
       delete window.__override['/v1/agents'];
       await refresh(false);
     },
@@ -994,6 +1055,69 @@ const SCENARIOS = String.raw`(() => {
       await until(() => calls('GET', /^\/v1\/agents$/).length > n);
       await until(() => pollPaused === false);
       delete document.hidden;
+    },
+    hiddenTabNotRead: async () => {
+      // The 20-second "you have read it" tick skips a hidden browser tab (review, 2026-10-09).
+      const seen = () => calls('POST', /\/v1\/agents\/a1\/seen$/).length;
+      const prevId = consoleAgentId;
+      try {
+        consoleAgentId = 'a1'; consoleDlg.showModal();
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+        const n = seen();
+        consoleSeenTick();
+        eq('hidden: not marked read', seen() - n, 0);
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+        consoleSeenTick();
+        eq('shown: marked read', seen() - n, 1);
+      } finally {
+        delete document.hidden;
+        if (consoleDlg.open) consoleDlg.close();
+        consoleAgentId = prevId;
+      }
+    },
+    staleRefreshDropped: async () => {
+      // Two refreshes overlap and the older answer lands last: it must not put a deleted agent back (review, 2026-10-09).
+      const list = await (await fetch('/v1/agents')).json();
+      const prev = window.fetch;
+      let first = true;
+      window.fetch = async (input, init) => {
+        const url = String(typeof input === 'string' ? input : input.url);
+        if (url.split('?')[0] === '/v1/agents' && (!init || !init.method || init.method === 'GET') && first) {
+          first = false;
+          await sleep(400);
+          return new Response(JSON.stringify([...list, { ...list[1], id: 'gone1', name: 'Deleted Agent' }]), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        return prev(input, init);
+      };
+      try {
+        const older = refresh(false);
+        await sleep(20);
+        await refresh(false);
+        await older;
+        ok('the older answer was dropped', !v2Find('gone1') && !tile('Deleted Agent'));
+      } finally { window.fetch = prev; await refresh(false); }
+    },
+    inspectLateAnswer: async () => {
+      // A file or transcript that lands after the dialog moved to another agent is dropped, as openInspect does (review, 2026-10-09).
+      const prev = window.fetch;
+      let release; const held = new Promise((r) => { release = r; });
+      const J = (b) => new Response(JSON.stringify(b), { status: 200, headers: { 'content-type': 'application/json' } });
+      window.fetch = async (input, init) => {
+        const path = String(typeof input === 'string' ? input : input.url).split('?')[0];
+        if (path === '/v1/agents/a1/inspect/file/NOTES.md') { await held; return J({ content: 'from the first agent' }); }
+        if (path === '/v1/agents/a1/inspect/transcript') { await held; return J({ turns: [{ role: 'user', text: 'a first-agent turn' }], totalTurns: 1 }); }
+        if (/^\/v1\/agents\/a[12]\/inspect$/.test(path)) return J({ files: [], transcriptTurns: 0 });
+        return prev(input, init);
+      };
+      try {
+        await openInspect('a1', 'First');
+        const file = loadInspectFile('NOTES.md');
+        const chat = loadInspectChat();
+        await openInspect('a2', 'Second');
+        release(); await file; await chat;
+        ok('the first agent\'s file is not shown for the second: ' + document.getElementById('inspFileBody').textContent, !document.getElementById('inspFileBody').textContent.includes('first agent'));
+        ok('nor its conversation', !document.getElementById('inspChatBody').textContent.includes('first-agent turn'));
+      } finally { window.fetch = prev; release(); if (inspectDlg.open) inspectDlg.close(); }
     },
     pollFetchesLess: async () => {
       // No /members fan-out on v2, no /pairing for web-only agents, no hidden Activity card, a light backups read (night review #24/#25/#47).
@@ -1091,7 +1215,7 @@ const SCENARIOS = String.raw`(() => {
         const sent = await until(() => calls('POST', /\/v1\/agents\/w1\/chat$/)[0]);
         eq('Enter sent it', sent.body, { text: 'What should we read?' });
         await until(() => log.textContent.includes('Try Middlemarch.'));
-        ok('the thinking line is gone', !document.getElementById('wchatWait'));
+        ok('the thinking line is gone', !log.querySelector('.wchat-msg.wait'));
         box.value = 'And after that?';
         document.getElementById('wchatSend').click();
         await until(() => document.getElementById('wchatErr').textContent.includes('60 messages this hour'));
@@ -1103,6 +1227,30 @@ const SCENARIOS = String.raw`(() => {
         eq('the undelivered message is back in the box', box.value, 'Anything by Eliot?');
         ok('and not in the conversation as if sent', !log.textContent.includes('Anything by Eliot?'));
         ok('what was answered before stays', log.textContent.includes('Try Middlemarch.'));
+        // Another agent while one is thinking: Send works there, the late reply is not dropped silently (review, 2026-10-09).
+        window.__answer = {};
+        let release; const held = new Promise((r) => { release = r; });
+        const prevFetch = window.fetch;
+        window.fetch = async (input, init) => {
+          const url = String(typeof input === 'string' ? input : input.url);
+          if (url === '/v1/agents/w1/chat' && init && init.method === 'POST') { await held; return new Response(JSON.stringify({ reply: 'A late answer.' }), { status: 200, headers: { 'content-type': 'application/json' } }); }
+          return prevFetch(input, init);
+        };
+        try {
+          box.value = 'Slow one';
+          document.getElementById('wchatSend').click();
+          await until(() => log.querySelector('.wchat-msg.wait'));
+          window.__override['/v1/agents/a1/chat'] = { messages: [] };
+          await openWebChatPanel('a1');
+          ok('Send works for the other agent', !document.getElementById('wchatSend').disabled);
+          window.__answer = { 'POST /v1/agents/a1/chat': [{ status: 200, body: { reply: 'Hello from the other one.' } }] };
+          box.value = 'Hi other';
+          document.getElementById('wchatSend').click();
+          await until(() => log.textContent.includes('Hello from the other one.'));
+          release();
+          await until(() => document.getElementById('toast').textContent.includes('Book Club answered'));
+          ok('the open chat keeps its own lines', !log.textContent.includes('A late answer.') && !log.querySelector('.wchat-msg.wait'));
+        } finally { window.fetch = prevFetch; release(); delete window.__override['/v1/agents/a1/chat']; }
       } finally {
         window.__answer = {};
         if (webChatDlg.open) webChatDlg.close();
@@ -1410,6 +1558,12 @@ const SCENARIOS = String.raw`(() => {
         ok('a knock on it offers "That\'s me", not "Let them in"', !!byText('#v2Chans button', "That's me") && !byText('#v2Chans button', 'Let them in'));
         ok('no "Who can reach it" for it', !card.textContent.includes('Who can reach it'));
         v2Close();
+        // Nor on the home screen's join list or the agent's notices: the server answers 400 (review, 2026-10-09).
+        renderV2Joins();
+        const joins = document.getElementById('v2JoinList');
+        ok('the join list has the knock: ' + joins.textContent.replace(/\s+/g, ' ').slice(0, 160), joins.textContent.includes('Stranger'));
+        ok('but no "Let them in" for the manager', !byText('#v2JoinList button', 'Let them in'));
+        ok('nor in its notices', !agentNotices(v2Find(hb.id)).includes('Let them in'));
       } finally {
         window.__promptAnswer = null; window.__answer = {}; window.__confirmAnswer = true;
         if (inviteDlg.open) inviteDlg.close();
@@ -1440,20 +1594,43 @@ const SCENARIOS = String.raw`(() => {
         openV2Agent('a1', 'sharing');
         const btn = await until(() => byText('#v2Pane button', 'Share a copy'));
         ok('the button says what the copy is: ' + btn.title, /instructions and scheduled tasks, without its bot, members or conversations\. Read it before you send it/.test(btn.title) && !/safe to email/i.test(btn.title));
+        // Esc on the MEMORY.md question stops it: confirm() made Esc mean "without MEMORY.md" (review, 2026-10-09).
+        btn.click();
+        await until(() => choiceDlg.open);
+        ok('asked about MEMORY.md in plain words: ' + document.getElementById('choiceText').textContent, document.getElementById('choiceText').textContent.includes('MEMORY.md (its summary notes) may contain personal facts'));
+        choiceDlg.close(); await sleep(100);
+        eq('Esc: nothing exported', asked.length, 0);
         window.__confirmAnswer = false; // leave MEMORY.md out, then don't save
         btn.click();
+        await until(() => choiceDlg.open);
+        byText('#choiceBtns button', 'Instructions and tasks only').click();
         await until(() => document.getElementById('toast').textContent.includes('Not saved'));
-        const said = window.__confirms.slice(-2);
-        ok('asked about MEMORY.md in plain words: ' + said[0], said[0].includes('also include MEMORY.md (its summary notes; may contain personal facts)'));
-        ok('then said what the copy mentions: ' + said[1], said[1].includes('This copy mentions 2 email addresses and 1 phone number — read it before you send it.'));
-        ok('and where', said[1].includes('AGENTS.md, line 3: ann@example.com') && said[1].includes('Scheduled task “Digest”, line 1: 416-555-0123'));
+        const said = window.__confirms.slice(-1);
+        ok('then said what the copy mentions: ' + said[0], said[0].includes('This copy mentions 2 email addresses and 1 phone number — read it before you send it.'));
+        ok('and where', said[0].includes('AGENTS.md, line 3: ann@example.com') && said[0].includes('Scheduled task “Digest”, line 1: 416-555-0123'));
         ok('without MEMORY.md: ' + asked[0], asked[0].endsWith('?excludeMemory=1'));
         window.__confirmAnswer = true;
         btn.click();
+        await until(() => choiceDlg.open);
+        byText('#choiceBtns button', 'Also MEMORY.md').click();
         await until(() => document.getElementById('toast').textContent.includes('Saved homework-helper.template.hatchabot'));
         ok('with MEMORY.md this time', asked.length === 2 && !asked[1].includes('excludeMemory'));
+        // Recover context: Cancel and Esc start nothing; a choice says which (review, 2026-10-09).
+        const rec = () => calls('POST', /\/recover-context$/).length, r0 = rec();
+        let p = recoverContext('a1', 'Test Agent');
+        await until(() => choiceDlg.open);
+        choiceDlg.close(); await p;
+        p = recoverContext('a1', 'Test Agent');
+        await until(() => choiceDlg.open);
+        byText('#choiceBtns button', 'Cancel').click(); await p;
+        eq('Esc and Cancel: not started', rec() - r0, 0);
+        p = recoverContext('a1', 'Test Agent');
+        await until(() => choiceDlg.open);
+        byText('#choiceBtns button', 'Also the current one').click(); await p;
+        eq('started, with the current conversation', calls('POST', /\/recover-context$/).at(-1).body, { includeLive: true });
       } finally {
         window.fetch = prev; window.__confirmAnswer = true;
+        if (choiceDlg.open) choiceDlg.close();
         try { v2Close(); } catch {}
       }
     },
@@ -1854,6 +2031,57 @@ const SCENARIOS = String.raw`(() => {
         const third = await api('/v1/cli-tokens', { method: 'POST', body: {} }).then(() => 'went through', (e) => e.message);
         ok('told, not prompted: ' + third, third.includes('no second factor') && !sfDlg.open);
       } finally {
+        delete window.__override['/v1/second-factor'];
+        window.__answer = {};
+        if (sfDlg.open) sfDlg.close();
+      }
+    },
+    rawFetchSecondFactor: async () => {
+      // Files up and down go by fetch(), not api(): they ask for the second factor too, then go again (review, 2026-10-09).
+      window.__override['/v1/second-factor'] = { factors: [{ id: 'sf-1', kind: 'totp' }], backupCodes: 3, need: 'yes', methods: ['totp', 'backup'], passkeyHere: false };
+      const STEP = { status: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
+      const pub = appConfig.publicAddress;
+      try {
+        // An upload: asked, given, sent again.
+        window.__answer = { 'PUT /v1/agents/a1/fs/file': [STEP, { status: 200, body: { ok: true } }] };
+        const before = calls('PUT', /\/fs\/file$/).length;
+        const up = v2UploadFiles('a1', '', [new File(['made-up'], 'notes.txt')]);
+        await until(() => sfDlg.open);
+        sfDone();
+        await up;
+        eq('the upload was sent again after the prompt', calls('PUT', /\/fs\/file$/).length - before, 2);
+        // The agent's download: asked; Cancel stops it with a plain reason.
+        window.__confirmAnswer = true;
+        window.__answer = { 'GET /v1/agents/a1/backup': [STEP] };
+        const dl = downloadAgent('a1', 'Test Agent');
+        await until(() => sfDlg.open);
+        byText('#sfDlg button', 'Cancel').click();
+        await dl;
+        ok('cancelled, said: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('The second factor was not given'));
+        // Share (saveFromServer) and an import ask too.
+        window.__answer = { 'GET /v1/agents/a1/export': [STEP] };
+        const share = saveFromServer('/v1/agents/a1/export', 'agent-template.json');
+        await until(() => sfDlg.open);
+        byText('#sfDlg button', 'Cancel').click();
+        await share;
+        window.__answer = { 'POST /v1/agents/import': [STEP] };
+        const imp = importAgentFile(new File(['not gzip'], 'x.hatchabot'));
+        await until(() => sfDlg.open);
+        byText('#sfDlg button', 'Cancel').click();
+        await imp;
+        // A folder's .tar.gz link at the public address is fetched (so it can ask); elsewhere it is a plain link.
+        const a = Object.assign(document.createElement('a'), { href: '/v1/agents/a1/fs/archive?path=' });
+        let prevented = false; const ev = { preventDefault: () => { prevented = true; } };
+        appConfig.publicAddress = false;
+        ok('a plain link at the private address', sfLink(ev, a, 'f.tar.gz') === true && !prevented);
+        appConfig.publicAddress = true;
+        window.__answer = { 'GET /v1/agents/a1/fs/archive': [STEP] };
+        ok('fetched at the public address', sfLink(ev, a, 'f.tar.gz') === false && prevented);
+        await until(() => sfDlg.open);
+        byText('#sfDlg button', 'Cancel').click();
+        ok('the archive link was asked for once', calls('GET', /\/fs\/archive$/).length >= 1);
+      } finally {
+        appConfig.publicAddress = pub;
         delete window.__override['/v1/second-factor'];
         window.__answer = {};
         if (sfDlg.open) sfDlg.close();
@@ -2498,7 +2726,8 @@ const SCENARIOS = String.raw`(() => {
         ok('no Roll back without an earlier release', !byText('#v2AppRow button', 'Roll back'));
         // A failing update: the output shows, the button comes back, nothing changed.
         window.__answer = window.__answer || {};
-        window.__answer['POST /v1/agents/a1/app/update'] = [{ status: 400, body: { error: 'Its tests failed, so f00dfeed1234 was not switched on:\nFAILED (failures=1)', test: { ok: false, output: 'FAILED (failures=1)' } } }];
+        // The output only in data.test.output, not the message: shown from e.data (never set until 2026-10-09).
+        window.__answer['POST /v1/agents/a1/app/update'] = [{ status: 400, body: { error: 'Its tests failed, so f00dfeed1234 was not switched on.', test: { ok: false, output: 'FAILED (failures=1)' } } }];
         document.getElementById('v2AppUpdateBtn').click();
         await until(() => !document.getElementById('v2AppOut').hidden);
         ok('the test output is on the page', document.getElementById('v2AppOut').textContent.includes('FAILED (failures=1)'));
@@ -2574,8 +2803,24 @@ const SCENARIOS = String.raw`(() => {
         const pend = window.__calls.slice(mark).find((c) => c.path === '/v1/agents/newapp1/app/pending');
         eq('with the source, the values and the confirmation', pend.body, { source: '~/demoapp', values: { mailbox: 'demo@example.org', mode: 'shadow' }, allowShared: true });
         ok('and the dialog closed', !appDlg.open);
+        // A later step fails: the half-made agent is removed, so Create again
+        // does not meet "name taken"; the tests' output shows (review, 2026-10-09).
+        window.__answer['POST /v1/apps/inspect'] = [{ status: 200, body: { sha: 'c0ffee0123456789c0ffee0123456789c0ffee01', manifest: { ...MAN, model: undefined },
+          ask: [{ key: 'mailbox', label: 'its address', type: 'email', required: true }], connections: MAN.connections } }];
+        window.__answer['POST /v1/agents'] = [{ status: 200, body: { id: 'newapp2', name: 'Demo App', state: 'PROVISIONING' } }];
+        window.__answer['POST /v1/agents/newapp2/app/pending'] = [{ status: 400, body: { error: 'Its tests failed.', test: { ok: false, output: 'made-up test output: 1 failed' } } }];
+        openAppDlg('create');
+        document.getElementById('appSource').value = '~/demoapp';
+        await appRead();
+        document.getElementById('appConn').value = 'c2'; appConnPicked();
+        const mark2 = window.__calls.length;
+        await appGo();
+        ok('the failure is said: ' + document.getElementById('appErr').textContent, document.getElementById('appErr').textContent.includes('Its tests failed'));
+        ok('with the tests\' output', !document.getElementById('appOut').hidden && document.getElementById('appOut').textContent.includes('made-up test output'));
+        ok('the half-made agent is deleted', window.__calls.slice(mark2).some((c) => c.method === 'DELETE' && c.path === '/v1/agents/newapp2'));
+        ok('the dialog stays open to try again', appDlg.open);
       } finally {
-        for (const k of ['POST /v1/apps/inspect', 'POST /v1/agents', 'POST /v1/agents/newapp1/model', 'POST /v1/agents/newapp1/app/pending']) if (window.__answer) delete window.__answer[k];
+        for (const k of ['POST /v1/apps/inspect', 'POST /v1/agents', 'POST /v1/agents/newapp1/model', 'POST /v1/agents/newapp1/app/pending', 'POST /v1/agents/newapp2/app/pending']) if (window.__answer) delete window.__answer[k];
         delete window.__override['/v1/connections'];
         if (appDlg.open) appDlg.close();
         if (createDlg.open) createDlg.close();

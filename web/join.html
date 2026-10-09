@@ -143,7 +143,7 @@ async function join(idToken) {
         <li>Open <b>${esc(data.agentName)}</b> in ${label} below and send it a direct message — that links you to the agent.</li>
         <li>Give it a few seconds, then just chat.</li>
       </ol>
-      ${data.deepLink ? `<a class="btn" href="${esc(data.deepLink)}" target="_blank" rel="noopener">Open in ${label}</a>`
+      ${/^https:\/\//i.test(data.deepLink || '') /* https only: never a javascript: link (review, 2026-10-09) */ ? `<a class="btn" href="${esc(data.deepLink)}" target="_blank" rel="noopener">Open in ${label}</a>`
         : `<div class="notice">The agent isn't running right now — ask the owner to start it, then message it.</div>`}`;
       return;
     }
