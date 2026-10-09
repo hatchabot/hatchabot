@@ -44,6 +44,34 @@ export function startReconcileLoop(
   return timer;
 }
 
+/** Findings a sweep repeats every two minutes while they last. */
+const REPEATING = new Set(['reconcile.unhealthy', 'reconcile.host_unreachable', 'reconcile.error']);
+
+/**
+ * Reconcile's log: the journal, and — for a finding about one agent — that
+ * agent's timeline (Activity, the Setup log). It was journal-only, so "found
+ * stopped" or "its container is gone" never reached the page. A finding the
+ * sweep repeats (a wedged gateway, a runner asleep) is written once while it
+ * lasts, not 30 times an hour over the agent's history (the timeline keeps
+ * 200 lines).
+ */
+export function reconcileEventLog(
+  store: Store,
+  journal: (event: string, detail: Record<string, unknown>) => void,
+): (event: string, detail: Record<string, unknown>) => void {
+  return (event, detail) => {
+    journal(event, detail);
+    const id = typeof detail.agentId === 'string' ? detail.agentId : undefined;
+    if (!id) return;
+    try {
+      if (REPEATING.has(event) && store.lastEventFor(id)?.event === event) return;
+      store.recordEvent(id, event, detail);
+    } catch {
+      /* a timeline write must never break the sweep */
+    }
+  };
+}
+
 /**
  * The providers by name, or a resolver per host. A runner's provider is built
  * from its stored Docker endpoint (resolveProvider), not registered by name —
@@ -71,6 +99,11 @@ export async function reconcileAgents(
     // An agent mid-provision/rebuild/import looks broken to docker by
     // definition. Judging it here is how a healthy import got marked FAILED.
     if (isBusy(agent.id)) continue;
+    // Nor one whose long operation is on disk and not over (operations.ts): an
+    // interrupted move or import is settled by resumeOperations on purpose,
+    // and a held one waits for its owner — judging it here (FAILED "Setup was
+    // interrupted — tap Retry") is how a half-imported agent got started.
+    if (store.activeOperationFor(agent.id)) continue;
     // ARCHIVED is a deliberate resting state: stopped on purpose, no bot, and
     // possibly no container at all if the box was pruned. Every rule below
     // would read that as damage and "mend" it into FAILED or RUNNING.
@@ -101,6 +134,7 @@ export async function reconcileAgents(
       if (
         !now ||
         isBusy(agent.id) ||
+        !!store.activeOperationFor(agent.id) ||
         now.state !== agent.state ||
         now.hostId !== agent.hostId ||
         now.runtimeRef !== agent.runtimeRef ||

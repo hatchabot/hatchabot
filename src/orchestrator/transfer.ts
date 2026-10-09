@@ -16,6 +16,7 @@ import {
   type ProvisionDeps,
 } from './provision.js';
 import { clearBusy, markBusy } from './busy.js';
+import { beginOperation, handleFor, rethrowIfCrash } from './operations.js';
 import { ENV_NAME_RE, reservedEnvProblem } from './envPolicy.js';
 import { buildRecipeOn, derivedByTag, recipeFor, recipeProblem, type ImageRecipe } from './imageRecipe.js';
 import { DERIVED_TAG_PREFIX } from './derivedImage.js';
@@ -414,6 +415,10 @@ export interface ImportOptions {
    * and the agent would poll a dead token behind a link to their bot.
    */
   verifyToken?: (token: string) => Promise<string>;
+  /** Who asked, for the operation's record (default: ownerId). */
+  requestedBy?: string;
+  /** Told the operation's id once the agent's row exists (the route returns it). */
+  onOperation?: (id: string) => void;
 }
 
 /**
@@ -620,11 +625,16 @@ async function importAgentInner(
   if (image.pin) store.setAgentImage(agent.id, image.pin);
   // From here the agent exists but is mid-build: reconcile must not judge it.
   markBusy(agent.id);
+  // On disk too: a restart before RUNNING undoes the whole import
+  // (resumeImport) — a half-imported volume must never start.
+  const op = beginOperation(store, 'import', agent.id, { slug: agent.slug, hostId: host.id, from: manifest.exportedAt }, { hostId: host.id, requestedBy: opts.requestedBy ?? opts.ownerId });
+  opts.onOperation?.(op.id);
 
-  const secretRef = `channel/${agent.id}/bot-token`;
+  const secretRef = importSecretRef(agent.id);
   const envSecretRefs: string[] = [];
   let runtimeRef: string | undefined;
   try {
+    op.step('row-made');
     // Memberships travel verbatim, except the owner seat belongs to whoever
     // imports — it's their installation now. Inside the try: a malformed row
     // must roll back with everything else, not strand a half-made agent.
@@ -660,6 +670,7 @@ async function importAgentInner(
         joinedAt: now,
       });
     }
+    op.step('members');
 
     if (manifest.channel) {
       if (opts.verifyToken) {
@@ -683,6 +694,7 @@ async function importAgentInner(
         createdAt: now,
       });
     }
+    op.step('channel');
 
     // Recreate the env vars BEFORE provisioning renders the runtime spec, so
     // the container boots with them (an agent without its env secrets is
@@ -703,6 +715,7 @@ async function importAgentInner(
       envSecretRefs.push(envRef);
       store.insertAgentEnv({ id: envId, agentId: agent.id, name: v.name, secretRef: envRef, createdAt: now });
     }
+    op.step('env');
 
     // Provision creates + seeds the volume; the snapshot then overwrites it
     // with the real state; a second provision re-applies THIS installation's
@@ -712,11 +725,15 @@ async function importAgentInner(
     const spec = await buildRuntimeSpec(deps, agent.id);
     ({ runtimeRef } = await provider.provision(spec));
     store.setAgentRuntimeRef(agent.id, runtimeRef);
+    op.step('created');
     await provider.importState(runtimeRef, stateBuf);
+    op.step('state-copied');
     const respec = await buildRuntimeSpec(deps, agent.id);
     await provider.provision(respec);
     recordApplied(store, agent.id);
+    op.step('configured');
     await provider.start(runtimeRef);
+    op.step('started');
     // First boot on an import can be slow (cold image on Docker Desktop's VM,
     // imported sessions to load) — give it 2 minutes, not the default 30s.
     await waitForHealthy(
@@ -734,48 +751,111 @@ async function importAgentInner(
     // imported conversation thread — the same guard rebuild uses (audit 2026-09-08).
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))), log);
     await reindexMemoryIfSwitched(deps, agent.id, runtimeRef, log);
+    op.step('settled');
     log('agent.imported', { agentId: agent.id, slug: agent.slug, from: manifest.exportedAt });
-    return store.setAgentState(agent.id, 'RUNNING');
+    const done = store.setAgentState(agent.id, 'RUNNING');
+    op.done('Imported.');
+    return done;
   } catch (err) {
+    rethrowIfCrash(err);
     // Roll back completely: a "Retry" on a half-imported agent would boot it
     // with a fresh seeded volume — an empty-headed impostor of the archive.
     // Leaving nothing behind keeps "import again" the one true retry path.
-    // Each step guarded: one rollback step failing (a store hiccup, a state
-    // moved out from under us) must not abandon the rest half-done.
-    // Each step guarded on its own so one failing does not skip the rest —
-    // above all the tombstone MUST land, or the half-made PROVISIONING row
-    // keeps the slug and bot accountId and refuses the "import again" retry.
-    const step = (fn: () => void) => {
-      try {
-        fn();
-      } catch (e) {
-        log('import.rollback_step_failed', { agentId: agent.id, error: String(e) });
-      }
-    };
-    // Its memory-search decision was never applied: dropped, as every other failed build does (2026-10-09).
-    forgetEmbedDecision(agent.id);
-    if (runtimeRef) await provider.destroy(runtimeRef, { purge: true }).catch(() => {});
-    await secrets.delete(secretRef).catch(() => {});
-    for (const ref of envSecretRefs) await secrets.delete(ref).catch(() => {});
-    step(() => store.deleteChannelForAgent(agent.id, 'all'));
-    step(() => store.deleteMemberships(agent.id));
-    // Env rows too — their secrets are already deleted above; a tombstone
-    // keeping references to swept secrets is the residue class the v0.90
-    // audit scrubbed.
-    step(() => store.scrubAgentResidue(agent.id));
-    step(() => {
-      store.setAgentState(agent.id, 'DELETING');
-      store.setAgentState(agent.id, 'DELETED');
-    });
+    await rollbackImport(deps, agent.id, runtimeRef, envSecretRefs, { mustDestroy: false });
     log('import.rolled_back', { agentId: agent.id, error: String(err) });
-    throw new TransferError(
+    const e = new TransferError(
       `Import failed and was rolled back — fix the cause and import again. (${String(
         err instanceof Error ? err.message : err,
       ).slice(0, 300)})`,
     );
+    op.rolledBack(e.userMessage);
+    throw e;
   } finally {
     // However this ends, the busy flag must not outlive it: a stuck flag makes
     // reconcile skip this agent forever.
     clearBusy(agent.id);
   }
+}
+
+/** Where an imported agent's bot token is kept. */
+function importSecretRef(agentId: string): string {
+  return `channel/${agentId}/bot-token`;
+}
+
+/**
+ * Undo a half-made import: its runtime and volume, its secrets, its channel
+ * (the bot), its members, then the DELETED tombstone. Each step guarded on its
+ * own so one failing does not skip the rest — above all the tombstone MUST
+ * land, or the half-made PROVISIONING row keeps the slug and bot accountId and
+ * refuses the "import again" retry. `mustDestroy`: a runtime that could not be
+ * removed (its machine not answering) stops the undo before anything else, so
+ * it can be tried again — a restart's recovery may not know whether it runs.
+ * Returns false then.
+ */
+async function rollbackImport(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string | undefined,
+  envSecretRefs: string[],
+  opts: { mustDestroy: boolean },
+): Promise<boolean> {
+  const { store, secrets, provider } = deps;
+  const log = deps.log ?? (() => {});
+  const step = (fn: () => void) => {
+    try {
+      fn();
+    } catch (e) {
+      log('import.rollback_step_failed', { agentId, error: String(e) });
+    }
+  };
+  // Its memory-search decision was never applied: dropped, as every other failed build does (2026-10-09).
+  forgetEmbedDecision(agentId);
+  if (runtimeRef) {
+    try {
+      await provider.destroy(runtimeRef, { purge: true });
+    } catch (err) {
+      if (opts.mustDestroy) return false;
+      log('import.rollback_step_failed', { agentId, error: String(err) });
+    }
+  }
+  await secrets.delete(importSecretRef(agentId)).catch(() => {});
+  for (const ref of envSecretRefs) await secrets.delete(ref).catch(() => {});
+  step(() => store.deleteChannelForAgent(agentId, 'all'));
+  step(() => store.deleteMemberships(agentId));
+  // Env rows too — their secrets are already deleted above; a tombstone
+  // keeping references to swept secrets is the residue class the v0.90
+  // audit scrubbed.
+  step(() => store.scrubAgentResidue(agentId));
+  step(() => {
+    const s = store.getAgent(agentId)?.state;
+    if (s && s !== 'DELETING' && s !== 'DELETED') store.setAgentState(agentId, 'DELETING');
+    if (store.getAgent(agentId)?.state === 'DELETING') store.setAgentState(agentId, 'DELETED');
+  });
+  return true;
+}
+
+/**
+ * An import a restart cut off before RUNNING (the design's table, import
+ * row): undo it, as a failed import undoes itself — a half-imported volume
+ * must never start (Retry used to start one). If it reached RUNNING, it is
+ * done. A runtime whose machine does not answer is held: [Try again].
+ */
+export async function resumeImport(deps: ProvisionDeps, opId: string): Promise<void> {
+  const { store } = deps;
+  const op = handleFor(store, opId);
+  const row = op.get();
+  const agent = row.agentId ? store.getAgent(row.agentId) : undefined;
+  if (!agent || agent.state === 'DELETED') { op.rolledBack('Import interrupted — import the file again.'); return; }
+  if (agent.state === 'RUNNING') { op.done('Imported.'); return; }
+  const envRefs = store.listAgentEnv(agent.id).map((e) => e.secretRef);
+  const ok = await rollbackImport(deps, agent.id, agent.runtimeRef, envRefs, { mustDestroy: true });
+  if (!ok) {
+    op.hold(
+      'Import interrupted by a restart, and its half-made copy could not be removed yet (its machine is not answering). It will not start.',
+      { actions: [{ action: 'retry', label: 'Try again' }], recommended: 'retry' },
+    );
+    return;
+  }
+  deps.log?.('import.rolled_back', { agentId: agent.id, error: 'interrupted by a restart' });
+  op.rolledBack('Import interrupted — import the file again.');
 }

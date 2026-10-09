@@ -179,6 +179,8 @@ import { clearStaleRuntimePinsWhenUp } from '../orchestrator/runtimePins.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
+import { operationRefusal, publicOperation } from '../orchestrator/operations.js';
+import { recoverOperation, RecoverError, resumeOperations, startOperationRetryLoop, type ResumeContext } from '../orchestrator/operationsResume.js';
 import {
   ensureRunnerKey,
   ensureSshConfigBlock,
@@ -498,7 +500,7 @@ export function etagMatches(header: string | undefined, etag: string): boolean {
   return header.split(',').some((t) => t.trim() === '*' || bare(t) === bare(etag));
 }
 
-export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promise<void> {
+export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promise<RoutesHandle> {
   const { store, secrets } = deps;
 
   // Compress what the app fetches: the page was 778 KB per load and the
@@ -747,6 +749,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
        *  as a lie — a move shows STOPPED for a minute — so the app can show
        *  "working" instead of leaving the owner to think nothing is happening. */
       busy: isBusy(agent.id),
+      /** Its long operation that is not over (operations.ts): running, interrupted
+       *  by a restart, or held for the owner's choice — with the choices. */
+      operation: publicOperation(store.activeOperationFor(agent.id)),
       /** Being archived right now (saving its conversation, then stopping): the step and since when. */
       archiving: archiving.get(agent.id),
       /** Asleep (hibernate.ts): stopped by the idle rule; a message, its console or an ask wakes it. */
@@ -759,7 +764,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // owner's files live, their env var names, or its gateway port (26th audit).
       ...((extra.role !== undefined && extra.role !== 'owner') || extra.foreign === true
         // A legacy folder's id IS its path: renamed for them too (night review).
-        ? { dataSources: dataSourcesFor(agent).map((d) => ({ ...d, hostPath: undefined, ...(d.legacy ? { id: `legacy:${d.mountName}` } : {}) })), envVars: [], gatewayPort: undefined, sharedPaths: undefined }
+        ? { dataSources: dataSourcesFor(agent).map((d) => ({ ...d, hostPath: undefined, ...(d.legacy ? { id: `legacy:${d.mountName}` } : {}) })), envVars: [], gatewayPort: undefined, sharedPaths: undefined,
+          // Members see that it is busy with something, never what or the owner's choices.
+          operation: ((o) => o && { kind: o.kind, kindLabel: o.kindLabel, status: o.status })(publicOperation(store.activeOperationFor(agent.id), { recovery: false })) }
         : {}),
     };
   };
@@ -830,6 +837,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * a mid-migration Start ends with two runtimes polling one bot token.
    */
   const busyNow = (agent: Agent, reply: any): boolean => {
+    // A long operation on disk (operations.ts) — running, interrupted by a
+    // restart, or held for the owner's choice — refuses with its own line.
+    const onDisk = operationRefusal(store, agent.id);
+    if (onDisk) {
+      reply.code(409).send({ error: onDisk, operation: store.activeOperationFor(agent.id)?.id });
+      return true;
+    }
     // An archive's checkpoint turn runs before the busy flag is taken: a
     // Rebuild or a move started under it would be cut off by the stop.
     if (!isBusy(agent.id) && !archiving.has(agent.id)) return false;
@@ -1089,6 +1103,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // it polls the same bot as the copy there (bulk source switches and the
     // channel routes reached it; night review, 2026-09-28).
     if (agent.migratedTo) return false;
+    // Nor one with a long operation not over (a move or import interrupted by
+    // a restart, or held for its owner): the rebuild would start it.
+    if (store.activeOperationFor(agentId)) return false;
     const startedAt = Date.now();
     const task = (async () => {
       rebuildQueued.add(agentId);
@@ -2881,7 +2898,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // flag, and the idle sweep stopped a container mid-answer (30th audit).
     // A rebuild waiting for its turn counts too: put to sleep meanwhile, its
     // rebuild was skipped and the change it carried lost (regression review).
-    isBusy: (id) => isBusy(id) || a2aInFlight.has(id) || inflight.has(id) || webChatBusy(webChatInFlight, id),
+    // And a long operation on disk (operations.ts): a held move must not be woken by a message.
+    isBusy: (id) => isBusy(id) || a2aInFlight.has(id) || inflight.has(id) || webChatBusy(webChatInFlight, id) || !!store.activeOperationFor(id),
     log: (id) => (event, detail) => trace(id)(event, detail ?? {}),
     fetchImpl: deps.oauthFetch,
   };
@@ -10455,6 +10473,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       if (agent.ops) return reply.code(409).send({ error: OPS_STAYS_HERE });
       if (movedAway(agent, reply)) return reply;
+      // A move or import interrupted by a restart, or held for a choice, first.
+      { const onDisk = operationRefusal(store, agent.id); if (onDisk) return reply.code(409).send({ error: onDisk, operation: store.activeOperationFor(agent.id)?.id }); }
       const targetId = z.string().min(1).safeParse((req.body as { hostId?: unknown } | null)?.hostId);
       const host = targetId.success ? store.getHost(targetId.data) : undefined;
       if (!host || (host.ownerId !== ownerIdOf(req) && host.kind !== 'local')) {
@@ -10531,14 +10551,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         store.setAgentImage(agent.id, null);
         trace(agent.id)('image.unpinned', { reason: 'move-host', was: agent.image, to: host.id });
       }
+      // The move is recorded as an operation (operations.ts); its id comes back
+      // either way. Still answered when it is done: running it in the
+      // background with a 202 comes with the page's operation view (phase 3).
+      let operation: string | undefined;
       try {
         const moved = await moveAgentToHost(
           { store, secrets, channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision,
-            source: providerFor(agent.hostId), sourceHostId: agent.hostId, target: providerFor(host.id) },
+            source: providerFor(agent.hostId), sourceHostId: agent.hostId, target: providerFor(host.id),
+            requestedBy: ownerIdOf(req), onOperation: (id) => { operation = id; } },
           agent.id,
           host.id,
         );
-        return publicAgent(moved);
+        return { ...publicAgent(moved), operation };
       } catch (err) {
         // A move that did not happen keeps its pin: the agent stays on the
         // old host, where the next rebuild would otherwise drop the image's
@@ -10548,7 +10573,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           trace(agent.id)('image.repinned', { reason: 'move-host failed', image: agent.image });
         }
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
-        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage, operation });
         throw err;
       }
     },
@@ -10564,28 +10589,76 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // ships that token to a third server and mints a second poller, the
       // exact thing the tombstone exists to prevent.
       if (movedAway(agent, reply)) return reply;
+      { const onDisk = operationRefusal(store, agent.id); if (onDisk) return reply.code(409).send({ error: onDisk, operation: store.activeOperationFor(agent.id)?.id }); }
       const peerId = (req.body as { peerId?: string } | null)?.peerId;
       const peer = peerId && store.getPeer(ownerIdOf(req), peerId);
       if (!peer) return reply.code(400).send({ error: 'Unknown server' });
       // Image pins don't travel — moving a pinned agent silently drops its
       // extra packages, so it's refused unless the caller states the choice.
       const allowDroppedPin = (req.body as { allowDroppedPin?: boolean } | null)?.allowDroppedPin === true;
+      let operation: string | undefined;
       try {
         return await migrateAgent(
           { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
             log: trace(agent.id) },
           agent.id,
           peer,
-          { allowDroppedPin },
+          { allowDroppedPin, requestedBy: ownerIdOf(req), onOperation: (id) => { operation = id; } },
         );
       } catch (err) {
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
-        if (err instanceof MigrateError) return reply.code(400).send({ error: err.userMessage });
-        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        if (err instanceof MigrateError) return reply.code(400).send({ error: err.userMessage, operation });
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage, operation });
         throw err;
       }
     },
   );
+
+  // ---- operations (orchestrator/operations.ts) -----------------------------
+  // Long changes recorded on disk as they go. A restart in the middle is
+  // settled by resumeOperations (index.ts, at boot); one the machine cannot
+  // settle by itself is held, and its owner chooses here.
+  const opsCtx: ResumeContext = {
+    store, secrets, channel: deps.channel, embedder: embedderForProvision,
+    providerForHost: (hostId) => { try { return providerFor(hostId); } catch { return undefined; } },
+    logFor: (agentId) => trace(agentId ?? undefined),
+  };
+  /** An operation the caller may see: on an agent they own. Members see nothing. */
+  const ownedOperation = (req: FastifyRequest, id: string) => {
+    const op = store.getOperation(id);
+    if (!op?.agentId || !ownedAgent(req, op.agentId)) return undefined;
+    return op;
+  };
+  app.get<{ Querystring: { agentId?: string; limit?: string } }>('/v1/operations', async (req, reply) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+    if (req.query.agentId) {
+      const agent = ownedAgent(req, req.query.agentId);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      return { operations: store.listOperations([agent.id], limit).map((o) => publicOperation(o)) };
+    }
+    const ids = store.listAgents(ownerIdOf(req)).filter((a) => a.ownerId === ownerIdOf(req)).map((a) => a.id);
+    return { operations: store.listOperations(ids, limit).map((o) => publicOperation(o)) };
+  });
+  app.get<{ Params: { id: string } }>('/v1/operations/:id', async (req, reply) => {
+    const op = ownedOperation(req, req.params.id);
+    if (!op) return reply.code(404).send({ error: 'Not found' });
+    return publicOperation(op);
+  });
+  app.post<{ Params: { id: string }; Body: { action?: string } }>('/v1/operations/:id/recover', async (req, reply) => {
+    const op = ownedOperation(req, req.params.id);
+    if (!op) return reply.code(404).send({ error: 'Not found' });
+    const action = z.string().min(1).max(32).safeParse((req.body as { action?: unknown } | null)?.action);
+    if (!action.success) return reply.code(400).send({ error: 'Say which choice: { "action": "…" } (one of the operation\'s recovery actions).' });
+    trace(op.agentId!)('op.recover', { op: op.id, action: action.data });
+    try {
+      const after = await recoverOperation(opsCtx, op.id, action.data);
+      const agent = store.getAgent(op.agentId!);
+      return { operation: publicOperation(after), agent: agent ? publicAgent(agent) : undefined };
+    } catch (err) {
+      if (err instanceof RecoverError) return reply.code(err.status).send({ error: err.userMessage, operation: publicOperation(store.getOperation(op.id)) });
+      throw err;
+    }
+  });
 
   // ---- export & import (agent portability) ---------------------------------
 
@@ -10663,17 +10736,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           return reply.code(400).send({ error: 'Unknown AI profile' });
         }
       }
+      let operation: string | undefined;
       try {
         const agent = await importAgent(
           // No id yet — trace() picks it up from the orchestrator's log detail.
           { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
           body,
-          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId), verifyToken: deps.verifyImportedToken },
+          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId), verifyToken: deps.verifyImportedToken,
+            onOperation: (id) => { operation = id; } },
         );
-        return reply.code(201).send(publicAgent(agent));
+        return reply.code(201).send({ ...publicAgent(agent), operation });
       } catch (err) {
         if (err instanceof ImageDecisionNeeded) return reply.code(409).send(imageDecisionBody(err));
-        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage, operation });
         throw err;
       }
     },
@@ -11355,6 +11430,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     '/v1/agents/import',
     async (req, reply) => {
       { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
+      /** A full copy's import operation (operations.ts), returned either way. */
+      let operation: string | undefined;
       const body = req.body;
       if (!Buffer.isBuffer(body) || body.length === 0) {
         return reply.code(400).send({ error: 'Send the .hatchabot file as the request body.' });
@@ -11414,12 +11491,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const agent = await importAgent(
           { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
           body,
-          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId), verifyToken: deps.verifyImportedToken },
+          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId), verifyToken: deps.verifyImportedToken,
+            onOperation: (id) => { operation = id; } },
         );
-        return reply.code(201).send({ ...publicAgent(agent), kind: 'agent' });
+        return reply.code(201).send({ ...publicAgent(agent), kind: 'agent', operation });
       } catch (err) {
         if (err instanceof ImageDecisionNeeded) return reply.code(409).send(imageDecisionBody(err));
-        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage, operation });
         throw err;
       }
     },
@@ -12421,6 +12499,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const startRefusal = (a: Agent | undefined, holdingLock = false): string | undefined => {
     if (!a || !a.runtimeRef) return 'Not found';
     if (a.migratedTo) return `It moved to ${a.migratedTo}.`;
+    // A move or import interrupted by a restart, or held for the owner's
+    // choice: starting it could put two copies on one bot (operations.ts).
+    { const onDisk = operationRefusal(store, a.id); if (onDisk) return onDisk; }
     if ((!holdingLock && isBusy(a.id)) || archiving.has(a.id)) return BUSY_MSG;
     // A rebuild in flight or waiting its turn (one follows every bot
     // handover): the container still holds the bot it gave back, and
@@ -12835,4 +12916,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     store.scrubAgentResidue(agent.id);
     return publicAgent(store.setAgentState(agent.id, 'DELETED'));
   });
+
+  return {
+    /** At boot, after the first reconcile: settle what the last process left running. */
+    resumeOperations: () => resumeOperations(opsCtx),
+    /** Ask again, every 10 minutes, the questions a held operation is waiting on. */
+    startOperationRetryLoop: (intervalMs?: number) => startOperationRetryLoop(opsCtx, intervalMs),
+  };
+}
+
+/** What registerRoutes hands back to index.ts. */
+export interface RoutesHandle {
+  resumeOperations(): Promise<void>;
+  startOperationRetryLoop(intervalMs?: number): NodeJS.Timeout;
 }

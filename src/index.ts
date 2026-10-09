@@ -22,7 +22,8 @@ import { CompositeTelegramProvisioner } from './channels/composite.js';
 import { registerRoutes } from './api/routes.js';
 import { authIsEnabled, authModeFromEnv, bindHostFor, registerAuth } from './api/auth.js';
 import { identityConfigFromEnv, IdentityVerifier } from './api/identity.js';
-import { reconcileAgents, startReconcileLoop } from './orchestrator/reconcile.js';
+import { reconcileAgents, reconcileEventLog, startReconcileLoop } from './orchestrator/reconcile.js';
+import { markInterrupted, setOperationJournal } from './orchestrator/operations.js';
 import { runPostureSweep } from './orchestrator/posture.js';
 import { LOCAL_OWNER } from './api/principal.js';
 import type { RuntimeProvider } from './providers/provider.js';
@@ -136,7 +137,17 @@ const providerForHost = (host: Host): RuntimeProvider | undefined => {
     return resolveProvider(host, providers, remoteProviders, { image: process.env.HATCHABOT_IMAGE, prefix: process.env.HATCHABOT_PREFIX });
   } catch { return undefined; }
 };
-const bootReconcile = reconcileAgents(store, providerForHost, (e, d) => app.log.info(d, e));
+// Long operations (orchestrator/operations.ts) write their steps to the
+// journal too. Rows a previous process left `running` were cut off by the
+// restart: marked interrupted BEFORE reconcile, so reconcile leaves those
+// agents to resumeOperations below (an interrupted import is undone, never
+// marked "tap Retry").
+setOperationJournal((e, d) => app.log.info(d, e));
+markInterrupted(store);
+// Reconcile's findings about an agent go to its timeline as well as the
+// journal (they were journal-only: "found stopped" never reached Activity).
+const reconcileLog = reconcileEventLog(store, (e, d) => app.log.info(d, e));
+const bootReconcile = reconcileAgents(store, providerForHost, reconcileLog);
 await Promise.race([
   bootReconcile.catch(() => {}),
   new Promise<void>((r) => setTimeout(r, Number(process.env.HATCHABOT_BOOT_RECONCILE_MS ?? 30_000)).unref()),
@@ -190,7 +201,7 @@ await registerAuth(app, {
     }
   },
 });
-await registerRoutes(app, {
+const routes = await registerRoutes(app, {
   store,
   secrets,
   providers,
@@ -255,7 +266,15 @@ if (bindHost !== '127.0.0.1' && !tls) {
 }
 // Keep mending state after boot: a container that wedges at 3am should not
 // stay green until someone notices.
-startReconcileLoop(store, providerForHost, (e, d) => app.log.info(d, e), undefined, bootReconcile);
+startReconcileLoop(store, providerForHost, reconcileLog, undefined, bootReconcile);
+
+// Settle the long operations the last process left running (a move, a move to
+// another Hatchabot, an import): finished or undone where the direction is
+// certain, held for the owner otherwise. After the first reconcile; in the
+// background, since asking another server whether an agent arrived can take
+// minutes. Held questions are asked again every 10 minutes.
+void routes.resumeOperations().catch((err) => app.log.error({ err: String(err) }, 'operations.resume_failed'));
+routes.startOperationRetryLoop();
 
 // Finish any bot rename that didn't land. Renaming happens at the worst moment
 // for network calls — mid-provision, while the box is churning docker — and a

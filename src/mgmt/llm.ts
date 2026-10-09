@@ -87,6 +87,8 @@ export const SYSTEM_PROMPT = [
   '  (list_peers/set_peers), Telegram (add_telegram from the pool, remove_telegram, create_invite), Slack and Discord (remove_channel; connecting needs tokens, so the owner does it in the Messaging tab),',
   '  memory (checkpoint_memory, snapshot_agent/list_snapshots/restore_snapshot), run_backup,',
   '  list_sources for AI usage and rate limits. Chain steps in one turn when a job needs several.',
+  '- An agent that refuses Start because a move or import was interrupted: list_operations shows',
+  '  what happened and, when it is held, its choices; recover_operation makes the one the owner picks.',
   '- Left to the app on purpose; say so and point there: anything involving a secret (AI keys,',
   '  bot tokens, environment values, passwords), deleting an agent, promoting a base image to the',
   '  fleet, moving to another server, accounts, and adding host folders or Google accounts.',

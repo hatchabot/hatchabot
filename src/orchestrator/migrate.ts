@@ -4,6 +4,7 @@ import { exportAgent, TransferError } from './transfer.js';
 import { existsSync } from 'node:fs';
 import type { ProvisionDeps } from './provision.js';
 import { whileBusy } from './busy.js';
+import { beginOperation, handleFor, rethrowIfCrash, stepReached, type OpHandle } from './operations.js';
 
 /**
  * Move an agent to another Hatchabot installation in one action.
@@ -168,7 +169,7 @@ export function preflight(
 }
 
 async function peerFetch(
-  deps: MigrateDeps,
+  deps: Pick<MigrateDeps, 'secrets'>,
   peer: Peer,
   path: string,
   init: RequestInit,
@@ -189,17 +190,20 @@ async function peerFetch(
  * own rollback will either finish it or remove it, so wait it out rather
  * than guess.
  */
-async function destinationHasAgent(
-  deps: MigrateDeps,
+export async function destinationHasAgent(
+  deps: Pick<MigrateDeps, 'secrets' | 'sleep'>,
   peer: Peer,
   slug: string,
+  attempts = 12,
 ): Promise<'yes' | 'no' | 'unknown'> {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  for (let attempt = 0; attempt < 12; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt > 0) await sleep(15_000);
     let agents: Array<{ slug?: string; state?: string }>;
     try {
-      const res = await peerFetch(deps, peer, '/v1/agents', { method: 'GET' });
+      // Bounded: a server that is down must not hold the question (or a
+      // restart's recovery) for a whole TCP timeout.
+      const res = await peerFetch(deps, peer, '/v1/agents', { method: 'GET', signal: AbortSignal.timeout(20_000) });
       if (!res.ok) continue;
       agents = (await res.json()) as Array<{ slug?: string; state?: string }>;
     } catch {
@@ -256,30 +260,102 @@ export interface MigrateResult {
   remoteAgentId: string;
   /** The source is left stopped, not deleted — deleting it is the owner's call. */
   sourceState: string;
+  /** The operation that recorded it (GET /v1/operations/:id). */
+  operation?: string;
 }
 
 export async function migrateAgent(
   deps: MigrateDeps,
   agentId: string,
   peer: Peer,
-  opts: { allowDroppedPin?: boolean } = {},
+  opts: { allowDroppedPin?: boolean; requestedBy?: string; onOperation?: (id: string) => void } = {},
 ): Promise<MigrateResult> {
   // Busy for the whole move: between export stopping the source and the
   // tombstone landing, the agent looks like an ordinary STOPPED agent — a
   // Start, Rebuild or Delete in that window boots or purges the copy whose
   // bot is about to belong elsewhere. (Routes check isBusy; this also stops
-  // reconcile from judging the stopped source mid-move.)
+  // reconcile from judging the stopped source mid-move.) The operation's row
+  // (operations.ts) keeps that true across a restart.
   return whileBusy(agentId, () => migrateAgentInner(deps, agentId, peer, opts));
 }
+
+/** What a move to another Hatchabot records, and what a restart needs. Never a secret. */
+interface MigrateParams {
+  peerId: string;
+  peerName: string;
+  ownerId: string;
+  slug: string;
+  accountId: string;
+  wasRunning: boolean;
+  runtimeRef: string;
+  slept?: { at: string; mark?: number };
+}
+
+/** Put the source back as it was found: asleep again, or started if it ran. */
+async function undoSource(
+  deps: Pick<MigrateDeps, 'store' | 'log'>,
+  provider: MigrateDeps['provider'],
+  agentId: string,
+  p: Pick<MigrateParams, 'wasRunning' | 'runtimeRef' | 'slept'>,
+  why: string,
+): Promise<boolean> {
+  const { store } = deps;
+  const log = deps.log ?? (() => {});
+  log('migrate.rolled_back', { agentId, why });
+  if (p.slept && store.getAgent(agentId)?.state === 'STOPPED') store.setHibernated(agentId, p.slept.at, p.slept.mark);
+  if (!p.wasRunning) return true;
+  try {
+    await provider.start(p.runtimeRef);
+    if (store.getAgent(agentId)?.state !== 'RUNNING') store.setAgentState(agentId, 'RUNNING');
+    return true;
+  } catch (err) {
+    log('migrate.restart_failed', { agentId, error: String(err) });
+    return false;
+  }
+}
+
+/** The bot moved with the agent: tombstone this copy, and take a pool bot out of the pool here. */
+async function settleArrived(deps: MigrateDeps, agentId: string, peerName: string, accountId: string): Promise<void> {
+  const { store } = deps;
+  const log = deps.log ?? (() => {});
+  // Tombstone the source. Without this nothing stops a later Start, Rebuild
+  // or Retry from resurrecting a copy whose bot now belongs elsewhere — which
+  // is exactly how a "successful" move ends with two live pollers.
+  store.setAgentMigratedTo(agentId, `${peerName} (${new Date().toISOString().slice(0, 10)})`);
+  // If the moved bot was a pool bot, retire it locally: its token now lives on
+  // the peer, so the local pool row must not linger leased-forever (a slot
+  // leak) NOR be freed for re-lease (which would hand the same token to a new
+  // local agent — two pollers). Removing scrubs the local copy and frees the
+  // count. Best-effort: the migrate already succeeded; never fail it over this.
+  const pool = (deps.channel as { pool?: { owns(u: string): boolean; release(u: string, o?: { reason?: 'moved' }): Promise<void>; removeFromPool(u: string): Promise<void> } } | undefined)?.pool;
+  if (pool?.owns(accountId)) {
+    try {
+      // Clear the lease so remove is allowed — quietly: `moved` sends no
+      // "this agent has been removed" through a bot now answering on the peer.
+      await pool.release(accountId, { reason: 'moved' });
+      await pool.removeFromPool(accountId);
+    } catch (err) {
+      log('migrate.pool_retire_failed', { agentId, accountId, error: String(err) });
+    }
+  }
+}
+
+const unsettledChoices = (peerName: string, canAsk: boolean) => ({
+  actions: [
+    ...(canAsk ? [{ action: 'retry', label: `Ask ${peerName} again` }] : []),
+    { action: 'arrived', label: `It is running on ${peerName} — keep this copy stopped` },
+    { action: 'start-here', label: `It is not on ${peerName} — keep it here` },
+  ],
+  recommended: canAsk ? 'retry' : undefined,
+});
 
 async function migrateAgentInner(
   deps: MigrateDeps,
   agentId: string,
   peer: Peer,
-  opts: { allowDroppedPin?: boolean } = {},
+  opts: { allowDroppedPin?: boolean; requestedBy?: string; onOperation?: (id: string) => void } = {},
 ): Promise<MigrateResult> {
-  const { store, provider } = deps;
-  const log = deps.log ?? (() => {});
+  const { store } = deps;
   const agent = store.getAgent(agentId);
   if (!agent?.runtimeRef) throw new MigrateError('This agent has no runtime to move.');
   if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
@@ -295,6 +371,40 @@ async function migrateAgentInner(
     ? 'This agent has no Telegram bot, and moving to another server needs one. Download a copy (Advanced → Download copy) and import it there instead, or add a bot first.'
     : 'This agent has no messaging identity to move.');
   const profile = store.getAIProfile(agent.aiProfileId);
+
+  // The export wakes nothing but clears a sleeping agent's hibernation (so
+  // the wake poll here leaves the bot alone); undo puts it back, or a failed
+  // move left the agent plain STOPPED, never to wake on a message again
+  // (review, 2026-09-29).
+  const slept = agent.hibernatedAt ? { at: agent.hibernatedAt, mark: agent.hibernateMark } : undefined;
+  const p: MigrateParams = {
+    peerId: peer.id, peerName: peer.name, ownerId: agent.ownerId, slug: agent.slug, accountId: channel.accountId,
+    wasRunning: agent.state === 'RUNNING', runtimeRef: agent.runtimeRef, ...(slept ? { slept } : {}),
+  };
+  const op = beginOperation(store, 'migrate', agentId, { ...p }, { requestedBy: opts.requestedBy });
+  opts.onOperation?.(op.id);
+  try {
+    return await migrateSteps(deps, op, agent, peer, p, channel.accountId, profile?.vendor, imageChoice);
+  } catch (err) {
+    rethrowIfCrash(err);
+    if (op.get().status === 'running') op.fail(err);
+    throw err;
+  }
+}
+
+async function migrateSteps(
+  deps: MigrateDeps,
+  op: OpHandle,
+  agent: NonNullable<ReturnType<MigrateDeps['store']['getAgent']>>,
+  peer: Peer,
+  p: MigrateParams,
+  accountId: string,
+  vendor: string | undefined,
+  imageChoice: 'drop' | 'build' | undefined,
+): Promise<MigrateResult> {
+  const { store, provider } = deps;
+  const log = deps.log ?? (() => {});
+  const agentId = agent.id;
 
   // Our runtime-image version rides along so the destination can refuse a
   // DOWNGRADE (its image older than ours — the config-schema hazard).
@@ -312,8 +422,8 @@ async function migrateAgentInner(
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         slug: agent.slug,
-        accountId: channel.accountId,
-        vendor: profile?.vendor,
+        accountId,
+        vendor,
         sharedPaths: agent.sharedPaths,
         openclawVersion: sourceVersion,
       }),
@@ -322,6 +432,7 @@ async function migrateAgentInner(
     if (!res.ok) throw new MigrateError(`${peer.name} answered ${res.status} to the preflight check.`);
     answer = (await res.json()) as PreflightAnswer;
   } catch (err) {
+    rethrowIfCrash(err);
     if (err instanceof MigrateError) throw err;
     throw new MigrateError(`Couldn't reach ${peer.name} at ${peer.url}.`);
   }
@@ -329,30 +440,17 @@ async function migrateAgentInner(
     throw new MigrateError(`${peer.name} can't accept this agent: ${answer.reasons.join(' ')}`);
   }
   log('migrate.preflight_ok', { agentId, peer: peer.name });
+  op.step('preflight-ok');
 
   // 2. Export — this STOPS the source, so from here nothing is polling the bot.
-  const wasRunning = agent.state === 'RUNNING';
-  // The export wakes nothing but clears a sleeping agent's hibernation (so
-  // the wake poll here leaves the bot alone); undo puts it back, or a failed
-  // move left the agent plain STOPPED, never to wake on a message again
-  // (review, 2026-09-29).
-  const slept = agent.hibernatedAt ? { at: agent.hibernatedAt, mark: agent.hibernateMark } : undefined;
   const { data } = await exportAgent(deps, agentId);
   log('migrate.exported', { agentId, bytes: data.length });
+  // From here a restart asks the other server before anything is started
+  // again here (resumeMigrate): the two-pollers case.
+  op.step('exported');
 
   /** Put the source back exactly as we found it. */
-  const undo = async (why: string) => {
-    log('migrate.rolled_back', { agentId, why });
-    if (slept && store.getAgent(agentId)?.state === 'STOPPED') store.setHibernated(agentId, slept.at, slept.mark);
-    if (wasRunning) {
-      try {
-        await provider.start(agent.runtimeRef!);
-        store.setAgentState(agentId, 'RUNNING');
-      } catch (err) {
-        log('migrate.restart_failed', { agentId, error: String(err) });
-      }
-    }
-  };
+  const undo = async (why: string) => { await undoSource(deps, provider, agentId, p, why); };
 
   /**
    * The import gave no definite answer. The import takes minutes (volume
@@ -368,29 +466,37 @@ async function migrateAgentInner(
     const landed = await destinationHasAgent(deps, peer, agent.slug);
     if (landed === 'no') {
       await undo(`transfer failed: ${why}`);
-      throw new MigrateError(
+      const e = new MigrateError(
         `The transfer to ${peer.name} failed${status ? ` (it answered ${status})` : ''}. Your agent is unchanged.`,
       );
+      op.rolledBack(e.userMessage);
+      throw e;
     }
     if (landed === 'yes') {
       log('migrate.landed_despite_error', { agentId, peer: peer.name, error: why });
-      store.setAgentMigratedTo(
-        agentId,
-        `${peer.name} (${new Date().toISOString().slice(0, 10)})`,
-      );
-      throw new MigrateError(
+      await settleArrived(deps, agentId, peer.name, accountId);
+      const e = new MigrateError(
         `${status ? `${peer.name} answered ${status}` : `The connection to ${peer.name} dropped`}, but the ` +
           `agent DID arrive and is running there. This copy stays stopped and marked as moved.`,
       );
+      op.done(e.userMessage);
+      throw e;
     }
-    // Can't tell. Leaving the source stopped is recoverable (the owner can
-    // start it once they've looked); starting it next to a live copy is not.
+    // Can't tell. Leaving the source stopped is recoverable; starting it next
+    // to a live copy is not. Held on disk: Start is refused until the other
+    // server answers (asked again every 10 minutes) or the owner says.
     log('migrate.outcome_unknown', { agentId, peer: peer.name, error: why });
-    throw new MigrateError(
+    const e = new MigrateError(
       `The transfer to ${peer.name} failed${status ? ` (it answered ${status})` : ''} and we couldn't ` +
         `confirm whether the agent arrived there. This copy is left stopped to be safe — check ` +
-        `${peer.name}, then either delete this copy (it arrived) or start it again (it didn't).`,
+        `${peer.name}, then say on this agent's page (Alerts) whether it arrived; Hatchabot also asks ` +
+        `${peer.name} again every 10 minutes.`,
     );
+    op.hold(
+      `The move to ${peer.name} could not be confirmed. This copy stays stopped so two copies never answer the same bot; Hatchabot asks ${peer.name} again every 10 minutes.`,
+      unsettledChoices(peer.name, true),
+    );
+    throw e;
   };
 
   // 3. Import on the destination. Its own rollback guarantees it leaves
@@ -403,6 +509,7 @@ async function migrateAgentInner(
       body: new Uint8Array(data),
     });
   } catch (err) {
+    rethrowIfCrash(err);
     // NO answer from the destination — which is not the same as "it failed".
     return settleUnanswered(String(err));
   }
@@ -417,17 +524,17 @@ async function migrateAgentInner(
       return settleUnanswered(`HTTP ${status}`, status);
     }
     // A real answer from the destination: it refused and rolled back.
+    op.step('answered');
     await undo(`import rejected: ${body.error}`);
-    if (body.code === 'image_decision') {
-      throw new MigrateError(
+    const e = body.code === 'image_decision'
+      ? new MigrateError(
         `${peer.name} doesn't have the image ${agent.image} and won't build it for this move` +
           `${body.problem ? ` (${body.problem})` : " (only that server's owner may build images there)"}. ` +
           'Your agent is unchanged. Move it on that server\'s default image (CLI: --drop-pin), or Download a copy and import it there as its owner.',
-      );
-    }
-    throw new MigrateError(
-      `${peer.name} couldn't import it: ${body.error}. Your agent is unchanged.`,
-    );
+      )
+      : new MigrateError(`${peer.name} couldn't import it: ${body.error}. Your agent is unchanged.`);
+    op.rolledBack(e.userMessage);
+    throw e;
   }
   if (!body || typeof body.state !== 'string') {
     // A success status with no agent in it (a proxy's page, a cut-off body):
@@ -435,46 +542,104 @@ async function migrateAgentInner(
     return settleUnanswered(`HTTP ${res.status} without an agent in the body`, `${res.status} with no agent in the reply`);
   }
   const remote = body as { id: string; state: string; name: string };
+  op.step('answered');
 
   // 4. Verify it actually came up there before we consider this done.
   if (remote.state !== 'RUNNING') {
     await undo(`remote state ${remote.state}`);
-    throw new MigrateError(
+    const e = new MigrateError(
       `${peer.name} accepted the agent but it is ${remote.state} there. Your agent is unchanged — ` +
         `check that server before trying again.`,
     );
+    op.rolledBack(e.userMessage);
+    throw e;
   }
 
-  // Tombstone the source. Without this nothing stops a later Start, Rebuild
-  // or Retry from resurrecting a copy whose bot now belongs elsewhere — which
-  // is exactly how a "successful" move ends with two live pollers.
-  store.setAgentMigratedTo(
-    agentId,
-    `${peer.name} (${new Date().toISOString().slice(0, 10)})`,
-  );
-
-  // If the moved bot was a pool bot, retire it locally: its token now lives on
-  // the peer, so the local pool row must not linger leased-forever (a slot
-  // leak) NOR be freed for re-lease (which would hand the same token to a new
-  // local agent — two pollers). Removing scrubs the local copy and frees the
-  // count. Best-effort: the migrate already succeeded; never fail it over this.
-  const pool = (deps.channel as { pool?: { owns(u: string): boolean; release(u: string, o?: { reason?: 'moved' }): Promise<void>; removeFromPool(u: string): Promise<void> } }).pool;
-  if (pool?.owns(channel.accountId)) {
-    try {
-      // Clear the lease so remove is allowed — quietly: `moved` sends no
-      // "this agent has been removed" through a bot now answering on the peer.
-      await pool.release(channel.accountId, { reason: 'moved' });
-      await pool.removeFromPool(channel.accountId);
-    } catch (err) {
-      log('migrate.pool_retire_failed', { agentId, accountId: channel.accountId, error: String(err) });
-    }
-  }
+  await settleArrived(deps, agentId, peer.name, accountId);
   log('migrate.done', { agentId, peer: peer.name, remoteAgentId: remote.id });
+  op.done(`Moved to ${peer.name}. This copy stays stopped, marked as moved.`);
   return {
     movedTo: peer.name,
     remoteAgentId: remote.id,
     sourceState: store.getAgent(agentId)!.state,
+    operation: op.id,
   };
+}
+
+/**
+ * A move to another Hatchabot that a restart cut off (the design's table,
+ * migrate rows):
+ *  - before the export finished: nothing was sent — failed; a source the
+ *    export had stopped is started again (nothing can be running elsewhere);
+ *  - exported, no answer recorded: ask the other server. Yes → tombstone and
+ *    retire the bot; no → start the source if it ran; unknown → hold (Start
+ *    refused), asked again every 10 minutes (operationsResume.ts).
+ * `attempts`: how many times to ask (15 s apart) before calling it unknown.
+ */
+export async function resumeMigrate(deps: MigrateDeps, opId: string, attempts = 12): Promise<void> {
+  const { store } = deps;
+  const op = handleFor(store, opId);
+  const row = op.get();
+  const p = row.params as unknown as MigrateParams;
+  const agent = row.agentId ? store.getAgent(row.agentId) : undefined;
+  if (!agent || agent.state === 'DELETED') { op.fail('The agent is gone.'); return; }
+  if (agent.migratedTo) { op.done(`Moved to ${agent.migratedTo}.`); return; }
+  if (!stepReached(row.kind, row.step, 'exported')) {
+    const back = await undoSource(deps, deps.provider, agent.id, p, 'interrupted before anything was sent');
+    op.fail(
+      `The move to ${p.peerName} was interrupted by a restart before anything was sent` +
+        (p.wasRunning ? (back ? '; it was started here again.' : ', and it did not start here again — Start it.') : '.'),
+    );
+    return;
+  }
+  const peer = store.getPeer(p.ownerId, p.peerId);
+  if (!peer) {
+    op.hold(
+      `The move to ${p.peerName} was interrupted, and ${p.peerName} is no longer among this machine's servers, so it can't be asked whether the agent arrived. This copy stays stopped.`,
+      unsettledChoices(p.peerName, false),
+    );
+    return;
+  }
+  const landed = await destinationHasAgent(deps, peer, p.slug, attempts);
+  if (landed === 'yes') {
+    await settleArrived(deps, agent.id, peer.name, p.accountId);
+    deps.log?.('migrate.done', { agentId: agent.id, peer: peer.name, afterRestart: true });
+    op.done(`Moved to ${peer.name} (a restart interrupted it; ${peer.name} says it is running there). This copy stays stopped, marked as moved.`);
+    return;
+  }
+  if (landed === 'no') {
+    const back = await undoSource(deps, deps.provider, agent.id, p, `interrupted; not on ${peer.name}`);
+    op.rolledBack(
+      `The move to ${peer.name} was interrupted by a restart and it did not arrive there — it stays here` +
+        (p.wasRunning ? (back ? ' and is running again.' : ', but it did not start again — Start it.') : '.'),
+    );
+    return;
+  }
+  op.hold(
+    `The move to ${peer.name} was interrupted by a restart, and ${peer.name} hasn't said whether it arrived. This copy stays stopped so two copies never answer the same bot; Hatchabot asks ${peer.name} again every 10 minutes.`,
+    unsettledChoices(peer.name, true),
+  );
+}
+
+/** The owner's choice on a held move to another Hatchabot. */
+export async function recoverMigrate(deps: MigrateDeps, opId: string, action: string): Promise<void> {
+  const { store } = deps;
+  const op = handleFor(store, opId);
+  const row = op.get();
+  const p = row.params as unknown as MigrateParams;
+  const agentId = row.agentId!;
+  if (action === 'retry') return resumeMigrate(deps, opId, 1);
+  if (action === 'arrived') {
+    await settleArrived(deps, agentId, p.peerName, p.accountId);
+    op.done(`Marked as moved to ${p.peerName} (you said it is running there). This copy stays stopped.`);
+    return;
+  }
+  if (action === 'start-here') {
+    const back = await undoSource(deps, deps.provider, agentId, p, 'the owner said it is not on the other server');
+    op.rolledBack(`Kept here (you said it is not on ${p.peerName})${p.wasRunning ? (back ? ' and running again.' : ', but it did not start — Start it.') : '.'}`);
+    return;
+  }
+  throw new MigrateError(`"${action}" is not one of this operation's choices.`);
 }
 
 export { TransferError };

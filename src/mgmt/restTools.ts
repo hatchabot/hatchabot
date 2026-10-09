@@ -352,6 +352,39 @@ export const REST_TOOLS: RestTool[] = [
     done: (r) => (r && typeof r === 'object' && 'message' in r ? String((r as { message: string }).message) : undefined),
   },
 
+  // ---- long operations (orchestrator/operations.ts) ----
+  {
+    name: 'list_operations', tier: 'read',
+    description:
+      'The long changes recorded for the owner\'s agents (moves to another machine or another Hatchabot, imports), newest first: '
+      + 'kind, status (running, succeeded, failed, rolled_back, interrupted, held), the last step done, the outcome in plain words, and — '
+      + 'for a HELD one, which keeps the agent from starting until someone chooses — the choices (recovery.actions). With agent: only that agent\'s.',
+    input_schema: obj({ agent: { ...agentRef, description: 'Optional: only this agent\'s operations.' } }),
+    call: async ({ input, resolve }) => {
+      const a = input.agent ? await resolve(input.agent) : undefined;
+      return { method: 'GET', path: `/v1/operations${a ? `?agentId=${encodeURIComponent(a.id)}` : ''}` };
+    },
+  },
+  {
+    name: 'recover_operation', tier: 'mutate',
+    description:
+      'Settle a HELD operation (list_operations shows it, with its choices): e.g. a move interrupted by a restart while the other machine was not answering '
+      + '("retry" when it is back, "put-back" onto the machine it came from), or a move to another Hatchabot that server has not confirmed '
+      + '("retry" to ask again, "arrived" if it is running there, "start-here" if it is not). Only an action the operation offers.',
+    input_schema: obj({ operation: str(64, 'the operation id (op_…)'), action: str(32, 'one of its recovery.actions[].action') }, ['operation', 'action']),
+    call: async ({ input, get, resolve }) => {
+      const id = need(input.operation, 'operation');
+      const action = need(input.action, 'action');
+      const op = (await get(`/v1/operations/${enc(id)}`)) as { agentId?: string; kindLabel?: string; outcome?: string; recovery?: { actions?: Array<{ action: string; label: string }> } };
+      const choice = op.recovery?.actions?.find((x) => x.action === action);
+      if (!choice) throw new Error(`"${action}" is not one of its choices: ${(op.recovery?.actions ?? []).map((x) => x.action).join(', ') || '(none — it is not waiting on anyone)'}.`);
+      const agent = op.agentId ? await resolve(op.agentId) : undefined;
+      input.__card = `${op.kindLabel ?? 'Operation'} of "${agent?.name ?? 'an agent'}": ${choice.label}`;
+      return { method: 'POST', path: `/v1/operations/${enc(id)}/recover`, body: { action } };
+    },
+    card: ({ input }) => `↩ ${String(input.__card ?? `Recover operation ${String(input.operation)}: ${String(input.action)}`)}`,
+  },
+
   // ---- Report a problem, and help with settings (problemReport.ts) ----
   {
     name: 'get_diagnostics', tier: 'read',

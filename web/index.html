@@ -7333,6 +7333,7 @@ function agentNotices(a, opts = {}) {
   const pending = a.pendingAction?.type === 'bot_token';
   const pairs = pairings[a.id] ?? [];
   return `
+      ${opNotice(a)}
       ${recheckNote(a)}
       ${a.contextReset ? `<div class="pair" style="align-items:flex-start">🧠 <span class="grow"><b>Its chat started fresh ${esc(ago(a.contextReset.resetAt))}</b> — ${a.contextReset.lostMessages} earlier message${a.contextReset.lostMessages === 1 ? '' : 's'} are no longer in its context. Its saved memory is untouched; <b>Recover context</b> has it read the old conversation and keep what matters.</span>
         <button class="primary" onclick="recoverContext('${a.id}','${jsq(a.name)}')">📥 Recover context</button>
@@ -11252,6 +11253,30 @@ async function downloadHistory(id, name) {
     toast(`Downloaded ${file} — ${n} messages across ${c} conversation${c === '1' ? '' : 's'}.`, 7000);
   } catch (e) { toast(`Couldn't download the history: ${e.message}`, 9000); }
 }
+/**
+ * A long operation held for the owner's choice (operations.ts): a move
+ * interrupted by a restart while the other machine was away, a move to
+ * another Hatchabot that server has not confirmed. Its choices, as buttons.
+ * Start, Rebuild and the rest refuse until one is made. (The full operation
+ * view — Working on, Activity rows — comes with the page work, phase 3.)
+ */
+function opNotice(a) {
+  const op = a.operation;
+  if (!op || op.status !== 'held' || !v2Mine(a)) return '';
+  const acts = op.recovery?.actions || [];
+  const step = op.stepLabel ? ` Last step done: ${esc(op.stepLabel)}${op.stepN ? ` (${op.stepN} of ${op.steps})` : ''}.` : '';
+  return `<div class="pair oprecover" style="align-items:flex-start">⏸ <span class="grow"><b>${esc(op.kindLabel || 'An operation')} is waiting for your choice.</b>${step} <span class="sub">${esc(ago(op.updatedAt))}</span></span>
+    ${acts.map((x) => `<button class="${x.action === op.recovery?.recommended ? 'primary' : ''}" data-op-action="${esc(x.action)}" onclick="recoverOp('${jsq(op.id)}','${jsq(x.action)}',this)">${esc(x.label)}</button>`).join('')}</div>`;
+}
+async function recoverOp(opId, action, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api(`/v1/operations/${encodeURIComponent(opId)}/recover`, { method: 'POST', body: { action } });
+    toast(r.operation?.outcome || 'Done.', 6000);
+  } catch (e) { toast(e.message, 8000); if (btn) btn.disabled = false; }
+  await refresh(false);
+}
+
 async function dismissContextReset(id) {
   try { await api(`/v1/agents/${id}/context-reset`, { method: 'DELETE' }); await refresh(false); }
   catch (e) { toast(e.message); }
@@ -11745,6 +11770,9 @@ function agentAttention(a) {
   // The reason is printed beside the status; the list only says there is one,
   // so a long explanation isn't repeated twice on the same screen.
   if (a.state === 'FAILED') out.push({ key: 'failed', icon: '❗', why: a.stateReason ? 'it failed — the reason is beside its status' : 'it failed', failure: true });
+  // A long operation held for the owner's choice (operations.ts): keyed on
+  // its id, so clearing it from Alerts holds only until the next one.
+  if (a.operation?.status === 'held' && v2Mine(a)) out.push({ key: 'op:' + a.operation.id, icon: '⏸', why: a.operation.outcome || `${a.operation.kindLabel || 'An operation'} is waiting for your choice` });
   if (a.pendingAction) out.push({ key: 'pending', icon: '✋', why: a.pendingAction.type === 'bot_token' ? 'waiting for a Telegram bot token' : 'a step is waiting on you' });
   // No pool bot was free when it came back (or was cloned/imported): it went on web-only rather than wait.
   if (a.telegramSkipped) out.push({ key: 'nobot:' + a.telegramSkipped.at, icon: '📵', why: 'No Telegram bot was free — it is running in the web app; attach a bot later (its settings → Messaging → Telegram)' });
@@ -12221,6 +12249,9 @@ function v2Status(a) {
     st = { cls: 'working', glyph: '↻', label: a.state === 'PROVISIONING' ? 'Setting up' : a.state === 'REBUILDING' ? 'Rebuilding' : 'Working on it' };
   }
   else if (a.state === 'FAILED') st = { cls: 'blocked', glyph: '!', label: 'Failed' };
+  // A move or import held for a choice, or one a restart cut off that is being put right (operations.ts).
+  else if (a.operation?.status === 'held' && v2Mine(a)) st = { cls: 'waiting', glyph: '⏸', label: `${a.operation.kindLabel || 'An operation'} was interrupted — waiting for your choice` };
+  else if (a.operation && (a.operation.status === 'interrupted' || a.operation.status === 'running')) st = { cls: 'working', glyph: '↻', label: a.operation.kindLabel || 'Working on it' };
   else if (a.pendingAction) st = { cls: 'waiting', glyph: '✋', label: 'Waiting on you' };
   else if (waiting && v2Mine(a)) st = { cls: 'waiting', glyph: '👤', label: 'Someone wants to join' };
   else if ((a.stuck || []).length && v2Mine(a) && a.state === 'RUNNING' && !attentionCleared(a)) st = { cls: 'blocked', glyph: '🔁', label: 'Stuck in a loop — using tokens' };
