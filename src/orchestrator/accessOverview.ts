@@ -78,7 +78,14 @@ function intent(store: Store, agent: Agent) {
   return { folders, repos, channels, env };
 }
 
-/** The read-only probe run inside the agent: only paths and names go in; a token's hash prefix, never the token, comes out. */
+/**
+ * The read-only probe run inside the agent: only paths and names go in; a token's hash prefix, never the token, comes out.
+ *
+ * 2026-10-09 (#23): a source of admitted chat ids that cannot be read (openclaw.json, an allowFrom file, the
+ * pairing store — node:sqlite missing, the file unreadable, a query error) is no proof that nobody is
+ * admitted. `unread` names, per chat app, each source that failed with a short reason; a chat app with
+ * none listed was read completely. A path whose stat fails other than "no such file" is null (unknown).
+ */
 export function accessProbeScript(input: { paths: string[]; env: string[] }): string {
   const b64 = Buffer.from(JSON.stringify(input), 'utf8').toString('base64');
   // No single quotes below: the code sits inside node -e '…'.
@@ -86,18 +93,25 @@ export function accessProbeScript(input: { paths: string[]; env: string[] }): st
     'const fs=require("fs"),path=require("path"),cr=require("crypto");',
     'const inp=JSON.parse(Buffer.from(process.env.HB_ACCESS_PROBE,"base64").toString("utf8"));',
     'const d=process.env.OPENCLAW_STATE_DIR||"/home/node/.openclaw";',
-    'let cfg=null;try{cfg=JSON.parse(fs.readFileSync(d+"/openclaw.json","utf8"))}catch(e){}',
+    'const gone=(e)=>!!e&&(e.code==="ENOENT"||e.code==="ENOTDIR");',
+    // Never a parse error's message: it quotes the file (openclaw.json holds bot tokens).
+    'const er=(e)=>String((e&&(e.code||(e.name==="SyntaxError"?"not valid JSON":e.message)))||e||"unreadable").slice(0,60);',
+    'let cfg=null,cfgErr=null;try{cfg=JSON.parse(fs.readFileSync(d+"/openclaw.json","utf8"))}catch(e){cfgErr=e}',
+    'if(cfg&&typeof cfg!=="object")cfg=null;',
     'const h=(t)=>typeof t==="string"&&t?cr.createHash("sha256").update(t).digest("hex").slice(0,16):null;',
-    'const out={config:!!cfg,channels:{},env:{},paths:{},admitted:{}};',
+    'const out={config:!!cfg,channels:{},env:{},paths:{},admitted:{},unread:{telegram:[],slack:[],discord:[]}};',
+    'const bad=(k,s,e)=>{for(const c of (k?[k]:["telegram","slack","discord"]))out.unread[c]&&out.unread[c].push(s+": "+er(e))};',
+    'if(!cfg)bad(null,"openclaw.json",cfgErr||"not an object");',
     'const adm=(k,x)=>{if(x===undefined||x===null)return;let v=String(x);if(v.startsWith(k+":"))v=v.slice(k.length+1);(out.admitted[k]=out.admitted[k]||[]).includes(v)||out.admitted[k].push(v)};',
     'const ch=(cfg&&cfg.channels)||{};',
     'for(const k of ["telegram","slack","discord"]){const x=ch[k];if(!x||typeof x!=="object")continue;const a={};',
-    'for(const [id,v] of Object.entries(x.accounts||{})){a[id]={enabled:!!v&&v.enabled!==false,h:h(v&&(v.botToken||v.token))};for(const y of ((v&&v.allowFrom)||[]))adm(k,y)}',
+    'try{for(const [id,v] of Object.entries(x.accounts||{})){a[id]={enabled:!!v&&v.enabled!==false,h:h(v&&(v.botToken||v.token))};for(const y of ((v&&v.allowFrom)||[]))adm(k,y)}}catch(e){bad(k,"openclaw.json",e)}',
     'out.channels[k]={enabled:x.enabled!==false,accounts:a}}',
-    'const cd=d+"/credentials";try{for(const f of fs.readdirSync(cd)){const m=/^(telegram|slack|discord)-.*-allowFrom\\.json$/.exec(f);if(!m)continue;try{for(const y of (JSON.parse(fs.readFileSync(path.join(cd,f),"utf8")).allowFrom||[]))adm(m[1],y)}catch(e){}}}catch(e){}',
-    `try{if(fs.existsSync(${JSON.stringify(PAIRING_DB)})){const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync(${JSON.stringify(PAIRING_DB)},{readOnly:true});for(const r of db.prepare("select channel_key, entry from channel_pairing_allow_entries").all())adm(String(r.channel_key),r.entry)}}catch(e){}`,
+    'const cd=d+"/credentials";try{for(const f of fs.readdirSync(cd)){const m=/^(telegram|slack|discord)-.*-allowFrom\\.json$/.exec(f);if(!m)continue;try{for(const y of (JSON.parse(fs.readFileSync(path.join(cd,f),"utf8")).allowFrom||[]))adm(m[1],y)}catch(e){bad(m[1],"allowFrom file",e)}}}catch(e){if(!gone(e))bad(null,"allowFrom files",e)}',
+    `let st=null;try{st=fs.statSync(${JSON.stringify(PAIRING_DB)})}catch(e){if(!gone(e))bad(null,"pairing store",e)}`,
+    `if(st){try{const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync(${JSON.stringify(PAIRING_DB)},{readOnly:true});try{for(const r of db.prepare("select channel_key, entry from channel_pairing_allow_entries").all())adm(String(r.channel_key),r.entry)}finally{try{db.close()}catch(e){}}}catch(e){bad(null,"pairing store",e)}}`,
     'for(const n of inp.env)out.env[n]=Object.prototype.hasOwnProperty.call(process.env,n);',
-    'for(const p of inp.paths)out.paths[p]=fs.existsSync(p);',
+    'for(const p of inp.paths){try{fs.statSync(p);out.paths[p]=true}catch(e){out.paths[p]=gone(e)?false:null}}',
     'process.stdout.write(JSON.stringify(out));',
   ].join('');
   return `HB_ACCESS_PROBE=${b64} node -e '${code}'`;
@@ -107,15 +121,24 @@ export interface ProbeResult {
   config: boolean;
   channels: Partial<Record<ChannelKind, { enabled: boolean; accounts: Record<string, { enabled: boolean; h: string | null }> }>>;
   env: Record<string, boolean>;
-  paths: Record<string, boolean>;
+  /** true found, false no such file, null could not be looked at. */
+  paths: Record<string, boolean | null>;
   admitted: Partial<Record<ChannelKind, string[]>>;
+  /** Per chat app, the admission sources that could not be read ("pairing store: EACCES"); empty = read completely. */
+  unread: Record<ChannelKind, string[]>;
 }
 
 export function parseProbe(stdout: string): ProbeResult | null {
   try {
     const j = JSON.parse(stdout) as Partial<ProbeResult>;
     if (!j || typeof j !== 'object' || typeof j.env !== 'object' || typeof j.paths !== 'object') return null;
-    return { config: !!j.config, channels: j.channels ?? {}, env: j.env ?? {}, paths: j.paths ?? {}, admitted: j.admitted ?? {} };
+    // A probe that says nothing of what it read is not a complete read of anything.
+    const u = (j.unread && typeof j.unread === 'object' ? j.unread : {}) as Partial<Record<ChannelKind, unknown>>;
+    const unreadOf = (k: ChannelKind) => (Array.isArray(u[k]) ? (u[k] as unknown[]).map(String) : ['not reported']);
+    return {
+      config: !!j.config, channels: j.channels ?? {}, env: j.env ?? {}, paths: j.paths ?? {}, admitted: j.admitted ?? {},
+      unread: { telegram: unreadOf('telegram'), slack: unreadOf('slack'), discord: unreadOf('discord') },
+    };
   } catch { return null; }
 }
 
@@ -190,9 +213,21 @@ async function verifyNow(deps: VerifyDeps, agent: Agent, runtimeRef: string): Pr
     return { status: 'checked', at, checked, skipped: [...skipped, 'bots, folders, variables and people (could not read inside it)'] };
   }
 
-  for (const p of folderPaths) { store.recordAccessCheck(agent.id, 'folder', p, !!probe.paths[p], undefined, at); checked++; }
-  for (const r of want.repos) { store.recordAccessCheck(agent.id, 'repo', r.mount, !!probe.paths[`${GIT_BASE}/${r.mount}`], undefined, at); checked++; }
-  for (const m of keyMounts) { store.recordAccessCheck(agent.id, 'repo-key', m, !!probe.paths[keyPath(m)], undefined, at); checked++; }
+  // 2026-10-09 (#23): what could not be read is no proof of absence. Record unknown — but a thing last
+  // found present keeps that finding (and its time), so a warning stays until a complete read shows it gone.
+  const unread = (kind: string, subject: string) => {
+    if (prior.some((c) => c.kind === kind && c.subject === subject && c.present)) return;
+    store.recordAccessCheck(agent.id, kind, subject, null, undefined, at);
+  };
+  const unseenPaths: string[] = [];
+  const pathCheck = (kind: string, subject: string, p: string) => {
+    const v = probe.paths[p];
+    if (v === true || v === false) { store.recordAccessCheck(agent.id, kind, subject, v, undefined, at); checked++; } else { unread(kind, subject); unseenPaths.push(subject); }
+  };
+  for (const p of folderPaths) pathCheck('folder', p, p);
+  for (const r of want.repos) pathCheck('repo', r.mount, `${GIT_BASE}/${r.mount}`);
+  for (const m of keyMounts) pathCheck('repo-key', m, keyPath(m));
+  if (unseenPaths.length) skipped.push(`${unseenPaths.join(', ')} (could not be looked at)`);
   for (const n of envNames) { store.recordAccessCheck(agent.id, 'env', n, !!probe.env[n], undefined, at); checked++; }
 
   // Chat bots: the account Hatchabot gave it, the token compared by hash; any other account in its settings.
@@ -230,11 +265,18 @@ async function verifyNow(deps: VerifyDeps, agent: Agent, runtimeRef: string): Pr
       known.get(k)!.add(id);
     }
     if (!ids.length) continue; // web chat only: Hatchabot's own sign-in decides, nothing to read in the agent
+    if (m.status !== 'active' && m.status !== 'revoked') continue;
+    // Found admitted anywhere is proof; "not admitted" only when every source on each of their chat apps was read.
     const present = ids.some(([k, id]) => admitted.get(k)?.has(id));
-    if (m.status === 'active' || m.status === 'revoked') { store.recordAccessCheck(agent.id, 'person', m.userId, present, undefined, at); checked++; }
+    if (present || ids.every(([k]) => !probe.unread[k]?.length)) { store.recordAccessCheck(agent.id, 'person', m.userId, present, undefined, at); checked++; } else unread('person', m.userId);
   }
   for (const kind of ['telegram', 'slack', 'discord'] as const) {
     const others = onApps.has(kind) ? [...(admitted.get(kind) ?? [])].filter((id) => !known.get(kind)?.has(id)) : [];
+    if (onApps.has(kind) && probe.unread[kind].length) {
+      skipped.push(`people on ${kind} (${probe.unread[kind].join('; ')})`);
+      // Nobody else found in what could be read proves nothing: keep the last finding.
+      if (!others.length) { if (prior.some((c) => c.kind === 'person-unknown' && c.subject === kind)) unread('person-unknown', kind); continue; }
+    }
     if (others.length || prior.some((c) => c.kind === 'person-unknown' && c.subject === kind)) {
       store.recordAccessCheck(agent.id, 'person-unknown', kind, others.length > 0, String(others.length), at);
     }

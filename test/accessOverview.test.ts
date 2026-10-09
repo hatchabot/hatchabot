@@ -10,6 +10,10 @@ import type { Agent } from '../src/domain/types.js';
 import type { ExecResult } from '../src/providers/provider.js';
 import { accessAlertOf, accessOverview, accessProbeScript, verifyAgentAccess } from '../src/orchestrator/accessOverview.js';
 import { syncConnections } from '../src/orchestrator/googleConnections.js';
+import { PAIRING_DB } from '../src/orchestrator/claim.js';
+import vm from 'node:vm';
+import nodePath from 'node:path';
+import nodeCrypto from 'node:crypto';
 
 /**
  * The access overview (docs/access-overview-design.md): what each agent can
@@ -43,6 +47,51 @@ interface Inside {
   paths: Record<string, boolean>;
   admitted: Record<string, string[]>;
   probeFails?: boolean;
+  /** Run the real generated probe in an isolated VM against this made-up container instead of faking its output. */
+  vm?: VmInside;
+}
+
+/** A made-up container for the real probe code: files by path, an error code per unreadable path, and node:sqlite. */
+interface VmInside {
+  files: Record<string, string>;
+  dirs: Record<string, string[]>;
+  /** A path whose read or stat fails with this code (EACCES, …). */
+  fail?: Record<string, string>;
+  /** The pairing store's rows, or the error opening it throws (node:sqlite unavailable, unreadable, …). */
+  sqlite: Array<{ channel_key: string; entry: string }> | { throws: string } | { queryThrows: string };
+}
+
+const STATE = '/home/node/.openclaw';
+/** Run the generated probe exactly as it would run in the container, in a VM with a fake fs and node:sqlite. */
+function runProbeInVm(script: string, c: VmInside): string {
+  const m = /^HB_ACCESS_PROBE=([A-Za-z0-9+/=]+) node -e '([^']*)'$/.exec(script);
+  if (!m) throw new Error('probe script not in the expected form');
+  const err = (code: string, p: string) => Object.assign(new Error(`${code}: ${p}`), { code });
+  const check = (p: string) => { if (c.fail?.[p]) throw err(c.fail[p]!, p); };
+  const fs = {
+    readFileSync: (p: string) => { check(p); if (p in c.files) return c.files[p]; throw err('ENOENT', p); },
+    readdirSync: (p: string) => { check(p); if (p in c.dirs) return c.dirs[p]; throw err('ENOENT', p); },
+    statSync: (p: string) => { check(p); if (p in c.files || p in c.dirs) return { isFile: () => p in c.files }; throw err('ENOENT', p); },
+    existsSync: (p: string) => { try { check(p); } catch { return false; } return p in c.files || p in c.dirs; },
+  };
+  const sqlite = {
+    DatabaseSync: class {
+      constructor() { if ('throws' in c.sqlite) throw err('ERR_SQLITE_ERROR', c.sqlite.throws); }
+      prepare() {
+        const s = c.sqlite;
+        return { all: () => { if ('queryThrows' in s) throw err('ERR_SQLITE_ERROR', s.queryThrows); return s as Array<{ channel_key: string; entry: string }>; } };
+      }
+      close() {}
+    },
+  };
+  const mods: Record<string, unknown> = { fs, path: nodePath, crypto: nodeCrypto, 'node:sqlite': sqlite };
+  let out = '';
+  vm.runInNewContext(m[2]!, {
+    require: (n: string) => { if (!(n in mods)) throw new Error(`module ${n} not in the fake container`); return mods[n]; },
+    process: { env: { HB_ACCESS_PROBE: m[1] }, stdout: { write: (x: string) => { out += x; return true; } } },
+    Buffer,
+  });
+  return out;
 }
 
 async function world() {
@@ -105,11 +154,12 @@ async function world() {
     }
     if (script.startsWith('HB_ACCESS_PROBE=')) {
       if (inside.probeFails) return { code: 1, stdout: '', stderr: 'boom' };
+      if (inside.vm) return { code: 0, stdout: runProbeInVm(script, inside.vm), stderr: '' };
       const input = JSON.parse(Buffer.from(/^HB_ACCESS_PROBE=([A-Za-z0-9+/=]+) /.exec(script)![1]!, 'base64').toString('utf8')) as { paths: string[]; env: string[] };
       return {
         code: 0, stderr: '',
         stdout: JSON.stringify({
-          config: true, channels: inside.channels, admitted: inside.admitted,
+          config: true, channels: inside.channels, admitted: inside.admitted, unread: { telegram: [], slack: [], discord: [] },
           env: Object.fromEntries(input.env.map((n) => [n, !!inside.env[n]])),
           paths: Object.fromEntries(input.paths.map((p) => [p, !!inside.paths[p]])),
         }),
@@ -226,6 +276,101 @@ describe('Verify now records what is inside the running agent', () => {
     expect((r as { skipped?: string[] }).skipped?.join(' ')).toMatch(/could not read inside it/);
     expect(w.row('a1', 'google', 'mail@example.org')!.verified.status).toBe('present');
     expect(w.row('a1', 'env', 'SEARCH_KEY')!.verified.status).toBe('unknown');
+  });
+});
+
+describe('an admission source that cannot be read is no proof that nobody is admitted (#23)', () => {
+  /** a1's container as the real probe sees it: a readable openclaw.json admitting the owner; the pairing store as given. */
+  const container = (sqlite: VmInside['sqlite'], extra: Partial<VmInside> = {}): VmInside => ({
+    files: {
+      [`${STATE}/openclaw.json`]: JSON.stringify({ channels: { telegram: { accounts: { TestAgentBot: { enabled: true, botToken: BOT_VALUE, allowFrom: [tgId(1)] } } } } }),
+      [PAIRING_DB]: '',
+      '/data/recipes': '', '/home/node/.openclaw/notes': '', '/home/node/.openclaw/.ssh/notes_deploy': '',
+      ...extra.files,
+    },
+    dirs: { ...extra.dirs }, // no credentials folder: no legacy allowlist files
+    sqlite,
+    ...(extra.fail ? { fail: extra.fail } : {}),
+  });
+  /** A revoked member OpenClaw still admits: the overview flags the extra access. */
+  const revokedButAdmitted = async () => {
+    const w = await world();
+    await verifyAgentAccess(w.deps, 'a1');
+    w.store.revokeMembership('a1', 'u-sam');
+    w.inside.vm = container([{ channel_key: 'telegram', entry: tgId(2) }]);
+    await verifyAgentAccess(w.deps, 'a1');
+    expect(w.row('a1', 'person', 'u-sam')).toMatchObject({ intended: false, mismatch: 'extra' });
+    return w;
+  };
+
+  it('the pairing store cannot be opened (node:sqlite throws): the revoked member\'s warning stays', async () => {
+    const w = await revokedButAdmitted();
+    const before = w.row('a1', 'person', 'u-sam')!.verified;
+    w.inside.vm = container({ throws: 'unable to open database file' });
+    const r = await verifyAgentAccess(w.deps, 'a1');
+    expect(r.status).toBe('checked');
+    expect(w.row('a1', 'person', 'u-sam')).toMatchObject({ intended: false, mismatch: 'extra' });
+    expect((r as { skipped?: string[] }).skipped?.join(' ')).toMatch(/people on telegram/);
+    expect(w.row('a1', 'person', 'u-sam')!.verified).toEqual(before); // the finding and its time are kept
+    expect(accessAlertOf(accessOverview(w.store, w.store.getAgent('a1')!))!.line).toMatch(/Sam: still there/);
+    // The owner, admitted by the readable config, is still found.
+    expect(w.row('a1', 'person', OWNER)!.verified.status).toBe('present');
+  });
+
+  it('a query error, an unreadable store or an unreadable allowlist file: the warning stays too', async () => {
+    for (const vmInside of [
+      container({ queryThrows: 'no such table: channel_pairing_allow_entries' }),
+      container([], { fail: { [PAIRING_DB]: 'EACCES' } }),
+      container([], { dirs: { [`${STATE}/credentials`]: ['telegram-default-allowFrom.json'] }, fail: { [`${STATE}/credentials/telegram-default-allowFrom.json`]: 'EACCES' } }),
+      container([], { fail: { [`${STATE}/credentials`]: 'EACCES' } }),
+      container([], { fail: { [`${STATE}/openclaw.json`]: 'EACCES' } }),
+    ]) {
+      const w = await revokedButAdmitted();
+      w.inside.vm = vmInside;
+      await verifyAgentAccess(w.deps, 'a1');
+      expect(w.row('a1', 'person', 'u-sam'), JSON.stringify(vmInside.fail ?? vmInside.sqlite)).toMatchObject({ mismatch: 'extra' });
+    }
+  });
+
+  it('the reason for an unreadable source never quotes the file (openclaw.json holds bot tokens)', async () => {
+    const w = await revokedButAdmitted();
+    w.inside.vm = container([], { files: { [`${STATE}/openclaw.json`]: `x"${BOT_VALUE}"` } }); // node's message would quote 'x"fixture-'
+    const r = await verifyAgentAccess(w.deps, 'a1');
+    const said = (r as { skipped?: string[] }).skipped?.join(' ') ?? '';
+    expect(said).toMatch(/openclaw\.json: not valid JSON/);
+    expect(said).not.toContain(BOT_VALUE.slice(0, 8));
+    expect(w.row('a1', 'person', 'u-sam')).toMatchObject({ mismatch: 'extra' });
+  });
+
+  it('a complete read that no longer admits them is believed: the warning clears', async () => {
+    const w = await revokedButAdmitted();
+    w.inside.vm = container([]);
+    await verifyAgentAccess(w.deps, 'a1');
+    expect(w.row('a1', 'person', 'u-sam')).toBeUndefined();
+    expect(w.store.listAccessChecks('a1').find((c) => c.kind === 'person' && c.subject === 'u-sam')!.present).toBe(false);
+  });
+
+  it('an active member the agent could not be read for is unknown, not "not found"', async () => {
+    const w = await world();
+    w.inside.vm = container({ throws: 'unable to open database file' });
+    await verifyAgentAccess(w.deps, 'a1');
+    expect(w.row('a1', 'person', 'u-sam')!.verified.status).toBe('unknown');
+    expect(w.row('a1', 'person', 'u-sam')!.mismatch).toBeUndefined();
+  });
+
+  it('a folder that cannot be looked at (stat fails, not "no such file") keeps its finding too', async () => {
+    const w = await world();
+    w.inside.vm = container([{ channel_key: 'telegram', entry: tgId(2) }]);
+    await verifyAgentAccess(w.deps, 'a1');
+    w.store.deleteDataSource('a1', 'd1');
+    w.inside.vm = container([{ channel_key: 'telegram', entry: tgId(2) }], { fail: { '/data/recipes': 'EACCES' } });
+    await verifyAgentAccess(w.deps, 'a1');
+    expect(w.store.listAccessChecks('a1').find((c) => c.kind === 'folder' && c.subject === '/data/recipes')!.present).toBe(true);
+    // Gone for real (no such file): recorded absent.
+    w.inside.vm = container([{ channel_key: 'telegram', entry: tgId(2) }]);
+    delete w.inside.vm.files['/data/recipes'];
+    await verifyAgentAccess(w.deps, 'a1');
+    expect(w.store.listAccessChecks('a1').find((c) => c.kind === 'folder' && c.subject === '/data/recipes')!.present).toBe(false);
   });
 });
 
