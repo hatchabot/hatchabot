@@ -30,6 +30,24 @@ jobs:
       # sub-second, no docker, no network, no secrets.
       - run: npm run e2e
 
+  # The real web page, clicked through in headless Chrome against a stubbed
+  # API (scripts/ui-clickthrough.mjs). It is one of the required gates
+  # (AGENTS.md); CI ran every other gate but this one (#14). Chrome comes from
+  # its Docker image, which GitHub's Ubuntu runners can run. promote.sh reads
+  # this workflow's result, so a failure here also stops a promote.
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: docker pull zenika/alpine-chrome
+      - run: npm run test:ui
+
   # Can a database written by an OLDER release be opened by this one?
   #
   # Every unit test starts from a fresh :memory: database, where CREATE TABLE
