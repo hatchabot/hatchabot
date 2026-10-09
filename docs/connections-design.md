@@ -201,7 +201,14 @@ control plane now owns the OAuth dance:
   --refresh-token-stdin`, with the keyring-password + ~/.local/bin/gog
   wrapper bootstrap (the condo agent's proven pattern). `gmail_no_send` per
   attachment. Detach/vault-removal dematerializes (`gog auth remove
-  --force`) and vault-removal also revokes at Google.
+  --force`) and vault-removal also revokes at Google (skipped while another
+  account holds the same Google account: they share one grant). A removal is
+  recorded in `connection_removals` (agent + email) before the attachment or
+  vault row is deleted, and is cleared only when the account is verifiably
+  off the volume (the remove exited 0, or `gog auth list` no longer names
+  it) or the same account is attached again. A stopped agent, or a remove
+  that failed, is retried at the next start, wake or rebuild
+  (`syncConnections`).
 - What stays manual by design: the consent click (Google requires a human),
   and the one-time console setup. Retail-grade zero-setup = shipping a
   verified Hatchabot OAuth client (CASA assessment for Gmail scopes) —

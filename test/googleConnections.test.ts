@@ -5,6 +5,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
+import type { ExecResult, RuntimeProvider } from '../src/providers/provider.js';
 import { OAuthStateJar, googleAuthUrl, parseOAuthClient, syncConnections } from '../src/orchestrator/googleConnections.js';
 
 /** The browser-binding cookie the start route set (night review, 2026-09-28). */
@@ -179,15 +180,15 @@ describe('the consent round-trip', () => {
 });
 
 describe('attach / detach / remove', () => {
-  async function connectedWorld() {
-    const { fetchImpl } = googleMock();
+  async function connectedWorld(email?: string) {
+    const { fetchImpl, calls } = googleMock(email ? { email } : {});
     const w = await world(fetchImpl);
     await configureClient(w.f);
     const start = await w.f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: {} });
     const state = new URL(start.json().url).searchParams.get('state')!;
     await w.f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}`, headers: H, cookies: { hb_oauth: nonceOf(start) } });
     const connId = w.store.listConnections(OWNER)[0]!.id;
-    return { ...w, connId };
+    return { ...w, connId, googleCalls: calls };
   }
 
   it('attach on a RUNNING agent materializes immediately via gog auth import', async () => {
@@ -301,5 +302,162 @@ describe('attach / detach / remove', () => {
     const conns = store.listConnections(OWNER);
     expect(conns).toHaveLength(1);
     await expect(secrets.get(`connection/${conns[0]!.id}`)).resolves.toBe('rt-secret-1');
+  });
+
+  // ---- issue #11: removals are durable until verified ----------------------
+
+  const removeOf = (log: string[][], email: string) =>
+    log.filter((c) => c[0] === 'sh' && String(c[1] ?? '').includes(`gog auth remove --force -- "${email}"`)).length;
+  const settle = () => new Promise((r) => setTimeout(r, 50));
+
+  it('detach on a STOPPED agent records the removal; deleting the connection after keeps it; Start removes the right email, then clears', async () => {
+    const w = await connectedWorld('mailbox@example.org');
+    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } });
+    await w.provider.stop(w.store.getAgent('a1')!.runtimeRef!);
+    w.store.setAgentState('a1', 'STOPPED');
+    const det = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/detach', headers: H, payload: { connectionId: w.connId } });
+    expect(det.json()).toMatchObject({ detached: true, removed: false });
+    expect(w.store.listAgentConnections('a1')).toHaveLength(0);
+    expect(w.store.connectionRemovals('a1')).toEqual(['mailbox@example.org']);
+    // The vault row (the old email lookup) goes; the record must not.
+    expect((await w.f.inject({ method: 'DELETE', url: `/v1/connections/${w.connId}`, headers: H })).statusCode).toBe(200);
+    expect(w.store.listConnections(OWNER)).toHaveLength(0);
+    expect(w.store.connectionRemovals('a1')).toEqual(['mailbox@example.org']);
+    expect(removeOf(w.provider.execLog, 'mailbox@example.org')).toBe(0);
+    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/start', headers: H })).statusCode).toBe(200);
+    await settle();
+    expect(removeOf(w.provider.execLog, 'mailbox@example.org')).toBe(1);
+    expect(w.store.connectionRemovals('a1')).toEqual([]);
+  });
+
+  it('re-attaching the same account before the agent starts drops the pending removal; the credential stays', async () => {
+    const w = await connectedWorld('mailbox@example.org');
+    await w.provider.stop(w.store.getAgent('a1')!.runtimeRef!);
+    w.store.setAgentState('a1', 'STOPPED');
+    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } });
+    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/detach', headers: H, payload: { connectionId: w.connId } });
+    expect(w.store.connectionRemovals('a1')).toEqual(['mailbox@example.org']);
+    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } });
+    expect(w.store.connectionRemovals('a1')).toEqual([]);
+    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/start', headers: H })).statusCode).toBe(200);
+    await settle();
+    expect(removeOf(w.provider.execLog, 'mailbox@example.org')).toBe(0);
+    expect(w.provider.secretShells.some((s) => s.includes('gog auth import --email "mailbox@example.org"'))).toBe(true);
+  });
+
+  it('a stale record for an account attached again is cleared by sync without removing it', async () => {
+    const w = await connectedWorld('mailbox@example.org');
+    w.store.attachConnection('a1', w.connId, false);
+    w.store.addConnectionRemoval('a1', 'mailbox@example.org');
+    await syncConnections({ store: w.store, secrets: w.secrets, provider: w.provider, log: () => {} }, 'a1', w.store.getAgent('a1')!.runtimeRef!);
+    expect(removeOf(w.provider.execLog, 'mailbox@example.org')).toBe(0);
+    expect(w.store.connectionRemovals('a1')).toEqual([]);
+  });
+
+  it('a failed live detach keeps the record for the next start', async () => {
+    const w = await connectedWorld('mailbox@example.org');
+    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } });
+    w.provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'keyring locked' });
+    const det = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/detach', headers: H, payload: { connectionId: w.connId } });
+    expect(det.json()).toMatchObject({ detached: true, removed: false });
+    expect(w.store.connectionRemovals('a1')).toEqual(['mailbox@example.org']);
+    const del = await w.f.inject({ method: 'DELETE', url: `/v1/connections/${w.connId}`, headers: H });
+    expect(del.json()).toMatchObject({ removed: true, pendingOn: 0 }); // already detached: no holders left
+    expect(w.store.connectionRemovals('a1')).toEqual(['mailbox@example.org']);
+  });
+
+  it('deleting a connection held by another account still takes it off the agent but does not revoke the shared grant', async () => {
+    const w = await connectedWorld('shared-box@example.org');
+    w.store.insertConnection({ id: 'c-other', ownerId: 'user-other', kind: 'google', email: 'shared-box@example.org', services: [], secretRef: 'connection/c-other' });
+    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } });
+    const del = await w.f.inject({ method: 'DELETE', url: `/v1/connections/${w.connId}`, headers: H });
+    expect(del.json()).toMatchObject({ removed: true, pendingOn: 0 });
+    expect(removeOf(w.provider.execLog, 'shared-box@example.org')).toBe(1);
+    expect(w.store.connectionRemovals('a1')).toEqual([]);
+    expect(w.googleCalls.some((c) => c.url.includes('/revoke'))).toBe(false);
+    expect(w.store.getConnection('c-other')).toBeTruthy();
+  });
+
+  it('deleting a connection nobody else holds revokes it at Google (unchanged)', async () => {
+    const w = await connectedWorld('mailbox@example.org');
+    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } });
+    await w.f.inject({ method: 'DELETE', url: `/v1/connections/${w.connId}`, headers: H });
+    expect(w.googleCalls.some((c) => c.url.includes('/revoke'))).toBe(true);
+  });
+});
+
+describe('syncConnections retries a removal until it is verified (issue #11)', () => {
+  const EMAIL = 'old-box@example.org';
+  /** A runtime whose remove/list answers the test scripts; every script is logged. */
+  function scripted(answer: (kind: 'remove' | 'list' | 'other', n: number) => ExecResult | Error) {
+    const scripts: string[] = [];
+    let removes = 0;
+    const provider = {
+      async execShell(_ref: string, script: string): Promise<ExecResult> {
+        scripts.push(script);
+        const kind = script.includes('gog auth remove') ? 'remove' : script.includes('gog auth list') ? 'list' : 'other';
+        const r = answer(kind, kind === 'remove' ? ++removes : 0);
+        if (r instanceof Error) throw r;
+        return r;
+      },
+    } as unknown as RuntimeProvider;
+    return { provider, removes: () => scripts.filter((s) => s.includes(`gog auth remove --force -- "${EMAIL}"`)).length };
+  }
+  const stillHeld: ExecResult = { code: 0, stdout: JSON.stringify({ accounts: [{ email: EMAIL }] }), stderr: '' };
+  const ok: ExecResult = { code: 0, stdout: '', stderr: '' };
+
+  async function bare() {
+    const w = await world();
+    w.store.addConnectionRemoval('a1', EMAIL);
+    const ref = w.store.getAgent('a1')!.runtimeRef!;
+    return { ...w, ref };
+  }
+
+  it('a non-zero remove keeps the record; the next sync retries and clears it on success', async () => {
+    const w = await bare();
+    const rt = scripted((kind, n) => kind === 'remove' ? (n === 1 ? { code: 1, stdout: '', stderr: 'keyring locked' } : ok) : kind === 'list' ? stillHeld : ok);
+    const events: string[] = [];
+    const deps = { store: w.store, secrets: w.secrets, provider: rt.provider, log: (e: string) => { events.push(e); } };
+    await syncConnections(deps, 'a1', w.ref);
+    expect(rt.removes()).toBe(1);
+    expect(w.store.connectionRemovals('a1')).toEqual([EMAIL]);
+    expect(events).toContain('connection.remove_failed');
+    expect(events).not.toContain('connection.removed_from_agent');
+    await syncConnections(deps, 'a1', w.ref);
+    expect(rt.removes()).toBe(2);
+    expect(w.store.connectionRemovals('a1')).toEqual([]);
+    expect(events).toContain('connection.removed_from_agent');
+  });
+
+  it('a thrown exec keeps the record', async () => {
+    const w = await bare();
+    const rt = scripted((kind) => kind === 'remove' ? new Error('container gone') : kind === 'list' ? stillHeld : ok);
+    await syncConnections({ store: w.store, secrets: w.secrets, provider: rt.provider }, 'a1', w.ref);
+    expect(rt.removes()).toBe(1);
+    expect(w.store.connectionRemovals('a1')).toEqual([EMAIL]);
+  });
+
+  it('a failed remove whose list cannot be read keeps the record', async () => {
+    const w = await bare();
+    const rt = scripted(() => new Error('docker unreachable'));
+    await syncConnections({ store: w.store, secrets: w.secrets, provider: rt.provider }, 'a1', w.ref);
+    expect(w.store.connectionRemovals('a1')).toEqual([EMAIL]);
+  });
+
+  it('a failed remove for an account gog no longer lists counts as removed', async () => {
+    const w = await bare();
+    const rt = scripted((kind) => kind === 'remove' ? { code: 1, stdout: '', stderr: 'no such account' } : kind === 'list' ? { code: 0, stdout: JSON.stringify({ accounts: [] }), stderr: '' } : ok);
+    await syncConnections({ store: w.store, secrets: w.secrets, provider: rt.provider }, 'a1', w.ref);
+    expect(w.store.connectionRemovals('a1')).toEqual([]);
+  });
+
+  it('a vault account the reconcile fails to remove is remembered, so deleting it later cannot lose it', async () => {
+    const w = await bare();
+    w.store.clearConnectionRemoval('a1', EMAIL);
+    w.store.insertConnection({ id: 'c-v', ownerId: OWNER, kind: 'google', email: EMAIL, services: [], secretRef: 'connection/c-v' });
+    const rt = scripted((kind) => kind === 'remove' ? { code: 1, stdout: '', stderr: 'busy' } : kind === 'list' ? stillHeld : stillHeld);
+    await syncConnections({ store: w.store, secrets: w.secrets, provider: rt.provider }, 'a1', w.ref);
+    expect(rt.removes()).toBeGreaterThan(0);
+    expect(w.store.connectionRemovals('a1')).toEqual([EMAIL]);
   });
 });

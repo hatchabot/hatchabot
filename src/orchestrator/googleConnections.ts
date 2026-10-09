@@ -254,17 +254,78 @@ export async function materializeConnection(
   return { ok: true };
 }
 
-/** Remove one previously-materialized account from a RUNNING agent. */
+/** The accounts gog holds on the volume, or null when that can't be read. */
+async function gogAccounts(deps: ConnectionSyncDeps, runtimeRef: string): Promise<string[] | null> {
+  try {
+    const res = await deps.provider.execShell(
+      runtimeRef,
+      '~/.local/bin/gog auth list --json 2>/dev/null || gog auth list --json 2>/dev/null',
+    );
+    if (res.code !== 0) return null;
+    const parsed = JSON.parse(res.stdout) as { accounts?: Array<{ email?: string }> } | null;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return (parsed.accounts ?? []).map((a) => a.email).filter((e): e is string => typeof e === 'string');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove one previously-materialized account from a RUNNING agent. `ok` only
+ * when the account is verifiably gone: the remove exited 0, or it failed but
+ * gog's own list no longer names the account (never there, or an earlier try
+ * already took it). A thrown exec, or a non-zero exit with the account still
+ * listed or the list unreadable, is a failure the caller keeps for retry —
+ * the volume may still hold the credential (issue #11).
+ */
 export async function dematerializeConnection(
   deps: ConnectionSyncDeps,
   agent: { id: string; runtimeRef: string },
   email: string,
-): Promise<void> {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+$/.test(email)) return;
-  await deps.provider
-    .execShell(agent.runtimeRef, `~/.local/bin/gog auth remove --force -- "${email}" 2>/dev/null || gog auth remove --force -- "${email}"`)
-    .catch(() => {});
-  deps.log?.('connection.removed_from_agent', { agentId: agent.id, email });
+): Promise<{ ok: boolean; error?: string }> {
+  // A shape materialize refuses to write: nothing of ours can be there.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+$/.test(email) || email.length > 254) return { ok: true };
+  let error: string;
+  try {
+    const res = await deps.provider.execShell(
+      agent.runtimeRef,
+      `~/.local/bin/gog auth remove --force -- "${email}" 2>/dev/null || gog auth remove --force -- "${email}"`,
+    );
+    if (res.code === 0) {
+      deps.log?.('connection.removed_from_agent', { agentId: agent.id, email });
+      return { ok: true };
+    }
+    error = (res.stderr || res.stdout || `gog auth remove exited ${res.code}`).slice(0, 300);
+  } catch (err) {
+    error = String((err as Error)?.message ?? err).slice(0, 300);
+  }
+  const held = await gogAccounts(deps, agent.runtimeRef);
+  if (held && !held.some((e) => e.toLowerCase() === email.toLowerCase())) {
+    deps.log?.('connection.removed_from_agent', { agentId: agent.id, email, alreadyGone: true });
+    return { ok: true };
+  }
+  deps.log?.('connection.remove_failed', { agentId: agent.id, email, error });
+  return { ok: false, error };
+}
+
+/**
+ * Removals are durable (issue #11): callers record the intent with
+ * store.addConnectionRemoval(agent, email) BEFORE deleting the attachment or
+ * the vault row, so a stopped agent, a failed exec or a later vault deletion
+ * can't lose the email the removal needs. This is the live half: on a RUNNING
+ * agent it removes the account now and clears the record only when verified;
+ * otherwise the record waits for the next start, wake or rebuild
+ * (syncConnections). Returns whether the account is verifiably off already.
+ */
+export async function removeQueuedNow(
+  deps: ConnectionSyncDeps,
+  agent: { id: string; state?: string; runtimeRef?: string | null },
+  email: string,
+): Promise<boolean> {
+  if (agent.state !== 'RUNNING' || !agent.runtimeRef) return false;
+  const r = await dematerializeConnection(deps, { id: agent.id, runtimeRef: agent.runtimeRef }, email);
+  if (r.ok) deps.store.clearConnectionRemoval(agent.id, email);
+  return r.ok;
 }
 
 /**
@@ -294,9 +355,16 @@ export async function syncConnections(
   // (not a platform connection) is never touched (audit 2026-09-08).
   // Connections deleted while this agent was down: gone from the vault, so
   // the vault check below no longer knows them (night review, 2026-09-28).
+  // A record is cleared only once the account is verifiably off the volume,
+  // or when the same account was deliberately attached again (then it stays
+  // and is re-imported below). A failure keeps it for the next sync (#11).
   for (const email of deps.store.connectionRemovals(agentId)) {
-    if (!attachedEmails.has(email)) await dematerializeConnection(deps, { id: agentId, runtimeRef }, email);
-    deps.store.clearConnectionRemoval(agentId, email);
+    if (attachedEmails.has(email)) {
+      deps.store.clearConnectionRemoval(agentId, email);
+      continue;
+    }
+    const r = await dematerializeConnection(deps, { id: agentId, runtimeRef }, email);
+    if (r.ok) deps.store.clearConnectionRemoval(agentId, email);
   }
   try {
     const vaultEmails = new Set(deps.store.listConnections(agent.ownerId).map((c) => c.email));
@@ -305,7 +373,9 @@ export async function syncConnections(
     for (const acc of parsed.accounts ?? []) {
       const email = acc.email;
       if (email && vaultEmails.has(email) && !attachedEmails.has(email)) {
-        await dematerializeConnection(deps, { id: agentId, runtimeRef }, email);
+        // A failure is remembered, so deleting the vault entry later can't lose the email.
+        const r = await dematerializeConnection(deps, { id: agentId, runtimeRef }, email);
+        if (!r.ok) deps.store.addConnectionRemoval(agentId, email);
       }
     }
   } catch {

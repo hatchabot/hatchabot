@@ -147,7 +147,7 @@ import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAc
 import { memoryPolicySection, replaceMemoryPolicy, replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import {
   DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar,
-  dematerializeConnection, exchangeGoogleCode, googleAuthUrl, materializeConnection, syncConnections,
+  exchangeGoogleCode, googleAuthUrl, materializeConnection, removeQueuedNow, syncConnections,
   parseOAuthClient, revokeGoogleToken, type OAuthClient,
 } from '../orchestrator/googleConnections.js';
 import { INSPECTABLE_FILES, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
@@ -9720,16 +9720,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.delete<{ Params: { id: string } }>('/v1/connections/:id', async (req, reply) => {
     const conn = store.getConnection(req.params.id);
     if (!conn || conn.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
-    // Pull it off every RUNNING agent first, then revoke at Google, then
-    // drop the vault entry — so a half-failure errs toward less access.
-    for (const aid of store.listAgentsForConnection(conn.id)) {
-      const a = store.getAgent(aid);
-      if (a?.state === 'RUNNING' && a.runtimeRef) {
-        await dematerializeConnection(connSyncDeps(a.hostId), { id: a.id, runtimeRef: a.runtimeRef }, conn.email);
-      } else if (a) {
-        // Down now: its next start, wake or rebuild takes the account off.
-        store.addConnectionRemoval(a.id, conn.email);
-      }
+    // Record the removal on every attached agent BEFORE anything is deleted
+    // (the record carries the email the vault row is about to lose), pull it
+    // off the RUNNING ones now, then revoke at Google, then drop the vault
+    // entry — so a half-failure errs toward less access. A record clears only
+    // when the account is verifiably off; a stopped agent or a failed remove
+    // is retried at its next start, wake or rebuild (issue #11).
+    const holders = store.listAgentsForConnection(conn.id)
+      .map((aid) => store.getAgent(aid))
+      .filter((a): a is NonNullable<typeof a> => !!a);
+    for (const a of holders) store.addConnectionRemoval(a.id, conn.email);
+    let pendingOn = 0;
+    for (const a of holders) {
+      if (!(await removeQueuedNow(connSyncDeps(a.hostId), a, conn.email))) pendingOn++;
     }
     // Not revoked while another account holds the same Google account: both
     // share one grant for this install's client, and revoking ends it for
@@ -9739,8 +9742,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const revoked = token && !shared ? await revokeGoogleToken(token, oauthFetch) : false;
     await secrets.delete(conn.secretRef).catch(() => {});
     store.deleteConnection(conn.id);
-    trace()('connection.unlinked', { email: conn.email, revoked, keptForOtherAccount: shared });
-    return { removed: true };
+    trace()('connection.unlinked', { email: conn.email, revoked, keptForOtherAccount: shared, pendingOn });
+    return { removed: true, pendingOn };
   });
 
   /** Attach a vault connection to an agent — live immediately when RUNNING,
@@ -9757,6 +9760,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // allow (sharing, if ever, is an explicit owner opt-in like AI sources).
       if (!conn || conn.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'No such connection.' });
       store.attachConnection(agent.id, conn.id, body.gmailNoSend === true);
+      // Attached again on purpose: a removal still pending from an earlier
+      // detach must not take the account off at the next start (issue #11).
+      store.clearConnectionRemoval(agent.id, conn.email);
       let live = false;
       let error: string | undefined;
       if (agent.state === 'RUNNING' && agent.runtimeRef) {
@@ -9777,12 +9783,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const body = (req.body ?? {}) as { connectionId?: string };
       const conn = body.connectionId ? store.getConnection(body.connectionId) : undefined;
       if (!conn || conn.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'No such connection.' });
+      // The removal is recorded before the attachment goes: a STOPPED agent
+      // used to lose it here, and deleting the vault entry afterwards erased
+      // the last place its email was known (issue #11). Running → removed now;
+      // otherwise (or on failure) at its next start, wake or rebuild.
+      store.addConnectionRemoval(agent.id, conn.email);
       store.detachConnection(agent.id, conn.id);
-      if (agent.state === 'RUNNING' && agent.runtimeRef) {
-        await dematerializeConnection(connSyncDeps(agent.hostId), { id: agent.id, runtimeRef: agent.runtimeRef }, conn.email);
-      }
-      trace(agent.id)('connection.detached', { email: conn.email });
-      return { detached: true };
+      const removed = await removeQueuedNow(connSyncDeps(agent.hostId), agent, conn.email);
+      trace(agent.id)('connection.detached', { email: conn.email, removed });
+      return { detached: true, removed };
     },
   );
 
