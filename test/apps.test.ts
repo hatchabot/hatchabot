@@ -10,7 +10,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
 import {
-  AppError, fieldsToAsk, hostGit, installRelease, mergeConfig, parseManifest, parseSource, repoFor, resolveRelease, type AgentFacts,
+  AppError, fieldsToAsk, hostGit, installRelease, mergeConfig, parseManifest, parseSource, repoFor, resolveRelease, switchTo, type AgentFacts,
 } from '../src/orchestrator/apps.js';
 
 /**
@@ -78,6 +78,12 @@ class FakeAgent extends MockProvider {
   testSaw: string[] = [];
   failAdd: (name: string) => boolean = () => false;
   failRm: (id: string) => boolean = () => false;
+  /** A `cron add` (by name) or `cron rm` (by id) that takes effect, then its reply is lost. */
+  lostAdd: (name: string) => boolean = () => false;
+  lostRm: (id: string) => boolean = () => false;
+  /** `cron list` calls so far; those after the `failListAfter`th cannot be read. */
+  lists = 0;
+  failListAfter = Infinity;
   /** Change a shell step before it runs (to break it part way). */
   breakScript: (script: string) => string = (s) => s;
   #roots = new Map<string, string>();
@@ -95,17 +101,21 @@ class FakeAgent extends MockProvider {
   }
   override async exec(_ref: string, argv: string[]): Promise<ExecResult> {
     this.calls.push({ kind: 'exec', what: JSON.stringify(argv) });
+    const lost = { code: 1, stdout: '', stderr: 'fixture response lost', timedOut: true };
+    if (argv[0] === 'cron' && argv[1] === 'list' && ++this.lists > this.failListAfter) return { code: 1, stdout: '', stderr: 'gateway closed' };
     if (argv[0] === 'cron' && argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs: this.jobs.map(({ id, name }) => ({ id, name })) }), stderr: '' };
     if (argv[0] === 'cron' && argv[1] === 'add') {
       const name = argv[argv.indexOf('--name') + 1]!;
       if (this.failAdd(name)) return { code: 1, stdout: '', stderr: 'gateway refused the job' };
       const id = `j${this.#next++}`;
       this.jobs.push({ id, name, argv });
+      if (this.lostAdd(name)) return lost;
       return { code: 0, stdout: JSON.stringify({ id }), stderr: '' };
     }
     if (argv[0] === 'cron' && argv[1] === 'rm') {
       if (this.failRm(argv[2]!)) return { code: 1, stdout: '', stderr: 'gateway timed out' };
       this.jobs = this.jobs.filter((j) => j.id !== argv[2]);
+      if (this.lostRm(argv[2]!)) return lost;
     }
     return { code: 0, stdout: '{}', stderr: '' };
   }
@@ -323,7 +333,61 @@ describe('a failed update leaves the running app as it was', () => {
     let rmFailed = false;
     agent.failRm = (id) => (id === oldDigest ? (rmFailed = true) : false);
     agent.failAdd = (name) => rmFailed && name === 'demoapp-tick'; // the re-add of the old tick fails
-    await expect(installRelease(d, v2, {})).rejects.toThrow(/Could not put the tasks back as they were: not re-added: demoapp-tick/);
+    await expect(installRelease(d, v2, {})).rejects.toThrow(/Its scheduled tasks could not be confirmed: not re-added: demoapp-tick\. Check them/);
+  });
+
+  // #17 (2026-10-09): a removal or an add can take effect and still answer an
+  // error (its reply lost, a timeout); the rollback goes by what the agent has.
+  it('an old task taken off whose reply is lost: it is put back, and only then called as it was', async () => {
+    const { agent, d, v2, before } = await installed({ ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['python3', '-m', 'demo', 'tick'] }] });
+    const oldTick = agent.jobs.find((j) => j.name === 'demoapp-tick')!.id;
+    agent.lostRm = (id) => id === oldTick;
+    await expect(installRelease(d, v2, { mailbox: 'second@example.org' }))
+      .rejects.toThrow(/Could not take off the old task demoapp-tick: fixture response lost\. Its tasks are as they were\. [0-9a-f]{12} is running as before/);
+    const now = agent.live();
+    expect(now.current).toBe(before.current);
+    expect(now.config).toBe(OWN_BYTES);
+    expect(agent.every('demoapp-tick')).toEqual(['1m']); // the old one, as v1 defined it; the new one is gone
+    expect(agent.jobs.map((j) => j.name).sort()).toEqual(['daily-brief', 'demoapp-tick']);
+  });
+
+  it('the put-back re-add loses its reply too: the list shows it back, so it is as it was', async () => {
+    const { agent, d, v2 } = await installed({ ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['python3', '-m', 'demo', 'tick'] }] });
+    const oldTick = agent.jobs.find((j) => j.name === 'demoapp-tick')!.id;
+    let rmLost = false;
+    agent.lostRm = (id) => (id === oldTick ? (rmLost = true) : false);
+    agent.lostAdd = (name) => rmLost && name === 'demoapp-tick';
+    await expect(installRelease(d, v2, {})).rejects.toThrow(/Its tasks are as they were/);
+    expect(agent.every('demoapp-tick')).toEqual(['1m']);
+  });
+
+  it('a new task added whose reply is lost: the rollback finds it and takes it off', async () => {
+    const { agent, d, v2, before } = await installed(TWO_TASKS);
+    agent.lostAdd = (name) => name === 'demoapp-digest';
+    await expect(installRelease(d, v2, {})).rejects.toThrow(/Could not schedule demoapp-digest: fixture response lost\. Its tasks are as they were/);
+    expect(agent.live()).toEqual({ ...before, config: OWN_BYTES, staging: false });
+    expect(agent.jobs.map((j) => j.name).sort()).toEqual(['daily-brief', 'demoapp-tick']);
+  });
+
+  it('when the tasks cannot be listed again it says they could not be confirmed, never that they are as they were', async () => {
+    const { agent, d, v2 } = await installed({ ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['python3', '-m', 'demo', 'tick'] }] });
+    const oldTick = agent.jobs.find((j) => j.name === 'demoapp-tick')!.id;
+    agent.lostRm = (id) => id === oldTick;
+    agent.failListAfter = agent.lists + 1; // the sync's own list, then nothing
+    const err = await installRelease(d, v2, {}).catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/Its scheduled tasks could not be confirmed: the list could not be read.*openclaw cron list/s);
+    expect((err as Error).message).not.toMatch(/as they were/);
+  });
+
+  it('a lost reply on rollback: the release it had keeps its tasks', async () => {
+    const changed = { ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['python3', '-m', 'demo', 'tick'] }] };
+    const { agent, d, v1, v2 } = await installed(changed);
+    await installRelease(d, v2, {});
+    const newTick = agent.jobs.find((j) => j.name === 'demoapp-tick')!.id;
+    agent.lostRm = (id) => id === newTick;
+    await expect(switchTo(d, v1.manifest, v1.sha, v2.manifest)).rejects.toThrow(/Its tasks are as they were\. Still on [0-9a-f]{12}/);
+    expect(agent.live().current).toBe(`releases/${v2.sha.slice(0, 12)}`);
+    expect(agent.every('demoapp-tick')).toEqual(['5m']);
   });
 });
 

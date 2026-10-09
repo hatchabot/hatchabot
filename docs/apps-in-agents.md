@@ -102,9 +102,13 @@ codebase gets deployed, updated and rolled back from Hatchabot.
 A failure in step 5 or 6 puts everything back: `current` at the previous
 release, its config to the byte (or no config, on a first install), and its
 tasks (new ones taken off, old ones already removed re-added from the previous
-release's `hatchabot.json`). The record is only written after step 6, so the
-agent, its tasks and the record agree either way; the error says if anything
-could not be put back. Replacing one app with another takes the old app's tasks
+release's `hatchabot.json`). The tasks are put back by listing what the agent
+has, not by what each add or removal answered (one can take effect and still
+answer an error), and listed again to confirm. The record is only written after
+step 6, so the agent, its tasks and the record agree either way; when the
+tasks cannot be confirmed (the list cannot be read, or a job will not come off
+or go back), the error says so and what to check (`openclaw cron list` in the
+agent's console). Replacing one app with another takes the old app's tasks
 off first and puts them back if the new one fails.
 
 **One copy per account.** An install is refused (409) when another live agent

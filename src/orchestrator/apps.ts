@@ -369,49 +369,64 @@ function addArgv(d: InstallDeps, m: AppManifest, t: AppManifest['tasks'][number]
 /**
  * OpenClaw command tasks named "<app>-<task>": the manifest's set, exactly.
  * The new jobs go in first and the old ones come off after, so a failure part
- * way leaves the old set: new jobs already added are taken off again, and old
- * ones already removed are added back from `previous` (the manifest they were
- * made from). The error says what could not be put back.
+ * way puts the old set back: new jobs taken off again, old ones gone re-added
+ * from `previous` (the manifest they were made from). The error says what
+ * could not be put back.
+ *
+ * The put-back goes by what the agent has, not by what each call answered
+ * (2026-10-09, #17): a `cron add` or `cron rm` can take effect and still
+ * answer an error (its reply lost, a timeout). So it lists the jobs, takes off
+ * any that were not there before, re-adds the old ones that are gone, and lists
+ * again; only that second list may say the tasks are as they were.
  */
 export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppManifest): Promise<string[]> {
   const run = (argv: string[]) => d.provider.exec(d.runtimeRef, argv, { timeoutMs: 60_000 });
   const old = await appJobs(d, m.app);
   const oldIds = new Set(old.map((j) => j.id));
-  /** Take off what this sync added; the names it could not. */
-  const takeOffNew = async (): Promise<string[]> => {
+  const prev = previous?.app === m.app ? previous : undefined;
+  /** Put the old set back; what is still wrong after a fresh list ([] = confirmed as it was). */
+  const putBack = async (): Promise<string[]> => {
+    const unread = (e: unknown) => [`the list could not be read (${(e as Error)?.message ?? e})`];
     let now: Job[];
-    try { now = await appJobs(d, m.app); } catch { return ['(the new tasks: the list could not be read)']; }
-    const left: string[] = [];
-    for (const j of now.filter((x) => !oldIds.has(x.id))) if ((await run(['cron', 'rm', j.id])).code !== 0) left.push(j.name);
-    return left;
+    try { now = await appJobs(d, m.app); } catch (e) { return unread(e); }
+    const seen = new Set(now.map((j) => j.id));
+    for (const j of now.filter((x) => !oldIds.has(x.id))) await run(['cron', 'rm', j.id]);
+    for (const j of old.filter((x) => !seen.has(x.id))) {
+      const t = prev?.tasks.find((x) => `${m.app}-${x.name}` === j.name);
+      if (t) await run(addArgv(d, prev!, t));
+    }
+    let after: Job[];
+    try { after = await appJobs(d, m.app); } catch (e) { return unread(e); }
+    // Listed before the put-back and not in the old set: a new job that would not come off.
+    // Not listed before: added by the put-back, whatever its add answered.
+    const stray = after.filter((j) => seen.has(j.id) && !oldIds.has(j.id)).map((j) => j.name);
+    const count = (jobs: Job[]) => jobs.reduce((n, j) => n.set(j.name, (n.get(j.name) ?? 0) + 1), new Map<string, number>());
+    const want = count(old);
+    const have = count(after.filter((j) => oldIds.has(j.id) || !seen.has(j.id)));
+    const missing = [...want].filter(([name, n]) => (have.get(name) ?? 0) < n).map(([name]) => name);
+    const twice = [...have].filter(([name, n]) => n > (want.get(name) ?? 0)).map(([name]) => name);
+    return [
+      ...(stray.length ? [`still there: ${stray.join(', ')}`] : []),
+      ...(missing.length ? [`not re-added: ${missing.join(', ')}`] : []),
+      ...(twice.length ? [`more than once: ${twice.join(', ')}`] : []),
+    ];
   };
-  const fail = (what: string, problems: string[]) => new AppError(
-    `${what} ${problems.length ? `Could not put the tasks back as they were: ${problems.join('; ')}.` : 'Its tasks are as they were.'}`);
+  const fail = async (what: string) => {
+    const problems = await putBack();
+    return new AppError(`${what} ${problems.length
+      ? `Its scheduled tasks could not be confirmed: ${problems.join('; ')}. Check them with \`openclaw cron list\` in the agent's console (jobs named ${m.app}-…), then Update or Roll back again.`
+      : 'Its tasks are as they were.'}`);
+  };
 
   const made: string[] = [];
   for (const t of m.tasks) {
     const r = await run(addArgv(d, m, t));
-    if (r.code !== 0) {
-      const left = await takeOffNew();
-      throw fail(`Could not schedule ${m.app}-${t.name}: ${errText(r)}.`, left.length ? [`still there: ${left.join(', ')}`] : []);
-    }
+    if (r.code !== 0) throw await fail(`Could not schedule ${m.app}-${t.name}: ${errText(r)}.`);
     made.push(`${m.app}-${t.name}`);
   }
-
-  const removed: string[] = [];
   for (const j of old) {
     const r = await run(['cron', 'rm', j.id]);
-    if (r.code === 0) { removed.push(j.name); continue; }
-    const problems: string[] = [];
-    const left = await takeOffNew();
-    if (left.length) problems.push(`still there: ${left.join(', ')}`);
-    const missing: string[] = [];
-    for (const name of removed) {
-      const t = previous?.app === m.app ? previous.tasks.find((x) => `${m.app}-${x.name}` === name) : undefined;
-      if (!t || (await run(addArgv(d, previous!, t))).code !== 0) missing.push(name);
-    }
-    if (missing.length) problems.push(`not re-added: ${missing.join(', ')}`);
-    throw fail(`Could not take off the old task ${j.name}: ${errText(r)}.`, problems);
+    if (r.code !== 0) throw await fail(`Could not take off the old task ${j.name}: ${errText(r)}.`);
   }
   return made;
 }
