@@ -94,6 +94,34 @@ published release before any promote, as today.
 - Re-running an old release's build is refused (its version exists), so a
   historical re-run can no longer change an image or move an alias.
 
+### 5. Privacy, enforced on GitHub's side
+
+The owner's main concern: AI agents writing private values (real agent
+names, people, emails, machine and tailnet names) into this public repo. The
+checks so far — the pre-push hook, the release-notes check, the `privacy`
+live test — all need the private values, which live only on the owner's
+machine, so text written anywhere else (another machine's agent, a web edit,
+a pull request made elsewhere) was not checked. So:
+
+- This machine computes a **keyed fingerprint** (HMAC) of every private value
+  and stores only the fingerprints and the key in an encrypted GitHub Actions
+  secret. GitHub never holds the values; a fingerprint can't be turned back
+  into a name.
+- A **`privacy` CI job** fingerprints every run of words in what a pull
+  request or push adds — the diff, file names, commit messages, authors, the
+  pull request's title and description — and fails on a match, printing only
+  a masked hint and where. With `main` behind pull requests, this check is
+  **required**: nothing reaches `main` without passing it, whoever or
+  whatever wrote the change.
+- A daily timer on this machine refreshes the fingerprints, so a new agent's
+  name is covered within a day; a release refreshes them first.
+- A daily **watch workflow** scans new issues, comments, pull request text
+  and release notes, and fails — GitHub emails the owner — on a match.
+- **Fail closed:** a missing or unreadable fingerprint set fails the check.
+- What it cannot catch: a private value Hatchabot has no record of, a
+  paraphrase, text inside images. The rule in `AGENTS.md` (examples from the
+  invented household) stays the first line of defence.
+
 ## Emergencies
 
 - **A broken `main` that blocks every PR:** the admin bypass lets the
@@ -121,6 +149,9 @@ Existing releases stay as they are: not re-uploaded, not deleted, not frozen
 (#38: historical assets are a separate decision).
 
 ## Questions for review
+
+(Answered so far: the privacy layer above — build it, 2026-10-10.)
+
 
 1. **Merge method:** rebase (keeps each commit, as today) — proposed — or
    squash (one commit per PR)?
