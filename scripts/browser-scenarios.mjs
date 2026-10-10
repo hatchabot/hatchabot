@@ -14,7 +14,7 @@
  * (example.org does not resolve on every network; a real page is used.)
  */
 import { spawnSync } from 'node:child_process';
-import { api, cleanupAgents, createAgent, hbt, inAgent, log, scenario, settle, sleep, summary } from './live-lib.mjs';
+import { api, cleanupAgents, createAgent, hbt, inAgent, log, requireRoom, scenario, settle, sleep, summary } from './live-lib.mjs';
 
 const PREFIX = 'zz browser test';
 const keep = process.argv.includes('--keep');
@@ -58,6 +58,7 @@ async function setBrowser(agent, on) {
 async function main() {
   const existing = (await api('/v1/agents')).json.filter((a) => a.name?.startsWith(PREFIX));
   if (existing.length) throw new Error(`Test agents from an earlier run are still there: ${existing.map((a) => a.name).join(', ')} — delete them first.`);
+  await requireRoom(1); // it makes 1 agent at once — say so before making any
   let agent = await createAgent(`${PREFIX} agent`);
   await scenario('B0 off by default: no browser, and the tool is off', async () => {
     const st = await inAgent(agent, ['openclaw', 'browser', 'status', '--json'], 120_000);

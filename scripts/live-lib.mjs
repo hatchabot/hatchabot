@@ -55,6 +55,21 @@ export async function requireVersion(min) {
   if (older) throw new Error(`This test needs Hatchabot ${min} or newer on the install (it runs v${v || '?'}).`);
 }
 
+/**
+ * Room for `n` more agents under this account's limit
+ * (HATCHABOT_MAX_AGENTS_PER_ACCOUNT; archived agents don't count), or stop
+ * before anything is made. Without it a test ran into the limit half-way and
+ * its later checks failed for that reason only (2026-10-09).
+ */
+export async function requireRoom(n) {
+  const max = Number((await api('/v1/config')).json?.maxAgentsPerAccount || 0);
+  if (!max) return;
+  const mine = ((await api('/v1/agents')).json ?? []).filter((a) => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED' && a.state !== 'DELETED').length;
+  if (max - mine < n) {
+    throw new Error(`This test makes ${n} agent(s) at once; this account has ${mine} of its ${max} (HATCHABOT_MAX_AGENTS_PER_ACCOUNT). Archive or delete ${n - (max - mine)}, or raise the limit, then run it again.`);
+  }
+}
+
 /** Until the agent settles in `want` (not busy); FAILED or the deadline throws. */
 export async function settle(id, want = 'RUNNING', minutes = 20) {
   const deadline = Date.now() + minutes * 60_000;

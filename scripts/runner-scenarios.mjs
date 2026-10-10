@@ -203,6 +203,13 @@ async function main() {
   if (!local || !runner) throw new Error(`No runner ${want ?? ''} (hosts: ${hosts.map((h) => h.name).join(', ')})`);
   const existing = (await api('/v1/agents')).json.filter((a) => a.name?.startsWith(PREFIX));
   if (existing.length) throw new Error(`Test agents from an earlier run are still there: ${existing.map((a) => a.name).join(', ')} — delete them first.`);
+  // Phase A makes 3 agents at once: say so before making any, not half-way
+  // through (its later checks then failed for that reason only, 2026-10-09).
+  {
+    const max = Number((await api('/v1/config')).json?.maxAgentsPerAccount || 0);
+    const mine = ((await api('/v1/agents')).json ?? []).filter((a) => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED' && a.state !== 'DELETED').length;
+    if (max && max - mine < 3) throw new Error(`This test makes 3 agents at once; this account has ${mine} of its ${max} (HATCHABOT_MAX_AGENTS_PER_ACCOUNT). Archive or delete ${3 - (max - mine)}, or raise the limit, then run it again.`);
+  }
   let ping = (await api(`/v1/hosts/${runner.id}/ping`)).json;
   if (!ping.reachable) throw new Error(`${runner.name} is not answering: ${ping.error ?? ''}`);
   const old = opt('old-image');

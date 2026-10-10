@@ -14,7 +14,7 @@
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { api, byName, cleanupAgents, createAgent, hbt, inAgent, log, putFile, recalls, requireVersion, scenario, settle, summary, workspaceOf } from './live-lib.mjs';
+import { api, byName, cleanupAgents, createAgent, hbt, inAgent, log, putFile, recalls, requireRoom, requireVersion, scenario, settle, summary, workspaceOf } from './live-lib.mjs';
 
 const PREFIX = 'zz transfer test';
 const keep = process.argv.includes('--keep');
@@ -30,6 +30,7 @@ async function main() {
   await requireVersion('2.150.0');
   const existing = (await api('/v1/agents')).json.filter((a) => a.name?.startsWith(PREFIX));
   if (existing.length) throw new Error(`Test agents from an earlier run are still there: ${existing.map((a) => a.name).join(', ')} — delete them first.`);
+  await requireRoom(3); // it makes 3 agents at once — say so before making any
   let src;
   await scenario('T0 set up: an agent with a daily note and a line in MEMORY.md', async () => {
     src = await createAgent(`${PREFIX} source`);

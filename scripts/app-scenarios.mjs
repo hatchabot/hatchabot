@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { api, cleanupAgents, createAgent, hbt, inAgent, log, scenario, sleep, summary } from './live-lib.mjs';
+import { api, cleanupAgents, createAgent, hbt, inAgent, log, requireRoom, scenario, sleep, summary } from './live-lib.mjs';
 
 const PREFIX = 'zz app test';
 const APP = 'zztestapp';
@@ -76,6 +76,7 @@ const taskThere = async (agent) => (await inAgent(agent, ['openclaw', 'cron', 'l
 async function main() {
   const existing = (await api('/v1/agents')).json.filter((a) => a.name?.startsWith(PREFIX));
   if (existing.length) throw new Error(`Test agents from an earlier run are still there: ${existing.map((a) => a.name).join(', ')} — delete them first.`);
+  await requireRoom(1); // it makes 1 agent at once — say so before making any
   git('init', '-q', '-b', 'main');
   const v1 = release('v1');
   let agent;

@@ -28,7 +28,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { api, cleanupAgents, createAgent, log, results, scenario, sleep, summary } from './live-lib.mjs';
+import { api, cleanupAgents, createAgent, log, requireRoom, results, scenario, sleep, summary } from './live-lib.mjs';
 
 const PREFIX = 'zz console test';
 const keep = process.argv.includes('--keep');
@@ -65,6 +65,7 @@ async function main() {
   if (!PUBLIC.startsWith('https://')) throw new Error(`HATCHABOT_PUBLIC_URL must be the HTTPS address other devices use (got "${PUBLIC || 'nothing'}").`);
   const existing = (await api('/v1/agents')).json.filter((a) => a.name?.startsWith(PREFIX));
   if (existing.length) throw new Error(`Test agents from an earlier run are still there: ${existing.map((a) => a.name).join(', ')} — delete them first.`);
+  await requireRoom(1); // it makes 1 agent at once — say so before making any
   const agent = await createAgent(`${PREFIX} agent`);
   const run = spawnSync('docker', ['run', '-d', '--rm', '--name', CHROME, '--network', 'host', '--shm-size=1g', 'zenika/alpine-chrome',
     '--no-sandbox', '--headless', '--disable-gpu', '--disable-dev-shm-usage', '--window-size=1280,900',

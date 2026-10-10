@@ -99,3 +99,9 @@ tests that run on their own.
 | 2026-10-09 | upgrade-check | pass | v2.157.0 | 1 |  |
 | 2026-10-09 | privacy | pass | v2.158.0 | 1 | OpenClaw 2026.9.8 |
 | 2026-10-09 | upgrade-check | pass | v2.158.0 | 1 |  |
+| 2026-10-09 | privacy | pass | v2.158.1 | 1 | OpenClaw 2026.9.8 |
+| 2026-10-09 | runner-scenarios | fail | v2.158.1 | 5 | OpenClaw 2026.9.8 |
+| 2026-10-09 | transfer | fail | v2.158.1 | 4 | OpenClaw 2026.9.8 |
+| 2026-10-10 | apps | pass | v2.158.1 | 4 | OpenClaw 2026.9.8 |
+| 2026-10-10 | restore-drill | pass | v2.158.1 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-10 | upgrade-check | pass | v2.158.1 | 1 |  |
