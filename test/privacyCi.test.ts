@@ -217,13 +217,14 @@ describe('--sync-ci', () => {
     const r = check(['--sync-ci', '--repo', 'example/project']);
     expect(r.status, shown(r)).toBe(0);
     const argv = readFileSync(join(dir, 'gh-argv'), 'utf8');
-    expect(argv.split('\n')).toEqual(['secret', 'set', 'PRIVACY_FINGERPRINTS', '--repo', 'example/project', '']);
+    // Two calls: the Actions copy, then Dependabot's (its pull requests see only Dependabot secrets).
+    expect(argv.split('\n')).toEqual(['secret', 'set', 'PRIVACY_FINGERPRINTS', '--repo', 'example/project', '--app', 'actions', 'secret', 'set', 'PRIVACY_FINGERPRINTS', '--repo', 'example/project', '--app', 'dependabot', '']);
     const sent = JSON.parse(readFileSync(join(dir, 'gh-stdin'), 'utf8'));
     expect(sent.v).toBe(1);
     expect(argv).not.toContain(sent.key);
     expect(shown(r)).not.toContain(sent.key);
     expect(shown(r)).not.toContain(sent.exact[0]);
-    expect(r.stdout).toMatch(/✓ PRIVACY_FINGERPRINTS set on example\/project: \d+ fingerprints/);
+    expect(r.stdout).toMatch(/✓ PRIVACY_FINGERPRINTS set on example\/project \(Actions and Dependabot\): \d+ fingerprints/);
     masked(r);
   });
 
