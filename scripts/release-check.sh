@@ -51,13 +51,20 @@ else
   git merge-base --is-ancestor "$SHA" "$MAIN" || die "$COMMIT is not on main — a release is made only from a commit on main."
 fi
 
-HAS="$(git show "$SHA:package.json" 2>/dev/null | sed -nE 's/^  "version": "([^"]+)".*/\1/p' | sed -n 1p)"
+# Each file read whole into a temp file first: a reader that stops early
+# (awk's exit, grep -q, sed -n 1p) left git show writing into a closed pipe,
+# and with pipefail its SIGPIPE ended this script without a word on a real
+# CHANGELOG, too big for the pipe buffer (the first dry run, 2026-10-10).
+AT="$(mktemp -d)"; trap 'rm -rf "$AT"' EXIT
+git show "$SHA:package.json" > "$AT/package.json" 2>/dev/null || die "No package.json at ${SHA:0:9}."
+git show "$SHA:CHANGELOG.md" > "$AT/CHANGELOG.md" 2>/dev/null || die "No CHANGELOG.md at ${SHA:0:9}."
+HAS="$(sed -nE 's/^  "version": "([^"]+)".*/\1/p' "$AT/package.json" | sed -n 1p)"
 [ "$HAS" = "$VERSION" ] || die "package.json at ${SHA:0:9} says ${HAS:-nothing}, not $VERSION — commit the version bump and land it first."
-SECTION="$(git show "$SHA:CHANGELOG.md" 2>/dev/null | awk -v v="$VERSION" '
+SECTION="$(awk -v v="$VERSION" '
   index($0, "## [" v "]") == 1 { f = 1; next }
   f && /^## \[/ { exit }
-  f { print }')"
-git show "$SHA:CHANGELOG.md" 2>/dev/null | grep -qF "## [$VERSION]" || die "CHANGELOG.md at ${SHA:0:9} has no \"## [$VERSION]\" section."
+  f { print }' "$AT/CHANGELOG.md")"
+grep -qF "## [$VERSION]" "$AT/CHANGELOG.md" || die "CHANGELOG.md at ${SHA:0:9} has no \"## [$VERSION]\" section."
 [ -n "$(printf '%s' "$SECTION" | tr -d '[:space:]')" ] || die "The CHANGELOG section for $VERSION is empty."
 if [ -n "$NOTES" ]; then printf '%s\n' "$SECTION" | sed -e '/./,$!d' > "$NOTES"; fi
 

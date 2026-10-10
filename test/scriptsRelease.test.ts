@@ -233,4 +233,14 @@ describe('scripts/release-check.sh (the workflow\'s first job runs it too)', () 
     expect(r.status, out(r)).toBe(0);
     expect(readFileSync(notes, 'utf8')).toBe('### Added\n- A thing.\n\n### Fixed\n- Another.\n');
   });
+
+  it('reads a CHANGELOG far bigger than a pipe buffer (the first dry run ended silently, exit 141)', () => {
+    const w = world();
+    const older = Array.from({ length: 6000 }, (_, i) => `## [1.0.${i}] — 2026-01-01\n\n- An older change, number ${i}.\n`).join('\n');
+    w.landed('9.8.7', CHANGELOG('9.8.7') + older);
+    const notes = join(w.root, 'notes.md');
+    const r = w.run('release-check.sh', ['9.8.7', '--notes', notes]);
+    expect(r.status, out(r)).toBe(0);
+    expect(readFileSync(notes, 'utf8')).toBe('### Fixed\n- An agent no longer stalls.\n');
+  });
 });
