@@ -105,3 +105,5 @@ tests that run on their own.
 | 2026-10-10 | apps | pass | v2.158.1 | 4 | OpenClaw 2026.9.8 |
 | 2026-10-10 | restore-drill | pass | v2.158.1 | 2 | OpenClaw 2026.9.8 |
 | 2026-10-10 | upgrade-check | pass | v2.158.1 | 1 |  |
+| 2026-10-10 | runner-scenarios | pass | v2.158.1 | 11 | OpenClaw 2026.9.8 |
+| 2026-10-10 | transfer | pass | v2.158.1 | 6 | OpenClaw 2026.9.8 |
