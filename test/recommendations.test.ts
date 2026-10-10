@@ -130,6 +130,40 @@ describe('the list: each check becomes an item, ranked', () => {
     expect(now.secondary.map((a) => a.kind)).toEqual(['context-cap']);
   });
 
+  it('a compaction running or done since the size was measured: the advice catches up (2026-10-10)', async () => {
+    const { compactingNow } = await import('../src/orchestrator/compactionState.js');
+    const w = world();
+    w.agent('budget', 'Budget Tracker');
+    w.store.setTokenHealth('budget', health({ conv: { calls: 300, p50: 200_000, p90: 260_000, max: 320_000, over100k: 300 }, main: { budget: { ctx: 310_000, at: NOW - HOUR } } }), iso(NOW));
+    const owner = w.store.getAgent('budget')!.ownerId;
+    const compaction = (id: string, at: number, outcome: string, detail: Record<string, unknown>) =>
+      w.store.addTokenAction({ id, agentId: 'budget', ownerId: owner, kind: 'compaction', at: iso(at), by: 'owner', via: 'recommendation', detail: { mode: 'summarise', session: 'main', beforeK: 310, ...detail }, outcome });
+    const card = () => w.list().items.find((x) => x.kind === 'big-conversation');
+
+    // Running in this process: the card says so, with no second Compact button.
+    compaction('ta_run', NOW - 2 * 60_000, 'running', {});
+    compactingNow.add('budget');
+    try {
+      expect(card()!.title).toBe("Budget Tracker's conversation is being compacted");
+      expect(card()!.action).toMatchObject({ kind: 'open-agent' });
+      expect(card()!.concern).toContain('the result goes to your chat');
+    } finally { compactingNow.delete('budget'); }
+    // A "running" row this process is not running (a restart cut it off): the advice stands.
+    expect(card()!.action).toMatchObject({ kind: 'compact' });
+
+    // Done after the measured call: the size it left (14K) stands, so no Compact
+    // button; the cap advice (from the 30-day median) remains.
+    compaction('ta_ok', NOW - 60_000, 'ok', { afterK: 14 });
+    expect(card()!.action).toMatchObject({ kind: 'context-cap' });
+    expect(card()!.secondary).toEqual([]);
+    // "Already compacted" (recorded as failed before this fix): done too.
+    compaction('ta_already', NOW - 30_000, 'failed', { reason: 'Already compacted' });
+    expect(card()!.action).toMatchObject({ kind: 'context-cap' });
+    // A compaction older than the measured call is no news: the advice stands.
+    w.store.setTokenHealth('budget', health({ conv: { calls: 300, p50: 200_000, p90: 260_000, max: 320_000, over100k: 300 }, main: { budget: { ctx: 300_000, at: NOW } } }), iso(NOW));
+    expect(card()!.action).toMatchObject({ kind: 'compact' });
+  });
+
   it('an agent over ~$20 a month with no budget is offered the suggested one', () => {
     const w = world();
     w.agent('stock', 'Stock Watcher');

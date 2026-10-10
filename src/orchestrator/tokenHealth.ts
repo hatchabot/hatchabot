@@ -4,6 +4,7 @@ import type { CacheTally, Mix4, TokenHealthRaw } from './usage.js';
 import { priceMix } from './modelOptions.js';
 import { effectiveModel } from './provision.js';
 import { channelHandlerTimeoutMs, OPENCLAW_HANDLER_TIMEOUT_MS } from './channelTimeout.js';
+import { compactingNow } from './compactionState.js';
 export { LOOP_LINE, parseLoopLines, type LoopMark, type LoopMarkKind } from './loopLines.js';
 
 /**
@@ -345,6 +346,10 @@ export interface TokenHealthRow {
     largest?: { kind: string; nowK: number };
     compactions30d: number;
     lastCompaction?: { at: string; beforeK: number };
+    /** A compaction of the main conversation running now (from the ledger and this process), since when. */
+    compacting?: { since: string; beforeK?: number };
+    /** mainNowK is the size a compaction left, newer than the last measured call (until the next call measures it again). */
+    mainAfterCompaction?: { at: string; beforeK?: number; already?: boolean };
   };
   /** The context cap: set by Hatchabot (and whether it is in the agent's config), and what OpenClaw then compacts at. */
   contextCap?: { tokens?: number; applied: boolean; compactsAtK?: number; model?: string };
@@ -434,6 +439,10 @@ export function tokenHealthRow(a: Agent, profile: AIProfile | undefined, stored:
   cap?: { tokens?: number; appliedModel?: string };
   /** The owner's enabled scheduled tasks, from the model profile (null = unreadable). */
   crons?: number | null;
+  /** Its latest compaction of the main conversation, from the token ledger. */
+  compaction?: TokenActionRow;
+  /** Whether that compaction is running in this process now. */
+  compacting?: boolean;
 }): TokenHealthRow {
   const T = THRESHOLDS;
   const h = stored?.health;
@@ -459,7 +468,22 @@ export function tokenHealthRow(a: Agent, profile: AIProfile | undefined, stored:
       ...(h.compactions?.last ? { lastCompaction: { at: iso(h.compactions.last), beforeK: kOf(h.compactions.before) } } : {}),
     };
     if (h.conv.calls >= 10 && h.conv.p50 >= T.largeConversation) flags.push('large-conversation');
-    if ((mainNow?.ctx ?? 0) >= T.compactNow) flags.push('compact-now');
+    // The size Hatchabot measured is the last call's, so a compaction since
+    // then (or one running) is newer news: without this the advice to compact
+    // stayed after it was done, and a second click got "Already compacted"
+    // (2026-10-10).
+    const cp = ctx.compaction;
+    const cd = (cp?.detail ?? {}) as { beforeK?: number; afterK?: number; reason?: string };
+    const cpAt = cp ? Date.parse(cp.at) : NaN;
+    let mainCtx = mainNow?.ctx ?? 0;
+    if (cp && cp.outcome === 'running' && ctx.compacting) {
+      row.conversation.compacting = { since: cp.at, ...(cd.beforeK !== undefined ? { beforeK: cd.beforeK } : {}) };
+    } else if (cp && (cp.outcome === 'ok' || /already compacted/i.test(cd.reason ?? '')) && mainNow && cpAt > mainNow.at) {
+      const already = cd.afterK === undefined;
+      if (cd.afterK !== undefined) { mainCtx = cd.afterK * 1000; row.conversation.mainNowK = cd.afterK; } else mainCtx = 0;
+      row.conversation.mainAfterCompaction = { at: cp.at, ...(cd.beforeK !== undefined ? { beforeK: cd.beforeK } : {}), ...(already ? { already: true } : {}) };
+    }
+    if (mainCtx >= T.compactNow && !row.conversation.compacting) flags.push('compact-now');
     row.cache = {
       ...(hit(h.cache.first5) !== undefined ? { firstOfTurnHit: hit(h.cache.first5) } : {}),
       firstOfTurnCalls: h.cache.first5[0], afterPauseCalls: h.cache.firstCold[0],
@@ -520,10 +544,12 @@ export function buildTokenHealth(store: Store, ownerId: string, opts: { now?: nu
   const consults = store.consultEvents(store.listAgents(ownerId).map((a) => a.id), since);
   const incidents = store.listTokenIncidents({ ownerId, open: true });
   const crons = store.modelProfiles(ids) as Map<string, { profile: { crons?: number | null } }>;
+  const compactions = store.lastMainCompactions(ids);
   const profiles = new Map<string, AIProfile | undefined>();
   const profileOf = (id: string) => { if (!profiles.has(id)) profiles.set(id, store.getAIProfile(id)); return profiles.get(id); };
   const rows = agents.map((a) => tokenHealthRow(a, profileOf(a.aiProfileId), healths.get(a.id), {
     now, marks: marks.filter((m) => m.agentId === a.id), consults, incidents, cap: store.getContextCap(a.id), crons: crons.get(a.id)?.profile.crons,
+    compaction: compactions.get(a.id), compacting: compactingNow.has(a.id),
   })).sort((x, y) => (y.cost30d?.total ?? -1) - (x.cost30d?.total ?? -1) || (y.conversation?.calls ?? 0) - (x.conversation?.calls ?? 0));
   const shown = rows.slice(0, limit);
   return {

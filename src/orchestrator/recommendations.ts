@@ -364,6 +364,22 @@ function conversationItems(c: Ctx): Recommendation[] {
     const a = c.byId.get(row.id);
     const conv = row.conversation;
     if (!a || !conv || row.billing === 'local') continue;
+    if (conv.compacting) {
+      // Its compaction is running: say so, rather than offer it again.
+      const since = new Date(conv.compacting.since).toLocaleTimeString('en-US', { timeZone: c.tz, hour: 'numeric', minute: '2-digit' });
+      out.push({
+        id: `conversation:${a.id}`, kind: 'big-conversation', agents: [ref(a)],
+        title: `${a.name}'s conversation is being compacted`,
+        concern: `started at ${since}; summarising${conv.compacting.beforeK ? ` ${conv.compacting.beforeK}K tokens` : ''} takes a few minutes, and the result goes to your chat`,
+        evidence: [],
+        effect: { text: 'Nothing to do: it finishes by itself', usdPerMonth: 0, billing: row.billing },
+        action: { kind: 'open-agent', label: 'Details', agentId: a.id },
+        secondary: [],
+        rank: { group: GROUP['big-conversation'], money: 0 },
+        fingerprint: `compacting:${conv.compacting.since}`,
+      });
+      continue;
+    }
     const now = row.flags.includes('compact-now');
     const capped = !!row.contextCap?.tokens;
     const large = row.flags.includes('large-conversation') && !capped;
@@ -387,7 +403,7 @@ function conversationItems(c: Ctx): Recommendation[] {
     const sizeK = now ? conv.mainNowK ?? conv.ctxK.p50 : conv.ctxK.p50;
     out.push({
       id: `conversation:${a.id}`, kind: 'big-conversation', agents: [ref(a)],
-      title: `${a.name}'s conversation is ${sizeK}K tokens`,
+      title: now ? `${a.name}'s conversation is ${sizeK}K tokens` : `${a.name}'s calls carry ${sizeK}K tokens (median)`,
       concern: now ? 'every call carries all of it; compacting replaces the older turns with a summary' : `its median call carries ${conv.ctxK.p50}K; a cap makes OpenClaw compact at about ${Math.round(after / 1000)}K`,
       evidence: [
         `${conv.calls} calls in ${Math.round(days)} days; median ${conv.ctxK.p50}K, 90th percentile ${conv.ctxK.p90}K per call${conv.mainNowK ? `; its main conversation is ${conv.mainNowK}K now` : ''}`,

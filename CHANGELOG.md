@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.159.1] — 2026-10-10
+
+### Fixed
+- **"Compact it now" in Usage shows that it is working.** A summarising compaction takes minutes in the background, and the advice kept showing the size from before it, so the button looked dead and a second click got "Already compacted". The card now says the conversation is being compacted (with no second button) and, once done, uses the size the compaction left; "Already compacted" counts as done, not as a failure.
+- The cap advice's title names what it measures: the median call's size, not the conversation's size now.
+
 ## [2.159.0] — 2026-10-10
 
 Releases made only by GitHub's release workflow, and installs that check what they download against the release (#37, #38, #47). Changes to `main` now go through pull requests whose checks include privacy.
