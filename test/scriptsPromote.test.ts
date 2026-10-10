@@ -47,6 +47,8 @@ esac
   const work = join(root, 'work'); mkdirSync(join(work, 'scripts'), { recursive: true });
   git(work, 'init', '-q', '-b', 'main');
   writeFileSync(join(work, 'scripts', 'promote.sh'), readFileSync('scripts/promote.sh'), { mode: 0o755 });
+  // promote.sh lands through land.sh; this throwaway remote has no pull-request rule.
+  writeFileSync(join(work, 'scripts', 'land.sh'), readFileSync('scripts/land.sh'), { mode: 0o755 });
   writeFileSync(join(work, 'channels.json'), '{\n  "stable": "v1.0.0",\n  "beta": "v1.0.0"\n}\n');
   git(work, 'add', '.');
   git(work, 'commit', '-q', '-m', 'init');
@@ -54,7 +56,7 @@ esac
   git(work, 'remote', 'add', 'origin', origin);
   git(work, 'push', '-q', '--tags', 'origin', 'main');
   const promote = (extra: Record<string, string> = {}, ...args: string[]) =>
-    spawnSync('bash', [join(work, 'scripts', 'promote.sh'), ...args], { cwd: work, env: { ...env, ...extra }, encoding: 'utf8' });
+    spawnSync('bash', [join(work, 'scripts', 'promote.sh'), ...args], { cwd: work, env: { ...env, HATCHABOT_LAND_DIRECT: '1', ...extra }, encoding: 'utf8' });
   const channels = () => readFileSync(join(work, 'channels.json'), 'utf8');
   return { root, bin, origin, work, git, promote, channels };
 }
@@ -121,7 +123,7 @@ describe('scripts/promote.sh asks CI first (it was red for eight days unseen, 20
     // Built from scratch, as every script test's environment is (review, 2026-10-09).
     const r = spawnSync('bash', [join(w.work, 'scripts', 'promote.sh'), 'v0.9.0'], {
       cwd: w.work, encoding: 'utf8', input: 'y\n',
-      env: scriptEnv(join(w.work, '..', 'home'), `${join(w.work, '..', 'bin')}:/usr/bin:/bin`, { HB_CI: 'failure' }),
+      env: scriptEnv(join(w.work, '..', 'home'), `${join(w.work, '..', 'bin')}:/usr/bin:/bin`, { HB_CI: 'failure', HATCHABOT_LAND_DIRECT: '1' }),
     });
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(w.channels()).toContain('"stable": "v0.9.0"');
@@ -202,7 +204,7 @@ describe('scripts/promote.sh publishes only the promote (review, 2026-10-09)', (
     writeFileSync(join(w.bin, 'git'), `#!/usr/bin/env bash\n[ "$1" = push ] && { echo "! [rejected] main -> main (fetch first)" >&2; exit 1; }\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o755 });
     const r = w.promote({}, 'v1.1.0');
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain('The push to origin was refused');
+    expect(r.stderr).toContain('The promote did not land');
     expect(w.git(w.work, 'rev-parse', 'HEAD').trim()).toBe(originMain(w));
     expect(w.channels()).toContain('"stable": "v1.0.0"');
     expect(w.git(w.work, 'status', '--porcelain').trim()).toBe('');
@@ -250,7 +252,7 @@ describe('scripts/promote.sh publishes only the promote (review, 2026-10-09)', (
     writeFileSync(join(w.bin, 'git'), `#!/usr/bin/env bash\n[ "$1" = push ] && { echo "! [rejected] main -> main (fetch first)" >&2; exit 1; }\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o755 });
     const r = w.promote({}, 'v1.1.0');
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain('The push to origin was refused');
+    expect(r.stderr).toContain('The promote did not land');
     expect(w.git(w.work, 'rev-parse', 'HEAD').trim()).toBe(head);
     expect(w.channels()).toContain('"stable": "v1.0.0"');
     expect(w.state()).toEqual(w.before);

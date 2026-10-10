@@ -113,8 +113,10 @@ CHANGED="$(git diff --name-only "$START" HEAD)"
 # A refused push (main moved on meanwhile) used to leave the promote commit
 # here, and a re-run then said "already points at" with GitHub unchanged
 # (review, 2026-10-09). Take it back off, as if it had not been made.
-if ! git push -q origin main; then
+# main takes changes only through a pull request with passing checks
+# (scripts/land.sh); it opens one for this commit and waits for it to merge.
+if ! "$(dirname "$0")/land.sh" --footer "Promotion by scripts/promote.sh: changes channels.json only."; then
   undo
-  die "The push to origin was refused (did main move on?) — nothing changed here or there. Pull, then run it again."
+  die "The promote did not land — nothing changed here. See the message above; run it again once it is fixed."
 fi
 echo "✓ $CH → $TAG  (was ${CURRENT:-unset}). New installs on $CH get it now."

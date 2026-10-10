@@ -37,6 +37,9 @@ key that expired), not a bug. Say which it is.
 
 ## Changing the code
 
+- **Changes reach `main` only through a pull request** whose required checks
+  pass, privacy included: `scripts/land.sh` opens it and waits for the merge.
+  A direct push to `main` is refused.
 - **The gates, chained so one failure stops the rest:**
 
   ```sh

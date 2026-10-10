@@ -154,11 +154,17 @@ management agent stays pinned and moves last.
    `optional` only rides along with the next rebuild. Never edit or remove
    an entry: containers carry the number. A new runtime image needs no entry;
    agents behind the default image are already `recommended`.
-3. Commit, tag, push:
+3. Commit, land, tag:
    ```sh
    git commit -am "Release vX.Y.Z"
-   git tag vX.Y.Z && git push origin main vX.Y.Z
+   scripts/land.sh                        # a pull request; merges when its checks pass
+   git tag vX.Y.Z && git push origin vX.Y.Z   # the tag on what landed
    ```
+   `main` takes changes only through a pull request whose required checks
+   pass (test, ui, secrets, upgrade, privacy); `scripts/land.sh` opens it,
+   asks for a rebase merge, waits, and brings local `main` to what landed.
+   There is no bypass: in an emergency the repository owner turns the `main`
+   rule off in GitHub's settings, pushes, and turns it back on.
    Push the one tag by name, never `--tags`: a checkout can hold tags that
    must not be public (the pre-1.0 history's `v0.*` tags reached GitHub that
    way, found 2026-10-09). The privacy check's hook refuses such a push.
