@@ -1,0 +1,155 @@
+# Builds the agent runtime image on GitHub's own arm64 and amd64 runners and
+# hands it on as artifacts — pushed nowhere. Called by release.yml (a release's
+# image) and runtime-image.yml (a candidate OpenClaw); each pushes the result
+# in a small job of its own.
+#
+# Read-only throughout (#46, 2026-10-09): the build runs the Dockerfile (apt,
+# npm) with no registry login. Each arch comes out as an OCI archive
+# (`image-<arch>`); `index` then writes the multi-arch index's exact bytes and
+# digest from the archives' descriptions (`image-index`: runtime-index.json and
+# runtime-image.json — index, per-platform digests, OpenClaw version, base
+# image), so the release manifest can name the digest before anything is
+# published, and the push makes exactly that digest (scripts/oci-index.mjs;
+# release by workflow, #47, 2026-10-10). Actions and the base image are
+# pinned to digests (test/workflowPins.test.ts; docs/releasing.md, "Updating
+# pinned actions and images").
+name: runtime image build
+on:
+  workflow_call:
+    inputs:
+      commit:
+        description: The commit to build
+        type: string
+        required: true
+      release:
+        description: The Hatchabot release (X.Y.Z) the image is for; blank for a candidate
+        type: string
+        default: ''
+      openclaw_version:
+        description: OpenClaw version to build (blank = the Dockerfile's pinned default)
+        type: string
+        default: ''
+permissions: {}
+jobs:
+  build:
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.commit }}
+      - id: ver
+        env:
+          ASKED: ${{ inputs.openclaw_version }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          if [ -n "$RELEASE" ]; then
+            echo "$RELEASE" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "release \"$RELEASE\" is not X.Y.Z" >&2; exit 1; }
+            # A release image is the Dockerfile's own OpenClaw: what the release was tested with.
+            [ -z "$ASKED" ] || { echo "a release image builds the Dockerfile's OpenClaw, not a chosen one" >&2; exit 1; }
+          fi
+          V="$ASKED"
+          [ -n "$V" ] || V="$(grep -oP 'ARG OPENCLAW_VERSION=\K\S+' docker/Dockerfile.runtime)"
+          echo "$V" | grep -qE '^[0-9]{4}\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "OpenClaw version \"$V\" is not a version" >&2; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          # 2026.8+ has no engine to bake: those images are built engine-free (step 4 of the embedder design).
+          echo "engine=$(node scripts/runtime-pins.mjs embed-engine "$V")" >> "$GITHUB_OUTPUT"
+          # Slack/Discord (and the baked search plugins) are published in step with OpenClaw: the
+          # newest plugin release not newer than this OpenClaw, like scripts/build-runtime-image.sh.
+          # v2.77.x built 2026.9.6 against the Dockerfile's old 2026.7.1 pin and failed on both arches.
+          LIST="$(npm view @openclaw/slack versions --json 2>/dev/null || echo '[]')"
+          PICK="$(node scripts/runtime-pins.mjs plugin "$V" "$LIST" 2>/dev/null || true)"
+          [ -n "$PICK" ] || PICK="$(grep -oP 'ARG CHANNEL_PLUGIN_VERSION=\K\S+' docker/Dockerfile.runtime)"
+          echo "channel=$PICK" >> "$GITHUB_OUTPUT"
+          # …and those bake the DuckDuckGo plugin and install channel plugins from an npm cache (trust model).
+          if [ "$(node scripts/runtime-pins.mjs embed-engine "$V")" = none ]; then
+            echo "baked=duckduckgo=@openclaw/duckduckgo-plugin,brave=@openclaw/brave-plugin" >> "$GITHUB_OUTPUT"; echo "install=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "baked=" >> "$GITHUB_OUTPUT"; echo "install=link" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - run: mkdir -p /tmp/image /tmp/desc
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: docker
+          file: docker/Dockerfile.runtime
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            OPENCLAW_VERSION=${{ steps.ver.outputs.version }}
+            EMBED_ENGINE=${{ steps.ver.outputs.engine }}
+            CHANNEL_PLUGIN_VERSION=${{ steps.ver.outputs.channel }}
+            BAKED_PLUGINS=${{ steps.ver.outputs.baked }}
+            PLUGIN_INSTALL=${{ steps.ver.outputs.install }}
+            HATCHABOT_RELEASE=${{ inputs.release }}
+          # The image as an OCI archive, not pushed: the publishing job pushes these bytes.
+          outputs: type=oci,dest=/tmp/image/runtime-${{ matrix.arch }}.tar
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+      # The archive's descriptors, checked against the digest the build
+      # reported; `index` makes the multi-arch index from these.
+      - name: describe the archive
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: node scripts/oci-index.mjs describe "/tmp/image/runtime-$ARCH.tar" "$ARCH" "$DIGEST" > "/tmp/desc/runtime-$ARCH.desc.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.arch }}
+          path: /tmp/image/*
+          if-no-files-found: error
+          retention-days: 1
+          # The layers are already compressed.
+          compression-level: 0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-desc-${{ matrix.arch }}
+          path: /tmp/desc/*
+          if-no-files-found: error
+          retention-days: 1
+
+  index:
+    needs: build
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.commit }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-desc-*
+          path: /tmp/desc
+          merge-multiple: true
+      - name: the multi-arch index
+        env:
+          OPENCLAW: ${{ needs.build.outputs.version }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          # The base image the Dockerfile builds on by default — what a release build uses.
+          NODE_IMAGE="$(sed -n 's/^ARG NODE_IMAGE=//p' docker/Dockerfile.runtime | sed -n 1p)"
+          # Each arch's labels must say this OpenClaw (and this release): installs check the first.
+          node scripts/oci-index.mjs merge /tmp/desc/runtime-amd64.desc.json /tmp/desc/runtime-arm64.desc.json \
+            --openclaw "$OPENCLAW" --release "$RELEASE" --node-image "$NODE_IMAGE" --out /tmp/index
+          cat /tmp/index/runtime-image.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-index
+          path: /tmp/index/*
+          if-no-files-found: error
+          retention-days: 1

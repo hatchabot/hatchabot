@@ -7,7 +7,8 @@
   bumps MAJOR. The CHANGELOG is the contract; "Upgrading" notes go at the top
   of the entry that needs them.
 - **A tag is a release.** `vX.Y.Z` tags on `main` are the only things a user
-  should install. `package.json` must carry the same version (the web app shows
+  should install, and only the release workflow makes them (below, "Cutting a
+  release"). `package.json` must carry the same version (the web app shows
   it at the bottom; the server stamps it at boot).
 - **CHANGELOG.md is written with the change**, not at release time — every
   user-visible commit adds a line under the version it ships in.
@@ -16,15 +17,14 @@
 
 - `main` is the stable trunk: every commit on it is tested (CI runs typecheck,
   unit tests and the e2e suite) and deployable.
-- Anything non-trivial goes on a branch and lands by pull request, so CI has run
-  before it reaches `main`. Small fixes may go straight to `main` with a green
-  local `npm test`.
-- Protect `main` on GitHub: require the CI check and a linear history. (Settings
-  → Branches → Add rule → `main`.)
+- Every change lands by pull request (`scripts/land.sh`), so CI has run
+  before it reaches `main`; `main`'s ruleset requires it (the checks test, ui,
+  secrets, upgrade, privacy; linear history).
 
 ## Channels — releasing fast without moving new users
 
-A tag is a release, and **tagging makes a release `latest` — nothing more.**
+A tag is a release, and **releasing makes it `latest` — nothing more**
+(the newest release also moves the runtime image's `:latest`).
 New installs take **`stable`**, which names a release in `channels.json` on
 `main` and moves only when you say so:
 
@@ -45,10 +45,20 @@ forward asks GitHub first: it refuses a release whose CI run for the push to
 or no `gh` — `HATCHABOT_PROMOTE_IGNORE_CI=1` goes on without the check. Moving
 a channel back (a rollback) is not held to it.
 
+Once the channel's commit has landed, it starts
+`.github/workflows/promote-images.yml` to move the runtime image's `:stable`
+or `:beta` to that release's image — by the digest in its
+`release-manifest.json`, one move at a time, never to an older release
+unless this is a rollback — and waits for it. A release made before the
+release workflow has no manifest: its image tags are left as they are. If
+the move fails, the channel has still moved; the message says how to re-run
+it.
+
 On the development machine the CLI has the release verbs too — set
 `HATCHABOT_DEV_DIR=<your checkout>` in `~/.config/hatchabot/env` once:
 
 ```sh
+hbt release 2.32.0   # GitHub makes the release (scripts/release.sh; --draft-only for a dry run)
 hbt deploy           # this machine: the newest tag, now   (hbt deploy v2.31.3 for a specific one)
 hbt promote          # stable ← what this machine runs     (hbt promote v2.32.0 beta)
 hbt channels         # where everything points
@@ -139,9 +149,6 @@ management agent stays pinned and moves last.
    test starts from a fresh database, where `CREATE TABLE` runs in full). CI
    runs it too. `npx tsx scripts/schema-drift.ts` does the same against a live
    install's database.
-   Then **`node scripts/privacy-check.mjs --sync-ci`**: GitHub's copy of
-   the privacy fingerprints, current before the release's commits and notes
-   reach it (the daily timer does it too; below).
 2. Bump `version` in `package.json` and finish the CHANGELOG section
    (`## [X.Y.Z] — YYYY-MM-DD`).
    **Does it change how containers are made** (docker run flags, mounts,
@@ -154,28 +161,90 @@ management agent stays pinned and moves last.
    `optional` only rides along with the next rebuild. Never edit or remove
    an entry: containers carry the number. A new runtime image needs no entry;
    agents behind the default image are already `recommended`.
-3. Commit, land, tag:
+3. Commit and land the version commit:
    ```sh
    git commit -am "Release vX.Y.Z"
    scripts/land.sh                        # a pull request; merges when its checks pass
-   git tag vX.Y.Z && git push origin vX.Y.Z   # the tag on what landed
    ```
    `main` takes changes only through a pull request whose required checks
    pass (test, ui, secrets, upgrade, privacy); `scripts/land.sh` opens it,
    asks for a rebase merge, waits, and brings local `main` to what landed.
    There is no bypass: in an emergency the repository owner turns the `main`
    rule off in GitHub's settings, pushes, and turns it back on.
-   Push the one tag by name, never `--tags`: a checkout can hold tags that
-   must not be public (the pre-1.0 history's `v0.*` tags reached GitHub that
-   way, found 2026-10-09). The privacy check's hook refuses such a push.
-4. Create the GitHub Release with the CHANGELOG section as its notes, after
-   checking them — the notes are published apart from the code, so the push
-   hook never sees them:
+4. Release it — GitHub makes the release; nothing is tagged, built or
+   uploaded from this machine:
    ```sh
-   awk '/^## \[X.Y.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md > notes.md
-   node scripts/privacy-check.mjs --text notes.md && gh release create vX.Y.Z -F notes.md -t vX.Y.Z
+   scripts/release.sh X.Y.Z               # or: hbt release X.Y.Z
    ```
-5. Deploy it (below).
+   It refuses unless local `main` is `origin/main` and the version commit is
+   on it (`package.json` says X.Y.Z, CHANGELOG has `## [X.Y.Z]`), CI passed
+   on that commit's push to `main` (it waits for a run still going), and the
+   tag `vX.Y.Z` does not exist yet. It checks the release notes (the
+   CHANGELOG section) with `privacy-check.mjs --text`, brings GitHub's
+   privacy fingerprints up to date (`--sync-ci`), starts
+   `.github/workflows/release.yml`, follows it, and prints the release's
+   address. `--commit <sha>` releases an earlier commit on `main` instead of
+   its head.
+5. Deploy it (below), then promote it when it has held up (above).
+
+### What the release workflow does
+
+`.github/workflows/release.yml` (started by hand on `main` only; one release
+at a time):
+
+1. **check** (read-only): `scripts/release-check.sh` — the commit is on
+   `main`, `package.json` and CHANGELOG say the version, the CI run for its
+   push to `main` succeeded, the tag is free — and the notes against the
+   privacy fingerprints (`privacy-ci.mjs --text`; no fingerprints fails).
+2. **bundles** and **image** (read-only, nothing pushed): the three bundles
+   with their `.sha256` (`bundles.yml`), and the multi-arch runtime image as
+   OCI archives with its index made in advance (`runtime-image-build.yml`,
+   `scripts/oci-index.mjs`), its labels checked (the Dockerfile's OpenClaw,
+   this release).
+3. **manifest** (read-only): `release-manifest.json`
+   (`scripts/release-manifest.mjs`) — version, commit, each asset's name,
+   size and sha256, the image's index and per-arch digests, the OpenClaw
+   version (the released commit's `ARG OPENCLAW_VERSION`) and base image.
+4. **attest**: a GitHub build-provenance attestation over the bundles, their
+   `.sha256` files and the manifest, then `gh attestation verify` on each.
+   Anyone can check a download the same way:
+   `gh attestation verify <file> --repo hatchabot/hatchabot`.
+5. **publish** (the one job that can write; it runs no project code): the
+   image pushed by its index digest and tagged `:vX.Y.Z` (refused if that tag
+   names another digest), a **draft** release with the notes, every bundle,
+   `.sha256` and the manifest, the draft's asset list checked against the
+   manifest (names, sizes, digests), then the tag `vX.Y.Z` made on the
+   checked commit and the release published.
+6. **latest**: when it is the newest release, `:latest` moves to its image
+   (`promote-images.yml`). `:beta` and `:stable` move only when
+   `scripts/promote.sh` moves the channel; nothing else moves them, and never
+   to an older release unless it is a rollback.
+
+A failure before **publish** changes nothing on GitHub. Inside it, the
+worst left behind is a draft (the next attempt deletes it) or an image
+pushed by digest with no tag. Fix the cause and re-run the failed jobs
+(`gh run rerun <run> --failed`): they use the same artifacts. A whole new
+run is refused once the tag exists.
+
+### The dry run
+
+`scripts/release.sh X.Y.Z --draft-only` runs everything up to a checked
+draft release: the image is pushed by digest but not tagged, and no git tag
+is made. Look at the draft (its notes, six bundle files and
+`release-manifest.json`), then delete it
+(`gh release delete vX.Y.Z --yes`); the real release of the same version
+can follow.
+
+### Emergencies
+
+- **A broken `main` that blocks every pull request:** turn the `main` rule off
+  in the repository settings, push the fix, turn the rule back on, and say so
+  in the commit.
+- **GitHub Actions is down:** wait. There is no local way to publish once the
+  tag rule is on; that is the point.
+- **A bad release:** release a new patch version. `scripts/promote.sh` with
+  an older tag rolls a channel (and its image alias) back. Releases are never
+  deleted or edited.
 
 ## The privacy check
 
@@ -308,8 +377,9 @@ Every `uses:` in `.github/workflows/` names a full commit SHA with its
 release as a comment (`actions/checkout@<sha> # v7.0.1`), and the base
 images name a digest (`node:24-slim@sha256:…`). A tag can be moved by
 whoever controls it; a SHA or digest cannot. The jobs that build run with a
-read-only token; only the small jobs that upload (`attach` in bundles.yml,
-`publish` in runtime-image.yml) can write, and they run no project code.
+read-only token; only the small jobs that attest, push or upload (`attest`
+and `publish` in release.yml, `publish` in runtime-image.yml, `move` in
+promote-images.yml) can write, and they run no project code.
 `test/workflowPins.test.ts` fails CI when a `uses:` is not a SHA, a checkout
 keeps its git credentials, a job that installs or builds can write, or an
 image pin is missing.

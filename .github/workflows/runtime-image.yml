@@ -1,28 +1,25 @@
-# Builds the agent runtime image on GitHub's own arm64 and amd64 runners and
-# publishes ONE multi-arch tag to GHCR, so an install pulls it in a minute
-# instead of building it for twenty. Runs on every release tag; can also be
-# dispatched for a candidate OpenClaw version (published, never :latest).
+# A candidate runtime image for another OpenClaw version, built on GitHub's own
+# arm64 and amd64 runners and published as ONE multi-arch tag,
+# ghcr.io/<owner>/runtime:<openclaw version>, so a machine can try it in a
+# minute instead of building it for twenty (docs/releasing.md, "Trying a newer
+# OpenClaw"). Started by hand only.
 #
-# Two jobs (#46, 2026-10-09): `build` runs the Dockerfile (apt, npm) with a
-# read-only token and no registry login, and hands each arch's image on as an
-# OCI archive; `publish` holds the only packages: write, runs no project code,
-# pushes each archive by the digest the build reported (the registry refuses a
-# manifest that does not match it) and then makes the same tags as before.
-# Actions and the base image are pinned to digests (test/workflowPins.test.ts;
-# docs/releasing.md, "Updating pinned actions and images").
+# A release's image is not made here any more: release.yml builds it, pushes it
+# by digest as :vX.Y.Z and records the digest in the release manifest; the
+# :latest, :beta and :stable aliases move only through promote-images.yml
+# (release by workflow, #47, 2026-10-10). This never moves an alias.
+#
+# The build (runtime-image-build.yml) is read-only and pushes nothing;
+# `publish` holds the only packages: write, runs no project code, and pushes
+# the archives and the index the build made, by digest (skopeo
+# --preserve-digests: the registry refuses a manifest that does not match).
 name: runtime image
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       openclaw_version:
         description: OpenClaw version to build (blank = the Dockerfile's pinned default)
         required: false
-      promote_latest:
-        description: Also move :latest to this build
-        type: boolean
-        default: false
 permissions: {}
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/runtime
@@ -30,111 +27,50 @@ jobs:
   build:
     permissions:
       contents: read
-    strategy:
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    outputs:
-      version: ${{ steps.ver.outputs.version }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - id: ver
-        env:
-          ASKED: ${{ github.event.inputs.openclaw_version }}
-        run: |
-          V="$ASKED"
-          [ -n "$V" ] || V="$(grep -oP 'ARG OPENCLAW_VERSION=\K\S+' docker/Dockerfile.runtime)"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          # 2026.8+ has no engine to bake: those images are built engine-free (step 4 of the embedder design).
-          echo "engine=$(node scripts/runtime-pins.mjs embed-engine "$V")" >> "$GITHUB_OUTPUT"
-          # Slack/Discord (and the baked search plugins) are published in step with OpenClaw: the
-          # newest plugin release not newer than this OpenClaw, like scripts/build-runtime-image.sh.
-          # v2.77.x built 2026.9.6 against the Dockerfile's old 2026.7.1 pin and failed on both arches.
-          LIST="$(npm view @openclaw/slack versions --json 2>/dev/null || echo '[]')"
-          PICK="$(node scripts/runtime-pins.mjs plugin "$V" "$LIST" 2>/dev/null || true)"
-          [ -n "$PICK" ] || PICK="$(grep -oP 'ARG CHANNEL_PLUGIN_VERSION=\K\S+' docker/Dockerfile.runtime)"
-          echo "channel=$PICK" >> "$GITHUB_OUTPUT"
-          # …and those bake the DuckDuckGo plugin and install channel plugins from an npm cache (trust model).
-          if [ "$(node scripts/runtime-pins.mjs embed-engine "$V")" = none ]; then
-            echo "baked=duckduckgo=@openclaw/duckduckgo-plugin,brave=@openclaw/brave-plugin" >> "$GITHUB_OUTPUT"; echo "install=npm" >> "$GITHUB_OUTPUT"
-          else
-            echo "baked=" >> "$GITHUB_OUTPUT"; echo "install=link" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - run: mkdir -p /tmp/image
-      - id: build
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: docker
-          file: docker/Dockerfile.runtime
-          platforms: linux/${{ matrix.arch }}
-          build-args: |
-            OPENCLAW_VERSION=${{ steps.ver.outputs.version }}
-            EMBED_ENGINE=${{ steps.ver.outputs.engine }}
-            CHANNEL_PLUGIN_VERSION=${{ steps.ver.outputs.channel }}
-            BAKED_PLUGINS=${{ steps.ver.outputs.baked }}
-            PLUGIN_INSTALL=${{ steps.ver.outputs.install }}
-          # The image as an OCI archive, not pushed: `publish` pushes these bytes.
-          outputs: type=oci,dest=/tmp/image/runtime-${{ matrix.arch }}.tar
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
-      - env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-          ARCH: ${{ matrix.arch }}
-        run: |
-          echo "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$' || { echo "the build reported no digest" >&2; exit 1; }
-          echo "$DIGEST" > "/tmp/image/runtime-$ARCH.digest"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: image-${{ matrix.arch }}
-          path: /tmp/image/*
-          if-no-files-found: error
-          retention-days: 1
-          # The layers are already compressed.
-          compression-level: 0
+    uses: ./.github/workflows/runtime-image-build.yml
+    with:
+      commit: ${{ github.sha }}
+      release: ''
+      openclaw_version: ${{ inputs.openclaw_version }}
+
   publish:
     needs: build
     permissions:
       contents: read
       packages: write
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: /tmp/image
           pattern: image-*
           merge-multiple: true
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # Untagged, as push-by-digest did: only the tags below name the image.
-      # skopeo comes with GitHub's Ubuntu runners; it reads the login above.
-      - name: push each arch by its digest
+      # One OCI layout holding both arches and the index the build made; skopeo
+      # (on GitHub's Ubuntu runners) pushes it by the index digest, then names it.
+      - name: push by digest, then tag the OpenClaw version
         run: |
-          for d in /tmp/image/*.digest; do
-            DIGEST="$(cat "$d")"
-            echo "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$' || { echo "bad digest in $d" >&2; exit 1; }
-            skopeo copy --all --preserve-digests --retry-times 3 \
-              --dest-authfile "$HOME/.docker/config.json" \
-              "oci-archive:${d%.digest}.tar" "docker://$IMAGE@$DIGEST"
-          done
-      - env:
-          V: ${{ needs.build.outputs.version }}
-          PROMOTE_LATEST: ${{ github.event.inputs.promote_latest }}
-        run: |
-          TAGS=(-t "$IMAGE:$V")
-          # A release tag is the proven fleet image: it also carries the release name and :latest.
-          if [ "$GITHUB_REF_TYPE" = tag ]; then TAGS+=(-t "$IMAGE:$GITHUB_REF_NAME" -t "$IMAGE:latest"); fi
-          if [ "$PROMOTE_LATEST" = true ]; then TAGS+=(-t "$IMAGE:latest"); fi
-          DIGESTS=$(for f in /tmp/image/*.digest; do printf '%s@%s ' "$IMAGE" "$(cat "$f")"; done)
-          docker buildx imagetools create "${TAGS[@]}" $DIGESTS
-          docker buildx imagetools inspect "$IMAGE:$V" | head -20
+          set -euo pipefail
+          IMAGE="${IMAGE,,}"
+          INDEX="$(jq -r .index /tmp/image/runtime-image.json)"
+          V="$(jq -r .openclaw /tmp/image/runtime-image.json)"
+          echo "$INDEX" | grep -qE '^sha256:[0-9a-f]{64}$' || { echo "no index digest" >&2; exit 1; }
+          echo "$V" | grep -qE '^[0-9]{4}\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "no OpenClaw version" >&2; exit 1; }
+          [ "sha256:$(sha256sum /tmp/image/runtime-index.json | cut -d' ' -f1)" = "$INDEX" ] || { echo "runtime-index.json is not $INDEX" >&2; exit 1; }
+          L=/tmp/layout; mkdir -p "$L"
+          for a in amd64 arm64; do tar -xf "/tmp/image/runtime-$a.tar" -C "$L"; rm -f "/tmp/image/runtime-$a.tar"; done
+          cp /tmp/image/runtime-index.json "$L/blobs/sha256/${INDEX#sha256:}"
+          printf '{"imageLayoutVersion":"1.0.0"}' > "$L/oci-layout"
+          printf '{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"%s","size":%s,"annotations":{"org.opencontainers.image.ref.name":"image"}}]}' \
+            "$INDEX" "$(stat -c %s /tmp/image/runtime-index.json)" > "$L/index.json"
+          AUTH="$HOME/.docker/config.json"
+          skopeo copy --all --preserve-digests --retry-times 3 --dest-authfile "$AUTH" "oci:$L:image" "docker://$IMAGE@$INDEX"
+          skopeo copy --all --preserve-digests --retry-times 3 --src-authfile "$AUTH" --dest-authfile "$AUTH" "docker://$IMAGE@$INDEX" "docker://$IMAGE:$V"
+          GOT="sha256:$(skopeo inspect --raw --authfile "$AUTH" "docker://$IMAGE:$V" | sha256sum | cut -d' ' -f1)"
+          [ "$GOT" = "$INDEX" ] || { echo "$IMAGE:$V names $GOT, not $INDEX" >&2; exit 1; }
+          echo "✓ $IMAGE:$V = $INDEX (candidate; no alias moved)"

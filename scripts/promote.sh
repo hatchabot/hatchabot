@@ -9,7 +9,9 @@
 # Tagging a release makes it `latest` and nothing more; `stable` only moves
 # when you run this. That is what lets you release several times a day
 # without a stranger's first install landing on whatever you tagged an hour
-# ago. It commits channels.json on main and pushes — no new tag, no rebuild.
+# ago. It commits channels.json on main and pushes — no new tag, no rebuild —
+# then has GitHub move the runtime image's :stable/:beta to that release's
+# image (promote-images.yml), and waits for it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 die() { echo "✗ $*" >&2; exit 1; }
@@ -120,3 +122,28 @@ if ! "$(dirname "$0")/land.sh" --footer "Promotion by scripts/promote.sh: change
   die "The promote did not land — nothing changed here. See the message above; run it again once it is fixed."
 fi
 echo "✓ $CH → $TAG  (was ${CURRENT:-unset}). New installs on $CH get it now."
+
+# The runtime image's :stable/:beta tag follows the channel (issue #47,
+# 2026-10-10). .github/workflows/promote-images.yml moves it — one move at a
+# time, to the digest in the release's release-manifest.json, never to an
+# older release unless this is a rollback (allow_backwards). A release made
+# before the release workflow has no manifest: its image tags stay as they are.
+promote_images() {
+  local slug="${HATCHABOT_SLUG:-hatchabot/hatchabot}" back=false assets run
+  [ -z "$CURRENT" ] || [ "$NEWER" != "$CURRENT" ] || back=true
+  local again="gh workflow run promote-images.yml --repo $slug --ref main -f version=${TAG#v} -f alias=$CH -f allow_backwards=$back"
+  command -v gh >/dev/null 2>&1 || { echo "✗ The image :$CH was not moved: no gh command. Move it with: $again" >&2; return 1; }
+  assets="$(gh release view "$TAG" --repo "$slug" --json assets -q '.assets[].name')" \
+    || { echo "✗ Could not read $TAG's release from GitHub: the image :$CH was not moved. Move it with: $again" >&2; return 1; }
+  if ! printf '%s\n' "$assets" | grep -qx release-manifest.json; then
+    echo "  The image :$CH is unchanged: $TAG was released before release-manifest.json, and image tags move only by a release's manifest."
+    return 0
+  fi
+  run="$(bash scripts/dispatch-run.sh "$slug" promote-images.yml -f version="${TAG#v}" -f alias="$CH" -f allow_backwards="$back")" \
+    || { echo "✗ The image :$CH was not moved. Move it with: $again" >&2; return 1; }
+  echo "→ image :$CH → $TAG: https://github.com/$slug/actions/runs/$run"
+  gh run watch "$run" --repo "$slug" --exit-status >/dev/null 2>&1 \
+    || { echo "✗ Moving the image :$CH failed: https://github.com/$slug/actions/runs/$run — channels.json has moved; once the cause is fixed: gh run rerun $run --failed --repo $slug" >&2; return 1; }
+  echo "✓ image :$CH → $TAG"
+}
+promote_images || exit 1

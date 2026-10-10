@@ -20,13 +20,22 @@ function world() {
   // A fake gh ahead of the real one (/usr/bin/gh): CI's answer comes from
   // HB_CI — "success" (default), "failure", "running:success", "running:failure", "none",
   // "pr-only" (a passing pull-request run on the commit, and no run for the push to main).
+  // The release's assets include release-manifest.json when HB_MANIFEST is set;
+  // promote-images.yml's run (801, once dispatched) ends as HB_IMG says.
   const bin = join(root, 'bin'); mkdirSync(bin);
+  const dispatched = join(root, 'dispatched');
   writeFileSync(join(bin, 'gh'), `#!/usr/bin/env bash
 ci="\${HB_CI:-success}"
 echo "gh $*" >> ${JSON.stringify(join(root, 'gh.log'))}
 case "$1 $2" in
-  "run list") case "$ci" in none) ;; pr-only) case "$*" in *"--event push"*) ;; *) echo "4243 completed success" ;; esac ;; running:*) echo "4242 in_progress " ;; *) echo "4242 completed $ci" ;; esac ;;
-  "run watch") [ "\${ci#running:}" = success ] ;;
+  "run list")
+    case "$*" in
+      *"--workflow promote-images.yml"*) [ -f ${JSON.stringify(dispatched)} ] && echo 801; echo 800 ;;
+      *) case "$ci" in none) ;; pr-only) case "$*" in *"--event push"*) ;; *) echo "4243 completed success" ;; esac ;; running:*) echo "4242 in_progress " ;; *) echo "4242 completed $ci" ;; esac ;;
+    esac ;;
+  "run watch") if [ "$3" = 801 ]; then [ "\${HB_IMG:-success}" = success ]; else [ "\${ci#running:}" = success ]; fi ;;
+  "release view") echo "hatchabot-$3-linux-x64.tar.gz"; [ -z "\${HB_MANIFEST:-}" ] || echo release-manifest.json ;;
+  "workflow run") touch ${JSON.stringify(dispatched)} ;;
   *) exit 1 ;;
 esac
 `, { mode: 0o755 });
@@ -36,6 +45,7 @@ esac
     GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
     GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com',
     GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com',
+    HATCHABOT_DISPATCH_POLL: '0',
   };
   const git = (cwd: string, ...args: string[]) => {
     const r = spawnSync('git', args, { cwd, env, encoding: 'utf8' });
@@ -49,6 +59,8 @@ esac
   writeFileSync(join(work, 'scripts', 'promote.sh'), readFileSync('scripts/promote.sh'), { mode: 0o755 });
   // promote.sh lands through land.sh; this throwaway remote has no pull-request rule.
   writeFileSync(join(work, 'scripts', 'land.sh'), readFileSync('scripts/land.sh'), { mode: 0o755 });
+  // …and moves the image alias through promote-images.yml.
+  writeFileSync(join(work, 'scripts', 'dispatch-run.sh'), readFileSync('scripts/dispatch-run.sh'), { mode: 0o755 });
   writeFileSync(join(work, 'channels.json'), '{\n  "stable": "v1.0.0",\n  "beta": "v1.0.0"\n}\n');
   git(work, 'add', '.');
   git(work, 'commit', '-q', '-m', 'init');
@@ -279,6 +291,48 @@ describe('scripts/promote.sh publishes only the promote (review, 2026-10-09)', (
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/No CI run for v1\.1\.0/);
     expect(readFileSync(join(w.root, 'gh.log'), 'utf8')).toContain('--event push --branch main');
+  });
+});
+
+describe('scripts/promote.sh moves the runtime image alias too (promote-images.yml, issue #47, 2026-10-10)', () => {
+  const ghLog = (w: ReturnType<typeof world>) => readFileSync(join(w.root, 'gh.log'), 'utf8');
+
+  it('a release with a manifest: starts promote-images for the channel, waits for it, says so', () => {
+    const w = world();
+    const r = w.promote({ HB_MANIFEST: '1' }, 'v1.1.0', 'beta');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(ghLog(w)).toContain('gh workflow run promote-images.yml --repo hatchabot/hatchabot --ref main -f version=1.1.0 -f alias=beta -f allow_backwards=false');
+    expect(ghLog(w)).toContain('gh run watch 801 --repo hatchabot/hatchabot --exit-status');
+    expect(r.stdout).toContain('→ image :beta → v1.1.0: https://github.com/hatchabot/hatchabot/actions/runs/801');
+    expect(r.stdout).toContain('✓ image :beta → v1.1.0');
+  });
+
+  it('a rollback passes allow_backwards', () => {
+    const w = world();
+    w.git(w.work, 'tag', 'v0.9.0');
+    const r = spawnSync('bash', [join(w.work, 'scripts', 'promote.sh'), 'v0.9.0'], {
+      cwd: w.work, encoding: 'utf8', input: 'y\n',
+      env: scriptEnv(join(w.root, 'home'), `${w.bin}:/usr/bin:/bin`, { HATCHABOT_LAND_DIRECT: '1', HB_MANIFEST: '1', HATCHABOT_DISPATCH_POLL: '0' }),
+    });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(ghLog(w)).toContain('-f version=0.9.0 -f alias=stable -f allow_backwards=true');
+  });
+
+  it('a release from before the manifest: the channel moves, its image tags stay, nothing is started', () => {
+    const w = world();
+    const r = w.promote({}, 'v1.1.0');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('The image :stable is unchanged: v1.1.0 was released before release-manifest.json');
+    expect(ghLog(w)).not.toContain('workflow run');
+  });
+
+  it('the image move fails: exit 1, the channel has moved, and how to re-run it', () => {
+    const w = world();
+    const r = w.promote({ HB_MANIFEST: '1', HB_IMG: 'failure' }, 'v1.1.0');
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('Moving the image :stable failed: https://github.com/hatchabot/hatchabot/actions/runs/801 — channels.json has moved');
+    expect(r.stderr).toContain('gh run rerun 801 --failed');
+    expect(w.git(w.origin, 'show', 'main:channels.json')).toContain('"stable": "v1.1.0"');
   });
 });
 

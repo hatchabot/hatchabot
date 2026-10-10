@@ -1,6 +1,11 @@
 # Design: release by workflow, and main through pull requests
 
-Status: **proposal, for review** (2026-10-10). From a security audit of
+Status: **accepted; parts 1, 2, 4 and 5 built** (2026-10-10) — `main`
+through pull requests (`scripts/land.sh`), the release workflow
+(`.github/workflows/release.yml`, `scripts/release.sh`), image aliases moved
+only by `.github/workflows/promote-images.yml`, and the privacy check on
+GitHub. Left: the rollout steps below (a dry run, the first real release,
+then the settings). Originally a proposal (2026-10-10). From a security audit of
 v2.158.2: #37 (CI and main ancestry before publication), #38 (immutable
 releases and artifact provenance), #47 (runtime images bound to release
 digests). The maintainer chose: a design first, and changes to `main` only
@@ -148,6 +153,57 @@ a pull request made elsewhere) was not checked. So:
 
 Existing releases stay as they are: not re-uploaded, not deleted, not frozen
 (#38: historical assets are a separate decision).
+
+### Where the rollout stands (2026-10-10)
+
+Built: step 1's workflows and scripts — `release.yml` (check, bundles,
+image, manifest, attest, publish, latest), `bundles.yml` and
+`runtime-image-build.yml` as build-only reusable workflows,
+`runtime-image.yml` for candidates only, `promote-images.yml`,
+`scripts/release-check.sh`, `scripts/release-manifest.mjs`,
+`scripts/oci-index.mjs`, `scripts/release.sh` (`hbt release`), and
+`scripts/promote.sh` starting `promote-images.yml`. How to release:
+`docs/releasing.md`, "Cutting a release". The `main` pull-request rule is
+already on.
+
+Left, in order:
+
+1. **The dry run:** `scripts/release.sh X.Y.Z --draft-only` for the next
+   version, once its version commit has landed. Check the draft (notes, six
+   bundle files, `release-manifest.json`), the run's `attest` job, and that
+   `ghcr.io/hatchabot/runtime@<index>` exists untagged; then
+   `gh release delete vX.Y.Z --yes`.
+2. **The first real release:** `scripts/release.sh X.Y.Z`.
+3. **The settings** (repository admin):
+   - The `release` environment, deployable from `main` only (the publish job
+     runs in it, so a copy of the workflow on another branch cannot publish):
+     ```sh
+     gh api -X PUT repos/hatchabot/hatchabot/environments/release --input - <<'EOF'
+     {"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
+     EOF
+     gh api -X POST repos/hatchabot/hatchabot/environments/release/deployment-branch-policies -f name=main -f type=branch
+     ```
+   - Only GitHub Actions (the integration with id 15368) may create `v*`
+     tags; the existing "release tags: never moved or deleted" ruleset keeps
+     refusing updates and deletion:
+     ```sh
+     gh api -X POST repos/hatchabot/hatchabot/rulesets --input - <<'EOF'
+     {"name": "release tags: made only by the release workflow", "target": "tag", "enforcement": "active",
+      "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+      "rules": [{"type": "creation"}],
+      "bypass_actors": [{"actor_id": 15368, "actor_type": "Integration", "bypass_mode": "always"}]}
+     EOF
+     ```
+     The bypass is for any workflow's token that can write contents; only
+     `release.yml`'s `publish` job has `contents: write`
+     (`test/workflowPins.test.ts` keeps write access to small jobs).
+   - Immutable releases (a published release's assets and tag can then never
+     change; drafts stay editable, which the workflow relies on):
+     ```sh
+     gh api -X PUT repos/hatchabot/hatchabot/immutable-releases
+     gh api repos/hatchabot/hatchabot/immutable-releases      # {"enabled":true,…}
+     ```
+     The publish job prints `immutable: true` for each release from then on.
 
 ## Questions for review
 

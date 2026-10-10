@@ -1,0 +1,352 @@
+# The one way a release is made (release by workflow,
+# docs/release-by-workflow-design.md; issues #37, #38, #47, 2026-10-10).
+# Started by `scripts/release.sh X.Y.Z` (`hbt release X.Y.Z`), on main:
+#
+#   check     read-only: the commit is on main (main's head unless given),
+#             package.json and CHANGELOG say X.Y.Z, CI passed on its push to
+#             main, the tag is free (scripts/release-check.sh); the notes are
+#             the CHANGELOG section, checked against the privacy fingerprints.
+#   bundles   read-only: the three bundles and their .sha256 (bundles.yml).
+#   image     read-only: the multi-arch runtime image as OCI archives and its
+#             index digest (runtime-image-build.yml) — pushed nowhere yet.
+#   manifest  read-only: release-manifest.json from those artifacts
+#             (scripts/release-manifest.mjs).
+#   attest    a build-provenance attestation over the bundles, their .sha256
+#             files and the manifest, verified with `gh attestation verify`.
+#   publish   the only job that can write, and it runs no project code (gh,
+#             jq, skopeo on the artifacts): the image pushed by digest and
+#             tagged :vX.Y.Z (refused if that tag names another digest); a
+#             DRAFT release with the notes, every asset and the manifest; its
+#             asset list checked against the manifest; then the tag on the
+#             checked commit and the release published. draft_only stops at
+#             the checked draft: no image tag, no git tag (the dry run).
+#   latest    :latest moves to this release's image (promote-images.yml) when
+#             it is the newest release.
+#
+# A failure before `publish` changes nothing on GitHub; one inside it leaves
+# at most a draft (deleted by the next attempt) or a pushed image digest.
+# "Re-run failed jobs" runs `publish` again on the same artifacts.
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to release (X.Y.Z, as package.json and CHANGELOG.md say)
+        required: true
+      commit:
+        description: The commit on main to release (blank = main's head)
+        required: false
+        default: ''
+      draft_only:
+        description: Stop at a complete draft release (the dry run) — no tag, no image tag, nothing published
+        type: boolean
+        default: false
+permissions: {}
+# One release at a time; a second waits rather than racing for the same tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  check:
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+      commit: ${{ steps.check.outputs.commit }}
+      newest: ${{ steps.check.outputs.newest }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0     # main's history, for "is the commit on main"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          # This workflow as main has it: a branch's copy could say anything.
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "::error::Start the release on main (this run is on $GITHUB_REF)."; exit 1; }
+          bash scripts/release-check.sh "$VERSION" ${COMMIT:+--commit "$COMMIT"} --repo "$GITHUB_REPOSITORY" --notes "$RUNNER_TEMP/notes.md" | tee -a "$GITHUB_OUTPUT"
+      # The notes are published apart from the code; release.sh checked them
+      # with the private values on the owner's machine, and this checks them
+      # here too, wherever the release was started from. No fingerprints is a
+      # failure, not a pass.
+      - name: release notes against the privacy fingerprints
+        env:
+          PRIVACY_FINGERPRINTS: ${{ secrets.PRIVACY_FINGERPRINTS }}
+        run: node scripts/privacy-ci.mjs --text "$RUNNER_TEMP/notes.md"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes.md
+          if-no-files-found: error
+          retention-days: 3
+
+  bundles:
+    needs: check
+    permissions:
+      contents: read
+    uses: ./.github/workflows/bundles.yml
+    with:
+      commit: ${{ needs.check.outputs.commit }}
+      version: ${{ needs.check.outputs.version }}
+
+  image:
+    needs: check
+    permissions:
+      contents: read
+    uses: ./.github/workflows/runtime-image-build.yml
+    with:
+      commit: ${{ needs.check.outputs.commit }}
+      release: ${{ needs.check.outputs.version }}
+
+  manifest:
+    needs: [check, bundles, image]
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0     # the released commit's Dockerfile
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bundle-*
+          path: ${{ runner.temp }}/assets
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image-index
+          path: ${{ runner.temp }}/image
+      - name: release-manifest.json
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          COMMIT: ${{ needs.check.outputs.commit }}
+        run: |
+          set -euo pipefail
+          A="$RUNNER_TEMP/assets"; mkdir -p "$RUNNER_TEMP/manifest"
+          # image.openclaw must be the released commit's ARG OPENCLAW_VERSION (installs rely on it).
+          git show "$COMMIT:docker/Dockerfile.runtime" > "$RUNNER_TEMP/Dockerfile.runtime"
+          node scripts/release-manifest.mjs build --version "$VERSION" --commit "$COMMIT" --assets "$A" \
+            --image "$RUNNER_TEMP/image/runtime-image.json" --repository "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/runtime" \
+            --dockerfile "$RUNNER_TEMP/Dockerfile.runtime" --out "$RUNNER_TEMP/manifest/release-manifest.json"
+          node scripts/release-manifest.mjs check "$RUNNER_TEMP/manifest/release-manifest.json" --assets "$A"
+          cat "$RUNNER_TEMP/manifest/release-manifest.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/manifest/release-manifest.json
+          if-no-files-found: error
+          retention-days: 3
+
+  attest:
+    needs: [check, manifest]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bundle-*
+          path: ${{ runner.temp }}/assets
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/assets
+      # What is attested is what the manifest lists, and nothing else.
+      - name: the files are the manifest's
+        working-directory: ${{ runner.temp }}/assets
+        run: |
+          set -euo pipefail
+          jq -r '.assets[] | "\(.sha256)  \(.name)"' release-manifest.json | sha256sum -c --strict
+          diff <(jq -r '.assets[].name' release-manifest.json; echo release-manifest.json) <(ls -1 | sort) \
+            || { echo "::error::the files are not exactly the manifest's assets and the manifest"; exit 1; }
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/assets/hatchabot-*
+            ${{ runner.temp }}/assets/release-manifest.json
+      - name: verify the attestation
+        working-directory: ${{ runner.temp }}/assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for f in *; do
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-ref refs/heads/main >/dev/null
+            echo "✓ $f"
+          done
+
+  publish:
+    needs: [check, image, manifest, attest]
+    # Its own environment: in the repository settings only main may deploy to
+    # it (docs/release-by-workflow-design.md, "Rollout").
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      TAG: ${{ needs.check.outputs.tag }}
+      COMMIT: ${{ needs.check.outputs.commit }}
+      PRERELEASE: ${{ needs.check.outputs.prerelease }}
+      NEWEST: ${{ needs.check.outputs.newest }}
+      DRAFT_ONLY: ${{ inputs.draft_only }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bundle-*
+          path: ${{ runner.temp }}/assets
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-*
+          path: ${{ runner.temp }}/image
+          merge-multiple: true
+      - name: the files are the manifest's
+        working-directory: ${{ runner.temp }}/assets
+        run: |
+          set -euo pipefail
+          M=release-manifest.json
+          jq -e --arg v "$VERSION" --arg t "$TAG" --arg c "$COMMIT" '.schema == 1 and .version == $v and .tag == $t and .commit == $c' "$M" >/dev/null \
+            || { echo "::error::release-manifest.json is not for $TAG at $COMMIT"; exit 1; }
+          # What installs rely on: these fields, and a file they read whole (at most 65536 bytes).
+          jq -e '(.image.repository | type == "string") and (.image.index | type == "string") and (.image.openclaw | type == "string")' "$M" >/dev/null \
+            || { echo "::error::release-manifest.json lacks image.repository, image.index or image.openclaw"; exit 1; }
+          [ "$(stat -c %s "$M")" -lt 65536 ] || { echo "::error::release-manifest.json is 64 KB or more"; exit 1; }
+          jq -r '.assets[] | "\(.sha256)  \(.name)"' "$M" | sha256sum -c --strict
+          diff <(jq -r '.assets[].name' "$M"; echo "$M") <(ls -1 | sort) \
+            || { echo "::error::the files are not exactly the manifest's assets and the manifest"; exit 1; }
+          [ "$(jq -r .image.index "$M")" = "$(jq -r .index "$RUNNER_TEMP/image/runtime-image.json")" ] \
+            || { echo "::error::the image built is not the manifest's"; exit 1; }
+          [ "sha256:$(sha256sum "$RUNNER_TEMP/image/runtime-index.json" | cut -d' ' -f1)" = "$(jq -r .image.index "$M")" ] \
+            || { echo "::error::runtime-index.json is not the manifest's index"; exit 1; }
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # One OCI layout holding both arches and the index the build made;
+      # skopeo pushes it by the index digest (--preserve-digests: exactly
+      # those bytes, or nothing). The release's tag is never moved.
+      - name: the image, by digest, tagged with the release
+        run: |
+          set -euo pipefail
+          M="$RUNNER_TEMP/assets/release-manifest.json"
+          IMAGE="$(jq -r .image.repository "$M")"; INDEX="$(jq -r .image.index "$M")"
+          [ "$IMAGE" = "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/runtime" ] || { echo "::error::the manifest names $IMAGE"; exit 1; }
+          AUTH="$HOME/.docker/config.json"
+          digest_of() { echo "sha256:$(skopeo inspect --raw --authfile "$AUTH" "docker://$1" | sha256sum | cut -d' ' -f1)"; }
+          if HAS="$(skopeo inspect --raw --authfile "$AUTH" "docker://$IMAGE:$TAG" 2>"$RUNNER_TEMP/err")"; then
+            GOT="sha256:$(printf '%s' "$HAS" | sha256sum | cut -d' ' -f1)"
+            [ "$GOT" = "$INDEX" ] || { echo "::error::$IMAGE:$TAG already names $GOT — a release's image is never replaced"; exit 1; }
+            echo "$IMAGE:$TAG already names $INDEX (a re-run)"
+          elif ! grep -qiE 'manifest unknown|not found' "$RUNNER_TEMP/err"; then
+            cat "$RUNNER_TEMP/err" >&2; echo "::error::could not read $IMAGE:$TAG"; exit 1
+          fi
+          I="$RUNNER_TEMP/image"; L="$RUNNER_TEMP/layout"; mkdir -p "$L"
+          for a in amd64 arm64; do tar -xf "$I/runtime-$a.tar" -C "$L"; rm -f "$I/runtime-$a.tar"; done
+          cp "$I/runtime-index.json" "$L/blobs/sha256/${INDEX#sha256:}"
+          printf '{"imageLayoutVersion":"1.0.0"}' > "$L/oci-layout"
+          printf '{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"%s","size":%s,"annotations":{"org.opencontainers.image.ref.name":"image"}}]}' \
+            "$INDEX" "$(stat -c %s "$I/runtime-index.json")" > "$L/index.json"
+          skopeo copy --all --preserve-digests --retry-times 3 --dest-authfile "$AUTH" "oci:$L:image" "docker://$IMAGE@$INDEX"
+          [ "$(digest_of "$IMAGE@$INDEX")" = "$INDEX" ] || { echo "::error::the registry does not hold $INDEX"; exit 1; }
+          # What installs check: each arch, as pushed, labelled with the manifest's OpenClaw (and this release).
+          OC="$(jq -r .image.openclaw "$M")"
+          for arch in amd64 arm64; do
+            LABELS="$(skopeo inspect --authfile "$AUTH" --override-os linux --override-arch "$arch" "docker://$IMAGE@$INDEX" | jq -c .Labels)"
+            [ "$(jq -r '.["org.agentclaw.openclaw-version"] // ""' <<<"$LABELS")" = "$OC" ] \
+              || { echo "::error::$arch is not labelled org.agentclaw.openclaw-version=$OC"; exit 1; }
+            [ "$(jq -r '.["org.hatchabot.release"] // ""' <<<"$LABELS")" = "$VERSION" ] \
+              || { echo "::error::$arch is not labelled org.hatchabot.release=$VERSION"; exit 1; }
+          done
+          if [ "$DRAFT_ONLY" = true ]; then echo "draft only: $IMAGE@$INDEX pushed, not tagged"; exit 0; fi
+          skopeo copy --all --preserve-digests --retry-times 3 --src-authfile "$AUTH" --dest-authfile "$AUTH" "docker://$IMAGE@$INDEX" "docker://$IMAGE:$TAG"
+          [ "$(digest_of "$IMAGE:$TAG")" = "$INDEX" ] || { echo "::error::$IMAGE:$TAG does not name $INDEX"; exit 1; }
+          echo "✓ $IMAGE:$TAG = $INDEX"
+      - name: a draft release with every asset, checked
+        id: draft
+        run: |
+          set -euo pipefail
+          R="$GITHUB_REPOSITORY"; A="$RUNNER_TEMP/assets"
+          # A published release is never touched; a draft of this tag is what
+          # a dry run or a failed attempt left, and goes.
+          [ "$(gh api "repos/$R/releases?per_page=100" --paginate --jq ".[] | select(.tag_name == \"$TAG\" and .draft == false) | .id")" = "" ] \
+            || { echo "::error::$TAG is already released"; exit 1; }
+          for old in $(gh api "repos/$R/releases?per_page=100" --paginate --jq ".[] | select(.tag_name == \"$TAG\" and .draft) | .id"); do
+            echo "deleting the earlier draft $old of $TAG"; gh api -X DELETE "repos/$R/releases/$old"
+          done
+          RID="$(gh api -X POST "repos/$R/releases" -f tag_name="$TAG" -f target_commitish="$COMMIT" -f name="$TAG" \
+            -F body=@"$RUNNER_TEMP/notes/notes.md" -F draft=true -F prerelease="$PRERELEASE" --jq .id)"
+          echo "id=$RID" >> "$GITHUB_OUTPUT"
+          (cd "$A" && gh release upload "$TAG" --repo "$R" hatchabot-* release-manifest.json)
+          # The release's assets, as GitHub lists them, are the manifest's assets and the manifest — names, sizes and, where GitHub gives one, digests.
+          want="$(cd "$A" && { jq -r '.assets[] | "\(.name) \(.size) sha256:\(.sha256)"' release-manifest.json; echo "release-manifest.json $(stat -c %s release-manifest.json) sha256:$(sha256sum release-manifest.json | cut -d' ' -f1)"; } | sort)"
+          have="$(gh api "repos/$R/releases/$RID/assets?per_page=100" --paginate --jq '.[] | "\(.name) \(.size) \(.digest // "")"' | sort)"
+          if [ "$(printf '%s\n' "$have" | awk '{print $1, $2}')" != "$(printf '%s\n' "$want" | awk '{print $1, $2}')" ]; then
+            echo "::error::the draft's assets are not the manifest's"; diff <(echo "$want") <(echo "$have") || true; exit 1
+          fi
+          printf '%s\n' "$have" | while read -r n s d; do
+            [ -z "$d" ] || printf '%s\n' "$want" | grep -qxF "$n $s $d" || { echo "::error::$n: GitHub's digest $d is not the manifest's"; exit 1; }
+          done
+          echo "✓ draft $TAG holds exactly the manifest's $(printf '%s\n' "$have" | wc -l) files: $(gh api "repos/$R/releases/$RID" --jq .html_url)"
+      - name: tag the checked commit and publish
+        if: ${{ !inputs.draft_only }}
+        env:
+          RID: ${{ steps.draft.outputs.id }}
+        run: |
+          set -euo pipefail
+          R="$GITHUB_REPOSITORY"
+          if AT="$(gh api "repos/$R/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null)"; then
+            # Only a re-run of this job finds it: the check refused an existing tag.
+            [ "$AT" = "$COMMIT" ] || { echo "::error::the tag $TAG names $AT, not $COMMIT"; exit 1; }
+          else
+            gh api -X POST "repos/$R/git/refs" -f ref="refs/tags/$TAG" -f sha="$COMMIT" >/dev/null
+          fi
+          LATEST=false; [ "$NEWEST" = true ] && LATEST=true
+          gh api -X PATCH "repos/$R/releases/$RID" -F draft=false -f make_latest="$LATEST" --jq '"✓ published \(.html_url) (immutable: \(.immutable // "not reported"))"'
+
+  latest:
+    needs: [check, publish]
+    if: ${{ !inputs.draft_only && needs.check.outputs.newest == 'true' }}
+    permissions:
+      contents: read
+      packages: write
+      attestations: read
+    uses: ./.github/workflows/promote-images.yml
+    with:
+      version: ${{ needs.check.outputs.version }}
+      alias: latest
+      allow_backwards: false

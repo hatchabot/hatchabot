@@ -47,7 +47,8 @@ describe('OPENCLAW_VERSION: Dockerfile ARG ↔ build script default', () => {
     const oc = /ARG OPENCLAW_VERSION=(\d+)\.(\d+)\./.exec(dfText);
     const ch = /ARG CHANNEL_PLUGIN_VERSION=(\d+)\.(\d+)\./.exec(dfText);
     expect(ch?.slice(1)).toEqual(oc?.slice(1));
-    const wf = read('.github/workflows/runtime-image.yml');
+    // The build moved to the reusable workflow both the release and a candidate call (2026-10-10).
+    const wf = read('.github/workflows/runtime-image-build.yml');
     expect(wf).toContain('runtime-pins.mjs plugin');
     expect(wf).toContain('CHANNEL_PLUGIN_VERSION=${{ steps.ver.outputs.channel }}');
   });

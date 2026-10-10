@@ -373,6 +373,8 @@ Options must be ones listed here: a mistyped one is an error, not a guess.`;
 const MAINTAINER_USAGE = `
 
 Release (this is the development machine):
+  release X.Y.Z [--draft-only] Make a release: GitHub's release workflow builds, attests and
+                               publishes it (land the version commit first; docs/releasing.md)
   deploy [vX.Y.Z]              Put a release on this machine now (default: the newest tag)
   promote [vX.Y.Z] [channel]   New installs get it (default: what this machine runs → stable)
   channels [all]               Where stable, beta and latest point, and every release`;
@@ -486,7 +488,7 @@ function repoDir(): string {
  */
 const userPath = (p: string): string => resolve(process.env.HATCHABOT_CWD || process.cwd(), p);
 
-const BOOL_FLAGS = new Set(['private', 'no-wait', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
+const BOOL_FLAGS = new Set(['private', 'no-wait', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet', 'draft-only']);
 const VALUE_FLAGS = new Set(['ref', 'kind', 'at-once', 'agents', 'base', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
@@ -1043,11 +1045,15 @@ async function main() {
   // Release commands for the machine Hatchabot is DEVELOPED on: HATCHABOT_DEV_DIR
   // names the development checkout (the scripts, your push rights). Anywhere else
   // they do not exist — nobody else publishes releases, and `upgrade` is their verb.
-  if (cmd === 'deploy' || cmd === 'promote' || cmd === 'channels') {
+  if (cmd === 'deploy' || cmd === 'promote' || cmd === 'channels' || cmd === 'release') {
     if (!devDir) fail(`"${cmd}" is for the machine Hatchabot is developed on. To update this machine: hatchabot upgrade`);
     const git = (dir: string, ...a: string[]) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     let argv: string[];
-    if (cmd === 'deploy') {
+    if (cmd === 'release') {
+      // GitHub's release workflow makes it (scripts/release.sh; release by workflow, 2026-10-10).
+      const version = rest[0] ?? fail('say which version: hatchabot release X.Y.Z [--draft-only]');
+      argv = [join(devDir, 'scripts', 'release.sh'), version, ...(flags.has('draft-only') ? ['--draft-only'] : [])];
+    } else if (cmd === 'deploy') {
       git(devDir, 'fetch', '--tags', '--force', '--quiet', 'origin');
       const tag = rest[0] ?? git(devDir, 'tag', '-l', 'v[0-9]*', '--sort=-v:refname').split('\n').find((t) => t && !/-(rc|beta|alpha)/.test(t));
       argv = [join(devDir, 'scripts', 'deploy-release.sh'), tag ?? fail('no release tags')];
