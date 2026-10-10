@@ -30,7 +30,8 @@ case "$1 $2" in
       close) echo CLOSED ;;
       *) echo OPEN ;;
     esac ;;
-  "pr checks") [ "${prState}" = fail ] && echo privacy || true ;;
+  # Like gh: exit 8 while checks are still pending.
+  "pr checks") if [ "${prState}" = fail ]; then printf 'test\tpass\t1m\turl\nprivacy\tfail\t8s\turl\n'; exit 1; else printf 'test\tpending\t0\turl\n'; exit 8; fi ;;
 esac
 `, { mode: 0o755 });
   const env = scriptEnv(join(root, 'home'), `${bin}:/usr/bin:/bin`, {});
