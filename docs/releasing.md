@@ -35,7 +35,10 @@ New installs take **`stable`**, which names a release in `channels.json` on
 ```
 
 Promote from a `main` that matches `origin/main` exactly (it refuses
-otherwise, so nothing unpushed rides along) and a tag on `main`. Promoting
+otherwise, so nothing unpushed rides along) and a tag on `main`. The commit
+it pushes changes `channels.json` and nothing else: other staged or unstaged
+work is left as it was, and it refuses before pushing if the commit would
+hold anything more. Promoting
 forward asks GitHub first: it refuses a release whose CI run for the push to
 `main` failed
 (naming the run), waits for one still running, and stops when there is no run
@@ -175,23 +178,61 @@ emails, bot usernames, machine, tailnet and IP names, and the secret values in
 A pattern scanner cannot do this: a real agent's name is just words.
 
 - **Every push** from a clone with the hook (`node scripts/privacy-check.mjs
-  --install-hook`, once per clone) checks the lines and commit messages being
-  published, and refuses a `v0.*` tag or a tag off `main`. On a machine with no
-  install it warns and lets the push through.
+  --install-hook`, once per clone; `--check-hook` says whether this clone's
+  pre-push runs it, including through a machine-wide `core.hooksPath` that
+  hands on to the repo's own hook) checks the lines, file names, branch and
+  tag names, authors, committers, taggers and messages being published, and
+  refuses a `v0.*` tag or a tag off `main`. On a machine with no install at
+  all it warns and lets the push through; an install it can only partly read
+  (an env file but no database, say) blocks the push.
 - **Every release note**, with `--text` (step 4 above).
-- **Every promote**: the `privacy` live test (`--public`) reads everything
-  GitHub serves, so a push from another machine, a web edit or a merged pull
-  request is caught before `stable` moves.
+- **Every promote**: the `privacy` live test (`--public --check-hook`) reads
+  everything GitHub serves, so a push from another machine, a web edit or a
+  merged pull request is caught before `stable` moves; it also fails when the
+  checkout it runs from has no hook.
+
+Each run ends in one of three results, and says which:
+
+| Exit | Result | Meaning |
+|---|---|---|
+| 0 | clean | nothing it checked names a private value |
+| 1 | found | a private value (printed masked), or a refused tag |
+| 3 | incomplete | something it needed could not be read: the database, an env file, a note file, or GitHub's release notes and issues (`gh` missing, signed out, refused). Never a pass: the live test records it as a fail and `--text … &&` stops the release |
+
+Every result also says what is **not covered**: binary files and images (no
+OCR), and, with `--no-machine` or no `tailscale` command, this machine's
+names. `--public` always prints how many accepted historical commits it left
+out (below). The clone's own git identity (`user.name`, `user.email`) is not
+a finding as an author or committer — it is on every commit by choice — but
+the same value in a file or message is.
 
 A hit: replace the value with a made-up one — examples come from the invented
 household in `docs/deck/shot-data.mjs`. A generic word that is only by chance
-an agent's name ("Test") goes in `scripts/privacy-ignore.txt`. The history up
-to the 2026-10-09 scrub still names real agents (kept, not rewritten);
-`--public` checks what came after it.
+an agent's name ("Test") goes in `scripts/privacy-ignore.txt`.
+
+### Retained history
+
+The history published up to the 2026-10-09 scrub (`ACCEPTED_HISTORY` in
+`scripts/privacy-check.mjs`, commit `4dfbb0f`) still names real agents and
+other household values. Keeping it, not rewriting it, is the maintainer's
+deliberate decision (2026-10-09, issue #40), not an oversight: `--public`
+checks main's files as they are now and everything after that commit, and
+reports the commits before it separately ("N accepted historical commits not
+checked (retained by decision, docs/releasing.md)") instead of calling the
+whole repository clean. Removing that history would need an explicit,
+authorized plan first — an inventory of every branch, tag, release, pull
+request ref and cache that holds it, then a destructive rewrite — and even
+then it cannot reach copies outside this repository, such as the existing
+fork or anyone's clone.
 
 GitHub's side: secret scanning and push protection are on; rulesets refuse
 force-pushes and deletion of `main`, `v0.*` tags, and moving or deleting a
-release tag; CI runs gitleaks on every push and pull request.
+release tag; CI runs gitleaks on every push and pull request. Its exceptions
+(`.gitleaks.toml`) are exact fixture values, each for one rule and only in the
+files that hold it — never a word list, which let a setting's name hide a
+real-looking value (#42). A new fixture that trips it gets its exact value
+added there; `scripts/gitleaks-regression.sh` (run by the same CI job) checks
+that ordinary values are still reported whatever they are called.
 
 ## Deploying — run releases, not the working tree
 

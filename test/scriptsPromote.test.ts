@@ -212,6 +212,65 @@ describe('scripts/promote.sh publishes only the promote (review, 2026-10-09)', (
     expect(again.stdout).not.toContain('already points at');
   });
 
+  /**
+   * The caller's own work (audit issue #43, 2026-10-09): a tracked file with
+   * an unstaged edit, a new file staged, and an untracked one. The promote
+   * commit used to take the whole index, so the staged file went to main.
+   */
+  const withWork = () => {
+    const w = world();
+    writeFileSync(join(w.work, 'notes.md'), 'first\n');
+    w.git(w.work, 'add', 'notes.md'); w.git(w.work, 'commit', '-q', '-m', 'notes'); w.git(w.work, 'push', '-q', 'origin', 'main');
+    writeFileSync(join(w.work, 'notes.md'), 'first\nedited, not staged\n');
+    writeFileSync(join(w.work, 'staged.txt'), 'staged, not for the promote\n');
+    w.git(w.work, 'add', 'staged.txt');
+    writeFileSync(join(w.work, 'loose.txt'), 'untracked\n');
+    const state = () => ({
+      status: w.git(w.work, 'status', '--porcelain'),
+      staged: w.git(w.work, 'diff', '--cached'),
+      unstaged: w.git(w.work, 'diff'),
+    });
+    return { ...w, state, before: state() };
+  };
+
+  it('commits only channels.json, and leaves staged and unstaged work as it was', () => {
+    const w = withWork();
+    const r = w.promote({}, 'v1.1.0');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(w.git(w.origin, 'diff', '--name-only', 'main^', 'main').trim()).toBe('channels.json');
+    expect(w.git(w.origin, 'show', 'main:channels.json')).toContain('"stable": "v1.1.0"');
+    expect(w.channels()).toContain('"stable": "v1.1.0"');
+    expect(w.state()).toEqual(w.before);
+  });
+
+  it('a refused push leaves HEAD, the index and the working tree exactly as they were', () => {
+    const w = withWork();
+    const head = w.git(w.work, 'rev-parse', 'HEAD').trim();
+    const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+    writeFileSync(join(w.bin, 'git'), `#!/usr/bin/env bash\n[ "$1" = push ] && { echo "! [rejected] main -> main (fetch first)" >&2; exit 1; }\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o755 });
+    const r = w.promote({}, 'v1.1.0');
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('The push to origin was refused');
+    expect(w.git(w.work, 'rev-parse', 'HEAD').trim()).toBe(head);
+    expect(w.channels()).toContain('"stable": "v1.0.0"');
+    expect(w.state()).toEqual(w.before);
+  });
+
+  it('refuses before pushing when the commit would change anything but channels.json', () => {
+    const w = withWork();
+    const head = w.git(w.work, 'rev-parse', 'HEAD').trim();
+    // A pre-commit hook (this sandbox's own) that slips another file in.
+    const hooks = join(w.root, 'hooks'); mkdirSync(hooks);
+    writeFileSync(join(hooks, 'pre-commit'), '#!/bin/sh\necho slipped > slipped.txt && git add slipped.txt\n', { mode: 0o755 });
+    const r = w.promote({ GIT_CONFIG_VALUE_0: hooks }, 'v1.1.0');
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('more than channels.json');
+    expect(w.git(w.origin, 'rev-parse', 'main').trim()).toBe(head);
+    expect(w.git(w.work, 'rev-parse', 'HEAD').trim()).toBe(head);
+    expect(w.channels()).toContain('"stable": "v1.0.0"');
+    expect(w.git(w.work, 'diff', '--cached')).toBe(w.before.staged);
+  });
+
   it('CI is the run for the push to main — a passing pull-request run on the commit does not count', () => {
     const w = world();
     const r = w.promote({ HB_CI: 'pr-only' }, 'v1.1.0');

@@ -79,6 +79,9 @@ jobs:
           FROM="${BASE:-$BEFORE}"
           if [ -n "$FROM" ] && ! echo "$FROM" | grep -qE '^0+$' && git cat-file -e "$FROM^{commit}" 2>/dev/null; then RANGE="$FROM..$HEAD_SHA"; else RANGE="-1 $HEAD_SHA"; fi
           ./gitleaks git --log-opts="$RANGE" --config .gitleaks.toml --redact --no-banner --exit-code 1
+          # The config still reports ordinary values whatever they are called,
+          # and keeps its fixtures quiet only where they live (#42, 2026-10-09).
+          bash scripts/gitleaks-regression.sh ./gitleaks
 
   upgrade:
     runs-on: ubuntu-latest

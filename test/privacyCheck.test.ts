@@ -1,8 +1,8 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 
 /**
@@ -89,11 +89,208 @@ describe('the pre-push check', () => {
     expect(run(['--pre-push', 'origin', 'x'], line).status).toBe(0);
   });
 
-  it('lets a push through, with a warning, where there is no install to read', () => {
+  it('lets a push through, with a warning, where there is no install to read (no database, no env file)', () => {
     const line = commit('notes.md', 'Mapleford Helper\n');
-    const r = spawnSync('node', [SCRIPT, '--pre-push', 'origin', 'x', '--db', join(dir, 'none.sqlite'), '--env', env, '--no-machine'], { cwd: repo, input: line, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: dir } });
+    const r = spawnSync('node', [SCRIPT, '--pre-push', 'origin', 'x', '--db', join(dir, 'none.sqlite'), '--env', join(dir, 'none.env'), '--no-machine'], { cwd: repo, input: line, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: dir } });
     expect(r.status).toBe(0);
     expect(r.stderr).toContain('not checked');
+  });
+
+  it('says what it checked and what it never reads', () => {
+    const line = commit('notes.md', 'nothing private\n');
+    const r = run(['--pre-push', 'origin', 'x'], line);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toContain('not covered: binary files and images (no OCR)');
+  });
+});
+
+describe('incomplete is never clean (audit issue #41)', () => {
+  /** Run with a database path of the test's choosing, beside the env file. */
+  const runDb = (dbPath: string, args: string[], input = '') => spawnSync('node', [SCRIPT, ...args, '--db', dbPath, '--env', env, '--no-machine'], {
+    cwd: repo, input, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: dir },
+  });
+
+  it('pre-push: a database that is not there, beside an env file that is, blocks the push (exit 3)', () => {
+    const line = commit('notes.md', 'Mapleford Helper\n');
+    const r = runDb(join(dir, 'none.sqlite'), ['--pre-push', 'origin', 'x'], line);
+    expect(r.status).toBe(3);
+    expect(r.stderr).toMatch(/incomplete: the database .* is not there/);
+  });
+
+  it('pre-push: a database without the agents table blocks the push', () => {
+    const empty = join(dir, 'empty.sqlite');
+    new Database(empty).close();
+    const r = runDb(empty, ['--pre-push', 'origin', 'x'], commit('notes.md', 'Mapleford Helper\n'));
+    expect(r.status).toBe(3);
+    expect(r.stderr).toContain('no readable agents table');
+  });
+
+  it('--text: a missing database, or a note file that cannot be read, is incomplete (exit 3), not clean', () => {
+    writeFileSync(join(dir, 'ok.md'), 'nothing private\n');
+    const noDb = runDb(join(dir, 'none.sqlite'), ['--text', join(dir, 'ok.md')]);
+    expect(noDb.status).toBe(3);
+    expect(noDb.stdout).toContain('incomplete');
+    const noFile = run(['--text', join(dir, 'missing.md')]);
+    expect(noFile.status).toBe(3);
+    expect(noFile.stdout).toContain('could not be read');
+  });
+
+  it('an env file asked for and not there is incomplete', () => {
+    writeFileSync(join(dir, 'ok.md'), 'nothing private\n');
+    const r = spawnSync('node', [SCRIPT, '--text', join(dir, 'ok.md'), '--db', db, '--env', join(dir, 'gone.env'), '--no-machine'], { cwd: repo, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: dir } });
+    expect(r.status).toBe(3);
+    expect(r.stdout).toContain('the env file');
+  });
+
+  it('a missing tailscale command is said, not passed over (an optional tool)', async () => {
+    // @ts-expect-error — a plain .mjs script
+    const { tailnetValues } = await import('../scripts/privacy-check.mjs');
+    const notes: string[] = [];
+    tailnetValues(() => {}, notes, join(dir, 'no-such-tailscale'));
+    expect(notes).toEqual(['tailnet names (no tailscale command here)']);
+    const shim = join(dir, 'tailscale-fails'); writeFileSync(shim, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const failed: string[] = [];
+    tailnetValues(() => {}, failed, shim);
+    expect(failed).toEqual(['tailnet names (tailscale status failed)']);
+  });
+});
+
+describe('names, refs and identities, not only contents (audit issue #41)', () => {
+  it('a file name', () => {
+    const r = run(['--pre-push', 'origin', 'x'], commit('mapleford-helper.md', 'nothing private\n'));
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/\[agent slug\] 'ma…\(16\)' file name/);
+  });
+
+  it('a branch name being pushed', () => {
+    commit('a.md', 'nothing private\n');
+    const r = run(['--pre-push', 'origin', 'x'], `refs/heads/main ${sh('rev-parse', 'HEAD')} refs/heads/mapleford-helper ${'0'.repeat(40)}\n`);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('ref name');
+  });
+
+  it('a commit author, and an annotated tag\'s tagger', () => {
+    writeFileSync(join(repo, 'a.md'), 'x\n'); sh('add', 'a.md');
+    sh('-c', 'user.name=Quillon Varga', 'commit', '-qm', 'plain message');
+    const byAuthor = run(['--pre-push', 'origin', 'x'], `refs/heads/main ${sh('rev-parse', 'HEAD')} refs/heads/main ${'0'.repeat(40)}\n`);
+    expect(byAuthor.status).toBe(1);
+    expect(byAuthor.stderr).toContain('author/committer');
+    sh('push', '-q', 'origin', 'main');
+    sh('-c', 'user.name=Quillon Varga', 'tag', '-a', 'v2.0.0', '-m', 'release');
+    const byTagger = run(['--pre-push', 'origin', 'x'], `refs/tags/v2.0.0 ${sh('rev-parse', 'v2.0.0')} refs/tags/v2.0.0 ${'0'.repeat(40)}\n`);
+    expect(byTagger.status).toBe(1);
+    expect(byTagger.stderr).toContain('tagger');
+  });
+
+  it('the clone\'s own git identity is not a finding as author; the same value in a file still is', () => {
+    sh('config', 'user.email', 'someone@example.org');
+    writeFileSync(join(repo, 'a.md'), 'x\n'); sh('add', 'a.md');
+    sh('-c', 'user.email=someone@example.org', 'commit', '-qm', 'mine');
+    expect(run(['--pre-push', 'origin', 'x'], `refs/heads/main ${sh('rev-parse', 'HEAD')} refs/heads/main ${'0'.repeat(40)}\n`).status).toBe(0);
+    const inFile = run(['--pre-push', 'origin', 'x'], commit('b.md', 'mail someone@example.org\n'));
+    expect(inFile.status).toBe(1);
+  });
+});
+
+/**
+ * --public and --check-hook read the checkout the script lives in, so these
+ * run a copy of it inside a throwaway repo (its own origin, a gh shim, no
+ * hooks run). Nothing reaches GitHub.
+ */
+describe('--public and the hook check (audit issues #40, #41)', () => {
+  let work: string, bin: string;
+  const REPO_ROOT = join(__dirname, '..');
+  const g = (...a: string[]) => {
+    const r = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Test', '-c', 'user.email=test@example.org', ...a], { cwd: work, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: dir, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+    if (r.status !== 0) throw new Error(r.stderr);
+    return r.stdout.trim();
+  };
+  const put = (file: string, text: string, msg = `add ${file}`) => { writeFileSync(join(work, file), text); g('add', file); g('commit', '-qm', msg); g('push', '-q', 'origin', 'main'); return g('rev-parse', 'HEAD'); };
+  const pub = (args: string[], extra: Record<string, string> = {}) => spawnSync('node', [join(work, 'scripts', 'privacy-check.mjs'), ...args, '--db', db, '--env', env, '--no-machine'], {
+    cwd: work, encoding: 'utf8',
+    env: { PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: dir, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', ...extra },
+  });
+  const publicRun = (extra: Record<string, string> = {}, more: string[] = []) => pub(['--public', '--repo', 'example/project', ...more], extra);
+
+  beforeEach(() => {
+    work = join(dir, 'work'); bin = join(dir, 'bin');
+    mkdirSync(join(work, 'scripts'), { recursive: true }); mkdirSync(bin);
+    copyFileSync(join(REPO_ROOT, 'scripts', 'privacy-check.mjs'), join(work, 'scripts', 'privacy-check.mjs'));
+    copyFileSync(join(REPO_ROOT, 'scripts', 'privacy-ignore.txt'), join(work, 'scripts', 'privacy-ignore.txt'));
+    symlinkSync(join(REPO_ROOT, 'node_modules'), join(work, 'node_modules'));
+    writeFileSync(join(work, '.gitignore'), 'node_modules\nscripts\n'); // the copy names the made-up household's values in its comments
+    spawnSync('git', ['init', '-q', '--bare', join(dir, 'public.git')]);
+    g('init', '-q', '-b', 'main'); g('remote', 'add', 'origin', join(dir, 'public.git'));
+    g('add', '.'); g('commit', '-qm', 'start'); g('push', '-q', 'origin', 'main');
+    // gh: HB_GH=ok (default; prints HB_GH_TEXT), fail (GitHub refuses), missing.
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\ncase "$1" in\n  --version) [ "$HB_GH" = missing ] && exit 127; echo "gh version 0"; exit 0 ;;\n  api) [ "$HB_GH" = fail ] && { echo "HTTP 401: Bad credentials" >&2; exit 1; }; printf "%s\\n" "$HB_GH_TEXT"; exit 0 ;;\nesac\nexit 1\n', { mode: 0o755 });
+  });
+
+  it('clean: says so only for what it checked, with the accepted-history line and what is not covered', async () => {
+    const r = publicRun();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/0 accepted historical commits/);
+    expect(r.stdout).toContain('not covered: binary files and images (no OCR)');
+    expect(r.stdout).toContain('✓ privacy: what was checked is clean');
+    // @ts-expect-error — a plain .mjs script
+    const { resultOf } = await import('../scripts/live.mjs');
+    expect(resultOf(r.status, r.stdout)).toBe('pass');
+  });
+
+  it('GitHub not answering, or no gh, is incomplete (exit 3) — a failed live test, not a skip', async () => {
+    // @ts-expect-error — a plain .mjs script
+    const { resultOf } = await import('../scripts/live.mjs');
+    const refused = publicRun({ HB_GH: 'fail' });
+    expect(refused.status).toBe(3);
+    expect(refused.stdout).toMatch(/incomplete: release notes: GitHub did not answer/);
+    expect(resultOf(refused.status, refused.stdout)).toBe('fail');
+    const none = publicRun({ HB_GH: 'missing' });
+    expect(none.status).toBe(3);
+    expect(none.stdout).toContain('no gh command here');
+    const noRepo = pub(['--public']);
+    expect(noRepo.status).toBe(3);
+    expect(noRepo.stdout).toContain('is not a GitHub address');
+  });
+
+  it('a private value in release notes or issues is a finding', () => {
+    const r = publicRun({ HB_GH_TEXT: 'v2.0.0\nRelease\nMapleford Helper is faster.' });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('release notes');
+  });
+
+  it('accepted history is left out and counted; anything after it, and any file name, is checked', () => {
+    put('old.md', 'Mapleford Helper\n');
+    const base = put('old.md', 'scrubbed\n', 'scrub');
+    const r = publicRun({}, ['--accepted-history', base]);
+    expect(r.status, r.stdout).toBe(0);
+    expect(r.stdout).toContain('3 accepted historical commits not checked (retained by decision, docs/releasing.md)');
+    put('later.md', 'Mapleford Helper again\n');
+    expect(publicRun({}, ['--accepted-history', base]).status).toBe(1);
+    g('rm', '-q', 'later.md'); put('mapleford-helper.txt', 'nothing private\n');
+    const named = publicRun({}, ['--accepted-history', g('rev-parse', 'HEAD~1')]);
+    expect(named.status).toBe(1);
+    expect(named.stdout).toContain('file/folder names');
+  });
+
+  it('--check-hook: not installed, installed, and through a core.hooksPath that hands on to it', () => {
+    expect(pub(['--check-hook']).status).toBe(1);
+    const missing = publicRun({}, ['--check-hook']);
+    expect(missing.status).toBe(3);
+    expect(missing.stdout).toContain('✗ pre-push hook');
+    expect(pub(['--install-hook']).status).toBe(0);
+    expect(pub(['--check-hook']).stdout).toContain('✓ pre-push hook');
+    expect(publicRun({}, ['--check-hook']).status).toBe(0);
+    // A machine-wide hook folder: counts only when its pre-push hands on to the repo's own hook.
+    const shared = join(dir, 'shared-hooks'); mkdirSync(shared);
+    g('config', 'core.hooksPath', shared);
+    writeFileSync(join(shared, 'pre-push'), '#!/bin/sh\necho other checks\nexit 0\n', { mode: 0o755 });
+    expect(pub(['--check-hook']).status).toBe(1);
+    writeFileSync(join(shared, 'pre-push'), '#!/bin/sh\nown="$(git rev-parse --git-common-dir)/hooks/pre-push"\n[ -x "$own" ] && exec "$own" "$@"\nexit 0\n', { mode: 0o755 });
+    const chained = pub(['--check-hook']);
+    expect(chained.status, chained.stdout).toBe(0);
+    expect(chained.stdout).toContain('hands on to');
+    g('config', 'core.hooksPath', '/dev/null');
+    expect(pub(['--check-hook']).stdout).toContain('hooks are off');
   });
 });
 

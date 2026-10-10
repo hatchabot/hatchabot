@@ -122,6 +122,11 @@ describe('a run\'s result', () => {
     expect(resultOf(0, 'all good')).toBe('pass');
     expect(resultOf(1, 'SKIP')).toBe('fail');
   });
+
+  it('privacy: an incomplete check (exit 3) is a fail, and the test checks the pre-push hook (#41, 2026-10-09)', () => {
+    expect(resultOf(3, '✗ privacy: incomplete — not everything GitHub serves could be checked')).toBe('fail');
+    expect(LIVE_TESTS.find((t: { name: string }) => t.name === 'privacy')!.cmd).toEqual(['node', 'scripts/privacy-check.mjs', '--public', '--check-hook']);
+  });
 });
 
 type Area = Array<string | { path: string; near: RegExp }>;

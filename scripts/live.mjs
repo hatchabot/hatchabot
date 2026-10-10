@@ -37,9 +37,11 @@ const STORE = 'src/store/store.ts';
 const LIB = 'scripts/live-lib.mjs';
 export const LIVE_TESTS = [
   {
-    name: 'privacy', cmd: ['node', 'scripts/privacy-check.mjs', '--public'], against: 'install', minutes: '1–3', aiTurns: false, everyRelease: true, parallel: true,
-    needs: 'this machine\'s install (its private values: agents, people, bots, machines, .env secrets) and gh signed in',
-    proves: 'nothing GitHub serves — the files, every commit and tag since the 2026-10-09 scrub, release notes, issues — names a private value, and no tag is from before 1.0 or off main',
+    // --check-hook: this checkout's pre-push must run the check too; anything
+    // it cannot read (the database, GitHub) exits 3, recorded as a fail (#41, 2026-10-09).
+    name: 'privacy', cmd: ['node', 'scripts/privacy-check.mjs', '--public', '--check-hook'], against: 'install', minutes: '1–3', aiTurns: false, everyRelease: true, parallel: true,
+    needs: 'this machine\'s install (its private values: agents, people, bots, machines, .env secrets), gh signed in, and this checkout\'s pre-push hook (node scripts/privacy-check.mjs --install-hook)',
+    proves: 'nothing GitHub serves — the files and their names, every commit (authors, messages) and tag since the 2026-10-09 scrub, ref names, release notes, issues — names a private value; no tag is from before 1.0 or off main; this checkout\'s pre-push runs the check',
     area: [],
   },
   {

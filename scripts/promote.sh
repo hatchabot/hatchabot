@@ -80,9 +80,25 @@ live_gate() {
 }
 if [ -z "$CURRENT" ] || [ "$NEWER" != "$CURRENT" ]; then ci_gate; live_gate; fi
 
+# The promote commit holds channels.json and nothing else. It used to `git
+# add channels.json` and commit the whole index, so whatever the caller had
+# staged went to main with it (audit issue #43, 2026-10-09). Now it commits
+# with --only (git's own temporary index: HEAD plus channels.json), checks the
+# commit changes exactly channels.json before pushing, and on any failure puts
+# HEAD, the caller's index and channels.json back exactly as they were. Other
+# staged or unstaged work is never touched.
+START="$(git rev-parse HEAD)"
+INDEX="$(git rev-parse --git-path index)"
+SAVED="$(mktemp -d)"; trap 'rm -rf "$SAVED"' EXIT
+cp -p channels.json "$SAVED/channels.json"
+[ ! -f "$INDEX" ] || cp -p "$INDEX" "$SAVED/index"
+undo() {
+  git update-ref -m "promote: taken back" refs/heads/main "$START"
+  if [ -f "$SAVED/index" ]; then cp -p "$SAVED/index" "$INDEX"; else rm -f "$INDEX"; fi
+  cp -p "$SAVED/channels.json" channels.json
+}
 sed -i.bak -E "s/(\"$CH\"[[:space:]]*:[[:space:]]*\")v[^\"]*(\")/\1$TAG\2/" channels.json && rm -f channels.json.bak
-grep -q "\"$CH\": \"$TAG\"" channels.json || die "Could not update channels.json."
-git add channels.json
+grep -q "\"$CH\": \"$TAG\"" channels.json || { undo; die "Could not update channels.json."; }
 # Trailers only when the caller passes them (HATCHABOT_PROMOTE_TRAILERS, one
 # per line): a fixed Co-Authored-By and session URL stamped every promote
 # with a session that never made it (review, 2026-09-29).
@@ -90,12 +106,15 @@ MSG="Promote $TAG to $CH"
 [ -z "${HATCHABOT_PROMOTE_TRAILERS:-}" ] || MSG="$MSG
 
 $HATCHABOT_PROMOTE_TRAILERS"
-git commit -q -m "$MSG"
+git commit -q --only -m "$MSG" -- channels.json || { undo; die "Could not commit channels.json — nothing changed."; }
+CHANGED="$(git diff --name-only "$START" HEAD)"
+[ "$CHANGED" = channels.json ] \
+  || { undo; die "The promote commit would change more than channels.json ($(echo "$CHANGED" | tr '\n' ' ')) — nothing pushed, nothing changed."; }
 # A refused push (main moved on meanwhile) used to leave the promote commit
 # here, and a re-run then said "already points at" with GitHub unchanged
 # (review, 2026-10-09). Take it back off, as if it had not been made.
 if ! git push -q origin main; then
-  git reset -q --soft HEAD~1 && git reset -q -- channels.json && git checkout -q -- channels.json
+  undo
   die "The push to origin was refused (did main move on?) — nothing changed here or there. Pull, then run it again."
 fi
 echo "✓ $CH → $TAG  (was ${CURRENT:-unset}). New installs on $CH get it now."
