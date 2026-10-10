@@ -23,7 +23,7 @@ function bundleTree(root: string, tag: string, restartRc = 0): string {
   mkdirSync(join(dir, 'node_modules'), { recursive: true });
   symlinkSync(process.execPath, join(dir, '.node', 'bin', 'node'));
   symlinkSync(driver, join(dir, 'node_modules', 'better-sqlite3'));
-  for (const s of ['upgrade.sh', 'release-target.sh']) writeFileSync(join(dir, 'scripts', s), readFileSync(join('scripts', s)), { mode: 0o755 });
+  for (const s of ['upgrade.sh', 'release-target.sh', 'release-manifest.sh']) writeFileSync(join(dir, 'scripts', s), readFileSync(join('scripts', s)), { mode: 0o755 });
   writeFileSync(join(dir, 'scripts', 'restart.sh'), `#!/usr/bin/env bash\nexit ${restartRc}\n`, { mode: 0o755 });
   writeFileSync(join(dir, 'VERSION'), tag);
   writeFileSync(join(dir, 'BUNDLE.json'), JSON.stringify({ version: tag.slice(1), tag, platform: 'linux-arm64' }) + '\n');

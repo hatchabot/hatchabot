@@ -72,12 +72,21 @@ fi
 # sanctioned upgrade flow only sets OPENCLAW_VERSION — pass the plugin pin
 # through when given, and warn when an OpenClaw bump leaves it implicit so the
 # stale-peer case is at least loud (audit 2026-09-02).
-# Prefer the published multi-arch image (built by .github/workflows/runtime-image.yml)
-# over a 20-minute local build: same Dockerfile, same pins. A version that isn't
-# published yet (a fresh candidate) — or BUILD_LOCAL=1 — falls through to the
+# Prefer the published multi-arch image (built by the release workflow) over a
+# 20-minute local build: same Dockerfile, same pins. A version that isn't
+# published (a fresh candidate) — or BUILD_LOCAL=1 — falls through to the
 # local build below.
 PUBLISHED="${HATCHABOT_IMAGE_REGISTRY:-ghcr.io/hatchabot/runtime}"
-if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] && [ -z "${LLAMA_CPP_PROVIDER_VERSION:-}" ] && [ "${EMBED_ENGINE}" = "${ENGINE_RULE}" ]; then
+# A pulled image, under this script's names.
+use_pulled() {
+  docker tag "$1" "${REPO}:${IMAGE_TAG}"
+  if [ "${NO_LATEST:-0}" != "1" ]; then docker tag "${REPO}:${IMAGE_TAG}" "${REPO}:latest"; echo "Pulled ${REPO}:${IMAGE_TAG} (promoted to :latest)"; else echo "Pulled ${REPO}:${IMAGE_TAG} (candidate — :latest untouched)"; fi
+  exit 0
+}
+# Legacy: a release made before release manifests (before v2.159.0). Its
+# images are found by tag, and accepted when their version label says the
+# OpenClaw asked for.
+legacy_published() {
   # The per-release tag (vX.Y.Z) is never rewritten; the version tag moves with every release.
   RELEASE_TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
   # The per-release image bakes the Dockerfile's DEFAULT OpenClaw. It is only
@@ -104,12 +113,43 @@ if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] 
       echo "  …that image carries OpenClaw ${HAS:-unknown}, not ${OPENCLAW_VERSION}; not using it."
     fi
   done
-  if [ -n "$PULLED" ]; then
-    docker tag "$PULLED" "${REPO}:${IMAGE_TAG}"
-    if [ "${NO_LATEST:-0}" != "1" ]; then docker tag "${REPO}:${IMAGE_TAG}" "${REPO}:latest"; echo "Pulled ${REPO}:${IMAGE_TAG} (promoted to :latest)"; else echo "Pulled ${REPO}:${IMAGE_TAG} (candidate — :latest untouched)"; fi
-    exit 0
-  fi
+  if [ -n "$PULLED" ]; then use_pulled "$PULLED"; fi
   echo "Not published (or offline) — building locally instead."
+}
+if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] && [ -z "${LLAMA_CPP_PROVIDER_VERSION:-}" ] && [ "${EMBED_ENGINE}" = "${ENGINE_RULE}" ]; then
+  # This install's release, and what it vouches for (#47, 2026-10-10): a
+  # release with a manifest (v2.159.0 on) names its runtime image by digest,
+  # and only that image is pulled — a tag can be moved, a digest cannot, and
+  # a version label is no proof of content. Its label must still agree.
+  RELEASE="v$(sed -nE 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' package.json | sed -n 1p)"
+  MRC=0; PIN="$(./scripts/release-manifest.sh image "$RELEASE")" || MRC=$?
+  case "$MRC" in
+    0)
+      PIN_REF="${PIN%% *}"; PIN_OPENCLAW="${PIN#* }"
+      # A mirror serves the same digest: content-addressed, it cannot differ.
+      [ -z "${HATCHABOT_IMAGE_REGISTRY:-}" ] || PIN_REF="${HATCHABOT_IMAGE_REGISTRY}@${PIN_REF#*@}"
+      if [ "$PIN_OPENCLAW" != "$OPENCLAW_VERSION" ]; then
+        echo "Release $RELEASE publishes the image for OpenClaw $PIN_OPENCLAW only, not $OPENCLAW_VERSION — building locally."
+      else
+        echo "Pulling release $RELEASE's runtime image by its digest (${PIN_REF})…"
+        if docker pull "$PIN_REF"; then
+          HAS="$(docker inspect "$PIN_REF" --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}' 2>/dev/null || true)"
+          if [ "$HAS" != "$OPENCLAW_VERSION" ]; then
+            echo "✗ The image release $RELEASE's manifest names carries OpenClaw ${HAS:-unknown}, not ${OPENCLAW_VERSION} as the manifest says. Not using it." >&2
+            echo "  Build it from source instead: BUILD_LOCAL=1 ./scripts/build-runtime-image.sh" >&2
+            exit 1
+          fi
+          use_pulled "$PIN_REF"
+        fi
+        echo "Could not pull it (offline?) — building locally instead."
+      fi ;;
+    10) legacy_published ;;
+    3) echo "Could not fetch the release manifest of $RELEASE (offline?) — building locally instead." ;;
+    *)
+      echo "✗ Not pulling a published image: the release manifest of $RELEASE is refused (above)." >&2
+      echo "  Build it from source instead: BUILD_LOCAL=1 ./scripts/build-runtime-image.sh" >&2
+      exit 1 ;;
+  esac
 fi
 DEFAULT_OPENCLAW="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | sed -n 1p)"
 

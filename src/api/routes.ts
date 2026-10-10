@@ -195,6 +195,7 @@ import {
   installRuntimeImage,
   runnerSetupSnippet,
 } from '../orchestrator/runnerSetup.js';
+import { publishedRuntimeImage } from '../orchestrator/releaseManifest.js';
 import { probeImageCapabilities } from '../orchestrator/runtimeCaps.js';
 import {
   baseProblem,
@@ -2530,12 +2531,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // On disk (operations.ts): a restart in the middle leaves "interrupted —
       // Install again", and the Activity list shows it (GET /v1/events).
       const op = beginOperation(store, 'install-image', null, { image, host: host.name }, { hostId: host.id, requestedBy: ownerIdOf(req) });
-      // A runner on another CPU pulls the published image of the same OpenClaw instead (installRuntimeImage).
+      // A runner on another CPU pulls the published image of the same OpenClaw
+      // instead (installRuntimeImage): the one this release's manifest names,
+      // by digest (#47, 2026-10-10); by tag only for a release made before manifests.
       const version = local ? (await providerFor(local).currentImageInfo().catch(() => undefined))?.openclawVersion : undefined;
-      const published = version && /^\d{4}\.\d+\.\d+(?:-\d+)?$/.test(version)
-        ? { ref: `${process.env.HATCHABOT_IMAGE_REGISTRY ?? 'ghcr.io/hatchabot/runtime'}:${version}`, openclawVersion: version }
-        : undefined;
-      const finished = installRuntimeImage(dockerHost, { image, total: job.total, published, onProgress: (p) => { job.bytes = p.bytes; } })
+      const found = version && /^\d{4}\.\d+\.\d+(?:-\d+)?$/.test(version) ? await publishedRuntimeImage(version) : undefined;
+      const published = found && !('problem' in found) ? found : undefined;
+      const unpublished = found && 'problem' in found ? found.problem : undefined;
+      const finished = installRuntimeImage(dockerHost, { image, total: job.total, published, unpublished, onProgress: (p) => { job.bytes = p.bytes; } })
         .then((r) => {
           Object.assign(job, { done: true, ok: r.ok, error: r.ok ? undefined : `Image install failed: ${r.error}`, finishedAt: new Date().toISOString(), ...(r.pulled ? { pulled: r.pulled } : {}) });
           trace()(r.ok ? 'host.image_copied' : 'host.image_copy_failed', { host: host.id, bytes: job.bytes, ...(r.pulled ? { pulled: r.pulled } : {}), ...(r.ok ? {} : { error: r.error }) });

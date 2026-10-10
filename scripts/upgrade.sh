@@ -128,9 +128,22 @@ if [ "$BUNDLED" = 1 ]; then
   STAGE="$(mktemp -d "$(dirname "$DIR")/.hatchabot-next-XXXXXX")"
   sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
   curl -fsSL --retry 3 -o "$STAGE/$NAME" "$BASE/$TARGET/$NAME" || { echo "No bundle for $TARGET on $PLATFORM yet — try again later."; exit 3; }
-  # Its own message: under pipefail a failed fetch here ended the script with curl's code and no word.
-  WANT="$(curl -fsSL --retry 3 "$BASE/$TARGET/$NAME.sha256" 2>/dev/null | cut -d' ' -f1)" || { echo "Could not fetch the $TARGET bundle's checksum — try again later."; exit 3; }
-  [ -n "$WANT" ] && [ "$WANT" = "$(sha "$STAGE/$NAME")" ] || { echo "The $TARGET bundle's checksum does not match — not installing it."; exit 3; }
+  # What the release vouches for (#38): the bundle's size and sha256 as its
+  # release-manifest.json names them (scripts/release-manifest.sh, which also
+  # keeps the manifest for the runtime image step below). A manifest that is
+  # there but unreadable, or for another release, is refused — never passed
+  # over for the weaker check. A release made before manifests (before
+  # v2.159.0) has none: the .sha256 beside the bundle, as before (legacy).
+  MRC=0; "$DIR/scripts/release-manifest.sh" asset "$TARGET" "$STAGE/$NAME" "$NAME" || MRC=$?
+  case "$MRC" in
+    0) ;;
+    10)
+      # Its own message: under pipefail a failed fetch here ended the script with curl's code and no word.
+      WANT="$(curl -fsSL --retry 3 "$BASE/$TARGET/$NAME.sha256" 2>/dev/null | cut -d' ' -f1)" || { echo "Could not fetch the $TARGET bundle's checksum — try again later."; exit 3; }
+      [ -n "$WANT" ] && [ "$WANT" = "$(sha "$STAGE/$NAME")" ] || { echo "The $TARGET bundle's checksum does not match — not installing it."; exit 3; } ;;
+    3) echo "Could not fetch the $TARGET release's manifest to check its bundle — try again later."; exit 3 ;;
+    *) echo "Not installing the $TARGET bundle: the release's manifest does not vouch for it (above). Staying on $CUR."; exit 3 ;;
+  esac
   tar -xzf "$STAGE/$NAME" -C "$STAGE" || { echo "Could not unpack the $TARGET bundle."; exit 3; }
   NEW="$STAGE/hatchabot"
   ( cd "$NEW" && ./.node/bin/node -e 'new (require("better-sqlite3"))(":memory:").exec("SELECT 1")' ) >/dev/null 2>&1 || { echo "The $TARGET bundle does not run on this machine — staying on $CUR."; exit 3; }

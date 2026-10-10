@@ -15,7 +15,7 @@ prebuilt bundle on supported machines.
 | Ubuntu 22.04 or newer, Debian 12 or newer (x64 or arm64; glibc 2.35+) | Downloads the bundle |
 | Apple-silicon Mac | Downloads the bundle; offers Docker Desktop through Homebrew if Docker is missing |
 | Anything else: Alpine (musl), older glibc, 32-bit, Intel Mac | The native install: git, Node 22 and build tools, then a clone at the release |
-| A release with no bundle, a checksum mismatch, or a bundle that fails its self-check | Falls back to the native install automatically |
+| A release with no bundle, a bundle that is not the one the release's manifest names (or a manifest it cannot read), a checksum mismatch, or a bundle that fails its self-check | Falls back to the native install automatically, and says why |
 
 `HATCHABOT_NATIVE=1` forces the native install. A clone that is already
 installed (`~/hatchabot/.git`) keeps upgrading as a clone; a bundle install
@@ -39,6 +39,46 @@ It is a plain archive per platform, attached to each GitHub release by
 
 It checks itself when it is built (its Node opens a database with its driver),
 and the installer checks it again before it moves in.
+
+## What a release vouches for
+
+From v2.159.0 every release carries `release-manifest.json`, written by the
+release workflow (`docs/release-by-workflow-design.md`). It names the release's
+tag and commit, each asset's name, size and sha256, and the runtime image's
+index digest and the OpenClaw version inside it. Releases are immutable once
+published, so the manifest and the bundles beside it cannot be replaced
+afterwards. Installs rely on that; they do not check the Sigstore attestation
+themselves (`gh attestation verify` does, for anyone who wants to).
+
+- **Bundles.** The installer and `hatchabot upgrade` fetch the manifest from
+  the same release. The bundle's size and sha256 must be the ones it names.
+  A bundle that does not match is refused: the installer goes on with the
+  native install and says why, and an upgrade stops with exit 3 and changes
+  nothing.
+- **A manifest that is there but unreadable, or for another release,** is
+  refused. It is never passed over for the weaker `.sha256` check. A manifest
+  that cannot be fetched (no network, a server error) is refused the same way;
+  only a 404 means "no manifest".
+- **The runtime image** is pulled by the digest the manifest names
+  (`ghcr.io/hatchabot/runtime@sha256:…`), never by a tag. Its OpenClaw version
+  label must agree with the manifest, or it is refused. The same goes for
+  `scripts/build-runtime-image.sh` (install, upgrade, Settings → Images), a base
+  image fetched for a recipe, and **Install image** on a runner with another CPU.
+  An OpenClaw version other than the one the release names is built on the
+  machine, not pulled. `HATCHABOT_IMAGE_REGISTRY` can point at a mirror; the
+  image is still pulled by the same digest.
+- **Kept for offline restarts.** A checked manifest is kept in the data
+  directory as `release-manifests/<tag>.json` (`scripts/release-manifest.sh`,
+  `src/orchestrator/releaseManifest.ts`), so nothing fetches it again.
+- **Releases made before manifests** (before v2.159.0) have none. Their bundles
+  are checked against the `.sha256` beside them, and their images are pulled by
+  tag and accepted on their version label, as before. The code marks this
+  path as legacy. Each release still carries the `.sha256` files for older
+  installers.
+
+To check by hand: `scripts/release-manifest.sh get vX.Y.Z` prints the kept
+manifest's path. `scripts/release-manifest.sh image vX.Y.Z` prints the image
+reference and its OpenClaw version.
 
 ## Docker without logging out
 
@@ -70,15 +110,17 @@ it from the address bar.
 
 1. Resolves the channel without git (`scripts/release-target.sh`: `channels.json`
    on main, or the newest release).
-2. Downloads the next bundle beside the install, checks its `.sha256`, unpacks
-   it, and runs its self-check.
+2. Downloads the next bundle beside the install, checks it against the
+   release's manifest (or, for a release made before manifests, its `.sha256`),
+   unpacks it, and runs its self-check.
 3. Swaps only the bundle's own top-level files. `.env`, `data/` and backups are
    never touched, and the old files are kept aside.
 4. Restarts. If the new release does not come up, the old files go back and the
    old release restarts.
 
-Exit codes are the same as a clone's upgrade: `3` means it is worth trying
-again (no bundle yet, network), `1` means the release did not start and was
+Exit codes are the same as a clone's upgrade: `3` means it did not complete
+and nothing changed (no bundle yet, no network, or a bundle the release's
+manifest does not vouch for), `1` means the release did not start and was
 rolled back. Upgrades do not depend on the npm registry.
 
 ## The driver on a native install
