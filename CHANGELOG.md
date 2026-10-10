@@ -2,6 +2,21 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.159.0] — 2026-10-10
+
+Releases made only by GitHub's release workflow, and installs that check what they download against the release (#37, #38, #47). Changes to `main` now go through pull requests whose checks include privacy.
+
+### Added
+- **Releases are made only by the release workflow** (`scripts/release.sh X.Y.Z`, `hbt release`). It checks the commit is on `main`, the versions agree, CI passed and the tag is new; builds the bundles and the runtime image without publishing rights; writes `release-manifest.json` (each asset's size and sha256, the image's digests, the OpenClaw version) and attests it; and uploads everything to a draft and checks it before tagging and publishing. `--draft-only` makes a dry run. (#37, #38)
+- **Privacy is checked on GitHub's side too.** A required `privacy` check fails a pull request or push that names a private value, using keyed fingerprints of the values (the values never leave this machine); a daily watch scans new issues, comments, pull request text and release notes. `privacy-check.mjs --sync-ci` refreshes the fingerprints, daily by timer.
+- `scripts/land.sh` lands commits on `main` through a pull request that merges itself when its checks pass; `scripts/promote.sh` uses it.
+
+### Changed
+- **Installs and upgrades check each bundle against the release's manifest:** its size and sha256 must be the ones the release names. A manifest that is unreadable, for another release, or cannot be fetched is refused, never skipped: the installer then uses the native install, and an upgrade stops with nothing changed. Releases from before manifests keep the `.sha256` check. (#38)
+- **The runtime image is pulled by the digest the release's manifest names**, not by a tag, and its OpenClaw version must match. This covers install, upgrade, Settings → Images, recipe base images, and Install image on a runner with another CPU; any other OpenClaw version is built on the machine. The manifest is kept in the data directory, so a restart offline does not need GitHub. (#47)
+- **The runtime image's `:latest`, `:beta` and `:stable` move only by a release's manifest digest**, one at a time and never backwards except on a rollback. A release moves `:latest`; `scripts/promote.sh` moves `:stable` and `:beta` with the channel. Rebuilding an old release can no longer change its image or move an alias. (#47)
+- Release bundles are no longer replaced on a published release (`--clobber` is gone).
+
 ## [2.158.3] — 2026-10-10
 
 GitHub issues #39–#46 (a security audit of v2.158.2), and a web-chat guest's visits.
