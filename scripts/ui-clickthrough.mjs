@@ -242,6 +242,14 @@ const SCENARIOS = String.raw`(() => {
         await until(() => calls('POST', /\/sent$/).length);
         eq('the edit is saved before anything leaves', calls('PATCH', /^\/v1\/problem-reports\//).at(-1).body, { title: 'Rebuild fails', body: 'edited' });
         ok('GitHub opened in a new tab, without a way back to this page', opened.length === 1 && opened[0].location.href.startsWith('https://github.com/hatchabot/hatchabot/issues/new') && opened[0].opener === null);
+        // An edit the server masks (a private name): the review shows what will go out, not what was typed.
+        window.__answer = { ['PATCH /v1/problem-reports/' + id]: [{ body: view({ body: 'The <name> agent failed' }) }] };
+        $('reportBody').value = 'The Meal Planner agent failed';
+        const before = calls('PATCH', /^\/v1\/problem-reports\//).length;
+        byText('#reportReview button', 'Open on GitHub').click();
+        await until(() => calls('PATCH', /^\/v1\/problem-reports\//).length > before);
+        await until(() => $('reportBody').value === 'The <name> agent failed');
+        ok('the masked text is what the review shows', true);
         reportDlg.close();
         // The agent's link: …/#report=<id> opens that draft and leaves the address bar.
         window.__override['/v1/problem-reports/' + draftId] = view({ id: draftId, title: 'Telegram replies stop', by: 'agent', known: [{ title: 'Telegram replies stop after a long turn', fixedIn: 'v9.9.0' }] });

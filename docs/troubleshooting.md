@@ -85,6 +85,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `install.sh` — `native-existing`
 
+### Privacy check: "✗ incomplete: the database … is not there" (exit 3) and the push or release stops
+- **Check:** `node scripts/privacy-check.mjs --text CHANGELOG.md` prints `✗ incomplete:` lines.
+- **Cause:** an env file was found but the database (`HATCHABOT_DB`) wasn't, or it has no agents/accounts table, or a `--env` file is missing; before, this passed on partial values.
+- **Fix:** point `HATCHABOT_DB` (or `--db`) at the install's database and pass only `--env` files that exist.
+- **Fixed in:** `v2.158.3`
+- **Code:** `scripts/privacy-check.mjs` — `load`, `privateValues`
+
+### The `privacy` live test fails with "release notes: GitHub did not answer" or "no gh command here"
+- **Check:** `gh auth status`; the output has `✗ incomplete:` lines.
+- **Cause:** `--public` can't read release notes or issues; this used to print SKIP and pass, now it fails.
+- **Fix:** install `gh` and `gh auth login`, then `node scripts/live.mjs run privacy`.
+- **Fixed in:** `v2.158.3`
+- **Code:** `scripts/privacy-check.mjs` — `publicScan`
+
+### The `privacy` live test fails with "✗ pre-push hook: …"
+- **Check:** `node scripts/privacy-check.mjs --check-hook`.
+- **Cause:** this checkout's pre-push doesn't run the privacy check: not installed, a `core.hooksPath` folder whose pre-push doesn't hand on to the repo's hook, or hooks off.
+- **Fix:** `node scripts/privacy-check.mjs --install-hook`; with a machine-wide hooks folder, its pre-push must run `$(git rev-parse --git-common-dir)/hooks/pre-push`.
+- **Fixed in:** `v2.158.3`
+- **Code:** `scripts/privacy-check.mjs` — `hookStatus`
+
 ## Sign-in and accounts
 
 ### Password mode: requests to the app's address were served without the password
@@ -685,6 +706,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `web/index.html` — `webChatSend`, `openWebChatPanel`
 
+### An agent's Setup log is full of "a web chat guest was refused part of the console"
+- **Check:** the agent's Setup log or Activity shows `console.guest_opened` and `console.guest_refused` lines every few minutes, for a member with web chat.
+- **Cause:** OpenClaw's console app asks for a few owner-only things each time a guest opens the chat; each was recorded, and the 200-line history filled with them.
+- **Fix:** upgrade to v2.158.3 (the startup refusals go to the service log; a visit is recorded at most once an hour, with its device). If you don't recognise the visits, the note on each says the browser and address; remove that member's web chat on the agent's Sharing tab, or sign that account out everywhere.
+- **Fixed in:** `v2.158.3`
+- **Code:** `src/api/guestConsoleLog.ts` — `GuestConsoleLog`
+
 ## Runners
 
 ### A runner agent's tile: "Its machine isn't answering — it may be asleep or offline"
@@ -1060,6 +1088,34 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** pick a Claude, OpenAI or Gemini source for it.
 - **Fixed in:** —
 - **Code:** `src/api/routes.ts` — `OPS_NO_LOCAL`
+
+### The Hatchabot agent's search_source finds nothing for a pattern like "a|b"
+- **Check:** the search used a regular expression without `regex: true`.
+- **Cause:** since v2.158.3 search_source looks for plain text by default.
+- **Fix:** ask again with `regex: true`, or search for plain text.
+- **Fixed in:** `v2.158.3`
+- **Code:** `src/orchestrator/problemReport.ts` — `searchSource`
+
+### search_source answers "The search took longer than 3 s and was stopped"
+- **Check:** the query is a regular expression with nested repeats.
+- **Cause:** expression searches run in a worker stopped at the time limit, so the app stays responsive.
+- **Fix:** search for plain text, or use a simpler expression.
+- **Fixed in:** `v2.158.3`
+- **Code:** `src/orchestrator/problemReport.ts` — `searchSource`, `SEARCH_LIMITS`
+
+### read_source or search_source says "Outside the source." for a path that exists
+- **Check:** `ls -l` on the path in the install folder shows a link.
+- **Cause:** a link is judged by where it leads; a target outside the readable set, or a dangling link, is refused.
+- **Fix:** none needed if it points outside the shipped source; otherwise replace the link with the file.
+- **Fixed in:** `v2.158.3`
+- **Code:** `src/orchestrator/problemReport.ts` — `sourcePath`, `realInside`
+
+### A problem report shows `<name>` where an agent's or person's name was, even after editing it back
+- **Check:** the masked word is one of your agents' names or slugs, a member's name, or a machine's name.
+- **Cause:** since v2.158.3 reports mask every private name the app knows, edits included, because the issue is public.
+- **Fix:** describe the agent another way ("my recipe agent").
+- **Fixed in:** `v2.158.3`
+- **Code:** `src/orchestrator/problemReport.ts` — `redactForPublic`
 
 ## Docker, disk and memory
 

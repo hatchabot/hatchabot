@@ -13828,6 +13828,12 @@ async function reportSaveEdits() {
   const title = $('reportRTitle').value.trim() || reportCur.title, body = $('reportBody').value;
   if (title === reportCur.title && body === reportCur.body) return reportCur;
   reportCur = await api(`/v1/problem-reports/${encodeURIComponent(reportCur.id)}`, { method: 'PATCH', body: { title, body } });
+  // The server masks the edits too (private names, keys): show what will go
+  // out, not what was typed (2026-10-10).
+  if ($('reportRTitle').value.trim() !== reportCur.title || $('reportBody').value !== reportCur.body) {
+    $('reportRTitle').value = reportCur.title; $('reportBody').value = reportCur.body;
+    toast('Some of what you wrote was masked (a private name or key) — the report shows what will be sent.', 8000);
+  }
   return reportCur;
 }
 function reportFile(r) {

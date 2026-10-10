@@ -2,6 +2,27 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.158.3] — 2026-10-10
+
+GitHub issues #39–#46 (a security audit of v2.158.2), and a web-chat guest's visits.
+
+### Fixed
+- **A web-chat guest's visits no longer flood an agent's timeline.** OpenClaw's console app asks for a few owner-only things each time it starts and a guest is refused them by design; recorded on every connection, a chat reopened every few minutes filled an agent's 200-line history overnight and pushed its real setup log out. The app's own startup calls now go to the service log only, other refusals reach the timeline once a day per guest, a visit once an hour.
+- **A guest's visit says where it came from:** the browser, the address Tailscale forwarded, and the tailnet user, in Activity and the Setup log.
+- Report a problem: after an edit, the review shows the masked text that will be sent (a private name or key typed in an edit), not what was typed.
+- **The Hatchabot agent's source search looks for plain text by default**; a regular expression is used only when asked, and every search runs in its own worker that is stopped after a few seconds — one slow search can no longer hold up the app for everyone (#39).
+- Reading or searching the installed source no longer follows a link out of it: a link is judged by where it leads, and a link loop no longer traps a search (#45).
+- **Report a problem also masks your agents' names and slugs, their members' names and your machines' names, any setting named like a password, token or key however short its value, and the agent's own known keys** — in your edits and in the GitHub link and file too (#44).
+
+### Release and privacy checks
+- **The privacy check no longer passes what it could not read** (#41): a missing database beside an env file, an unreadable table, a missing note file, or GitHub's release notes and issues being unreachable now ends "incomplete" (exit 3) — that blocks the push or release and fails the `privacy` live test, where before it said clean or SKIP.
+- It also checks file and folder names, branch and tag names, and commit authors, committers and taggers; every result says what it does not read (binary files, images), and `--public` reports how many accepted historical commits it left out (#40, #41).
+- `node scripts/privacy-check.mjs --check-hook` says whether this clone's pre-push hook runs the privacy check, through a machine-wide hooks folder too; the `privacy` live test fails when it doesn't (#41).
+- The CI secret scan's exceptions are exact fixture values, so a value is no longer hidden because its setting's name contains "example" or "fake" (#42).
+- `scripts/promote.sh` commits only `channels.json`; other staged or unstaged work stays as it was, and a failed promote puts everything back (#43).
+- `docs/releasing.md` records the decision to keep the history before the 2026-10-09 scrub (#40).
+- Release builds are safer from a tampered dependency: every GitHub Action and base image is pinned to a commit or digest, and the build jobs hold no write access — small separate jobs attach the bundles and push the runtime image, to the same places and tags. Dependabot proposes the weekly bumps, and a CI check stops the pins from slipping (#46).
+
 ## [2.158.2] — 2026-10-09
 
 Fixes GitHub audit issues #25–#35.
