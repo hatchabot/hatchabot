@@ -556,3 +556,14 @@ it('backs up an environment-only key without logging it', () => {
   expect(readFileSync(join(w.setDir(), 'secret-key.env'), 'utf8')).toBe(`HATCHABOT_SECRET_KEY="${key}"\n`);
   expect(r.stdout + r.stderr).not.toContain(key);
 });
+
+it('a missing key does not discard the key from an earlier run of the same dated set', () => {
+  const w = scriptWorld([], []);
+  expect(w.run().status).toBe(0);
+  const keyFile = join(w.setDir(), 'secret-key.env');
+  const saved = readFileSync(keyFile, 'utf8');
+  rmSync(join(w.repo, '.env'));
+  expect(w.run().status).toBe(1);
+  expect(w.record().state).toBe('incomplete');
+  expect(readFileSync(keyFile, 'utf8')).toBe(saved);
+});

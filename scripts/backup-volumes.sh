@@ -124,7 +124,7 @@ echo "  ✓ control plane database → $DEST/hatchabot.sqlite"
 # Prefer the effective environment, as the server does. Never evaluate .env
 # as shell code or print its contents. A missing key makes the set incomplete
 # and stops before retention can remove any older set.
-rm -f "$DEST/secret-key.env"
+# Keep any key already captured in this dated set if validation fails.
 if ! node - "$DEST/secret-key.env" <<'KEY'
 const fs = require('node:fs');
 const { parseEnv } = require('node:util');
