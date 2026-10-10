@@ -12,7 +12,7 @@ Fixes GitHub audit issues #25–#35.
 - A backup without a usable encryption key is incomplete and cannot prune older sets. Environment-only keys are captured too (#31).
 - Peer registration rejects IPv6 loopback, mapped loopback and link-local addresses, and refuses redirects during its probe (#33).
 - Hosts with mixed zram and uncompressed disk swap no longer receive compressed-swap allowances. Normal memory-limit reconciliation applies the correction to existing agents (#34).
-- The required typecheck gate compiles again, and the use-case coverage checker understands named UI scenarios (#25, #35).
+- The required typecheck gate compiles again, and the use-case coverage checker understands named UI scenarios (#25, #35). Recovery-readiness test timestamps now preserve event order at every time of day.
 
 ## [2.158.1] — 2026-10-09
 

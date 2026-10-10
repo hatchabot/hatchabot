@@ -106,13 +106,14 @@ describe('readiness from the sets on disk', () => {
     expect(r.agents.map((a) => [a.status, !!a.alert])).toEqual([['stale', false], ['not covered', false]]);
   });
 
-  it('a missing volume, an agent no set holds, one made after the last backup, one with no runtime, an archived one', () => {
+  it.each([1, 12, 23])('missing, new, absent and archived agents at hour %s: creation follows the backup', (hour) => {
+    const now = new Date(2026, 0, 10, hour).getTime();
     const w = base();
-    w.set(day(1), ['hatchabot-a1-vol'], { state: 'incomplete', missing: ['hatchabot-a2-vol'], failedVolumes: ['hatchabot-a2-vol'], captured: ['hatchabot-a1-vol'] });
-    w.set(day(0), ['hatchabot-a1-vol'], { state: 'incomplete', missing: ['hatchabot-a2-vol'], failedVolumes: ['hatchabot-a2-vol'], captured: ['hatchabot-a1-vol'] });
+    w.set(day(1, now), ['hatchabot-a1-vol'], { state: 'incomplete', missing: ['hatchabot-a2-vol'], failedVolumes: ['hatchabot-a2-vol'], captured: ['hatchabot-a1-vol'] });
+    w.set(day(0, now), ['hatchabot-a1-vol'], { startedAt: new Date(now - 3_600_000).toISOString(), finishedAt: new Date(now - 1_800_000).toISOString(), state: 'incomplete', missing: ['hatchabot-a2-vol'], failedVolumes: ['hatchabot-a2-vol'], captured: ['hatchabot-a1-vol'] });
     const r = computeReadiness({
-      sets: listBackups(w.b), drills: [], host: hosts, now: Date.now(),
-      agents: [agent('a1'), agent('a2'), agent('a3', { createdAt: new Date().toISOString() }), agent('a4', { runtimeRef: undefined }), agent('a5', { state: 'ARCHIVED' })],
+      sets: listBackups(w.b), drills: [], host: hosts, now,
+      agents: [agent('a1'), agent('a2'), agent('a3', { createdAt: new Date(now).toISOString() }), agent('a4', { runtimeRef: undefined }), agent('a5', { state: 'ARCHIVED' })],
     });
     const by = Object.fromEntries(r.agents.map((a) => [a.agentId, a]));
     expect(by.a2).toMatchObject({ status: 'not covered', leftOut: { count: 2, of: 2, missing: 2 } });
