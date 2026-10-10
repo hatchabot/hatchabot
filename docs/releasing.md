@@ -193,6 +193,37 @@ GitHub's side: secret scanning and push protection are on; rulesets refuse
 force-pushes and deletion of `main`, `v0.*` tags, and moving or deleting a
 release tag; CI runs gitleaks on every push and pull request.
 
+## Updating pinned actions and images
+
+Every `uses:` in `.github/workflows/` names a full commit SHA with its
+release as a comment (`actions/checkout@<sha> # v7.0.1`), and the base
+images name a digest (`node:24-slim@sha256:…`). A tag can be moved by
+whoever controls it; a SHA or digest cannot. The jobs that build run with a
+read-only token; only the small jobs that upload (`attach` in bundles.yml,
+`publish` in runtime-image.yml) can write, and they run no project code.
+`test/workflowPins.test.ts` fails CI when a `uses:` is not a SHA, a checkout
+keeps its git credentials, a job that installs or builds can write, or an
+image pin is missing.
+
+- **The reviewed path:** Dependabot (`.github/dependabot.yml`) opens a
+  weekly pull request for actions and for the `FROM` lines in `docker/`. Read
+  the upstream release notes, let CI pass, merge.
+- **What Dependabot does not see:** `ARG NODE_IMAGE=` in
+  `docker/Dockerfile.runtime` and `CHROME_IMAGE` in
+  `scripts/ui-clickthrough.mjs` (with the matching `docker pull` in
+  `ci.yml`). Bump those by hand, as below.
+- **By hand (and the emergency path, when an action or image must move
+  today):** check the upstream release (its notes, and that the tag belongs
+  to the project's own repository), then resolve it yourself:
+  ```sh
+  gh api repos/<owner>/<action>/git/ref/tags/<tag>   # type "tag"? then:
+  gh api repos/<owner>/<action>/git/tags/<sha>       # .object.sha is the commit
+  docker buildx imagetools inspect <image>:<tag>     # the index "Digest:", not one platform's
+  ```
+  Replace the SHA (and its comment) or digest, run the gates, and release as
+  usual. A new runtime base image is a new image: build a candidate first
+  (Trying a newer OpenClaw, above).
+
 ## Deploying — run releases, not the working tree
 
 A production Hatchabot should run from a **checkout pinned to a tag**, not

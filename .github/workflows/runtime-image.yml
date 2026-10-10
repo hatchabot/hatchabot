@@ -2,6 +2,14 @@
 # publishes ONE multi-arch tag to GHCR, so an install pulls it in a minute
 # instead of building it for twenty. Runs on every release tag; can also be
 # dispatched for a candidate OpenClaw version (published, never :latest).
+#
+# Two jobs (#46, 2026-10-09): `build` runs the Dockerfile (apt, npm) with a
+# read-only token and no registry login, and hands each arch's image on as an
+# OCI archive; `publish` holds the only packages: write, runs no project code,
+# pushes each archive by the digest the build reported (the registry refuses a
+# manifest that does not match it) and then makes the same tags as before.
+# Actions and the base image are pinned to digests (test/workflowPins.test.ts;
+# docs/releasing.md, "Updating pinned actions and images").
 name: runtime image
 on:
   push:
@@ -15,13 +23,13 @@ on:
         description: Also move :latest to this build
         type: boolean
         default: false
-permissions:
-  contents: read
-  packages: write
+permissions: {}
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/runtime
 jobs:
   build:
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -33,10 +41,14 @@ jobs:
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: ver
+        env:
+          ASKED: ${{ github.event.inputs.openclaw_version }}
         run: |
-          V="${{ github.event.inputs.openclaw_version }}"
+          V="$ASKED"
           [ -n "$V" ] || V="$(grep -oP 'ARG OPENCLAW_VERSION=\K\S+' docker/Dockerfile.runtime)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           # 2026.8+ has no engine to bake: those images are built engine-free (step 4 of the embedder design).
@@ -54,14 +66,10 @@ jobs:
           else
             echo "baked=" >> "$GITHUB_OUTPUT"; echo "install=link" >> "$GITHUB_OUTPUT"
           fi
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - run: mkdir -p /tmp/image
       - id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: docker
           file: docker/Dockerfile.runtime
@@ -72,37 +80,61 @@ jobs:
             CHANNEL_PLUGIN_VERSION=${{ steps.ver.outputs.channel }}
             BAKED_PLUGINS=${{ steps.ver.outputs.baked }}
             PLUGIN_INSTALL=${{ steps.ver.outputs.install }}
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # The image as an OCI archive, not pushed: `publish` pushes these bytes.
+          outputs: type=oci,dest=/tmp/image/runtime-${{ matrix.arch }}.tar
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.arch }},mode=max
-      - run: |
-          mkdir -p /tmp/digests
-          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
-      - uses: actions/upload-artifact@v7
+      - env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          echo "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$' || { echo "the build reported no digest" >&2; exit 1; }
+          echo "$DIGEST" > "/tmp/image/runtime-$ARCH.digest"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: digest-${{ matrix.arch }}
-          path: /tmp/digests/*
-  merge:
+          name: image-${{ matrix.arch }}
+          path: /tmp/image/*
+          if-no-files-found: error
+          retention-days: 1
+          # The layers are already compressed.
+          compression-level: 0
+  publish:
     needs: build
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          path: /tmp/digests
-          pattern: digest-*
+          path: /tmp/image
+          pattern: image-*
           merge-multiple: true
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - run: |
-          V="${{ needs.build.outputs.version }}"
+      # Untagged, as push-by-digest did: only the tags below name the image.
+      # skopeo comes with GitHub's Ubuntu runners; it reads the login above.
+      - name: push each arch by its digest
+        run: |
+          for d in /tmp/image/*.digest; do
+            DIGEST="$(cat "$d")"
+            echo "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$' || { echo "bad digest in $d" >&2; exit 1; }
+            skopeo copy --all --preserve-digests --retry-times 3 \
+              --dest-authfile "$HOME/.docker/config.json" \
+              "oci-archive:${d%.digest}.tar" "docker://$IMAGE@$DIGEST"
+          done
+      - env:
+          V: ${{ needs.build.outputs.version }}
+          PROMOTE_LATEST: ${{ github.event.inputs.promote_latest }}
+        run: |
           TAGS=(-t "$IMAGE:$V")
           # A release tag is the proven fleet image: it also carries the release name and :latest.
-          if [ "${{ github.ref_type }}" = tag ]; then TAGS+=(-t "$IMAGE:${{ github.ref_name }}" -t "$IMAGE:latest"); fi
-          if [ "${{ github.event.inputs.promote_latest }}" = true ]; then TAGS+=(-t "$IMAGE:latest"); fi
-          DIGESTS=$(for f in /tmp/digests/*; do printf '%s@%s ' "$IMAGE" "$(cat "$f")"; done)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then TAGS+=(-t "$IMAGE:$GITHUB_REF_NAME" -t "$IMAGE:latest"); fi
+          if [ "$PROMOTE_LATEST" = true ]; then TAGS+=(-t "$IMAGE:latest"); fi
+          DIGESTS=$(for f in /tmp/image/*.digest; do printf '%s@%s ' "$IMAGE" "$(cat "$f")"; done)
           docker buildx imagetools create "${TAGS[@]}" $DIGESTS
           docker buildx imagetools inspect "$IMAGE:$V" | head -20

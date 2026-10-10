@@ -8,11 +8,13 @@ on:
   issues:
     types: [opened]
 
-permissions:
-  issues: write
+# Nothing at the top; the one job gets the one permission it uses (#46).
+permissions: {}
 
 jobs:
   label:
+    permissions:
+      issues: write
     if: contains(github.event.issue.body, '<!-- hatchabot-report v1')
     runs-on: ubuntu-latest
     timeout-minutes: 2
