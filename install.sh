@@ -7,8 +7,9 @@
 # On Ubuntu/Debian (x64 or arm64, glibc 2.35 or newer) and Apple-silicon Macs it
 # downloads the release's prebuilt bundle — Hatchabot with its own Node and
 # database driver inside — so git, Node and a compiler are not needed
-# (docs/install-bundle.md). Anywhere else, or when a release has no bundle or it
-# fails its self-check, it falls back to the native install: git clone, Node 22
+# (docs/install-bundle.md). Anywhere else, or when a release has no bundle, the
+# bundle is not the one the release's manifest (release-manifest.json) names, or
+# it fails its self-check, it falls back to the native install: git clone, Node 22
 # and build tools. HATCHABOT_NATIVE=1 forces that. Then scripts/setup-host.sh
 # writes .env, pulls the agent runtime image, installs the background service,
 # links the `hatchabot` command, and prints the link (and a QR code) to open.
@@ -191,21 +192,132 @@ fi
 # ---- 2/3 Hatchabot ----------------------------------------------------------------
 say "2/3 Hatchabot $TAG → $DIR"
 sha256() { if have sha256sum; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+# ---- release manifest reader (the same text is in install.sh; test/releaseManifest.test.ts keeps them equal) ----
+# Read with awk, not node or python: the installer has neither when it checks a
+# bundle (the bundle's own Node is not run until the bundle is checked), and
+# awk is in every base system (mawk, gawk, BusyBox, macOS).
+# mf_fetch URL FILE: 0 fetched; 1 the release has none (a 404, or no such file
+# on a file:// test bed); 2 could not fetch (no network, a server error).
+mf_fetch() {
+  local code rc=0
+  code="$(curl -sSL --retry 3 --max-filesize 65536 -o "$2" -w '%{http_code}' "$1" 2>/dev/null)" || rc=$?
+  case "$rc:$code" in
+    0:200|0:000) [ -s "$2" ] && return 0 ;;
+    0:404|37:*) rm -f "$2"; return 1 ;;
+  esac
+  rm -f "$2"; return 2
+}
+# mf_paths FILE: the manifest as "path<TAB>value" lines (schema, assets.0.name,
+# image.index, …); fails on anything that is not one well-formed JSON object.
+mf_paths() {
+  awk '
+function bad() { exit 2 }
+function ws() { while (p <= n && index(" \t\r\n", substr(s, p, 1)) > 0) p++ }
+function str(   c, out) {
+  p++; out = ""
+  while (p <= n) {
+    c = substr(s, p, 1)
+    if (c == "\"") { p++; return out }
+    if (c == "\t" || c == "\n" || c == "\r") bad()
+    if (c == "\\") { p++; c = substr(s, p, 1); if (c == "" || index("\"\\/", c) == 0) bad() }
+    out = out c; p++
+  }
+  bad()
+}
+function val(path,   c, k, i, start) {
+  ws(); if (++depth > 8) bad()
+  c = substr(s, p, 1)
+  if (c == "{") {
+    p++; ws()
+    if (substr(s, p, 1) == "}") { p++; depth--; return }
+    while (1) {
+      ws(); if (substr(s, p, 1) != "\"") bad()
+      k = str(); ws()
+      if (substr(s, p, 1) != ":") bad()
+      p++; val(path == "" ? k : path "." k); ws()
+      c = substr(s, p, 1); p++
+      if (c == "}") { depth--; return }
+      if (c != ",") bad()
+    }
+  }
+  if (c == "[") {
+    p++; ws(); i = 0
+    if (substr(s, p, 1) == "]") { p++; depth--; return }
+    while (1) {
+      val(path "." i); i++; ws()
+      c = substr(s, p, 1); p++
+      if (c == "]") { depth--; return }
+      if (c != ",") bad()
+    }
+  }
+  if (c == "\"") { k = str(); print path "\t" k; depth--; return }
+  start = p
+  while (p <= n && index("0123456789+-.eE", substr(s, p, 1)) > 0) p++
+  if (p == start) {
+    if (substr(s, p, 4) == "true" || substr(s, p, 4) == "null") p += 4
+    else if (substr(s, p, 5) == "false") p += 5
+    else bad()
+  }
+  print path "\t" substr(s, start, p - start); depth--
+}
+{ s = s $0 "\n" }
+END { n = length(s); p = 1; depth = 0; ws(); if (substr(s, p, 1) != "{") bad(); val(""); ws(); if (p <= n) bad() }
+' "$1"
+}
+# mf_value PATHS KEY: the one value at KEY (missing, or there twice, fails).
+mf_value() { printf '%s\n' "$1" | awk -v k="$2" 'BEGIN { FS = "\t" } $1 == k { v = $2; c++ } END { if (c != 1) exit 1; print v }'; }
+# mf_valid PATHS TAG: a manifest this reader knows (schema 1), for release TAG.
+mf_valid() { [ "$(mf_value "$1" schema 2>/dev/null)" = 1 ] && [ "$(mf_value "$1" tag 2>/dev/null)" = "$2" ]; }
+# mf_asset PATHS NAME: "size sha256" of the asset called NAME (listed exactly once).
+mf_asset() {
+  printf '%s\n' "$1" | awk -v want="$2" 'BEGIN { FS = "\t" }
+    { v[$1] = $2; seen[$1]++ }
+    $1 ~ /^assets\.[0-9]+\.name$/ && $2 == want { at = substr($1, 1, length($1) - 4); c++ }
+    END { if (c != 1 || seen[at "size"] != 1 || seen[at "sha256"] != 1) exit 1; print v[at "size"] " " v[at "sha256"] }'
+}
+mf_sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+# mf_matches PATHS NAME FILE: FILE is the asset NAME, by its size and sha256.
+mf_matches() {
+  local want size sum
+  want="$(mf_asset "$1" "$2")" || return 1
+  size="${want%% *}"; sum="${want#* }"
+  printf '%s\n' "$size" | grep -Eq '^[0-9]+$' && printf '%s\n' "$sum" | grep -Eq '^[0-9a-f]{64}$' || return 1
+  [ "$(wc -c < "$3" | tr -d ' ')" = "$size" ] && [ "$(mf_sha256 "$3")" = "$sum" ]
+}
+# ---- end of the release manifest reader ----
 # The prebuilt bundle: download, check its hash, unpack, and run its own
 # self-check (its Node opens a database with its driver) before it goes in.
 # Any failure returns non-zero, and the native install takes over.
 install_bundle() {
-  local name="hatchabot-$TAG-$PLATFORM.tar.gz" tmp want
+  local name="hatchabot-$TAG-$PLATFORM.tar.gz" tmp want mrc mf
   tmp="$(mktemp -d)"
   echo "   downloading ${name}…"
   curl -fsSL --retry 3 -o "$tmp/$name" "$BUNDLES/$TAG/$name" || { echo "   (no bundle for $TAG on $PLATFORM)"; rm -rf "$tmp"; return 1; }
-  want="$(curl -fsSL --retry 3 "$BUNDLES/$TAG/$name.sha256" 2>/dev/null | cut -d' ' -f1)"
-  [ -n "$want" ] && [ "$want" = "$(sha256 "$tmp/$name")" ] || { echo "   (the bundle's checksum does not match — not using it)"; rm -rf "$tmp"; return 1; }
+  # What the release vouches for (#38): its release-manifest.json names the
+  # bundle's size and sha256, and a manifest that is there but unreadable, or
+  # for another release, is refused — never passed over for the weaker check.
+  # A release made before manifests (before v2.159.0) has none: the .sha256
+  # beside the bundle, as before (legacy). Refused, the native install takes over.
+  mrc=0; mf_fetch "$BUNDLES/$TAG/release-manifest.json" "$tmp/release-manifest.json" || mrc=$?
+  if [ "$mrc" = 0 ]; then
+    mf="$(mf_paths "$tmp/release-manifest.json")" && mf_valid "$mf" "$TAG" \
+      || { echo "   (the release's manifest is not a readable manifest for $TAG — not using the bundle)"; rm -rf "$tmp"; return 1; }
+    mf_matches "$mf" "$name" "$tmp/$name" || { echo "   (the bundle does not match the release's manifest — not using it)"; rm -rf "$tmp"; return 1; }
+  elif [ "$mrc" = 1 ]; then
+    want="$(curl -fsSL --retry 3 "$BUNDLES/$TAG/$name.sha256" 2>/dev/null | cut -d' ' -f1)"
+    [ -n "$want" ] && [ "$want" = "$(sha256 "$tmp/$name")" ] || { echo "   (the bundle's checksum does not match — not using it)"; rm -rf "$tmp"; return 1; }
+  else
+    echo "   (could not fetch the release's manifest to check the bundle — not using it)"; rm -rf "$tmp"; return 1
+  fi
   tar -xzf "$tmp/$name" -C "$tmp" || { rm -rf "$tmp"; return 1; }
   ( cd "$tmp/hatchabot" && ./.node/bin/node -e 'new (require("better-sqlite3"))(":memory:").exec("SELECT 1")' ) >/dev/null 2>&1 \
     || { echo "   (the bundle does not run on this machine — falling back)"; rm -rf "$tmp"; return 1; }
   mkdir -p "$(dirname "$DIR")"
   mv "$tmp/hatchabot" "$DIR"
+  # Kept where the app and scripts/release-manifest.sh look (the data
+  # directory, data/ on a new install), so the runtime image step below need
+  # not fetch it again.
+  if [ "$mrc" = 0 ]; then mkdir -p "$DIR/data/release-manifests" && cp "$tmp/release-manifest.json" "$DIR/data/release-manifests/$TAG.json" || true; fi
   rm -rf "$tmp"
   echo "   unpacked: Hatchabot with its own Node $("$DIR/.node/bin/node" --version) — nothing to compile"
 }

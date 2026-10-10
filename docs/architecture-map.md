@@ -44,14 +44,15 @@ repository and installs natively. Release channels (stable, beta) are named in
 `channels.json`. Upgrades check out another release and restart the service;
 the doctor command prints what is wrong with an install.
 
-- `install.sh` — `install_bundle`, `install_native`, `newest_release`, `in_docker_group`: the one-line installer.
+- `install.sh` — `install_bundle`, `install_native`, `newest_release`, `in_docker_group`: the one-line installer (`mf_fetch`, `mf_paths`, `mf_matches`: the bundle checked against the release's release-manifest.json, the .sha256 only for releases made before manifests).
+- `scripts/release-manifest.sh` — `get`, `asset`, `image`, `load`, `data_dir`: what a release vouches for — its release-manifest.json, checked and kept in the data directory (release-manifests/); the same reader as `install.sh`.
 - `channels.json` — `stable`, `beta`: which release each channel points at.
 - `scripts/build-bundle.sh` — `PLATFORM`, `linux-arm64`, `darwin-arm64`: builds the per-platform release bundle.
 - `scripts/sqlite-driver.sh` — `better-sqlite3`, `--compile`: makes sure the database driver loads on this machine.
 - `scripts/setup-host.sh` — `say`, `launchd`: clone-based setup of a fresh host (dependencies, .env, the service; launchd on macOS).
 - `scripts/install-service.sh` — `sed_escape`, `systemctl`: installs the systemd user service on Linux.
 - `scripts/ensure-deps.sh` — `npm ci`: installs dependencies only when the lockfile moved.
-- `scripts/upgrade.sh` — `rollback`, `restore_deps`, `vernewer`: the upgrade command (a channel or a tag), with rollback on failure.
+- `scripts/upgrade.sh` — `rollback`, `restore_deps`, `vernewer`: the upgrade command (a channel or a tag), with rollback on failure; a bundle install's next bundle is checked by release-manifest.sh asset.
 - `scripts/follow-channel.sh` — `--install`, `--uninstall`, `MAX_TRIES`: optional timer that keeps an install on its channel (retries a failing install less often, then sets it aside).
 - `scripts/uninstall.sh` — `--purge`, `--installed`, `volumes`, `other_installs`: removes the install it lives in (or, with `--installed`, the one the service runs), keeping data unless asked.
 - `scripts/upgrade-check.sh` — `CREATE TABLE IF NOT EXISTS`: checks that databases from older releases still open.
@@ -179,7 +180,7 @@ per container.
 - `src/providers/localDockerProvider.ts` — `LocalDockerProvider`, `provision`, `execShell`, `exportState`, `importState`, `rootless`, `sshTarget`, `tcpReachable`: Docker commands for local and remote daemons.
 - `src/providers/resolveProvider.ts` — `resolveProvider`, `pingRunner`: picks the provider for a host; checks a runner's Docker.
 - `src/providers/mockProvider.ts` — `MockProvider`: the in-memory provider used by tests.
-- `src/orchestrator/runnerSetup.ts` — `ensureRunnerKey`, `runnerSetupSnippet`, `installRuntimeImage`: adding a runner machine.
+- `src/orchestrator/runnerSetup.ts` — `ensureRunnerKey`, `runnerSetupSnippet`, `installRuntimeImage`: adding a runner machine (a runner on another CPU pulls the published image by the digest in the release's manifest, `publishedRuntimeImage`).
 - `scripts/runner-scenarios.mjs` — `scenario`, `recalls`: real moves between this machine and a runner on a live install (old and new images, memory recalled by meaning).
 - `scripts/live.mjs` — `LIVE_TESTS`, `dueFor`, `touches`, `committedRuns`, `readRuns`, `resultOf`: the live tests' register, what is due for a release (`touches`: a change to a big shared file counts only near the test's own routes), and the record (the gate reads the committed one) (`docs/live-tests.md`, `docs/live-test-runs.md`); `scripts/promote.sh` — `live_gate`.
 - `scripts/privacy-check.mjs` — `privateValues`, `load`, `scan`, `mask`, `ACCEPTED_HISTORY`, `hookStatus`: the privacy check (the household's private values read from the live install; what it could not read makes the result incomplete, exit 3; the pre-push hook and tag guard, `--check-hook`, `--text` for release notes, `--public` for the `privacy` live test, `allowedHere` for the owner's identities, `syncCi`/`exportDigests` for GitHub's copy); `scripts/privacy-ignore.txt` (generic words); `scripts/privacy-identity.txt` (the maintainer's public author identities). `scripts/privacy-ci.mjs` — `buildFingerprints`, `parseFingerprints`, `scanLine`, `scanRange`, `rangeOf`, `allowedIdentities`, `withoutOwnTrailers`, `watchMain`: the privacy check GitHub runs on keyed fingerprints (CI's `privacy` job, `.github/workflows/privacy-watch.yml`); `scripts/privacy-sync.sh`: the daily sync timer. `.gitleaks.toml` (exact fixture exceptions) and `scripts/gitleaks-regression.sh`: the CI secret scan. `scripts/make-debian-test-image.sh`: the local Debian 12 VM image for `clean-install-debian-12`.
@@ -439,7 +440,8 @@ build derived images (the base plus extra packages) for particular agents.
 
 - `docker/Dockerfile.runtime` — `OPENCLAW_VERSION`: the runtime image.
 - `docker/entrypoint.sh` — `PYTHONPATH`: container start-up.
-- `scripts/build-runtime-image.sh` — `NO_LATEST`: builds and tags the image.
+- `scripts/build-runtime-image.sh` — `NO_LATEST`, `use_pulled`, `legacy_published`: builds and tags the image, or pulls the one the release's manifest names by digest (`legacy_published`: by tag, for releases made before manifests).
+- `src/orchestrator/releaseManifest.ts` — `releaseManifest`, `parseReleaseManifest`, `publishedRuntimeImage`: the app's reading of its release's manifest; the published image by digest for the provider's ensureBaseImage and a runner's Install image.
 - `src/orchestrator/derivedImage.ts` — `buildDerivedImage`, `renderDockerfile`, `removeDerivedImage`: derived images.
 - `src/orchestrator/imageRecipe.ts` — `ensureImageOn`, `buildRecipeOn`: rebuilding an image on another machine from its recipe.
 - `src/orchestrator/runtimeCaps.ts` — `probeImageCapabilities`: what an image can do.

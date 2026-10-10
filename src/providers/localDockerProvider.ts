@@ -24,6 +24,7 @@ import { dockerMemorySwap, parseCgroupLimit, parseSwapProbe, procCgroupPath, SWA
 const IMPORT_MAX_BYTES = Math.floor((Number(process.env.HATCHABOT_IMPORT_MAX_GB) || 8) * 2 ** 30);
 import { DOORMAN_ALIAS, DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, doormanScript, HOST_ALIAS } from '../ops/doorman.js';
 import { batchConfigCommands, buildConfigCommands, describeConfigCommands, seedInvocation, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
+import { publishedRuntimeImage, type PublishedImage } from '../orchestrator/releaseManifest.js';
 
 const execFileP = promisify(execFile);
 
@@ -51,6 +52,8 @@ export interface LocalDockerOptions {
   swapProbe?: () => Promise<string | undefined>;
   /** Where /proc and /sys are read from for cgroup limits ('' = this machine); tests point it at a fake tree. */
   hostRoot?: string;
+  /** The published runtime image of an OpenClaw version this release vouches for (tests); default from the release manifest. */
+  publishedImage?: (openclawVersion: string) => Promise<PublishedImage>;
 }
 
 /**
@@ -110,9 +113,11 @@ export class LocalDockerProvider implements RuntimeProvider {
   readonly #fetch: typeof fetch;
   readonly #swapProbe?: () => Promise<string | undefined>;
   readonly #hostRoot: string;
+  readonly #publishedImage: (openclawVersion: string) => Promise<PublishedImage>;
 
   constructor(opts: LocalDockerOptions = {}) {
     this.#fetch = opts.fetchImpl ?? fetch;
+    this.#publishedImage = opts.publishedImage ?? ((v) => publishedRuntimeImage(v));
     this.#swapProbe = opts.swapProbe;
     this.#hostRoot = opts.hostRoot ?? '';
     this.image = opts.image ?? 'hatchabot-runtime:latest';
@@ -1762,9 +1767,19 @@ export class LocalDockerProvider implements RuntimeProvider {
     // <registry>:<openclaw version>, multi-arch). Anything else is local-only.
     const m = /^[^:]+:(\d{4}\.\d+\.\d+(?:-\d+)?)$/.exec(tag);
     if (!m) return false;
-    const published = `${process.env.HATCHABOT_IMAGE_REGISTRY ?? 'ghcr.io/hatchabot/runtime'}:${m[1]}`;
+    // The image this release vouches for (#47, 2026-10-10): by the digest in
+    // its manifest, and only for the OpenClaw it names; a release made before
+    // manifests pulls by tag (legacy).
+    const found = await this.#publishedImage(m[1]!);
+    if ('problem' in found) return false;
+    const published = found.ref;
     const pull = await this.#docker(['pull', '--quiet', published], IO_TIMEOUT_MS);
     if (pull.code !== 0) return false;
+    if (found.pinned) {
+      // The digest's image must also say, by its label, the OpenClaw the manifest names.
+      const label = await this.#docker(['image', 'inspect', '--format', '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}', published]);
+      if (label.code !== 0 || label.stdout.trim() !== m[1]) return false;
+    }
     return (await this.#docker(['tag', published, tag])).code === 0;
   }
 

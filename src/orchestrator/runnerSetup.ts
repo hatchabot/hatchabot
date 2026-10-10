@@ -140,8 +140,15 @@ export async function installRuntimeImage(
   endpoint: string,
   opts: {
     image?: string; docker?: string; timeoutMs?: number; stallMs?: number; total?: number; onProgress?: (p: ImageCopyProgress) => void;
-    /** The published multi-arch image of the same OpenClaw, pulled there when the runner's CPU differs. */
+    /**
+     * The published multi-arch image of the same OpenClaw, pulled there when
+     * the runner's CPU differs: by the digest the release's manifest names
+     * (releaseManifest.ts publishedRuntimeImage), or by tag for a release made
+     * before manifests. Its label must say that OpenClaw either way.
+     */
     published?: { ref: string; openclawVersion: string };
+    /** Why there is no published image to pull (no manifest could be read, or it names another OpenClaw). */
+    unpublished?: string;
   } = {},
 ): Promise<{ ok: boolean; error?: string; pulled?: string }> {
   const docker = opts.docker ?? 'docker';
@@ -154,7 +161,7 @@ export async function installRuntimeImage(
   const [here, there] = await Promise.all([dockerArch(docker, []), dockerArch(docker, ['-H', endpoint])]);
   if (here && there && here !== there) {
     if (!opts.published) {
-      return { ok: false, error: `This machine's image is built for ${here}, and that runner is ${there}: a copy would not run there, and there is no published image of this version to pull instead.` };
+      return { ok: false, error: `This machine's image is built for ${here}, and that runner is ${there}: a copy would not run there, and there is no published image of this version to pull instead${opts.unpublished ? ` (${opts.unpublished.replace(/\.$/, '')})` : ''}.` };
     }
     const { ref, openclawVersion } = opts.published;
     const pulled = await dockerRun(docker, ['-H', endpoint, 'pull', '--quiet', ref], opts.timeoutMs ?? 3 * 3600_000);
