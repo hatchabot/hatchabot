@@ -32,7 +32,7 @@ case "$1 $2" in
   "run list")
     case "$*" in
       *"--workflow release.yml"*) [ -f ${JSON.stringify(dispatched)} ] && echo 501; echo 500 ;;
-      *) case "$ci" in none) ;; pr-only) case "$*" in *"--event push"*) ;; *) echo "4243 completed success" ;; esac ;; running:*) echo "4242 in_progress " ;; *) echo "4242 completed $ci" ;; esac ;;
+      *) case "$ci" in late:*) n=$(cat ${JSON.stringify(log)}.ci 2>/dev/null || echo 0); echo $((n+1)) > ${JSON.stringify(log)}.ci; if [ "$n" -ge 2 ]; then echo "4242 completed \${ci#late:}"; fi ;; none) ;; pr-only) case "$*" in *"--event push"*) ;; *) echo "4243 completed success" ;; esac ;; running:*) echo "4242 in_progress " ;; *) echo "4242 completed $ci" ;; esac ;;
     esac ;;
   "run watch") if [ "$3" = 4242 ]; then [ "\${ci#running:}" = success ]; else [ "\${HB_RUN:-success}" = success ]; fi ;;
   "workflow run") touch ${JSON.stringify(dispatched)} ;;
@@ -40,7 +40,7 @@ case "$1 $2" in
   *) exit 1 ;;
 esac
 `, { mode: 0o755 });
-  const env = scriptEnv(home, `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, { HATCHABOT_SLUG: 'example-owner/example', HATCHABOT_DISPATCH_POLL: '0' });
+  const env = scriptEnv(home, `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, { HATCHABOT_SLUG: 'example-owner/example', HATCHABOT_DISPATCH_POLL: '0', HATCHABOT_CI_APPEAR_SECS: '2' });
   const git = (cwd: string, ...args: string[]) => {
     const r = spawnSync('git', args, { cwd, env, encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
@@ -111,6 +111,14 @@ describe('scripts/release.sh starts the release workflow once everything it need
     const r = w.release(['9.8.7'], { HB_CI: 'running:success' });
     expect(r.status, out(r)).toBe(0);
     expect(r.stderr).toContain('still running — waiting');
+  });
+
+  it('waits for the push\'s CI run to appear: GitHub lists it a few seconds after the merge', () => {
+    const w = world();
+    w.landed('9.8.7');
+    const r = w.release(['9.8.7'], { HB_CI: 'late:success' });
+    expect(r.status, out(r)).toBe(0);
+    expect(r.stderr).toContain('No CI run listed yet');
   });
 
   it('a failed workflow run: exit 1, with the run and how to re-run it', () => {

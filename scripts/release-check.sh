@@ -75,6 +75,17 @@ if [ -n "$NOTES" ]; then printf '%s\n' "$SECTION" | sed -e '/./,$!d' > "$NOTES";
 command -v gh >/dev/null 2>&1 || die "Can't check CI: the gh command is not installed."
 ci() { gh run list --repo "$REPO" --workflow ci.yml --commit "$SHA" --event push --branch main --limit 1 --json databaseId,status,conclusion -q '.[] | "\(.databaseId) \(.status) \(.conclusion)"'; }
 RUN="$(ci)" || die "Could not ask GitHub about CI for ${SHA:0:9}."
+# Right after a pull request merges, GitHub takes a few seconds to list the
+# push's run (the first v2.159.1 release stopped here, 2026-10-10): with
+# --wait-ci, give it up to HATCHABOT_CI_APPEAR_SECS (180) to appear.
+if [ -z "$RUN" ] && [ "$WAIT" = 1 ]; then
+  say "No CI run listed yet for ${SHA:0:9} — waiting for it to appear…"
+  APPEAR_END=$(( $(date +%s) + ${HATCHABOT_CI_APPEAR_SECS:-180} ))
+  while [ -z "$RUN" ] && [ "$(date +%s)" -lt "$APPEAR_END" ]; do
+    sleep "${HATCHABOT_DISPATCH_POLL:-10}"
+    RUN="$(ci)" || die "Could not ask GitHub about CI for ${SHA:0:9}."
+  done
+fi
 [ -n "$RUN" ] || die "No CI run for the push to main of ${SHA:0:9} — has it landed on main?"
 ID="${RUN%% *}"; ST="${RUN#* }"
 if [ "${ST%% *}" != completed ]; then
