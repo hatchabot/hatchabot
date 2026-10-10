@@ -66,7 +66,9 @@ while :; do
     MERGED) break ;;
     CLOSED) die "The pull request was closed without merging: $URL" 1 ;;
   esac
-  FAILED="$(gh pr checks "$URL" --repo "$SLUG" --json name,bucket -q '.[] | select(.bucket=="fail") | .name' 2>/dev/null | tr '\n' ' ')"
+  # gh pr checks prints "name<TAB>state<TAB>…" (older gh has no --json here)
+  # and exits non-zero while checks are pending: not an error here.
+  FAILED="$({ gh pr checks "$URL" --repo "$SLUG" 2>/dev/null || true; } | awk -F'\t' '$2=="fail"{printf "%s ", $1}')"
   [ -z "$FAILED" ] || die "Check(s) failed: ${FAILED% } — see $URL. Fix, commit, and land again (the pull request stays open)." 1
   [ "$(date +%s)" -lt "$END" ] || die "Still waiting after $TIMEOUT min: $URL merges by itself when its checks pass." 3
   sleep 20
