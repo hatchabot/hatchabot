@@ -40,6 +40,15 @@ async function world() {
 }
 
 describe('GET /v1/agents/:id/events and the list\'s progress', () => {
+  it('a web-chat guest\'s visit names the device and address it came from (2026-10-10)', async () => {
+    const { store, f } = await world();
+    store.recordEvent('a1', 'console.guest_opened', { userId: 'u-guest', device: 'Safari on iOS', from: '100.64.0.7', tailnetUser: 'someone@example.org' });
+    store.recordEvent('a1', 'console.guest_opened', { userId: 'u-guest', device: 'Chrome on macOS', from: 'unknown' });
+    const ev = (await f.inject({ method: 'GET', url: '/v1/agents/a1/events', headers: as })).json().events;
+    expect(ev[1].note).toBe('Safari on iOS from 100.64.0.7 (someone@example.org)');
+    expect(ev[0].note).toBe('Chrome on macOS');
+  });
+
   it('returns the trail newest first with labels, and the list shows the current step of a busy agent', async () => {
     const { store, f } = await world();
     store.recordEvent('a1', 'runtime.seeding', { migrating: true });

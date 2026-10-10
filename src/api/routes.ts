@@ -1,5 +1,6 @@
 import { allowedPeerAddress } from './peerAddress.js';
 import { GuestConsoleLog } from './guestConsoleLog.js';
+import { deviceLabel } from './publicAccess.js';
 import { stopAndConfirm } from '../orchestrator/quiesce.js';
 import { AppError, fieldsToAsk, hostGit, installRelease, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
 import { agentTimeZone } from '../orchestrator/timezone.js';
@@ -5512,7 +5513,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const events = store.listEvents([agent.id], limit).map((e) => ({
       at: e.at, event: e.event, label: eventLabel(e.event, e.detail),
       // A little of the detail for the curious; never the whole blob.
-      note: e.detail?.reason ?? e.detail?.error ?? e.detail?.why ?? e.detail?.mountName ?? undefined,
+      // A guest's visit names its device and address (console.guest_opened).
+      note: e.detail?.reason ?? e.detail?.error ?? e.detail?.why ?? e.detail?.mountName ?? (e.detail?.device ? [e.detail.device, e.detail.from && e.detail.from !== 'unknown' ? `from ${e.detail.from}` : '', e.detail.tailnetUser ? `(${e.detail.tailnetUser})` : ''].filter(Boolean).join(' ') : undefined),
     }));
     return { agent: agent.name, state: agent.state, events };
   });
@@ -6900,8 +6902,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             else app.log.info({ agent: caller.agent.id, userId: principal.ownerId, method: name }, 'console.guest_refused');
           },
         });
-        if (guestConsoleLog.opened(caller.agent.id, principal.ownerId)) trace(caller.agent.id)('console.guest_opened', { userId: principal.ownerId });
-        else app.log.info({ agent: caller.agent.id, userId: principal.ownerId }, 'console.guest_opened');
+        // Where the visit came from, so an owner who sees one they don't
+        // recognise can tell which device it is (2026-10-10): the browser,
+        // the address Tailscale Serve or Funnel forwarded, and the tailnet
+        // user Serve names. None of it is a credential.
+        const tsUser = String(rawReq.headers['tailscale-user-login'] ?? '').slice(0, 120);
+        const visit = { userId: principal.ownerId, device: deviceLabel(rawReq.headers['user-agent']), from: publicClientAddress(rawReq), ...(tsUser ? { tailnetUser: tsUser } : {}) };
+        if (guestConsoleLog.opened(caller.agent.id, principal.ownerId)) trace(caller.agent.id)('console.guest_opened', visit);
+        else app.log.info({ agent: caller.agent.id, ...visit }, 'console.guest_opened');
         // The owner's view names guests' sessions after them (best-effort).
         void consoleAccess.nameGuests(caller.agent, true).catch(() => {});
         return;
