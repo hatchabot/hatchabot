@@ -240,11 +240,35 @@ can follow.
 - **A broken `main` that blocks every pull request:** turn the `main` rule off
   in the repository settings, push the fix, turn the rule back on, and say so
   in the commit.
-- **GitHub Actions is down:** wait. There is no local way to publish once the
-  tag rule is on; that is the point.
+- **GitHub Actions is down:** wait. A release is made only by the workflow;
+  `scripts/release.sh` has no local path.
 - **A bad release:** release a new patch version. `scripts/promote.sh` with
-  an older tag rolls a channel (and its image alias) back. Releases are never
-  deleted or edited.
+  an older tag rolls a channel (and its image alias) back. A bad release is
+  not edited.
+- **Something private leaked into a release:**
+  - *In the release notes:* edit them. An immutable release's title and notes
+    stay editable; only its files and tag are locked.
+  - *In code that shipped:* delete the release (an immutable release can be
+    deleted, and its bundles go with it), turn the "release tags: never moved
+    or deleted" rule off, delete the tag, rewrite the history with the `main`
+    rule off as for any history scrub, turn both rules back on, and release
+    the next patch version. That version number is gone for good: GitHub never
+    lets an immutable release's tag name be used again. Cached copies of the
+    old commits are removed by GitHub Support, as before.
+
+### The repository's settings
+
+- `main`: pull requests only, the five required checks, linear history, no
+  force-push or deletion, no bypass.
+- `v*` tags: never moved or deleted; `v0.*` never created.
+- Immutable releases: on (since 2026-10-10).
+- The `release` environment (the publish job's): deployable from `main` only.
+- **Not on: a rule that only the workflow may create `v*` tags.** GitHub does
+  not let a free organization's repository rule exempt GitHub Actions, and
+  the alternatives (a deploy key or an organization-owned app for the
+  workflow) were declined (2026-10-10). So a token with write access can
+  still push a new `v*` tag; it cannot move or delete one, or change a
+  published release's files.
 
 ## The privacy check
 
