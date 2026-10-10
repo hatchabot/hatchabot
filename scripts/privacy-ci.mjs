@@ -14,6 +14,7 @@
  *   node scripts/privacy-ci.mjs                 # in Actions: the pull request or push in $GITHUB_EVENT_PATH
  *   node scripts/privacy-ci.mjs --watch [--days 2] [--repo owner/name]
  *       # issues, comments, pull requests and release notes changed lately (privacy-watch.yml)
+ *   node scripts/privacy-ci.mjs --text <file>...  # whole files: the release notes (release.yml)
  *
  * Options: --event <file> and --event-name <name> (default: GitHub's own),
  * --dir <checkout> (default: the current directory).
@@ -365,7 +366,35 @@ function watchMain(args) {
   return CLEAN;
 }
 
+// ---- a file: the release notes, on GitHub's side --------------------------------------
+/**
+ * Files scanned whole with the fingerprints: the release workflow's notes
+ * (release.yml's check job, 2026-10-10), so a release from any machine has
+ * its notes checked even where privacy-check.mjs --text never ran. A file it
+ * cannot read is incomplete, as a missing secret is.
+ */
+export function textMain(args) {
+  const files = args.filter((a) => a !== '--text');
+  if (!files.length) { console.error('usage: privacy-ci.mjs --text <file>...'); return USAGE; }
+  let fp;
+  try { fp = parseFingerprints(process.env[SECRET_NAME]); } catch (e) { console.log(`✗ privacy: incomplete — ${e.message}`); return INCOMPLETE; }
+  const hits = [];
+  for (const f of files) {
+    let text;
+    try { text = readFileSync(f, 'utf8'); } catch { console.log(`✗ privacy: incomplete — ${f} could not be read`); return INCOMPLETE; }
+    hits.push(...scanText(text, f, fp));
+  }
+  if (hits.length) {
+    console.log(`✗ privacy: ${hits.length} private value(s):`);
+    report(hits); advice(console.log); console.log(`not covered: ${NOT_COVERED}`);
+    return FOUND;
+  }
+  console.log(`✓ privacy: ${files.join(', ')} clean (${fp.exact.size + fp.lower.size} fingerprints)`);
+  console.log(`not covered: ${NOT_COVERED}`);
+  return CLEAN;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
-  process.exitCode = args.includes('--watch') ? watchMain(args) : ciMain(args);
+  process.exitCode = args.includes('--watch') ? watchMain(args) : args.includes('--text') ? textMain(args) : ciMain(args);
 }

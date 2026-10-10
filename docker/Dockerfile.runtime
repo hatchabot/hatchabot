@@ -266,3 +266,11 @@ ENV HOME=/home/node
 
 ENTRYPOINT ["agentclaw-entrypoint"]
 CMD ["openclaw", "gateway"]
+
+# The Hatchabot release this image was built for: the release workflow passes
+# it; a local or candidate build leaves it empty. promote-images.yml reads it
+# so an image alias (:latest, :beta, :stable) never moves back to an older
+# release by accident (issue #47, 2026-10-10). Last, so every layer above is
+# the same for every release.
+ARG HATCHABOT_RELEASE=
+LABEL org.hatchabot.release="${HATCHABOT_RELEASE}"

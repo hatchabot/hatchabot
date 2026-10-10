@@ -23,8 +23,9 @@ upgrades by bundle.
 
 ## The bundle
 
-It is a plain archive per platform, attached to each GitHub release by
-`.github/workflows/bundles.yml` (`scripts/build-bundle.sh`):
+It is a plain archive per platform, built by
+`.github/workflows/bundles.yml` (`scripts/build-bundle.sh`) and attached to
+each GitHub release by `.github/workflows/release.yml`:
 `hatchabot-<tag>-<linux-x64|linux-arm64|darwin-arm64>.tar.gz` and its
 `.sha256`. About 65 MB. Inside:
 

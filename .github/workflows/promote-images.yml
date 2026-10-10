@@ -1,0 +1,121 @@
+# Moves one of the runtime image's aliases — :latest, :beta, :stable — to a
+# release's image (release by workflow, issue #47, 2026-10-10). Nothing else
+# moves them: a release build tags only :vX.Y.Z, and runtime-image.yml (a
+# candidate) only its OpenClaw version.
+#
+#   - release.yml calls it for :latest after publishing the newest release;
+#   - scripts/promote.sh starts it for :stable/:beta once the channel's commit
+#     has landed (allow_backwards for a rollback), and waits for it.
+#
+# One move at a time (job concurrency `image-aliases`). The image is the one
+# the release's own release-manifest.json names, by its index digest — the
+# manifest is checked against its attestation from release.yml first — and
+# the release's :vX.Y.Z must name that same digest. An alias never moves to an
+# older release (the org.hatchabot.release label of the image it names now)
+# unless allow_backwards. The job runs no project code: gh, jq and skopeo on
+# the published manifest.
+name: Promote images
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The release (X.Y.Z) whose image the alias should name
+        required: true
+      alias:
+        description: Which alias to move
+        type: choice
+        options: [latest, beta, stable]
+        required: true
+      allow_backwards:
+        description: Allow moving the alias to an older release (a rollback)
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      alias:
+        type: string
+        required: true
+      allow_backwards:
+        type: boolean
+        default: false
+permissions: {}
+jobs:
+  move:
+    permissions:
+      contents: read
+      packages: write
+      attestations: read
+    concurrency:
+      group: image-aliases
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: move the alias by the release manifest's digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          ALIAS: ${{ inputs.alias }}
+          BACK: ${{ inputs.allow_backwards }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          VERSION="${VERSION#v}"
+          echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || fail "\"$VERSION\" is not a version"
+          case "$ALIAS" in latest|beta|stable) ;; *) fail "alias must be latest, beta or stable" ;; esac
+          TAG="v$VERSION"
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/runtime"
+          AUTH="$HOME/.docker/config.json"
+          D="$RUNNER_TEMP/m"; mkdir -p "$D"
+
+          [ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft)" = false ] \
+            || fail "$TAG is not a published release"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p release-manifest.json -D "$D" \
+            || fail "$TAG has no release-manifest.json (released before release by workflow): its image is not moved by digest"
+          M="$D/release-manifest.json"
+          gh attestation verify "$M" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-ref refs/heads/main \
+            || fail "release-manifest.json of $TAG does not carry release.yml's attestation"
+          jq -e --arg v "$VERSION" --arg t "$TAG" --arg i "$IMAGE" \
+            '.schema == 1 and .version == $v and .tag == $t and .image.repository == $i and .image.tag == $t and (.image.index | test("^sha256:[0-9a-f]{64}$"))' \
+            "$M" >/dev/null || fail "release-manifest.json of $TAG does not describe $IMAGE:$TAG"
+          INDEX="$(jq -r .image.index "$M")"
+          digest_of() { echo "sha256:$(skopeo inspect --raw --authfile "$AUTH" "docker://$1" | sha256sum | cut -d' ' -f1)"; }
+          [ "$(digest_of "$IMAGE:$TAG")" = "$INDEX" ] || fail "$IMAGE:$TAG does not name the manifest's $INDEX"
+
+          # What the alias names now, and the release that image was built for.
+          if CUR_RAW="$(skopeo inspect --raw --authfile "$AUTH" "docker://$IMAGE:$ALIAS" 2>"$D/err")"; then
+            CUR="sha256:$(printf '%s' "$CUR_RAW" | sha256sum | cut -d' ' -f1)"
+          elif grep -qiE 'manifest unknown|not found' "$D/err"; then
+            CUR=""
+          else
+            cat "$D/err" >&2; fail "could not read $IMAGE:$ALIAS"
+          fi
+          if [ "$CUR" = "$INDEX" ]; then echo "✓ $IMAGE:$ALIAS already names $TAG ($INDEX)"; exit 0; fi
+          HAS=""
+          if [ -n "$CUR" ]; then
+            HAS="$(skopeo inspect --authfile "$AUTH" --override-os linux --override-arch amd64 "docker://$IMAGE:$ALIAS" | jq -r '.Labels["org.hatchabot.release"] // ""')"
+          fi
+          if [ -n "$HAS" ]; then
+            [ "$HAS" != "$VERSION" ] || fail "$IMAGE:$ALIAS is labelled $VERSION but is not the manifest's image ($CUR, not $INDEX)"
+            # "~" sorts a pre-release below its release.
+            NEWER="$(printf '%s\n%s\n' "$HAS" "$VERSION" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/')"
+            if [ "$NEWER" = "$HAS" ] && [ "$BACK" != true ]; then
+              fail ":$ALIAS names $HAS, newer than $VERSION — moving it back needs allow_backwards (promote.sh passes it for a rollback)"
+            fi
+          else
+            echo "note: :$ALIAS ${CUR:+names $CUR, }with no release label (made before release by workflow, or not there yet) — moving it"
+          fi
+
+          skopeo copy --all --preserve-digests --retry-times 3 --src-authfile "$AUTH" --dest-authfile "$AUTH" \
+            "docker://$IMAGE@$INDEX" "docker://$IMAGE:$ALIAS"
+          [ "$(digest_of "$IMAGE:$ALIAS")" = "$INDEX" ] || fail "$IMAGE:$ALIAS does not name $INDEX after the move"
+          echo "✓ $IMAGE:$ALIAS → $TAG ($INDEX)${HAS:+, was $HAS}"

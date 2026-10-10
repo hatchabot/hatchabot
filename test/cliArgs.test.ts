@@ -11,6 +11,12 @@ describe('CLI flags (audit: unknown flags swallowed the next argument)', () => {
     expect(b.flags.get('to')).toBe('Claude');
   });
 
+  it('hbt release takes --draft-only as an on/off flag (release by workflow, 2026-10-10)', () => {
+    const a = parseArgs(['release', '--draft-only', '2.159.0']);
+    expect(a.positional).toEqual(['release', '2.159.0']);
+    expect(a.flags.get('draft-only')).toBe('1');
+  });
+
   it('refuses an unknown option instead of guessing', () => {
     expect(() => parseArgs(['delete', 'x', '--yess'])).toThrow(/unknown option --yess/);
   });

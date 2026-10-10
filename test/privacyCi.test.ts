@@ -212,6 +212,28 @@ describe('the daily watch (privacy-watch.yml)', () => {
   });
 });
 
+describe('--text: the release notes, in the release workflow (release.yml, 2026-10-10)', () => {
+  const text = (blob: string | undefined, ...files: string[]) => spawnSync('node', [CI, '--text', ...files], {
+    cwd: dir, encoding: 'utf8', env: scriptEnv(dir, PATH(), blob === undefined ? {} : { PRIVACY_FINGERPRINTS: blob }),
+  });
+
+  it('a private value in the notes fails, masked; clean notes pass; no fingerprints or no file is incomplete', () => {
+    const blob = exportBlob();
+    const notes = join(dir, 'notes.md');
+    writeFileSync(notes, '### Fixed\n- The Mapleford Helper no longer stalls.\n');
+    const hit = text(blob, notes);
+    expect(hit.status, shown(hit)).toBe(1);
+    expect(hit.stdout).toContain(`[A agent name] 'Ma…(16)' ${notes}:2`);
+    masked(hit);
+    writeFileSync(notes, '### Fixed\n- An agent no longer stalls.\n');
+    const clean = text(blob, notes);
+    expect(clean.status, shown(clean)).toBe(0);
+    expect(clean.stdout).toContain('✓ privacy');
+    expect(text(undefined, notes).status).toBe(3);
+    expect(text(blob, join(dir, 'no-such-notes.md')).status).toBe(3);
+  });
+});
+
 describe('--sync-ci', () => {
   it('hands the blob to gh on stdin, never in its arguments, and prints counts only', () => {
     const r = check(['--sync-ci', '--repo', 'example/project']);
