@@ -106,6 +106,48 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.3`
 - **Code:** `scripts/privacy-check.mjs` — `hookStatus`
 
+### The installer or an upgrade says the bundle does not match the release's manifest
+- **Check:** `scripts/release-manifest.sh asset vX.Y.Z <downloaded bundle> hatchabot-vX.Y.Z-<platform>.tar.gz` says it does not match; compare `wc -c` and `sha256sum` of the download with the manifest's entry. The installer says "the bundle does not match the release's manifest — not using it"; an upgrade says "the release's manifest does not vouch for it" and exits 3.
+- **Cause:** the downloaded bundle is not the one the release vouched for: a truncated or altered download, or a proxy rewriting it.
+- **Fix:** run the installer or `hatchabot upgrade` again, from another network if it repeats. If it still differs, report it; do not bypass the check. The installer has already fallen back to the native install.
+- **Fixed in:** `v2.159.0` (#38)
+- **Code:** `install.sh` — `install_bundle`, `mf_matches`; `scripts/release-manifest.sh` — `asset`
+
+### The release's manifest is "not a readable manifest" and is refused
+- **Check:** `curl -sSL https://github.com/hatchabot/hatchabot/releases/download/vX.Y.Z/release-manifest.json | head` shows a sign-in page, a proxy's page, or a different `"tag"`.
+- **Cause:** what came back was not that release's manifest (a captive portal, a proxy, or the wrong file). Hatchabot refuses it rather than fall back to the weaker `.sha256` check.
+- **Fix:** sign in to the network or go around the proxy, then run it again.
+- **Fixed in:** `v2.159.0` (#38)
+- **Code:** `scripts/release-manifest.sh` — `load`, `mf_valid`
+
+### "Could not fetch the release's manifest" during an install, upgrade or image pull
+- **Check:** `curl -sSI` of the manifest's address fails, or answers something other than 200 or 404.
+- **Cause:** no network to GitHub, or a server error. Only a 404 means "this release has no manifest" (a release from before manifests); anything else is refused, never skipped.
+- **Fix:** try again later; an upgrade retries on its own (exit 3). An image pull for a release whose manifest was kept on this machine works offline.
+- **Fixed in:** `v2.159.0` (#38)
+- **Code:** `scripts/release-manifest.sh` — `mf_fetch`; `src/orchestrator/releaseManifest.ts` — `releaseManifest`
+
+### The published runtime image is refused: its OpenClaw version is not the manifest's
+- **Check:** `scripts/release-manifest.sh image vX.Y.Z`, then `docker inspect <that reference> --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}'`.
+- **Cause:** the image at the manifest's digest does not carry the OpenClaw version the manifest names, or the manifest itself was refused. Either way Hatchabot will not use the published image.
+- **Fix:** `BUILD_LOCAL=1 ./scripts/build-runtime-image.sh` builds it from source; report the release.
+- **Fixed in:** `v2.159.0` (#47)
+- **Code:** `scripts/build-runtime-image.sh` — `use_pulled`; `src/orchestrator/releaseManifest.ts` — `publishedRuntimeImage`
+
+### Install image on a runner says there is no published image of this version to pull
+- **Check:** this machine's `hatchabot-runtime:latest` carries a different OpenClaw version than the release's manifest names (a candidate OpenClaw).
+- **Cause:** a runner with another CPU can only take the published image the release vouches for, and a candidate OpenClaw has none.
+- **Fix:** build the image on the runner itself, or use the release's own OpenClaw version on that runner.
+- **Fixed in:** `v2.159.0` (#47)
+- **Code:** `src/orchestrator/runnerSetup.ts` — `installRuntimeImage`
+
+### Promote says "Moving the image :stable failed" (or :beta)
+- **Check:** open the run address in the message; promote-images.yml says why: no manifest, no attestation, `:vX.Y.Z` names another digest, or "newer than … needs allow_backwards".
+- **Cause:** the channel moved but the image alias did not (a registry error, a release from before manifests, or a backwards move that was not a rollback).
+- **Fix:** fix the cause, then `gh run rerun <id> --failed`, or `gh workflow run promote-images.yml --ref main -f version=X.Y.Z -f alias=stable [-f allow_backwards=true]`.
+- **Fixed in:** `v2.159.0` (#47)
+- **Code:** `scripts/promote.sh` — `promote_images`
+
 ## Sign-in and accounts
 
 ### Password mode: requests to the app's address were served without the password
