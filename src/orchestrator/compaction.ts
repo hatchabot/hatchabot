@@ -7,6 +7,7 @@ import { modelOption } from './modelOptions.js';
 import { parseLoopLines } from './loopLines.js';
 import { OPENCLAW_HANDLER_TIMEOUT_MS } from './channelTimeout.js';
 import { modelRefOf, THRESHOLDS } from './tokenHealth.js';
+import { compactingNow } from './compactionState.js';
 
 /**
  * Compaction and the context cap: the token steward's two changes (docs/
@@ -75,6 +76,9 @@ export function parseCompactResult(res: ExecResult): CompactResult {
   if (!j) { try { j = JSON.parse(res.stdout.slice(res.stdout.indexOf('{'))); } catch { /* none */ } }
   const reason = String(j?.reason ?? j?.error ?? (res.stderr.trim().split('\n').pop() ?? '')).slice(0, 200) || undefined;
   if (/active run|queued work/i.test(text)) return { outcome: 'busy', ...(reason ? { reason } : {}) };
+  // Nothing new since its last compaction: done already, not a failure (a
+  // second click on advice that had not caught up yet, 2026-10-10).
+  if (/already compacted/i.test(text)) return { outcome: 'nothing', reason: 'already compacted: nothing new since its last compaction' };
   if (/abort/i.test(text) && !(j?.ok && j.compacted)) return { outcome: 'aborted', ...(reason ? { reason } : {}) };
   if (res.code === 0 && j?.ok) {
     if (j.compacted === false) return { outcome: 'nothing', ...(reason ? { reason } : {}), ...(typeof j.kept === 'number' ? { kept: j.kept } : {}) };
@@ -127,7 +131,7 @@ async function nextStall(deps: CompactDeps, agent: Agent, afterMs: number, waitM
   return undefined;
 }
 
-const inFlight = new Set<string>();
+const inFlight = compactingNow;
 export const compactionRunning = (agentId: string): boolean => inFlight.has(agentId);
 
 export interface CompactRequest {
@@ -231,6 +235,7 @@ export function resultLine(name: string, a: Pick<TokenActionRow, 'outcome' | 'de
     case 'ok':
       if (d.afterK !== undefined) return `Compacted "${name}": ${d.beforeK ?? '?'}K → ${d.afterK}K tokens.`;
       if (d.keptLines !== undefined || d.mode === 'lines') return `Compacted "${name}": kept the last ${d.keptLines ?? d.lines} lines${d.beforeK ? ` of a ${d.beforeK}K conversation` : ''}; its new size shows after its next turn.`;
+      if (/already compacted/i.test(d.reason ?? '')) return `"${name}" is already compacted: nothing new since its last compaction. Its size shows after its next turn.`;
       return `"${name}": nothing to compact${d.reason ? ` (${d.reason})` : ''}.`;
     case 'aborted': return `Compaction of "${name}" was aborted${d.reason ? ` (${d.reason})` : ''} — usually its stuck chat message's retry starting the same compaction again. Keeping the last ${THRESHOLDS.keepLines} lines takes seconds and gets through.`;
     case 'busy': return `"${name}" was busy answering, three times; nothing was compacted. Try again when it is quiet.`;

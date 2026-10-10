@@ -3721,6 +3721,21 @@ const SCENARIOS = String.raw`(() => {
         ok('asked before compacting', window.__confirms.at(-1) === 'Compact it now?');
         ok('and No sent nothing', !window.__calls.slice(mark).some((c) => c.path === '/v1/agents/a8/compact'));
         window.__confirmAnswer = true;
+        // Yes: it starts in the background, and the card says it is running instead
+        // of offering the button again (a second click got "Already compacted",
+        // 2026-10-10).
+        const compacting = { ...conv, title: 'Budget Tracker\'s conversation is being compacted', concern: 'started at 4:30 PM; summarising 310K tokens takes a few minutes, and the result goes to your chat',
+          evidence: [], effect: { text: 'Nothing to do: it finishes by itself', usdPerMonth: 0, billing: 'api' }, action: { kind: 'open-agent', label: 'Details', agentId: 'a8' }, secondary: [], fingerprint: 'compacting:x' };
+        window.__answer['POST /v1/agents/a8/compact'] = [{ status: 200, body: { background: true, message: 'Compaction of "Budget Tracker" started; summarising a 310K conversation can take several minutes. The result goes to the owner\'s chat and the token ledger.' } }];
+        window.__override['/v1/recommendations'] = { items: [loop, card, compacting], dismissed: 0 };
+        mark = window.__calls.length;
+        document.querySelector('#fleetRecommended [data-rec="conversation:a8"] button.primary').click();
+        await until(() => window.__calls.slice(mark).some((c) => c.method === 'POST' && c.path === '/v1/agents/a8/compact'));
+        const running = await until(() => { const el = document.querySelector('#fleetRecommended [data-rec="conversation:a8"]'); return el?.textContent.includes('being compacted') && el; });
+        ok('the card says it is being compacted', running.textContent.includes('the result goes to your chat'));
+        ok('and offers no Compact button', ![...running.querySelectorAll('button')].some((b) => /Compact/.test(b.textContent)));
+        window.__override['/v1/recommendations'] = { items: [loop, card, conv], dismissed: 0 };
+        await loadRecommended('', true);
         // Not now on the card item: the card is cancelled and the item put away.
         mark = window.__calls.length;
         const nn = [...document.querySelectorAll('#fleetRecommended [data-rec="cheaper:a9"] button')].find((b) => b.textContent === 'Not now');

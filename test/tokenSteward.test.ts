@@ -503,6 +503,8 @@ describe('compaction', () => {
     expect(ok({ ok: true, compacted: false, reason: 'no transcript' })).toMatchObject({ outcome: 'nothing', reason: 'no transcript' });
     expect(ok({ ok: false, error: 'Session agent:stock:main has an active run; retry after it finishes.' }, 1)).toMatchObject({ outcome: 'busy' });
     expect(ok({ ok: false, reason: 'aborted | user_abort' }, 1)).toMatchObject({ outcome: 'aborted' });
+    // Nothing new since the last compaction: done already, not a failure.
+    expect(ok({ ok: false, reason: 'Already compacted' }, 1)).toEqual({ outcome: 'nothing', reason: 'already compacted: nothing new since its last compaction' });
     expect(parseCompactResult({ code: 1, stdout: '', stderr: 'gateway closed', timedOut: true })).toMatchObject({ outcome: 'failed', reason: 'it took longer than 30 minutes' });
   });
 

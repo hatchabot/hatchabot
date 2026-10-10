@@ -425,6 +425,7 @@ advice comes together in one ranked list, Recommended. Every dollar figure is to
 - `src/api/routes.ts` — `'/v1/recommendations'`, `'/v1/agents/:id/recommendations'`, `'/v1/recommendations/:id/dismiss'`, `ledgerMeta`: the list, Not now, and via "recommendation" in the ledger.
 - `src/orchestrator/loopLines.ts` — `parseLoopLines`: loop lines in the gateway log.
 - `src/orchestrator/compaction.ts` — `compactAgent`, `syncContextCap`: compaction and the conversation cap.
+- `src/orchestrator/compactionState.ts` — `compactingNow`: the compactions running in this process; `src/orchestrator/tokenHealth.ts` — `tokenHealthRow` reads it and the latest one in the ledger (`lastMainCompactions` in `src/store/store.ts`), so the advice to compact catches up with a compaction.
 - `src/orchestrator/modelLedger.ts` — `recordChange`, `evaluateModelChanges`, `rightSizeSavings`, `fileGuardProposals`: the model-change ledger and quality guard.
 - `src/orchestrator/modelScorecard.ts` — `buildScorecard`: the weekly review's evidence.
 - `src/orchestrator/modelReview.ts` — `syncModelReviewCron`: the manager's weekly review task.

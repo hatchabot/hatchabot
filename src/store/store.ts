@@ -3969,6 +3969,20 @@ export class Store {
       detail: ((r.detail ? safeParse(r.detail) : undefined) ?? {}) as Record<string, unknown>, outcome: r.outcome,
     }));
   }
+  /** Each agent's latest compaction of its main conversation (the ledger's newest row), for the health view. */
+  lastMainCompactions(agentIds: string[]): Map<string, TokenActionRow> {
+    const out = new Map<string, TokenActionRow>();
+    if (!agentIds.length) return out;
+    const rows = this.db.prepare(`SELECT * FROM token_actions WHERE kind = 'compaction' AND agent_id IN (${agentIds.map(() => '?').join(',')}) ORDER BY at DESC`).all(...agentIds) as any[];
+    for (const r of rows) {
+      if (out.has(r.agent_id)) continue;
+      const detail = ((r.detail ? safeParse(r.detail) : undefined) ?? {}) as Record<string, unknown>;
+      if (detail.session !== 'main') continue;
+      out.set(r.agent_id, { id: r.id, agentId: r.agent_id, ownerId: r.owner_id, kind: r.kind, at: r.at, by: r.by, via: r.via,
+        ...(r.why ? { why: r.why } : {}), ...(r.proposal_id ? { proposalId: r.proposal_id } : {}), detail, outcome: r.outcome });
+    }
+    return out;
+  }
   deleteManagedCron(agentId: string, name: string): void {
     this.db.prepare(`DELETE FROM managed_crons WHERE agent_id = ? AND name = ?`).run(agentId, name);
   }

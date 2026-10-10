@@ -1055,6 +1055,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.0`
 - **Code:** `src/orchestrator/recommendations.ts` — `buildRecommendations`
 
+### "Compact it now" seems to do nothing, and a second click says "Already compacted"
+- **Check:** the agent's chat has "🗜 Hatchabot: Compacted …" and then "Compaction of … failed: Already compacted"; the Usage advice still showed the old size after the first one.
+- **Cause:** a summarising compaction runs in the background for minutes, and the advice read the conversation's size at its last turn, from before the compaction, so the button stayed. A second click found nothing new to compact, and OpenClaw's "Already compacted" was reported as a failure.
+- **Fix:** upgrade. The card now says "is being compacted" while it runs (with no second button), takes the size the compaction left once it is done, and "Already compacted" counts as done. The size is measured again at the agent's next turn.
+- **Fixed in:** `v2.159.1`
+- **Code:** `src/orchestrator/tokenHealth.ts` — `tokenHealthRow`; `src/orchestrator/compaction.ts` — `parseCompactResult`; `src/orchestrator/recommendations.ts` — `conversationItems`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody
