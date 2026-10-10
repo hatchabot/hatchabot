@@ -117,7 +117,8 @@ describe('archiving shows from the click, not from the end', () => {
     // The stop throws while it is RUNNING: archiveAgent refuses and the bot is kept.
     provider.stop = async () => { throw new Error('docker did not answer'); };
     const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/archive', headers: as, payload: {} });
-    expect(res.statusCode).toBe(502);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/bot was not given up/);
     expect(store.getAgent('a1')!.state).toBe('RUNNING');
     expect((await f.inject({ method: 'GET', url: '/v1/agents/a1', headers: as })).json().archiving).toBeUndefined();
   });

@@ -175,3 +175,15 @@ describe('the archived state is a resting state, not a broken one', () => {
     expect(canTransition('STOPPED', 'ARCHIVED')).toBe(true);
   });
 });
+
+it(' unreachable STOPPED record retains its bot lease',async()=>{
+ const {store,provider,pool,deps,runtimeRef}=await world();
+ store.setAgentState('a1','STOPPED');
+ provider.stop=async()=>{throw new Error('fixture runner unreachable');};
+ provider.status=async()=>({phase:'unknown'});
+ await expect(archiveAgent(deps,'a1')).rejects.toThrow(/not given up/);
+ expect(store.getAgent('a1')!.state).toBe('STOPPED');
+ expect(store.getChannelForAgent('a1')).toBeDefined();
+ expect(pool.availableCount()).toBe(0);
+ expect(provider.runtimes.get(runtimeRef)!.phase).toBe('running');
+});

@@ -41,7 +41,9 @@ export interface SetupChange {
  * should be remade. Never edit or remove an entry: containers carry the
  * number. Containers from before this list existed count as generation 0.
  */
-export const SETUP_CHANGES: SetupChange[] = [];
+export const SETUP_CHANGES: SetupChange[] = [
+  { gen: 1, version: '2.158.2', level: 'optional', why: 'mixed disk and zram swap no longer qualifies for a compressed allowance' },
+];
 
 export const CONTAINER_GEN = SETUP_CHANGES.reduce((n, c) => Math.max(n, c.gen), 0);
 

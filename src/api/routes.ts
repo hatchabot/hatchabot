@@ -1,3 +1,5 @@
+import { allowedPeerAddress } from './peerAddress.js';
+import { stopAndConfirm } from '../orchestrator/quiesce.js';
 import { AppError, fieldsToAsk, hostGit, installRelease, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
 import { agentTimeZone } from '../orchestrator/timezone.js';
 import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
@@ -158,7 +160,7 @@ import { accessAlertOf, accessOverview, agentsWithAccessFindings, verifyAgentAcc
 import { INSPECTABLE_FILES, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
 import { computePosture, riskKeys, diffRisks, diskWarnBytes, measureAgentDisks } from '../orchestrator/posture.js';
 import { notifyAgentChat } from '../channels/notify.js';
-import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
+import { exportAgent, ImageDecisionNeeded, ImportCleanupPending, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
 import { eventLabel, IN_PROGRESS } from '../orchestrator/eventLabels.js';
 import { moveCrossesDown, needsPortHeal } from '../openclaw/configWriter.js';
@@ -7155,8 +7157,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const had = store.getAgentApp(a.id);
     if (!had) return reply.code(404).send({ error: `${a.name} has no app installed.` });
     try {
-      const n = await whileBusy(a.id, () => removeTasks(appDeps(a), had.app));
-      store.deleteAgentApp(a.id);
+      const n = await whileBusy(a.id, async () => {
+        appStillAsWas(a, had);
+        const removed = await removeTasks(appDeps(a), had.app);
+        store.deleteAgentApp(a.id);
+        return removed;
+      });
       trace(a.id)('app.removed', { app: had.app, tasks: n });
       return { removed: true, tasks: n };
     } catch (e) { return appFail(reply, e); }
@@ -9467,10 +9473,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    */
   const stopForBotHandover = async (agent: Agent): Promise<boolean> => {
     const now = store.getAgent(agent.id);
-    if (!now?.runtimeRef || now.state !== 'RUNNING') return true;
+    if (!now?.runtimeRef) return true;
     try {
-      await providerFor(now.hostId).stop(now.runtimeRef);
-      store.setAgentState(now.id, 'STOPPED');
+      await stopAndConfirm(providerFor(now.hostId), now.runtimeRef);
+      if (now.state === 'RUNNING') store.setAgentState(now.id, 'STOPPED');
       return true;
     } catch (err) {
       trace(agent.id)('channel.stop_failed', { error: String(err).slice(0, 200) });
@@ -9667,13 +9673,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Stop, park and delete under the busy flag, and only the bot this
     // request was about: a swap from another tab during the farewells used to
     // have its NEW bot's row deleted here, losing both bots (night review).
-    let outcome: 'done' | 'changed' | 'busy';
+    let outcome: 'done' | 'changed' | 'busy' | 'not-stopped';
     try {
       outcome = await whileBusy(agent.id, async () => {
         const now = store.getChannelForAgent(agent.id, conn.kind);
         if (!now || now.accountId !== row.accountId) return 'changed' as const;
         const stopped = await stopForBotHandover(agent);
-        try { if (!stopped) throw new Error('the agent would not stop, so its bot is not handed on'); await parkDiscordBot({ store, secrets }, agent.ownerId, now); parked = true; }
+        if (!stopped) return 'not-stopped' as const;
+        try { await parkDiscordBot({ store, secrets }, agent.ownerId, now); parked = true; }
         catch (err) { trace(agent.id)('channel.park_failed', { kind: conn.kind, error: String(err).slice(0, 200) }); }
         if (!parked) await secrets.delete(now.secretRef).catch(() => {});
         store.deleteChannelForAgent(agent.id, conn.kind);
@@ -9684,6 +9691,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       outcome = 'busy';
     }
     if (outcome === 'busy') return reply.code(409).send({ error: 'It is busy with another change — try again in a moment.' });
+    if (outcome === 'not-stopped') return reply.code(409).send({ error: 'Its runtime could not be confirmed stopped. The bot is still connected; try again when its machine answers.' });
     if (outcome === 'changed') return reply.code(409).send({ error: `Its ${conn.label} bot changed meanwhile — look again before removing it.` });
     trace(agent.id)('channel.detached', { kind: conn.kind, accountId: row.accountId, parked, told });
     if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) {
@@ -10796,8 +10804,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Another Hatchabot server is another machine: not this one's loopback,
       // nor a link-local/metadata address — that turned the probe into a
       // port scan from the server's own vantage point (26th audit).
-      const peerHost = new URL(url).hostname;
-      if (/^(localhost|127\.|::1$|0\.0\.0\.0$|169\.254\.)/.test(peerHost) || peerHost.endsWith('.internal')) {
+      if (!allowedPeerAddress(url)) {
         return reply.code(400).send({ error: 'Give the other server\'s own address (its Tailscale or LAN name), not a local one.' });
       }
 
@@ -10805,6 +10812,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // than halfway through a migration.
       try {
         const probe = await fetch(`${url.replace(/\/$/, '')}/v1/agents`, {
+          redirect: 'error',
           headers: { authorization: `Bearer ${token}` },
           signal: AbortSignal.timeout(8000),
         });
@@ -11185,7 +11193,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           onOperation: (id) => { operation = id; receipt.operation(id); onOperation?.(id); } },
       ).then(
         (agent) => { receipt.finished('landed'); return agent; },
-        (err: unknown) => { receipt.finished('failed'); throw err; },
+        (err: unknown) => { if (!(err instanceof ImportCleanupPending)) receipt.finished('failed'); throw err; },
       );
       try {
         if (req.query.async === '1') {
@@ -11197,6 +11205,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return reply.code(201).send({ ...publicAgent(agent), operation });
       } catch (err) {
         if (err instanceof ImageDecisionNeeded) return reply.code(409).send(imageDecisionBody(err));
+        if (err instanceof ImportCleanupPending) return reply.code(503).send({ error: err.message, operation });
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage, operation });
         throw err;
       }
@@ -11964,6 +11973,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return reply.code(201).send({ ...publicAgent(bg.value), kind: 'agent', operation });
       } catch (err) {
         if (err instanceof ImageDecisionNeeded) return reply.code(409).send(imageDecisionBody(err));
+        if (err instanceof ImportCleanupPending) return reply.code(503).send({ error: err.message, operation });
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage, operation });
         throw err;
       }

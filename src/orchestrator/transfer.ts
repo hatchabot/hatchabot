@@ -1,3 +1,4 @@
+import { stopAndConfirm } from './quiesce.js';
 import { moveCrossesDown } from '../openclaw/configWriter.js';
 import { validIcon, validIconColor } from './agentIcons.js';
 import { randomUUID } from 'node:crypto';
@@ -103,6 +104,9 @@ export interface ExportManifest {
   state: string;
 }
 
+
+/** Cleanup is unconfirmed: a peer must keep its source stopped. */
+export class ImportCleanupPending extends Error {}
 
 export class TransferError extends Error {
   constructor(readonly userMessage: string) {
@@ -307,10 +311,8 @@ export async function exportAgent(
   // Quiesce for a consistent snapshot, and LEAVE it stopped: the whole point
   // of an export is usually that the agent is about to live somewhere else.
   const wasRunning = agent.state === 'RUNNING';
-  if (wasRunning) {
-    await provider.stop(agent.runtimeRef);
-    store.setAgentState(agentId, 'STOPPED');
-  }
+  await stopAndConfirm(provider, agent.runtimeRef);
+  if (wasRunning) store.setAgentState(agentId, 'STOPPED');
   // If the snapshot fails AFTER quiescing, a plain export (not a migrate,
   // which owns its own undo) would strand a running agent silently STOPPED —
   // it stops answering Telegram with no error the owner ever sees. Put it back.
@@ -768,8 +770,13 @@ async function importAgentInner(
     rethrowIfCrash(err);
     // Roll back completely: a "Retry" on a half-imported agent would boot it
     // with a fresh seeded volume — an empty-headed impostor of the archive.
-    // Leaving nothing behind keeps "import again" the one true retry path.
-    await rollbackImport(deps, agent.id, runtimeRef, envSecretRefs, { mustDestroy: false });
+    // Only a confirmed cleanup permits "import again". Otherwise retain the
+    // identity and hold cleanup so a peer cannot restart its source.
+    if (!(await rollbackImport(deps, agent.id, runtimeRef, envSecretRefs))) {
+      const message = 'Import failed, but its runtime could not be removed. Cleanup is waiting; keep the source stopped and retry cleanup when this machine answers.';
+      op.hold(message, { actions: [{ action: 'retry', label: 'Try again' }], recommended: 'retry' });
+      throw new ImportCleanupPending(message);
+    }
     log('import.rolled_back', { agentId: agent.id, error: String(err) });
     const e = new TransferError(
       `Import failed and was rolled back — fix the cause and import again. (${String(
@@ -793,19 +800,15 @@ function importSecretRef(agentId: string): string {
 /**
  * Undo a half-made import: its runtime and volume, its secrets, its channel
  * (the bot), its members, then the DELETED tombstone. Each step guarded on its
- * own so one failing does not skip the rest — above all the tombstone MUST
- * land, or the half-made PROVISIONING row keeps the slug and bot accountId and
- * refuses the "import again" retry. `mustDestroy`: a runtime that could not be
- * removed (its machine not answering) stops the undo before anything else, so
- * it can be tried again — a restart's recovery may not know whether it runs.
- * Returns false then.
+ * own so one failing does not skip the rest, but runtime destruction must
+ * finish before any identity is discarded. False means cleanup is unconfirmed
+ * and the held operation can try again without starting a second copy.
  */
 async function rollbackImport(
   deps: ProvisionDeps,
   agentId: string,
   runtimeRef: string | undefined,
   envSecretRefs: string[],
-  opts: { mustDestroy: boolean },
 ): Promise<boolean> {
   const { store, secrets, provider } = deps;
   const log = deps.log ?? (() => {});
@@ -822,8 +825,9 @@ async function rollbackImport(
     try {
       await provider.destroy(runtimeRef, { purge: true });
     } catch (err) {
-      if (opts.mustDestroy) return false;
+      rethrowIfCrash(err);
       log('import.rollback_step_failed', { agentId, error: String(err) });
+      return false;
     }
   }
   await secrets.delete(importSecretRef(agentId)).catch(() => {});
@@ -856,7 +860,7 @@ export async function resumeImport(deps: ProvisionDeps, opId: string): Promise<v
   if (!agent || agent.state === 'DELETED') { op.rolledBack('Import interrupted — import the file again.'); return; }
   if (agent.state === 'RUNNING') { op.done('Imported.'); return; }
   const envRefs = store.listAgentEnv(agent.id).map((e) => e.secretRef);
-  const ok = await rollbackImport(deps, agent.id, agent.runtimeRef, envRefs, { mustDestroy: true });
+  const ok = await rollbackImport(deps, agent.id, agent.runtimeRef, envRefs);
   if (!ok) {
     op.hold(
       'Import interrupted by a restart, and its half-made copy could not be removed yet (its machine is not answering). It will not start.',

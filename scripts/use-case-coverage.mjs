@@ -18,14 +18,28 @@ const gaps = rows.filter((r) => /^(none|manual)/.test(r.coverage));
 const stale = [];
 for (const r of rows) {
   for (const ref of r.coverage.matchAll(/\(([^)]*)\)/g)) {
-    for (const part of ref[1].split(/[,;]/)) {
-      // A reference is one file-like token (`crons.test.ts`, `restore-drill.sh`); anything with spaces is prose.
-      if (!/^[\w.–-]+$/.test(part.trim())) continue;
-      const name = part.trim().replace(/\.test\.ts$|\.ts$|\.sh$|\.mjs$/, '');
-      if (!name || /^(UI|LXD|npm)$/i.test(name)) continue;
-      const bare = name.replace(/\*$/, '');
-      const ok = [...tests].some((t) => t === bare || t.startsWith(bare)) || scripts.has(part.trim()) || existsSync(join(root, 'scripts', part.trim()));
-      if (!ok) stale.push(`${r.id}: "${part.trim()}"`);
+    for (const group of ref[1].split(';')) {
+      const scoped = /^\s*([\w.-]+):\s*(.+)$/.exec(group);
+      if (scoped) {
+        const script = scoped[1].endsWith('.mjs') ? scoped[1] : `${scoped[1]}.mjs`;
+        const path = join(root, 'scripts', script);
+        if (!existsSync(path)) { stale.push(`${r.id}: "${scoped[1]}"`); continue; }
+        const source = readFileSync(path, 'utf8');
+        for (const scenario of scoped[2].split(',').map((s) => s.trim())) {
+          if (!/^[\w-]+$/.test(scenario)) continue;
+          if (!new RegExp(`^\\s*${scenario}:\\s*async\\s*\\(`, 'm').test(source)) stale.push(`${r.id}: "${scoped[1]}: ${scenario}"`);
+        }
+        continue;
+      }
+      for (const part of group.split(',')) {
+        // A reference is one file-like token (`crons.test.ts`, `restore-drill.sh`); anything with spaces is prose.
+        if (!/^[\w.–-]+$/.test(part.trim())) continue;
+        const name = part.trim().replace(/\.test\.ts$|\.ts$|\.sh$|\.mjs$/, '');
+        if (!name || /^(UI|LXD|npm)$/i.test(name)) continue;
+        const bare = name.replace(/\*$/, '');
+        const ok = [...tests].some((t) => t === bare || t.startsWith(bare)) || scripts.has(part.trim()) || existsSync(join(root, 'scripts', part.trim()));
+        if (!ok) stale.push(`${r.id}: "${part.trim()}"`);
+      }
     }
   }
 }

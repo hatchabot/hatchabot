@@ -124,6 +124,7 @@ the step that failed.
 - `src/orchestrator/template.ts` — `exportTemplate`, `importTemplate`: templates (a trained copy for someone else); also behind clone.
 - `src/orchestrator/adopt.ts` — `inspectWorkspace`, `applyWorkspace`: adopting an existing OpenClaw workspace.
 - `src/orchestrator/openclawImport.ts` — `discoverOpenclawAgents`, `quiesceOpenclawBots`: finding OpenClaw agents already on the machine.
+- `src/orchestrator/quiesce.ts` — `stopAndConfirm`: stops and observes runtimes before snapshots and bot handoffs; unknown is refused.
 - `src/orchestrator/archive.ts` — `archiveAgent`, `resumeArchive`: archiving (stops the agent and gives its bot back); after a restart, finished once the bot was given back, undone before.
 - `src/api/routes.ts` — `'/v1/agents/:id/archive'`, `'/v1/agents/:id/restore'`, `archiving`, `progressOf`: archive (the `archiving` marker the list shows while the conversation is saved first) and unarchive.
 - `src/orchestrator/provision.ts` — `provisionChannelOrGoWebOnly`, `webOnlyIfNoBot`: no pool bot free on an unarchive, clone, derive or template import → the agent goes on web-only instead of waiting for a token (create still asks).
@@ -184,6 +185,7 @@ per container.
 - `scripts/privacy-check.mjs` — `privateValues`, `scan`, `mask`, `ACCEPTED_HISTORY`: the privacy check (the household's private values read from the live install; the pre-push hook and tag guard, `--text` for release notes, `--public` for the `privacy` live test); `scripts/privacy-ignore.txt` (generic words). `scripts/make-debian-test-image.sh`: the local Debian 12 VM image for `clean-install-debian-12`.
 - `src/orchestrator/moveHost.ts` — `moveAgentToHost`, `completeOnTarget`, `putBack`, `resumeMoveHost`, `recoverMoveHost`: moving an agent between this install's machines, and finishing or undoing one a restart cut off.
 - `src/orchestrator/migrate.ts` — `migrateAgent`, `preflight`, `destinationHasAgent`, `resumeMigrate`, `recoverMigrate`: moving an agent to another Hatchabot; after a lost answer or a restart, asking that server whether it arrived. `MOVE_HEADER`, `receiveMove`, `moveState` (`src/api/routes.ts` — `'/v1/moves/:id'`; table `move_receipts`): the destination records each move's id before its import awaits anything and answers for that move.
+- `src/api/peerAddress.ts` — `allowedPeerAddress`: peer URL protocol and loopback/link-local checks, including IPv6 literals.
 - `src/orchestrator/transfer.ts` — `exportAgent`, `importAgent`, `rollbackImport`, `resumeImport`: the whole-agent archive behind download, moving to another Hatchabot, and restore from a download; an import a restart cut off is undone.
 - `src/orchestrator/hibernate.ts` — `hibernateSweep`, `wakeSweep`, `wakeAgent`, `hibernateBlocker`: idle agents sleep and wake on demand (off unless HATCHABOT_HIBERNATE_AFTER is set).
 - `src/orchestrator/memoryCap.ts` — `effectiveMemoryCap`, `parseMemoryCap`: per-agent memory limits.

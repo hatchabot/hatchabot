@@ -122,13 +122,14 @@ case "$1 $2" in
 esac
 `, { mode: 0o755 });
   const backups = join(root, 'backups');
-  const run = () => spawnSync('bash', [join(repo, 'scripts', 'backup-volumes.sh')], {
+  const run = (extraEnv: Record<string, string> = {}) => spawnSync('bash', [join(repo, 'scripts', 'backup-volumes.sh')], {
     encoding: 'utf8',
     env: {
       HOME: home, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
       HATCHABOT_BACKUP_DIR: backups, HATCHABOT_PREFIX: 'hatchabot',
       NODE_PATH: join(dirname(createRequire(import.meta.url).resolve('better-sqlite3/package.json')), '..'),
       GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
+      ...extraEnv,
     },
   });
   // This run's set: the newest dated directory (an older one may sit beside it).
@@ -531,4 +532,38 @@ describe('the app never runs the real backup script under a test runner (2026-10
       expect(backupRunState().status).toBe('error');
     } finally { if (saved !== undefined) process.env.HATCHABOT_BACKUP_SCRIPT = saved; }
   });
+});
+
+it.each(['missing-file','missing-setting','empty-value'])('missing backup encryption key makes the set incomplete and preserves older sets: %s', mode=>{
+ const w=scriptWorld(['hatchabot-fixture-1-vol'],['docker://hatchabot-fixture-1']);
+ const old=w.oldSet(['hatchabot.sqlite','secret-key.env','hatchabot-fixture-1-vol.tgz']);
+ if(mode==='missing-file')rmSync(join(w.repo,'.env'));
+ else writeFileSync(join(w.repo,'.env'),mode==='empty-value' ? 'HATCHABOT_SECRET_KEY=""\n' : 'HATCHABOT_AUTH=accounts\n');
+ const r=w.run();
+ expect(r.status,r.stdout+r.stderr).toBe(1);
+ expect(w.record().state).toBe('incomplete');
+ expect(existsSync(join(w.setDir(),'secret-key.env'))).toBe(false);
+ expect(existsSync(old)).toBe(true);
+});
+
+it('backs up an environment-only key without logging it', () => {
+  const w = scriptWorld([], []);
+  rmSync(join(w.repo, '.env'));
+  const key = 'fixture passphrase with spaces';
+  const r = w.run({ HATCHABOT_SECRET_KEY: key });
+  expect(r.status, r.stdout + r.stderr).toBe(0);
+  expect(w.record().state).toBe('complete');
+  expect(readFileSync(join(w.setDir(), 'secret-key.env'), 'utf8')).toBe(`HATCHABOT_SECRET_KEY="${key}"\n`);
+  expect(r.stdout + r.stderr).not.toContain(key);
+});
+
+it('a missing key does not discard the key from an earlier run of the same dated set', () => {
+  const w = scriptWorld([], []);
+  expect(w.run().status).toBe(0);
+  const keyFile = join(w.setDir(), 'secret-key.env');
+  const saved = readFileSync(keyFile, 'utf8');
+  rmSync(join(w.repo, '.env'));
+  expect(w.run().status).toBe(1);
+  expect(w.record().state).toBe('incomplete');
+  expect(readFileSync(keyFile, 'utf8')).toBe(saved);
 });

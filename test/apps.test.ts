@@ -775,5 +775,67 @@ describe('an app change cut off by a restart (kill at every step)', () => {
     expect(w.store.getAppPending('a1')).toBeUndefined();
     expect(w.agrees()!.app).toBe('demoapp');
     expect(opOf(w.store)).toMatchObject({ kind: 'app-install', status: 'succeeded' });
+  }); it('failed go-back preserves candidate config for a subsequent use-new', async () => {
+  const w = await world();
+  try {
+   expect((await w.install()).statusCode).toBe(200);
+   commit(w.dir, SECOND);
+   crashAt('switched');
+   await w.f.inject({method:'POST',url:'/v1/agents/a1/app/update',headers:hdr,payload:{values:{mailbox:'candidate@example.org'}}});
+   reboot(); await w.routes.resumeOperations();
+   const op = opOf(w.store);
+   expect(op.status).toBe('held');
+   expect(JSON.parse(readFileSync(w.provider.configFile('mock://a1'),'utf8')).mailbox).toBe('candidate@example.org');
+   w.provider.failAdd = () => true;
+   const back = await w.f.inject({method:'POST',url:`/v1/operations/${op.id}/recover`,headers:hdr,payload:{action:'go-back'}});
+   expect(back.statusCode).toBeGreaterThanOrEqual(400);
+   expect(w.store.getOperation(op.id)!.status).toBe('held');
+   w.provider.failAdd = () => false;
+   const forward = await w.f.inject({method:'POST',url:`/v1/operations/${op.id}/recover`,headers:hdr,payload:{action:'use-new'}});
+   expect(forward.statusCode).toBe(200);
+   expect(w.store.getOperation(op.id)!.status).toBe('succeeded');
+   expect(w.agrees()!.sha).toBe(op.params.toSha);
+   expect(w.provider.every('demoapp-tick')).toEqual(['5m']);
+   expect(JSON.parse(readFileSync(w.provider.configFile('mock://a1'),'utf8')).mailbox).toBe('candidate@example.org');
+  } finally {setStepHookForTests(undefined); await w.f.close();}
+ }); it.each(['unreadable-list','failed-removal'])('app removal retains its record when tasks cannot be removed: %s', async failure => {
+  const w=await world();
+  try {
+   expect((await w.install()).statusCode).toBe(200);
+   expect(w.provider.jobs.some(j=>j.name==='demoapp-tick')).toBe(true);
+   if(failure==='unreadable-list') w.provider.failListAfter=0;
+   else w.provider.failRm=()=>true;
+   const removed=await w.f.inject({method:'DELETE',url:'/v1/agents/a1/app',headers:hdr});
+   expect(removed.statusCode).toBeGreaterThanOrEqual(400);
+   expect(w.store.getAgentApp('a1')).toBeDefined();
+   expect(w.provider.jobs.some(j=>j.name==='demoapp-tick')).toBe(true);
+   w.provider.failListAfter=Infinity; w.provider.failRm=()=>false;
+   const retry=await w.f.inject({method:'DELETE',url:'/v1/agents/a1/app',headers:hdr});
+   expect(retry.statusCode).toBe(200);
+  } finally {await w.f.close();}
+ });
+ it('replacing an app refuses when old tasks remain',async()=>{
+  const w=await world();
+  try {
+   expect((await w.install()).statusCode).toBe(200);
+   w.provider.failRm=()=>true;
+   const replaced=await w.install({source:repo({...MANIFEST,app:'otherapp'}),values:{mailbox:'demo@example.org'},allowShared:true});
+   expect(replaced.statusCode).toBeGreaterThanOrEqual(400);
+   expect(w.store.getAgentApp('a1')!.app).toBe('demoapp');
+   expect(w.provider.jobs.map(j=>j.name).sort()).toEqual(['demoapp-tick']);
+  } finally {await w.f.close();}
+ });
+  it('app removal reconciles a lost response after the task was actually removed', async () => {
+    const w = await world();
+    try {
+      expect((await w.install()).statusCode).toBe(200);
+      w.provider.lostRm = () => true;
+      const r = await w.f.inject({ method: 'DELETE', url: '/v1/agents/a1/app', headers: hdr });
+      expect(r.statusCode).toBe(200);
+      expect(r.json()).toEqual({ removed: true, tasks: 1 });
+      expect(w.store.getAgentApp('a1')).toBeUndefined();
+      expect(w.provider.jobs).toEqual([]);
+    } finally { await w.f.close(); }
   });
+
 });

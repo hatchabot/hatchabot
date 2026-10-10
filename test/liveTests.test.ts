@@ -14,7 +14,7 @@ import { LIVE_TESTS, committedRuns, dueFor, planRun, readRuns, resultOf, touches
  * what docs/live-tests.md says — checked in a throwaway git repository
  * (hooks off, no global config).
  */
-type T = { name: string; cmd: string[]; area: string[]; onHold?: string };
+type T = { name: string; cmd: string[]; area: string[]; onHold?: string; parallel?: boolean };
 const tests = LIVE_TESTS as T[];
 
 describe('the register', () => {
@@ -46,7 +46,7 @@ describe('running what is due', () => {
     expect(plan.serial).toEqual(['transfer', 'runner-scenarios']);
   });
   it('flags as parallel only tests that make no agent on the live install', () => {
-    const parallel = LIVE_TESTS.filter((t) => (t as { parallel?: boolean }).parallel).map((t) => t.name).sort();
+    const parallel = tests.filter((t) => t.parallel).map((t) => t.name).sort();
     expect(parallel).toEqual(['clean-install', 'clean-install-debian-12', 'clean-install-ubuntu-2204', 'privacy', 'upgrade-check']);
   });
 });

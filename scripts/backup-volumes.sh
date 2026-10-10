@@ -121,14 +121,24 @@ chmod 600 "$DEST/hatchabot.sqlite"
 echo "  ✓ control plane database → $DEST/hatchabot.sqlite"
 # Without the key the backup's secrets are undecryptable, so keep a copy
 # beside it. Both are only as safe as this directory (0700).
-if [ -f .env ]; then
-  if grep -E '^(HATCHABOT|AGENTCLAW)_SECRET_KEY=' .env | sed 's/^AGENTCLAW_/HATCHABOT_/' > "$DEST/secret-key.env" && [ -s "$DEST/secret-key.env" ]; then
-    chmod 600 "$DEST/secret-key.env"
-  else
-    # An empty secret-key.env would read as "key backed up" at restore time.
-    rm -f "$DEST/secret-key.env"
-    echo "  ⚠ .env has no HATCHABOT_SECRET_KEY — this backup's secrets cannot be decrypted without the key!" >&2
-  fi
+# Prefer the effective environment, as the server does. Never evaluate .env
+# as shell code or print its contents. A missing key makes the set incomplete
+# and stops before retention can remove any older set.
+# Keep any key already captured in this dated set if validation fails.
+if ! node - "$DEST/secret-key.env" <<'KEY'
+const fs = require('node:fs');
+const { parseEnv } = require('node:util');
+const file = fs.existsSync('.env') ? parseEnv(fs.readFileSync('.env', 'utf8')) : {};
+const key = process.env.HATCHABOT_SECRET_KEY ?? process.env.AGENTCLAW_SECRET_KEY
+  ?? file.HATCHABOT_SECRET_KEY ?? file.AGENTCLAW_SECRET_KEY;
+if (!key || /[\r\n]/.test(key)) process.exit(1);
+// restore-drill strips one surrounding quote pair; preserve the exact bytes.
+fs.writeFileSync(process.argv[2], `HATCHABOT_SECRET_KEY="${key}"\n`, { mode: 0o600 });
+KEY
+then
+  echo "✗ No usable HATCHABOT_SECRET_KEY — backup incomplete; older backups were kept." >&2
+  failed=$((failed + 1))
+  exit 1
 fi
 
 # The runtime image normally provides tar; on a host that hasn't built it yet
