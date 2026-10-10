@@ -183,6 +183,12 @@ Left, in order:
      EOF
      gh api -X POST repos/hatchabot/hatchabot/environments/release/deployment-branch-policies -f name=main -f type=branch
      ```
+   - **Not applied** (2026-10-10): GitHub refused the bypass below ("Actor
+     GitHub Actions integration must be part of the ruleset source or owner
+     organization") on this free organization, and the owner declined the
+     alternatives (a deploy key or an organization-owned app). Applied: the
+     `release` environment and immutable releases. The intended call, kept
+     for reference:
    - Only GitHub Actions (the integration with id 15368) may create `v*`
      tags; the existing "release tags: never moved or deleted" ruleset keeps
      refusing updates and deletion:
