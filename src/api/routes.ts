@@ -1,4 +1,5 @@
 import { allowedPeerAddress } from './peerAddress.js';
+import { GuestConsoleLog } from './guestConsoleLog.js';
 import { stopAndConfirm } from '../orchestrator/quiesce.js';
 import { AppError, fieldsToAsk, hostGit, installRelease, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
 import { agentTimeZone } from '../orchestrator/timezone.js';
@@ -719,6 +720,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * the button had done nothing (2026-10-07). The list, the agent's own GET and
    * the CLI read it (`archiving`, `progress`).
    */
+  // What a web-chat guest's console visits leave in the timeline (guestConsoleLog.ts).
+  const guestConsoleLog = new GuestConsoleLog();
   const archiving = new Map<string, { at: string; step: string }>();
   const publicAgent = (agent: Agent, extra: Record<string, unknown> = {}) => {
     const desired = store.getAIProfile(agent.aiProfileId);
@@ -6886,15 +6889,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         spliceGuest(socket, upSocket, {
           identity: consoleIdentity(caller.agent.gatewayToken!, 'guest', principal.ownerId),
           scope: { agentId: caller.agent.slug, sessionKey: consoleAccess.guestSessionKey(caller.agent, principal.ownerId) },
-          // Once per method per connection: the app polls some of them.
+          // Once per method per connection: the app polls some of them. The
+          // timeline gets only what guestConsoleLog lets through (the app's
+          // startup calls never, others once a day); the service log gets each.
           onRefused: (method) => {
             const name = String(method ?? '').slice(0, 60);
             if (refusedOnce.has(name)) return;
             refusedOnce.add(name);
-            trace(caller.agent.id)('console.guest_refused', { userId: principal.ownerId, method: name });
+            if (guestConsoleLog.refused(caller.agent.id, principal.ownerId, name)) trace(caller.agent.id)('console.guest_refused', { userId: principal.ownerId, method: name });
+            else app.log.info({ agent: caller.agent.id, userId: principal.ownerId, method: name }, 'console.guest_refused');
           },
         });
-        trace(caller.agent.id)('console.guest_opened', { userId: principal.ownerId });
+        if (guestConsoleLog.opened(caller.agent.id, principal.ownerId)) trace(caller.agent.id)('console.guest_opened', { userId: principal.ownerId });
+        else app.log.info({ agent: caller.agent.id, userId: principal.ownerId }, 'console.guest_opened');
         // The owner's view names guests' sessions after them (best-effort).
         void consoleAccess.nameGuests(caller.agent, true).catch(() => {});
         return;
