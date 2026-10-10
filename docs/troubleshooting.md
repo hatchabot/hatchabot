@@ -1083,3 +1083,82 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade.
 - **Fixed in:** `v2.132.3`
 - **Code:** `src/orchestrator/consoleAccess.ts` — `gatewayCallAs`, `settled`
+
+## Audit fixes in v2.158.2
+
+### An archived agent's old bot still answers, or two agents answer the same bot
+- **Check:** the old runtime is running although its stored state said stopped when Archive was requested; its runner could not answer the stop request.
+- **Cause:** Archive previously accepted an unknown runtime status for a stopped record and released its bot.
+- **Fix:** upgrade and confirm the old runtime is down before reusing the bot. Archive now refuses unknown status and keeps the lease for retry.
+- **Fixed in:** `v2.158.2` (#29)
+- **Code:** `src/orchestrator/archive.ts` — `archiveAgent`; `src/orchestrator/quiesce.ts` — `stopAndConfirm`
+
+### A move copies a live volume or leaves the source running
+- **Check:** the source container runs while its record says stopped; export or host move previously skipped stopping it.
+- **Cause:** these snapshot paths trusted the stored state instead of checking the runtime.
+- **Fix:** upgrade; snapshots now stop and observe the source first, refusing running or unknown status. Keep the source down when a destination may already run.
+- **Fixed in:** `v2.158.2` (#30)
+- **Code:** `src/orchestrator/transfer.ts` — `exportAgent`; `src/orchestrator/moveHost.ts` — `moveAgentToHost`
+
+### Import fails but a destination container keeps running
+- **Check:** the import failed after creating a runtime, and removing that runtime failed too. The destination now shows a held cleanup operation.
+- **Cause:** ordinary import rollback previously discarded the identity even when runtime removal failed, letting the mover restart its source.
+- **Fix:** restore connectivity to the destination's runner and choose Try again on its operation. Keep the source stopped until the destination confirms cleanup.
+- **Fixed in:** `v2.158.2` (#26)
+- **Code:** `src/orchestrator/transfer.ts` — `rollbackImport`, `resumeImport`; `src/orchestrator/migrate.ts` — `moveState`
+
+### Removing Slack or Discord says it succeeded, but the old bot still answers
+- **Check:** the runtime stop failed and the channel record disappeared; retrying removal returned not found.
+- **Cause:** a failed stop prevented parking the bot but still deleted its credentials and channel record.
+- **Fix:** upgrade. Removal now retains the connection and returns an error until it can confirm the runtime is stopped; retry when the runner answers.
+- **Fixed in:** `v2.158.2` (#32)
+- **Code:** `src/api/routes.ts` — `stopForBotHandover`
+
+### An app recovery chooses the new release with the old settings
+- **Check:** Go back failed while restoring scheduled tasks, then Use the new release succeeded with the previous configuration values.
+- **Cause:** going back consumed the backup and overwrote the only candidate configuration before recovery had completed.
+- **Fix:** upgrade; both configurations now survive a failed recovery choice. For a previously affected app, update it with the intended settings.
+- **Fixed in:** `v2.158.2` (#27)
+- **Code:** `src/orchestrator/appOperations.ts` — `configState`, `goBack`, `useNew`
+
+### A removed or replaced app still has scheduled jobs
+- **Check:** jobs named for the old app remain after removal, or both app names appear after replacement.
+- **Cause:** an unreadable task list or failed task removal was treated as success.
+- **Fix:** upgrade. Removal now checks a fresh task list, keeps the app record if cleanup is uncertain, and supports retry; a replacement cannot proceed while old jobs remain. Check older orphan jobs in the agent console.
+- **Fixed in:** `v2.158.2` (#28)
+- **Code:** `src/orchestrator/apps.ts` — `appJobs`, `removeTasks`
+
+### A complete backup has no encryption key
+- **Check:** the set has no usable `secret-key.env`, while its status says complete; the key was absent from the install's environment file.
+- **Cause:** key capture was optional and ignored keys supplied only through the process environment; retention still ran.
+- **Fix:** upgrade and run a fresh backup with the same key the server uses. A missing or empty key now makes the set incomplete and preserves older sets. Do not discard the original key or older keyed backups.
+- **Fixed in:** `v2.158.2` (#31)
+- **Code:** `scripts/backup-volumes.sh` — `finish`, `write_status`
+
+### A local IPv6 address is accepted as another server
+- **Check:** registering an IPv6 loopback, mapped loopback, or link-local URL reached the peer probe.
+- **Cause:** the IPv4-oriented hostname check did not handle bracketed or mapped IPv6 literals.
+- **Fix:** upgrade. Use the other machine's LAN or tailnet address; unsuitable literals and probe redirects are refused.
+- **Fixed in:** `v2.158.2` (#33)
+- **Code:** `src/api/peerAddress.ts` — `allowedPeerAddress`
+
+### A mixed zram and disk-swap host grants compressed-swap allowances
+- **Check:** the host has active zram and a plain swap file or partition while zswap is disabled.
+- **Cause:** detecting any zram device qualified the whole host despite its uncompressed fallback.
+- **Fix:** upgrade; the allowance is withheld and existing memory limits are reconciled. Disable plain disk swap or enable zswap if a compressed allowance is wanted.
+- **Fixed in:** `v2.158.2` (#34)
+- **Code:** `src/orchestrator/swap.ts` — `parseSwapProbe`, `limitsDrift`
+
+### Typecheck reports TS7006 in the live-test register assertion
+- **Check:** the errors name the filter and map callbacks in the parallel-test assertion.
+- **Cause:** the assertion used the untyped JavaScript register rather than its typed view.
+- **Fix:** upgrade the checkout; the assertion now uses the typed register.
+- **Fixed in:** `v2.158.2` (#25)
+- **Code:** `test/liveTests.test.ts`
+
+### The use-case checker calls a named UI scenario a stale test reference
+- **Check:** the documented UI script and scenario both exist, but the checker treats a comma-separated scenario name as a file.
+- **Cause:** parsing dropped the script context after the first scenario.
+- **Fix:** upgrade the checkout. Named references are now checked against their script, including each scenario.
+- **Fixed in:** `v2.158.2` (#35)
+- **Code:** `scripts/use-case-coverage.mjs`

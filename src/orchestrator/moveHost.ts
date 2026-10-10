@@ -1,3 +1,4 @@
+import { stopAndConfirm } from './quiesce.js';
 import type { Agent } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
@@ -126,9 +127,13 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
 
   // 1. Quiesce. One bot, one poller: the source must stop before the copy on
   //    the target ever starts, and the volume must be still for the snapshot.
-  if (wasRunning) {
-    await source.stop(oldRef);
-    store.setAgentState(agentId, 'STOPPED');
+  try {
+    await stopAndConfirm(source, oldRef);
+    if (wasRunning) store.setAgentState(agentId, 'STOPPED');
+  } catch (err) {
+    rethrowIfCrash(err);
+    op.fail(err);
+    throw err;
   }
   op.step('stopped');
 

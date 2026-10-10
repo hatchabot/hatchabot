@@ -1,3 +1,4 @@
+import { stopAndConfirm } from './quiesce.js';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { RuntimeProvider } from '../providers/provider.js';
@@ -67,18 +68,10 @@ export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<
       // polling (a failed delete or rebuild leaves it so). If it cannot be
       // stopped, the bot is not given up (night review, 2026-09-27).
       if (agent.runtimeRef) {
-        try {
-          await provider.stop(agent.runtimeRef);
-        } catch (err) {
+        try { await stopAndConfirm(provider, agent.runtimeRef); }
+        catch (err) {
           rethrowIfCrash(err);
-          if (agent.state === 'RUNNING') throw err;
-          const st = await provider.status(agent.runtimeRef).catch(() => ({ phase: 'unknown' as const }));
-          // A record that says STOPPED on a machine that cannot be reached (a
-          // runner that is off) archives as it used to (regression review).
-          const offline = agent.state === 'STOPPED' && st.phase === 'unknown';
-          if (!offline && st.phase !== 'absent' && st.phase !== 'stopped') {
-            throw new ArchiveError("Couldn't stop its runtime, so its bot was not given up. Try again in a moment.");
-          }
+          throw new ArchiveError("Couldn't confirm its runtime stopped, so its bot was not given up. Try again when its machine answers.");
         }
       }
       op.step('stopped');

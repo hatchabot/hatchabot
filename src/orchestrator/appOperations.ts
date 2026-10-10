@@ -45,15 +45,15 @@ export class AppRecoverError extends Error {
 const short = (sha: string | null | undefined) => (sha ? sha.slice(0, 12) : undefined);
 
 /** How the config switch stands for a release: still staged, moved in (the old one kept aside), or nothing staged. */
-async function configState(d: InstallDeps, app: string, toShort: string, m: AppManifest | undefined): Promise<'none' | 'staged' | 'moved'> {
+async function configState(d: InstallDeps, app: string, toShort: string, m: AppManifest | undefined): Promise<'none' | 'staged' | 'moved' | 'restoring'> {
   if (!m?.config) return 'none';
   const name = m.config.file ?? 'config.json';
   const staged = `${stagingDir(app, toShort)}/${name}`;
   const r = await d.provider.execShell(d.runtimeRef,
-    `if [ -e ${sq(staged)} ]; then echo staged; elif [ -e ${sq(`${staged}.prev`)} ] || [ -e ${sq(`${staged}.none`)} ]; then echo moved; else echo none; fi`, { timeoutMs: 60_000 });
+    `if [ -e ${sq(staged)} ]; then if [ -e ${sq(`${staged}.prev`)} ] || [ -e ${sq(`${staged}.none`)} ]; then echo restoring; else echo staged; fi; elif [ -e ${sq(`${staged}.prev`)} ] || [ -e ${sq(`${staged}.none`)} ]; then echo moved; else echo none; fi`, { timeoutMs: 60_000 });
   if (r.code !== 0) throw new Error(`could not read the agent's app folder: ${(r.stderr || r.stdout).slice(-200)}`);
   const v = r.stdout.trim();
-  return v === 'staged' || v === 'moved' ? v : 'none';
+  return v === 'staged' || v === 'moved' || v === 'restoring' ? v : 'none';
 }
 
 function choices(kind: string, p: AppOpParams): Recovery {
@@ -137,7 +137,7 @@ export async function resumeAppOperation(deps: AppOpDeps, opId: string): Promise
     return;
   }
   // The switch never landed: the link, the config and the record all as before.
-  if (cur === short(p.fromSha ?? undefined) && recShort === cur && cfg !== 'moved') {
+  if (cur === short(p.fromSha ?? undefined) && recShort === cur && cfg !== 'moved' && cfg !== 'restoring') {
     if (!(await replacedBack())) return;
     await clearStaging(d, p.app, to);
     op.rolledBack(`The ${p.app} change was interrupted by a restart before it switched — nothing changed. Try it again.`);
@@ -171,12 +171,12 @@ async function useNew(deps: AppOpDeps, op: OpHandle, kind: string, p: AppOpParam
   const rec = deps.store.getAgentApp(op.get().agentId!);
   const m = await releaseManifest(d, `${ap.releases}/${to}`);
   if (!m) throw new AppRecoverError(`Release ${to} is no longer in the agent; go back to the previous one instead.`);
-  if (kind !== 'app-rollback' && (await configState(d, p.app, to, m)) === 'staged') {
+  if (kind !== 'app-rollback' && ['staged', 'restoring'].includes(await configState(d, p.app, to, m))) {
     const name = m.config!.file ?? 'config.json';
     const live = `${ap.data}/${name}`;
     const staged = `${stagingDir(p.app, to)}/${name}`;
     const r = await d.provider.execShell(d.runtimeRef,
-      `{ if [ -f ${sq(live)} ]; then cp -p ${sq(live)} ${sq(`${staged}.prev`)}; else : > ${sq(`${staged}.none`)}; fi; } && mv -f ${sq(staged)} ${sq(live)}`, { timeoutMs: 60_000 });
+      `{ if [ ! -e ${sq(`${staged}.prev`)} ] && [ ! -e ${sq(`${staged}.none`)} ]; then if [ -f ${sq(live)} ]; then cp -p ${sq(live)} ${sq(`${staged}.prev`)}; else : > ${sq(`${staged}.none`)}; fi; fi; } && mv -f ${sq(staged)} ${sq(live)}`, { timeoutMs: 60_000 });
     if (r.code !== 0) throw new AppRecoverError(`Its new configuration could not be put in place: ${(r.stderr || r.stdout).slice(-200)}`);
   }
   const ln = await d.provider.execShell(d.runtimeRef, `cd ${sq(ap.root)} && test -d releases/${to} && ln -sfn releases/${to} current.new && mv -T current.new current`, { timeoutMs: 60_000 });
@@ -206,12 +206,12 @@ async function goBack(deps: AppOpDeps, op: OpHandle, kind: string, p: AppOpParam
   const rec = deps.store.getAgentApp(op.get().agentId!);
   if (kind !== 'app-rollback') {
     const m = await releaseManifest(d, `${ap.releases}/${to}`);
-    if ((await configState(d, p.app, to, m)) === 'moved') {
+    if (['moved', 'restoring'].includes(await configState(d, p.app, to, m))) {
       const name = m!.config!.file ?? 'config.json';
       const live = `${ap.data}/${name}`;
       const staged = `${stagingDir(p.app, to)}/${name}`;
       const r = await d.provider.execShell(d.runtimeRef,
-        `if [ -f ${sq(`${staged}.prev`)} ]; then mv -f ${sq(`${staged}.prev`)} ${sq(live)}; elif [ -f ${sq(`${staged}.none`)} ]; then rm -f ${sq(live)}; fi`, { timeoutMs: 60_000 });
+        `{ if [ ! -e ${sq(staged)} ]; then cp -p ${sq(live)} ${sq(staged)}; fi; } && { if [ -f ${sq(`${staged}.prev`)} ]; then cp -p ${sq(`${staged}.prev`)} ${sq(live)}; elif [ -f ${sq(`${staged}.none`)} ]; then rm -f ${sq(live)}; fi; }`, { timeoutMs: 60_000 });
       if (r.code !== 0) throw new AppRecoverError(`Its previous configuration could not be put back: ${(r.stderr || r.stdout).slice(-200)}`);
     }
   }

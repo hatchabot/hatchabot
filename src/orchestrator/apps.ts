@@ -380,8 +380,8 @@ export async function appJobs(d: InstallDeps, app: string): Promise<Job[]> {
   const list = await d.provider.exec(d.runtimeRef, ['cron', 'list', '--json'], { timeoutMs: 60_000 });
   if (list.code !== 0) throw new AppError(`Could not read the agent's scheduled tasks: ${errText(list)}`);
   let jobs: unknown;
-  try { jobs = JSON.parse(list.stdout).jobs ?? []; } catch { throw new AppError("The agent's scheduled tasks did not read as JSON."); }
-  if (!Array.isArray(jobs)) return [];
+  try { jobs = JSON.parse(list.stdout).jobs; } catch { throw new AppError("The agent's scheduled tasks did not read as JSON."); }
+  if (!Array.isArray(jobs) || jobs.some((j) => !j || typeof j.id !== 'string' || typeof j.name !== 'string')) throw new AppError("The agent's scheduled task list is incomplete or malformed. Try again.");
   return (jobs as Job[]).filter((x) => typeof x?.name === 'string' && x.name.startsWith(`${app}-`));
 }
 
@@ -462,13 +462,12 @@ export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppMa
 
 /** Take its tasks off; the code and data stay on the volume. */
 export async function removeTasks(d: InstallDeps, app: string): Promise<number> {
-  const list = await d.provider.exec(d.runtimeRef, ['cron', 'list', '--json'], { timeoutMs: 60_000 });
-  let jobs: Array<{ id: string; name: string }> = [];
-  try { jobs = (JSON.parse(list.stdout).jobs ?? []) as typeof jobs; } catch { return 0; }
-  let n = 0;
-  for (const j of jobs.filter((x) => x.name?.startsWith(`${app}-`))) {
-    const r = await d.provider.exec(d.runtimeRef, ['cron', 'rm', j.id], { timeoutMs: 60_000 });
-    if (r.code === 0) n++;
+  const jobs = await appJobs(d, app);
+  for (const j of jobs) {
+    // A lost response may mean it was removed. The fresh list decides.
+    await d.provider.exec(d.runtimeRef, ['cron', 'rm', j.id], { timeoutMs: 60_000 }).catch(() => undefined);
   }
-  return n;
+  const left = await appJobs(d, app);
+  if (left.length) throw new AppError(`Could not remove ${app}'s scheduled tasks: ${left.map((j) => j.name).join(', ')} remain. Try again; the app record has been kept.`);
+  return jobs.length;
 }

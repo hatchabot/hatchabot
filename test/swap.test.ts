@@ -106,8 +106,8 @@ describe('detecting compressed swap', () => {
     expect(s.why).toMatch(/no swap device behind it/);
   });
 
-  it('an active zram swap device is compressed swap, zswap or not; the bracketed algorithm is the one in use', () => {
-    const s = parseSwapProbe(probe({ zswap: 'N', swaps: [ZRAM0, SWAPFILE], zram: { zram0: { algo: 'lzo [zstd] lz4', mm: `${2759 * MiB} ${700 * MiB} ${760 * MiB} 0 ${800 * MiB} 0 0 0 0` } } }));
+  it('zram-only swap qualifies; the bracketed algorithm is the one in use', () => {
+    const s = parseSwapProbe(probe({ zswap: 'N', swaps: [ZRAM0], zram: { zram0: { algo: 'lzo [zstd] lz4', mm: `${2759 * MiB} ${700 * MiB} ${760 * MiB} 0 ${800 * MiB} 0 0 0 0` } } }));
     expect(s.kind).toBe('zram');
     expect(s.compressed).toBe(true);
     expect(s.zram).toEqual([{ device: 'zram0', algorithm: 'zstd', origBytes: 2759 * MiB, comprBytes: 700 * MiB, memUsedBytes: 760 * MiB }]);

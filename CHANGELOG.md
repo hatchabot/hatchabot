@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.158.2] — 2026-10-09
+
+Fixes GitHub audit issues #25–#35.
+
+- Archive, export, host moves, and channel handoffs confirm that the runtime is stopped even when its record already says stopped. An unreachable runtime keeps its bot and credentials; channel removal can be retried (#29, #30, #32).
+- Failed import cleanup keeps the destination's identity and a held operation. The source stays stopped until cleanup is confirmed; retry cleanup from the destination's operation (#26).
+- App recovery preserves both configurations when going back fails, so choosing the new release afterward uses its own settings. App removal and replacement verify that old scheduled tasks are gone, keeping the management record on failure (#27, #28).
+- A backup without a usable encryption key is incomplete and cannot prune older sets. Environment-only keys are captured too (#31).
+- Peer registration rejects IPv6 loopback, mapped loopback and link-local addresses, and refuses redirects during its probe (#33).
+- Hosts with mixed zram and uncompressed disk swap no longer receive compressed-swap allowances. Normal memory-limit reconciliation applies the correction to existing agents (#34).
+- The required typecheck gate compiles again, and the use-case coverage checker understands named UI scenarios (#25, #35).
+
 ## [2.158.1] — 2026-10-09
 
 GitHub issues #18–#24, from audits of v2.153.1 and v2.158.0.

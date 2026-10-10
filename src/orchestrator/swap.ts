@@ -173,7 +173,8 @@ export function parseSwapProbe(out: string | undefined): CompressedSwap {
   const zramSwap = swapDevices.filter((d) => /^\/dev\/zram\d+$/.test(d.name));
   const behind = swapDevices.filter((d) => !/^\/dev\/zram\d+$/.test(d.name));
   const base = { swapDevices, ...(zswap ? { zswap } : {}), ...(zram.length ? { zram } : {}) };
-  if (zramSwap.length) return { kind: 'zram', compressed: true, ...base };
+  if (zramSwap.length && !behind.length) return { kind: 'zram', compressed: true, ...base };
+  if (zramSwap.length && behind.length && !zswap?.enabled) return { kind: 'none', compressed: false, why: 'This machine has zram and uncompressed disk swap: agents get no swap. Disable the disk swap or enable zswap before granting an allowance.', ...base };
   if (zswap?.enabled && behind.length) return { kind: 'zswap', compressed: true, ...base };
   const why = zswap?.enabled
     ? 'zswap is on, but there is no swap device behind it: agents get no swap.'
