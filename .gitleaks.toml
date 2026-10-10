@@ -1,15 +1,45 @@
-# gitleaks (the CI "secrets" job): its default rules, minus test fixtures whose
-# values say they are made up. A real secret never contains these markers.
+# gitleaks (the CI "secrets" job): its default rules, minus the exact fixture
+# values below, each only for the rule it trips and only in the files that
+# hold it. No word list: "fake|example|…" matched against the whole
+# assignment, so a setting NAME with one of those words in it hid a
+# real-looking value beside it (audit issue #42, 2026-10-09). A new fixture
+# gets its exact value added here; scripts/gitleaks-regression.sh checks that
+# ordinary values stay detected whatever they are called.
+#
+# Per-rule allowlists ([[rules]] with a default rule's id): gitleaks 8.28
+# ignores a top-level allowlist's targetRules when the rules come from
+# useDefault, so those would have applied to every rule.
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "made-up fixtures"
-regexTarget = "match"
+[[rules]]
+id = "generic-api-key"
+[[rules.allowlists]]
+description = "published sample values and made-up fixtures, in tests"
+condition = "AND"
+paths = ['''^(test/[^/]+\.ts|scripts/ui-clickthrough\.mjs|scripts/gitleaks-regression\.sh)$''']
+regexTarget = "secret"
 regexes = [
-  '''(?i)fake|example|made-?up|madeUpKey|not-a-real|0123456789|1234567890|abcdefghij''',
-  '''dGhlIHNhbXBsZSBub25jZQ==''',   # RFC 6455's sample WebSocket key
-  '''GEZDGNBVGY3TQOJQ''',           # RFC 6238's test seed, in base32
-  '''gw-SECRET''',                  # the gateway-token fixture
-  '''secretRef: 'telegram/''',      # a secret-store reference name, not a secret
+  '''^dGhlIHNhbXBsZSBub25jZQ==$''',   # RFC 6455's sample WebSocket key
+  '''^GEZDGNBVGY3TQOJQ$''',           # RFC 6238's test seed, in base32
+  '''^gw-SECRET-1234$''',             # the gateway-token fixture
+  '''^telegram/bot/[a-z]+bot$''',     # a secret-store reference name, not a secret
 ]
+
+[[rules]]
+id = "discord-client-id"
+[[rules.allowlists]]
+description = "the made-up Discord user id, in tests and as the web page's placeholder"
+condition = "AND"
+paths = ['''^(test/[^/]+\.ts|web/index\.html|scripts/gitleaks-regression\.sh)$''']
+regexTarget = "secret"
+regexes = ['''^123456789012345678$''']
+
+[[rules]]
+id = "slack-app-token"
+[[rules.allowlists]]
+description = "the made-up Slack app token the redaction test feeds in"
+condition = "AND"
+paths = ['''^test/redact\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^xapp-1-A0APP-1111-abcdefghijklmnop$''']
