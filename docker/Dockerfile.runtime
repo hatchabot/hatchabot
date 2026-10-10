@@ -15,8 +15,11 @@
 #      bind-mounted credential is readable/refreshable without chown games.
 # The Node.js line follows what the OpenClaw being baked requires (its npm
 # "engines"). scripts/build-runtime-image.sh picks it; a bare build gets the
-# one the default OpenClaw below is proven on.
-ARG NODE_IMAGE=node:24-slim
+# one the default OpenClaw below is proven on, pinned to the digest of the
+# multi-arch index (#46, 2026-10-09) so the release image is built on the base
+# that was reviewed. Dependabot does not read ARG defaults: bump it by hand
+# (docs/releasing.md, "Updating pinned actions and images").
+ARG NODE_IMAGE=node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 FROM ${NODE_IMAGE}
 
 # Keep this in step with scripts/build-runtime-image.sh's default, so a bare

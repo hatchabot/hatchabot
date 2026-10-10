@@ -22,6 +22,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { STUB } from '../docs/deck/shot-data.mjs';
 
+// Headless Chrome, pinned to a digest so CI runs the image it was reviewed with
+// (#46, 2026-10-09). ci.yml pulls the same one; test/workflowPins.test.ts checks
+// they agree. Bumping it: docs/releasing.md, "Updating pinned actions and images".
+const CHROME_IMAGE = 'zenika/alpine-chrome@sha256:eb3378c1ed0079f94db054a5fe1aaa790a254ec0d6bbc67eda052420d86a179d';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const keep = process.argv.includes('--keep');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
@@ -3836,7 +3840,7 @@ try {
     // past the budget the page never reports and the failing scenario goes
     // unnamed (seen twice in release runs, 2026-10-09).
       dom = execFileSync('docker', [
-        'run', '--rm', '--shm-size=1g', '-v', `${work}:/w`, 'zenika/alpine-chrome',
+        'run', '--rm', '--shm-size=1g', '-v', `${work}:/w`, CHROME_IMAGE,
         '--no-sandbox', '--headless', '--disable-gpu', '--disable-dev-shm-usage', '--hide-scrollbars',
         '--window-size=1400,1000', '--virtual-time-budget=1800000', '--dump-dom', 'file:///w/page.html?ui=classic',
       ], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] });

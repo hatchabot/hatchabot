@@ -1,0 +1,17 @@
+# The reviewed path for moving a pinned action or base image forward (#46):
+# Dependabot opens a pull request with the new commit SHA or digest, CI runs on
+# it read-only, and a person merges it. docs/releasing.md, "Updating pinned
+# actions and images", has the hand-bump path and what Dependabot cannot see.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly

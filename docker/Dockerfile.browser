@@ -2,7 +2,9 @@
 # browser tool. Hatchabot runs one per agent that has the browser switched on,
 # inside that agent's network namespace, so the agent reaches it at
 # 127.0.0.1:9222 and nothing else can. It holds none of the agent's files.
-FROM debian:bookworm-slim
+# Pinned to the multi-arch index digest (#46, 2026-10-09); Dependabot proposes
+# bumps. A bump changes this file, so every machine builds the new image.
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 RUN apt-get update \
  && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-noto-color-emoji ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
