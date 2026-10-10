@@ -475,11 +475,11 @@ tail), masks private details, and builds a GitHub issue link. Nothing is sent by
 Hatchabot. The manager can read the installed source to diagnose first and save
 a draft. See `docs/field-reports.md`.
 
-- `src/orchestrator/problemReport.ts` — `buildReport`, `redactForPublic`, `issueUrl`, `searchSource`, `readSource`, `sourcePath`: facts, masking, the link, and the source the manager may read.
-- `src/api/routes.ts` — `'/v1/problem-reports'`, `'/v1/problem-reports/:id'`, `'/v1/diagnostics'`, `'/v1/source'`, `'/v1/source/search'`, `reportFacts`: drafts, diagnostics and source routes.
+- `src/orchestrator/problemReport.ts` — `buildReport`, `redactForPublic`, `issueUrl`, `searchSource`, `SEARCH_WORKER`, `SEARCH_LIMITS`, `readSource`, `sourcePath`, `realInside`: facts, masking, the link, and the source the manager may read (links checked by where they lead; searches bounded in a worker).
+- `src/api/routes.ts` — `'/v1/problem-reports'`, `'/v1/problem-reports/:id'`, `'/v1/diagnostics'`, `'/v1/source'`, `'/v1/source/search'`, `reportFacts`, `reportRedaction`: drafts, diagnostics and source routes; the private names and known credentials a draft is masked with.
 - `src/mgmt/restTools.ts` — `'get_diagnostics'`, `'search_source'`, `'read_source'`, `'prepare_problem_report'`: the manager's tools for it.
 - `src/ops/opsAgent.ts` — `Settings questions, and reporting a bug in Hatchabot`: the manager's instructions for it.
-- `src/domain/redact.ts` — `redactSecrets`: key masking shared with logs.
+- `src/domain/redact.ts` — `redactSecrets`, `redactCredentialFields`, `maskKnownValues`: key masking shared with logs.
 - `src/store/store.ts` — `problem_reports`, `ProblemReportRow`: where drafts are stored.
 - `web/index.html` — `openReport`, `reportCreate`, `reportOpenIssue`, `reportFromHash`: the review panel.
 

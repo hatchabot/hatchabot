@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { briefCause, redactSecrets } from '../src/domain/redact.js';
+import { briefCause, credentialValuesFromEnv, maskKnownValues, redactSecrets } from '../src/domain/redact.js';
 import { opsListenError } from '../src/ops/opsServer.js';
 
 /** A failure message must say enough to act on and never carry a credential. */
@@ -19,6 +19,30 @@ describe('redacting a failure', () => {
       expect(out, text).not.toContain(secret);
       expect(out).toContain('***');
     }
+  });
+
+  it('masks a credential field by its name, however short the value (2026-10-09)', () => {
+    const cases: Array<[string, string]> = [
+      ['GARDEN_API_TOKEN=pl4nt', 'GARDEN_API_TOKEN=***'],
+      ['export DB_PASSWORD="tulip"', 'export DB_PASSWORD="***"'],
+      ['{"apiKey": "seed1", "name": "Test Agent"}', '{"apiKey": "***", "name": "Test Agent"}'],
+      ["config password: rose9 loaded", 'config password: *** loaded'],
+      ['GET /hook?token=abc12&page=2', 'GET /hook?token=***&page=2'],
+      ['Authorization: Bearer abc12', 'Authorization: ***'],
+      ['const clientSecret = "fern"', 'const clientSecret = "***"'],
+    ];
+    for (const [text, want] of cases) expect(redactSecrets(text), text).toBe(want);
+  });
+
+  it('leaves counts, code and references alone', () => {
+    for (const text of ['max_tokens: 400, tokens: 1200', 'const token = getToken(req);', 'TOKEN=$GARDEN_TOKEN', 'token: ${{ secrets.GARDEN }}', 'the tokenizer: fast', 'password reset link sent']) {
+      expect(redactSecrets(text), text).toBe(text);
+    }
+  });
+
+  it('masks known values exactly, and only real-looking ones', () => {
+    expect(maskKnownValues('login failed for pl4nt-bed-7 at 10:00', ['pl4nt-bed-7', 'abc', ''])).toBe('login failed for *** at 10:00');
+    expect(credentialValuesFromEnv({ GARDEN_API_KEY: 'k-1', HOME: '/home/pat', PWD: '/home/pat/x', SMTP_PASSWORD: 'p' })).toEqual(['k-1', 'p']);
   });
 
   it('keeps the part that helps: the code and a short message', () => {
