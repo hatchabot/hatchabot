@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { hostname, homedir, userInfo } from 'node:os';
-import { join, normalize, relative, resolve, sep } from 'node:path';
-import { redactSecrets } from '../domain/redact.js';
+import { isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
+import { Worker } from 'node:worker_threads';
+import { maskKnownValues, redactSecrets } from '../domain/redact.js';
 
 /**
  * "Report a problem" (docs/field-reports.md): the manager agent — or the
@@ -15,8 +16,17 @@ import { redactSecrets } from '../domain/redact.js';
 export const REPORT_SLUG = 'hatchabot/hatchabot';
 export const REPORT_FORMAT = 'hatchabot-report v1';
 
-/** What makes a home machine identifiable, for a PUBLIC issue: on top of redactSecrets. */
-export interface PublicRedactContext { home?: string; user?: string; host?: string }
+/**
+ * What makes a home machine identifiable, for a PUBLIC issue: on top of redactSecrets.
+ * `names` (agents' names and slugs, members' names), `hosts` (machine names) and
+ * `secrets` (known credential values) are what the app knows is private: the
+ * patterns alone let an agent's name in a log line through (security audit,
+ * 2026-10-09). Held for one call, never stored or logged.
+ */
+export interface PublicRedactContext {
+  home?: string; user?: string; host?: string;
+  names?: Iterable<string>; hosts?: Iterable<string>; secrets?: Iterable<string>;
+}
 
 export function localContext(): PublicRedactContext {
   let user: string | undefined;
@@ -27,6 +37,23 @@ export function localContext(): PublicRedactContext {
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const isPrivateV4 = (a: number, b: number) =>
   a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254);
+// Never masked as a private name: the manager's own names, and the words the masks and headings are made of.
+const NOT_PRIVATE = /^(hatchabot([ -](agent|manager))?|openclaw|agent|name|host|user|bot|email)$/i;
+
+/**
+ * Private words masked as whole words, longest first. In any case from 6
+ * characters; a shorter name ("To Do") only as written, or every "to do" in
+ * the prose would go too.
+ */
+function maskWords(text: string, words: Iterable<string> | undefined, as: string): string {
+  const list = [...new Set([...(words ?? [])].map((w) => String(w ?? '').trim()).filter((w) => w.length >= 3 && !NOT_PRIVATE.test(w)))]
+    .sort((a, b) => b.length - a.length).slice(0, 2000);
+  let out = text;
+  for (const [group, flags] of [[list.filter((w) => w.length >= 6), 'gi'], [list.filter((w) => w.length < 6), 'g']] as const) {
+    if (group.length) out = out.replace(new RegExp(`(?<![A-Za-z0-9_])(?:${group.map(esc).join('|')})(?![A-Za-z0-9_])`, flags), as);
+  }
+  return out;
+}
 
 /**
  * Blunt on purpose, like redactSecrets: an issue is public and permanent, so a
@@ -34,7 +61,7 @@ const isPrivateV4 = (a: number, b: number) =>
  * every line before it goes anywhere.
  */
 export function redactForPublic(text: string, ctx: PublicRedactContext = localContext()): string {
-  let out = redactSecrets(text);
+  let out = redactSecrets(maskKnownValues(text, ctx.secrets));
   if (ctx.home && ctx.home.length > 1) out = out.replace(new RegExp(esc(ctx.home), 'g'), '~');
   out = out
     .replace(/\b[\w.+-]+@[\w-]+(\.[\w-]+)+\b/g, '<email>')                                          // addresses, incl. ssh user@host
@@ -45,7 +72,8 @@ export function redactForPublic(text: string, ctx: PublicRedactContext = localCo
     .replace(/@?\b(?!hatchabot\b)[A-Za-z][A-Za-z0-9_]{2,}bot\b/gi, '<bot>');
   if (ctx.user && ctx.user.length >= 3) out = out.replace(new RegExp(`\\b${esc(ctx.user)}\\b`, 'g'), '<user>');
   if (ctx.host && ctx.host.length >= 3 && ctx.host !== 'localhost') out = out.replace(new RegExp(`\\b${esc(ctx.host)}\\b`, 'g'), '<host>');
-  return out;
+  out = maskWords(out, [...(ctx.hosts ?? [])].filter((h) => h !== 'localhost'), '<host>');
+  return maskWords(out, ctx.names, '<name>');
 }
 
 export interface ReportInput {
@@ -77,8 +105,10 @@ const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…`
 const fence = (s: string, lang = '') => `\`\`\`${lang}\n${s.replace(/```/g, "'''")}\n\`\`\``;
 
 /** The issue body: the person's (or agent's) words, then the facts. Redacted for public use. */
-export function buildReport(input: ReportInput, facts: ReportFacts, ctx?: PublicRedactContext): { title: string; body: string } {
-  const r = (s: string) => redactForPublic(s, ctx);
+export function buildReport(input: ReportInput, facts: ReportFacts, ctx: PublicRedactContext = localContext()): { title: string; body: string } {
+  // The agent it is about is private wherever it turns up — its log, the prose, the patch — not only in the facts.
+  const own = { ...ctx, names: [...(ctx.names ?? []), ...(facts.agent?.name ? [facts.agent.name] : [])] };
+  const r = (s: string) => redactForPublic(s, own);
   const parts: string[] = [];
   parts.push(`<!-- ${REPORT_FORMAT} version=${facts.version} install=${facts.install.replace(/\s+/g, '-')} -->`);
   parts.push('### What happened', r(clip(input.whatHappened.trim(), 4000)));
@@ -141,12 +171,13 @@ const SOURCE_ROOTS = ['src', 'web', 'scripts', 'docs', 'bin', 'docker', 'deploy'
 const SOURCE_FILES = ['README.md', 'CHANGELOG.md', 'package.json', 'install.sh', '.env.example', 'channels.json'];
 const MAX_FILE = 2 * 1024 * 1024;
 
-/** A repo-relative path inside the readable set, or an Error saying why not. */
-export function sourcePath(appDir: string, path: string): string {
+const inReadableSet = (rel: string) => SOURCE_ROOTS.includes(rel.split(sep)[0]!) || SOURCE_FILES.includes(rel);
+
+/** The lexical check: a repo-relative path naming the readable set. */
+function lexicalPath(appDir: string, path: string): string {
   const rel = normalize(String(path ?? '').replace(/^\.?\/+/, ''));
   if (!rel || rel.startsWith('..') || rel.includes(`${sep}..${sep}`) || rel.startsWith(sep)) throw new Error('A path inside the Hatchabot source, like src/api/routes.ts.');
-  const top = rel.split(sep)[0]!;
-  if (!SOURCE_ROOTS.includes(top) && !SOURCE_FILES.includes(rel)) {
+  if (!inReadableSet(rel)) {
     throw new Error(`Only the source and docs: ${[...SOURCE_ROOTS.map((r) => `${r}/`), ...SOURCE_FILES].join(', ')}.`);
   }
   const abs = resolve(appDir, rel);
@@ -154,14 +185,49 @@ export function sourcePath(appDir: string, path: string): string {
   return abs;
 }
 
+/**
+ * The real file or folder behind a path, when THAT is in the readable set.
+ * A link is followed and its target checked, not its name: a link under src/
+ * to .env or outside the install read what it pointed at (security audit,
+ * 2026-10-09). A link to somewhere else in the source is fine. undefined: not
+ * there, a loop, or outside.
+ */
+function realInside(realRoot: string, abs: string): string | undefined {
+  let real: string;
+  try { real = realpathSync(abs); } catch { return undefined; }
+  const rel = relative(realRoot, real);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) return undefined;
+  return inReadableSet(rel) ? real : undefined;
+}
+const realRootOf = (appDir: string): string => { try { return realpathSync(appDir); } catch { return resolve(appDir); } };
+
+/** A path inside the readable set — as resolved, links followed — or an Error saying why not. */
+export function sourcePath(appDir: string, path: string): string {
+  const abs = lexicalPath(appDir, path);
+  let real: string;
+  try { real = realpathSync(abs); } catch {
+    // Not there (readSource says so) — or a link that leads nowhere or round in a loop: refused.
+    let link = false;
+    try { link = lstatSync(abs).isSymbolicLink(); } catch { /* not there */ }
+    if (link) throw new Error('Outside the source.');
+    return abs;
+  }
+  if (!realInside(realRootOf(appDir), real)) throw new Error('Outside the source.');
+  return real;
+}
+
 export function readSource(appDir: string, path: string, from = 1, to?: number): { path: string; from: number; to: number; lines: number; text: string } {
   const abs = sourcePath(appDir, path);
   const st = statSync(abs, { throwIfNoEntry: false });
   if (!st) throw new Error(`No file ${path} in this release.`);
   if (st.isDirectory()) {
-    const names = readdirSync(abs, { withFileTypes: true }).map((d) => (d.isDirectory() ? `${d.name}/` : d.name)).sort();
+    // A link in the folder that leads out of the source is not listed either.
+    const realRoot = realRootOf(appDir);
+    const names = readdirSync(abs, { withFileTypes: true }).filter((d) => !d.isSymbolicLink() || realInside(realRoot, join(abs, d.name)))
+      .map((d) => (d.isDirectory() || (d.isSymbolicLink() && statSync(join(abs, d.name), { throwIfNoEntry: false })?.isDirectory()) ? `${d.name}/` : d.name)).sort();
     return { path, from: 1, to: names.length, lines: names.length, text: names.join('\n') };
   }
+  if (!st.isFile()) throw new Error(`${path} is not a file.`);
   if (st.size > MAX_FILE) throw new Error(`${path} is too big to read here.`);
   const all = readFileSync(abs, 'utf8').split('\n');
   const a = Math.max(1, Math.floor(from) || 1);
@@ -174,50 +240,139 @@ export const PLAYBOOK = 'docs/troubleshooting.md';
 const PACK = [PLAYBOOK, 'docs/architecture-map.md'];
 
 /**
- * Lines matching a regular expression (case-insensitive), across the readable
- * set or under one folder. The knowledge pack comes first, with its own room
- * (`packLimit`): a broad search ("400", a model id) filled the 40 lines with
- * code before it reached docs/, and the Hatchabot agent never saw the playbook
- * entry that answered the question (2026-10-07). A playbook line carries the
- * entry it belongs to.
+ * The bounds of one search (security audit, 2026-10-09): a pattern that
+ * backtracks without end held the server's one thread, for every account.
+ * The scan runs in a worker thread that is stopped at `ms`, over at most
+ * `files` files and `bytes` bytes; a query is at most `query` characters, and
+ * only so many searches run at once, per caller and in all.
  */
-export function searchSource(appDir: string, query: string, under?: string, limit = 40, packLimit = 15): {
+export const SEARCH_LIMITS = { query: 300, files: 5000, bytes: 48 * 1024 * 1024, line: 4000, ms: 3000, perCaller: 2, total: 6 };
+let running = 0;
+const runningFor = new Map<string, number>();
+/** Searches running now (their workers alive): for tests. */
+export const searchesRunning = (): number => running;
+
+// The scan itself, run in the worker: plain JavaScript, no imports from the app.
+const SEARCH_WORKER = `
+const { parentPort, workerData } = require('node:worker_threads');
+const { readFileSync } = require('node:fs');
+const { files, query, regex, limit, packLimit, line: maxLine, playbook, truncated } = workerData;
+const re = regex ? new RegExp(query, 'i') : null;
+const lower = query.toLowerCase();
+const hit = re ? (l) => re.test(l.length > maxLine ? l.slice(0, maxLine) : l) : (l) => l.toLowerCase().includes(lower);
+const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + '\\u2026' : s);
+const matches = [];
+let more = false, fromPack = 0;
+for (const f of files) {
+  if (!f.pack && more) break;
+  let text;
+  try { text = readFileSync(f.real, 'utf8'); } catch { continue; }
+  const lines = text.split('\\n');
+  let entry, n = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith('### ')) entry = lines[i].slice(4).trim();
+    if (!hit(lines[i])) continue;
+    if (f.pack ? n++ >= packLimit : matches.length - fromPack >= limit) { if (!f.pack) more = true; break; }
+    matches.push(Object.assign({ path: f.rel, line: i + 1, text: clip(lines[i].trim(), 200) }, entry && f.rel === playbook ? { entry: clip(entry, 160) } : {}));
+  }
+  if (f.pack) fromPack = matches.length;
+}
+parentPort.postMessage({ matches, more: more || truncated });
+`;
+
+/**
+ * Lines containing the query (case-insensitive), across the readable set or
+ * under one folder; `regex` for a regular expression. The knowledge pack
+ * comes first, with its own room (`packLimit`): a broad search ("400", a model
+ * id) filled the 40 lines with code before it reached docs/, and the
+ * Hatchabot agent never saw the playbook entry that answered the question
+ * (2026-10-07). A playbook line carries the entry it belongs to.
+ *
+ * Plain text by default, a regular expression only when asked, and either way
+ * in a worker stopped at the time limit (SEARCH_LIMITS, 2026-10-09).
+ */
+export async function searchSource(appDir: string, query: string, under?: string, limit = 40, packLimit = 15,
+  opts: { regex?: boolean; caller?: string; ms?: number } = {}): Promise<{
   matches: Array<{ path: string; line: number; text: string; entry?: string }>; more: boolean;
-} {
-  let re: RegExp;
-  try { re = new RegExp(String(query ?? ''), 'i'); } catch { re = new RegExp(esc(String(query ?? '')), 'i'); }
-  if (!String(query ?? '').trim()) throw new Error('Say what to look for.');
-  const rest = under ? [sourcePath(appDir, under)] : ['docs', 'README.md', ...SOURCE_ROOTS.filter((r) => r !== 'docs'), ...SOURCE_FILES.filter((f) => f !== 'README.md')].map((p) => join(appDir, p));
-  const pack = PACK.map((p) => join(appDir, p)).filter((abs) => !under || abs === rest[0] || abs.startsWith(rest[0] + sep));
-  const matches: Array<{ path: string; line: number; text: string; entry?: string }> = [];
-  const seen = new Set<string>();
-  let more = false;
-  const scan = (abs: string, cap: () => boolean): void => {
-    seen.add(abs);
-    const lines = readFileSync(abs, 'utf8').split('\n');
-    let entry: string | undefined;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i]!.startsWith('### ')) entry = lines[i]!.slice(4).trim();
-      if (!re.test(lines[i]!)) continue;
-      if (cap()) { more = true; return; }
-      matches.push({ path: relative(appDir, abs), line: i + 1, text: clip(lines[i]!.trim(), 200), ...(entry && abs.endsWith(PLAYBOOK) ? { entry: clip(entry, 160) } : {}) });
-    }
+}> {
+  const q = String(query ?? '');
+  if (!q.trim()) throw new Error('Say what to look for.');
+  if (q.length > SEARCH_LIMITS.query) throw new Error(`At most ${SEARCH_LIMITS.query} characters to look for.`);
+  let regex = !!opts.regex;
+  if (regex) { try { new RegExp(q, 'i'); } catch { regex = false; } } // not a valid expression: looked for as written
+  const files = sourceFiles(appDir, under);
+  const caller = opts.caller ?? '';
+  if (running >= SEARCH_LIMITS.total || (runningFor.get(caller) ?? 0) >= SEARCH_LIMITS.perCaller) {
+    throw new Error('Other searches are running: try again in a few seconds.');
+  }
+  running++;
+  runningFor.set(caller, (runningFor.get(caller) ?? 0) + 1);
+  const done = () => {
+    running--;
+    const n = (runningFor.get(caller) ?? 1) - 1;
+    if (n > 0) runningFor.set(caller, n); else runningFor.delete(caller);
   };
-  for (const abs of pack) if (statSync(abs, { throwIfNoEntry: false })?.isFile()) { let n = 0; scan(abs, () => n++ >= packLimit); more = false; }
-  const fromPack = matches.length;
-  const visit = (abs: string): void => {
-    if (more || seen.has(abs)) return;
-    const st = statSync(abs, { throwIfNoEntry: false });
+  let worker: Worker;
+  try {
+    worker = new Worker(SEARCH_WORKER, {
+      eval: true,
+      workerData: { files: files.list, query: q, regex, limit, packLimit, line: SEARCH_LIMITS.line, playbook: PLAYBOOK, truncated: files.truncated },
+      resourceLimits: { maxOldGenerationSizeMb: 256 },
+    });
+  } catch (e) { done(); throw e; }
+  return new Promise((ok, no) => {
+    let settled = false;
+    const finish = (err?: Error, value?: { matches: Array<{ path: string; line: number; text: string; entry?: string }>; more: boolean }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) no(err); else ok(value!);
+    };
+    // Stopped, not abandoned: terminate() ends the thread mid-match, so the work ends with the request.
+    const timer = setTimeout(() => {
+      void worker.terminate();
+      finish(new Error(`The search took longer than ${Math.round((opts.ms ?? SEARCH_LIMITS.ms) / 1000)} s and was stopped: look for plain text, or a simpler expression.`));
+    }, opts.ms ?? SEARCH_LIMITS.ms);
+    worker.once('message', (m) => { finish(undefined, m); void worker.terminate(); });
+    worker.once('error', (e: Error) => finish(new Error(`The search failed: ${e.message}`)));
+    worker.once('exit', () => { done(); finish(new Error('The search stopped.')); });
+  });
+}
+
+/**
+ * The files a search reads, in order: the knowledge pack, then the rest.
+ * Each one as resolved — a link counts as where it leads, and a folder
+ * reached twice (a link loop, or a link to a folder already searched) is
+ * searched once (2026-10-09). Bounded in files and bytes.
+ */
+function sourceFiles(appDir: string, under?: string): { list: Array<{ real: string; rel: string; pack: boolean }>; truncated: boolean } {
+  const realRoot = realRootOf(appDir);
+  const rest = under ? [lexicalPath(appDir, under)] : ['docs', 'README.md', ...SOURCE_ROOTS.filter((r) => r !== 'docs'), ...SOURCE_FILES.filter((f) => f !== 'README.md')].map((p) => join(appDir, p));
+  if (under && statSync(rest[0]!, { throwIfNoEntry: false }) && !realInside(realRoot, rest[0]!)) throw new Error('Outside the source.');
+  const pack = PACK.map((p) => join(appDir, p)).filter((abs) => !under || abs === rest[0] || abs.startsWith(rest[0] + sep));
+  const list: Array<{ real: string; rel: string; pack: boolean }> = [];
+  const seen = new Set<string>();
+  let bytes = 0, truncated = false;
+  const visit = (abs: string, isPack: boolean): void => {
+    if (truncated) return;
+    const real = realInside(realRoot, abs);
+    if (!real || seen.has(real)) return;
+    seen.add(real);
+    const st = statSync(real, { throwIfNoEntry: false });
     if (!st) return;
     if (st.isDirectory()) {
-      for (const d of readdirSync(abs).sort()) { if (d !== 'node_modules' && !d.startsWith('.')) visit(join(abs, d)); if (more) return; }
+      for (const d of readdirSync(real).sort()) { if (d !== 'node_modules' && !d.startsWith('.')) visit(join(abs, d), false); if (truncated) return; }
       return;
     }
-    if (st.size > MAX_FILE || !/\.(ts|mjs|cjs|js|sh|md|html|json|yml|yaml|txt|example|service|timer|plist|conf)$|\/[A-Za-z]+file[^/]*$|\.runtime$/.test(abs) && !SOURCE_FILES.some((f) => abs.endsWith(f))) return;
-    scan(abs, () => matches.length - fromPack >= limit);
+    // Only regular files: a pipe or a device would block the read.
+    if (!st.isFile() || st.size > MAX_FILE || !/\.(ts|mjs|cjs|js|sh|md|html|json|yml|yaml|txt|example|service|timer|plist|conf)$|\/[A-Za-z]+file[^/]*$|\.runtime$/.test(abs) && !SOURCE_FILES.some((f) => abs.endsWith(f))) return;
+    if (list.length >= SEARCH_LIMITS.files || bytes + st.size > SEARCH_LIMITS.bytes) { truncated = true; return; }
+    bytes += st.size;
+    list.push({ real, rel: relative(appDir, abs), pack: isPack });
   };
-  for (const s of rest) visit(s);
-  return { matches, more };
+  for (const abs of pack) visit(abs, true);
+  for (const s of rest) visit(s, false);
+  return { list, truncated };
 }
 
 /**

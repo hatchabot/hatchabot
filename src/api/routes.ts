@@ -219,8 +219,8 @@ import {
   stripClientIdentity, withConsoleIdentity, withGuestView,
 } from './consoleProxy.js';
 import { ConsoleAccess } from '../orchestrator/consoleAccess.js';
-import { redactSecrets } from '../domain/redact.js';
-import { buildReport, issueUrl, knownProblems, matchKnownProblems, readSource, searchSource, type ReportFacts, type ReportInput } from '../orchestrator/problemReport.js';
+import { credentialValuesFromEnv, redactSecrets } from '../domain/redact.js';
+import { buildReport, issueUrl, knownProblems, localContext, matchKnownProblems, readSource, redactForPublic, searchSource, type PublicRedactContext, type ReportFacts, type ReportInput } from '../orchestrator/problemReport.js';
 import { consoleIdentity, type ConsoleRole } from '../openclaw/consoleIdentity.js';
 import type { IdentityVerifier } from './identity.js';
 import {
@@ -8443,7 +8443,35 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     return facts;
   };
-  const reportView = (r: { id: string; title: string; body: string; createdAt: string; by: string; agentId?: string; sentAt?: string }) => {
+  /**
+   * What a public report must not carry, as this app knows it (security audit, 2026-10-09):
+   * the names and slugs of the agents it could mention, their members' names, the
+   * machines' names, and the credentials of the agent it is about (its bot token,
+   * its own settings, its AI key) plus the credential settings of this server.
+   * Built for one report and dropped: never stored, never logged.
+   */
+  const reportRedaction = async (req: FastifyRequest, agentRef?: string): Promise<PublicRedactContext> => {
+    const owner = ownsLocalHost(req);
+    const agents = owner ? store.listAllActiveAgents() : store.listAgents(ownerIdOf(req));
+    const names: string[] = [];
+    for (const a of agents) {
+      names.push(a.name, a.slug);
+      for (const m of store.listMemberships(a.id)) if (m.displayName) names.push(m.displayName);
+    }
+    if (owner) for (const acc of store.listLocalAccounts()) if (acc.displayName) names.push(acc.displayName);
+    const hosts = store.listHosts(ownerIdOf(req)).map((h) => h.name);
+    const secretValues = credentialValuesFromEnv(process.env);
+    const a = agentRef ? ownedAgent(req, agentRef) ?? (owner ? store.getAgent(agentRef) : undefined) : undefined;
+    if (a) {
+      names.push(a.name, a.slug);
+      const refs = [...store.listChannelsForAgent(a.id).map((c) => c.secretRef), ...store.listAgentEnv(a.id).map((v) => v.secretRef), store.getAIProfile(a.aiProfileId)?.secretRef];
+      for (const ref of refs) if (ref) { const v = await secrets.get(ref).catch(() => undefined); if (v) secretValues.push(v); }
+    }
+    return { ...localContext(), names, hosts, secrets: secretValues };
+  };
+  // Masked again as it leaves — the link, the file, a person's edit — so a draft made before a rule, or an edit, is held to it too.
+  const reportView = (raw: { id: string; title: string; body: string; createdAt: string; by: string; agentId?: string; sentAt?: string }, ctx: PublicRedactContext) => {
+    const r = { ...raw, title: redactForPublic(raw.title, ctx), body: redactForPublic(raw.body, ctx) };
     const fileName = `hatchabot-report-${r.createdAt.slice(0, 10)}-${r.id.slice(0, 6)}.md`;
     const link = issueUrl(r.title, r.body, { file: fileName });
     // What the person (or agent) wrote, not the facts below it: doctor's lines would match entries by accident.
@@ -8463,8 +8491,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     try { return readSource(appDir, String(req.query.path ?? ''), Number(req.query.from ?? 1), req.query.to ? Number(req.query.to) : undefined); }
     catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
   });
-  app.get<{ Querystring: { q?: string; under?: string } }>('/v1/source/search', async (req, reply) => {
-    try { return searchSource(appDir, String(req.query.q ?? ''), req.query.under || undefined); }
+  // Plain text unless regex=1; bounded in a worker either way (problemReport.ts SEARCH_LIMITS, 2026-10-09).
+  app.get<{ Querystring: { q?: string; under?: string; regex?: string } }>('/v1/source/search', async (req, reply) => {
+    try { return await searchSource(appDir, String(req.query.q ?? ''), req.query.under || undefined, 40, 15, { regex: req.query.regex === '1' || req.query.regex === 'true', caller: ownerIdOf(req) }); }
     catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
   });
 
@@ -8472,7 +8501,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     store.listProblemReports(ownerIdOf(req)).map(({ body: _b, ...r }) => r));
   app.get<{ Params: { id: string } }>('/v1/problem-reports/:id', async (req, reply) => {
     const r = store.getProblemReport(ownerIdOf(req), req.params.id);
-    return r ? reportView(r) : reply.code(404).send({ error: 'Not found' });
+    return r ? reportView(r, await reportRedaction(req, r.agentId)) : reply.code(404).send({ error: 'Not found' });
   });
   app.post<{ Body: Partial<ReportInput> & { agent?: string } }>('/v1/problem-reports', async (req, reply) => {
     const b = (req.body ?? {}) as Partial<ReportInput> & { agent?: string };
@@ -8485,16 +8514,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       title, whatHappened, steps: str(b.steps, 4000), diagnosis: str(b.diagnosis, 10_000), confidence,
       suggestedPatch: str(b.suggestedPatch, 24_000), by: b.by === 'agent' ? 'agent' : 'person',
     };
-    const built = buildReport(input, await reportFacts(req, agentId));
+    const ctx = await reportRedaction(req, agentId);
+    const built = buildReport(input, await reportFacts(req, agentId), ctx);
     const row = { id: randomUUID(), ownerId: ownerIdOf(req), createdAt: new Date().toISOString(), by: input.by, title: built.title, body: built.body, ...(agentId ? { agentId } : {}) };
     store.addProblemReport(row);
-    return reportView(row);
+    return reportView(row, ctx);
   });
   app.patch<{ Params: { id: string }; Body: { title?: string; body?: string } }>('/v1/problem-reports/:id', async (req, reply) => {
     const b = (req.body ?? {}) as { title?: string; body?: string };
-    const patch = { ...(typeof b.title === 'string' && b.title.trim() ? { title: b.title.slice(0, 200) } : {}), ...(typeof b.body === 'string' ? { body: b.body.slice(0, 60_000) } : {}) };
+    const had = store.getProblemReport(ownerIdOf(req), req.params.id);
+    if (!had) return reply.code(404).send({ error: 'Not found' });
+    // A person's edit is masked like the rest before it is kept (2026-10-09); what comes back is what goes out, for them to read.
+    const ctx = await reportRedaction(req, had.agentId);
+    const patch = { ...(typeof b.title === 'string' && b.title.trim() ? { title: redactForPublic(b.title.slice(0, 200), ctx) } : {}), ...(typeof b.body === 'string' ? { body: redactForPublic(b.body.slice(0, 60_000), ctx) } : {}) };
     if (!store.updateProblemReport(ownerIdOf(req), req.params.id, patch)) return reply.code(404).send({ error: 'Not found' });
-    return reportView(store.getProblemReport(ownerIdOf(req), req.params.id)!);
+    return reportView(store.getProblemReport(ownerIdOf(req), req.params.id)!, ctx);
   });
   app.post<{ Params: { id: string } }>('/v1/problem-reports/:id/sent', async (req, reply) => {
     if (!store.updateProblemReport(ownerIdOf(req), req.params.id, { sentAt: new Date().toISOString() })) return reply.code(404).send({ error: 'Not found' });

@@ -413,15 +413,17 @@ export const REST_TOOLS: RestTool[] = [
     name: 'search_source', tier: 'read',
     description:
       'Search the Hatchabot source and docs INSTALLED on this machine (the exact release that runs here): src/, web/, scripts/, docs/, bin/, docker/, deploy/, test/, '
-      + 'README.md, CHANGELOG.md, .env.example. A regular expression, case-insensitive; up to 40 matching lines with path:line. '
+      + 'README.md, CHANGELOG.md, .env.example. Plain text, case-insensitive (regex: true for a regular expression, stopped after a few seconds); up to 40 matching lines with path:line. '
       + 'The knowledge pack is searched first, with its own room: playbook lines (docs/troubleshooting.md) carry their entry\'s title in `entry`. '
       + 'Search the EXACT error text first; a broad term (a status code, a model id) matches a great deal of code. '
       + 'Use it to find the code behind an error message, and the docs behind a settings question (docs/ and README.md explain every setting).',
     input_schema: obj({
-      query: { type: 'string', maxLength: 300, description: 'A regular expression, e.g. "probe the runtime image" or "sleep timer"' },
+      query: { type: 'string', maxLength: 300, description: 'The text to find, e.g. "probe the runtime image" or "sleep timer"' },
       under: { type: 'string', maxLength: 200, description: 'Optional: only under this folder or file, e.g. docs/ or src/orchestrator/' },
+      regex: { type: 'boolean', description: 'Optional: query is a regular expression, e.g. "sleep|hibernat"' },
     }, ['query']),
-    call: ({ input }) => ({ method: 'GET', path: `/v1/source/search?q=${encodeURIComponent(String(input.query ?? ''))}${input.under ? `&under=${encodeURIComponent(String(input.under))}` : ''}` }),
+    // Plain text unless asked (2026-10-09): a regular expression runs bounded, in a worker.
+    call: ({ input }) => ({ method: 'GET', path: `/v1/source/search?q=${encodeURIComponent(String(input.query ?? ''))}${input.under ? `&under=${encodeURIComponent(String(input.under))}` : ''}${input.regex === true ? '&regex=1' : ''}` }),
   },
   {
     name: 'read_source', tier: 'read',

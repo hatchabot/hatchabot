@@ -16,10 +16,11 @@ Open your account menu (top right), then **Report a problem**:
    - `hatchabot doctor` (machine owner);
    - failures from the last three days;
    - for an agent, its state, model and last log lines.
-3. **Read it through.** It becomes a **public** issue. Keys, file paths, IP
-   addresses, Tailscale names, email addresses, your username and the
-   machine's name are masked. Anything you or the agent wrote is not, so edit
-   it right there.
+3. **Read it through.** It becomes a **public** issue. Keys (and any
+   setting named like a password, token or key, however short), file paths,
+   IP addresses, Tailscale names, email addresses, your username, the names
+   of your agents, their members and your machines are masked, in your edits
+   too. Anything else you or the agent wrote is not, so edit it right there.
 4. **Open on GitHub** opens the issue form, filled in, in a new tab. You
    press Submit there, with your own GitHub account. A report too long for a
    link is also saved as a file: drag it into the issue.
