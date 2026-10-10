@@ -64,6 +64,8 @@ jobs:
           [ "sha256:$(sha256sum /tmp/image/runtime-index.json | cut -d' ' -f1)" = "$INDEX" ] || { echo "runtime-index.json is not $INDEX" >&2; exit 1; }
           L=/tmp/layout; mkdir -p "$L"
           for a in amd64 arm64; do tar -xf "/tmp/image/runtime-$a.tar" -C "$L"; rm -f "/tmp/image/runtime-$a.tar"; done
+          # buildkit writes the archive's files read-only: writable, then the top two replaced.
+          chmod -R u+w "$L"; rm -f "$L/oci-layout" "$L/index.json"
           cp /tmp/image/runtime-index.json "$L/blobs/sha256/${INDEX#sha256:}"
           printf '{"imageLayoutVersion":"1.0.0"}' > "$L/oci-layout"
           printf '{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"%s","size":%s,"annotations":{"org.opencontainers.image.ref.name":"image"}}]}' \
