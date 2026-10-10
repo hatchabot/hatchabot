@@ -1,0 +1,9 @@
+# The maintainer's git identities: already public as the author of commits
+# on main, and accepted as public. Not findings as a commit's author or
+# committer, or in a Co-authored-by/Signed-off-by trailer (a squash merge on
+# GitHub adds one); anywhere else in a change they are checked as usual.
+# A line counts only while a commit on main already carries that exact
+# identity, so adding one here cannot allow a private name
+# (scripts/privacy-ci.mjs; docs/releasing.md, "The privacy check").
+# One per line: Name <email>
+Christopher Krueger <ckscijdtest@gmail.com>

@@ -139,6 +139,9 @@ management agent stays pinned and moves last.
    test starts from a fresh database, where `CREATE TABLE` runs in full). CI
    runs it too. `npx tsx scripts/schema-drift.ts` does the same against a live
    install's database.
+   Then **`node scripts/privacy-check.mjs --sync-ci`**: GitHub's copy of
+   the privacy fingerprints, current before the release's commits and notes
+   reach it (the daily timer does it too; below).
 2. Bump `version` in `package.json` and finish the CHANGELOG section
    (`## [X.Y.Z] — YYYY-MM-DD`).
    **Does it change how containers are made** (docker run flags, mounts,
@@ -186,6 +189,12 @@ A pattern scanner cannot do this: a real agent's name is just words.
   all it warns and lets the push through; an install it can only partly read
   (an env file but no database, say) blocks the push.
 - **Every release note**, with `--text` (step 4 above).
+- **Every pull request and push to `main`, on GitHub**: CI's `privacy` job
+  (below) — whoever or whatever wrote the change, on any machine or on
+  GitHub's own pages. With `main` behind pull requests it is a required
+  check.
+- **Every day, on GitHub**: the `Privacy watch` workflow reads what is
+  published beside the code (below).
 - **Every promote**: the `privacy` live test (`--public --check-hook`) reads
   everything GitHub serves, so a push from another machine, a web edit or a
   merged pull request is caught before `stable` moves; it also fails when the
@@ -202,9 +211,62 @@ Each run ends in one of three results, and says which:
 Every result also says what is **not covered**: binary files and images (no
 OCR), and, with `--no-machine` or no `tailscale` command, this machine's
 names. `--public` always prints how many accepted historical commits it left
-out (below). The clone's own git identity (`user.name`, `user.email`) is not
-a finding as an author or committer — it is on every commit by choice — but
-the same value in a file or message is.
+out (below). The clone's own git identity (`user.name`, `user.email`) and
+the identities in `scripts/privacy-identity.txt` (the maintainer's author
+name and addresses, already public on every commit) are not findings as an
+author or committer or in a `Co-authored-by`/`Signed-off-by` trailer — a
+squash merge on GitHub adds one — but the same value in a file or anywhere
+else in a message is. A line of that file counts only while a commit on
+`main` already carries that exact identity, so adding a line cannot allow a
+private name.
+
+### On GitHub: keyed fingerprints
+
+GitHub never gets the private values. What it holds, in the repository
+secret `PRIVACY_FINGERPRINTS`, is a **keyed fingerprint** of each:
+HMAC-SHA256 over the value's words, with a key made once on this machine
+(`~/.config/hatchabot/privacy-ci.key`, 0600), plus that key, each
+fingerprint's kind (agent name, email, …) and the word counts to try. A
+fingerprint cannot be turned back into a name, but anyone with the whole
+secret can test guesses against it, so it is kept as a secret.
+
+- **`node scripts/privacy-check.mjs --sync-ci`** makes the set from this
+  install and sets the secret with `gh secret set` (the value on stdin,
+  never in a command line; it prints counts only). It refuses, exit 3, an
+  install it cannot fully read — the same rule as the hook.
+  `--export-digests --out <file>` writes the same set to a 0600 file.
+- **Daily**: `scripts/privacy-sync.sh --install` (Linux, a systemd user
+  timer) runs it once a day, so a new agent's name is covered within a day;
+  `scripts/privacy-sync.sh --uninstall` stops it. On a Mac there is no
+  timer: run the command after adding an agent or a person, and before each
+  release (step 1 above).
+- **CI's `privacy` job** (`.github/workflows/ci.yml`, `scripts/privacy-ci.mjs`)
+  splits into words — letters and digits, with `. @ - _` kept inside a word,
+  and each joined word's parts tried as well (so a slug inside a file name
+  is found) — every added line of a pull request (`base...head`) or a push
+  to `main` (`before..after`), every changed file's path, each commit's
+  message, author and committer, and the pull request's title, body and
+  branch name; it fingerprints every run of words of a length some value has
+  and fails on a match. A hit prints the kind, a masked hint (`'Ma…(16)'`)
+  and where — `file:line`, `commit message <sha>`, `PR body` — never the
+  value. Names keep their case as here; slugs, emails, machine names and ids
+  match in any case. The scanner is taken from the base commit, so a change
+  cannot loosen the check it is judged by.
+- **`Privacy watch`** (`.github/workflows/privacy-watch.yml`, daily and by
+  hand) reads the last two days of issues, pull request titles and bodies,
+  issue comments, review comments and release notes with a read-only token,
+  and fails on a match; GitHub then emails the owner.
+- **No secret is a failure**, never a pass (exit 3): a pull request from a
+  fork gets no secrets, so its `privacy` check fails until the maintainer
+  re-makes it on a branch here. A garbled secret, or a range that is not in
+  the checkout, is exit 3 too.
+
+What it cannot catch: a private value the install has no record of (a
+person mentioned only in conversation, say); a paraphrase or a misspelling;
+a name broken across two lines (text is read a line at a time); images and
+other binary files; review summaries, discussions and the wiki; anything the
+watch's two days have passed. The rule in `AGENTS.md` — examples come from
+the invented household — stays the first line of defence.
 
 A hit: replace the value with a made-up one — examples come from the invented
 household in `docs/deck/shot-data.mjs`. A generic word that is only by chance

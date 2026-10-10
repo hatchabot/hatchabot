@@ -69,7 +69,8 @@ key that expired), not a bug. Say which it is.
   including the names of anyone's agents. Examples and fixtures come from
   the invented household in `docs/deck/shot-data.mjs`. The privacy check
   (`scripts/privacy-check.mjs`, docs/releasing.md) enforces it on push, on
-  release notes and before promoting; never `git push --tags`.
+  release notes and before promoting; never `git push --tags`. CI requires
+  it too: its `privacy` job fails a pull request or push that names one.
 - **Keep the knowledge pack true.** A fix for a problem users can hit gets a
   `docs/troubleshooting.md` entry, and moved code updates
   `docs/architecture-map.md`. `test/knowledgePack.test.ts` fails when either

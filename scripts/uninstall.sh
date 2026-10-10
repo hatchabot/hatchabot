@@ -225,6 +225,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
 else
   for unit in hatchabot.service hatchabot-backup.timer hatchabot-backup.service hatchabot-mgmt-bot.service \
               hatchabot-follow-channel.timer hatchabot-follow-channel.service hatchabot-follow-latest.timer hatchabot-follow-latest.service \
+              hatchabot-privacy-sync.timer hatchabot-privacy-sync.service \
               agentclaw.service agentclaw-backup.timer agentclaw-backup.service; do
     if systemctl --user list-unit-files "$unit" >/dev/null 2>&1 && [ -f "$HOME/.config/systemd/user/$unit" ]; then
       systemctl --user disable --now "$unit" >/dev/null 2>&1

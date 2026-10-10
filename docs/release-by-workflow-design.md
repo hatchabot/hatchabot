@@ -33,7 +33,7 @@ build — even a re-run of an old one — moves `:latest`.
 
 - Work goes on a branch; `gh pr create --fill && gh pr merge --auto --rebase`.
   The PR merges itself when the required checks pass (`test`, `ui`,
-  `secrets`, `upgrade` — about ten minutes). No human approval is required
+  `secrets`, `upgrade`, `privacy` — about ten minutes). No human approval is required
   (one maintainer); history stays linear.
 - A ruleset on `main`: pull request required (0 approvals), those checks
   required, linear history; force-push and deletion stay refused. The
@@ -68,8 +68,9 @@ A failure leaves a draft and no tag movement; the workflow can be re-run.
 A ruleset lets only this workflow create `v*` tags (the existing rules
 already refuse moving or deleting them).
 
-The household privacy check needs this machine's private values, so it
-cannot run on GitHub: `hbt release` runs `privacy-check.mjs --text` on the
+The household privacy check's values stay on this machine; GitHub checks
+their keyed fingerprints (section 5). `hbt release` syncs them
+(`privacy-check.mjs --sync-ci`) and runs `privacy-check.mjs --text` on the
 notes before starting the workflow, and the `privacy` live test checks the
 published release before any promote, as today.
 

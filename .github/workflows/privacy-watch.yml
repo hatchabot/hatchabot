@@ -1,0 +1,35 @@
+name: Privacy watch
+
+# What GitHub publishes beside the code — issues, pull request titles and
+# bodies, comments, review comments, release notes — never passes a push
+# check. Once a day this looks at what changed in the last two days with the
+# same keyed fingerprints as CI's `privacy` job (scripts/privacy-ci.mjs,
+# docs/releasing.md "The privacy check"). A hit fails the run, and GitHub
+# emails the owner; the log shows a masked hint and where, never the value.
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+# Read-only: it reads issues, pull requests and releases, and changes nothing.
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: the last two days of issues, comments, pull requests and release notes
+        env:
+          PRIVACY_FINGERPRINTS: ${{ secrets.PRIVACY_FINGERPRINTS }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/privacy-ci.mjs --watch --days 2

@@ -16,13 +16,23 @@
  *   node scripts/privacy-check.mjs --pre-push <remote> <url>   # the hook: stdin is git's pre-push lines
  *   node scripts/privacy-check.mjs --text <file>...   # e.g. release notes, before `gh release create`
  *   node scripts/privacy-check.mjs --public [--check-hook]   # everything GitHub serves (the `privacy` live test)
+ *   node scripts/privacy-check.mjs --sync-ci [--repo owner/name]   # GitHub's keyed fingerprints (scripts/privacy-ci.mjs)
+ *   node scripts/privacy-check.mjs --export-digests [--out <file>] # the same fingerprints, to a file
  *
  * Options: --db <hatchabot.sqlite>, --env <file> (repeatable), --no-machine
  * (skip this machine's host, tailnet and IP values; for tests), --repo
  * <owner/name> (the GitHub repository, when origin's URL does not say),
  * --accepted-history <commit> (the accepted base; for tests).
  * Generic words that happen to be agent names ("Test", "Laptop runner") are
- * in scripts/privacy-ignore.txt.
+ * in scripts/privacy-ignore.txt. The owner's own author identities, already
+ * public on every commit, are in scripts/privacy-identity.txt: not findings as
+ * author, committer or in a Co-authored-by trailer (a squash merge adds one).
+ *
+ * GitHub cannot read these values, so CI checks keyed fingerprints of them
+ * instead (2026-10-10): --sync-ci sends HMAC-SHA256(key, the value's words)
+ * of each, with the key, as the PRIVACY_FINGERPRINTS secret, and
+ * scripts/privacy-ci.mjs looks up the words of every pull request and push.
+ * The key is made once and kept in ~/.config/hatchabot/privacy-ci.key (0600).
  *
  * Exit 0: clean (of what it says it checked); 1: found something; 2: usage;
  * 3: incomplete — something it needed could not be read (the database, an
@@ -35,11 +45,13 @@
  * cannot see; an install it can only partly read blocks the push.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync } from 'node:fs';
 import { homedir, hostname, networkInterfaces, tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { IDENTITY_FILE, SECRET_NAME, allowedIdentities, buildFingerprints, publishedIdentities, withoutAllowedLines, withoutOwnTrailers } from './privacy-ci.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -202,6 +214,24 @@ function ownIdentity(cwd) {
 }
 const withoutOwn = (ms, own) => ms.filter((m) => !own.has(m.low));
 
+/**
+ * The identities that are not findings where git puts one (author, committer,
+ * a Co-authored-by or Signed-off-by trailer): the clone's own, and the lines
+ * of scripts/privacy-identity.txt (as `fileRev` has it) that a commit on
+ * `revs` already carries as its author or committer. A squash merge on GitHub
+ * puts the owner's address in a Co-authored-by trailer, and the hook and
+ * --public flagged it (2026-10-10). → { pairs, names, emails, low } (`low`:
+ * lowercased names and emails, for withoutOwn).
+ */
+function allowedHere(cwd, revs, fileRev) {
+  const file = git(cwd, 'show', `${fileRev}:${IDENTITY_FILE}`);
+  const a = allowedIdentities(file.status === 0 ? file.stdout : '', publishedIdentities(cwd, revs));
+  const name = git(cwd, 'config', '--get', 'user.name').stdout.trim(), email = git(cwd, 'config', '--get', 'user.email').stdout.trim().toLowerCase();
+  if (name) a.names.add(name);
+  if (email) a.emails.add(email);
+  return { ...a, low: new Set([...ownIdentity(cwd), ...[...a.names].map((n) => n.toLowerCase()), ...a.emails]) };
+}
+
 // ---- git helpers ---------------------------------------------------------------
 const git = (cwd, ...a) => spawnSync('git', ['-C', cwd, ...a], { encoding: 'utf8', maxBuffer: 1 << 30 });
 /** Contents of many objects at once: [{ id, type, data }]. */
@@ -337,7 +367,8 @@ function prePush() {
     return CLEAN;
   }
   const { ms } = loaded;
-  const people = withoutOwn(ms, ownIdentity(cwd));
+  const allowed = allowedHere(cwd, [`--remotes=${remote}`], 'HEAD');
+  const people = withoutOwn(ms, allowed.low);
   const hits = [];
   // The names being published, not only what is in them (#41).
   for (const r of refs) hits.push(...scan(r, 'ref name', ms));
@@ -346,7 +377,7 @@ function prePush() {
     const short = c.slice(0, 7);
     const show = git(cwd, 'show', '--format=%B%x00', '--unified=0', '--no-color', '--no-ext-diff', c).stdout;
     const [msg, diff = ''] = show.split('\0');
-    hits.push(...scan(msg, `commit ${short} message`, ms));
+    hits.push(...scan(withoutOwnTrailers(msg, allowed), `commit ${short} message`, ms));
     hits.push(...scan(git(cwd, 'show', '-s', '--format=%an%n%ae%n%cn%n%ce', c).stdout, `commit ${short} author/committer`, people));
     for (const f of git(cwd, 'show', '--format=', '--name-only', '--no-renames', '--diff-filter=d', c).stdout.split('\n').filter(Boolean)) hits.push(...scan(f, `file name (commit ${short})`, ms));
     let file = '?', line = 0;
@@ -355,7 +386,11 @@ function prePush() {
       if (/^Binary files .* differ$/.test(l)) { binary++; continue; }
       const h = /^@@ -\S+ \+(\d+)/.exec(l);
       if (h) { line = Number(h[1]); continue; }
-      if (l.startsWith('+')) { for (const x of scan(l.slice(1), `${file} (commit ${short})`, ms)) hits.push({ ...x, line }); line++; }
+      if (l.startsWith('+')) {
+        const added = file === IDENTITY_FILE ? withoutAllowedLines(l.slice(1), allowed) : l.slice(1);
+        for (const x of scan(added, `${file} (commit ${short})`, ms)) hits.push({ ...x, line });
+        line++;
+      }
     }
   }
   for (const t of catBatch(cwd, annotated)) {
@@ -425,7 +460,9 @@ function publicScan() {
       return INCOMPLETE;
     }
     const hits = [];
-    const people = withoutOwn(ms, ownIdentity(ROOT));
+    const allowed = allowedHere(mirror, ['refs/heads/main'], 'refs/heads/main');
+    for (const v of ownIdentity(ROOT)) allowed.low.add(v);
+    const people = withoutOwn(ms, allowed.low);
     // Tags: none from before 1.0, none off main.
     const tagLines = git(mirror, 'for-each-ref', 'refs/tags', '--format=%(refname:short) %(*objectname)%(objectname)').stdout.split('\n').filter(Boolean);
     const tags = tagLines.map((l) => { const [name, ids] = l.split(' '); return { name, commit: ids.slice(0, 40) }; });
@@ -450,9 +487,10 @@ function publicScan() {
       if (b.type !== 'blob') continue;
       if (!isText(b.data)) { binary++; continue; }
       files++;
-      hits.push(...scan(b.data.toString(), `${paths.get(b.id) ?? b.id.slice(0, 7)} (${b.id.slice(0, 7)})`, ms));
+      const body = paths.get(b.id) === IDENTITY_FILE ? withoutAllowedLines(b.data.toString(), allowed) : b.data.toString();
+      hits.push(...scan(body, `${paths.get(b.id) ?? b.id.slice(0, 7)} (${b.id.slice(0, 7)})`, ms));
     }
-    hits.push(...scan(git(mirror, 'log', '--all', '--format=%B', ...base).stdout, 'commit messages', ms));
+    hits.push(...scan(withoutOwnTrailers(git(mirror, 'log', '--all', '--format=%B', ...base).stdout, allowed), 'commit messages', ms));
     hits.push(...scan(git(mirror, 'log', '--all', '--format=%an%n%ae%n%cn%n%ce', ...base).stdout, 'commit authors/committers', people));
     const newTags = tags.filter((t) => !haveBase || git(mirror, 'merge-base', '--is-ancestor', t.commit, accepted).status !== 0).map((t) => `refs/tags/${t.name}`);
     if (newTags.length) {
@@ -492,6 +530,86 @@ function publicScan() {
   } finally { rmSync(work, { recursive: true, force: true }); }
 }
 
+// ---- GitHub's copy: keyed fingerprints (scripts/privacy-ci.mjs) ---------------------
+/** GitHub's limit for one secret. */
+const SECRET_MAX = 48 * 1024;
+export const keyFile = () => join(homedir(), '.config', 'hatchabot', 'privacy-ci.key');
+
+/** The fingerprint key: 32 random bytes, made once, 0600. A garbled file is said, not replaced. */
+function ciKey() {
+  const f = keyFile();
+  if (existsSync(f)) {
+    const k = Buffer.from(readFileSync(f, 'utf8').trim(), 'base64url');
+    if (k.length !== 32) throw new Error(`${f} is not a 32-byte key — remove it to make a new one`);
+    chmodSync(f, 0o600);
+    return k;
+  }
+  mkdirSync(dirname(f), { recursive: true, mode: 0o700 });
+  const k = randomBytes(32);
+  writeFileSync(f, k.toString('base64url') + '\n', { mode: 0o600 });
+  chmodSync(f, 0o600);
+  return k;
+}
+
+/**
+ * The fingerprint blob for this install, or why not. An install it cannot
+ * fully read is refused (load's rules), as the hook does: half the values
+ * would let the other half through on GitHub.
+ */
+function exportBlob() {
+  const loaded = load();
+  if (!loaded) return { why: 'no Hatchabot install here to read private values from' };
+  if (loaded.gaps.length) return { why: 'this install could not be fully read', loaded };
+  let key;
+  try { key = ciKey(); } catch (e) { return { why: e.message, loaded }; }
+  // The same case rule as the local matchers: a value matched in any case goes in `lower`.
+  const blob = buildFingerprints(loaded.ms.map((m) => ({ value: m.value, cat: m.cat, caseless: m.re.flags.includes('i') })), key);
+  return { blob, json: JSON.stringify(blob), loaded };
+}
+const blobSummary = (b, json) => {
+  const kinds = {};
+  for (const l of Object.values(b.cats)) kinds[l] = (kinds[l] ?? 0) + 1;
+  return `${b.exact.length + b.lower.length} fingerprints (${b.exact.length} as written, ${b.lower.length} in any case; ${Object.entries(kinds).sort().map(([k, n]) => `${k}=${n}`).join(' ')}), word lengths ${b.lengths.join(',')}, ${Math.ceil(Buffer.byteLength(json) / 1024)} KB`;
+};
+function refuseExport(r, say) {
+  say(`✗ privacy fingerprints: not made — ${r.why}`);
+  if (r.loaded) coverage(say, r.loaded);
+  return INCOMPLETE;
+}
+
+/** --export-digests [--out file]: the blob, to a 0600 file or a pipe (never a terminal). */
+function exportDigests() {
+  const out = opt('--out');
+  if (!out && process.stdout.isTTY) { console.error('usage: privacy-check.mjs --export-digests --out <file> (or into a pipe): the output is a secret'); return USAGE; }
+  const r = exportBlob();
+  if (!r.blob) return refuseExport(r, console.error);
+  if (out) { writeFileSync(out, r.json + '\n', { mode: 0o600 }); chmodSync(out, 0o600); } else process.stdout.write(r.json + '\n');
+  console.error(`✓ privacy fingerprints: ${blobSummary(r.blob, r.json)}`);
+  return CLEAN;
+}
+
+/**
+ * --sync-ci: the blob as the repository's PRIVACY_FINGERPRINTS secret. It goes
+ * to `gh secret set` on stdin — never in its arguments, where any process on
+ * the machine could read it — and only counts are printed.
+ */
+function syncCi() {
+  const r = exportBlob();
+  if (!r.blob) return refuseExport(r, console.log);
+  const url = git(ROOT, 'remote', 'get-url', 'origin').stdout.trim();
+  const repo = opt('--repo') || /github\.com[:/](.+?)(?:\.git)?$/.exec(url)?.[1];
+  if (!repo) { console.log(`✗ privacy fingerprints: not sent — ${url || 'origin'} is not a GitHub address (pass --repo <owner/name>)`); return USAGE; }
+  if (Buffer.byteLength(r.json) > SECRET_MAX) { console.log(`✗ privacy fingerprints: not sent — ${Math.ceil(Buffer.byteLength(r.json) / 1024)} KB is over GitHub's 48 KB for a secret`); return FOUND; }
+  const set = spawnSync('gh', ['secret', 'set', SECRET_NAME, '--repo', repo], { input: r.json, encoding: 'utf8' });
+  if (set.error || set.status !== 0) {
+    console.log(`✗ privacy fingerprints: not sent — gh secret set failed (${(set.stderr || String(set.error?.message ?? '')).trim().split('\n')[0] || `exit ${set.status}`})`);
+    return FOUND;
+  }
+  console.log(`✓ ${SECRET_NAME} set on ${repo}: ${blobSummary(r.blob, r.json)}`);
+  coverage(console.log, r.loaded);
+  return CLEAN;
+}
+
 function installHook() {
   const dir = join(git(ROOT, 'rev-parse', '--git-common-dir').stdout.trim().replace(/^(?!\/)/, ROOT + '/'), 'hooks');
   const file = join(dir, 'pre-push');
@@ -511,7 +629,8 @@ function checkHook() {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const code = has('--install-hook') ? installHook() : has('--pre-push') ? prePush() : has('--text') ? text() : has('--public') ? publicScan()
+    : has('--sync-ci') ? syncCi() : has('--export-digests') ? exportDigests()
     : has('--check-hook') ? checkHook()
-    : (console.error('usage: privacy-check.mjs --install-hook | --check-hook | --pre-push <remote> <url> | --text <file>... | --public [--check-hook]'), USAGE);
+    : (console.error('usage: privacy-check.mjs --install-hook | --check-hook | --pre-push <remote> <url> | --text <file>... | --public [--check-hook] | --sync-ci [--repo owner/name] | --export-digests [--out file]'), USAGE);
   process.exitCode = code;
 }

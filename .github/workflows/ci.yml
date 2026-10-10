@@ -92,6 +92,35 @@ jobs:
           # and keeps its fixtures quiet only where they live (#42, 2026-10-09).
           bash scripts/gitleaks-regression.sh ./gitleaks
 
+  # The household privacy check, on GitHub (2026-10-10): what a pull request
+  # or push to main adds — lines, file names, commit messages and authors, the
+  # pull request's title, body and branch — looked up against keyed
+  # fingerprints of the owner's private values (PRIVACY_FINGERPRINTS, synced
+  # daily from the owner's machine; the values themselves never leave it).
+  # Text written on another machine or on GitHub never passes the owner's
+  # pre-push hook; this catches it. No secret (a fork's pull request) is a
+  # failure, not a pass. The scanner comes from the base commit when it has
+  # one, so a change cannot loosen the check it is judged by.
+  privacy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0     # the whole range, and who authored main's commits
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: household privacy check (keyed fingerprints)
+        env:
+          PRIVACY_FINGERPRINTS: ${{ secrets.PRIVACY_FINGERPRINTS }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          SCANNER="$RUNNER_TEMP/privacy-ci.mjs"
+          if [ -n "$BASE" ] && git show "$BASE:scripts/privacy-ci.mjs" > "$SCANNER" 2>/dev/null; then echo "scanner: from $BASE"; else cp scripts/privacy-ci.mjs "$SCANNER"; echo "scanner: from this change (the base has none)"; fi
+          node "$SCANNER" --dir "$GITHUB_WORKSPACE"
+
   upgrade:
     runs-on: ubuntu-latest
     timeout-minutes: 10

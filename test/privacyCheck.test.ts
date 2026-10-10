@@ -190,6 +190,23 @@ describe('names, refs and identities, not only contents (audit issue #41)', () =
     const inFile = run(['--pre-push', 'origin', 'x'], commit('b.md', 'mail someone@example.org\n'));
     expect(inFile.status).toBe(1);
   });
+
+  it('the owner\'s identity (scripts/privacy-identity.txt, already an author on the remote) is not a finding in a Co-authored-by trailer; others are (2026-10-10)', () => {
+    // A commit by the owner is already on origin, so their identity is public there.
+    writeFileSync(join(repo, 'a.md'), 'a\n'); sh('add', 'a.md');
+    sh('-c', 'user.name=Quillon Varga', '-c', 'user.email=someone@example.org', 'commit', '-qm', 'by the owner', '--author', 'Quillon Varga <someone@example.org>');
+    sh('push', '-q', 'origin', 'main');
+    mkdirSync(join(repo, 'scripts'));
+    writeFileSync(join(repo, 'scripts', 'privacy-identity.txt'), '# the maintainer\nQuillon Varga <someone@example.org>\n'); sh('add', 'scripts/privacy-identity.txt');
+    sh('commit', '-qm', 'Fix a thing (#1)\n\n---------\n\nCo-authored-by: Quillon Varga <someone@example.org>\n');
+    const ok = run(['--pre-push', 'origin', 'x'], `refs/heads/main ${sh('rev-parse', 'HEAD')} refs/heads/main ${'0'.repeat(40)}\n`);
+    expect(ok.status, ok.stderr).toBe(0);
+    sh('push', '-q', 'origin', 'main');
+    // Not named in the file, or not yet an author on the remote: still a finding.
+    writeFileSync(join(repo, 'b.md'), 'b\n'); sh('add', 'b.md');
+    sh('commit', '-qm', 'Fix (#2)\n\nCo-authored-by: Mapleford Helper <helper@example.org>\n');
+    expect(run(['--pre-push', 'origin', 'x'], `refs/heads/main ${sh('rev-parse', 'HEAD')} refs/heads/main ${'0'.repeat(40)}\n`).stderr).toContain('message');
+  });
 });
 
 /**
@@ -216,6 +233,7 @@ describe('--public and the hook check (audit issues #40, #41)', () => {
     work = join(dir, 'work'); bin = join(dir, 'bin');
     mkdirSync(join(work, 'scripts'), { recursive: true }); mkdirSync(bin);
     copyFileSync(join(REPO_ROOT, 'scripts', 'privacy-check.mjs'), join(work, 'scripts', 'privacy-check.mjs'));
+    copyFileSync(join(REPO_ROOT, 'scripts', 'privacy-ci.mjs'), join(work, 'scripts', 'privacy-ci.mjs'));
     copyFileSync(join(REPO_ROOT, 'scripts', 'privacy-ignore.txt'), join(work, 'scripts', 'privacy-ignore.txt'));
     symlinkSync(join(REPO_ROOT, 'node_modules'), join(work, 'node_modules'));
     writeFileSync(join(work, '.gitignore'), 'node_modules\nscripts\n'); // the copy names the made-up household's values in its comments
@@ -270,6 +288,23 @@ describe('--public and the hook check (audit issues #40, #41)', () => {
     const named = publicRun({}, ['--accepted-history', g('rev-parse', 'HEAD~1')]);
     expect(named.status).toBe(1);
     expect(named.stdout).toContain('file/folder names');
+  });
+
+  it('the owner\'s identity in a squash merge\'s Co-authored-by trailer is not a finding (2026-10-10)', () => {
+    // The owner authors main's history; the identity file names them; their address is a private value.
+    const d = new Database(db); d.prepare('insert into accounts values (?, ?)').run('owner@example.org', null); d.close();
+    const owner = ['-c', 'user.name=Ada Owner', '-c', 'user.email=owner@example.org'];
+    writeFileSync(join(work, 'a.md'), 'a\n'); g('add', 'a.md'); g(...owner, 'commit', '-qm', 'by the owner');
+    writeFileSync(join(work, 'scripts', 'privacy-identity.txt'), '# the maintainer\nAda Owner <owner@example.org>\n');
+    g('add', '-f', 'scripts/privacy-identity.txt');
+    const squash = 'Fix a thing (#1)\n\n* one\n\n---------\n\nCo-authored-by: Ada Owner <owner@example.org>\n';
+    g(...owner, 'commit', '-qm', squash); g('push', '-q', 'origin', 'main');
+    const r = publicRun();
+    expect(r.status, r.stdout).toBe(0);
+    // Someone the file does not name, in the same trailer, still is.
+    writeFileSync(join(work, 'b.md'), 'b\n'); g('add', 'b.md');
+    g(...owner, 'commit', '-qm', 'Fix (#2)\n\nCo-authored-by: Quillon Varga <q@example.org>\n'); g('push', '-q', 'origin', 'main');
+    expect(publicRun().stdout).toContain('commit messages');
   });
 
   it('--check-hook: not installed, installed, and through a core.hooksPath that hands on to it', () => {
