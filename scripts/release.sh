@@ -45,7 +45,7 @@ AHEAD="$(git rev-list --count origin/main..HEAD)"; BEHIND="$(git rev-list --coun
   || die "Local main is not origin/main ($AHEAD commits ahead, $BEHIND behind) — land the version commit (scripts/land.sh) or pull first."
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
-OUT="$(bash scripts/release-check.sh "$VERSION" ${COMMIT:+--commit "$COMMIT"} --repo "$SLUG" --notes "$WORK/notes.md" --wait-ci)" || exit 1
+OUT="$(bash scripts/release-check.sh "$VERSION" ${COMMIT:+--commit "$COMMIT"} --repo "$SLUG" --notes "$WORK/notes.md" --wait-ci)" || die "The release check stopped (exit $?) — its reason is above; with none, run scripts/release-check.sh $VERSION by hand."
 val() { printf '%s\n' "$OUT" | sed -n "s/^$1=//p"; }
 SHA="$(val commit)"; TAG="$(val tag)"
 
