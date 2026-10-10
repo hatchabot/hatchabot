@@ -600,12 +600,17 @@ function syncCi() {
   const repo = opt('--repo') || /github\.com[:/](.+?)(?:\.git)?$/.exec(url)?.[1];
   if (!repo) { console.log(`✗ privacy fingerprints: not sent — ${url || 'origin'} is not a GitHub address (pass --repo <owner/name>)`); return USAGE; }
   if (Buffer.byteLength(r.json) > SECRET_MAX) { console.log(`✗ privacy fingerprints: not sent — ${Math.ceil(Buffer.byteLength(r.json) / 1024)} KB is over GitHub's 48 KB for a secret`); return FOUND; }
-  const set = spawnSync('gh', ['secret', 'set', SECRET_NAME, '--repo', repo], { input: r.json, encoding: 'utf8' });
-  if (set.error || set.status !== 0) {
-    console.log(`✗ privacy fingerprints: not sent — gh secret set failed (${(set.stderr || String(set.error?.message ?? '')).trim().split('\n')[0] || `exit ${set.status}`})`);
-    return FOUND;
+  // Twice: for Actions, and for Dependabot — its pull requests get only
+  // Dependabot secrets, so without this their required privacy check could
+  // never pass (2026-10-10).
+  for (const app of ['actions', 'dependabot']) {
+    const set = spawnSync('gh', ['secret', 'set', SECRET_NAME, '--repo', repo, '--app', app], { input: r.json, encoding: 'utf8' });
+    if (set.error || set.status !== 0) {
+      console.log(`✗ privacy fingerprints: not sent to ${app} — gh secret set failed (${(set.stderr || String(set.error?.message ?? '')).trim().split('\n')[0] || `exit ${set.status}`})`);
+      return FOUND;
+    }
   }
-  console.log(`✓ ${SECRET_NAME} set on ${repo}: ${blobSummary(r.blob, r.json)}`);
+  console.log(`✓ ${SECRET_NAME} set on ${repo} (Actions and Dependabot): ${blobSummary(r.blob, r.json)}`);
   coverage(console.log, r.loaded);
   return CLEAN;
 }
