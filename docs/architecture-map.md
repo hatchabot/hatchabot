@@ -308,7 +308,7 @@ from the app takes a snapshot first. Memory search uses embeddings, normally
 from one shared embedder container on each machine (this one, and each runner
 its own since 2.147); switching embedder, or moving machine, means a re-index.
 
-- `src/orchestrator/snapshots.ts` — `CORE_FILES`, `captureSnapshot`, `autoSnapshot`, `restoreSnapshot`, `writeCoreFile`, `resumeSnapshotRestore`, `recoverSnapshotRestore`: snapshots and safe edits of the core files; a restore cut off part-way is held with "Finish" / "Revert to the copy taken before".
+- `src/orchestrator/snapshots.ts` — `CORE_FILES`, `readCoreFile`, `captureSnapshot`, `autoSnapshot`, `restoreSnapshot`, `restoreParamLayer`, `writeCoreFile`, `resumeSnapshotRestore`, `recoverSnapshotRestore`: snapshots and safe edits of the core files; a restore cut off part-way is held with "Finish" / "Revert to the copy taken before".
 - `src/orchestrator/provision.ts` — `checkpointMemory`, `reindexMemoryIfSwitched`, `memoryIndexIncomplete`: saving memory before risky steps; re-indexing.
 - `src/orchestrator/transcript.ts` — `recoverContext`, `contextStats`, `exportTranscript`: recovering context after a reset; chat history download.
 - `src/orchestrator/inspect.ts` — `readInspectableFile`, `readTranscript`: reading an archived agent's files.
