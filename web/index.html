@@ -9389,7 +9389,10 @@ let cronAgentId = null;
 function cronScheduleLabel(c) {
   if (c.scheduleKind === 'cron') return c.scheduleExpr + (c.scheduleTz ? ' · ' + c.scheduleTz : '');
   if (c.scheduleKind === 'every' && c.everyMs) {
-    const m = Math.round(c.everyMs / 60000);
+    // To the second: rounding to minutes showed a 15 s interval as "every 0m"
+    // and 90 s as "every 2m" (#95). The gateway takes seconds (msToEvery).
+    const s = Math.max(1, Math.round(c.everyMs / 1000)), m = Math.floor(s / 60);
+    if (s % 60) return m ? `every ${m}m ${s % 60}s` : `every ${s}s`;
     return m >= 60 && m % 60 === 0 ? `every ${m / 60}h` : `every ${m}m`;
   }
   if (c.scheduleKind === 'at' && c.atMs) return 'once at ' + new Date(c.atMs).toLocaleString();
@@ -9477,6 +9480,9 @@ async function addCronJob() {
   const tz = every ? '' : ($('cronTz').value.trim() || (editing && editing.scheduleExpr ? '' : browserTz));
   if (!name || !message || (every ? !(everyMinutes >= 0.25) : !cron)) { $('cronErr').textContent = every ? 'Name, an interval (≥ 0.25 min), and message are all needed.' : 'Name, cron expression, and message are all needed.'; return; }
   if (cronEditingId && !editing) { $('cronErr').textContent = 'That task is no longer in the list — cancel, and add it again if it is gone.'; return; }
+  // The agent this save is for: another agent's Schedule tab can be opened
+  // while it waits, and its form must not be cleared by this one (#69).
+  const forId = cronAgentId, editId = editing ? editing.id : null;
   $('cronAddBtn').disabled = true; $('cronErr').textContent = '';
   try {
     if (editing) {
@@ -9494,17 +9500,21 @@ async function addCronJob() {
         if (tz && tz !== (editing.scheduleTz || '')) change.tz = tz;
       }
       if (Object.keys(change).length) {
-        await api(`/v1/agents/${cronAgentId}/crons/${encodeURIComponent(editing.id)}`, { method: 'PATCH', body: change });
+        await api(`/v1/agents/${forId}/crons/${encodeURIComponent(editing.id)}`, { method: 'PATCH', body: change });
         toast('Task saved');
       } else toast('Nothing was changed.');
-      cancelCronEdit();
     } else {
-      await api(`/v1/agents/${cronAgentId}/crons`, { method: 'POST', body: every ? { name, everyMinutes, message } : { name, cron, message, tz: tz || undefined } });
+      await api(`/v1/agents/${forId}/crons`, { method: 'POST', body: every ? { name, everyMinutes, message } : { name, cron, message, tz: tz || undefined } });
       toast('Task saved');
     }
-    $('cronName').value = ''; $('cronExpr').value = ''; $('cronMsg').value = '';
+    if (cronAgentId !== forId) return;
+    // The form still holds what was saved (not another task's edit begun since): empty it.
+    if (cronEditingId === editId) {
+      cancelCronEdit();
+      $('cronName').value = ''; $('cronExpr').value = ''; $('cronMsg').value = '';
+    }
     await loadCrons();
-  } catch (e) { $('cronErr').textContent = e.message; }
+  } catch (e) { if (cronAgentId === forId) $('cronErr').textContent = e.message; else toast(e.message, 9000); }
   finally { $('cronAddBtn').disabled = false; }
 }
 /** How a task's runs are going, from the scheduler's own state: a task that
