@@ -1008,6 +1008,73 @@ describe('an app change cut off by a restart (kill at every step)', () => {
     } finally { setStepHookForTests(undefined); await w.f.close(); }
   });
 
+  // #106, #97 (workflow audit, 2026-10-10): the put-back after a failed switch fails too.
+  it('an update whose put-back fails keeps its staging folder, is held for a choice, and never says "unchanged" (#106 #97)', async () => {
+    const w = await world();
+    try {
+      expect((await w.install()).statusCode).toBe(200);
+      const first = w.agrees()!;
+      const config = readFileSync(w.provider.configFile('mock://a1'), 'utf8');
+      commit(w.dir, SECOND);
+      w.provider.failAdd = (n) => n === 'demoapp-tick'; // its task cannot be scheduled…
+      w.provider.breakScript = (s) => (s.startsWith('rc=0;') ? s.replace('ln -sfn', 'false && ln -sfn') : s); // …and `current` will not go back
+      const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: { values: { mailbox: 'other@example.org' } } });
+      w.provider.failAdd = () => false;
+      w.provider.breakScript = (s) => s;
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ held: true, unchanged: false });
+      expect(res.json().error).toMatch(/back failed too.*waits for your choice/s);
+      const op = opOf(w.store);
+      expect(op).toMatchObject({ kind: 'app-update', status: 'held' });
+      expect(op.recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+      // What a recovery needs is still there: the new config, staged again.
+      const to = String(op.params.toSha).slice(0, 12);
+      expect(JSON.parse(readFileSync(join(w.provider.root('mock://a1'), `demoapp/staging/${to}/config.json`), 'utf8')).mailbox).toBe('other@example.org');
+      // Held: nothing else changes the app meanwhile.
+      expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: {} })).statusCode).toBe(409);
+      const back = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'go-back' } });
+      expect(back.json().operation.status).toBe('rolled_back');
+      expect(w.agrees()!.sha).toBe(first.sha);
+      expect(readFileSync(w.provider.configFile('mock://a1'), 'utf8')).toBe(config);
+      expect(w.provider.live('mock://a1').staging).toBe(false);
+    } finally { await w.f.close(); }
+  });
+
+  it('…and "Use the new release" after it gets the new config (#106)', async () => {
+    const w = await world();
+    try {
+      expect((await w.install()).statusCode).toBe(200);
+      commit(w.dir, SECOND);
+      w.provider.failAdd = (n) => n === 'demoapp-tick';
+      w.provider.breakScript = (s) => (s.startsWith('rc=0;') ? s.replace('ln -sfn', 'false && ln -sfn') : s);
+      await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: { values: { mailbox: 'other@example.org' } } });
+      w.provider.failAdd = () => false;
+      w.provider.breakScript = (s) => s;
+      const op = opOf(w.store);
+      const fwd = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'use-new' } });
+      expect(fwd.json().operation.status).toBe('succeeded');
+      expect(w.agrees()!.sha).toBe(op.params.toSha);
+      expect(JSON.parse(readFileSync(w.provider.configFile('mock://a1'), 'utf8')).mailbox).toBe('other@example.org');
+      expect(w.provider.every('demoapp-tick')).toEqual(['5m']);
+    } finally { await w.f.close(); }
+  });
+
+  it('a failure before the switch, or one put back whole, says the running version is unchanged (#97)', async () => {
+    const w = await world();
+    try {
+      expect((await w.install()).statusCode).toBe(200);
+      commit(w.dir, SECOND);
+      w.provider.testCode = 1;
+      const tests = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: {} });
+      expect(tests.json()).toMatchObject({ unchanged: true });
+      w.provider.testCode = 0;
+      w.provider.failAdd = (n) => n === 'demoapp-tick';
+      const tasks = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: {} });
+      expect(tasks.json()).toMatchObject({ unchanged: true });
+      expect(tasks.json().held).toBeUndefined();
+    } finally { await w.f.close(); }
+  });
+
 });
 
 // ---- the workflow audit of 2026-10-10 (issues #73–#121) ----

@@ -250,6 +250,19 @@ export async function releaseManifest(d: InstallDeps, dir: string): Promise<AppM
 const errText = (r: { stdout: string; stderr: string }) => (r.stderr || r.stdout).trim().slice(0, 300);
 
 /**
+ * How a failed install or update left the agent, on its error for the routes
+ * and the page: `unchanged` (nothing live changed, or all of it was put back
+ * and confirmed) or `held` (it could not be put back; the operation waits for
+ * a choice). Neither: it may not be as it was, and the message says what to
+ * check. The page said "the running version is unchanged" either way (#97).
+ */
+export type AppOutcome = { unchanged?: boolean; held?: boolean };
+export function outcome<E>(e: E, o: AppOutcome): E {
+  if (e && typeof e === 'object') Object.assign(e, o);
+  return e;
+}
+
+/**
  * Install or update: unpack the release, stage its config, run its tests
  * against the staged config, then switch: the config and `current` together,
  * then the tasks. Until the switch nothing live changes; a failure in the
@@ -272,6 +285,7 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
   const step = d.step ?? (() => {});
   let switching = false;
   let crashed = false;
+  let keepStaging = false;
   try {
     // 1. the code, and an empty staging folder for its data while it is tested.
     // The same commit as the live one (a change of values only) keeps the live
@@ -344,22 +358,28 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
     // A (simulated) dead process puts nothing back and clears nothing: the
     // restart finds it as it is (appOperations.ts, resumeAppOperation).
     if (e instanceof SimulatedCrash) { crashed = true; throw e; }
-    if (!switching) throw e;
-    // Put the previous release back: its config (when this one was moved in) and `current`.
+    if (!switching) throw outcome(e, { unchanged: true });
+    // Put the previous release back: its config (when this one was moved in; the
+    // new one goes back to staging first, so "Use the new release" still has it)
+    // and `current`.
     const cfgBack = m.config
-      ? `if [ ! -e ${sq(staged)} ]; then if [ -f ${sq(`${staged}.prev`)} ]; then mv -f ${sq(`${staged}.prev`)} ${sq(live)} || rc=1;`
-        + ` elif [ -f ${sq(`${staged}.none`)} ]; then rm -f ${sq(live)} || rc=1; fi; fi; `
+      ? `if [ ! -e ${sq(staged)} ]; then if [ -f ${sq(`${staged}.prev`)} ]; then { cp -p ${sq(live)} ${sq(staged)} && mv -f ${sq(`${staged}.prev`)} ${sq(live)}; } || rc=1;`
+        + ` elif [ -f ${sq(`${staged}.none`)} ]; then { cp -p ${sq(live)} ${sq(staged)} && rm -f ${sq(live)}; } || rc=1; fi; fi; `
       : '';
     const back = await sh(d, `rc=0; ${cfgBack}{ ${pointBack(p, previousLink)}; } || rc=1; exit $rc`)
       .catch((err: unknown) => ({ code: 1, stdout: '', stderr: (err as Error)?.message ?? String(err) }));
     log(back.code === 0 ? 'app.restored' : 'app.restore_failed', { app: m.app, sha: short, previous: previousSha ?? null });
+    // Not put back: the staging folder is what a recovery needs (the config it
+    // replaced, and the new one), so it stays, and the operation is held for the
+    // owner's choice (appOperations.ts). It was deleted all the same (#106).
+    keepStaging = back.code !== 0;
     const said = back.code === 0
       ? (previousSha ? ` ${previousSha} is running as before, with its configuration.` : ' Nothing was left switched on.')
-      : ` Putting ${previousSha ?? 'the agent'} back failed too (${errText(back) || 'no output'}); use Roll back or Update again.`;
+      : ` Putting ${previousSha ?? 'the agent'} back failed too (${errText(back) || 'no output'}). It waits for your choice on its page: use the new release, or go back to the previous one.`;
     if (e instanceof Error) e.message += said;
-    throw e;
+    throw outcome(e, back.code === 0 ? { unchanged: !(e as { tasksUnconfirmed?: boolean })?.tasksUnconfirmed } : { held: true });
   } finally {
-    if (!crashed) await clearStaging(d, m.app, short);
+    if (!crashed && !keepStaging) await clearStaging(d, m.app, short);
   }
 }
 
@@ -467,9 +487,9 @@ export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppMa
   };
   const fail = async (what: string) => {
     const problems = await putBack();
-    return new AppError(`${what} ${problems.length
+    return Object.assign(new AppError(`${what} ${problems.length
       ? `Its scheduled tasks could not be confirmed: ${problems.join('; ')}. Check them with \`openclaw cron list\` in the agent's console (jobs named ${m.app}-…), then Update or Roll back again.`
-      : 'Its tasks are as they were.'}`);
+      : 'Its tasks are as they were.'}`), { tasksUnconfirmed: problems.length > 0 });
   };
 
   const made: string[] = [];
