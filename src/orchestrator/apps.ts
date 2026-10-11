@@ -474,14 +474,22 @@ export async function switchTo(d: InstallDeps, m: AppManifest, sha: string, from
 
 type Job = { id: string; name: string };
 
-/** The agent's jobs named "<app>-…"; throws when the list cannot be read (a sync must know what is there). */
+/**
+ * The agent's jobs named "<app>-…", disabled ones too (`--all`: a disabled app
+ * task was invisible to Update and Stop app and stayed behind, #73); throws
+ * when the list cannot be read (a sync must know what is there). Only the
+ * app's own jobs must be whole: an unnamed job of the agent's own is none of
+ * its business (it blocked every app change, #74).
+ */
 export async function appJobs(d: InstallDeps, app: string): Promise<Job[]> {
-  const list = await d.provider.exec(d.runtimeRef, ['cron', 'list', '--json'], { timeoutMs: 60_000 });
+  const list = await d.provider.exec(d.runtimeRef, ['cron', 'list', '--all', '--json'], { timeoutMs: 60_000 });
   if (list.code !== 0) throw new AppError(`Could not read the agent's scheduled tasks: ${errText(list)}`);
   let jobs: unknown;
   try { jobs = JSON.parse(list.stdout).jobs; } catch { throw new AppError("The agent's scheduled tasks did not read as JSON."); }
-  if (!Array.isArray(jobs) || jobs.some((j) => !j || typeof j.id !== 'string' || typeof j.name !== 'string')) throw new AppError("The agent's scheduled task list is incomplete or malformed. Try again.");
-  return (jobs as Job[]).filter((x) => typeof x?.name === 'string' && x.name.startsWith(`${app}-`));
+  if (!Array.isArray(jobs) || jobs.some((j) => !j || typeof j !== 'object')) throw new AppError("The agent's scheduled task list is incomplete or malformed. Try again.");
+  const mine = (jobs as Array<{ id?: unknown; name?: unknown }>).filter((x) => typeof x.name === 'string' && x.name.startsWith(`${app}-`));
+  if (mine.some((j) => typeof j.id !== 'string')) throw new AppError("The agent's scheduled task list is incomplete or malformed. Try again.");
+  return mine as Job[];
 }
 
 function addArgv(d: InstallDeps, m: AppManifest, t: AppManifest['tasks'][number]): string[] {
@@ -542,7 +550,7 @@ export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppMa
   const fail = async (what: string) => {
     const problems = await putBack();
     return Object.assign(new AppError(`${what} ${problems.length
-      ? `Its scheduled tasks could not be confirmed: ${problems.join('; ')}. Check them with \`openclaw cron list\` in the agent's console (jobs named ${m.app}-…), then Update or Roll back again.`
+      ? `Its scheduled tasks could not be confirmed: ${problems.join('; ')}. Check them with \`openclaw cron list --all\` in the agent's console (jobs named ${m.app}-…), then Update or Roll back again.`
       : 'Its tasks are as they were.'}`), { tasksUnconfirmed: problems.length > 0 });
   };
 

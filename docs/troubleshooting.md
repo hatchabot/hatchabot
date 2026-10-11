@@ -532,6 +532,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/apps.ts` — `mergeConfig`, `installRelease`
 
+### An app task you had turned off stays after Stop app, or runs twice after an Update
+- **Check:** `openclaw cron list --all` in the agent's console shows an `<app>-<task>` job that is disabled (left after Stop app), or one disabled beside an enabled one of the same name after an Update.
+- **Cause:** before v2.160.0 Hatchabot listed the app's tasks without `--all`, so a disabled one was invisible to Update, Roll back and Stop app.
+- **Fix:** upgrade, then Update (or Stop app) again: disabled tasks are listed too and replaced or taken off. On an older version, remove the leftover with `openclaw cron rm <id>`.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/apps.ts` — `appJobs`
+
+### Every app install, update or Stop app says "The agent's scheduled task list is incomplete or malformed"
+- **Check:** `openclaw cron list --all --json` in the agent's console has a job with no `name` (one of the agent's own, not the app's), and the message comes back on every try.
+- **Cause:** before v2.160.0 every job of the agent had to have an id and a name, even ones that have nothing to do with the app.
+- **Fix:** upgrade: only the app's own jobs (`<app>-…`) are checked. On an older version, give the unnamed job a name or remove it.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/apps.ts` — `appJobs`
+
 ### Promoting a newer OpenClaw is refused: "… cannot read the data of agents already on 2026.8 or newer"
 - **Check:** the agents it names run OpenClaw 2026.7 (`hatchabot list`), not 2026.8 or newer.
 - **Cause:** before 2.146.1 the promote check was inverted: it refused moving the fleet UP across 2026.8 over agents still on 2026.7 (the normal path; their volume is healed on rebuild), instead of refusing a move DOWN below 2026.8 over agents already migrated.
