@@ -897,6 +897,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.157.0`
 - **Code:** `web/index.html` — `addPeer`
 
+### A failed move says the copy on the other machine "couldn't be cleaned up", and Start is refused
+- **Check:** the agent's page or Alerts shows a held "Move to …" whose outcome says its copy there could not be removed; `hatchabot ops <agent>` lists the choices `remove-copy` and `copy-removed`; `docker ps` on the other machine may still list the agent's container.
+- **Cause:** the move failed, and the copy it had started on the other machine could not be removed or confirmed stopped (its machine hung or stopped answering). Starting the agent where it was would let two copies answer the same bot. Before v2.160.0 the move was recorded as failed, which is over, so Start and wake were allowed while that copy might still run.
+- **Fix:** choose **Remove the copy on …** once that machine answers; or remove the container there yourself (`docker rm -f` on the agent's container) and choose **I removed the copy on …** — checked when the machine answers, taken at your word when it does not. Either starts it where it was if it was running. From the CLI: `hatchabot ops recover <op-id> remove-copy`.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/moveHost.ts` — `orphanChoices`, `settleOrphan`, `putBack`
+
 ## Backups and restore
 
 ### `hatchabot doctor`: "No backup set in … yet", "Last backup set is N days old", or "… is incomplete"
