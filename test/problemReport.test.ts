@@ -86,6 +86,21 @@ describe('issueUrl', () => {
     expect(body).toContain('### Diagnosis');
     expect(body).toContain('hatchabot-report-a.md');
   });
+
+  it('a cut that falls inside an emoji still makes a link (#159)', () => {
+    // The title's clip at 120 units lands between the halves of a pair.
+    const words = 'ab '.repeat(39) + 'a'; // 118 units
+    const r = buildReport({ title: words + '🙂🙂', whatHappened: '🙂'.repeat(3000), by: 'person' }, { version: 'v1.0.0', install: 'git checkout', platform: 'linux-x64', node: 'v22' }, ctx);
+    expect(r.title).toBe(words + '…');
+    // Every shrink step of a body of emoji, an odd number of units long.
+    for (const extra of ['', 'a']) {
+      const { url, trimmed } = issueUrl(r.title, extra + r.body, { max: 3000 });
+      expect(trimmed).toBe(true);
+      expect(decodeURIComponent(url.split('&body=')[1]!)).toContain('🙂');
+    }
+    // A lone half pasted in is shown as a replacement character, not an error.
+    expect(decodeURIComponent(issueUrl('T', 'broken \uD83D here').url.split('&body=')[1]!)).toBe('broken � here');
+  });
 });
 
 describe('the installed source, read-only', () => {
