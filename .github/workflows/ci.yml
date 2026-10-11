@@ -86,11 +86,21 @@ jobs:
           echo "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb  gl.tgz" | sha256sum -c -
           tar -xzf gl.tgz gitleaks
           FROM="${BASE:-$BEFORE}"
-          if [ -n "$FROM" ] && ! echo "$FROM" | grep -qE '^0+$' && git cat-file -e "$FROM^{commit}" 2>/dev/null; then RANGE="$FROM..$HEAD_SHA"; else RANGE="-1 $HEAD_SHA"; fi
-          ./gitleaks git --log-opts="$RANGE" --config .gitleaks.toml --redact --no-banner --exit-code 1
+          if [ -n "$FROM" ] && ! echo "$FROM" | grep -qE '^0+$' && git cat-file -e "$FROM^{commit}" 2>/dev/null; then RANGE="$FROM..$HEAD_SHA"; else RANGE="-1 $HEAD_SHA"; FROM=""; fi
+          # The config and its regression check come from the base commit, so
+          # a change cannot loosen what it is judged by: a change to them
+          # applies from the next one. A base without them uses this change's.
+          CONFIG="$RUNNER_TEMP/gitleaks.toml"; REGRESSION="$RUNNER_TEMP/gitleaks-regression.sh"
+          if [ -n "$FROM" ] && git show "$FROM:.gitleaks.toml" > "$CONFIG" 2>/dev/null && git show "$FROM:scripts/gitleaks-regression.sh" > "$REGRESSION" 2>/dev/null; then
+            echo "gitleaks config and regression check: from $FROM"
+          else
+            cp .gitleaks.toml "$CONFIG"; cp scripts/gitleaks-regression.sh "$REGRESSION"
+            echo "gitleaks config and regression check: from this change (no base, or the base has none)"
+          fi
+          ./gitleaks git --log-opts="$RANGE" --config "$CONFIG" --redact --no-banner --exit-code 1
           # The config still reports ordinary values whatever they are called,
           # and keeps its fixtures quiet only where they live (#42, 2026-10-09).
-          bash scripts/gitleaks-regression.sh ./gitleaks
+          bash "$REGRESSION" ./gitleaks "$CONFIG"
 
   # The household privacy check, on GitHub (2026-10-10): what a pull request
   # or push to main adds — lines, file names, commit messages and authors, the
