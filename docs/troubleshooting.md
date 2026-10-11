@@ -490,6 +490,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** v2.160.0
 - **Code:** `src/orchestrator/apps.ts` — `installRelease`
 
+### An app update reset the app's settings (mode, filters) to its defaults
+- **Check:** after an Update, `data/config.json` under `~/.openclaw/apps/<app>` in the agent has the manifest's defaults where you had set your own values, and nothing you typed asked for that.
+- **Cause:** before v2.160.0 a config file that could not be read (permissions, a disk error) was taken for no config at all, so the update wrote the defaults over it.
+- **Fix:** upgrade: a config that cannot be read stops the update ("Could not read … in the agent"), with nothing changed. Fix the file's permissions in the agent's console, then Update again. On an older version, set the values again (`hatchabot app update <agent> key=value …`).
+- **Fixed in:** v2.160.0
+- **Code:** `src/orchestrator/apps.ts` — `installRelease`
+
+### After a failed app update the app runs no release at all
+- **Check:** the update failed, and `~/.openclaw/apps/<app>/current` in the agent is gone (`readlink` prints nothing), while the App row still shows a commit.
+- **Cause:** before v2.160.0 a `current` link that could not be read was taken for "nothing installed yet", so a later failure in the same update "put back" no release by removing the link.
+- **Fix:** upgrade: a link that cannot be read stops the update before anything changes ("Could not tell which release of … is live"). To recover on an older version, run Update again, or Roll back.
+- **Fixed in:** v2.160.0
+- **Code:** `src/orchestrator/apps.ts` — `currentLink`
+
 ### Promoting a newer OpenClaw is refused: "… cannot read the data of agents already on 2026.8 or newer"
 - **Check:** the agents it names run OpenClaw 2026.7 (`hatchabot list`), not 2026.8 or newer.
 - **Cause:** before 2.146.1 the promote check was inverted: it refused moving the fleet UP across 2026.8 over agents still on 2026.7 (the normal path; their volume is healed on rebuild), instead of refusing a move DOWN below 2026.8 over agents already migrated.

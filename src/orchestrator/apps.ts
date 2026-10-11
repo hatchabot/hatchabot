@@ -217,9 +217,16 @@ async function sh(d: InstallDeps, script: string, timeoutMs = 60_000) {
   return d.provider.execShell(d.runtimeRef, script, { timeoutMs });
 }
 
-/** Where `current` points now, as the link says it ('' when not installed). */
+/**
+ * Where `current` points now, as the link says it ('' when not installed).
+ * Only a link that is not there is "not installed": one that cannot be read
+ * throws. Read as none, a failed update "put back" no release by removing
+ * `current` (#103).
+ */
 async function currentLink(d: InstallDeps, app: string): Promise<string> {
-  const r = await sh(d, `readlink ${sq(appPaths(app).current)} 2>/dev/null || true`);
+  const c = sq(appPaths(app).current);
+  const r = await sh(d, `if [ -L ${c} ]; then readlink ${c}; elif [ -e ${c} ]; then echo "it is not a link" >&2; exit 1; fi`);
+  if (r.code !== 0) throw new AppError(`Could not tell which release of ${app} is live (${errText(r) || 'no output'}), so nothing was changed. Try again.`);
   return r.stdout.trim();
 }
 const shaOf = (link: string) => /releases\/([0-9a-f]{12,40})$/.exec(link)?.[1];
@@ -283,7 +290,10 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
 
     // 2. the config, staged: the live file is not touched until the switch
     if (m.config) {
-      const read = await sh(d, `cat ${sq(live)} 2>/dev/null || true`);
+      // No file is an empty config; one that cannot be read stops it. Read as
+      // empty, the defaults were written over the owner's settings (#105).
+      const read = await sh(d, `if [ -e ${sq(live)} ]; then cat ${sq(live)}; fi`);
+      if (read.code !== 0) throw new AppError(`Could not read ${live} in the agent (${errText(read) || 'no output'}), so its settings were left as they are. Check it, then try again.`);
       let existing: Record<string, unknown> = {};
       try { existing = read.stdout.trim() ? JSON.parse(read.stdout) : {}; } catch { throw new AppError(`${live} in the agent is not valid JSON; fix or remove it.`); }
       const { config, missing } = mergeConfig(m, d.facts, existing, values);
