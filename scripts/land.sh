@@ -33,6 +33,10 @@ AHEAD="$(git rev-list --count origin/main..HEAD)"
 BEHIND="$(git rev-list --count HEAD..origin/main)"
 [ "$AHEAD" -gt 0 ] || { echo "Nothing to land: main is origin/main."; exit 0; }
 [ "$BEHIND" = 0 ] || die "main moved on by $BEHIND commit(s) — git pull --rebase first, then land."
+# GitHub refuses to rebase-merge a pull request this long ("This branch can't
+# be rebased"), and turns its auto-merge off: 106 commits failed, 53 landed
+# (2026-10-10). Land the first part, then the rest.
+[ "$AHEAD" -le 100 ] || die "$AHEAD commits are more than GitHub rebase-merges at once (100): land the first part (git reset to an earlier commit, land, then cherry-pick the rest)."
 
 if [ "${HATCHABOT_LAND_DIRECT:-}" = 1 ]; then
   git push -q origin main || die "The push was refused." 1
@@ -61,15 +65,22 @@ echo "→ $URL: merges by itself once its checks pass"
 
 END=$(( $(date +%s) + TIMEOUT * 60 ))
 while :; do
-  STATE="$(gh pr view "$URL" --repo "$SLUG" --json state -q .state 2>/dev/null || echo UNKNOWN)"
+  VIEW="$(gh pr view "$URL" --repo "$SLUG" --json state,autoMergeRequest -q '.state + " " + (if .autoMergeRequest then "auto" else "noauto" end)' 2>/dev/null || echo UNKNOWN)"
+  STATE="${VIEW%% *}"
   case "$STATE" in
     MERGED) break ;;
     CLOSED) die "The pull request was closed without merging: $URL" 1 ;;
   esac
   # gh pr checks prints "name<TAB>state<TAB>…" (older gh has no --json here)
   # and exits non-zero while checks are pending: not an error here.
-  FAILED="$({ gh pr checks "$URL" --repo "$SLUG" 2>/dev/null || true; } | awk -F'\t' '$2=="fail"{printf "%s ", $1}')"
+  CHECKS="$({ gh pr checks "$URL" --repo "$SLUG" 2>/dev/null || true; })"
+  FAILED="$(printf '%s\n' "$CHECKS" | awk -F'\t' '$2=="fail"{printf "%s ", $1}')"
   [ -z "$FAILED" ] || die "Check(s) failed: ${FAILED% } — see $URL. Fix, commit, and land again (the pull request stays open)." 1
+  # Every check passed and GitHub dropped the auto-merge (it does when it
+  # cannot merge, e.g. a rebase it refuses): nothing will merge it.
+  if [ "$VIEW" = "OPEN noauto" ] && [ -n "$CHECKS" ] && ! printf '%s\n' "$CHECKS" | awk -F'\t' 'NF>1 && $2!="pass"{bad=1} END{exit !bad}'; then
+    die "Its checks passed but GitHub turned auto-merge off, so it will not merge by itself: see $URL (gh pr merge --rebase says why)." 1
+  fi
   [ "$(date +%s)" -lt "$END" ] || die "Still waiting after $TIMEOUT min: $URL merges by itself when its checks pass." 3
   sleep 20
 done

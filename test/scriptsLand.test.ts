@@ -13,7 +13,7 @@ import { scriptEnv } from './helpers/scriptEnv.js';
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-function world(prState: 'merge' | 'fail' | 'close' = 'merge') {
+function world(prState: 'merge' | 'fail' | 'close' | 'noauto' = 'merge') {
   const root = mkdtempSync(join(tmpdir(), 'hb-land-')); dirs.push(root);
   const bin = join(root, 'bin'); mkdirSync(bin);
   const origin = join(root, 'origin.git');
@@ -28,10 +28,12 @@ case "$1 $2" in
       merge) b=$(git --git-dir="${origin}" for-each-ref --format='%(refname:short)' 'refs/heads/land/*' | head -1)
              [ -n "$b" ] && git --git-dir="${origin}" update-ref refs/heads/main "refs/heads/$b"; echo MERGED ;;
       close) echo CLOSED ;;
-      *) echo OPEN ;;
+      noauto) echo 'OPEN noauto' ;;
+      *) echo 'OPEN auto' ;;
     esac ;;
   # Like gh: exit 8 while checks are still pending.
-  "pr checks") if [ "${prState}" = fail ]; then printf 'test\tpass\t1m\turl\nprivacy\tfail\t8s\turl\n'; exit 1; else printf 'test\tpending\t0\turl\n'; exit 8; fi ;;
+  "pr checks") if [ "${prState}" = noauto ]; then printf 'test\tpass\t1m\turl\nprivacy\tpass\t8s\turl\n'; exit 0; fi
+    if [ "${prState}" = fail ]; then printf 'test\tpass\t1m\turl\nprivacy\tfail\t8s\turl\n'; exit 1; else printf 'test\tpending\t0\turl\n'; exit 8; fi ;;
 esac
 `, { mode: 0o755 });
   const env = scriptEnv(join(root, 'home'), `${bin}:/usr/bin:/bin`, {});
@@ -84,6 +86,23 @@ describe('scripts/land.sh lands commits on main through a pull request', () => {
     const r = w.land();
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('Check(s) failed: privacy');
+  });
+
+  it('checks passed but GitHub turned auto-merge off (a rebase it refuses): says so at once, exit 1', () => {
+    const w = world('noauto');
+    writeFileSync(join(w.work, 'b.txt'), 'two\n'); w.git(w.work, 'add', 'b.txt'); w.git(w.work, 'commit', '-q', '-m', 'Add b');
+    const r = w.land();
+    expect(r.status, r.stderr).toBe(1);
+    expect(r.stderr).toContain('turned auto-merge off');
+  });
+
+  it('more than 100 commits is refused before anything is pushed', () => {
+    const w = world('merge');
+    for (let i = 0; i < 101; i++) w.git(w.work, 'commit', '-q', '--allow-empty', '-m', `c${i}`);
+    const r = w.land();
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('more than GitHub rebase-merges at once');
+    expect(w.ghLog()).toBe('');
   });
 
   it('a closed pull request is exit 1; a main that moved on is refused before pushing anything', () => {
