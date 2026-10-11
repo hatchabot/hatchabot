@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.160.4] — 2026-10-11
+
+### Fixed
+- The clean-install live test waits up to a minute for the service after `hbt upgrade`: asked the moment the upgrade finished, systemd could still say "activating", and an upgrade that had worked was marked failed.
+
+### Changed
+- Fresh screenshots in `docs/deck` (and on hatchabot.com), with the Usage page in outlined sections.
+
 ## [2.160.3] — 2026-10-11
 
 ### Fixed
