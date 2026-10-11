@@ -1,4 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { DROP_CHAT_ACCOUNTS_SCRIPT } from '../src/orchestrator/members.js';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -152,10 +154,40 @@ describe('restoreAgentFromBackup', () => {
     const { store, provider, runtimeRef } = await runningAgent();
     mkdirSync(join(rbase, '2026-08-24'), { recursive: true });
     writeFileSync(join(rbase, '2026-08-24', agentArchiveName(runtimeRef)), 'that-night');
-    const r = await restoreAgentFromBackup({ store, provider, reapply: async () => { throw new Error('its AI source is gone'); } }, 'a1', '2026-08-24');
-    expect(r.undone?.at(-1)).toMatch(/follow at its next rebuild/);
+    const started: string[] = [];
+    const r = await restoreAgentFromBackup({
+      store, provider, reapply: async () => { throw new Error('its AI source is gone'); }, afterStart: (id) => { started.push(id); },
+    }, 'a1', '2026-08-24');
+    expect(r.undone?.at(-1)).toMatch(/its AI source is gone.*Slack and Discord off.*Google accounts are matched.*follows at its next rebuild/s);
     expect(provider.execLog.some(([k, sc]) => k === 'sh-volume' && (sc ?? '').includes('delete tg.accounts[k]'))).toBe(true);
+    // That night's Slack and Discord tokens are turned off too (B023)…
+    expect(provider.execLog.some(([k, sc]) => k === 'sh-volume' && sc === DROP_CHAT_ACCOUNTS_SCRIPT)).toBe(true);
+    // …and what a Start runs (Google accounts matched to today's) ran once it was up.
+    expect(started).toEqual(['a1']);
     expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('that-night');
+  });
+
+  it("the fallback's Slack and Discord script empties both channels' accounts and turns them off (B023)", () => {
+    const home = mkdtempSync(join(tmpdir(), 'acl-chat-'));
+    try {
+      const cfgPath = join(home, 'openclaw.json');
+      writeFileSync(cfgPath, JSON.stringify({
+        channels: {
+          telegram: { enabled: true, accounts: { kitchenbot: { botToken: 'not-a-token' } } },
+          slack: { enabled: true, accounts: { default: { botToken: 'not-a-slack-token', appToken: 'not-an-app-token' } } },
+          discord: { enabled: true, accounts: { default: { token: 'not-a-discord-token' } } },
+        },
+      }));
+      // The script's own body, pointed at the temp file instead of the volume's.
+      const body = DROP_CHAT_ACCOUNTS_SCRIPT.replace(/^node -e '/, '').replace(/'$/, '').replace('/home/node/.openclaw/openclaw.json', cfgPath);
+      execFileSync(process.execPath, ['-e', body], { env: { HOME: home, PATH: '' } });
+      const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+      expect(cfg.channels.slack).toEqual({ enabled: false, accounts: {} });
+      expect(cfg.channels.discord).toEqual({ enabled: false, accounts: {} });
+      expect(cfg.channels.telegram.accounts.kitchenbot).toBeDefined(); // the Telegram script's job, not this one's
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('puts the agent back as it was when even that cannot be done', async () => {

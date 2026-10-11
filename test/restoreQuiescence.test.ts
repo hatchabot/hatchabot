@@ -118,3 +118,76 @@ describe('restore from a backup: the runtime is confirmed down first (issue #21)
     });
   }
 });
+
+describe('a restore cut off by a restart: held stopped only when it is (B021), put back with today\'s settings (B022)', () => {
+  /** Killed after that night's copy went in; a new process; the boot pass. */
+  async function heldRestore(r: Awaited<ReturnType<typeof world>>, beforeBoot?: () => Promise<void>) {
+    setStepHookForTests((_op, k) => { if (k === 'replaced') throw new SimulatedCrash(); });
+    await expect(restoreAgentFromBackup({ store: r.w.store, provider: r.w.provider }, r.id, r.date)).rejects.toBeInstanceOf(SimulatedCrash);
+    setStepHookForTests(undefined); clearBusy(r.id); newBootForTests();
+    await beforeBoot?.();
+    await resumeOperations(r.ctx);
+    return r.w.store.listOperations([r.id])[0]!;
+  }
+
+  it('a stop that does not take is not reported as stopped', async () => {
+    const r = await world();
+    const op = await heldRestore(r, async () => {
+      // Up again before the boot pass, and its stop does nothing.
+      await r.w.provider.start(r.ref);
+      r.w.provider.stop = async () => {};
+    });
+    expect(op.status).toBe('held');
+    expect(op.outcome).toMatch(/could not be confirmed stopped \(it is still running\)/);
+    expect(op.outcome).not.toMatch(/stays stopped/);
+    expect(await r.phase()).toBe('running');
+  });
+
+  it('a stop whose machine does not answer is not reported as stopped, and the record is not set STOPPED', async () => {
+    const r = await world();
+    const op = await heldRestore(r, async () => {
+      r.w.store.setAgentState(r.id, 'RUNNING');
+      r.w.provider.stop = async () => { throw new Error('cannot connect to the docker daemon'); };
+      r.w.provider.status = async () => ({ phase: 'unknown' });
+    });
+    expect(op.status).toBe('held');
+    expect(op.outcome).toMatch(/could not be confirmed stopped \(its machine did not answer/);
+    expect(r.w.store.getAgent(r.id)!.state).toBe('RUNNING');
+  });
+
+  it('Put back the copy from before: today\'s members and bot go over it, and the start hooks run', async () => {
+    const r = await world();
+    const started: string[] = [];
+    r.ctx.afterStart = (id) => { started.push(id); };
+    const op = await heldRestore(r);
+    expect(op.status).toBe('held');
+    // While it was held, a member was removed: the copy from before still lets them in.
+    r.w.store.insertMembership({ id: 'm-sam', agentId: r.id, userId: 'u-sam', role: 'user', displayName: 'Sam', status: 'active', channelUserId: '4242' } as never);
+    r.w.store.revokeMembership(r.id, 'u-sam');
+    const provisions: string[] = [];
+    const prov = r.w.provider.provision.bind(r.w.provider);
+    r.w.provider.provision = async (spec) => { provisions.push(r.volume() ?? ''); return prov(spec); };
+    r.w.provider.execLog.length = 0;
+
+    const after = await recoverOperation(r.ctx, op.id, 'put-back');
+    expect(after.status).toBe('rolled_back');
+    expect(r.volume()).toBe('current-memory');
+    // The current settings went over the copy that was put back…
+    expect(provisions).toEqual(['current-memory']);
+    // …and the removed member was scrubbed from it again.
+    const scrub = r.w.provider.execLog.filter(([k, sc]) => k === 'sh-volume' && (sc ?? '').includes('"id":"4242"'));
+    expect(scrub.length).toBe(1);
+    expect(await r.phase()).toBe('running');
+    expect(started).toEqual([r.id]);
+  });
+
+  it('Put back whose settings cannot be put over it stays held and stopped', async () => {
+    const r = await world();
+    const op = await heldRestore(r);
+    r.w.provider.execResponses.set('sh-volume', { code: 1, stdout: '', stderr: 'disk full' });
+    r.w.provider.provision = async () => { throw new Error('its AI source is gone'); };
+    await expect(recoverOperation(r.ctx, op.id, 'put-back')).rejects.toThrow(/current settings could not be put over it/);
+    expect(r.w.store.getOperation(op.id)!.status).toBe('held');
+    expect(await r.phase()).toBe('stopped');
+  });
+});

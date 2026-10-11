@@ -2987,6 +2987,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         .then(verifyLater);
     } else void verifyLater();
   };
+  /** The same, for an agent something other than Start brought up (a restore), by id. */
+  const startHooksFor = (agentId: string): void => {
+    const a = store.getAgent(agentId);
+    if (a) clearPinsWhenUp(a);
+  };
   // Hibernation: the idle sweep and the Telegram wake poll (hibernate.ts).
   const hibernateDeps: HibernateDeps = {
     store, secrets, providerFor,
@@ -10681,6 +10686,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision },
           agent.id,
         ),
+        // Started again after it: what a Start runs once up — detached Google
+        // accounts come off, web chat and pins follow (B022).
+        afterStart: startHooksFor,
         requestedBy: ownerIdOf(req),
         onOperation,
       }, agent.id, date));
@@ -11113,6 +11121,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return kickRebuild(op.agentId!, { checkpoint: p.checkpoint === true, resume: { opId: op.id, was: (p.was ?? {}) as Agent } });
     },
     appDeps: (agentId) => { const a = store.getAgent(agentId); return a?.runtimeRef ? appDeps(a) : undefined; },
+    afterStart: startHooksFor,
   };
   /** An operation the caller may see: on an agent they own. Members see nothing. */
   const ownedOperation = (req: FastifyRequest, id: string) => {

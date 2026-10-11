@@ -1025,6 +1025,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.1`
 - **Code:** `src/orchestrator/backups.ts` — `confirmStopped`, `recoverBackupRestore`
 
+### A held restore says it "stays stopped", but the agent is still running
+- **Check:** Alerts shows a held "Restore from a backup"; `docker ps` (on its runner, if it lives on one) lists the agent's container running; the trail has `restore.not_stopped`.
+- **Cause:** after a restart cut a restore off, Hatchabot stopped the agent without checking the stop took. A machine that did not answer, or a stop that did nothing, was still recorded as stopped. Before v2.160.0 the outcome said "It stays stopped until you choose" either way.
+- **Fix:** upgrade. The outcome now says when the runtime "could not be confirmed stopped", and the agent is not marked stopped. Wake the machine or bring Docker back, then choose Finish the restore or Put back the copy from before. Each choice stops the agent and checks it is down before touching its memory.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/backups.ts` — `resumeBackupRestore`, `confirmStopped`
+
+### After "Put back the copy from before", a removed member or an old bot works again
+- **Check:** the agent's held restore was settled with **Put back the copy from before**. Since the restore began, a member was removed, its bot changed, or a Google account was detached, and the agent still answers that member, polls the old bot, or `gog auth list --json` still names the account.
+- **Cause:** the copy from before is how the agent was when the restore began, which may be days earlier. Before v2.160.0, putting it back started it with that copy's members and bots, without putting today's settings over it. A restore's restart also skipped what a Start runs, so Google accounts detached or queued for removal stayed until the next Start.
+- **Fix:** upgrade, then Rebuild the agent to put its current settings back. Put back now writes today's members, bot and settings over the copy before it starts, and a restore's restart runs the same steps as Start. If that cannot be done, the restore stays held and the agent stays stopped.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/backups.ts` — `recoverBackupRestore`, `restartAfterRestore`; `src/api/routes.ts` — `startHooksFor`
+
+### After a restore whose settings "couldn't all be put back", an old Slack, Discord or Google account works
+- **Check:** the restore's outcome says its current settings couldn't all be put back (for example, its AI source is gone). The agent still answers on a Slack or Discord bot it no longer has in the app, or `gog auth list --json` names a Google account that is no longer attached.
+- **Cause:** when the full re-apply fails, a restore falls back to the safety minimum. Before v2.160.0 that kept only the current Telegram bot and removed revoked members, so Slack and Discord tokens and Google accounts from the backup stayed and ran. The outcome said only "model, AI source" were left out.
+- **Fix:** upgrade, then Rebuild the agent once its AI source works again. That writes its current Slack, Discord and Google accounts. The fallback now turns Slack and Discord off until the next build, and a restore's restart removes Google accounts that are not attached now. On an older version, Rebuild the agent, or detach and reattach its Slack or Discord.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/backups.ts` — `applyCurrentSettingsOver`; `src/orchestrator/members.ts` — `DROP_CHAT_ACCOUNTS_SCRIPT`
+
 ## Usage, costs and budgets
 
 ### Usage shows small, flat token numbers for an agent that is busy all day
