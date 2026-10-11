@@ -378,6 +378,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.88.5`
 - **Code:** `src/openclaw/configWriter.ts` — `mediaMaxMb`
 
+### Connecting Discord or Slack keeps saying "Couldn't reach the server for the setup steps — try again", until the page is reloaded
+- **Check:** the first try came while the app was restarting or the connection dropped; every try after it says the same at once.
+- **Cause:** the failed fetch of the setup steps was kept as "no steps", so trying again never asked the server again.
+- **Fix:** upgrade: a failed fetch is not kept, and the next try asks again. On an older version, reload the page.
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `openChanSetup`, `chanFields`
+
 ### A new agent sits on "Waiting on you"
 - **Check:** the agent's sheet asks for a Telegram bot token; Settings → Telegram shows no spare bot.
 - **Cause:** the agent needs a bot and none is available in the pool. Only a new agent made with Telegram on asks this (the create form ticks "No Telegram" by itself when the pool is empty); an unarchived, cloned or imported one goes on web-only (next entry).
