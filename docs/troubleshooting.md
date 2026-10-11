@@ -1150,6 +1150,34 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0` (#85)
 - **Code:** `src/cli.ts` — `parseArgs`
 
+### An agent was put to sleep in the middle of a conversation
+- **Check:** `HATCHABOT_HIBERNATE_AFTER` is set; the timeline has `agent.hibernated` shortly after a message; the agent's container was slow or restarting then.
+- **Cause:** when its conversations could not be read, the idle check took the agent's record time instead, often days old, and judged it idle.
+- **Fix:** upgrade: an agent whose activity cannot be read stays up until it can be.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/hibernate.ts` — `hibernateBlocker`; `src/orchestrator/unread.ts` — `sessionsReadShell`
+
+### A sleeping agent did not wake for a Telegram message sent just as it went to sleep, or after many messages
+- **Check:** the message is waiting (the agent answers it once started); it was sent in the seconds the agent was going to sleep (`agent.hibernated` on the timeline), or a hundred or more messages were waiting.
+- **Cause:** the messages waiting right after the stop were all taken as ones the agent had already handled, including one sent after the stop. And Telegram hands back a hundred waiting messages at a time, oldest first: with that many left from bedtime, newer ones were never seen.
+- **Fix:** upgrade: only messages sent before bedtime count as handled, and a full hundred waiting wakes the agent. Starting it, or sending another message, wakes it on older releases.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/hibernate.ts` — `hibernateAgent`, `telegramHasMail`
+
+### A sleeping agent no longer wakes for messages after its bot token was replaced
+- **Check:** the timeline has `hibernate.token_refused` from before the new token was saved; messages wait but the agent stays asleep until restarted.
+- **Cause:** once Telegram refused the old token, the wake check left that bot alone until the service restarted, even with a new token in its place.
+- **Fix:** upgrade: a new token is tried again at once. On older releases restart the service or start the agent.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/hibernate.ts` — `refusedTokens`
+
+### "Put to sleep" put an agent to sleep though it has scheduled tasks
+- **Check:** the agent's tasks are on (Schedule tab); it was put to sleep by hand (Bulk actions → Put to sleep) while its tasks could not be read.
+- **Cause:** an unreadable task list was taken as "no tasks", so the tasks then missed their runs while it slept.
+- **Fix:** upgrade: putting it to sleep is refused with "Couldn't read its scheduled tasks just now" until the list can be read. Wake the agent so its tasks run.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/hibernate'`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")

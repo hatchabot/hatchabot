@@ -22,8 +22,9 @@ export interface SessionEntry {
  * run in its container. Up to OpenClaw 2026.7 that is the sessions.json file
  * itself; from 2026.8 the records live in the agent's SQLite store
  * (`session_nodes.entry_json`, one row per key, the same entry shape), read
- * here with Node's own sqlite module, read-only. Prints nothing when neither
- * exists. Found by the candidate gate on 2026.9.6 (2026-09-24).
+ * here with Node's own sqlite module, read-only. Prints {} when neither
+ * exists, and nothing when the read failed. Found by the candidate gate on
+ * 2026.9.6 (2026-09-24).
  */
 export function sessionsReadShell(slug: string): string {
   const base = `/home/node/.openclaw/agents/${slug}`;
@@ -37,7 +38,9 @@ export function sessionsReadShell(slug: string): string {
     'process.stdout.write(JSON.stringify(out));',
   ].join('');
   // Single quotes inside the node script would end the shell quoting; there are none.
-  return `if [ -f ${json} ]; then cat ${json}; elif [ -f ${db} ]; then node -e '${node}' 2>/dev/null || true; fi`;
+  // Neither file (an agent that has never talked) prints {}: "no sessions",
+  // told apart from a read that failed and printed nothing (#99).
+  return `if [ -f ${json} ]; then cat ${json}; elif [ -f ${db} ]; then node -e '${node}' 2>/dev/null || true; else printf "{}"; fi`;
 }
 
 const WEB = new Set(['', 'webchat', 'web', 'internal', 'cli']);

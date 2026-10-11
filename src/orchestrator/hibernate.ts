@@ -13,6 +13,7 @@
  * when it comes back, so a Telegram agent may sleep; a poll of getUpdates
  * with no offset (which confirms nothing) is how a new message is noticed.
  */
+import { createHash } from 'node:crypto';
 import type { Agent } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { SecretStore } from '../secrets/secretStore.js';
@@ -24,7 +25,8 @@ export interface HibernateDeps {
   store: Store;
   secrets: SecretStore;
   providerFor: (hostId: string) => RuntimeProvider;
-  /** The newest session activity, as the app's "last active" shows it. */
+  /** The newest session activity, as the app's "last active" shows it;
+   *  undefined when there is none, a rejection when it could not be read. */
   lastActiveFor: (a: Agent) => Promise<string | undefined>;
   /** The agent's own scheduled tasks (OpenClaw's built-in ones excluded). */
   ownCrons: (a: Agent) => Promise<Array<{ enabled: boolean; system?: boolean }>>;
@@ -57,7 +59,11 @@ export async function hibernateBlocker(deps: HibernateDeps, a: Agent, now: numbe
   if (kinds.some((k) => k !== 'telegram')) return 'on Discord or Slack (nothing queues their messages)';
   // The idle clock: the newest of its conversations and its last wake — a
   // woken agent gets the whole idle period again, restart or no restart.
-  const active = (await deps.lastActiveFor(a).catch(() => undefined)) ?? a.updatedAt ?? a.createdAt;
+  // A read that failed is not "no activity": falling back to the record's own
+  // timestamp put an agent to sleep mid-conversation (#99). It stays up.
+  let read: string | undefined;
+  try { read = await deps.lastActiveFor(a); } catch { return 'its activity could not be read'; }
+  const active = read ?? a.updatedAt ?? a.createdAt;
   const last = Math.max(Date.parse(active) || 0, Date.parse(a.wokenAt ?? '') || 0);
   if (now - last < afterMs) return 'active recently';
   const crons = await deps.ownCrons(a).catch(() => undefined);
@@ -77,7 +83,12 @@ export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string)
   // Under the busy flag: reconcile skips busy agents, and during the
   // up-to-ten-second docker stop it read the still-running container and
   // flipped the record back to RUNNING (night review, 2026-09-27).
+  // Bedtime, by the clock Telegram dates messages with (seconds): what was
+  // sent from now on is mail even if it is already waiting when the mark is
+  // read, after the stop (#98).
+  let bedtime = 0;
   await whileBusy(a.id, async () => {
+    bedtime = Math.floor(Date.now() / 1000);
     deps.store.setAgentState(a.id, 'STOPPED');
     deps.store.setHibernated(a.id, new Date().toISOString(), Number.MAX_SAFE_INTEGER);
     try {
@@ -96,7 +107,13 @@ export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string)
   // this gap saw the unconfirmed update as new, woke the agent, and the
   // write below then marked a RUNNING agent asleep (night review).
   deps.store.setHibernated(a.id, new Date().toISOString(), Number.MAX_SAFE_INTEGER);
-  const mark = (await telegramWaiting(deps, a)) ?? 0;
+  // A message that came in between the stop and this read used to become the
+  // mark, "already handled", and could not wake the agent. Only what was sent
+  // before bedtime counts as the gateway's unconfirmed batch; an update with
+  // no date of its own (a button press) is taken to be part of it.
+  const waiting = await telegramWaitingUpdates(deps, a);
+  const before = (waiting ?? []).filter((u) => u.date === undefined || u.date < bedtime);
+  const mark = before.length ? Math.max(0, ...before.map((u) => u.id)) : 0;
   const still = deps.store.getAgent(a.id);
   if (still?.state !== 'STOPPED' || !still.hibernatedAt) return still ?? a;
   deps.store.setHibernated(a.id, new Date().toISOString(), mark);
@@ -194,8 +211,14 @@ export async function wakeAgent(deps: HibernateDeps, a: Agent, why: string): Pro
   try { return await p; } finally { waking.delete(a.id); }
 }
 
-/** Bot tokens Telegram refused (401): said once on the trail, then left alone until the process restarts. */
-const refusedTokens = new Set<string>();
+/**
+ * Bot tokens Telegram refused (401), by secret and the token it held: said
+ * once on the trail, then left alone. Keyed by the token too, so a new token
+ * saved under the same secret is polled again; keyed by the secret alone, a
+ * sleeper whose token was replaced was never woken by a message again (#100).
+ */
+const refusedTokens = new Map<string, string>();
+const tokenPrint = (token: string): string => createHash('sha256').update(token).digest('hex').slice(0, 16);
 /** Tests: forget in-flight wakes, failure counts and refused tokens between worlds. */
 export function resetHibernateState(): void { refusedTokens.clear(); waking.clear(); wakeFailures.clear(); }
 
@@ -207,31 +230,45 @@ export function resetHibernateState(): void { refusedTokens.clear(); waking.clea
  * here.) Ask for a page, not one: with limit=1 the answer was always the
  * oldest waiting update — the bedtime mark itself — and ten newer messages
  * behind it were invisible until Telegram expired it a day later (30th
- * audit). The NEWEST waiting id is what this returns.
+ * audit). Every waiting id is what this returns.
  */
-export async function telegramWaiting(deps: HibernateDeps, a: Agent): Promise<number | undefined> {
-  const ids = await telegramWaitingIds(deps, a);
-  return ids?.length ? Math.max(0, ...ids) : undefined;
-}
-/** Every update id waiting for the agent (up to a page), or undefined when none or unreadable. */
 async function telegramWaitingIds(deps: HibernateDeps, a: Agent): Promise<number[] | undefined> {
+  return (await telegramWaitingUpdates(deps, a))?.map((u) => u.id);
+}
+/** getUpdates' page size: a full page may have more behind it. */
+const PAGE = 100;
+/** When an update was sent (or edited), in Telegram's seconds; undefined for one with no date of its own. */
+function updateDate(u: Record<string, unknown>): number | undefined {
+  for (const [k, v] of Object.entries(u)) {
+    if (k === 'update_id' || !v || typeof v !== 'object') continue;
+    const o = v as { date?: unknown; edit_date?: unknown };
+    const d = typeof o.edit_date === 'number' ? o.edit_date : o.date;
+    if (typeof d === 'number' && Number.isFinite(d)) return d;
+  }
+  return undefined;
+}
+/** The updates waiting for the agent (up to a page), or undefined when none or unreadable. */
+async function telegramWaitingUpdates(deps: HibernateDeps, a: Agent): Promise<Array<{ id: number; date?: number }> | undefined> {
   const ch = deps.store.listChannelsForAgent(a.id).find((c) => c.kind === 'telegram');
-  if (!ch || refusedTokens.has(ch.secretRef)) return undefined;
+  if (!ch) return undefined;
   let token: string;
   try { token = await deps.secrets.get(ch.secretRef); } catch { return undefined; }
+  const print = tokenPrint(token);
+  if (refusedTokens.get(ch.secretRef) === print) return undefined;
   const f = deps.fetchImpl ?? fetch;
   try {
-    const res = await f(`https://api.telegram.org/bot${token}/getUpdates?limit=100&timeout=0`, { signal: AbortSignal.timeout(8000) });
-    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error_code?: number; result?: Array<{ update_id?: number }> };
+    const res = await f(`https://api.telegram.org/bot${token}/getUpdates?limit=${PAGE}&timeout=0`, { signal: AbortSignal.timeout(8000) });
+    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error_code?: number; result?: Array<Record<string, unknown>> };
     if (body.ok !== true) {
-      if (body.error_code === 401 && !refusedTokens.has(ch.secretRef)) {
-        refusedTokens.add(ch.secretRef);
+      if (body.error_code === 401 && refusedTokens.get(ch.secretRef) !== print) {
+        refusedTokens.set(ch.secretRef, print);
         deps.log(a.id)('hibernate.token_refused', { kind: 'telegram' });
       }
       return undefined;
     }
+    if (refusedTokens.get(ch.secretRef) !== undefined) refusedTokens.delete(ch.secretRef);
     if (!Array.isArray(body.result) || !body.result.length) return undefined;
-    return body.result.map((u) => Number(u?.update_id) || 0);
+    return body.result.map((u) => ({ id: Number(u?.update_id) || 0, date: u && typeof u === 'object' ? updateDate(u) : undefined }));
   } catch {
     return undefined;
   }
@@ -260,6 +297,10 @@ export async function telegramHasMail(deps: HibernateDeps, a: Agent): Promise<bo
     return false;
   }
   if (!ids?.length) return false;
+  // A full page may hide newer mail behind it: the page always starts at the
+  // oldest unconfirmed update, and a hundred left from bedtime filled it for
+  // good (#63). Waking is the safe answer; the gateway works through the queue.
+  if (ids.length >= PAGE) return true;
   const mark = a.hibernateMark ?? 0;
   return ids.some((id) => id > mark || id < mark - MARK_BATCH);
 }
