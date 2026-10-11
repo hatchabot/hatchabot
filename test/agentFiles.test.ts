@@ -4,7 +4,11 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { catArgv, cleanFileName, cleanRelPath, downloadName, inlineType, listShell, parseListing, putArgv, tarArgv, uploadAllowed } from '../src/orchestrator/agentFiles.js';
+import { RUNTIME_STATE_FILES, catArgv, cleanFileName, cleanRelPath, downloadName, inlineType, listShell, parseListing, putArgv, tarArgv, uploadAllowed } from '../src/orchestrator/agentFiles.js';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /**
  * Browsing and downloading an agent's files: read-only, owner-only, paths
@@ -123,6 +127,31 @@ describe('uploads and opening in the browser', () => {
     expect(sh).toContain('mv -f');
     expect(sh).toContain('/home/node/.openclaw/agents/kitchen/agent|'); // the state rule, on the resolved directory
     expect(sh).toContain('if [ -d "$T" ]; then exit 4; fi'); // never into a directory under that name
+  });
+  it('an upload never replaces OpenClaw\'s live database or logins, even in the workspace (2026-10-10)', async () => {
+    const ws = '.openclaw/agents/kitchen/agent';
+    for (const name of RUNTIME_STATE_FILES) expect(uploadAllowed(ws, 'kitchen', name)).toBe(false);
+    expect(uploadAllowed(ws, 'kitchen', 'notes.md')).toBe(true);
+    expect(uploadAllowed('inbox', 'kitchen', 'openclaw-agent.sqlite')).toBe(true); // outside .openclaw it is just a file
+    const { f, provider } = await world();
+    const hdr = { ...as, 'content-type': 'application/octet-stream' };
+    const db = await f.inject({ method: 'PUT', url: `/v1/agents/a1/fs/file?path=${encodeURIComponent(ws)}&name=openclaw-agent.sqlite&overwrite=1`, headers: hdr, payload: Buffer.from('x') });
+    expect(db.statusCode).toBe(400);
+    expect(db.json().error).toMatch(/live state/);
+    expect(provider.written).toHaveLength(0);
+    // The resolved folder decides: a link from the home into the agent's folder is caught by the one-shot itself.
+    const home = mkdtempSync(join(tmpdir(), 'hb-home-'));
+    try {
+      mkdirSync(join(home, ws), { recursive: true });
+      writeFileSync(join(home, ws, 'openclaw-agent.sqlite'), 'live');
+      symlinkSync(join(home, ws), join(home, 'inbox'));
+      const run = (name: string) => spawnSync('sh', ['-c', putArgv('inbox', name, true, 'kitchen')[2]!.split('/home/node').join(home)], { input: 'uploaded' });
+      expect(run('openclaw-agent.sqlite-wal').status).toBe(6);
+      expect(run('openclaw-agent.sqlite').status).toBe(6);
+      expect(readFileSync(join(home, ws, 'openclaw-agent.sqlite'), 'utf8')).toBe('live');
+      expect(run('notes.md').status).toBe(0);
+      expect(readFileSync(join(home, ws, 'notes.md'), 'utf8')).toBe('uploaded');
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
   it('knows what a browser shows: text as text, pages and images as themselves, unknown binaries download', () => {
     expect(inlineType('notes.md')).toBe('text/plain');

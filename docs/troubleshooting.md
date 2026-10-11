@@ -828,6 +828,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/health.ts` — `MUTED`, `isMuted`, `doctorLint`
 
+### An agent lost its conversations or its login after a file was uploaded into its folder
+- **Check:** in Files, `.openclaw/agents/<agent>/agent` shows `openclaw-agent.sqlite` (or its `-wal`, `-shm`, `-journal`), `auth-profiles.json` or `auth-state.json` changed at the time someone uploaded a file of that name, just before the trouble began.
+- **Cause:** uploads into the agent's own folder were allowed, and that folder also holds OpenClaw's live session database and its logins, so an upload under one of those names replaced them.
+- **Fix:** upgrade: an upload under those names is refused there, even through a link that leads there. An agent already hit: restore its conversations from a backup (Backups → Restore), and sign its AI source in again if it says it needs a login.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/agentFiles.ts` — `RUNTIME_STATE_FILES`, `uploadAllowed`, `putArgv`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")

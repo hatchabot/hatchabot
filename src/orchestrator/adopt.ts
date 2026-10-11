@@ -8,6 +8,7 @@ import type { ProvisionDeps } from './provision.js';
 import { whileBusy } from './busy.js';
 import { openclawConfigPath } from './openclawImport.js';
 import { openclawConfigAgents } from '../openclaw/configWriter.js';
+import { RUNTIME_STATE_FILES } from './agentFiles.js';
 
 const execFileP = promisify(execFile);
 
@@ -34,11 +35,9 @@ export class AdoptError extends Error {
 
 /** Files that must never be carried into a managed agent. */
 const EXCLUDE = [
-  'openclaw-agent.sqlite',
-  'openclaw-agent.sqlite-wal',
-  'openclaw-agent.sqlite-shm',
-  'auth-profiles.json',
-  'auth-state.json',
+  // OpenClaw's live state (its database and logins): the same list uploads
+  // are refused under (agentFiles.ts).
+  ...RUNTIME_STATE_FILES,
   '.git',
   // Build artifacts: compiled for THIS machine, with absolute host paths baked
   // in, and regenerable from the manifests we do copy. Carrying them across is

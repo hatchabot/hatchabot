@@ -195,7 +195,7 @@ per container.
 - `src/orchestrator/hibernate.ts` — `hibernateSweep`, `wakeSweep`, `wakeAgent`, `hibernateBlocker`: idle agents sleep and wake on demand (off unless HATCHABOT_HIBERNATE_AFTER is set).
 - `src/orchestrator/memoryCap.ts` — `effectiveMemoryCap`, `parseMemoryCap`: per-agent memory limits.
 - `src/orchestrator/swap.ts` — `effectiveSwapAllowance`, `limitsDrift`, `parseSwapProbe`: compressed swap and the limits check.
-- `src/orchestrator/agentFiles.ts` — `listShell`, `tarArgv`, `uploadAllowed`: the Files pane (browse, download, upload).
+- `src/orchestrator/agentFiles.ts` — `listShell`, `tarArgv`, `uploadAllowed`, `RUNTIME_STATE_FILES`: the Files pane (browse, download, upload; never over OpenClaw's live database or logins, a list adopt.ts shares).
 - `src/api/routes.ts` — `'/v1/hosts'`, `'/v1/runner-setup'`, `'/v1/hosts/:id/install-image'`, `'/v1/agents/:id/move-host'`, `'/v1/agents/:id/rehost'`, `'/v1/agents/:id/fs'`, `'/v1/resources'`: hosts, moves, files and resources.
 - `web/index.html` — `loadHosts`, `addHost`, `showRunnerSetup`, `moveHostAgent`, `rehostAgent`, `v2LoadFiles`, `openFleetResources`: the matching screens. Other Hatchabot servers (`renderPeers`, `addPeer`) sit in Settings → Advanced (`SETTINGS_ADV`, `settingsAdvUnfold`; old links go through `V2_SETTINGS_ALIAS`).
 

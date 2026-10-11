@@ -6146,7 +6146,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const t = fsAgent(req, reply, req.params.id, req.query.path); if (!t) return reply;
     const name = cleanFileName(req.query.name);
     if (!name) return reply.code(400).send({ error: 'Give the file a plain name (no folders in it).' });
-    if (!uploadAllowed(t.rel, t.agent.slug)) return reply.code(400).send({ error: "Files go in the agent's workspace or anywhere outside .openclaw — not into OpenClaw's own state." });
+    if (!uploadAllowed(t.rel, t.agent.slug, name)) {
+      return reply.code(400).send({ error: uploadAllowed(t.rel, t.agent.slug)
+        ? `${name} is OpenClaw's own live state (its conversations or logins) — an upload cannot replace it. Give the file another name.`
+        : "Files go in the agent's workspace or anywhere outside .openclaw — not into OpenClaw's own state." });
+    }
     const body = req.body;
     if (!Buffer.isBuffer(body)) return reply.code(400).send({ error: 'Send the file as the request body (application/octet-stream).' });
     if (body.length > FILE_MAX_BYTES) return reply.code(413).send({ error: `Too big (${Math.round(body.length / 1048576)} MB; the limit is ${FILE_MAX_BYTES / 1048576} MB — HATCHABOT_FILE_MAX_MB).` });
