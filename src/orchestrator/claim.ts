@@ -1,7 +1,7 @@
 import type { ChannelKind } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import { normalizeHandle, Store } from '../store/store.js';
-import { ID_SHAPE } from './channelIds.js';
+import { ACCOUNT_SHAPE, ID_SHAPE } from './channelIds.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
 
 /**
@@ -131,6 +131,28 @@ export async function approvePairing(
     accountId,
   ]);
   return res.code === 0;
+}
+
+/**
+ * Take back an approval nobody's membership holds: the same on-volume scrub a
+ * member removal runs (credentials file, 2026.9 approval rows, config).
+ */
+async function scrubApproval(
+  deps: ClaimDeps,
+  opts: ClaimOptions,
+  kind: ChannelKind,
+  id: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  if (!ID_SHAPE[kind].test(id) || !ACCOUNT_SHAPE.test(opts.accountId)) return;
+  const { allowlistScrubScript } = await import('./members.js');
+  const script = allowlistScrubScript([{
+    channel: kind, acct: opts.accountId, id,
+    cred: `/home/node/.openclaw/credentials/${kind}-${opts.accountId.toLowerCase()}-allowFrom.json`,
+  }]);
+  forgetDmPolicy(opts.agentId);
+  const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script).catch(() => undefined);
+  log(res?.code === 0 ? 'claim.unbound_approval_scrubbed' : 'claim.unbound_approval_scrub_failed', { agentId: opts.agentId, kind });
 }
 
 /**
@@ -279,6 +301,22 @@ export async function claimFirstContact(
             ])
             .catch(() => undefined);
           return first.id;
+        }
+        if (ok) {
+          // Approved but not bound: the seat was removed (or someone else's
+          // window took the id) while the approval was in flight. OpenClaw's
+          // pairing store now admits a person with no member row to remove
+          // them by, so take the approval back unless the id is somebody
+          // else's on this agent (A088).
+          if (!deps.store.listAllowedChannelUserIds(opts.agentId, kind).includes(first.id)) {
+            await scrubApproval(deps, opts, kind, first.id, log);
+          }
+          if (!deps.store.listMemberships(opts.agentId).some((m) => m.userId === opts.forUserId && m.status === 'active')) {
+            log('claim.seat_gone', { agentId: opts.agentId, kind });
+            deps.store.closePairingWindow(opts.agentId, seat);
+            await restoreDoor();
+            return null;
+          }
         }
         log('claim.approve_failed', { agentId: opts.agentId, code: first.code });
       }
