@@ -1,9 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   AUTO_KEEP,
   MAX_FILE_BYTES,
   captureSnapshot,
+  readCoreFiles,
+  workspacePath,
   restoreSnapshot,
   SnapshotError,
 } from '../src/orchestrator/snapshots.js';
@@ -181,5 +187,81 @@ describe('restoreSnapshot', () => {
     expect(w.store.getSnapshot('other-agent', s.id)).toBeUndefined();
     expect(w.store.deleteSnapshot('other-agent', s.id)).toBe(false);
     expect(w.store.deleteSnapshot('a1', s.id)).toBe(true);
+  });
+});
+
+/** The real read and write scripts, run by bash against a local folder standing in for the workspace. */
+function folderWorld() {
+  const dir = mkdtempSync(join(tmpdir(), 'hb-snap-'));
+  const w = fileWorld({});
+  (w.provider as any).execShell = async (_ref: string, script: string) => {
+    const local = script.replaceAll(workspacePath('a1', ''), `${dir}/`);
+    const r = spawnSync('bash', ['-c', local], { encoding: 'utf8' });
+    return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
+  };
+  return { ...w, dir };
+}
+
+describe('reading the core files', () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  it('refuses a snapshot when one file is there but cannot be read, instead of leaving it out (#66)', async () => {
+    const w = folderWorld(); dirs.push(w.dir);
+    writeFileSync(join(w.dir, 'SOUL.md'), 'soul\n');
+    writeFileSync(join(w.dir, 'AGENTS.md'), 'agents\n');
+    mkdirSync(join(w.dir, 'MEMORY.md')); // there, but head cannot read it
+    await expect(readCoreFiles(w.provider, 'mock://a1', 'a1')).rejects.toThrow(/MEMORY\.md is there but could not be read/);
+    await expect(captureSnapshot(w.deps, 'a1')).rejects.toBeInstanceOf(SnapshotError);
+    expect(w.store.listSnapshots('a1')).toHaveLength(0);
+  });
+
+  it('a failed read is not a missing file (#66)', async () => {
+    const w = fileWorld(SEED);
+    (w.provider as any).execShell = async () => ({ code: 1, stdout: '', stderr: 'container is not running' });
+    await expect(readCoreFiles(w.provider, 'mock://a1', 'a1')).rejects.toBeInstanceOf(SnapshotError);
+  });
+
+  it('keeps an empty file as empty, so restoring empties it again; a missing one is left out (#67)', async () => {
+    const w = folderWorld(); dirs.push(w.dir);
+    writeFileSync(join(w.dir, 'SOUL.md'), 'soul\n');
+    writeFileSync(join(w.dir, 'AGENTS.md'), '');
+    expect(await readCoreFiles(w.provider, 'mock://a1', 'a1')).toEqual({ 'SOUL.md': 'soul\n', 'AGENTS.md': '' });
+    const snap = await captureSnapshot(w.deps, 'a1', { label: 'empty rules' });
+    expect(snap.files.sort()).toEqual(['AGENTS.md', 'SOUL.md']);
+    writeFileSync(join(w.dir, 'AGENTS.md'), 'filled in later\n');
+    await restoreSnapshot(w.deps, 'a1', snap.id);
+    expect(readFileSync(join(w.dir, 'AGENTS.md'), 'utf8')).toBe('');
+  });
+});
+
+describe('a restore and the setup-values layer (#68)', () => {
+  it('puts the layer and the values back with the files', async () => {
+    const w = fileWorld({ ...SEED, 'SOUL.md': 'A calm cook.\n' });
+    w.store.setAgentParamState('a1', { style: 'calm' }, { soul: 'A {{style}} cook.\n', persona: 'p {{style}}' });
+    const before = await captureSnapshot(w.deps, 'a1', { label: 'calm' });
+    // A direct edit rewrote SOUL.md and, with it, the layer; values changed too.
+    w.files['SOUL.md'] = 'A loud cook who shouts.\n';
+    w.store.setAgentParamState('a1', { style: 'loud' }, { soul: 'A {{style}} cook who shouts.\n', persona: 'p {{style}}' });
+    await restoreSnapshot(w.deps, 'a1', before.id);
+    const a = w.store.getAgent('a1')!;
+    expect(w.files['SOUL.md']).toBe('A calm cook.\n');
+    expect(a.paramFiles).toEqual({ soul: 'A {{style}} cook.\n', persona: 'p {{style}}' });
+    expect(a.paramValues).toEqual({ style: 'calm' });
+  });
+
+  it('a snapshot from before the agent had a layer clears it; one from before layers were kept makes the files the layer', async () => {
+    const w = fileWorld(SEED);
+    const none = await captureSnapshot(w.deps, 'a1', { label: 'no layer yet' });
+    w.store.setAgentParamState('a1', { style: 'calm' }, { soul: 'A {{style}} cook.\n' });
+    w.files['SOUL.md'] = 'A calm cook.\n';
+    await restoreSnapshot(w.deps, 'a1', none.id);
+    expect(w.store.getAgent('a1')!.paramFiles).toBeUndefined();
+
+    // A row written before v2.160.0 has no layer recorded.
+    w.store.setAgentParamState('a1', { style: 'calm' }, { soul: 'A {{style}} cook.\n', agents: 'old rules' });
+    w.store.insertSnapshot({ id: 'legacy', agentId: 'a1', label: 'old', reason: 'manual', files: { 'SOUL.md': 'An old cook.\n' }, createdAt: '2026-01-01T00:00:00Z' });
+    await restoreSnapshot(w.deps, 'a1', 'legacy');
+    expect(w.store.getAgent('a1')!.paramFiles).toEqual({ soul: 'An old cook.\n', agents: 'old rules' });
   });
 });

@@ -1072,6 +1072,10 @@ export class Store {
       // Which source last_ok was a success on (v2.160.0): an agent's success
       // before a source switch is not one on its new source.
       `ALTER TABLE usage_cursor ADD COLUMN last_ok_profile TEXT`,
+      // A snapshot's setup-values layer (v2.160.0, JSON; the text 'null' = the
+      // agent had none, NULL = taken before it was recorded): a restore puts
+      // it back with the files, or the next value edit re-renders what was undone.
+      `ALTER TABLE snapshots ADD COLUMN params TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -3167,13 +3171,15 @@ export class Store {
     reason: string;
     files: Record<string, string>;
     createdAt: string;
+    /** The setup-values layer then; null = it had none, undefined = not recorded. */
+    params?: SnapshotParams | null;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO snapshots (id, agent_id, label, reason, files, created_at)
-         VALUES (@id, @agentId, @label, @reason, @files, @createdAt)`,
+        `INSERT INTO snapshots (id, agent_id, label, reason, files, created_at, params)
+         VALUES (@id, @agentId, @label, @reason, @files, @createdAt, @params)`,
       )
-      .run({ ...s, files: JSON.stringify(s.files) });
+      .run({ ...s, files: JSON.stringify(s.files), params: s.params === undefined ? null : JSON.stringify(s.params) });
   }
 
   listSnapshots(agentId: string): Array<{
@@ -3204,18 +3210,14 @@ export class Store {
   }
 
   /** The newest snapshot of any kind, files included (the dedupe in captureSnapshot). */
-  latestSnapshot(agentId: string):
-    | { id: string; label: string; reason: string; createdAt: string; files: Record<string, string> }
-    | undefined {
+  latestSnapshot(agentId: string): StoredSnapshot | undefined {
     const r = this.db
       .prepare(`SELECT id FROM snapshots WHERE agent_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
       .get(agentId) as { id: string } | undefined;
     return r ? this.getSnapshot(agentId, r.id) : undefined;
   }
 
-  getSnapshot(agentId: string, id: string):
-    | { id: string; label: string; reason: string; createdAt: string; files: Record<string, string> }
-    | undefined {
+  getSnapshot(agentId: string, id: string): StoredSnapshot | undefined {
     const r = this.db
       .prepare(`SELECT * FROM snapshots WHERE id = ? AND agent_id = ?`)
       .get(id, agentId) as any;
@@ -3226,6 +3228,7 @@ export class Store {
       reason: r.reason,
       createdAt: r.created_at,
       files: safeJson(r.files, {}),
+      ...(r.params != null ? { params: safeJson<SnapshotParams | null>(r.params, null) } : {}),
     };
   }
 
@@ -5587,6 +5590,16 @@ function rowToChannel(r: any): Channel {
     createdAt: r.created_at,
     ...(settings ? { settings } : {}),
   };
+}
+
+/** A configured copy's setup values and the raw SOUL/AGENTS layer they render into, as a snapshot keeps them. */
+export interface SnapshotParams { values: Record<string, string>; soul?: string; agents?: string }
+
+/** One snapshot, files included. `params`: null = no setup-values layer then; absent = taken before it was recorded. */
+export interface StoredSnapshot {
+  id: string; label: string; reason: string; createdAt: string;
+  files: Record<string, string>;
+  params?: SnapshotParams | null;
 }
 
 /** One row of `operations` (orchestrator/operations.ts has the meaning of each field). */

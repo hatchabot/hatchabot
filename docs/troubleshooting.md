@@ -998,6 +998,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/embedder/embedder.ts` — `syncKeys`, `start`
 
+### A snapshot is refused: "… is there but could not be read" or "Couldn't read … — is the agent healthy?"
+- **Check:** the agent page's Snapshots list has no new entry; inside the agent, `ls -l ~/.openclaw/agents/<slug>/agent/` shows the named file with odd permissions, or as a folder.
+- **Cause:** one of SOUL.md, AGENTS.md or MEMORY.md is there but cannot be read, or the read itself failed (the container stopped). Before v2.160.0 such a file was left out and the snapshot still looked whole, so undoing a change could not bring that file back.
+- **Fix:** make the file readable again (or remove the folder in its place), or start the agent, then take the snapshot again. A restore refuses until the copy taken before it can be made.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/snapshots.ts` — `readCoreFile`, `readCoreFiles`
+
+### Restoring a snapshot does not empty a file that was empty when it was taken
+- **Check:** the snapshot's file list (`GET /v1/agents/<id>/snapshots/<snapshot id>`) has no entry for the file.
+- **Cause:** before v2.160.0 an empty file was left out of a snapshot, as if it were not there, so a restore left whatever the file held later.
+- **Fix:** upgrade; snapshots taken from then on keep an empty file as empty. For an older snapshot, empty the file by hand in the editor.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/snapshots.ts` — `readCoreFile`, `writeSnapshotFiles`
+
+### After restoring a snapshot, changing a setup value brings back the text that was undone
+- **Check:** the agent is a configured template copy (it has Setup values); after a restore, Apply values rewrites SOUL.md or AGENTS.md with the version from before the restore.
+- **Cause:** setup values re-render the files from a stored layer with `{{placeholders}}`. A restore put the files back but left the newer layer and values, so the next Apply rendered the undone version.
+- **Fix:** upgrade: a snapshot keeps the layer and values with the files, and a restore puts them back. A snapshot from before v2.160.0 makes the restored files the layer, as a direct edit does. Restore again after the upgrade if a value edit already brought the old text back.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/snapshots.ts` — `captureSnapshot`, `restoreParamLayer`; `src/store/store.ts` — `StoredSnapshot`
+
 ## Console and web chat
 
 ### The console says "Control UI did not start"
