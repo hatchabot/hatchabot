@@ -772,6 +772,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/accessOverview.ts` — `accessProbeScript`
 
+### A derived image is refused: "The last line ends with a \ that continues it into nothing", or "The heredoc <<EOF is never closed"
+- **Check:** the image's Dockerfile lines (Settings → Images): the last instruction ends with `\`, or a `<<WORD` heredoc has no line `WORD` after it. A derived image built before v2.160.0 from such lines runs as root: `docker inspect <its tag> --format '{{.Config.User}}'` prints `root` instead of `node`.
+- **Cause:** Hatchabot appends `USER node` after your lines. A trailing `\` joins it to your last instruction, and an open heredoc takes it in as text, so the image stayed root. Saving and rebuilding such lines is now refused.
+- **Fix:** finish the last instruction (drop the trailing `\`) or close the heredoc, then save and rebuild the image; agents on an old root image get `node` on their next rebuild.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/derivedImage.ts` — `dockerfileProblem`, `buildDerivedImage`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")

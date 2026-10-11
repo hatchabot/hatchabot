@@ -93,6 +93,19 @@ export function dockerfileProblem(snippet: string): string | null {
     if (/--network\b/i.test(line)) return 'RUN --network is not allowed in a derived image.';
     if (/^USER\b/i.test(line)) return 'USER is managed for you (root during your lines, node at the end).';
   }
+  // The USER node appended after the snippet must stay an instruction of its
+  // own. A last line ending in `\` continues into it (comment and blank lines
+  // between are dropped first), so `RUN echo installed \` swallowed it and
+  // the image stayed root (B002); an unterminated heredoc (`RUN <<EOF` with
+  // no EOF line) would take it in as text the same way.
+  if (/\\\s*$/.test(unjoined)) return 'The last line ends with a \\ that continues it into nothing — finish that instruction.';
+  const lines = unjoined.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    for (const [, dash, word] of lines[i]!.matchAll(/(?<!<)<<(?!<)(-?)\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?/g)) {
+      const closed = lines.slice(i + 1).some((l) => (dash ? l.replace(/^\t+/, '') : l) === word);
+      if (!closed) return `The heredoc <<${word} is never closed by a line "${word}".`;
+    }
+  }
   return null;
 }
 
@@ -122,6 +135,10 @@ export async function buildDerivedImage(opts: {
   onLog?: (chunk: string) => void;
   timeoutMs?: number;
 }): Promise<BuildResult> {
+  // Checked again here, not only when the lines were saved: a record saved
+  // before a rule existed (B002's trailing `\`) is rebuilt from the database.
+  const problem = dockerfileProblem(opts.dockerfile);
+  if (problem) return { ok: false, error: problem };
   const docker = opts.docker ?? 'docker';
   const dataDir = opts.dataDir ?? 'data';
   const tag = opts.tag ?? deriveTag(opts.name);

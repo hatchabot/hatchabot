@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
@@ -7,7 +10,9 @@ import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import {
   baseProblem,
+  buildDerivedImage,
   deriveTag,
+  dockerfileProblem,
   derivedNameProblem,
   renderDockerfile,
 } from '../src/orchestrator/derivedImage.js';
@@ -63,6 +68,24 @@ describe('renderDockerfile', () => {
     );
     // node comes last so the owner's snippet can't leave the image as root.
     expect(out.trimEnd().endsWith('USER node')).toBe(true);
+  });
+
+  it('refuses lines that would swallow the trailing USER node (B002)', () => {
+    // Docker joins a `\`-continued last line with the USER node after it
+    // (comment and blank lines between are dropped), so the image stayed root.
+    expect(dockerfileProblem('RUN echo installed \\')).toMatch(/continues it into nothing/);
+    expect(dockerfileProblem('RUN echo installed \\  \n\n# a note\n')).toMatch(/continues it into nothing/);
+    expect(dockerfileProblem('RUN apt-get install -y \\\n  ffmpeg')).toBeNull();
+    // An unterminated heredoc takes the rest of the file, USER node included, as text.
+    expect(dockerfileProblem('RUN <<EOF\necho hi')).toMatch(/heredoc <<EOF is never closed/);
+    expect(dockerfileProblem('RUN <<EOF\necho hi\nEOF')).toBeNull();
+    expect(dockerfileProblem('RUN <<-EOT\n\techo hi\n\tEOT')).toBeNull();
+    expect(dockerfileProblem('RUN cat <<< "hi"')).toBeNull();
+  });
+
+  it('a build of a saved record with such lines is refused before docker runs (B002)', async () => {
+    const res = await buildDerivedImage({ name: 'media', base: 'hatchabot-runtime:latest', dockerfile: 'RUN echo installed \\', docker: '/nonexistent/docker', dataDir: mkdtempSync(join(tmpdir(), 'hb-derive-')) });
+    expect(res).toEqual({ ok: false, error: expect.stringMatching(/continues it into nothing/) });
   });
 });
 
