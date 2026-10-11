@@ -2,6 +2,8 @@ import { BROWSER_CDP_URL, BROWSER_PROFILE } from '../orchestrator/browser.js';
 import { filesMb, FILES_MB_DEFAULT } from '../orchestrator/machineDefaults.js';
 import type { OpenClawConfigPatch } from '../providers/provider.js';
 import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
+import { resolve as resolvePath } from 'node:path';
 import { consoleGatewayAuth, consoleGatewayRoles, NO_PROXY_YET } from './consoleIdentity.js';
 
 /** A skipIf test: is there a route binding of this agent to channel:account? */
@@ -92,6 +94,18 @@ export function openclawConfigAgents(cfg: { agents?: unknown } | undefined): Ope
       .map(([id, e]) => ({ ...(e as OpenclawConfigAgent), id }));
   }
   return [];
+}
+
+/**
+ * A path from a host OpenClaw config as OpenClaw reads it: `~` and `~/…` are
+ * the user's home. path.resolve alone took `~/workspace` as a folder named
+ * `~` under the server's checkout, so discovery called the real workspace
+ * missing and offered the wrong path for adoption (#175).
+ */
+export function openclawUserPath(p: string, home = homedir()): string {
+  if (p === '~') return home;
+  if (p.startsWith('~/')) return resolvePath(home, p.slice(2));
+  return resolvePath(p);
 }
 
 /**

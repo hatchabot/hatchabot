@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { openclawConfigAgents } from '../openclaw/configWriter.js';
+import { openclawConfigAgents, openclawUserPath } from '../openclaw/configWriter.js';
 import { botPollState } from './adopt.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
@@ -102,7 +102,7 @@ export async function discoverOpenclawAgents(
   for (const a of openclawConfigAgents(cfg)) {
     const workspace = a.workspace ?? a.agentDir;
     if (!a.id || !workspace) continue;
-    const ws = resolve(workspace);
+    const ws = openclawUserPath(workspace);
     const accountId = (cfg.bindings ?? []).find(
       (b) => b.agentId === a.id && (b.match?.channel ?? 'telegram') === 'telegram',
     )?.match?.accountId;

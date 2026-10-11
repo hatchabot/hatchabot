@@ -9,6 +9,7 @@ import {
   disableOpenclawBot,
   quiesceOpenclawBots,
 } from '../src/orchestrator/openclawImport.js';
+import { openclawAgentIdForWorkspace } from '../src/orchestrator/cronImport.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 class MemSecrets implements SecretStore {
@@ -90,6 +91,25 @@ describe('discoverOpenclawAgents', () => {
     // config key "adoptedbot" ≠ stored @username "RealAdoptedName", but the
     // bot-id (222) matches → still recognised as already imported
     expect(by['stock-watcher']!.alreadyAdoptedAs).toBe('Already Here');
+  });
+
+  it('reads a ~/ workspace from the home folder, not the server checkout (#175)', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'acl-home-'));
+    mkdirSync(join(home, 'workspace-recipe-keeper'));
+    const cfg = join(root, 'tilde.json');
+    writeFileSync(cfg, JSON.stringify({ agents: { list: [{ id: 'recipe-keeper', workspace: '~/workspace-recipe-keeper' }] } }));
+    const was = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const { store, secrets } = await storeWithAdopted();
+      const [a] = await discoverOpenclawAgents({ store, secrets }, cfg);
+      expect(a).toMatchObject({ workspace: join(home, 'workspace-recipe-keeper'), name: 'Recipe Keeper' });
+      expect(a!.problem).toBeUndefined();
+      expect(openclawAgentIdForWorkspace(join(home, 'workspace-recipe-keeper'), cfg)).toBe('recipe-keeper');
+    } finally {
+      process.env.HOME = was;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('returns [] when the config is unreadable', async () => {

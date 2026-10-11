@@ -1161,6 +1161,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/adopt.ts` — `inspectWorkspace`
 
+### Adopt lists an OpenClaw agent as "workspace folder is missing", with a path inside the Hatchabot folder
+- **Check:** `~/.openclaw/openclaw.json` gives the agent's `workspace` (or `agentDir`) as `~/…`, and the path the adopt list shows ends in `/~/…`.
+- **Cause:** the path was resolved against the server's own folder instead of reading `~` as your home folder, as OpenClaw does.
+- **Fix:** upgrade, or write the full path (`/home/<you>/…`) in the OpenClaw config and look again.
+- **Fixed in:** `v2.160.0` (#175)
+- **Code:** `src/openclaw/configWriter.ts` — `openclawUserPath`; `src/orchestrator/openclawImport.ts` — `discoverOpenclawAgents`
+
+### An adopted agent's tasks or notes point at a folder that does not exist (`/home/node/.openclaw/…-two/…`)
+- **Check:** the adopted workspace had a sibling folder whose name starts with the same text (`…/agent` and `…/agent-two`), and the broken path is the sibling's with only its first part rewritten.
+- **Cause:** adoption repointed the old workspace path at the container by plain text replacement, which also caught any longer path that started the same way.
+- **Fix:** upgrade; only whole paths (or paths inside them) are repointed now. For an agent already adopted, fix the task text (Tasks → edit) and the note, giving the sibling's original path back.
+- **Fixed in:** `v2.160.0` (#80)
+- **Code:** `src/orchestrator/cronImport.ts` — `pathPattern`, `applyReplacements`, `rewriteWorkspaceFiles`
+
 ### A build fails: "The memory search service's port … is taken", or "embed door failed … port is already allocated"
 - **Check:** `docker ps --format '{{.Names}} {{.Ports}}' | grep 8093` shows another Hatchabot's `…-embed-door` holding the port.
 - **Cause:** two Hatchabots on one Docker (a second install, a test server) each start a memory search service on the same port, 8093 by default. From OpenClaw 2026.8 every agent needs that service.
