@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.160.3] — 2026-10-11
+
+### Fixed
+- The `privacy` live test no longer flags the maintainer's own address in a squash merge's `Co-authored-by` trailer when it reaches it through a release tag (a lightweight tag's message is its commit's); commit messages already allowed it.
+- Clean-install live tests run side by side get their own VMs: two started in the same second were given one name, and the second failed to launch.
+- Live tests ask a read again when the service closed a reused connection as it was sent, instead of failing in cleanup.
+
 ## [2.160.2] — 2026-10-11
 
 ### Changed

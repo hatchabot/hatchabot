@@ -27,7 +27,14 @@ export async function api(path, { method = 'GET', body, raw, headers: extra } = 
   let payload;
   if (raw) { headers['content-type'] = 'application/octet-stream'; payload = raw; }
   else if (body !== undefined) { headers['content-type'] = 'application/json'; payload = JSON.stringify(body); }
-  const res = await fetch(`${BASE}${path}`, { method, headers, body: payload, signal: AbortSignal.timeout(30 * 60_000) });
+  // A read whose kept-alive connection the server closed as it was reused
+  // ("other side closed") is asked once more: it changed nothing. A change is
+  // never repeated (it may have been done).
+  const once = () => fetch(`${BASE}${path}`, { method, headers, body: payload, signal: AbortSignal.timeout(30 * 60_000) });
+  const res = await once().catch((e) => {
+    if (method === 'GET' && /UND_ERR_SOCKET|other side closed|ECONNRESET/.test(`${e?.cause?.code} ${e?.cause?.message} ${e?.message}`)) return once();
+    throw e;
+  });
   const text = await res.text();
   let json; try { json = JSON.parse(text); } catch { json = { text }; }
   return { status: res.status, json };
