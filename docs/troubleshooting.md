@@ -1475,6 +1475,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `web/index.html` — `v2LoadCosts`
 
+### A context cap removed or moved, but a hand edit of the provider vanished, or the old model still compacts early
+- **Check:** in the agent's console, `openclaw config get models.providers.<provider>`: a `baseUrl` or model row you added is gone after taking a context cap off, or after a source switch the old provider still has a row with `contextTokens`; the event log has `token.context_cap_failed`.
+- **Cause:** taking the last cap off ran `config unset` on the whole provider entry without checking it was still what Hatchabot had read; and after a source switch a failed removal of the old provider's cap was forgotten once the new cap was written.
+- **Fix:** upgrade; put back the hand edit, or take the stale `contextTokens` row off by hand. Since v2.160.0 the entry is read again just before the unset and left alone if it changed, and the old cap stays on record until it is off, so the next rebuild or change retries it.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/compaction.ts` — `syncContextCap`, `writeEntry`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody

@@ -260,6 +260,38 @@ const RAW_GET = `node -e 'const fs=require("fs");const d=process.env.OPENCLAW_ST
 
 type ProviderEntry = { models?: Array<Record<string, unknown>>; [k: string]: unknown };
 
+/** One provider entry of the agent's openclaw.json as authored: undefined when absent, 'failed' when unreadable. */
+async function readEntry(provider: RuntimeProvider, runtimeRef: string, path: string): Promise<ProviderEntry | undefined | 'failed'> {
+  const read = await provider.execShell(runtimeRef, `${RAW_GET} ${path}`);
+  if (read.code !== 0 || read.stdout.startsWith('ERR')) return 'failed';
+  try { return read.stdout.trim() ? JSON.parse(read.stdout) as ProviderEntry : undefined; } catch { return 'failed'; }
+}
+
+/**
+ * Replace `current` (as read) with `next`, never over an edit made since the
+ * read: a set carries --expect-current-json. `config unset` has no such
+ * check, so a removal reads the entry again just before and leaves an
+ * entry that changed meanwhile alone (#115).
+ */
+async function writeEntry(provider: RuntimeProvider, runtimeRef: string, path: string, current: ProviderEntry | undefined, next: ProviderEntry | undefined, onError?: (error: string) => void):
+  Promise<'ok' | 'failed' | 'changed-by-hand'> {
+  if (JSON.stringify(next ?? null) === JSON.stringify(current ?? null)) return 'ok';
+  if (!next) {
+    const again = await readEntry(provider, runtimeRef, path);
+    if (again === 'failed') return 'failed';
+    if (again === undefined) return 'ok';
+    if (JSON.stringify(again) !== JSON.stringify(current)) { onError?.('changed since it was read'); return 'changed-by-hand'; }
+  }
+  const argv = next
+    ? ['config', 'set', path, JSON.stringify(next), '--strict-json', '--replace', ...(current === undefined ? ['--expect-current-absent'] : ['--expect-current-json', JSON.stringify(current)])]
+    : ['config', 'unset', path];
+  const res = await provider.exec(runtimeRef, argv);
+  if (res.code === 0) return 'ok';
+  const error = `${res.stderr}${res.stdout}`;
+  onError?.(error);
+  return /expect|current|mismatch|changed/i.test(error) ? 'changed-by-hand' : 'failed';
+}
+
 /** The provider entry with the cap row for `model` set to `tokens` (or taken out when null), and `previous` (a model Hatchabot capped before) taken out. */
 export function nextProviderEntry(current: ProviderEntry | undefined, model: string, tokens: number | null, previous?: string): ProviderEntry | undefined {
   const entry: ProviderEntry = { ...(current ?? {}) };
@@ -300,34 +332,33 @@ export async function syncContextCap(deps: { store: Store; provider: RuntimeProv
   const tokens = profile.vendor === 'local' ? null : cap.tokens ?? null;
   if (tokens === null && !cap.appliedModel) { store.markContextCapApplied(agent.id, null, new Date(now).toISOString()); return 'skipped'; }
   const path = `models.providers.${p}`;
-  const read = await provider.execShell(runtimeRef, `${RAW_GET} ${path}`);
-  if (read.code !== 0 || read.stdout.startsWith('ERR')) return 'failed';
-  let current: ProviderEntry | undefined;
-  try { current = read.stdout.trim() ? JSON.parse(read.stdout) as ProviderEntry : undefined; } catch { return 'failed'; }
+  const current = await readEntry(provider, runtimeRef, path);
+  if (current === 'failed') return 'failed';
   const previousProvider = cap.appliedModel?.includes('/') ? cap.appliedModel.split('/')[0] : undefined;
   const previous = cap.appliedModel ? cap.appliedModel.split('/').pop() : undefined;
-  // A cap written for another provider's model (a source switch) comes off there first.
+  // A cap written for another provider's model (a source switch) comes off
+  // there first. Until it has, the old model stays on record as applied, so
+  // the next sync tries again rather than forget it (#116).
+  let oldLeft: 'failed' | 'changed-by-hand' | undefined;
   if (previousProvider && previousProvider !== p && previous) {
-    const other = await provider.execShell(runtimeRef, `${RAW_GET} models.providers.${previousProvider}`);
-    try {
-      const cur = other.stdout.trim() && !other.stdout.startsWith('ERR') ? JSON.parse(other.stdout) as ProviderEntry : undefined;
-      const next = cur ? nextProviderEntry(cur, previous, null) : undefined;
-      if (cur) await provider.exec(runtimeRef, next ? ['config', 'set', `models.providers.${previousProvider}`, JSON.stringify(next), '--strict-json', '--replace', '--expect-current-json', JSON.stringify(cur)] : ['config', 'unset', `models.providers.${previousProvider}`]);
-    } catch { /* best effort */ }
+    const otherPath = `models.providers.${previousProvider}`;
+    const other = await readEntry(provider, runtimeRef, otherPath);
+    const r = other === 'failed' ? 'failed' : other ? await writeEntry(provider, runtimeRef, otherPath, other, nextProviderEntry(other, previous, null)) : 'ok';
+    if (r !== 'ok') {
+      oldLeft = r;
+      deps.log?.('token.context_cap_failed', { agentId: agent.id, byHand: r === 'changed-by-hand', error: `the cap on ${previousProvider}/${previous} was not taken off` });
+    }
   }
   const next = nextProviderEntry(current, id, tokens, previousProvider && previousProvider !== p ? undefined : previous);
   const at = new Date(now).toISOString();
   const applied = tokens === null ? null : `${p}/${id}`;
-  if (JSON.stringify(next ?? null) === JSON.stringify(current ?? null)) { store.markContextCapApplied(agent.id, applied, at); return 'unchanged'; }
-  const argv = next
-    ? ['config', 'set', path, JSON.stringify(next), '--strict-json', '--replace', ...(current === undefined ? ['--expect-current-absent'] : ['--expect-current-json', JSON.stringify(current)])]
-    : ['config', 'unset', path];
-  const res = await provider.exec(runtimeRef, argv);
-  if (res.code !== 0) {
-    const byHand = /expect|current|mismatch|changed/i.test(`${res.stdout}${res.stderr}`);
-    deps.log?.('token.context_cap_failed', { agentId: agent.id, byHand, error: `${res.stderr}${res.stdout}`.slice(0, 200) });
-    return byHand ? 'changed-by-hand' : 'failed';
+  if (JSON.stringify(next ?? null) === JSON.stringify(current ?? null)) {
+    if (oldLeft) return oldLeft;
+    store.markContextCapApplied(agent.id, applied, at); return 'unchanged';
   }
+  const res = await writeEntry(provider, runtimeRef, path, current, next, (error) => deps.log?.('token.context_cap_failed', { agentId: agent.id, byHand: /expect|current|mismatch|changed/i.test(error), error: error.slice(0, 200) }));
+  if (res !== 'ok') return res;
+  if (oldLeft) return oldLeft;
   store.markContextCapApplied(agent.id, applied, at);
   deps.log?.('token.context_cap_applied', { agentId: agent.id, model: applied, tokens });
   return tokens === null ? 'removed' : 'applied';
