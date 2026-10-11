@@ -33,9 +33,13 @@ export function doorScript(): string {
     'const KEYS_TTL=Number(process.env.EMBED_KEYS_TTL_MS||2000);',
     'const MAX_BODY=2*1024*1024,MAX_INPUTS=256,TIMEOUT=60000;',
     'let keys={},keysMtime=-1,keysAt=0;',
+    // The file's stamp is kept only once it was read and parsed: kept before,
+    // one failed read (a half-written file) emptied the keys until the file
+    // next changed, refusing every agent meanwhile (B066). A failure denies
+    // until the next read succeeds, a TTL later.
     'function loadKeys(){const now=Date.now();if(now-keysAt<KEYS_TTL)return;keysAt=now;',
-    ' try{const st=fs.statSync(KEYS);if(st.mtimeMs===keysMtime)return;keysMtime=st.mtimeMs;',
-    '  const j=JSON.parse(fs.readFileSync(KEYS,"utf8"));keys=(j&&typeof j==="object")?j:{};}catch(e){keys={};}}',
+    ' try{const st=fs.statSync(KEYS);if(st.mtimeMs===keysMtime)return;',
+    '  const j=JSON.parse(fs.readFileSync(KEYS,"utf8"));keys=(j&&typeof j==="object")?j:{};keysMtime=st.mtimeMs;}catch(e){keys={};keysMtime=-1;}}',
     'const buckets=new Map();',
     'function allow(agent){const now=Date.now(),cap=perMin(agent);let b=buckets.get(agent);if(!b){b={t:cap,at:now};buckets.set(agent,b);}',
     ' b.t=Math.min(cap,b.t+(now-b.at)*cap/60000);b.at=now;if(b.t<1)return false;b.t-=1;return true;}',

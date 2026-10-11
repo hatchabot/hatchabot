@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { doorScript } from '../src/embedder/door.js';
@@ -105,6 +105,18 @@ describe('the embed door', () => {
     await new Promise((r) => setTimeout(r, 20));
     expect((await call('agent-b-key', { input: 'y' })).status).toBe(200);
     expect((await call(KEY_A, { input: 'y' })).status).toBe(401); // the old key died with the rebuild
+  });
+
+  it('a keys file it could not read is read again, even when its time stamp has not moved (B066)', async () => {
+    // Half written: refused for now. Then whole, with the same mtime (a write
+    // in the same instant, or a coarse clock): the door must not keep the empty set.
+    const at = new Date('2026-01-01T00:00:00Z');
+    writeFileSync(keysFile, '{"half');
+    utimesSync(keysFile, at, at);
+    expect((await call('agent-c-key', { input: 'z' })).status).toBe(401);
+    writeFileSync(keysFile, JSON.stringify({ [embedKeyHash('agent-c-key')]: 'agent-c' }));
+    utimesSync(keysFile, at, at);
+    expect((await call('agent-c-key', { input: 'z' })).status).toBe(200);
   });
 
   it('answers /health for the server behind it', async () => {
