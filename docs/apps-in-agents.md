@@ -114,7 +114,11 @@ off first and puts them back if the new one fails.
 **One copy per account.** An install is refused (409) when another live agent
 already runs the same app on the account its values name (the mailbox): two
 copies would both answer every email. The dialog warns first; `allowShared`
-(the dialog's confirmation) overrides it.
+(the dialog's confirmation) overrides it. It is judged on the config the app
+would run with (the values given, the agent's existing file, the manifest's
+defaults), for installs, updates and new agents from a repo alike; an update
+is refused only for an account it adds, not one already confirmed. Installs of
+one app on one account run one at a time.
 
 **Update** is the same from step 1 with a newer commit; **rollback** points
 `current` back at the previous release and re-syncs its tasks (if they cannot
