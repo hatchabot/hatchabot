@@ -1384,6 +1384,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/mgmt/restTools.ts` — `set_budget`
 
+### Clearing one spike warning in Usage cleared all of them
+- **Check:** a request to `/v1/usage/alerts/dismiss` with an agent and time that were not text (a script or an older client).
+- **Cause:** before v2.160.0 an agent or time of the wrong type was read as "neither", which clears every warning.
+- **Fix:** upgrade: such a request is refused (400) and clears nothing.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `/v1/usage/alerts/dismiss`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody

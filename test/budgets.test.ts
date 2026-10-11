@@ -726,4 +726,16 @@ describe('budgets that act together, and messages that did not get through', () 
     expect(fresh.body).toEqual({ usd: 80, atLimit: 'warn' });
     expect(set.card!({ agent, input: { usd: 80 } } as never, fresh)).toContain('it keeps working past it');
   });
+
+  it('a malformed one-warning dismissal is refused, not read as "all of them" (#180)', async () => {
+    const { f, store } = await app();
+    const at = new Date(Date.now() - HOUR).toISOString();
+    store.addUsageAlert({ agentId: 'r1', ownerId: OWNER, at, tokens: 44e6, usual: 15e6, told: true });
+    store.addUsageAlert({ agentId: 'rops', ownerId: OWNER, at, tokens: 74e6, usual: 25e6, told: true });
+    for (const payload of [{ agentId: 1, at: 2 }, { agentId: 'r1', at: 5 }, { agentId: '', at: '' }, { agentId: null, at: null }]) {
+      const r = await f.inject({ method: 'POST', url: '/v1/usage/alerts/dismiss', headers: as(OWNER), payload });
+      expect(r.statusCode).toBe(400);
+    }
+    expect(store.usageAlertsSince(new Date(Date.now() - DAY).toISOString(), { ownerId: OWNER })).toHaveLength(2);
+  });
 });

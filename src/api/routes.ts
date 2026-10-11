@@ -8760,8 +8760,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Body: { agentId?: string; at?: string } }>('/v1/usage/alerts/dismiss', async (req, reply) => {
     const ownerId = ownerIdOf(req);
     const b = (req.body ?? {}) as { agentId?: unknown; at?: unknown };
-    if ((b.agentId === undefined) !== (b.at === undefined)) return reply.code(400).send({ error: 'Give both agentId and at for one warning, or neither for all of them.' });
-    const one = typeof b.agentId === 'string' && typeof b.at === 'string' ? { agentId: b.agentId, at: b.at } : undefined;
+    // Anything given must be a real id and time: a malformed one is refused,
+    // never read as "neither", which clears every warning (#180).
+    const all = b.agentId === undefined && b.at === undefined;
+    if (!all && !(typeof b.agentId === 'string' && b.agentId && typeof b.at === 'string' && b.at)) return reply.code(400).send({ error: 'Give both agentId and at for one warning, or neither for all of them.' });
+    const one = all ? undefined : { agentId: b.agentId as string, at: b.at as string };
     const cleared = store.dismissUsageAlerts(ownerId, new Date().toISOString(), one);
     return { cleared };
   });
