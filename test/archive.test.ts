@@ -142,6 +142,15 @@ describe('archiving frees the bot and keeps the agent', () => {
     expect(store.getAgent('a1')!.pendingAction).toBeFalsy();
   });
 
+  it('drops an app still waiting to go in, and the secret value it was given (2026-10-10)', async () => {
+    const { store, secrets, deps } = await world();
+    await secrets.put('app-pending/a1/app_password', '"made-up-app-password"');
+    store.setAppPending('a1', { source: '/tmp/demoapp', ref: 'HEAD', values: { app_password: { $secretRef: 'app-pending/a1/app_password' } } });
+    await archiveAgent(deps as any, 'a1');
+    expect(store.getAppPending('a1')).toBeUndefined();
+    expect(secrets.map.has('app-pending/a1/app_password')).toBe(false);
+  });
+
   it('is idempotent — a second archive is not an error', async () => {
     const { store, deps } = await world();
     await archiveAgent(deps as any, 'a1');

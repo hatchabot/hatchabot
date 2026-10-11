@@ -67,7 +67,10 @@ codebase gets deployed, updated and rolled back from Hatchabot.
   as `K=V …`).
 - `config.fields`: written to `{data_dir}/<file>` as JSON. A field is asked for
   (`required`, `default`) or filled by Hatchabot (`from`). Values already in the
-  file are kept on update; new fields get their defaults.
+  file are kept on update; new fields get their defaults. `"secret": true`
+  marks a password or key: the dialog asks for it in a hidden box, never
+  filled in, and a new agent's install that waits for the agent to be ready
+  keeps it in Hatchabot's secret store, not in the database, until it goes in.
 - `connections`: what to attach before it runs; `field` names the config value
   that says which account (here the mailbox's Google login).
 

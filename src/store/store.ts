@@ -1220,6 +1220,8 @@ export class Store {
       DELETE FROM agent_env   WHERE agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
       DELETE FROM agent_seed  WHERE agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
       DELETE FROM agent_proposals WHERE master_agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
+      -- An app that never went in kept its values, secrets included, in plain JSON (2026-10-10).
+      DELETE FROM agent_app_pending WHERE agent_id IN (SELECT id FROM agents WHERE state IN ('DELETED', 'ARCHIVED'));
     `);
   }
 
@@ -1243,7 +1245,7 @@ export class Store {
     this.db
       .prepare(`UPDATE agents SET gateway_token = NULL, gateway_port = NULL WHERE id = ?`)
       .run(agentId);
-    for (const t of ['memberships', 'invites', 'data_sources', 'agent_env', 'agent_seed', 'model_call_hours', 'usage_cursor', 'limit_hits', 'token_samples'] as const) {
+    for (const t of ['memberships', 'invites', 'data_sources', 'agent_env', 'agent_seed', 'model_call_hours', 'usage_cursor', 'limit_hits', 'token_samples', 'agent_app_pending'] as const) {
       this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId);
     }
     // Night review, 2026-09-27: the five-minute usage slots (a source's chart

@@ -11,6 +11,7 @@ import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { clearBusy } from '../src/orchestrator/busy.js';
 import { newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/operations.js';
+import { resolvePendingValues } from '../src/orchestrator/appPending.js';
 import {
   AppError, fieldsToAsk, hostGit, installRelease, mergeConfig, parseManifest, parseSource, repoFor, resolveRelease, switchTo, type AgentFacts,
 } from '../src/orchestrator/apps.js';
@@ -395,14 +396,14 @@ describe('a failed update leaves the running app as it was', () => {
 
 describe('the app routes', () => {
   const OWNER = 'owner-1';
-  async function app(appGit?: typeof hostGit) {
+  async function app(appGit?: typeof hostGit, secrets: { put(r: string, v: string): Promise<void>; get(r: string): Promise<string>; delete(r: string): Promise<void> } = { put: async () => {}, get: async () => 'x', delete: async () => {} }) {
     const store = new Store(new Database(':memory:'));
     const provider = new FakeAgent();
     store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
     store.insertAIProfile({ id: 'p', ownerId: OWNER, name: 'Plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-sonnet-5', secretRef: 'ai/p', createdAt: 'now' } as never);
     store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Demo', slug: 'demo-agent', state: 'RUNNING', runtimeRef: 'mock://a1', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
     const f = Fastify();
-    await registerRoutes(f, { store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} }, providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0 } }, appGit } as never);
+    await registerRoutes(f, { store, secrets, providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0 } }, appGit } as never);
     return { f, store, provider };
   }
   const as = { 'x-hatchabot-owner': OWNER };
@@ -519,6 +520,57 @@ describe('the app routes', () => {
     await f.inject({ method: 'POST', url: '/v1/agents/a1/app/pending', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } });
     for (let i = 0; i < 50 && !store.getAppPending('a1')?.error; i++) await new Promise((r) => setTimeout(r, 20));
     expect(store.getAppPending('a1')?.error).toMatch(/tests failed/);
+  });
+
+  it('a waiting app keeps its secret values in the secret store, and they go when it goes in or the agent goes (2026-10-10)', async () => {
+    const kept = new Map<string, string>();
+    const secrets = {
+      put: async (r: string, v: string) => { kept.set(r, v); },
+      get: async (r: string) => { const v = kept.get(r); if (v === undefined) throw new Error('missing'); return v; },
+      delete: async (r: string) => { kept.delete(r); },
+    };
+    const { f, store, provider } = await app(undefined, secrets);
+    const PASSWORD = 'made-up-app-password';
+    const withSecret = { ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'app_password', type: 'text', required: true, secret: true }] } };
+    const dir = repo(withSecret);
+    store.setAgentState('a1', 'STOPPED');
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/app/pending', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org', app_password: PASSWORD } } });
+    expect(res.statusCode).toBe(200);
+    // The database row names where it is, never what it is.
+    const row = (store as unknown as { db: Database.Database }).db.prepare(`SELECT vals FROM agent_app_pending WHERE agent_id = 'a1'`).get() as { vals: string };
+    expect(row.vals).not.toContain(PASSWORD);
+    expect(row.vals).toContain('demo@example.org');
+    expect([...kept.values()].some((v) => v.includes(PASSWORD))).toBe(true);
+    // A failed install keeps it waiting, and its secret with it.
+    provider.testCode = 1;
+    store.setAgentState('a1', 'RUNNING');
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/app/pending', headers: as, payload: {} });
+    for (let i = 0; i < 50 && !store.getAppPending('a1')?.error; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(store.getAppPending('a1')?.error).toMatch(/tests failed/);
+    expect(kept.size).toBe(1);
+    // It goes in: the app's config has the value; the row and the secret are gone.
+    provider.testCode = 0;
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/app/pending', headers: as, payload: {} });
+    for (let i = 0; i < 50 && !store.getAgentApp('a1'); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(JSON.parse(provider.live('mock://a1').config!)).toMatchObject({ app_password: PASSWORD });
+    for (let i = 0; i < 50 && store.getAppPending('a1'); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(store.getAppPending('a1')).toBeUndefined();
+    expect(kept.size).toBe(0);
+    // A second agent whose install never went in is deleted: nothing is left of it.
+    store.insertAgent({ id: 'a2', ownerId: OWNER, name: 'Demo Two', slug: 'demo-two', state: 'STOPPED', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    await f.inject({ method: 'POST', url: '/v1/agents/a2/app/pending', headers: as, payload: { source: dir, values: { mailbox: 'other@example.org', app_password: PASSWORD } } });
+    expect(kept.size).toBe(1);
+    const del = await f.inject({ method: 'DELETE', url: '/v1/agents/a2', headers: as });
+    expect(del.statusCode).toBe(200);
+    expect(store.getAppPending('a2')).toBeUndefined();
+    expect(kept.size).toBe(0);
+  });
+
+  it('a waiting value made to look like a secret reference reads nothing (2026-10-10)', async () => {
+    const kept = new Map([['ai/p', 'made-up-key'], ['app-pending/a1/mailbox', '"demo@example.org"']]);
+    const secrets = { put: async () => {}, get: async (r: string) => kept.get(r)!, delete: async () => {} };
+    const got = await resolvePendingValues(secrets, 'a1', { mode: { $secretRef: 'ai/p' }, mailbox: { $secretRef: 'app-pending/a1/mailbox' } });
+    expect(got).toEqual({ mailbox: 'demo@example.org' });
   });
 
   it('two copies of one app on one account: refused unless confirmed, and the connection list says who runs what', async () => {

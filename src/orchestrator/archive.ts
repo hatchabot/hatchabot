@@ -6,6 +6,7 @@ import type { CompositeTelegramProvisioner } from '../channels/composite.js';
 import { whileBusy } from './busy.js';
 import { canTransition } from '../domain/stateMachine.js';
 import { beginOperation, handleFor, rethrowIfCrash, type OpHandle } from './operations.js';
+import { dropAppPending } from './appPending.js';
 
 /**
  * Archive: a STOPPED agent that has handed its Telegram bot back.
@@ -138,6 +139,9 @@ async function finishArchive(deps: ArchiveDeps, op: OpHandle, agentId: string): 
   // giving up this identity, so don't quietly provision onto it later.
   store.setAgentPendingAction(agentId, null);
   channel.discardPending?.(agentId);
+  // So is an app still waiting to go in, and any secret values it was given:
+  // a restored agent is installed into again by hand.
+  await dropAppPending(store, secrets, agentId);
   if (agent.state !== 'ARCHIVED') store.setAgentState(agentId, 'ARCHIVED');
   op.step('archived');
   log('agent.archived', { agentId, accountId: row?.accountId ?? (op.get().params.accountId as string | null) ?? undefined });
