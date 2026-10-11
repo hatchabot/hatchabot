@@ -541,7 +541,7 @@ export class Broker {
       return {
         agentId: ctx.agent?.id ?? '',
         agentName: ctx.agent?.name ?? '',
-        rest: { call, card: rt.card ? rt.card(ctx) : `${name.replace(/_/g, ' ')}`, rebuild: rt.rebuildAfter },
+        rest: { call, card: rt.card ? rt.card(ctx, call) : `${name.replace(/_/g, ' ')}`, rebuild: rt.rebuildAfter },
       };
     }
     if (name === 'create_agent') {

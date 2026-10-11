@@ -711,4 +711,19 @@ describe('budgets that act together, and messages that did not get through', () 
     expect(suggestBudget(200_000)).toBe(MAX_BUDGET);
     expect(suggestBudget(Number.MAX_SAFE_INTEGER)).toBe(MAX_BUDGET);
   });
+
+  it('set_budget without at_limit: the card and the call keep the budget\'s own action (#183)', async () => {
+    const set = REST_BY_NAME.get('set_budget')!;
+    const agent = { id: 'r1', name: 'Garden Notes' } as Agent;
+    const get = async () => ({ agents: [{ id: 'r1', budget: { atLimit: 'pause' } }] });
+    const call = await set.call({ agent, input: { usd: 80 }, get } as never);
+    expect(call.body).toEqual({ usd: 80, atLimit: 'pause' });
+    const card = set.card!({ agent, input: { usd: 80 } } as never, call);
+    expect(card).toContain('at 100% it pauses until the 1st');
+    expect(card).not.toContain('keeps working past it');
+    // No budget yet: it warns, and says so.
+    const fresh = await set.call({ agent, input: { usd: 80 }, get: async () => ({ agents: [{ id: 'r1' }] }) } as never);
+    expect(fresh.body).toEqual({ usd: 80, atLimit: 'warn' });
+    expect(set.card!({ agent, input: { usd: 80 } } as never, fresh)).toContain('it keeps working past it');
+  });
 });
