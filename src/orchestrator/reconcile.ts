@@ -186,12 +186,19 @@ export function applyReconcileRule(
   } else if (status.phase === 'running' && s === 'STOPPED') {
     store.setAgentState(agent.id, 'RUNNING');
     log('reconcile.marked_running', { agentId: agent.id });
+  } else if (status.phase === 'running' && !status.healthy && (s === 'REBUILDING' || (s === 'PROVISIONING' && !agent.pendingAction))) {
+    // A container that is up is not a finished setup: cut off before its
+    // gateway answered (the health step), it may never have. Retry reuses
+    // the volume and runs the steps again (#90).
+    store.setAgentState(agent.id, 'FAILED', s === 'REBUILDING' ? 'The rebuild was interrupted — tap Retry.' : 'Setup was interrupted — tap Retry.');
+    log('reconcile.interrupted', { agentId: agent.id, was: s, unhealthy: true });
   } else if (status.phase === 'running' && s === 'REBUILDING') {
     // Rebuild finished but the control plane died before recording it.
     store.setAgentState(agent.id, 'RUNNING');
     log('reconcile.marked_running', { agentId: agent.id, was: s });
   } else if (status.phase === 'running' && s === 'PROVISIONING' && !agent.pendingAction) {
-    // Provisioning finished but the control plane died before recording it.
+    // Provisioning finished but the control plane died before recording it:
+    // its gateway answers.
     store.setAgentState(agent.id, 'RUNNING');
     log('reconcile.marked_running', { agentId: agent.id, was: s });
   } else if (status.phase === 'stopped' && s === 'RUNNING') {
