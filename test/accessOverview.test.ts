@@ -342,6 +342,28 @@ describe('an admission source that cannot be read is no proof that nobody is adm
     expect(w.row('a1', 'person', 'u-sam')).toMatchObject({ mismatch: 'extra' });
   });
 
+  it('a channel-level allowFrom or groupAllowFrom, or an account\'s groupAllowFrom, still admits them: the warning stays (B017)', async () => {
+    const tg = (extra: Record<string, unknown>, acct: Record<string, unknown> = {}) => JSON.stringify({ channels: { telegram: {
+      ...extra, accounts: { TestAgentBot: { enabled: true, botToken: BOT_VALUE, allowFrom: [tgId(1)], ...acct } },
+    } } });
+    for (const cfg of [
+      tg({ allowFrom: [tgId(2)] }),
+      tg({ groupAllowFrom: [`telegram:${tgId(2)}`] }),
+      tg({}, { groupAllowFrom: [tgId(2)] }),
+    ]) {
+      const w = await revokedButAdmitted();
+      w.inside.vm = container([], { files: { [`${STATE}/openclaw.json`]: cfg } });
+      await verifyAgentAccess(w.deps, 'a1');
+      expect(w.row('a1', 'person', 'u-sam'), cfg).toMatchObject({ intended: false, mismatch: 'extra' });
+    }
+    // A list that is not a list is not read as "nobody".
+    const w = await revokedButAdmitted();
+    w.inside.vm = container([], { files: { [`${STATE}/openclaw.json`]: tg({ allowFrom: tgId(2) }) } });
+    const r = await verifyAgentAccess(w.deps, 'a1');
+    expect((r as { skipped?: string[] }).skipped?.join(' ')).toMatch(/allowFrom not a list/);
+    expect(w.row('a1', 'person', 'u-sam')).toMatchObject({ mismatch: 'extra' });
+  });
+
   it('a complete read that no longer admits them is believed: the warning clears', async () => {
     const w = await revokedButAdmitted();
     w.inside.vm = container([]);
