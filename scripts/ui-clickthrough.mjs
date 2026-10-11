@@ -1042,7 +1042,10 @@ const SCENARIOS = String.raw`(() => {
       const body = await until(() => { const t = document.getElementById('usageBody').textContent; return t.includes('Last 24 hours') ? t : null; });
       ok('the last day: ' + body.slice(0, 200), /Last 24 hours:\s*109M tokens · 400 calls/.test(body));
       ok('the conversation size, and why it matters', body.includes('Conversation size now:') && body.includes('395K') && body.includes('Every call carries this much in'));
-      ok('the split', body.includes('cache reads 851M (85%)'));
+      const pie = document.querySelector('#usageBody svg[aria-label="Where the tokens went"]');
+      ok('the split is a donut, the total in the middle', !!pie && pie.textContent.includes('1B') && pie.querySelectorAll('circle').length === 4);
+      ok('its legend: cache reads 851M, 85%', /Cache reads\s*851M\s*85%/.test(pie.parentElement.textContent));
+      ok('a slice says its part on hover', [...pie.querySelectorAll('circle title')].some((x) => x.textContent === 'Cache reads: 851M (85%)'));
       ok('calls per model', body.includes('4.7k calls'));
       ok('its warning of earlier this week', body.includes('about 5× its usual day'));
       ok("today's is a Recommended item, not a second warning here", !body.includes('about 11× its usual day'));
