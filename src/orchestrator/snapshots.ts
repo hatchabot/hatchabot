@@ -53,20 +53,27 @@ export function workspacePath(slug: string, name: string): string {
   return `/home/node/.openclaw/agents/${slug}/agent/${name}`;
 }
 
+/**
+ * `onVolume`: through a one-shot on the agent's volume, for a stopped agent
+ * (its own container cannot exec), with the image it runs.
+ */
+export type VolumeAccess = { onVolume?: boolean; image?: string };
+
 export async function readCoreFiles(
   provider: RuntimeProvider,
   runtimeRef: string,
   slug: string,
+  via: VolumeAccess = {},
 ): Promise<Record<string, string>> {
   const files: Record<string, string> = {};
   for (const name of CORE_FILES) {
     // Read one byte past the cap so an oversized file is *detectable*:
     // silently truncating would store a partial MEMORY.md and later restore
     // it over the real one — data loss by the system meant to prevent it.
-    const res = await provider.execShell(
-      runtimeRef,
-      `head -c ${MAX_FILE_BYTES + 1} ${JSON.stringify(workspacePath(slug, name))} 2>/dev/null || true`,
-    );
+    const script = `head -c ${MAX_FILE_BYTES + 1} ${JSON.stringify(workspacePath(slug, name))} 2>/dev/null || true`;
+    const res = via.onVolume
+      ? await provider.execShellOnVolume(runtimeRef, script, { readOnly: true, image: via.image })
+      : await provider.execShell(runtimeRef, script);
     if (Buffer.byteLength(res.stdout, 'utf8') > MAX_FILE_BYTES) {
       throw new SnapshotError(
         `${name} is larger than ${Math.floor(MAX_FILE_BYTES / 1024)} KB — too big to snapshot safely. ` +
@@ -85,11 +92,12 @@ export async function readCoreFiles(
  * a MEMORY.md past ~98 KB failed to spawn ("Docker is not available") and a
  * snapshot restore stopped half-way (night review, 2026-09-27).
  */
-export async function writeFileInAgent(provider: RuntimeProvider, runtimeRef: string, path: string, b64: string): Promise<ExecResult> {
+export async function writeFileInAgent(provider: RuntimeProvider, runtimeRef: string, path: string, b64: string, via: VolumeAccess = {}): Promise<ExecResult> {
   if (b64.length <= ARGV_SAFE_B64) {
     // tmp + mv, so a failure never leaves the file truncated.
     const q = JSON.stringify(path);
-    return provider.execShell(runtimeRef, `set -e; echo ${JSON.stringify(b64)} | base64 -d > ${q}.tmp && mv ${q}.tmp ${q}`);
+    const script = `set -e; echo ${JSON.stringify(b64)} | base64 -d > ${q}.tmp && mv ${q}.tmp ${q}`;
+    return via.onVolume ? provider.execShellOnVolume(runtimeRef, script, { image: via.image }) : provider.execShell(runtimeRef, script);
   }
   if (!provider.writeToVolume) return { code: 1, stdout: '', stderr: 'this machine cannot write a file that large into the agent' };
   return provider.writeToVolume(runtimeRef, ['sh', '-c', 'cat > "$1.part-$$" && mv -f "$1.part-$$" "$1"', 'sh', path], Buffer.from(b64, 'base64'));
@@ -103,10 +111,11 @@ export async function writeCoreFile(
   slug: string,
   name: string,
   content: string,
+  via: VolumeAccess = {},
 ): Promise<void> {
   // base64 through the shell so arbitrary content can't break quoting.
   const b64 = Buffer.from(content, 'utf8').toString('base64');
-  const res = await writeFileInAgent(provider, runtimeRef, workspacePath(slug, name), b64);
+  const res = await writeFileInAgent(provider, runtimeRef, workspacePath(slug, name), b64, via);
   if (res.code !== 0) {
     throw new SnapshotError(`Couldn't write ${name}: ${res.stderr.slice(-200)}`);
   }
@@ -272,10 +281,10 @@ function coreFilesOf(files: Record<string, string>): string[] {
 
 /** Write a snapshot's core files; with `blankOthers`, the core files it lacks are emptied (how they were: absent or empty). */
 async function writeSnapshotFiles(
-  deps: SnapshotDeps, runtimeRef: string, slug: string, files: Record<string, string>, blankOthers: string[] = [],
+  deps: SnapshotDeps, runtimeRef: string, slug: string, files: Record<string, string>, blankOthers: string[] = [], via: VolumeAccess = {},
 ): Promise<void> {
-  for (const name of coreFilesOf(files)) await writeCoreFile(deps.provider, runtimeRef, slug, name, files[name]!);
-  for (const name of blankOthers) if (!(name in files)) await writeCoreFile(deps.provider, runtimeRef, slug, name, '');
+  for (const name of coreFilesOf(files)) await writeCoreFile(deps.provider, runtimeRef, slug, name, files[name]!, via);
+  for (const name of blankOthers) if (!(name in files)) await writeCoreFile(deps.provider, runtimeRef, slug, name, '', via);
 }
 
 const SNAPSHOT_CHOICES = {
@@ -308,7 +317,9 @@ export async function resumeSnapshotRestore(deps: SnapshotDeps, opId: string): P
   const safety = p.safetySnapshotId ? deps.store.getSnapshot(agent.id, p.safetySnapshotId) : undefined;
   if (row.step === 'written') { op.done(`Restored its files from "${label}".`); return; }
   let now: Record<string, string> | undefined;
-  try { now = await readCoreFiles(deps.provider, agent.runtimeRef, agent.slug); } catch { now = undefined; }
+  // A stopped agent's files are read on its volume (its container cannot exec).
+  const via: VolumeAccess = agent.state === 'STOPPED' ? { onVolume: true, image: agent.image ?? undefined } : {};
+  try { now = await readCoreFiles(deps.provider, agent.runtimeRef, agent.slug, via); } catch { now = undefined; }
   if (now && snapshot) {
     const names = coreFilesOf(snapshot.files);
     if (names.every((n) => now![n] === snapshot.files[n])) { op.done(`Restored its files from "${label}".`); return; }
@@ -330,19 +341,22 @@ export async function recoverSnapshotRestore(deps: SnapshotDeps, opId: string, a
   const p = row.params as { snapshotId?: string; safetySnapshotId?: string; label?: string };
   const agent = row.agentId ? deps.store.getAgent(row.agentId) : undefined;
   if (!agent?.runtimeRef) throw new SnapshotError('The agent is gone.');
-  if (agent.state !== 'RUNNING') throw new SnapshotError('Start the agent first: its files are written while it runs.');
+  // A stopped agent's files are written on its volume: Start is refused
+  // while this choice waits, so "start it first" was a dead end (#86).
+  if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') throw new SnapshotError(`It is ${agent.state.toLowerCase()}: wait for it to settle, or retry it, then choose again.`);
+  const via: VolumeAccess = agent.state === 'STOPPED' ? { onVolume: true, image: agent.image ?? undefined } : {};
   const label = p.label ?? 'a snapshot';
   if (action === 'revert') {
     const safety = p.safetySnapshotId ? deps.store.getSnapshot(agent.id, p.safetySnapshotId) : undefined;
     if (!safety) throw new SnapshotError('The snapshot taken before the restore is gone, so there is nothing to revert to. Finish instead.');
     const snapshot = p.snapshotId ? deps.store.getSnapshot(agent.id, p.snapshotId) : undefined;
-    await writeSnapshotFiles(deps, agent.runtimeRef, agent.slug, safety.files, snapshot ? coreFilesOf(snapshot.files) : []);
+    await writeSnapshotFiles(deps, agent.runtimeRef, agent.slug, safety.files, snapshot ? coreFilesOf(snapshot.files) : [], via);
     op.rolledBack(`Reverted its files to how they were before restoring "${label}".`);
     return;
   }
   const snapshot = p.snapshotId ? deps.store.getSnapshot(agent.id, p.snapshotId) : undefined;
   if (!snapshot) throw new SnapshotError(`The snapshot "${label}" no longer exists, so the restore cannot be finished. Revert instead.`);
-  await writeSnapshotFiles(deps, agent.runtimeRef, agent.slug, snapshot.files);
+  await writeSnapshotFiles(deps, agent.runtimeRef, agent.slug, snapshot.files, [], via);
   op.step('written');
   op.done(`Restored its files from "${label}".`);
 }

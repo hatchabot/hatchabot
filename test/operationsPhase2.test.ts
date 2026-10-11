@@ -218,6 +218,29 @@ describe('restore a snapshot: killed at every step, then a restart', () => {
       expect(operationRefusal(s.store, 'a1')).toBeUndefined();
     });
   }
+
+  for (const action of ['finish', 'revert'] as const) {
+    it(`held on a STOPPED agent (Start is refused meanwhile): "${action}" writes on its volume (#86)`, async () => {
+      const s = await snapshotWorld();
+      crashAt('file-written');
+      await expect(restoreSnapshot({ store: s.store, provider: s.provider }, 'a1', s.snapId)).rejects.toBeInstanceOf(SimulatedCrash);
+      reboot('a1');
+      s.store.setAgentState('a1', 'STOPPED');
+      // A stopped container cannot exec; its volume can be worked on.
+      const onVolume = (s.provider as any).execShell;
+      (s.provider as any).execShell = async () => { throw new Error('container is not running'); };
+      (s.provider as any).execShellOnVolume = onVolume;
+      await resumeOperations(s.ctx);
+      const op = s.store.listOperations(['a1'])[0]!;
+      expect(op.status).toBe('held');
+      expect(operationRefusal(s.store, 'a1')).toMatch(/part-way through its files/);
+      const after = await recoverOperation(s.ctx, op.id, action);
+      expect(after.status).toBe(action === 'finish' ? 'succeeded' : 'rolled_back');
+      expect(s.files).toEqual(action === 'finish' ? OLD : NEW);
+      expect(operationRefusal(s.store, 'a1')).toBeUndefined();
+      expect(s.store.getAgent('a1')!.state).toBe('STOPPED');
+    });
+  }
 });
 
 // ---- archive -------------------------------------------------------------------
