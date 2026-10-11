@@ -77,6 +77,7 @@ import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
 import { commandOwnersFor, reapplyCurrentSettings } from '../orchestrator/provision.js';
 import { CronSystemOwnedError, addCron, editCron, cronTargetFor, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
+import { dropAppPending, pendingSecretRefs, resolvePendingValues, stashPendingSecrets } from '../orchestrator/appPending.js';
 import { request as httpRequest } from 'node:http';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
@@ -7134,9 +7135,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const a = store.getAgent(agentId);
     if (!p || !a || a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id) || store.activeOperationFor(a.id)) return;
     try {
-      const { __allowShared, ...values } = p.values as Record<string, unknown> & { __allowShared?: boolean };
+      const { __allowShared, ...kept } = p.values as Record<string, unknown> & { __allowShared?: boolean };
+      const values = await resolvePendingValues(secrets, agentId, kept);
       await installFromSource(a, p.source, p.ref, values, __allowShared === true);
-      store.deleteAppPending(agentId);
+      // In: its secrets are in the app's config now, and nowhere else.
+      await dropAppPending(store, secrets, agentId);
     } catch (e) {
       const msg = (e as Error)?.message ?? String(e);
       store.setAppPendingError(agentId, msg.slice(0, 2000));
@@ -7176,7 +7179,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const effective = { ...values, ...mergeConfig(rel.manifest, appFacts(a), {}, values).config };
       const clash = req.body?.allowShared ? [] : sharedAppConflicts(a, rel.manifest, effective);
       if (clash.length) throw sharedRefusal(clash, rel.manifest);
-      store.setAppPending(a.id, { source: req.body!.source!, ref, values: { ...(req.body?.values ?? {}), ...(req.body?.allowShared ? { __allowShared: true } : {}) } });
+      // Secret fields go to the secret store; the row keeps where. One waiting
+      // before this is replaced: its secrets go unless this one reuses them.
+      const before = waiting ? pendingSecretRefs(a.id, waiting.values) : [];
+      const kept = await stashPendingSecrets(secrets, a.id, rel.manifest, values);
+      store.setAppPending(a.id, { source: req.body!.source!, ref, values: { ...kept, ...(req.body?.allowShared ? { __allowShared: true } : {}) } });
+      const now = new Set(pendingSecretRefs(a.id, kept));
+      for (const r of before) if (!now.has(r)) await secrets.delete(r).catch(() => {});
       trace(a.id)('app.pending', { app: rel.manifest.app });
       if (a.state === 'RUNNING') void runPendingApp(a.id);
       return { pending: true, app: rel.manifest.app, name: rel.manifest.name };
@@ -13630,6 +13639,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // credentials and the child rows — memberships carry Telegram user IDs
     // (PII), source/env/seed rows would dangle (their secrets were scrubbed
     // above). Pre-fix tombstones are cleaned by the same scrub in #migrate.
+    // An app still waiting to go in, with any secret values it was given.
+    await dropAppPending(store, secrets, agent.id);
     store.scrubAgentResidue(agent.id);
     return publicAgent(store.setAgentState(agent.id, 'DELETED'));
   });
