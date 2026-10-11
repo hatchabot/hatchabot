@@ -106,6 +106,70 @@ describe('OAuth client setup', () => {
   });
 });
 
+describe('replacing or removing the OAuth client', () => {
+  const OTHER = { clientId: 'other-cid.apps.googleusercontent.com', clientSecret: 'FAKE-FIXTURE-OTHER' };
+  async function connected() {
+    const { fetchImpl } = googleMock();
+    const w = await world(fetchImpl);
+    await configureClient(w.f);
+    const start = await w.f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: {} });
+    const state = new URL(start.json().url).searchParams.get('state')!;
+    await w.f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}`, headers: H, cookies: { hb_oauth: nonceOf(start) } });
+    return { ...w, connId: w.store.listConnections(OWNER)[0]!.id };
+  }
+  const put = (f: any, payload: object) => f.inject({ method: 'PUT', url: '/v1/google-oauth/client', headers: H, payload });
+
+  it('a different client ID is refused while connections from the old one exist, naming how many (B058)', async () => {
+    const w = await connected();
+    expect(w.store.getConnection(w.connId)!.clientId).toBe('cid.apps.googleusercontent.com');
+    const res = await put(w.f, OTHER);
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'google_client_change', reconnect: 1 });
+    expect(JSON.parse(await w.secrets.get('google-oauth/client')).clientId).toBe('cid.apps.googleusercontent.com');
+    // A new secret for the same client keeps working without a question.
+    expect((await put(w.f, { clientId: 'cid.apps.googleusercontent.com', clientSecret: 'FAKE-FIXTURE-ROTATED' })).statusCode).toBe(200);
+  });
+
+  it('confirmed, the old connections show as needing a reconnect and are not imported with the new client (B058)', async () => {
+    const w = await connected();
+    w.store.attachConnection('a1', w.connId, false);
+    const res = await put(w.f, { ...OTHER, confirm: true });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().reconnect).toBe(1);
+    const list = (await w.f.inject({ method: 'GET', url: '/v1/connections', headers: H })).json().connections;
+    expect(list[0]).toMatchObject({ needsReconnect: true });
+    expect(list[0].clientId).toBeUndefined();
+    const ref = w.store.getAgent('a1')!.runtimeRef!;
+    const r = await materializeConnection({ store: w.store, secrets: w.secrets, provider: w.provider }, { id: 'a1', slug: 'mailer', runtimeRef: ref }, w.connId);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/connect it again/);
+  });
+
+  it('Remove then Save of a different client is still caught (B058)', async () => {
+    const w = await connected();
+    expect((await w.f.inject({ method: 'DELETE', url: '/v1/google-oauth/client', headers: H })).statusCode).toBe(200);
+    expect((await put(w.f, OTHER)).statusCode).toBe(409);
+  });
+
+  it('connections from before the client was recorded count as made by the client set now (B058)', async () => {
+    const w = await world();
+    await configureClient(w.f);
+    w.store.insertConnection({ id: 'c-old', ownerId: OWNER, kind: 'google', email: 'mara@example.org', services: [], secretRef: 'connection/c-old' });
+    expect(w.store.getConnection('c-old')!.clientId).toBeNull();
+    expect((await put(w.f, OTHER)).json()).toMatchObject({ reconnect: 1 });
+  });
+
+  it('a failed delete in the secret store is an error, not "removed" (C051)', async () => {
+    const w = await world();
+    await configureClient(w.f);
+    w.secrets.delete = async () => { throw new Error('vault locked'); };
+    const res = await w.f.inject({ method: 'DELETE', url: '/v1/google-oauth/client', headers: H });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toMatch(/still set/);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/google-oauth/client', headers: H })).json().configured).toBe(true);
+  });
+});
+
 describe('the consent round-trip', () => {
   it('a callback from a different browser than the one that pressed Connect is refused (night review)', async () => {
     const { fetchImpl } = googleMock();
@@ -210,6 +274,29 @@ describe('attach / detach / remove', () => {
     expect(attached[0]).toMatchObject({ connectionId: connId, gmailNoSend: true });
     expect(attached[0]!.attachedAt).toBeTruthy();
     expect(attached[0]!.materializedAt).toBeTruthy(); // materialize stamped the pull
+  });
+
+  it('the per-account Disconnect on a platform account detaches it, so no later sync imports it again (B039)', async () => {
+    const w = await connectedWorld();
+    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } });
+    const del = await w.f.inject({ method: 'DELETE', url: '/v1/agents/a1/connections/chris%40example.com', headers: H });
+    expect(del.statusCode, del.body).toBe(200);
+    expect(del.json()).toMatchObject({ detached: true, removed: true });
+    expect(w.store.listAgentConnections('a1')).toEqual([]);
+    const mark = w.provider.execLog.length;
+    await syncConnections({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.store.getAgent('a1')!.runtimeRef!);
+    expect(w.provider.execLog.slice(mark).some((c) => String(c[1] ?? '').includes('gog auth import'))).toBe(false);
+  });
+
+  it('on a stopped agent, the Disconnect detaches and queues the removal for its next start (B039)', async () => {
+    const w = await connectedWorld();
+    w.store.attachConnection('a1', w.connId, false);
+    w.store.setAgentState('a1', 'STOPPED');
+    const del = await w.f.inject({ method: 'DELETE', url: '/v1/agents/a1/connections/chris%40example.com', headers: H });
+    expect(del.statusCode, del.body).toBe(200);
+    expect(del.json()).toMatchObject({ detached: true, removed: false });
+    expect(w.store.listAgentConnections('a1')).toEqual([]);
+    expect(w.store.connectionRemovals('a1')).toEqual(['chris@example.com']);
   });
 
   it('syncConnections reconciles away a vault account no longer attached (detached while stopped)', async () => {

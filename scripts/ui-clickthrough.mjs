@@ -3021,6 +3021,59 @@ const SCENARIOS = String.raw`(() => {
         await refresh(false);
       }
     },
+    // Saving a different Google OAuth client breaks the connections the old one made: it asks first, naming how many.
+    googleClientChange: async () => {
+      const msg = '1 Google connection was made with a different OAuth client. With this one, it stops working until each account is connected again.';
+      try {
+        window.__override['/v1/google-oauth/client'] = { configured: false, redirectUri: 'https://hatchabot.example.org/v1/connections/google/callback' };
+        window.__override['/v1/connections'] = { connections: [{ id: 'c1', kind: 'google', email: 'mara@example.org', services: ['gmail'], createdAt: '2026-10-01T00:00:00Z', attachedTo: [], needsReconnect: true }] };
+        await loadConnections();
+        ok('a connection from the old client says to connect it again', !!document.querySelector('#connVault .conn-reconnect') && document.getElementById('connVault').textContent.includes('earlier OAuth client'));
+        document.getElementById('connClientId').value = 'new-cid.apps.example.org';
+        document.getElementById('connClientSecret').value = 'FAKE-FIXTURE-VALUE';
+        window.__answer = window.__answer || {};
+        window.__answer['PUT /v1/google-oauth/client'] = [{ status: 409, body: { error: msg, code: 'google_client_change', reconnect: 1 } }];
+        window.__confirms.length = 0; window.__confirmAnswer = false;
+        let mark = window.__calls.length;
+        await saveOAuthClient();
+        ok('it asked, naming how many: ' + window.__confirms.at(-1), (window.__confirms.at(-1) || '').includes('1 Google connection'));
+        eq('declined: one PUT, nothing more', window.__calls.slice(mark).filter((c) => c.method === 'PUT').length, 1);
+        window.__answer['PUT /v1/google-oauth/client'] = [{ status: 409, body: { error: msg, code: 'google_client_change', reconnect: 1 } }, { status: 200, body: { configured: true, clientId: 'new-cid.apps.example.org', reconnect: 1 } }];
+        window.__confirmAnswer = true;
+        mark = window.__calls.length;
+        await saveOAuthClient();
+        const puts = window.__calls.slice(mark).filter((c) => c.method === 'PUT');
+        eq('confirmed: asked again with confirm', puts.map((c) => c.body.confirm ?? null), [null, true]);
+        ok('the toast says how many to reconnect: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('1 connection must be connected again'));
+      } finally {
+        window.__confirmAnswer = true;
+        if (window.__answer) delete window.__answer['PUT /v1/google-oauth/client'];
+        delete window.__override['/v1/google-oauth/client'];
+        delete window.__override['/v1/connections'];
+      }
+    },
+    // An agent's Disconnect goes to the server, which detaches a platform account (it used to
+    // pick the raw remove when /v1/connections failed, and the next rebuild imported it again).
+    disconnectGoogleAccount: async () => {
+      const prev = editAgentId;
+      const key = 'DELETE /v1/agents/a1/connections/mara%40example.org';
+      try {
+        editAgentId = 'a1';
+        window.__override['/v1/agents/a1/connections'] = { accounts: [] };
+        window.__answer = window.__answer || {};
+        window.__answer[key] = [{ status: 200, body: { removed: false, detached: true } }];
+        window.__confirmAnswer = true;
+        const mark = window.__calls.length;
+        await disconnectAccount('mara@example.org');
+        const sent = window.__calls.slice(mark).filter((c) => c.method !== 'GET').map((c) => c.method + ' ' + c.path);
+        eq('one request: the server decides', sent, [key]);
+        ok('a deferred removal is said: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('retried at its next start'));
+      } finally {
+        editAgentId = prev;
+        if (window.__answer) delete window.__answer[key];
+        delete window.__override['/v1/agents/a1/connections'];
+      }
+    },
     // The tooltip's three parts (2026-10-07): doing / cost and spending alarm / runtime (version, uptime, restarts).
     tooltipParts: async () => {
       const month = new Date().toISOString().slice(0, 7);
