@@ -2,6 +2,117 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.160.0] — 2026-10-10
+
+A reliability and hardening release: about 170 fixes from a security review of v2.159.0 and from the 129 issues an automated review filed on GitHub. None of the findings let one household account reach another's agents or data, and none needed no sign-in; most were places where a failure (a read that failed, a stop that did not take, a step cut off by a restart) was reported as success, or where a recovery path skipped a check the normal path makes. Each fix has a test that failed before it, and a docs/troubleshooting.md entry.
+
+### Fixed
+
+#### Moves, restores and archives
+- A move that fails and can't remove its copy on the other machine now waits for your choice: remove the copy, or say you did. The agent can't be started meanwhile, so two copies never answer the same bot.
+- A restore cut off by a restart says plainly when the agent couldn't be confirmed stopped, instead of claiming it was.
+- "Put back the copy from before" now applies today's members, bot and settings before starting. A restore that couldn't apply all current settings keeps Slack and Discord off until the next rebuild, and removes Google accounts that are no longer attached.
+- An archive cut off by a restart now waits until the agent is confirmed stopped before finishing.
+
+#### Access and sign-in
+- Unlinking your Telegram now also stops new agents from picking it up again; existing agents keep working until you remove it there.
+- If someone is removed just as their invite lets them in, they can no longer chat with the bot.
+- Access checks now find people let in by a chat app's channel-wide or group lists.
+- Adding a passkey or signing in with one works with Hatchabot open in several tabs.
+- Resetting someone's second factors also cancels any passkey they had started adding.
+- Making new backup codes can no longer lose your old ones if it fails part-way.
+- Invitation codes no longer appear in the service log.
+- An agent you disconnect from another no longer gets one last answer from it while it wakes.
+
+#### Connections and cleanup
+- Saving a different Google OAuth client now asks first and says how many accounts will need connecting again. Accounts made with an earlier client are marked in Settings → Connections. Removing the client reports an error when it fails instead of saying it was removed.
+- Disconnect in an agent's Connections now fully detaches a server-connected Google account, so a restart or rebuild no longer brings it back. A removal that failed is no longer mistaken for one that worked.
+- Removing a repo source keeps trying to take its deploy key off the agent until it is gone, and reminds you to delete the key on the repo's host too.
+- Deleting an agent no longer reports success when some of its stored keys could not be deleted (press Delete again). Keys left behind earlier are cleaned up when Hatchabot starts.
+- In "run an app from a repo", picking a different Google account now updates the app's mailbox to match.
+
+#### Chat history and the Hatchabot agent
+- Download history and Recover context now work on agents running OpenClaw 2026.9. They read the agent's own database, including conversations from before a reset.
+- Recover context no longer hands an agent a conversation it is still having, such as another person's web chat. If the agent can't be asked to read the recovered file, the click says so.
+- A chat history that can't be read now shows an error with the reason, not "No chat history found" or an empty web chat.
+- Web chat history keeps picture-only replies (shown as [image]), the same notice sent on different days, and on 2026.7 the conversation from before a reset.
+- On a Claude subscription, the Hatchabot agent's large actions now raise their confirmation card, and your messages are no longer read as its own.
+- Hatchabot agent: search result numbers never open the wrong page, long "waiting for you" Telegram messages are no longer refused, outcome notes reach it after a move or rebuild, and a failed compaction no longer shows as running forever.
+
+#### Releases, images and the runtime
+- Installs, upgrades and image pulls refuse a release from v2.159.0 on that has no release manifest, instead of falling back to its checksum file or image tag.
+- A derived image's lines can no longer leave the image running as root (a trailing `\` or an unclosed heredoc).
+- Config lint no longer hides real security findings that mention the gateway token.
+- Bringing in an OpenClaw agent no longer takes over its bot when Telegram can't confirm OpenClaw stopped polling it.
+- `hatchabot login` makes the config file private even when it already existed.
+- The Hatchabot agent refuses to end its own image pin from chat, as intended.
+- Changing a shared AI source's default model keeps other members' chosen models.
+- Memory search recovers by itself after a keys file it couldn't read, and a key retired while a runner's memory search was starting no longer stays valid there.
+- Opening Discord or Slack setup for two agents quickly can no longer connect the wrong one.
+
+#### Apps, tasks and files
+- Editing a scheduled task in the app changes it in place: it keeps posting where it did (a member's chat, a group) and stays quiet or paused.
+- A template keeps a quiet task quiet in every copy made from it.
+- Two agents can no longer end up running the same app on one mailbox through the app's default address, an update, or two installs at once.
+- App passwords and keys are typed into hidden boxes, and a new agent's waiting app install keeps them in the secret store, not the database.
+- A file upload can no longer replace an agent's live conversation database or logins.
+- Adopting a workspace copies exactly the files its preview lists; links are named and left out.
+
+#### Budgets and usage
+- Budgets: a machine budget set to pause now pauses agents that another budget had moved to a cheaper model.
+- Budget and "tell me every $X" messages, and a paused agent's Telegram reply, are retried until they get through, instead of being marked as sent.
+- A model switch that fails is no longer announced as "already on the cheapest model". Suggested budgets stay within what the app accepts.
+- The Hatchabot agent's budget card now states the action the budget will really take. Recommended items only merge a card that makes the same change.
+- Usage figures are more accurate: a new agent's first tokens count, no failed call is counted twice or lost, and calls are filed under the source the agent is actually running. Spike warnings judge each agent on its own measured days.
+- A current loop between two agents is no longer hidden by an older one. Turning off the weekly review also removes a review task brought in by a restored agent. Picking a cost window while figures are loading now updates them.
+
+#### Images, classes and rebuilds
+- Classes: an image an agent's data cannot go back to is refused, a refused edit keeps the agent's pin, and memory caps from a class are applied (or the app says when they weren't) on assign and delete.
+- Automatic rebuilds never take an agent whose conversations could not be read as idle, and a setup cut off before the agent answered is no longer marked running.
+- Moving a pinned image to another machine keeps every package (g++ included), a derived image's base tools and plugins, and extras built under a plain version tag.
+- The Hatchabot agent waits for a rebuild to finish and says "Failed" when a long change did not happen.
+- Context caps never overwrite a hand edit, and an old source's cap is retried until it is removed.
+- After a source switch, the new source is no longer shown as working because of the old source's successes; an empty health answer no longer counts as healthy.
+
+#### Templates, sharing and snapshots
+- Snapshots refuse to be taken when one of an agent's core files can't be read, instead of quietly leaving it out; an empty file stays empty when restored.
+- Restoring a snapshot also brings back the agent's setup values, so the next value change no longer brings back the text you undid.
+- Share, Clone and New child stop with a clear message when a file or the task list can't be read, or when the agent has more than 12 tasks switched on or more than 24 setup fields, instead of making an incomplete copy.
+- A child or recipient of an agent with setup fields now fills in its own answers instead of keeping the author's; OpenClaw's own upkeep tasks are no longer copied.
+- A misspelt yes/no setup answer is refused instead of switching the option off, choices with stray spaces can be picked, and a template whose setup fields repeat a key is refused.
+
+#### Files, backups and reports
+- Downloads from Files no longer end as a short, broken file when the copy fails part-way; the browser reports the download as failed.
+- Deleting a backup that is still being written is refused until the run finishes.
+- Looking inside an archived agent now says when its files couldn't be read, instead of showing them as empty, and long files no longer end in "�".
+- Files: the folder you opened last is the one shown, uploads work in folders like `.openclaw-notes`, each failed upload says why, file names keep their spaces, and an odd file time no longer breaks a folder.
+- Report a problem no longer fails on emoji, shows the draft you clicked, and keeps a draft whose discard failed.
+- Activity previews, and the Discord and Slack setup steps, now recover from a failed read on the next try, without reloading the page.
+
+#### Settings, imports and connections
+- Two settings saved at the same moment no longer overwrite each other, and a `.env` value that spans lines is left as written.
+- The CLI refuses `--force=false` instead of skipping the question, and `reach on --invited-only` works.
+- An agent's own downloaded copy imports again (long model names, many variables); variables containing a NUL character are refused.
+- Google connections record only the services you granted, and say which ones you didn't.
+- Re-adding a git source, cloning, connecting agents to each other and adopting with `~/` paths now work reliably, and runner keys work in folders with spaces.
+- A refused AI-source or manager setting change no longer saves part of it.
+- A machine that follows the newest release (the follow-latest timer) deploys only releases published by the release workflow: from v2.159.0 on, a tag must be a published, immutable release whose manifest matches it.
+
+#### Apps in agents
+- Changing an app's settings without a new commit no longer deletes the code it is running from, and a restart part-way through no longer reports the change as done.
+- An app update that can't put the old version back now waits on the agent's page for you to choose: use the new release, or go back.
+- The page says "the running version is unchanged" only when it is, and "its tests passed" only when the app has tests.
+- App settings: an empty value clears an optional setting, values must fit their type (a number, true/false, a list, an email), and a required setting Hatchabot can't fill stops the install with the reason.
+- App manifests can't repeat a task name or a setting key, and apps now see their disabled tasks; one of the agent's own tasks with no name no longer blocks app installs and updates.
+- If an app's config or its live link can't be read, an update stops without changing anything, and the dialog no longer installs a repo read earlier after a later read fails.
+
+#### Scheduled tasks and sleeping agents
+- Editing or adding a scheduled task stays with the agent it was made on, and a task can't be added while that agent is being moved or exported.
+- Scheduled tasks show intervals to the second and keep the time of one-time tasks; a task list or run history that can't be read says so instead of showing "none" or "has not run yet".
+- A task made quiet before you linked your chat now posts to you once you are linked.
+- Sleeping agents: an agent whose activity or tasks can't be read stays awake, and a message sent as it fell asleep, or waiting behind a hundred others, wakes it, as does a message after its bot token was replaced.
+- A conversation that started on Telegram no longer marks the agent unread, and `hatchabot bots` lists a sleeping agent's bot as in use instead of reclaimable.
+
 ## [2.159.1] — 2026-10-10
 
 ### Fixed

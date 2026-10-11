@@ -133,7 +133,7 @@ describe('check_known_problem (matchKnownProblems)', () => {
   it('every playbook entry is found first from its own symptom line', () => {
     const missed = titles.filter((t) => matchKnownProblems(process.cwd(), t, 'v2.138.0').matches[0]?.title !== t);
     expect(missed).toEqual([]);
-  });
+  }, 30_000); // each entry against all of them: grows with the playbook (321 entries took 4.5 s)
   it('the incident the Hatchabot agent got wrong is found from how it was described (2026-10-07), with the whole entry', () => {
     const r = matchKnownProblems(process.cwd(), "taxkit QA: every message failed with 'LLM request failed (request format rejected, HTTP 400)' when the chat was switched to Claude Opus 5.5", 'v2.138.0');
     expect(r.matches[0]!.title).toMatch(/request format rejected, HTTP 400/);
