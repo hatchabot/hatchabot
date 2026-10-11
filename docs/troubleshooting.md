@@ -320,6 +320,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/routes.ts` — `applyModelToRuntime`
 
+### Right after switching an agent's AI source, the new source shows "ok" although it refuses the agent
+- **Check:** Settings → AI sources shows the new source as working, and the agent's page as answering, while its event log or Usage shows 429 refusals on that source since the switch.
+- **Cause:** an agent's last successful call was kept per agent, not per source, so its success on the old source counted as one on the new source and hid the new source's refusals.
+- **Fix:** upgrade. Since v2.160.0 a success counts only for the source it was on; the status corrects itself at the next usage reading.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/sourceUsage.ts` — `summarizeSourceUsage`; `src/store/store.ts` — `lastOkOn`
+
 ## Telegram, Discord and Slack
 
 ### Discord or Slack ended up connected to a different agent than the one the sheet named

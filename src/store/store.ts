@@ -309,7 +309,7 @@ export class Store {
         owner_id TEXT, servers TEXT, warnings TEXT, add_to_server_url TEXT, checked_at TEXT, added_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS usage_cursor (
-        agent_id TEXT PRIMARY KEY, last_ts TEXT NOT NULL, last_ok TEXT, last_limited TEXT
+        agent_id TEXT PRIMARY KEY, last_ts TEXT NOT NULL, last_ok TEXT, last_limited TEXT, last_ok_profile TEXT
       );
       CREATE TABLE IF NOT EXISTS limit_hits (
         agent_id TEXT NOT NULL, profile_id TEXT, at TEXT NOT NULL, model TEXT,
@@ -1069,6 +1069,9 @@ export class Store {
       `ALTER TABLE usage_alerts ADD COLUMN dismissed_at TEXT`,
       // A spike whose message a loop's message covered (v2.158.0): one cause, one message.
       `ALTER TABLE usage_alerts ADD COLUMN covered TEXT`,
+      // Which source last_ok was a success on (v2.160.0): an agent's success
+      // before a source switch is not one on its new source.
+      `ALTER TABLE usage_cursor ADD COLUMN last_ok_profile TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -3634,18 +3637,27 @@ export class Store {
   }
 
   // ---- AI-source usage ---------------------------------------------------------
-  usageCursor(agentId: string): { lastTs: string; lastOk?: string; lastLimited?: string } | undefined {
-    const r = this.db.prepare(`SELECT last_ts, last_ok, last_limited FROM usage_cursor WHERE agent_id = ?`).get(agentId) as
-      { last_ts: string; last_ok: string | null; last_limited: string | null } | undefined;
-    return r ? { lastTs: r.last_ts, lastOk: r.last_ok ?? undefined, lastLimited: r.last_limited ?? undefined } : undefined;
+  usageCursor(agentId: string): { lastTs: string; lastOk?: string; lastLimited?: string; lastOkProfile?: string } | undefined {
+    const r = this.db.prepare(`SELECT last_ts, last_ok, last_limited, last_ok_profile FROM usage_cursor WHERE agent_id = ?`).get(agentId) as
+      { last_ts: string; last_ok: string | null; last_limited: string | null; last_ok_profile: string | null } | undefined;
+    return r ? { lastTs: r.last_ts, lastOk: r.last_ok ?? undefined, lastLimited: r.last_limited ?? undefined, lastOkProfile: r.last_ok_profile ?? undefined } : undefined;
   }
-  setUsageCursor(agentId: string, lastTs: string, lastOk?: string, lastLimited?: string): void {
+  /**
+   * The agent's newest success ON this source: one from before a switch is
+   * not (#114). A success recorded before the source was kept counts (legacy).
+   */
+  lastOkOn(agentId: string, profileId: string): string | undefined {
+    const c = this.usageCursor(agentId);
+    return c?.lastOk && (!c.lastOkProfile || c.lastOkProfile === profileId) ? c.lastOk : undefined;
+  }
+  setUsageCursor(agentId: string, lastTs: string, lastOk?: string, lastLimited?: string, profileId?: string): void {
     this.db.prepare(
-      `INSERT INTO usage_cursor (agent_id, last_ts, last_ok, last_limited) VALUES (?, ?, ?, ?)
+      `INSERT INTO usage_cursor (agent_id, last_ts, last_ok, last_limited, last_ok_profile) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(agent_id) DO UPDATE SET last_ts = excluded.last_ts,
+         last_ok_profile = CASE WHEN excluded.last_ok IS NULL THEN usage_cursor.last_ok_profile ELSE excluded.last_ok_profile END,
          last_ok = COALESCE(excluded.last_ok, usage_cursor.last_ok),
          last_limited = COALESCE(excluded.last_limited, usage_cursor.last_limited)`,
-    ).run(agentId, lastTs, lastOk ?? null, lastLimited ?? null);
+    ).run(agentId, lastTs, lastOk ?? null, lastLimited ?? null, lastOk ? profileId ?? null : null);
   }
   /**
    * Successful calls from the transcripts, as absolute counts: each slot
@@ -3682,8 +3694,8 @@ export class Store {
     return (this.db.prepare(`SELECT slot FROM usage_calls_through WHERE agent_id = ?`).get(agentId) as { slot: string } | undefined)?.slot;
   }
   /** A success seen in the transcripts: the source is answering (moves last_ok forward only). */
-  noteUsageOk(agentId: string, at: string): void {
-    this.db.prepare(`UPDATE usage_cursor SET last_ok = ? WHERE agent_id = ? AND (last_ok IS NULL OR last_ok < ?)`).run(at, agentId, at);
+  noteUsageOk(agentId: string, at: string, profileId?: string): void {
+    this.db.prepare(`UPDATE usage_cursor SET last_ok = ?, last_ok_profile = ? WHERE agent_id = ? AND (last_ok IS NULL OR last_ok < ?)`).run(at, profileId ?? null, agentId, at);
   }
   addModelCallHours(agentId: string, profileId: string, buckets: Map<string, { ok: number; limited: number; failed: number }>): void {
     const up = this.db.prepare(

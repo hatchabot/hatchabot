@@ -5,6 +5,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { logKey, parseModelCalls, sampleAgentUsage, sampleSourceUsage, summarizeSourceUsage } from '../src/orchestrator/sourceUsage.js';
+import { aiSourceHealth } from '../src/orchestrator/health.js';
 import { totalOf } from './helpers/usageFake.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
@@ -158,6 +159,22 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
     // A success by anyone after the refusal clears it for everyone.
     s2.setUsageCursor('a', at(5), at(5));
     expect(summarizeSourceUsage(s2, 'user-other', NOW)[0]!.status).toBe('ok');
+  });
+
+  it('a success on an agent\'s old source does not mask a refusal on its new one (#114)', async () => {
+    const { store } = await world();
+    const at = (min: number) => new Date(NOW - min * 60_000).toISOString();
+    store.insertAIProfile({ id: 'key', ownerId: OWNER, name: 'Spare Key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/key', createdAt: 'now' } as any);
+    // 'a' answered on the spare key ten minutes ago, then moved to the plan, which refused it.
+    store.setUsageCursor('a', at(10), at(10), undefined, 'key');
+    store.setAgentAIProfile('a', 'max');
+    store.addLimitHit('a', 'max', at(30), 'claude-opus-4-8');
+    expect(summarizeSourceUsage(store, OWNER, NOW).find((s) => s.id === 'max')).toMatchObject({ status: 'limited', limitedSince: at(30) });
+    expect(aiSourceHealth(store, store.getAgent('a')!)).toMatchObject({ lastAnsweredAt: undefined, refusal: 'refused' });
+    // A success on the plan itself clears it.
+    store.setUsageCursor('a', at(2), at(2), undefined, 'max');
+    expect(summarizeSourceUsage(store, OWNER, NOW).find((s) => s.id === 'max')!.status).toBe('ok');
+    expect(aiSourceHealth(store, store.getAgent('a')!).lastAnsweredAt).toBe(at(2));
   });
 
   it('successes come from the transcripts: the first pass replaces the log\'s partial counts, a repeat never doubles (review, 2026-09-29)', async () => {
