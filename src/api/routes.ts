@@ -8028,6 +8028,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(409).send({ error: 'That agent is not running.' });
     }
     const targetRef: string = awake.runtimeRef;
+    // A wake can take a minute or two: a grant withdrawn, a call token
+    // rotated or the target handed on meanwhile must stop the consult, not
+    // let the old caller in on the strength of the check before it (B042).
+    const callerNow = store.agentForCallToken(bearer);
+    const targetNow = store.getAgent(target.id);
+    if (!callerNow || callerNow.agentId !== caller.agentId || !targetNow || targetNow.state === 'DELETED' || targetNow.ops
+      || targetNow.ownerId !== callerNow.ownerId || !store.agentMayCall(caller.agentId, target.id)) {
+      return reply.code(403).send({ error: 'Not allowed to consult that agent.' });
+    }
     if (isBusy(target.id)) return reply.code(409).send({ error: 'That agent is busy (rebuilding or moving) — try again shortly.' });
     if (a2aInFlight.has(target.id)) {
       return reply.code(429).send({ error: 'That agent is already answering a consult — refusing (this also breaks consult loops).' });
