@@ -1036,4 +1036,34 @@ describe('apps: what the 2026-10-10 workflow audit found', () => {
     expect(JSON.parse(agent.live().config!).mailbox).toBe('second@example.org');
     expect(agent.calls.filter((c) => c.kind === 'write' && c.what.includes('tar -x'))).toHaveLength(1);
   });
+
+  /** v1 installed with the owner's own settings, and a v2 commit (with one task on another schedule) ready. */
+  async function v1AndV2() {
+    const dir = repo();
+    const agent = new FakeAgent();
+    agent.jobs = [];
+    const v1 = await resolveRelease(hostGit, dir, 'HEAD');
+    await installRelease(d(agent), v1, { mailbox: 'first@example.org', mode: 'live' });
+    commit(dir, { ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['python3', '-m', 'demo', 'tick'] }] });
+    return { agent, v1, v2: await resolveRelease(hostGit, dir, 'HEAD'), before: agent.live() };
+  }
+
+  it('the live link that cannot be read is not "no release": nothing is changed, and `current` is never removed (#103)', async () => {
+    const { agent, v2, before } = await v1AndV2();
+    agent.breakScript = (s) => (s.includes('readlink') ? 'echo "Input/output error" >&2; exit 1' : s);
+    agent.failAdd = () => true; // a later failure would "put back" what it read
+    await expect(installRelease(d(agent), v2, {})).rejects.toThrow(/Could not tell which release of demoapp is live \(Input\/output error\)/);
+    agent.breakScript = (s) => s;
+    expect(agent.live()).toEqual(before);
+  });
+
+  it('a config that cannot be read stops it: the defaults are never written over the owner\'s settings (#105)', async () => {
+    const { agent, v2, before } = await v1AndV2();
+    agent.breakScript = (s) => (s.includes('cat ') && s.includes('data/config.json') && !s.includes('cat >') ? 'echo "Permission denied" >&2; exit 1' : s);
+    // The mailbox given again, as the dialog would: the rest (its mode) would have gone back to the default.
+    await expect(installRelease(d(agent), v2, { mailbox: 'first@example.org' })).rejects.toThrow(/Could not read .*config\.json in the agent \(Permission denied\)/);
+    agent.breakScript = (s) => s;
+    expect(agent.live()).toEqual(before);
+    expect(JSON.parse(before.config!)).toMatchObject({ mailbox: 'first@example.org', mode: 'live' });
+  });
 });
