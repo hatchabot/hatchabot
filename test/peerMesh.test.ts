@@ -63,6 +63,19 @@ describe('POST /v1/agent-peers/mesh', () => {
     expect(store.listAgentPeers('ledger')).toEqual([]);
   });
 
+  it('a retry after a failed call-token mint mints it, though the grants are already in place (#167)', async () => {
+    const { store, secrets, mesh } = await world();
+    const put = secrets.put.bind(secrets);
+    let fail = true;
+    secrets.put = async (r: string, v: string) => { if (fail && r.startsWith('agent-call-token/')) throw new Error('vault busy'); return put(r, v); };
+    expect((await mesh(['stock', 'ledger'], true)).statusCode).toBe(500);
+    expect(store.listAgentPeers('stock')).toEqual(['ledger']); // the grant was saved before the mint failed
+    fail = false;
+    const retry = await mesh(['stock', 'ledger'], true);
+    expect(retry.statusCode).toBe(200);
+    for (const id of ['stock', 'ledger']) expect(store.hasAgentCallToken(id)).toBe(true);
+  });
+
   it('skips archived agents, refuses other owners, too few agents and bad shapes', async () => {
     const { mesh } = await world();
     const res = await mesh(['stock', 'ledger', 'old'], true);
@@ -105,5 +118,20 @@ describe('the call token: its secret and its hash always agree (2026-10-09)', ()
     const [a, b] = await Promise.all([peers(w, 'stock', ['ledger']), w.mesh(['stock', 'legal'], true)]);
     expect([a.statusCode, b.statusCode]).toEqual([200, 200]);
     expect(w.store.agentCallTokenIs('stock', w.secrets.map.get('agent-call-token/stock')!)).toBe(true);
+  });
+});
+
+describe('PUT /v1/agents/:id/peers takes only a real list (#166)', () => {
+  it('a missing or malformed peerIds is refused and revokes nothing; [] still revokes all', async () => {
+    const w = await world();
+    w.store.setAgentPeers('stock', ['ledger', 'legal'], ['ledger']);
+    const put = (payload: unknown) => w.f.inject({ method: 'PUT', url: '/v1/agents/stock/peers', headers: as, payload: payload as any });
+    for (const bad of [{}, { peerIds: 'ledger' }, { peerIds: { 0: 'ledger' } }, { peerIds: [1, 2] }, { peerIds: ['ledger'], allowActions: 'ledger' }]) {
+      expect((await put(bad)).statusCode, JSON.stringify(bad)).toBe(400);
+      expect(w.store.listAgentPeers('stock').sort()).toEqual(['ledger', 'legal']);
+      expect(w.store.listAgentActionPeers('stock')).toEqual(['ledger']);
+    }
+    expect((await put({ peerIds: [] })).statusCode).toBe(200);
+    expect(w.store.listAgentPeers('stock')).toEqual([]);
   });
 });
