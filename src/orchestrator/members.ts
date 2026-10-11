@@ -732,6 +732,27 @@ export function keepOnlyTelegramAccountScript(accountId: string | undefined): st
 }
 
 /**
+ * Turn Slack and Discord off in a restored config and empty their accounts —
+ * what a build writes for a channel the agent no longer has. The fallback
+ * when a full re-apply can't run, beside keepOnlyTelegramAccountScript: a
+ * restored Slack or Discord token can't be checked against the current one
+ * from here (both live under one account key), so neither runs until the next
+ * build writes the current ones back (B023).
+ */
+export const DROP_CHAT_ACCOUNTS_SCRIPT = `node -e '
+    const fs = require("fs"); const f = "/home/node/.openclaw/openclaw.json";
+    if (!fs.existsSync(f)) process.exit(0);
+    const cfg = JSON.parse(fs.readFileSync(f, "utf8"));
+    let n = 0;
+    for (const k of ["slack", "discord"]) {
+      const c = cfg.channels && cfg.channels[k];
+      if (!c) continue;
+      if (c.enabled !== false) { c.enabled = false; n++; }
+      if (c.accounts && Object.keys(c.accounts).length) { c.accounts = {}; n++; }
+    }
+    if (n) { fs.writeFileSync(f + ".tmp", JSON.stringify(cfg, null, 2)); fs.renameSync(f + ".tmp", f); }'`;
+
+/**
  * The on-volume scrub of chat ids from an agent's allowlists: the approval
  * credentials file, the 2026.9 approval rows, the config's account allowFrom,
  * and every Slack channel's / Discord server's users (a room left with nobody

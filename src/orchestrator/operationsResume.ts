@@ -42,6 +42,8 @@ export interface ResumeContext {
   requeueRebuild?: (op: Operation) => boolean;
   /** How to reach an agent's apps (the routes' appDeps); undefined when it has no runtime. */
   appDeps?: (agentId: string) => InstallDeps | undefined;
+  /** What a Start runs once it is up (the routes' clearPinsWhenUp), for an agent a recovery started. */
+  afterStart?: (agentId: string) => void;
 }
 
 export class RecoverError extends Error {
@@ -89,7 +91,7 @@ async function runKind(ctx: ResumeContext, op: Operation, action: string | undef
     case 'restore-backup': {
       const deps = depsFor(ctx, op);
       if (!deps) throw new Error('the machine it is on is not known here any more');
-      const rdeps = { store: ctx.store, provider: deps.provider, log, reapply: () => reapplyCurrentSettings(deps, op.agentId!) };
+      const rdeps = { store: ctx.store, provider: deps.provider, log, reapply: () => reapplyCurrentSettings(deps, op.agentId!), afterStart: ctx.afterStart };
       return action ? recoverBackupRestore(rdeps, op.id, action) : resumeBackupRestore(rdeps, op.id);
     }
     case 'restore-snapshot': {

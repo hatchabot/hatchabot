@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
-import { allowlistScrubScript, keepOnlyTelegramAccountScript, RESTORED_ACCESS_SCRIPT, revokedScrubTargets } from './members.js';
+import { allowlistScrubScript, DROP_CHAT_ACCOUNTS_SCRIPT, keepOnlyTelegramAccountScript, RESTORED_ACCESS_SCRIPT, revokedScrubTargets } from './members.js';
 import { beginOperation, handleFor, rethrowIfCrash, type OpHandle } from './operations.js';
 
 // A dated backup directory is exactly `YYYY-MM-DD`, matching what the script
@@ -367,6 +367,12 @@ export interface RestoreDeps {
   store: Store; provider: RuntimeProvider; log?: (e: string, d: Record<string, unknown>) => void;
   /** Put this installation's current settings (bot, members, model) back over the restored config, as Import and Move do. */
   reapply?: (runtimeRef: string) => Promise<void>;
+  /**
+   * What a Start runs once it is up (the routes' clearPinsWhenUp): Google
+   * accounts detached or queued for removal come off, web chat and pins
+   * follow. A restored volume needs it as much as a started one (B022).
+   */
+  afterStart?: (agentId: string) => void;
   /** Who asked, for the operation's record. */
   requestedBy?: string;
   /** Told the operation's id once it begins (the route answers 202 with it). */
@@ -579,7 +585,9 @@ async function restartAfterRestore(deps: RestoreDeps, agentId: string, runtimeRe
     if (deps.store.getAgent(agentId)?.state !== 'RUNNING') deps.store.setAgentState(agentId, 'RUNNING');
   } catch (startErr) {
     (deps.log ?? (() => {}))('restore.restart_failed', { agentId, error: String(startErr) });
+    return;
   }
+  deps.afterStart?.(agentId);
 }
 
 /**
@@ -619,7 +627,17 @@ async function applyCurrentSettingsOver(deps: RestoreDeps, agentId: string, runt
       log('restore.reapply_partial', { agentId, error: String(err).slice(0, 200) });
       const res = await provider.execShellOnVolume(runtimeRef, keepOnlyTelegramAccountScript(store.getChannelForAgent(agentId, 'telegram')?.accountId));
       if (res.code !== 0) throw new Error(`dropping the old bot failed: ${res.stderr.slice(-200)}`);
-      undone.push("Its other current settings (model, AI source) couldn't be put back now; they follow at its next rebuild.");
+      // Slack and Discord too: that night's tokens must not run either, and
+      // without the build they can't be told from today's (B023). Google
+      // accounts are matched to today's attachments when it starts (afterStart).
+      const chat = await provider.execShellOnVolume(runtimeRef, DROP_CHAT_ACCOUNTS_SCRIPT);
+      if (chat.code !== 0) throw new Error(`turning off Slack and Discord failed: ${chat.stderr.slice(-200)}`);
+      const hasChat = !!(store.getChannelForAgent(agentId, 'slack') || store.getChannelForAgent(agentId, 'discord'));
+      undone.push(
+        `Its current settings couldn't all be put back now (${short(err)}). To be safe it keeps only its current Telegram bot, ` +
+          `has Slack and Discord off, and its Google accounts are matched to the ones attached now when it next starts. ` +
+          `The rest (model, AI source${hasChat ? ', its Slack or Discord' : ''}) follows at its next rebuild.`,
+      );
     }
   }
   const { targets } = revokedScrubTargets(store, agentId);
@@ -687,8 +705,19 @@ export async function resumeBackupRestore(deps: RestoreDeps, opId: string): Prom
     await completeRestore(deps, op, agent.id, agent.runtimeRef, date, p.wasRunning === true, p.safetyFile, []);
     return;
   }
-  // Whatever its volume holds now must not run until the owner chooses.
-  await deps.provider.stop(agent.runtimeRef).catch(() => {});
+  // Whatever its volume holds now must not run until the owner chooses. Checked
+  // down, not assumed: a stop whose machine did not answer used to be
+  // recorded STOPPED and told the owner it "stays stopped" (B021). Held either
+  // way; the choices check again before they touch the volume.
+  const notDown = await confirmStopped(deps, agent.id, agent.runtimeRef);
+  if (notDown) {
+    op.hold(
+      `The restore from the ${date} backup was interrupted by a restart, so its memory may be half-restored, and its runtime ` +
+        `could not be confirmed stopped (${notDown}). Wake its machine or bring Docker back, then choose.`,
+      RESTORE_CHOICES,
+    );
+    return;
+  }
   if (agent.state === 'RUNNING') deps.store.setAgentState(agent.id, 'STOPPED');
   op.hold(
     `The restore from the ${date} backup was interrupted by a restart, so its memory may be half-restored. It stays stopped until you choose.`,
@@ -722,6 +751,13 @@ export async function recoverBackupRestore(deps: RestoreDeps, opId: string, acti
       throw new RestoreError(`The copy from before could not be put back: ${short(err)}. It stays stopped; try again.`);
     });
     forgetDmPolicy(agent.id);
+    // The copy is how it was when the restore began, maybe days ago: who may
+    // use it and its bot follow today's records, as a finished restore's do
+    // (B022). A failure keeps it held and stopped; trying again is safe.
+    await applyCurrentSettingsOver(deps, agent.id, ref).catch((err: unknown) => {
+      deps.provider.stop(ref).catch(() => {});
+      throw new RestoreError(`The copy from before was put back, but its current settings could not be put over it: ${short(err)}. It stays stopped; try again.`);
+    });
     await restartAfterRestore(deps, agent.id, ref, p.wasRunning === true);
     dropSafetyCopy(p.safetyFile);
     op.rolledBack(`Put back as it was before the restore from the ${date} backup.`);
