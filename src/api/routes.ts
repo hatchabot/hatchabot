@@ -4170,6 +4170,34 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+      // Every refusal before any write: a model saved together with a refused
+      // choice was kept although the request answered 400 (#56).
+      if (parsed.data.shared && profile.kind === 'subscription' && !profile.secretRef) {
+        // A machine-login subscription profile (no stored token) IS the
+        // operator's ~/.claude, bind-mounted into an agent's container. Sharing
+        // it would mount that directory — OAuth token, transcripts, and
+        // hook-executing settings.json — into another account's container.
+        // Never shareable; only setup-token / API-key sources are (family-member
+        // hardening, docs/family-member-risk-assessment.md).
+        return reply.code(400).send({
+          error:
+            "A machine-login Max source can't be shared — it would expose this machine's ~/.claude to " +
+            'other accounts. Run `claude setup-token` and share that source instead, or use an API-key source.',
+        });
+      }
+      if (parsed.data.mgmtLlm && !usableForMgmt(profile)) {
+        return reply.code(400).send({
+          error: 'Only an Anthropic source can back the management assistant (local model servers cannot).',
+        });
+      }
+      // Installation-wide single flag (one row across the whole DB): only
+      // the host owner sets it, or any co-tenant could clear/override the
+      // household default and redirect where new agents silently land
+      // (audit 2026-09-06). Contrast mgmtLlm/shared, which are
+      // legitimately per-owner.
+      if (parsed.data.defaultSource !== undefined && !ownsLocalHost(req)) {
+        return reply.code(403).send({ error: 'Only the server owner sets the default AI source.' });
+      }
       // A new default (or a menu that drops a pin) moves every agent that
       // follows it, any account's: each such change goes in the ledger.
       const followers = (parsed.data.model !== undefined || 'models' in ((req.body ?? {}) as object))
@@ -4179,40 +4207,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         store.setAIProfileModels(profile.id, parsed.data.models);
       }
       if (followers) recordLedger(req, 'source-default', followers);
-      if (parsed.data.shared !== undefined) {
-        // A machine-login subscription profile (no stored token) IS the
-        // operator's ~/.claude, bind-mounted into an agent's container. Sharing
-        // it would mount that directory — OAuth token, transcripts, and
-        // hook-executing settings.json — into another account's container.
-        // Never shareable; only setup-token / API-key sources are (family-member
-        // hardening, docs/family-member-risk-assessment.md).
-        if (parsed.data.shared && profile.kind === 'subscription' && !profile.secretRef) {
-          return reply.code(400).send({
-            error:
-              "A machine-login Max source can't be shared — it would expose this machine's ~/.claude to " +
-              'other accounts. Run `claude setup-token` and share that source instead, or use an API-key source.',
-          });
-        }
-        store.setAIProfileShared(profile.id, parsed.data.shared);
-      }
+      if (parsed.data.shared !== undefined) store.setAIProfileShared(profile.id, parsed.data.shared);
       if (parsed.data.mgmtLlm !== undefined) {
-        if (parsed.data.mgmtLlm && !usableForMgmt(profile)) {
-          return reply.code(400).send({
-            error: 'Only an Anthropic source can back the management assistant (local model servers cannot).',
-          });
-        }
         if (parsed.data.mgmtLlm) store.setAIProfileMgmtLlm(ownerIdOf(req), profile.id);
         else if (profile.mgmtLlm) store.setAIProfileMgmtLlm(ownerIdOf(req), null);
       }
       if (parsed.data.defaultSource !== undefined) {
-        // Installation-wide single flag (one row across the whole DB): only
-        // the host owner sets it, or any co-tenant could clear/override the
-        // household default and redirect where new agents silently land
-        // (audit 2026-09-06). Contrast mgmtLlm/shared above, which are
-        // legitimately per-owner.
-        if (!ownsLocalHost(req)) {
-          return reply.code(403).send({ error: 'Only the server owner sets the default AI source.' });
-        }
         if (parsed.data.defaultSource) store.setAIProfileDefault(profile.id);
         else if (profile.defaultSource) store.setAIProfileDefault(null);
       }
@@ -5770,7 +5770,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
       // Every refusal comes before the first write: a request that sets a
       // valid icon and an image the caller may not pin used to keep the icon
-      // and answer 403 (use-case audit lows, 2026-09-27).
+      // and answer 403 (use-case audit lows, 2026-09-27). The manager's
+      // browser refusal came after the plain writes, so a file limit sent
+      // with it was saved under a 400 (#57).
+      if (agent.ops && parsed.data.browser && !agent.browser) return reply.code(400).send({ error: 'The manager has no browser: its tools are Hatchabot\'s only.' });
       if (parsed.data.embedMode === 'shared' && !embedder.enabled && !embedder.external && !ownsLocalHost(req)) {
         // `shared` needs the machine's service, which its owner turns on; anyone
         // else switching first would only get the baked engine and a warning.
@@ -6000,7 +6003,6 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         trace(agent.id)('embed.mode', { mode: parsed.data.embedMode });
       }
       if (parsed.data.browser !== undefined && parsed.data.browser !== !!agent.browser) {
-        if (agent.ops && parsed.data.browser) return reply.code(400).send({ error: 'The manager has no browser: its tools are Hatchabot\'s only.' });
         store.setAgentBrowser(agent.id, parsed.data.browser);
         trace(agent.id)('browser.switched', { on: parsed.data.browser });
         // OpenClaw reads the browser profile at start: a rebuild writes it and
