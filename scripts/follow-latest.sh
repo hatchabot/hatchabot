@@ -11,6 +11,8 @@
 #
 # Deploys go through deploy-release.sh — health check and automatic rollback.
 # A tag that failed is remembered and not retried; the next tag clears it.
+# From v2.159.0 a tag is deployed only once it is a published, immutable
+# GitHub release whose release-manifest.json names that tag's commit.
 set -euo pipefail
 PROD="${HATCHABOT_PROD_DIR:-$HOME/hatchabot-prod}"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/hatchabot"
@@ -89,6 +91,91 @@ if [ "$T_TARGET" = "$NEWEST" ] && [ "$T_COUNT" -gt 0 ]; then
 else
   T_COUNT=0
 fi
+
+# ---- Only a release the release workflow published (#37) ----
+# A tag alone proves nothing: anyone who could push one would have its
+# deploy-release.sh run here. From v2.159.0 every release is published by the
+# release workflow (docs/release-by-workflow-design.md) as an immutable GitHub
+# release carrying release-manifest.json, which names the commit it was built
+# from. So before any of the tag's code runs: the release is published and
+# immutable, and its manifest is for this tag and this tag's commit. Older
+# tags (made before manifests) are deployed as before. Read without a token:
+# at one look per ten minutes the API's limit is far away.
+SLUG="${HATCHABOT_SLUG:-hatchabot/hatchabot}"
+# verify_release TAG: 0 verified, or made before manifests; 20 not a published
+# release (yet); 30 refused; 40 could not check. Says why in $WHY.
+verify_release() {
+  local tag="$1" dir code commit rc=0
+  WHY=""
+  [ "$(vernewer "$tag" v2.159.0)" = "$tag" ] || return 0
+  dir="$(mktemp -d)"
+  code="$(curl -sS --max-time 30 -o "$dir/release.json" -w '%{http_code}' \
+    -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$SLUG/releases/tags/$tag" 2>"$dir/err")" || rc=$?
+  if [ "$rc" != 0 ] || { [ "$code" != 200 ] && [ "$code" != 404 ]; }; then
+    WHY="GitHub did not answer about its release (${code:-no answer}$( [ -s "$dir/err" ] && printf ': %s' "$(head -c 200 "$dir/err")"))"
+    rm -rf "$dir"; return 40
+  fi
+  if [ "$code" = 404 ]; then WHY="it is not a published release on GitHub"; rm -rf "$dir"; return 20; fi
+  if ! commit="$(git -C "$PROD" rev-parse --verify --quiet "$tag^{commit}")"; then
+    WHY="its tag names no commit here"; rm -rf "$dir"; return 30
+  fi
+  # check MODE FILE: the release (published, immutable, carries the manifest)
+  # or the manifest (this tag, this version, this commit). 0 yes, 2 not yet, 1 no.
+  check() {
+    node - "$1" "$2" "$tag" "$commit" <<'JS'
+const [mode, file, tag, commit] = process.argv.slice(2);
+const no = (why, code = 1) => { console.log(why); process.exit(code); };
+let j;
+try { j = JSON.parse(require('fs').readFileSync(file, 'utf8')); } catch { no(`its ${mode === 'release' ? 'release' : 'release-manifest.json'} is not readable JSON`); }
+if (!j || typeof j !== 'object') no(`its ${mode} is not a JSON object`);
+if (mode === 'release') {
+  if (j.tag_name !== tag) no(`GitHub's answer is about ${JSON.stringify(j.tag_name)}, not ${tag}`);
+  if (j.draft) no('its release is still a draft', 2);
+  if (j.immutable !== true) no('its release is not immutable, so what it vouches for could still change');
+  if (!(j.assets ?? []).some((a) => a && a.name === 'release-manifest.json')) no('its release has no release-manifest.json');
+} else {
+  if (j.schema !== 1) no(`its release-manifest.json has schema ${JSON.stringify(j.schema)}, not 1`);
+  if (j.tag !== tag || j.version !== tag.slice(1)) no(`its release-manifest.json is for ${JSON.stringify(j.tag)} (${JSON.stringify(j.version)}), not ${tag}`);
+  if (j.commit !== commit) no(`its release-manifest.json was built from ${String(j.commit).slice(0, 40)}, but the tag here is ${commit}`);
+}
+JS
+  }
+  WHY="$(check release "$dir/release.json")" || rc=$?
+  if [ "$rc" = 0 ]; then
+    code="$(curl -sSL --max-time 60 --max-filesize 65536 -o "$dir/manifest.json" -w '%{http_code}' \
+      "https://github.com/$SLUG/releases/download/$tag/release-manifest.json" 2>"$dir/err")" || rc=$?
+    if [ "$rc" != 0 ] || { [ "$code" != 200 ] && [ "$code" != 404 ]; }; then
+      WHY="its release-manifest.json could not be fetched (${code:-no answer})"; rm -rf "$dir"; return 40
+    fi
+    # Listed on an immutable release, yet not there: it never will be.
+    [ "$code" = 200 ] || { WHY="its release-manifest.json is listed but not there"; rm -rf "$dir"; return 30; }
+    WHY="$(check manifest "$dir/manifest.json")" || rc=$?
+  fi
+  rm -rf "$dir"
+  case "$rc" in 0) return 0 ;; 2) return 20 ;; *) return 30 ;; esac
+}
+vrc=0; verify_release "$NEWEST" || vrc=$?
+case "$vrc" in
+  0) ;;
+  20)
+    # A release is published a few minutes after its tag. One that stays
+    # unpublished is looked at less and less often, then set aside.
+    if [ $((T_COUNT + 1)) -ge "$MAX_TRIES" ]; then
+      echo "$NEWEST" > "$STATE/follow-latest-failed"; rm -f "$TRIES"
+      echo "Not deploying $NEWEST: $WHY, $MAX_TRIES times in a row. It will not be looked at again; the next tag will be."
+    else
+      echo "$NEWEST $((T_COUNT + 1)) $(date +%s)" > "$TRIES"
+      echo "Not deploying $NEWEST yet: $WHY. Looking again later ($((T_COUNT + 1)) of $MAX_TRIES)."
+    fi
+    exit 1 ;;
+  30)
+    echo "$NEWEST" > "$STATE/follow-latest-failed"; rm -f "$TRIES"
+    echo "Not deploying $NEWEST: $WHY. None of its code was run. It will not be retried; the next tag will be."
+    exit 1 ;;
+  *)
+    echo "Not deploying $NEWEST yet: $WHY. Trying again next time."
+    exit 1 ;;
+esac
 
 # The deploy script as the NEW release ships it, from a copy for the same reason.
 deploy="$(mktemp)"

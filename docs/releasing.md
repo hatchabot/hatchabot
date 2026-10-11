@@ -87,7 +87,11 @@ The machine you develop on can run every release first, automatically:
 ```
 
 It deploys through `deploy-release.sh` (health check, automatic rollback). A tag
-that fails is not retried; the next tag is. It never moves `stable` — so the
+that fails is not retried; the next tag is. Before any of a tag's code runs
+(v2.159.0 and later), the tag must be a published, immutable GitHub release
+whose `release-manifest.json` is for that tag and names the tag's commit
+(read without a token from `api.github.com`). A mismatch sets the tag aside;
+one not published yet is looked at again, less and less often, then set aside. It never moves `stable` — so the
 rhythm becomes: tag → it runs here → promote when it has held up.
 
 Any other install can follow a channel on its own — a hosted tenant on

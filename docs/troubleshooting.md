@@ -57,6 +57,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `scripts/follow-channel.sh` — `MAX_TRIES`; `scripts/upgrade.sh` — `rollback`
 
+### The follow-latest timer says "Not deploying vX.Y.Z" for a new tag
+- **Check:** `journalctl --user -u hatchabot-follow-latest` gives the reason; `curl -s https://api.github.com/repos/hatchabot/hatchabot/releases/tags/vX.Y.Z` shows the release (`"immutable": true`, a `release-manifest.json` asset), and `git -C ~/hatchabot-prod rev-parse vX.Y.Z^{commit}` is the manifest's `commit`.
+- **Cause:** from v2.160.0 the timer deploys a v2.159.0-or-later tag only when it is a published, immutable release whose manifest is for that tag and names its commit. "Not a published release yet" is normal for a few minutes after tagging, while the release workflow runs. A manifest for another commit, a release that is not immutable, or one with no manifest means the tag did not come from the release workflow.
+- **Fix:** for "not published yet", wait, or see why the release workflow stopped (`gh run list -w release.yml`). For a refused tag, do not deploy it by hand: find out who made it. After fixing, `rm ~/.local/state/hatchabot/follow-latest-failed` to let the timer look again.
+- **Fixed in:** `v2.160.0` (#37)
+- **Code:** `scripts/follow-latest.sh` — `verify_release`
+
 ### `hatchabot upgrade beta` is undone: the channel file says stable again
 - **Check:** `cat ~/.config/hatchabot/channel` against `systemctl --user cat hatchabot-follow-channel` (its ExecStart channel).
 - **Cause:** the timer's own upgrade saved its channel over the one chosen by hand.
