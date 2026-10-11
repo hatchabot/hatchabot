@@ -133,7 +133,11 @@ function cronState(j: Record<string, any>): Partial<Cron> {
   };
 }
 
-/** A task's recent runs, newest first — the only record of what it actually did. */
+/**
+ * A task's recent runs, newest first — the only record of what it actually
+ * did. Throws when they could not be read: an empty history then read as
+ * "it has not run yet" for a task that ran (like listCrons, 2026-09-23).
+ */
 export async function listCronRuns(
   provider: RuntimeProvider,
   runtimeRef: string,
@@ -141,26 +145,26 @@ export async function listCronRuns(
   limit = 10,
 ): Promise<CronRun[]> {
   const res = await provider.exec(runtimeRef, ['cron', 'runs', '--id', jobId, '--limit', String(Math.min(Math.max(limit, 1), 50))]);
-  if (res.code !== 0) return [];
+  if (res.code !== 0) throw new Error(`cron runs failed (${res.code}): ${(res.stderr || res.stdout).slice(0, 200)}`);
+  let entries: unknown;
   try {
-    const body = res.stdout.slice(res.stdout.indexOf('{'));
-    const entries = JSON.parse(body).entries;
-    if (!Array.isArray(entries)) return [];
-    return entries
-      .filter((e: any) => e && (e.action === undefined || e.action === 'finished'))
-      .map((e: any): CronRun => ({
-        runAtMs: num(e.runAtMs) ?? num(e.ts) ?? 0,
-        status: String(e.status ?? 'unknown'),
-        summary: typeof e.summary === 'string' ? e.summary.slice(0, 4000) : undefined,
-        error: typeof e.error === 'string' ? e.error.slice(0, 1000) : undefined,
-        durationMs: num(e.durationMs),
-        delivered: typeof e.delivered === 'boolean' ? e.delivered : undefined,
-        model: typeof e.model === 'string' ? e.model : undefined,
-      }))
-      .sort((a: CronRun, b: CronRun) => b.runAtMs - a.runAtMs);
+    entries = JSON.parse(res.stdout.slice(res.stdout.indexOf('{'))).entries;
   } catch {
-    return [];
+    throw new Error('cron runs returned something other than JSON');
   }
+  if (!Array.isArray(entries)) throw new Error('cron runs returned no list of runs');
+  return entries
+    .filter((e: any) => e && (e.action === undefined || e.action === 'finished'))
+    .map((e: any): CronRun => ({
+      runAtMs: num(e.runAtMs) ?? num(e.ts) ?? 0,
+      status: String(e.status ?? 'unknown'),
+      summary: typeof e.summary === 'string' ? e.summary.slice(0, 4000) : undefined,
+      error: typeof e.error === 'string' ? e.error.slice(0, 1000) : undefined,
+      durationMs: num(e.durationMs),
+      delivered: typeof e.delivered === 'boolean' ? e.delivered : undefined,
+      model: typeof e.model === 'string' ? e.model : undefined,
+    }))
+    .sort((a: CronRun, b: CronRun) => b.runAtMs - a.runAtMs);
 }
 
 /**

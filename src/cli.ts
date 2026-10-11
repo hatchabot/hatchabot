@@ -2970,13 +2970,14 @@ async function main() {
       }
       if (sub === 'run') {
         const t = await pick(rest[2]);
-        const before = Math.max(t.lastRunAtMs ?? 0, ...(await runsOf(t.id, 1)).map((r) => r.runAtMs));
+        // A history that can't be read now still has the list's last run to go by.
+        const before = Math.max(t.lastRunAtMs ?? 0, ...(await runsOf(t.id, 1).catch(() => [])).map((r) => r.runAtMs));
         await jsonPost(`${base}/${encodeURIComponent(t.id)}/run`, {});
         if (!flags.has('wait')) return console.log(`"${t.name}" is running. How it went: hatchabot tasks "${a.name}" runs ${t.id.slice(0, 8)}`);
         const limit = minutesFlag(10);
         const deadline = Date.now() + limit * 60_000;
         for (;;) {
-          const [latest] = await runsOf(t.id, 1);
+          const [latest] = await runsOf(t.id, 1).catch(() => []); // a read that failed: ask again
           if (latest && latest.runAtMs > before) {
             if (flags.has('json')) console.log(JSON.stringify(latest));
             else printRun(latest);

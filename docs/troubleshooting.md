@@ -1946,6 +1946,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/crons.ts` — `atMsOf`
 
+### `hatchabot tasks … runs` says a task "has not run yet", though the list shows a last run
+- **Check:** the agent's gateway was slow or restarting at the time; `openclaw cron runs --id <task>` in the agent fails or prints no JSON.
+- **Cause:** a history that could not be read was answered as an empty one.
+- **Fix:** upgrade: it now says "Couldn't read that task's runs just now — try again in a moment." Try again once the agent answers.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/crons.ts` — `listCronRuns`
+
 ## Tailscale and public access
 
 ### The https address the setup guide gave does not open
