@@ -964,7 +964,7 @@ export function fmtBots(hosts: any[], live: boolean): string[] {
         ? (b.valid === false ? 'invalid' : 'valid') +
           (b.polling && b.polling !== 'unknown' ? `,${b.polling === 'busy' ? 'polled' : 'idle'}` : '')
         : '';
-      const who = b.source === 'pool' ? 'pool bot (unleased)' : `${b.agentName} [${b.state}]`;
+      const who = b.source === 'pool' ? 'pool bot (unleased)' : `${b.agentName} [${b.asleep ? 'asleep' : b.state}]`;
       const others = (places.get(b.username) ?? []).filter(
         (o) => !(o.host === h.host && o.agent === (b.agentName ?? b.source)),
       );
