@@ -1310,6 +1310,33 @@ export class Store {
     }
   }
 
+  /**
+   * The agent-scoped secrets nothing references any more: env values and
+   * deploy keys whose row is gone, and call tokens of agents that are gone.
+   * A failed delete (an agent's removal, an import's rollback, a source's
+   * removal) left these with nothing to retry them; at boot they go. A
+   * removed source's key still waiting in data_source_removals goes too —
+   * deleting it is that record's whole purpose, and its retry then finds
+   * nothing to delete and settles.
+   */
+  sweepOrphanAgentSecrets(): string[] {
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT ref FROM secrets
+           WHERE (ref LIKE 'agent-env/%' AND ref NOT IN (SELECT secret_ref FROM agent_env))
+              OR (ref LIKE 'data-source/%' AND ref NOT IN (SELECT secret_ref FROM data_sources WHERE secret_ref IS NOT NULL))
+              OR (ref LIKE 'agent-call-token/%' AND substr(ref, ${'agent-call-token/'.length + 1}) NOT IN (SELECT id FROM agents WHERE state != 'DELETED'))`,
+        )
+        .all() as Array<{ ref: string }>;
+      const del = this.db.prepare(`DELETE FROM secrets WHERE ref = ?`);
+      for (const { ref } of rows) del.run(ref);
+      return rows.map((r) => r.ref);
+    } catch {
+      return []; // no secrets table here (another secret store) — nothing to sweep
+    }
+  }
+
   // ---- AI profiles -------------------------------------------------------
 
   insertAIProfile(p: AIProfile): void {

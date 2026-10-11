@@ -167,6 +167,10 @@ for (const p of new Set(providers.values())) {
 // referencing stores are constructed above, so the sweep sees every table.
 const sweptRefs = store.sweepOrphanBotSecrets();
 if (sweptRefs.length) app.log.warn({ refs: sweptRefs }, 'deleted orphaned bot-token secrets');
+// Env values, deploy keys and call tokens a failed delete left behind (an
+// agent's removal, an import's rollback, a source's removal).
+const sweptAgentRefs = store.sweepOrphanAgentSecrets();
+if (sweptAgentRefs.length) app.log.warn({ count: sweptAgentRefs.length }, 'deleted orphaned agent secrets');
 await registerAuth(app, {
   password: process.env.HATCHABOT_PASSWORD,
   store,
