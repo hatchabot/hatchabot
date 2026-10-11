@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { listInspectableFiles, readInspectableFile, readTranscript } from '../src/orchestrator/inspect.js';
+import { InspectReadError, listInspectableFiles, readInspectableFile, readTranscript, utf8Prefix } from '../src/orchestrator/inspect.js';
 import type { RuntimeProvider } from '../src/providers/provider.js';
 
 /**
@@ -8,13 +8,26 @@ import type { RuntimeProvider } from '../src/providers/provider.js';
  * file body, transcript pick/tail) can be asserted independently.
  */
 
-function fakeProvider(respond: (script: string) => string): RuntimeProvider {
+function fakeProvider(respond: (script: string) => string, code = 0): RuntimeProvider {
   return {
     async execShellOnVolume(_ref: string, script: string) {
-      return { code: 0, stdout: respond(script), stderr: '' };
+      return { code, stdout: respond(script), stderr: '' };
     },
   } as unknown as RuntimeProvider;
 }
+
+describe('a read that fails is not an empty one (#151)', () => {
+  it('the listing, a file and the transcript each fail with the reason', async () => {
+    const down = fakeProvider(() => '', 125); // the one-shot never ran
+    await expect(listInspectableFiles(down, 'docker://x', 'x')).rejects.toBeInstanceOf(InspectReadError);
+    await expect(readInspectableFile(down, 'docker://x', 'x', 'MEMORY.md')).rejects.toBeInstanceOf(InspectReadError);
+    await expect(readTranscript(down, 'docker://x', 'x')).rejects.toBeInstanceOf(InspectReadError);
+  });
+
+  it('a file that is not there is null (404), not empty content', async () => {
+    expect(await readInspectableFile(fakeProvider(() => '', 3), 'docker://x', 'x', 'USER.md')).toBeNull();
+  });
+});
 
 describe('listInspectableFiles', () => {
   it('returns only known files that exist, with byte sizes', async () => {
@@ -48,6 +61,18 @@ describe('readInspectableFile', () => {
     const f = await readInspectableFile(p, 'docker://x', 'x', 'AGENTS.md');
     expect(f?.truncated).toBe(true);
     expect(Buffer.byteLength(f!.content, 'utf8')).toBe(256 * 1024);
+  });
+
+  it('a cut in the middle of a character ends before it, not on a replacement character (#152)', async () => {
+    const MAX = 256 * 1024;
+    // What head -c MAX+1 hands back: the euro sign's first two bytes, decoded.
+    const p = fakeProvider(() => Buffer.from('x'.repeat(MAX - 1) + '€€', 'utf8').subarray(0, MAX + 1).toString('utf8'));
+    const f = await readInspectableFile(p, 'docker://x', 'x', 'MEMORY.md');
+    expect(f?.truncated).toBe(true);
+    expect(f!.content).toBe('x'.repeat(MAX - 1));
+    expect(utf8Prefix(Buffer.from('a€b'), 2)).toBe('a');
+    expect(utf8Prefix(Buffer.from('a€b'), 4)).toBe('a€');
+    expect(utf8Prefix(Buffer.from('a😀'), 4)).toBe('a');
   });
 });
 
