@@ -115,6 +115,9 @@ describe('request log', () => {
       .toBe('/v1/agents/a1/ui/__openclaw__/assistant-media?…');
     expect(redactUrlForLog('/join/made-up-code')).toBe('/join/…');
     expect(redactUrlForLog('/v1/invites/made-up-code')).toBe('/v1/invites/…');
+    // Nested invite routes carry the code too (C046).
+    expect(redactUrlForLog('/v1/agents/a1/invites/made-up-code/knock-window')).toBe('/v1/agents/a1/invites/…/knock-window');
+    expect(redactUrlForLog('/v1/agents/a1/invites')).toBe('/v1/agents/a1/invites');
     expect(redactUrlForLog('/v1/agents')).toBe('/v1/agents');
     expect(redactUrlForLog(undefined)).toBe('');
   });
