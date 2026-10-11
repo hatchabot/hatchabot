@@ -485,6 +485,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `src/api/routes.ts` — `startStopped`, `startRefusal`; `src/orchestrator/hibernate.ts` — `wakeAgent`
 
+### An archive cut off by a restart is held: "its runtime could not be confirmed stopped"
+- **Check:** Alerts shows a held "Archive" with this outcome; the trail has `archive.not_stopped`; the agent's runner is asleep, or `docker ps` there still lists its container.
+- **Cause:** Hatchabot restarted after the agent's bot was given back but before the archive finished, and the agent's runtime could not be confirmed stopped afterwards. Before v2.160.0 the failed stop was ignored: the agent was marked archived while its container might still poll a bot that another agent could lease.
+- **Fix:** wake the machine or bring Docker back, then choose **Try again** (`hatchabot ops recover <op-id> retry`). It stops the agent, checks it is down and finishes the archive. On an older version, run `docker stop` on the archived agent's container.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/archive.ts` — `resumeArchive`; `src/orchestrator/quiesce.ts` — `stopAndConfirm`
+
 ### Agent-to-agent consults always fail with an unauthorized caller
 - **Check:** the agent has peers, yet `/message` calls from it are refused; the stored `agent-call-token/<id>` secret does not match the live hash.
 - **Cause:** the token's hash was saved before its secret; a failed write or two grants at once left them different, and nothing repaired it.

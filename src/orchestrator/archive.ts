@@ -165,7 +165,22 @@ export async function resumeArchive(deps: ArchiveDeps, opId: string): Promise<vo
   })();
   if (released) {
     // Its container must not poll a bot that may be someone else's now.
-    if (agent.runtimeRef) await deps.provider.stop(agent.runtimeRef).catch(() => {});
+    // Confirmed down before its channel row goes and it is called archived: a
+    // swallowed stop used to finish with the container still up (B025). Held
+    // until it is — Start and Wake stay refused, and Try again runs this again.
+    if (agent.runtimeRef) {
+      try { await stopAndConfirm(deps.provider, agent.runtimeRef); }
+      catch (err) {
+        rethrowIfCrash(err);
+        deps.log('archive.not_stopped', { agentId: agent.id, error: String(err instanceof Error ? err.message : err).slice(0, 200) });
+        op.hold(
+          'The archive was interrupted by a restart after its bot was given back, and its runtime could not be confirmed stopped, ' +
+            'so it may still answer on a bot that is free for another agent now. Wake its machine or bring Docker back, then try again.',
+          { actions: [{ action: 'retry', label: 'Try again' }], recommended: 'retry' },
+        );
+        return;
+      }
+    }
     await finishArchive(deps, op, agent.id);
     return;
   }
