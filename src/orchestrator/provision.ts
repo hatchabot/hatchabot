@@ -422,6 +422,8 @@ async function runProvisionStepsInner(
         if (existing.has(sch.name)) { log('schedule.already_present', { agentId, name: sch.name }); continue; }
         const out = await addCron(provider, runtimeRef, agent.slug, {
           name: sch.name, message: sch.message, cron: sch.cron, everyMs: sch.everyMs, tz: sch.tz,
+          // Quiet in the template, quiet here; unsaid (older templates) announces.
+          announce: sch.announce !== false,
           deliverTo: cronTargetFor(store, agent),
         }).catch(() => ({ ok: false as const, error: 'exec failed' }));
         if (!out.ok) {

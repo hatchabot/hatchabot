@@ -1351,6 +1351,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/crons.ts` — `editCron`; `web/index.html` — `addCronJob`
 
+### An agent made from a template posts the results of a task that was quiet in the original
+- **Check:** in the original agent the task is quiet (its runs are only read in the app); in the copy (imported, accepted from a share, or cloned) the same task posts into the chat.
+- **Cause:** a template carried each task's name, schedule and message, but not that it was quiet, and the copy made every task announce.
+- **Fix:** upgrade, then export the template again (a template exported before the fix does not say which tasks were quiet, so its tasks still announce). In a copy already made, ask the agent to make the task quiet.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/template.ts` — `exportTemplate`; `src/orchestrator/provision.ts` — `getPendingSchedules`
+
 ## Tailscale and public access
 
 ### The https address the setup guide gave does not open

@@ -97,6 +97,24 @@ describe('runProvisionSteps', () => {
     expect(second.agent.pendingAction).toBeFalsy();
   });
 
+  it('a template\'s quiet task is made quiet; one that says nothing announces, as before (2026-10-10)', async () => {
+    const w = await world({ parkFirst: true });
+    const first = await provisionAgent(w.deps, INPUT);
+    // The owner's chat is known, so an announcing task has somewhere to post.
+    w.store.setAccountTelegram('o', ['55', '50', '0', '02'].join(''));
+    w.store.setPendingSchedules(first.agent.id, [
+      { name: 'Quiet check', message: 'Check the inbox.', everyMs: 900_000, announce: false },
+      { name: 'Morning brief', message: 'Post the brief.', cron: '0 8 * * *' },
+    ]);
+    const second = await runProvisionSteps(w.deps, first.agent.id);
+    expect(second.agent.state).toBe('RUNNING');
+    const added = (name: string) => w.provider.execLog.find((c) => c[0] === 'cron' && c[1] === 'add' && c.includes(name))!;
+    expect(added('Quiet check')).toContain('--no-deliver');
+    expect(added('Quiet check')).not.toContain('--announce');
+    expect(added('Morning brief')).toContain('--announce');
+    expect(w.store.getPendingSchedules(first.agent.id)).toEqual([]);
+  });
+
   it('retries from FAILED reusing the already-created channel row', async () => {
     const w = await world({ failOn: 'start' });
     const { agent } = await provisionAgent(w.deps, INPUT);
