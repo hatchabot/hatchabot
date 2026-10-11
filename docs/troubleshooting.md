@@ -1600,6 +1600,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/api/routes.ts` — `OPS_NO_LOCAL`
 
+### The Hatchabot agent says ✅ for a rebuild or an archive that did not happen
+- **Check:** the confirmed card in its chat shows ✅, but the agent's page (or `hbt ops`) shows that operation failed or rolled back, or the rebuild was still running when ✅ appeared.
+- **Cause:** a confirmed rebuild was reported done as soon as it was accepted, and a long change (archive, move, restore) that ended failed was shown as ✅ with the failure text under it.
+- **Fix:** upgrade. Since v2.160.0 the card follows the operation to its end and says "⚠ Failed — …" with the reason when it did not happen; check the agent's page and retry from there.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/mgmt/broker.ts` — `followOperation`, `#rebuild`
+
 ### The Hatchabot agent's search_source finds nothing for a pattern like "a|b"
 - **Check:** the search used a regular expression without `regex: true`.
 - **Cause:** since v2.158.3 search_source looks for plain text by default.

@@ -103,7 +103,8 @@ export interface ApiClient {
   availableModels(profileId: string): Promise<string[]>;
   startAgent(id: string): Promise<void>;
   stopAgent(id: string): Promise<void>;
-  rebuildAgent(id: string): Promise<void>;
+  /** Accepted, not done: the answer may carry the rebuild's operation (followed by #rebuild). */
+  rebuildAgent(id: string): Promise<unknown>;
   setModel(id: string, model: string): Promise<void>;
   /** What the card for "this agent → that model" should say (GET /v1/agents/:id/model-check). Optional: older fakes. */
   modelCheck?(id: string, model: string): Promise<{ from: string; evidence: string; warnings: string[]; downgrade: boolean }>;
@@ -708,6 +709,18 @@ export class Broker {
     }
   }
 
+  /**
+   * A rebuild runs in the background: its answer is "accepted". Followed to
+   * its end, so a confirmed card says rebuilt (or why not) rather than ✅ at
+   * once (#127). An API without `raw` cannot follow: said as accepted.
+   */
+  async #rebuild(agentId: string): Promise<string | void> {
+    const out = await this.api.rebuildAgent(agentId);
+    const raw = this.api.raw;
+    if (!raw) return 'The rebuild has started.';
+    return (await followOperation(out, (path) => raw.call(this.api, 'GET', path))) ?? undefined;
+  }
+
   async #execMutate(name: string, r: Resolved): Promise<string | void> {
     if (r.rest) {
       const raw = this.#need(this.api.raw);
@@ -716,8 +729,12 @@ export class Broker {
       // (operations.ts, phase 3): follow it, so "done" means done.
       const followed = await followOperation(out, (path) => raw.call(this.api, 'GET', path));
       if (followed) return followed;
-      if (r.rest.rebuild && r.agentId) await this.api.rebuildAgent(r.agentId);
-      return REST_BY_NAME.get(name)?.done?.(out);
+      const done = REST_BY_NAME.get(name)?.done?.(out);
+      if (r.rest.rebuild && r.agentId) {
+        const rebuilt = await this.#rebuild(r.agentId);
+        return [done, rebuilt].filter(Boolean).join('\n') || undefined;
+      }
+      return done;
     }
     switch (name) {
       case 'build_image':
@@ -730,10 +747,10 @@ export class Broker {
         return this.#need(this.api.buildBaseCandidate).call(this.api, r.spec!.version, r.spec!.packages);
       case 'try_base_candidate':
         await this.#need(this.api.setAgentImage).call(this.api, r.agentId, r.spec!.tag!);
-        return this.api.rebuildAgent(r.agentId);
+        return this.#rebuild(r.agentId);
       case 'end_base_trial':
         await this.#need(this.api.setAgentImage).call(this.api, r.agentId, null);
-        return this.api.rebuildAgent(r.agentId);
+        return this.#rebuild(r.agentId);
       case 'create_agent': {
         const s = r.spec!;
         const created = await this.api.createAgent({
@@ -782,7 +799,7 @@ export class Broker {
       case 'stop_agent':
         return this.api.stopAgent(r.agentId);
       case 'rebuild_agent':
-        return this.api.rebuildAgent(r.agentId);
+        return this.#rebuild(r.agentId);
       case 'set_model':
         return this.api.setModel(r.agentId, r.model!);
       case 'approve_member':
@@ -800,11 +817,14 @@ export class Broker {
  *  can read below it. */
 /** Statuses of an operation that is not over (operations.ts). */
 const OP_ACTIVE = new Set(['queued', 'running', 'interrupted']);
+/** …and of one that ended without making its change. */
+const OP_FAILED = new Set(['failed', 'rolled_back']);
 
 /**
  * A call that answered 202 { operation }: follow GET /v1/operations/:id until
  * it is over (up to `limitMs`), and say how it ended, step and all. Undefined
  * when the answer is not an operation under way (the old synchronous shape).
+ * One that failed or was rolled back throws, with its outcome as the message.
  */
 export async function followOperation(
   out: unknown,
@@ -827,6 +847,9 @@ export async function followOperation(
   }
   const result = now.result as { safetySnapshotId?: string } | undefined;
   const choices = (now.recovery as { actions?: Array<{ action: string; label: string }> } | undefined)?.actions ?? [];
+  // It ended without doing the change: a failure, not a ✅ with the reason
+  // under it (#150). The caller's confirm turns this into "⚠ Failed — …".
+  if (OP_FAILED.has(String(now.status))) throw new Error(String(now.outcome ?? now.summary ?? 'It did not finish.'));
   return [
     String(now.outcome ?? now.summary ?? 'Done.'),
     now.status === 'held' && choices.length ? `It is waiting for the owner's choice (recover_operation ${op.id}): ${choices.map((c) => `"${c.action}" — ${c.label}`).join('; ')}.` : '',
