@@ -498,6 +498,51 @@ const SCENARIOS = String.raw`(() => {
         !after.some((c) => (c.method === 'POST' && /\/crons$/.test(c.path)) || c.method === 'DELETE'));
       v2Close(); window.__crons = [];
     },
+    scheduleSaveThenSwitch: async () => {
+      // A save still waiting when another agent's Schedule tab is opened and one of its tasks
+      // is being edited: the save goes to the first agent, and the second edit is left alone (#69).
+      const fetchWas = window.fetch;
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      window.fetch = async (input, init = {}) => {
+        if ((init.method || '').toUpperCase() === 'PATCH' && /\/crons\//.test(String(input))) await gate;
+        return fetchWas(input, init);
+      };
+      try {
+        window.__crons = [{ id: 'c1', name: 'Morning brief', scheduleExpr: '0 8 * * *', message: 'Good morning', enabled: true, payloadKind: 'agentTurn' }];
+        openV2Agent('a1', 'schedule');
+        await until(() => cronAgentId === 'a1' && cronCache.some((c) => c.id === 'c1'));
+        editCronJob('c1');
+        const mark = window.__calls.length;
+        document.getElementById('cronName').value = 'Morning brief 2';
+        document.getElementById('cronAddBtn').click();
+        await until(() => document.getElementById('cronAddBtn').disabled); // the save is waiting on its PATCH
+        v2Close();
+        window.__crons = [{ id: 'c2', name: 'Practice reminder', scheduleExpr: '0 17 * * 2', message: 'Pack the cleats', enabled: true, payloadKind: 'agentTurn' }];
+        openV2Agent('a2', 'schedule');
+        await until(() => cronAgentId === 'a2' && cronCache.some((c) => c.id === 'c2'));
+        editCronJob('c2');
+        document.getElementById('cronName').value = 'Practice reminder, Thursdays';
+        release();
+        await until(() => !document.getElementById('cronAddBtn').disabled);
+        await sleep(100);
+        const after = window.__calls.slice(mark);
+        eq('the save went to the first agent', after.filter((c) => c.method === 'PATCH').map((c) => c.path), ['/v1/agents/a1/crons/c1']);
+        ok('nothing is deleted or added on the second agent', !after.some((c) => c.method === 'DELETE' || c.method === 'POST'));
+        eq('the second agent\'s edit is still open', [cronEditingId, document.getElementById('cronAddBtn').textContent], ['c2', 'Save changes']);
+        eq('what was typed for it is kept', document.getElementById('cronName').value, 'Practice reminder, Thursdays');
+      } finally {
+        release();
+        window.fetch = fetchWas;
+        cancelCronEdit(); v2Close(); window.__crons = [];
+      }
+    },
+    intervalLabels: async () => {
+      // Intervals to the second: 15 s read "every 0m", 90 s "every 2m" (#95).
+      const label = (ms) => cronScheduleLabel({ scheduleKind: 'every', everyMs: ms });
+      eq('interval labels', [15e3, 90e3, 60e3, 45 * 60e3, 2 * 3600e3, 90 * 60e3].map(label),
+        ['every 15s', 'every 1m 30s', 'every 1m', 'every 45m', 'every 2h', 'every 90m']);
+    },
     keyboardLinks: async () => {
       // The notices' link-looking actions are buttons: Tab reaches them, Enter presses them (review, 2026-10-09;
       // ported from the classic card to the agent's notices when classic went, v2.155.0).

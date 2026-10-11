@@ -1960,6 +1960,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/crons.ts` — `retargetImplicitCrons`; `src/store/store.ts` — `quietedCrons`
 
+### A task's schedule reads "every 0m", or a slightly wrong number of minutes
+- **Check:** the task runs on an interval that is not whole minutes (`openclaw cron list --json` in the agent: `schedule.everyMs` such as 15000 or 90000).
+- **Cause:** the Schedule tab rounded intervals to whole minutes; the task itself ran on its real interval.
+- **Fix:** upgrade: intervals show to the second ("every 15s", "every 1m 30s").
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `cronScheduleLabel`
+
+### Editing a task on one agent while a save on another was still going lost the edit
+- **Check:** a task was saved in one agent's Schedule tab, and another agent's tab was opened and a task there loaded with ✏️ Edit before the first save finished; the form emptied and went back to "Add task".
+- **Cause:** when the first save finished, it emptied the form and left edit mode on whatever agent was open by then. Before the in-place edit of v2.160.0 it could also delete the task loaded on the second agent.
+- **Fix:** upgrade: a save goes to the agent it was made on and only empties the form while that agent and that edit are still open.
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `addCronJob`
+
 ## Tailscale and public access
 
 ### The https address the setup guide gave does not open
