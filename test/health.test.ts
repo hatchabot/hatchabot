@@ -184,6 +184,19 @@ describe('agentHealth', () => {
     expect(h.ok).toBeUndefined();
   });
 
+  it('an answer with no health in it is not healthy: {} is degraded, a non-object unreachable (#113)', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('health', { code: 0, stdout: '{}', stderr: '' });
+    expect((await agentHealth(p, ref)).status).toBe('degraded');
+    p.execResponses.set('health', { code: 0, stdout: JSON.stringify({ ts: 1 }), stderr: '' });
+    expect((await agentHealth(p, ref)).status).toBe('degraded');
+    for (const stdout of ['null', '[]', '1']) {
+      p.execResponses.set('health', { code: 0, stdout, stderr: '' });
+      expect(await agentHealth(p, ref), stdout).toEqual({ reachable: false, status: 'unreachable' });
+    }
+  });
+
   it('reports unreachable on a nonzero exit or unparseable output', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);
