@@ -6,7 +6,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ExecResult, RuntimeProvider } from '../src/providers/provider.js';
-import { OAuthStateJar, googleAuthUrl, materializeConnection, parseOAuthClient, syncConnections } from '../src/orchestrator/googleConnections.js';
+import { OAuthStateJar, gogAccounts, googleAuthUrl, materializeConnection, parseOAuthClient, syncConnections } from '../src/orchestrator/googleConnections.js';
 
 /** The browser-binding cookie the start route set (night review, 2026-09-28). */
 const nonceOf = (res: { cookies: Array<{ name: string; value: string }> }) => res.cookies.find((c) => c.name === 'hb_oauth')?.value ?? '';
@@ -649,6 +649,25 @@ describe('syncConnections retries a removal until it is verified (issue #11)', (
     const rt = scripted(() => new Error('docker unreachable'));
     await syncConnections({ store: w.store, secrets: w.secrets, provider: rt.provider }, 'a1', w.ref);
     expect(w.store.connectionRemovals('a1')).toEqual([EMAIL]);
+  });
+
+  it('a failed remove whose list has no accounts array keeps the record (A015)', async () => {
+    // `{}` or any other shape is not gog saying "nothing held": read as an
+    // empty list it verified a removal that had failed.
+    for (const stdout of ['{}', '{"accounts":{}}', '{"status":"ok"}', '[]']) {
+      const w = await bare();
+      const rt = scripted((kind) => kind === 'remove' ? { code: 1, stdout: '', stderr: 'keyring locked' } : kind === 'list' ? { code: 0, stdout, stderr: '' } : ok);
+      await syncConnections({ store: w.store, secrets: w.secrets, provider: rt.provider }, 'a1', w.ref);
+      expect(w.store.connectionRemovals('a1'), stdout).toEqual([EMAIL]);
+    }
+  });
+
+  it('gogAccounts reads only a real list: an array, or an explicit null as empty', async () => {
+    const at = (stdout: string) => gogAccounts({ provider: { execShell: async () => ({ code: 0, stdout, stderr: '' }) } } as never, 'r');
+    expect(await at('{}')).toBeNull();
+    expect(await at('{"accounts":"x"}')).toBeNull();
+    expect(await at('{"accounts":null}')).toEqual([]);
+    expect(await at(JSON.stringify({ accounts: [{ email: 'mara@example.org' }, null, { email: 3 }] }))).toEqual(['mara@example.org']);
   });
 
   it('a failed remove for an account gog no longer lists counts as removed', async () => {
