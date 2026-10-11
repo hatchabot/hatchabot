@@ -8052,7 +8052,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
-      const wanted = Array.isArray((req.body as any)?.peerIds) ? (req.body as { peerIds: string[] }).peerIds : [];
+      // The list replaces every grant, so only a real list of ids is one: a
+      // body without peerIds (or with something else there) was read as an
+      // empty list and silently revoked them all (#166). [] still revokes all.
+      const body = (req.body ?? {}) as { peerIds?: unknown; allowActions?: unknown };
+      const idList = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 500 && v.every((x) => typeof x === 'string');
+      if (!idList(body.peerIds)) return reply.code(400).send({ error: 'Send peerIds: the list of agent ids it may consult ([] for none).' });
+      if (body.allowActions !== undefined && !idList(body.allowActions)) return reply.code(400).send({ error: 'allowActions must be a list of agent ids.' });
+      const wanted = body.peerIds;
       // Every peer must be the CALLER's own agent — never a cross-owner grant.
       const valid = wanted.filter((pid) => {
         const p = store.getAgent(pid);
@@ -8060,7 +8067,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       });
       // "May request actions" only applies to peers actually granted, and only
       // between two agents the SAME person owns (already enforced above).
-      const wantAct = Array.isArray((req.body as any)?.allowActions) ? (req.body as { allowActions: string[] }).allowActions : [];
+      const wantAct = body.allowActions ?? [];
       const allowActions = wantAct.filter((pid) => valid.includes(pid));
       store.setAgentPeers(agent.id, valid, allowActions);
       if (allowActions.length) {
@@ -8112,10 +8119,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const next = b.connect
         ? [...new Set([...current, ...members.filter((m) => m.id !== a.id).map((m) => m.id)])]
         : current.filter((p) => !inSet.has(p));
-      if (next.length === current.length && next.every((p) => current.includes(p))) continue;
-      // Keep the "may ask it to act" grants to peers that stay (they were wiped).
-      store.setAgentPeers(a.id, next, store.listAgentActionPeers(a.id).filter((p) => next.includes(p)));
-      changed++;
+      if (!(next.length === current.length && next.every((p) => current.includes(p)))) {
+        // Keep the "may ask it to act" grants to peers that stay (they were wiped).
+        store.setAgentPeers(a.id, next, store.listAgentActionPeers(a.id).filter((p) => next.includes(p)));
+        changed++;
+      }
+      // Also when the grants were already right: a retry after a failed mint
+      // found them unchanged and skipped the token, leaving the connection
+      // unusable (#167). Minting is a no-op while a live token is held.
       if (next.length) await ensureAgentCallToken(a.id, ownerIdOf(req));
     }
     const pending = store.agentsWithPeersPending(ownerIdOf(req));
