@@ -126,7 +126,7 @@ import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
 import { createOpsPush, unannounced } from '../ops/push.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
 import { pickIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
-import { ENV_NAME_RE, reservedEnvProblem } from '../orchestrator/envPolicy.js';
+import { ENV_NAME_RE, envValueProblem, MAX_AGENT_ENV_VARS, reservedEnvProblem } from '../orchestrator/envPolicy.js';
 import { registerMgmtChat } from './mgmtChat.js';
 import { registerReachRoutes } from './reachRoutes.js';
 import { ConsoleSockets, type ConsoleSocket } from './consoleSockets.js';
@@ -7513,8 +7513,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       const reserved = reservedEnvProblem(name);
       if (reserved) return reply.code(400).send({ error: reserved });
-      if (store.listAgentEnv(agent.id).some((e) => e.name === name)) {
+      const badValue = envValueProblem(name, value);
+      if (badValue) return reply.code(400).send({ error: badValue });
+      const current = store.listAgentEnv(agent.id);
+      if (current.some((e) => e.name === name)) {
         return reply.code(409).send({ error: `"${name}" is already set — remove it first to change its value.` });
+      }
+      if (current.length >= MAX_AGENT_ENV_VARS) {
+        return reply.code(409).send({ error: `An agent can have at most ${MAX_AGENT_ENV_VARS} variables (so that a copy of it can be imported again) — remove one first.` });
       }
       const id = randomUUID();
       const secretRef = `agent-env/${id}`;

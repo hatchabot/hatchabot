@@ -25,7 +25,7 @@ export function stripManagedSections(agentsMd: string): string {
 import { listCrons } from './crons.js';
 import { createAgentRecord } from './provision.js';
 import { TransferError } from './transfer.js';
-import { reservedEnvProblem } from './envPolicy.js';
+import { envValueProblem, reservedEnvProblem } from './envPolicy.js';
 import { normalizeGitUrl } from './gitSource.js';
 
 /**
@@ -568,6 +568,8 @@ export function importTemplate(
   const envValues = [...envKeys]
     .filter((k) => resolved[k] !== undefined && resolved[k] !== '')
     .map((k) => ({ name: k.toUpperCase(), value: resolved[k]! }));
+  const badValue = envValues.map((v) => envValueProblem(v.name, v.value)).find(Boolean);
+  if (badValue) throw new TransferError(badValue);
   // Datasource-target fields: validate every pasted repo URL BEFORE creating
   // anything (same no-half-made-agent rule as resolveParamValues above). The
   // reserved-name and clash rules mirror the data-sources route — a template
