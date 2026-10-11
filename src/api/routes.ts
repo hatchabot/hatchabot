@@ -13504,11 +13504,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Scrub the agent's other stored secrets so a tombstone leaves no live
     // credentials: data-source deploy keys and env-var values (both keyed by
     // the source/var id, so release() never touches them).
-    for (const d of store.listDataSources(agent.id)) {
-      if (d.secretRef) await secrets.delete(d.secretRef).catch(() => {});
+    // A failure keeps the rows that name them: the scrub below would erase
+    // the last record of a live credential, so the delete parks in FAILED
+    // (retryable, like a runtime that would not go) instead of DELETED.
+    // Anything still missed is caught by the boot sweep (sweepOrphanAgentSecrets).
+    const refs = [
+      ...store.listDataSources(agent.id).map((d) => d.secretRef),
+      ...store.dataSourceRemovals(agent.id).map((r) => r.secretRef), // a removed source's key not yet scrubbed
+      ...store.listAgentEnv(agent.id).map((e) => e.secretRef),
+      `agent-call-token/${agent.id}`,
+    ].filter((r): r is string => !!r);
+    const kept: string[] = [];
+    for (const ref of refs) {
+      try { await secrets.delete(ref); } catch { kept.push(ref); }
     }
-    for (const e of store.listAgentEnv(agent.id)) {
-      await secrets.delete(e.secretRef).catch(() => {});
+    if (kept.length) {
+      store.setAgentState(agent.id, 'FAILED', 'Delete could not remove all of its stored keys — tap Delete again.');
+      app.log.error({ agentId: agent.id, kept: kept.length }, 'secret delete failed during delete');
+      return reply.code(502).send({ error: "Couldn't remove all of the agent's stored keys — try Delete again in a moment." });
     }
     store.deleteSnapshotsFor(agent.id);
     store.deleteEventsFor(agent.id);
@@ -13519,7 +13532,6 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // credentials and the child rows — memberships carry Telegram user IDs
     // (PII), source/env/seed rows would dangle (their secrets were scrubbed
     // above). Pre-fix tombstones are cleaned by the same scrub in #migrate.
-    await secrets.delete(`agent-call-token/${agent.id}`).catch(() => {});
     store.scrubAgentResidue(agent.id);
     return publicAgent(store.setAgentState(agent.id, 'DELETED'));
   });
