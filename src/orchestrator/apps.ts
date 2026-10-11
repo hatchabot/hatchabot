@@ -203,6 +203,14 @@ export interface InstallDeps {
   log?: (step: string, detail?: Record<string, unknown>) => void;
   /** The operation's record (operations.ts): each step as it is done (appOperations.ts). */
   step?: (key: string) => void;
+  /**
+   * Judges the config about to be staged: the values given merged with the
+   * file already in the agent, the manifest's defaults and Hatchabot's facts,
+   * so what is judged is what the app will run with (the values alone missed
+   * a mailbox that came from a default or the old file). `existing` is the
+   * file as it was. Throwing stops the install before anything live changes.
+   */
+  checkConfig?: (config: Record<string, unknown>, existing: Record<string, unknown>) => void;
 }
 
 async function sh(d: InstallDeps, script: string, timeoutMs = 60_000) {
@@ -274,6 +282,7 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
       try { existing = read.stdout.trim() ? JSON.parse(read.stdout) : {}; } catch { throw new AppError(`${live} in the agent is not valid JSON; fix or remove it.`); }
       const { config, missing } = mergeConfig(m, d.facts, existing, values);
       if (missing.length) throw new AppError(`Needs a value for: ${missing.join(', ')} (give them as key=value).`);
+      d.checkConfig?.(config, existing);
       const w = await d.provider.writeToVolume(d.runtimeRef,
         ['sh', '-c', `umask 077 && cat > ${sq(staged)}`], Buffer.from(JSON.stringify(config, null, 2) + '\n'));
       if (w.code !== 0) throw new AppError(`Could not write ${staged}.`);

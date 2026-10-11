@@ -544,6 +544,61 @@ describe('the app routes', () => {
     expect((await f.inject({ method: 'POST', url: '/v1/agents/a2/app', headers: as, payload: { source: dir, values, allowShared: true } })).statusCode).toBe(200);
   });
 
+  it('the same check on the config it would run with: a default mailbox, an update to another mailbox (2026-10-10)', async () => {
+    const { f, store } = await app();
+    store.insertAgent({ id: 'a2', ownerId: OWNER, name: 'Demo Two', slug: 'demo-two', state: 'RUNNING', runtimeRef: 'mock://a2', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    store.insertAgent({ id: 'a3', ownerId: OWNER, name: 'Demo Three', slug: 'demo-three', state: 'STOPPED', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    store.insertConnection({ id: 'c1', ownerId: OWNER, kind: 'google', email: 'demo@example.org', services: ['gmail'], secretRef: 's/c1' });
+    for (const id of ['a1', 'a2', 'a3']) store.attachConnection(id, 'c1', false);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: repo(), values: { mailbox: 'demo@example.org' } } })).statusCode).toBe(200);
+    // A manifest whose mailbox defaults to the shared one: nothing given, still the same account.
+    const byDefault = repo({ ...MANIFEST, config: { fields: [{ key: 'mailbox', type: 'email', default: 'demo@example.org' }, { key: 'mode', default: 'shadow' }] } });
+    const install = await f.inject({ method: 'POST', url: '/v1/agents/a2/app', headers: as, payload: { source: byDefault } });
+    expect(install.statusCode).toBe(409);
+    expect(install.json()).toMatchObject({ conflict: ['Demo'] });
+    expect(store.getAgentApp('a2')).toBeUndefined();
+    const pend = await f.inject({ method: 'POST', url: '/v1/agents/a3/app/pending', headers: as, payload: { source: byDefault } });
+    expect(pend.statusCode).toBe(409);
+    expect(store.getAppPending('a3')).toBeUndefined();
+    // On another mailbox it goes in; an update that moves it onto the shared one is refused, unless confirmed.
+    const dir = repo();
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a2/app', headers: as, payload: { source: dir, values: { mailbox: 'other@example.org' } } })).statusCode).toBe(200);
+    const moved = await f.inject({ method: 'POST', url: '/v1/agents/a2/app/update', headers: as, payload: { values: { mailbox: 'demo@example.org' } } });
+    expect(moved.statusCode).toBe(409);
+    expect(moved.json()).toMatchObject({ conflict: ['Demo'] });
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a2/app/update', headers: as, payload: { values: { mailbox: 'demo@example.org' }, allowShared: true } })).statusCode).toBe(200);
+    // Confirmed once, it stays allowed: a later update with nothing new about the mailbox is not refused.
+    commit(dir);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a2/app/update', headers: as, payload: {} })).statusCode).toBe(200);
+  });
+
+  it('two installs of one app on one account at the same time: one goes in, the other is refused (2026-10-10)', async () => {
+    const { f, store, provider } = await app();
+    store.insertAgent({ id: 'a2', ownerId: OWNER, name: 'Demo Two', slug: 'demo-two', state: 'RUNNING', runtimeRef: 'mock://a2', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    store.insertConnection({ id: 'c1', ownerId: OWNER, kind: 'google', email: 'demo@example.org', services: ['gmail'], secretRef: 's/c1' });
+    store.attachConnection('a1', 'c1', false);
+    store.attachConnection('a2', 'c1', false);
+    // The first one's tests are held: the second runs meanwhile, as far as it may.
+    let letGo!: () => void, firstIn!: () => void, secondIn!: () => void;
+    const gate = new Promise<void>((r) => { letGo = r; });
+    const inFirst = new Promise<void>((r) => { firstIn = r; });
+    const inSecond = new Promise<void>((r) => { secondIn = r; });
+    const shell = provider.execShell.bind(provider);
+    provider.execShell = async (ref: string, script: string) => {
+      if (script.includes('unittest')) { if (ref === 'mock://a1') { firstIn(); await gate; } else secondIn(); }
+      return shell(ref, script);
+    };
+    const payload = { source: repo(), values: { mailbox: 'demo@example.org' } };
+    const first = f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload });
+    await inFirst;
+    const second = f.inject({ method: 'POST', url: '/v1/agents/a2/app', headers: as, payload });
+    await Promise.race([inSecond, new Promise((r) => setTimeout(r, 1500))]);
+    letGo();
+    const both = await Promise.all([first, second]);
+    expect(both.map((r) => r.statusCode)).toEqual([200, 409]);
+    expect([store.getAgentApp('a1'), store.getAgentApp('a2')].filter(Boolean)).toHaveLength(1);
+  });
+
   /** A fetch that waits at a gate once armed: the minutes a real one can take. */
   const gatedFetch = () => {
     let armed = false;

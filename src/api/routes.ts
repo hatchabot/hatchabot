@@ -2,7 +2,7 @@ import { allowedPeerAddress } from './peerAddress.js';
 import { GuestConsoleLog } from './guestConsoleLog.js';
 import { deviceLabel } from './publicAccess.js';
 import { stopAndConfirm } from '../orchestrator/quiesce.js';
-import { AppError, fieldsToAsk, hostGit, installRelease, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
+import { AppError, fieldsToAsk, hostGit, installRelease, mergeConfig, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
 import { agentTimeZone } from '../orchestrator/timezone.js';
 import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
 import { claudePlanAllowed, CLAUDE_PLAN_HOSTED } from '../config/claudePlan.js';
@@ -7049,6 +7049,35 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const sharedRefusal = (names: string[], m: AppManifest) => Object.assign(new AppError(
     `${names.join(' and ')} already ${names.length > 1 ? 'run' : 'runs'} ${m.name} on the same account. Two copies would both answer every email. ` +
     'Stop the app there first, or use another account; or confirm you want both (allowShared).'), { conflict: names });
+  /**
+   * The same check on the config the install will actually write (installRelease's
+   * checkConfig): a mailbox from the manifest's default or the agent's old file
+   * passed the check on the values alone, and an update never checked at all.
+   * `kept`: the app is already this agent's, so a clash its old file already had
+   * was accepted then (allowShared) and stays allowed; only a new one is refused.
+   */
+  const sharedConfigCheck = (a: Agent, m: AppManifest, allowShared: boolean, kept: boolean) =>
+    (config: Record<string, unknown>, existing: Record<string, unknown>) => {
+      if (allowShared) return;
+      const before = new Set(kept ? sharedAppConflicts(a, m, existing) : []);
+      const clash = sharedAppConflicts(a, m, config).filter((n) => !before.has(n));
+      if (clash.length) throw sharedRefusal(clash, m);
+    };
+  /**
+   * Installs and updates of one app on one account, one at a time: each checks
+   * the others' records, and two running side by side both found none and both
+   * went in on the same mailbox.
+   */
+  const appAccountLocks = new Map<string, Promise<unknown>>();
+  const oneAppAtATime = <T>(ownerId: string, app: string, fn: () => Promise<T>): Promise<T> => {
+    const key = `${ownerId}\n${app}`;
+    const prev = appAccountLocks.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => {});
+    appAccountLocks.set(key, tail);
+    void tail.then(() => { if (appAccountLocks.get(key) === tail) appAccountLocks.delete(key); });
+    return run;
+  };
 
   /** Recorded as it goes (appOperations.ts): its steps, and how it ended. A (simulated) dead process records nothing more. */
   const appOpFailed = (op: OpHandle | undefined, e: unknown) => {
@@ -7061,38 +7090,43 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const label = src.kind === 'dir' ? src.path : src.url;
     const repo = await repoFor(appGit, src, appCacheDir);
     const rel = await resolveRelease(appGit, repo, ref);
+    // The values alone first: refused at once, before anything starts. The
+    // config the install would write is judged again inside it.
     const clash = allowShared ? [] : sharedAppConflicts(a, rel.manifest, values);
     if (clash.length) throw sharedRefusal(clash, rel.manifest);
-    const had = store.getAgentApp(a.id);
-    // Another app in its place: its tasks come off first (never two apps on one mailbox),
-    // and go back on if this install fails, so the agent still matches the record.
-    const replaced = had && had.app !== rel.manifest.app ? had : undefined;
-    let op: OpHandle | undefined;
-    const done = await whileBusy(a.id, async () => {
-      a = appStillAsWas(a, had);
-      op = beginOperation(store, 'app-install', a.id, {
-        app: rel.manifest.app, toSha: rel.sha, fromSha: had?.app === rel.manifest.app ? had.sha : null,
-        fromApp: had?.app ?? null, source: label, ref,
-      }, { requestedBy: requestedBy ?? a.ownerId });
-      if (replaced) await removeTasks(appDeps(a), replaced.app);
-      try {
-        return await installRelease(withSteps(appDeps(a), op), rel, values);
-      } catch (e) {
-        rethrowIfCrash(e);
-        if (replaced) {
-          await syncTasks(appDeps(a), replaced.manifest as AppManifest).catch((err: unknown) => {
-            if (e instanceof Error) e.message += ` ${replaced.app}'s tasks could not be put back: ${(err as Error)?.message ?? err}`;
-          });
+    return oneAppAtATime(a.ownerId, rel.manifest.app, async () => {
+      const had = store.getAgentApp(a.id);
+      // Another app in its place: its tasks come off first (never two apps on one mailbox),
+      // and go back on if this install fails, so the agent still matches the record.
+      const replaced = had && had.app !== rel.manifest.app ? had : undefined;
+      let op: OpHandle | undefined;
+      const done = await whileBusy(a.id, async () => {
+        a = appStillAsWas(a, had);
+        op = beginOperation(store, 'app-install', a.id, {
+          app: rel.manifest.app, toSha: rel.sha, fromSha: had?.app === rel.manifest.app ? had.sha : null,
+          fromApp: had?.app ?? null, source: label, ref,
+        }, { requestedBy: requestedBy ?? a.ownerId });
+        if (replaced) await removeTasks(appDeps(a), replaced.app);
+        try {
+          const check = sharedConfigCheck(a, rel.manifest, allowShared, had?.app === rel.manifest.app);
+          return await installRelease({ ...withSteps(appDeps(a), op), checkConfig: check }, rel, values);
+        } catch (e) {
+          rethrowIfCrash(e);
+          if (replaced) {
+            await syncTasks(appDeps(a), replaced.manifest as AppManifest).catch((err: unknown) => {
+              if (e instanceof Error) e.message += ` ${replaced.app}'s tasks could not be put back: ${(err as Error)?.message ?? err}`;
+            });
+          }
+          throw e;
         }
-        throw e;
-      }
-    }).catch((e: unknown) => { appOpFailed(op, e); throw e; });
-    store.setAgentApp({ agentId: a.id, app: done.app, source: label, ref, sha: done.sha, manifest: done.manifest,
-      previousSha: had?.app === done.app ? had.sha : undefined, previousManifest: had?.app === done.app ? had.manifest : undefined,
-      installedAt: new Date().toISOString(), testOk: done.test?.ok });
-    trace(a.id)('app.installed', { app: done.app, sha: done.sha.slice(0, 12), source: label });
-    op?.done(`${done.app} ${done.sha.slice(0, 12)} installed.`);
-    return done;
+      }).catch((e: unknown) => { appOpFailed(op, e); throw e; });
+      store.setAgentApp({ agentId: a.id, app: done.app, source: label, ref, sha: done.sha, manifest: done.manifest,
+        previousSha: had?.app === done.app ? had.sha : undefined, previousManifest: had?.app === done.app ? had.manifest : undefined,
+        installedAt: new Date().toISOString(), testOk: done.test?.ok });
+      trace(a.id)('app.installed', { app: done.app, sha: done.sha.slice(0, 12), source: label });
+      op?.done(`${done.app} ${done.sha.slice(0, 12)} installed.`);
+      return done;
+    });
   };
   /** A new agent "from a repo": install once it runs; a failure stays on the record for its page. */
   runPendingApp = async (agentId: string) => {
@@ -7136,7 +7170,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const rel = await resolveRelease(appGit, await repoFor(appGit, parseSource(req.body?.source ?? ''), appCacheDir), ref);
       const missing = fieldsToAsk(rel.manifest).filter((f) => f.required && f.default === undefined && !String((req.body?.values ?? {})[f.key] ?? '').trim()).map((f) => f.key);
       if (missing.length) return reply.code(400).send({ error: `Needs a value for: ${missing.join(', ')}.` });
-      const clash = req.body?.allowShared ? [] : sharedAppConflicts(a, rel.manifest, req.body?.values ?? {});
+      // Judged on what it would be installed with: a mailbox left to the
+      // manifest's default (or filled from the owner's address) counts too.
+      const values = req.body?.values ?? {};
+      const effective = { ...values, ...mergeConfig(rel.manifest, appFacts(a), {}, values).config };
+      const clash = req.body?.allowShared ? [] : sharedAppConflicts(a, rel.manifest, effective);
       if (clash.length) throw sharedRefusal(clash, rel.manifest);
       store.setAppPending(a.id, { source: req.body!.source!, ref, values: { ...(req.body?.values ?? {}), ...(req.body?.allowShared ? { __allowShared: true } : {}) } });
       trace(a.id)('app.pending', { app: rel.manifest.app });
@@ -7146,7 +7184,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   /** Install the newest commit (or a given ref) from where it came. */
-  app.post<{ Params: { id: string }; Body: { ref?: string; values?: Record<string, unknown> } }>('/v1/agents/:id/app/update', async (req, reply) => {
+  app.post<{ Params: { id: string }; Body: { ref?: string; values?: Record<string, unknown>; allowShared?: boolean } }>('/v1/agents/:id/app/update', async (req, reply) => {
     const a = appTarget(req, reply); if (!a) return reply;
     const had = store.getAgentApp(a.id);
     if (!had) return reply.code(404).send({ error: `${a.name} has no app installed.` });
@@ -7156,14 +7194,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const rel = await resolveRelease(appGit, repo, ref);
       if (rel.sha === had.sha && !req.body?.values) return { app: appView(a), unchanged: true };
       let op: OpHandle | undefined;
-      const done = await whileBusy(a.id, () => {
-        const now = appStillAsWas(a, had);
-        op = beginOperation(store, 'app-update', a.id, { app: had.app, toSha: rel.sha, fromSha: had.sha, fromApp: had.app, source: had.source, ref }, { requestedBy: ownerIdOf(req) });
-        return installRelease(withSteps(appDeps(now), op), rel, req.body?.values ?? {});
-      }).catch((e: unknown) => { appOpFailed(op, e); throw e; });
-      store.setAgentApp({ ...had, ref, sha: done.sha, manifest: done.manifest,
-        previousSha: rel.sha === had.sha ? had.previousSha : had.sha, previousManifest: rel.sha === had.sha ? had.previousManifest : had.manifest,
-        installedAt: new Date().toISOString(), testOk: done.test?.ok });
+      const done = await oneAppAtATime(a.ownerId, had.app, async () => {
+        const d = await whileBusy(a.id, () => {
+          const now = appStillAsWas(a, had);
+          op = beginOperation(store, 'app-update', a.id, { app: had.app, toSha: rel.sha, fromSha: had.sha, fromApp: had.app, source: had.source, ref }, { requestedBy: ownerIdOf(req) });
+          // An update that points it at another mailbox (new values, or a new
+          // default) is judged like an install; it never was.
+          const check = sharedConfigCheck(now, rel.manifest, req.body?.allowShared === true, had.app === rel.manifest.app);
+          return installRelease({ ...withSteps(appDeps(now), op), checkConfig: check }, rel, req.body?.values ?? {});
+        }).catch((e: unknown) => { appOpFailed(op, e); throw e; });
+        store.setAgentApp({ ...had, ref, sha: d.sha, manifest: d.manifest,
+          previousSha: rel.sha === had.sha ? had.previousSha : had.sha, previousManifest: rel.sha === had.sha ? had.previousManifest : had.manifest,
+          installedAt: new Date().toISOString(), testOk: d.test?.ok });
+        return d;
+      });
       trace(a.id)('app.updated', { app: done.app, from: had.sha.slice(0, 12), to: done.sha.slice(0, 12) });
       op?.done(`${done.app} updated to ${done.sha.slice(0, 12)}.`);
       return { app: appView(a), test: done.test ?? null };

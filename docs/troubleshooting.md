@@ -399,6 +399,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/api/routes.ts` — `sharedAppConflicts`
 
+### Two agents run the same app on one mailbox, and nothing warned you
+- **Check:** each agent's page → App shows the app, and both agents' app config (`config.json` under `~/.openclaw/apps/<app>/data` in the agent) names the same address.
+- **Cause:** the check looked only at the values typed in. A mailbox that came from the app's default or from the agent's existing config was not checked; an update, even one that changed the mailbox, was never checked; and two installs at the same moment could each miss the other.
+- **Fix:** upgrade: installs, updates and new agents from a repo are judged on the config the app would actually run with, and one install of an app per account runs at a time. Then stop the app on one of the two agents (its page → App → Stop app).
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `sharedConfigCheck`, `oneAppAtATime`; `src/orchestrator/apps.ts` — `checkConfig`
+
 ### A new agent's page says "Its app could not be installed"
 - **Check:** the message under it on the agent's page (App), and `app.install_failed` in its Setup log.
 - **Cause:** the app made for it from a repo failed to install once the agent was running: its tests failed, a value it needs was missing, or the repo could not be read.
