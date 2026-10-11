@@ -4053,6 +4053,45 @@ const SCENARIOS = String.raw`(() => {
         ok('it is under Alerts', [...document.querySelectorAll('#v2groups .v2group')].some((g) => !g.querySelector('h3')?.textContent.includes('Fine') && g.textContent.includes('Homework Helper')));
       } finally { await agentsCleanup(); }
     },
+    filesFolderRaceAndUploads: async () => {
+      // Files (made-up data): a slow read of the folder left behind lands last (#94); a folder
+      // named .openclaw-something is not OpenClaw's state (#117); each failed upload's reason
+      // stays after the folder is drawn again (#118).
+      const realFetch = window.fetch;
+      let release; const held = new Promise((r) => { release = r; });
+      let holdOld = true;
+      window.fetch = async (input, init = {}) => {
+        const url = String(typeof input === 'string' ? input : input.url);
+        const [path, qs] = url.split('?');
+        if (path === '/v1/agents/a1/fs' && (init.method || 'GET').toUpperCase() === 'GET') {
+          const p = new URLSearchParams(qs || '').get('path') || '';
+          window.__calls.push({ method: 'GET', path, url });
+          if (p === 'old' && holdOld) { holdOld = false; await held; }
+          const entries = [{ name: 'in-' + (p || 'home').replace(/\W/g, '-') + '.md', type: 'file', size: 1, mtime: '' }];
+          return new Response(JSON.stringify({ path: p, entries }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        return realFetch(input, init);
+      };
+      try {
+        openV2Agent('a1', 'files');
+        await until(() => $('v2Files')?.textContent.includes('in-home.md'));
+        const slow = v2LoadFiles('a1', 'old');
+        await until(() => !holdOld);
+        await v2LoadFiles('a1', 'new');
+        release(); await slow; await sleep(50);
+        ok('the folder opened last stays shown: ' + $('v2Files').textContent.slice(0, 120), $('v2Files').textContent.includes('in-new.md') && !$('v2Files').textContent.includes('in-old.md'));
+        eq('and is the one remembered', v2FilesPath.get('a1'), 'new');
+        await v2LoadFiles('a1', '.openclaw-notes');
+        ok('uploads are offered in .openclaw-notes', !!byText('#v2Files button', 'Upload'));
+        await v2LoadFiles('a1', '.openclaw');
+        ok('but not in .openclaw itself', !byText('#v2Files button', 'Upload'));
+        await v2LoadFiles('a1', 'inbox');
+        window.__answer = { 'PUT /v1/agents/a1/fs/file': [{ status: 413, body: { error: 'Too big (300 MB; the limit is 200 MB — HATCHABOT_FILE_MAX_MB).' } }, { status: 200, body: { ok: true } }] };
+        await v2UploadFiles('a1', 'inbox', [new File(['x'], 'huge.zip'), new File(['y'], 'notes.txt')]);
+        const note = $('v2UploadNote');
+        ok('the count and the reason, after the redraw: ' + note.textContent, !note.hidden && note.textContent.includes('1 of 2 uploaded') && note.textContent.includes('huge.zip: Too big (300 MB'));
+      } finally { window.fetch = realFetch; release?.(); window.__answer = {}; if (v2AgentDlg.open) v2Close(); v2FilesPath.delete('a1'); }
+    },
   });
   (async () => {
     for (const [name, run] of Object.entries(T)) {

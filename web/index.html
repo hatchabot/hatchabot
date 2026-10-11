@@ -12896,15 +12896,19 @@ async function v2LoadUsage(id) {
 
 /** The Files tab: browse the agent's home (read-only), download a file or a folder. */
 const v2FilesPath = new Map();
+// Each read numbered per agent: a slow read of the folder left behind landed
+// after the one clicked into, and showed it under the newer path (#94).
+const v2FilesGen = new Map();
 async function v2LoadFiles(id, path) {
   const box = $('v2Files'); if (!box || box.dataset.agent !== id) return;
   v2FilesPath.set(id, path);
+  const gen = (v2FilesGen.get(id) || 0) + 1; v2FilesGen.set(id, gen);
   const a = v2Find(id);
   const ws = a ? `.openclaw/agents/${a.slug}/agent` : '';
   let r;
   try { r = await api(`/v1/agents/${id}/fs?path=${encodeURIComponent(path)}`); }
-  catch (e) { box.innerHTML = `<div class="sub" style="color:var(--bad)">${esc(e.message)}</div>`; return; }
-  if (box.dataset.agent !== id) return;
+  catch (e) { if (v2FilesGen.get(id) === gen && box.dataset.agent === id) box.innerHTML = `<div class="sub" style="color:var(--bad)">${esc(e.message)}</div>`; return; }
+  if (box.dataset.agent !== id || v2FilesGen.get(id) !== gen) return;
   const segs = (r.path || '').split('/').filter(Boolean);
   const crumb = [`<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','')">home</a>`]
     .concat(segs.map((s, i) => `<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','${jsq(segs.slice(0, i + 1).join('/'))}')">${esc(s)}</a>`)).join(' / ');
@@ -12921,7 +12925,9 @@ async function v2LoadFiles(id, path) {
       : e.type === 'file' ? `<a class="btn" href="${dl('file', p)}" download title="Download">⬇</a>` : '';
     return `<tr><td>${open}</td><td class="num">${e.type === 'dir' ? '' : fmtBytes(e.size)}</td><td class="sub">${e.mtime ? ago(e.mtime) : ''}</td><td>${get}</td></tr>`;
   }).join('');
-  const canUpload = !(r.path || '').startsWith('.openclaw') || (r.path || '') === ws || (r.path || '').startsWith(ws + '/');
+  // .openclaw itself, not every name starting so (.openclaw-notes is the agent's own): the server's rule (#117).
+  const here = r.path || '';
+  const canUpload = !(here === '.openclaw' || here.startsWith('.openclaw/')) || here === ws || here.startsWith(ws + '/');
   box.innerHTML = `<div class="v2row"><div class="v2k">Folder</div><div class="v2v"><span style="font-family:ui-monospace,monospace">~/ ${crumb}</span>
       ${ws && (r.path || '') !== ws ? `<button onclick="v2LoadFiles('${jsq(id)}','${jsq(ws)}')">Workspace</button>` : ''}
       <a class="btn" href="${dl('archive', r.path || '')}" onclick="return sfLink(event, this, 'folder.tar.gz')" title="This folder as a .tar.gz">⬇ Whole folder</a>
@@ -12943,6 +12949,7 @@ async function v2UploadFiles(id, path, files) {
   const note = $('v2UploadNote'); if (note) { note.hidden = false; }
   const say = (t) => { if (note) note.textContent = t; };
   let done = 0;
+  const failed = [];
   for (const f of list) {
     say(`Uploading ${f.name} (${fmtBytes(f.size)})…`);
     const put = async (overwrite) => sfFetch(`/v1/agents/${id}/fs/file?path=${encodeURIComponent(path)}&name=${encodeURIComponent(f.name)}${overwrite ? '&overwrite=1' : ''}`,
@@ -12953,12 +12960,19 @@ async function v2UploadFiles(id, path, files) {
         if (!confirm(`${f.name} is already in this folder. Replace it?`)) continue;
         res = await put(true);
       }
-      if (!res.ok) { const e = await res.json().catch(() => ({})); say(`${f.name}: ${e.error || res.statusText}`); continue; }
+      if (!res.ok) { const e = await res.json().catch(() => ({})); failed.push(`${f.name}: ${e.error || res.statusText}`); continue; }
       done++;
-    } catch (e) { say(`${f.name}: ${e.message}`); }
+    } catch (e) { failed.push(`${f.name}: ${e.message}`); }
   }
-  say(`${done} of ${list.length} uploaded.`);
-  void v2LoadFiles(id, path);
+  // The count and each file's reason, said after the folder is drawn again:
+  // the redraw replaced the reason with a bare count (#118). Not when the
+  // person has moved on to another folder meanwhile.
+  if (v2FilesPath.get(id) !== path) return;
+  await v2LoadFiles(id, path);
+  const after = $('v2UploadNote'); if (!after || $('v2Files')?.dataset.agent !== id || v2FilesPath.get(id) !== path) return;
+  after.hidden = false;
+  after.innerHTML = [`${done} of ${list.length} uploaded.`, ...failed.map(esc)].join('<br>');
+  if (failed.length) after.style.color = 'var(--bad)';
 }
 
 function v2MemberPane(a) {
