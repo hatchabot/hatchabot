@@ -856,6 +856,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/rebuildPolicy.ts` — `pickAutoRebuilds`; `src/api/routes.ts` — `activityEvidence`
 
+### After a move or import, an agent pinned to a custom image is missing a tool (a compiler, a package, a messaging plugin)
+- **Check:** in the agent's console, the tool is absent (`which g++`, `dpkg -l <package>`) on the destination, while `docker image inspect <its image>` on the source machine lists it in `org.hatchabot.extra-packages`, or its base image does.
+- **Cause:** the image was rebuilt on the destination from its recipe, which dropped package names ending in `+` (g++), took a derived image's base as stock (its base's packages and plugins were not carried), and for packages built under a plain version tag only pulled the stock image.
+- **Fix:** upgrade, then rebuild the image on the destination (remove its tag there and move or rebuild the agent again), or install the tool in a derived image. Since v2.160.0 the recipe keeps every package, lays a derived image's base packages back on, refuses a destination base without its plugins, and builds the packages onto a pulled plain base.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/imageRecipe.ts` — `recipeFor`, `buildRecipeOn`
+
 ### An agent in a class will not start after a rebuild: its data was migrated for a newer OpenClaw than the class's image
 - **Check:** the agent's rebuild fails on a 2026.7 image although it ran 2026.8 or newer before; its Overview shows a class with an image, and `docker inspect` of its old container names the newer image.
 - **Cause:** assigning a class, or changing a class's image, pinned members without the check a direct image pin makes: 2026.7 cannot read a volume already migrated to 2026.8+. Clearing a class image also unpinned members before the rest of the edit was checked, so a member the edit then skipped lost its pin anyway.

@@ -30,8 +30,11 @@ export interface ImageRecipe {
   channels: string[];
 }
 
-// A trailing "-" or "+" is apt's REMOVE / install syntax ("curl-" removes curl).
-const PKG = /^[a-z0-9][a-z0-9+.-]*[a-z0-9]$|^[a-z0-9]$/;
+// A trailing "-" is apt's REMOVE syntax ("curl-" removes curl), so never
+// the last character. A trailing "+" is part of real names (g++, libstdc++):
+// apt installs a package by its exact name before reading "+" as its
+// install operator (#137).
+const PKG = /^[a-z0-9][a-z0-9+.-]*[a-z0-9+]$|^[a-z0-9]$/;
 
 /** A derived image's record, by the tag agents pin (`…:derived-<name>`). */
 export function derivedByTag(get: (name: string) => DerivedImage | undefined) {
@@ -53,8 +56,17 @@ export async function recipeFor(
     // Only a derived image that built: a failed or running edit's lines are
     // not what the agent actually runs (night review, 2026-09-28).
     if (d.status !== 'READY') return { problem: `${tag}'s recipe was changed and has not built (${String(d.status).toLowerCase()}), so it is not what the agent runs` };
-    // A derived image is FROM a plain base plus the owner's lines.
-    return { tag, base: d.base, packages: [], lines: d.dockerfile, channels: [] };
+    // A derived image is FROM a base plus the owner's lines — and that base
+    // may itself carry extra packages or messaging plugins, which a stock
+    // base on the destination lacks. Its labels (inherited from the base, or
+    // the base's own) say which: the packages are laid back on, the plugins
+    // checked against the destination's base (#128).
+    const tags = await source.listImageTags().catch(() => []);
+    const from = tags.find((t) => t.tag === tag) ?? tags.find((t) => t.tag === d.base);
+    const packages = from?.extraPackages ?? [];
+    const bad = packages.find((p) => !PKG.test(p));
+    if (bad) return { problem: `its base records a package "${bad.slice(0, 40)}" that is not a package name` };
+    return { tag, base: d.base, packages, lines: d.dockerfile, channels: from?.channels ?? [] };
   }
   const info = (await source.listImageTags().catch(() => [])).find((t) => t.tag === tag);
   if (!info) return { problem: `${tag} is not on this machine either, so there is nothing to rebuild it from` };
@@ -66,7 +78,11 @@ export async function recipeFor(
   if (/-lite(\b|$)/.test(name)) {
     return { problem: `${tag} is an engine-free image with its own build, so it cannot be rebuilt from a recipe` };
   }
-  const packages = (info.extraPackages ?? []).filter((p) => PKG.test(p));
+  // Every recorded package, or no recipe: one dropped quietly was a tool the
+  // agent lost on the destination (#137).
+  const packages = info.extraPackages ?? [];
+  const bad = packages.find((p) => !PKG.test(p));
+  if (bad) return { problem: `${tag} records a package "${bad.slice(0, 40)}" that is not a package name` };
   return { tag, base: `${repo}:${info.openclawVersion}`, packages, channels: info.channels ?? [] };
 }
 
@@ -143,7 +159,10 @@ export async function buildRecipeOn(
     const missing = r.channels.filter((c) => !(baseInfo?.channels ?? []).includes(c));
     if (missing.length) return { ok: false, problem: `it has ${missing.join(' and ')} built in, and that machine's ${r.base} does not` };
   }
-  if (r.base === tag) return { ok: true, built: false }; // the pin WAS a plain base: pulling was enough
+  // The pin WAS a plain base: pulling was enough — unless it carries extra
+  // packages under that plain name, which the pulled stock base lacks: they
+  // are built onto it, under the same name (#161).
+  if (r.base === tag && !r.packages.length && !r.lines?.trim()) return { ok: true, built: false };
   const built = await target.buildImage(tag, recipeDockerfile(r), {
     'org.hatchabot.extra-packages': r.packages.join(' '),
     'org.hatchabot.rebuilt-from-recipe': '1',
