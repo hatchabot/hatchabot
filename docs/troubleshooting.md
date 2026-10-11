@@ -1596,6 +1596,48 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/template.ts` — `exportTemplate`; `src/orchestrator/provision.ts` — `getPendingSchedules`
 
+### A copy made from a template has two of OpenClaw's own upkeep tasks (memory dreaming, the weekly skill review)
+- **Check:** the copy's Scheduled tasks list shows one of OpenClaw's tasks twice: once marked as OpenClaw's, once as an ordinary task.
+- **Cause:** before v2.160.0 an export carried OpenClaw's own tasks as ordinary ones, and every copy also gets its own from OpenClaw.
+- **Fix:** upgrade and export again; in a copy already made, delete the ordinary duplicate.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/template.ts` — `exportTemplate`; `src/orchestrator/crons.ts` — `normalizeCron`
+
+### Share, Clone or New child: "Couldn't read its scheduled tasks, so the copy would have none — nothing was exported"
+- **Check:** the agent's Scheduled tasks list does not load either, or `openclaw cron list --json` inside the agent fails.
+- **Cause:** the agent's gateway did not answer for its task list (still starting, or unwell). Before v2.160.0 the copy was made anyway, with no tasks, and nothing said so.
+- **Fix:** wait until the task list loads (restart the agent if it does not), then try again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/template.ts` — `exportTemplate`; `src/orchestrator/crons.ts` — `listCrons`
+
+### Share, Clone or New child: "It has N scheduled tasks switched on; a template carries at most 12"
+- **Check:** the agent's Scheduled tasks list has more than 12 tasks that run a message and are switched on.
+- **Cause:** a template holds at most 12 tasks (older Hatchabot releases refuse a file with more). Before v2.160.0 the rest were left out without a word.
+- **Fix:** switch off or remove the tasks a copy does not need (switched-off tasks are not copied), then share again; add them to the copy afterwards if it needs them.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/template.ts` — `exportTemplate`, `MAX_TEMPLATE_SCHEDULES`
+
+### Share, Clone or New child: "… is there but could not be read — nothing was exported"
+- **Check:** inside the agent, `ls -l ~/.openclaw/agents/<slug>/agent/` shows the named file with odd permissions, or as a folder; or the agent is not running properly.
+- **Cause:** its SOUL.md, AGENTS.md or MEMORY.md is there but could not be read. Before v2.160.0 the file went into the copy empty, so the copy had no persona or no instructions.
+- **Fix:** make the file readable again (or remove the folder in its place), or restart the agent, then try again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/template.ts` — `exportTemplate`; `src/orchestrator/snapshots.ts` — `readCoreFile`
+
+### Share, Clone or New child: "Its files use N setup fields; a template carries at most 24"
+- **Check:** count the `{{placeholders}}` in SOUL.md, AGENTS.md and the description, plus the declared Setup fields.
+- **Cause:** a template holds at most 24 setup fields. Before v2.160.0 the rest were cut off: the copy never asked for them and kept their `{{placeholders}}` in its instructions.
+- **Fix:** write the fixed text in place of some placeholders, or remove the ones no copy needs, then try again. The message names the ones past the limit.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/template.ts` — `collectParameters`
+
+### A child or a recipient of a configured agent keeps the author's setup values, whatever they answer
+- **Check:** the agent the copy came from has Setup values filled in; the copy asks for the fields, but its SOUL.md or AGENTS.md has the author's answers where the copy's should be.
+- **Cause:** before v2.160.0 an export read the agent's files as they are, with its own values filled in, so the copy got the field list but no `{{placeholders}}` to put its answers in.
+- **Fix:** upgrade and share or make the child (New child) again: an agent with Setup fields now travels as its placeholder layer. In a copy already made, change the text by hand or with Setup values after adding the placeholders back.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/template.ts` — `exportTemplate`
+
 ## Tailscale and public access
 
 ### The https address the setup guide gave does not open
