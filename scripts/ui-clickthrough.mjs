@@ -3224,6 +3224,59 @@ const SCENARIOS = String.raw`(() => {
         await refresh(false);
       }
     },
+    // Workflow audit, 2026-10-10: what an update says it did (#97 #121), and a second read that fails (#96).
+    appUpdateSays: async () => {
+      const SHA = 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0', NEW = 'f00dfeed1234f00dfeed1234f00dfeed1234f00d';
+      const APP = { app: 'demoapp', name: 'Demo App', source: '/home/tester/demoapp', ref: 'HEAD', sha: SHA, previousSha: null,
+        installedAt: new Date(Date.now() - 3600e3).toISOString(), testOk: null, tasks: ['demoapp-tick'] };
+      const toastSays = () => document.getElementById('toast').textContent;
+      const press = async (answer, until_) => {
+        window.__answer['POST /v1/agents/a1/app/update'] = [answer];
+        v2AppCache = null; v2Close(); openV2Agent('a1', 'overview');
+        await until(() => document.getElementById('v2AppUpdateBtn') && !document.getElementById('v2AppUpdateBtn').disabled);
+        document.getElementById('toast').textContent = '';
+        document.getElementById('v2AppUpdateBtn').click();
+        await until(until_);
+        return toastSays();
+      };
+      try {
+        window.__answer = window.__answer || {};
+        window.__override['/v1/agents/a1/app'] = { app: APP, pending: null, canChange: true };
+        // A release with no tests: it says so, never that they passed.
+        let said = await press({ status: 200, body: { app: { ...APP, sha: NEW }, test: null } }, () => toastSays().includes('Updated to f00dfeed1234'));
+        ok('no tests: not "its tests passed": ' + said, !said.includes('tests passed') && said.includes('no tests'));
+        said = await press({ status: 200, body: { app: { ...APP, sha: NEW }, test: { ok: true, output: 'OK' } } }, () => toastSays().includes('Updated to f00dfeed1234'));
+        ok('tests that ran and passed: said: ' + said, said.includes('its tests passed'));
+        // Failures: "unchanged" only when the server says so.
+        said = await press({ status: 400, body: { error: 'Its tests failed, so f00dfeed1234 was not switched on.', unchanged: true } }, () => toastSays().startsWith('Not updated'));
+        ok('nothing changed, said by the server: unchanged: ' + said, said.includes('the running version is unchanged'));
+        said = await press({ status: 400, body: { error: 'Could not schedule demoapp-tick. Putting a1b2c3d4e5f6 back failed too (no output). It waits for your choice on its page.', unchanged: false, held: true } }, () => toastSays().startsWith('Not updated'));
+        ok('put-back failed: never "unchanged", and where to choose: ' + said, !said.includes('unchanged') && said.includes('could not be put back'));
+        ok('and the message is on the page', document.getElementById('v2AppOut').textContent.includes('back failed too'));
+        said = await press({ status: 400, body: { error: 'Could not schedule demoapp-tick. Its scheduled tasks could not be confirmed: the list could not be read.', unchanged: false } }, () => toastSays().startsWith('Not updated'));
+        ok('tasks not confirmed: not "unchanged" either: ' + said, !said.includes('unchanged') && said.includes('may not be as it was'));
+        v2Close();
+        // The dialog: a second read that fails forgets the first, so Install cannot install it.
+        const MAN = { app: 'demoapp', name: 'Demo App', tasks: [], config: { fields: [] }, connections: [] };
+        window.__answer['POST /v1/apps/inspect'] = [
+          { status: 200, body: { sha: SHA, manifest: MAN, connections: [], ask: [{ key: 'mode', default: 'shadow' }] } },
+          { status: 400, body: { error: 'No folder at /home/tester/otherapp.' } }];
+        openAppDlg('install', 'a1');
+        document.getElementById('appSource').value = '~/demoapp';
+        await appRead();
+        ok('the first read offers Install', !document.getElementById('appGoBtn').disabled && !!document.getElementById('appF_mode'));
+        document.getElementById('appSource').value = '~/otherapp';
+        await appRead();
+        ok('a failed second read: Install is off, the first repo forgotten', document.getElementById('appGoBtn').disabled && appInspected === null);
+        ok('and its form is gone', !document.getElementById('appF_mode'));
+        eq('the error says why', document.getElementById('appErr').textContent, 'No folder at /home/tester/otherapp.');
+      } finally {
+        delete window.__override['/v1/agents/a1/app'];
+        if (window.__answer) { delete window.__answer['POST /v1/agents/a1/app/update']; delete window.__answer['POST /v1/apps/inspect']; }
+        if (appDlg.open) appDlg.close();
+        if (typeof v2AgentId !== 'undefined' && v2AgentId) v2Close();
+      }
+    },
     // The tooltip's three parts (2026-10-07): doing / cost and spending alarm / runtime (version, uptime, restarts).
     tooltipParts: async () => {
       const month = new Date().toISOString().slice(0, 7);

@@ -2,7 +2,7 @@ import { allowedPeerAddress } from './peerAddress.js';
 import { GuestConsoleLog } from './guestConsoleLog.js';
 import { deviceLabel } from './publicAccess.js';
 import { stopAndConfirm } from '../orchestrator/quiesce.js';
-import { AppError, fieldsToAsk, hostGit, installRelease, mergeConfig, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
+import { AppError, fieldsToAsk, hostGit, installRelease, mergeConfig, outcome, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
 import { agentTimeZone } from '../orchestrator/timezone.js';
 import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
 import { claudePlanAllowed, CLAUDE_PLAN_HOSTED } from '../config/claudePlan.js';
@@ -190,6 +190,7 @@ import { clearStaleRuntimePinsWhenUp } from '../orchestrator/runtimePins.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
 import { migrateAgent, MigrateError, MOVE_HEADER, moveIdFrom, moveState, preflight, receiveMove } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
+import { appChoices, type AppOpParams } from '../orchestrator/appOperations.js';
 import { BACKGROUND_KINDS, beginOperation, currentBootId, handleFor, KIND_LABEL, operationRefusal, operationSummary, publicOperation, rethrowIfCrash, runInBackground, spanWords, STATUS_EVENT, type OpHandle } from '../orchestrator/operations.js';
 import { recoverOperation, RecoverError, resumeOperations, startOperationRetryLoop, type ResumeContext } from '../orchestrator/operationsResume.js';
 import {
@@ -7039,10 +7040,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
   const appFail = (reply: FastifyReply, e: unknown) => {
     const conflict = (e as { conflict?: string[] })?.conflict;
-    if (e instanceof AppError && conflict) return reply.code(409).send({ error: e.message, conflict });
-    if (e instanceof AppError && (e as { stale?: boolean }).stale) return reply.code(409).send({ error: e.message });
-    if (e instanceof AppError) return reply.code(400).send({ error: e.message, test: (e as AppError & { test?: unknown }).test });
-    return reply.code(502).send({ error: `The install did not finish: ${(e as Error)?.message ?? e}` });
+    // How it left the agent (apps.ts, outcome): the page says "unchanged" only when this does.
+    const o = (e ?? {}) as { unchanged?: boolean; held?: boolean };
+    const state = { unchanged: o.unchanged === true, ...(o.held ? { held: true } : {}) };
+    if (e instanceof AppError && conflict) return reply.code(409).send({ error: e.message, conflict, unchanged: o.unchanged !== false });
+    if (e instanceof AppError && (e as { stale?: boolean }).stale) return reply.code(409).send({ error: e.message, unchanged: true });
+    if (e instanceof AppError) return reply.code(400).send({ error: e.message, test: (e as AppError & { test?: unknown }).test, ...state });
+    return reply.code(502).send({ error: `The install did not finish: ${(e as Error)?.message ?? e}`, ...state });
   };
   const appView = (a: Agent) => {
     const r = store.getAgentApp(a.id);
@@ -7151,7 +7155,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** Recorded as it goes (appOperations.ts): its steps, and how it ended. A (simulated) dead process records nothing more. */
   const appOpFailed = (op: OpHandle | undefined, e: unknown) => {
     rethrowIfCrash(e);
-    if (op && op.get().status === 'running') op.fail(e);
+    if (!op || op.get().status !== 'running') return;
+    // Not put back (apps.ts kept its staging folder): held for the owner's
+    // choice, as after a restart, not failed as if nothing were left to do (#106).
+    if ((e as { held?: boolean })?.held) {
+      const row = op.get();
+      op.hold(String((e as Error)?.message ?? e).slice(0, 500), appChoices(row.kind, row.params as unknown as AppOpParams));
+    } else op.fail(e);
   };
   const withSteps = (d: InstallDeps, op: OpHandle): InstallDeps => ({ ...d, step: (k) => op.step(k) });
   const installFromSource = async (a: Agent, source: string, ref: string, values: Record<string, unknown>, allowShared = false, requestedBy?: string) => {
@@ -7184,6 +7194,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           if (replaced) {
             await syncTasks(appDeps(a), replaced.manifest as AppManifest).catch((err: unknown) => {
               if (e instanceof Error) e.message += ` ${replaced.app}'s tasks could not be put back: ${(err as Error)?.message ?? err}`;
+              outcome(e, { unchanged: false });
             });
           }
           throw e;

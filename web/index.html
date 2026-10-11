@@ -12702,10 +12702,18 @@ async function v2AppUpdate(id, btn) {
   toast('Updating its app: fetching the newest commit and running its tests…', 60000, 'progress');
   try {
     const r = await api(`/v1/agents/${id}/app/update`, { method: 'POST', body: {} });
-    toast(r.unchanged ? 'Already running the newest commit.' : `Updated to ${String(r.app.sha).slice(0, 12)} — its tests passed.`);
+    // "Its tests passed" only when it has tests and they ran (a manifest without any answers test: null).
+    toast(r.unchanged ? 'Already running the newest commit.' : `Updated to ${String(r.app.sha).slice(0, 12)}${r.test?.ok ? ' — its tests passed.' : ' (it has no tests to run).'}`);
   } catch (e) {
-    toast('Not updated — the running version is unchanged.', 8000);
-    v2AppShow(e.message + (e.data?.test?.output && !e.message.includes(e.data.test.output.slice(-200)) ? '\n\n' + e.data.test.output : ''));
+    // Only the server knows how it left the agent: "unchanged" when it says so,
+    // held when putting it back failed (its choice is on this page), else unknown.
+    toast(e.data?.held ? 'Not updated, and it could not be put back as it was: choose how to finish it on this page.'
+      : e.data?.unchanged ? 'Not updated — the running version is unchanged.'
+      : 'Not updated — it may not be as it was; read what it says below.', 10000);
+    const said = e.message + (e.data?.test?.output && !e.message.includes(e.data.test.output.slice(-200)) ? '\n\n' + e.data.test.output : '');
+    v2AppShow(said);
+    // Held: the page redraws with the operation's choices, and the message again under them.
+    if (e.data?.held) void refresh(false).then(() => v2AppShow(said));
     btn.disabled = false; btn.textContent = '⬆ Update';
     return;
   }
@@ -12748,6 +12756,9 @@ async function appRead() {
   const source = $('appSource').value.trim();
   if (!source) { $('appErr').textContent = 'Give a folder on this machine (~/myapp) or a git address.'; return; }
   $('appErr').textContent = ''; $('appReadBtn').disabled = true; $('appInfo').innerHTML = '<div class="sub">Reading it…</div>';
+  // The repo read before is forgotten first: a read that fails left Install
+  // pointing at it, with its form still shown (#96).
+  appInspected = null; $('appGoBtn').disabled = true; $('appForm').innerHTML = ''; $('appOut').hidden = true;
   try {
     const r = await api('/v1/apps/inspect', { method: 'POST', body: { source } });
     appInspected = { ...r, source };

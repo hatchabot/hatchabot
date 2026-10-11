@@ -56,7 +56,8 @@ async function configState(d: InstallDeps, app: string, toShort: string, m: AppM
   return v === 'staged' || v === 'moved' || v === 'restoring' ? v : 'none';
 }
 
-function choices(kind: string, p: AppOpParams): Recovery {
+/** The two ways out of an app change left part way (a restart, or a put-back that failed: routes.ts). */
+export function appChoices(kind: string, p: AppOpParams): Recovery {
   const to = short(p.toSha);
   const from = short(p.fromSha);
   return kind === 'app-rollback'
@@ -160,7 +161,7 @@ export async function resumeAppOperation(deps: AppOpDeps, opId: string): Promise
   }
   op.hold(
     `The ${p.app} change to ${to} was interrupted by a restart part-way through the switch: the agent runs ${cur ?? 'no release'} while Hatchabot's record says ${recShort ?? 'none'}.`,
-    choices(row.kind, p),
+    appChoices(row.kind, p),
   );
 }
 

@@ -110,8 +110,12 @@ has, not by what each add or removal answered (one can take effect and still
 answer an error), and listed again to confirm. The record is only written after
 step 6, so the agent, its tasks and the record agree either way; when the
 tasks cannot be confirmed (the list cannot be read, or a job will not come off
-or go back), the error says so and what to check (`openclaw cron list` in the
-agent's console). Replacing one app with another takes the old app's tasks
+or go back), the error says so and what to check (`openclaw cron list --all` in the
+agent's console). When `current` or the config cannot be put back, the staging
+folder (the config it replaced, and the new one) is kept and the operation
+waits on the agent's page for **Use the new release** or **Go back to the
+previous one**, as after a restart. The page says "the running version is
+unchanged" only when the server says so (`unchanged` in the error). Replacing one app with another takes the old app's tasks
 off first and puts them back if the new one fails.
 
 **One copy per account.** An install is refused (409) when another live agent

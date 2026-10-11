@@ -487,21 +487,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Check:** an Update that gave new values on the commit already running (the App row's commit did not change), and the app's task failed at that moment with a file or module missing under `~/.openclaw/apps/<app>/releases/<commit>`.
 - **Cause:** before v2.160.0 an install unpacked the release folder afresh even when it was the live one: the running code, and anything its tests had built in that folder, was deleted and replaced before the new values had even been tested.
 - **Fix:** upgrade: the same commit keeps its live folder, and only the new configuration is staged and tested. The next run of the task works once the update has finished.
-- **Fixed in:** v2.160.0
+- **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/apps.ts` — `installRelease`
 
 ### An app update reset the app's settings (mode, filters) to its defaults
 - **Check:** after an Update, `data/config.json` under `~/.openclaw/apps/<app>` in the agent has the manifest's defaults where you had set your own values, and nothing you typed asked for that.
 - **Cause:** before v2.160.0 a config file that could not be read (permissions, a disk error) was taken for no config at all, so the update wrote the defaults over it.
 - **Fix:** upgrade: a config that cannot be read stops the update ("Could not read … in the agent"), with nothing changed. Fix the file's permissions in the agent's console, then Update again. On an older version, set the values again (`hatchabot app update <agent> key=value …`).
-- **Fixed in:** v2.160.0
+- **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/apps.ts` — `installRelease`
 
 ### After a failed app update the app runs no release at all
 - **Check:** the update failed, and `~/.openclaw/apps/<app>/current` in the agent is gone (`readlink` prints nothing), while the App row still shows a commit.
 - **Cause:** before v2.160.0 a `current` link that could not be read was taken for "nothing installed yet", so a later failure in the same update "put back" no release by removing the link.
 - **Fix:** upgrade: a link that cannot be read stops the update before anything changes ("Could not tell which release of … is live"). To recover on an older version, run Update again, or Roll back.
-- **Fixed in:** v2.160.0
+- **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/apps.ts` — `currentLink`
 
 ### Promoting a newer OpenClaw is refused: "… cannot read the data of agents already on 2026.8 or newer"
@@ -804,8 +804,29 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Check:** an Update that gave new values on the commit already running, a restart while it ran, and the operation then marked done; `data/config.json` under `~/.openclaw/apps/<app>` in the agent has the old values (or `openclaw cron list --all` shows one of its tasks twice).
 - **Cause:** before v2.160.0 the restart compared only the record and the `current` link with the new commit. A change of values keeps the same commit, so they matched from the start, and the operation was called done while the new config was still staged, which was then deleted.
 - **Fix:** upgrade: the staged config and the app's tasks are checked too. A change cut off before the switch is undone ("nothing changed"; run Update again), and one cut off after it waits for **Use the new release** or **Go back to the previous one**. On an older version, run Update again with the new values.
-- **Fixed in:** v2.160.0
+- **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/appOperations.ts` — `resumeAppOperation`, `tasksAre`
+
+### A failed app update said "the running version is unchanged", but the agent runs the new release
+- **Check:** the update's message on the agent's page ends "Putting … back failed too", or says its scheduled tasks "could not be confirmed"; `readlink ~/.openclaw/apps/<app>/current` in the agent names the new commit, or the config has the new values, while the App row shows the old one.
+- **Cause:** before v2.160.0 the page said "unchanged" after any failed update, and when putting the old release back failed too, the staging folder holding the config it replaced was deleted all the same and the operation marked failed.
+- **Fix:** upgrade: the page says "unchanged" only when the server confirms it; when the put-back fails, the staging folder is kept and the operation waits on the agent's page for **Use the new release** or **Go back to the previous one**. On an older version, run Update again (or Roll back); if the old config is gone, set its values again with `hatchabot app update <agent> key=value …`.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/apps.ts` — `installRelease`, `outcome`; `src/api/routes.ts` — `appOpFailed`, `appFail`; `web/index.html` — `v2AppUpdate`
+
+### An app update said "its tests passed", but the app has no tests
+- **Check:** the app's `hatchabot.json` has no `test`, and the update's message said "— its tests passed".
+- **Cause:** before v2.160.0 the page said so after every successful update, whatever the server answered (`test: null` when there are none).
+- **Fix:** upgrade: it says "(it has no tests to run)" instead. Add a `test` command to the manifest to have each release checked before it goes live.
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `v2AppUpdate`
+
+### "Run an app from a repo" installed the repo read before, not the one whose read failed
+- **Check:** in the dialog you read one repo, then another whose read failed (an error under the box), then pressed Install, and the first repo went in.
+- **Cause:** before v2.160.0 a failed read left the earlier one's form and its Install button in place.
+- **Fix:** upgrade: each read forgets the one before, and Install stays off until a read succeeds. If the wrong app went in, Stop app on the agent's page and install the right one.
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `appRead`
 
 ### Alerts listed general alerts above failed agents, and people knocking near the bottom
 - **Check:** View by → Alerts; the order of its sections.

@@ -205,7 +205,8 @@ A codebase with a `hatchabot.json`, installed into an agent (docs/apps-in-agents
 
 - `src/orchestrator/apps.ts` — `parseManifest`, `parseSource`, `repoFor`, `resolveRelease`: the manifest and the source, read on the host (a folder, or a git address mirrored beside the database).
 - `src/orchestrator/apps.ts` — `installRelease`, `mergeConfig`, `syncTasks`, `switchTo`, `removeTasks`, `clearStaging`: inside the agent (releases under `~/.openclaw/apps/<app>/`, its config, its tests before the switch, its scheduled commands).
-- `src/orchestrator/appOperations.ts` — `resumeAppOperation`, `recoverAppOperation`: an install, update or roll back cut off by a restart (the `current` link and config compared with the record; held with "Use the new release" / "Go back to the previous one").
+- `src/orchestrator/appOperations.ts` — `resumeAppOperation`, `recoverAppOperation`, `appChoices`: an install, update or roll back cut off by a restart, or whose put-back failed (the `current` link, the staged config and the tasks compared with the record; held with "Use the new release" / "Go back to the previous one").
+- `src/orchestrator/apps.ts` — `outcome`; `src/api/routes.ts` — `appFail`, `appOpFailed`: how a failed change left the agent (`unchanged`, or `held` for a choice), which the page repeats.
 - `src/api/routes.ts` — `'/v1/apps/inspect'`, `'/v1/agents/:id/app'`, `'/v1/agents/:id/app/update'`, `'/v1/agents/:id/app/rollback'`, `appTarget`: the routes (machine owner only).
 - `src/store/store.ts` — `agent_apps`, `getAgentApp`, `setAgentApp`: which app, source, commit and previous commit.
 - `src/api/routes.ts` — `'/v1/agents/:id/app/pending'`, `runPendingApp`, `installFromSource`: a new agent from a repo installs its app when provisioning finishes.
