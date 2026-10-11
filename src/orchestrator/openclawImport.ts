@@ -160,12 +160,21 @@ export async function restartOpenclawGateway(): Promise<void> {
   });
 }
 
-async function botQuiet(token: string, fetchImpl: typeof fetch, tries = 4, gapMs = 700): Promise<boolean> {
+/**
+ * Whether a bot's poller has stopped: quiet only when Telegram said so on
+ * every try. A try that got no answer (no network, an unreadable reply) is no
+ * proof — counting it as quiet reported an unreachable Telegram as "safe to
+ * take over" (C065) — so such a bot is `unconfirmed`, not `quiet`.
+ */
+async function botQuiet(token: string, fetchImpl: typeof fetch, tries = 4, gapMs = 700): Promise<'quiet' | 'busy' | 'unconfirmed'> {
+  let confirmed = true;
   for (let i = 0; i < tries; i++) {
-    if ((await botPollState(token, fetchImpl)) === 'busy') return false;
+    const state = await botPollState(token, fetchImpl);
+    if (state === 'busy') return 'busy';
+    if (state !== 'quiet') confirmed = false;
     if (i < tries - 1) await sleep(gapMs);
   }
-  return true;
+  return confirmed ? 'quiet' : 'unconfirmed';
 }
 
 export interface QuiesceResult {
@@ -173,6 +182,8 @@ export interface QuiesceResult {
   quiet: string[];
   /** account ids that still look polled after the restart */
   stillBusy: string[];
+  /** account ids Telegram did not answer for, so neither is known: not safe to take over yet */
+  unconfirmed: string[];
 }
 
 /**
@@ -188,6 +199,8 @@ export async function quiesceOpenclawBots(
     fetchImpl?: typeof fetch;
     settleMs?: number;
     restart?: () => Promise<void>;
+    /** The gap between polls of one bot (tests). */
+    pollGapMs?: number;
   } = {},
 ): Promise<QuiesceResult> {
   const configPath = opts.configPath ?? openclawConfigPath();
@@ -225,13 +238,15 @@ export async function quiesceOpenclawBots(
 
   const quiet: string[] = [];
   const stillBusy: string[] = [];
+  const unconfirmed: string[] = [];
   for (const id of accountIds) {
     const token = accounts[id]?.botToken;
     if (!token) {
       stillBusy.push(id);
       continue;
     }
-    ((await botQuiet(token, fetchImpl)) ? quiet : stillBusy).push(id);
+    const state = await botQuiet(token, fetchImpl, 4, opts.pollGapMs);
+    (state === 'quiet' ? quiet : state === 'busy' ? stillBusy : unconfirmed).push(id);
   }
-  return { quiet, stillBusy };
+  return { quiet, stillBusy, unconfirmed };
 }

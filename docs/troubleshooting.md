@@ -308,6 +308,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ## Telegram, Discord and Slack
 
+### Bring in from OpenClaw: "couldn't confirm OpenClaw stopped using this bot (Telegram didn't answer)"
+- **Check:** the row of that agent in Add → From OpenClaw says it; `curl -sS https://api.telegram.org` from this machine fails or hangs.
+- **Cause:** after OpenClaw's gateway restarts with the bot turned off, Hatchabot asks Telegram whether anything still polls the bot. When Telegram does not answer, nothing is known, and taking the bot over could leave two programs answering it. Before v2.160.0 no answer counted as "stopped".
+- **Fix:** get this machine back on the network to Telegram, then bring the agent in again. The bot is already turned off in OpenClaw's config.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/openclawImport.ts` — `quiesceOpenclawBots`, `botQuiet`; `web/index.html` — `bringInSelected`
+
 ### The agent welcomes its owner, then every later message is dropped without a word
 - **Check:** the agent's config has `dmPolicy` "allowlist" with no `allowFrom` entries; the gateway log shows no turn for those messages.
 - **Cause:** closing the door switched the policy to allowlist before the list held anyone.

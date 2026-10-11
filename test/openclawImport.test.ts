@@ -145,10 +145,26 @@ describe('quiesceOpenclawBots', () => {
     expect(restarts).toBe(1); // ONE restart for the batch
     expect(res.quiet).toEqual(['a1bot']);
     expect(res.stillBusy).toEqual(['adoptedbot']);
+    expect(res.unconfirmed).toEqual([]);
     // both were disabled in the file
     const after = JSON.parse(readFileSync(cfg, 'utf8'));
     expect(after.channels.telegram.accounts.a1bot.enabled).toBe(false);
     expect(after.channels.telegram.accounts.adoptedbot.enabled).toBe(false);
+  });
+
+  it('a bot Telegram did not answer for is unconfirmed, not quiet (C065)', async () => {
+    const cfg = join(root, 'quiesce-unknown.json');
+    writeConfig(cfg);
+    // a1's token (111): no network at all. adopted's (222): an unreadable reply once, quiet otherwise.
+    let flaky = 0;
+    const fetchImpl = (async (url: string | URL) => {
+      if (String(url).includes('bot111:')) throw new Error('getaddrinfo ENOTFOUND api.telegram.org');
+      return flaky++ === 1
+        ? { status: 502, json: async () => { throw new Error('not json'); } }
+        : { status: 200, json: async () => ({ ok: true }) };
+    }) as unknown as typeof fetch;
+    const res = await quiesceOpenclawBots(['a1bot', 'adoptedbot'], { configPath: cfg, fetchImpl, settleMs: 0, pollGapMs: 0, restart: async () => {} });
+    expect(res).toEqual({ quiet: [], stillBusy: [], unconfirmed: ['a1bot', 'adoptedbot'] });
   });
 
   it('validates ALL ids before writing — a bad id leaves the config untouched and never restarts', async () => {

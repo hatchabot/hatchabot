@@ -10799,7 +10799,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!Array.isArray(ids) || ids.some((x) => typeof x !== 'string')) {
       return reply.code(400).send({ error: 'accountIds (string[]) required.' });
     }
-    if (!ids.length) return { quiet: [], stillBusy: [] };
+    if (!ids.length) return { quiet: [], stillBusy: [], unconfirmed: [] };
     try {
       return await quiesceOpenclawBots(ids);
     } catch (err) {

@@ -6891,10 +6891,14 @@ async function createAgent() {
 
 let adoptInspected = null; // last inspect result: { path, existingBot }
 let ocAgents = [];         // discovered OpenClaw agents
+// What the last "Bring in selected" said on each row, by workspace: the list
+// is drawn again once it is done, and a "not taken over" line must survive it.
+let ocRowNotes = {};
 
 function openAdoptDlg() {
   adoptInspected = null;
   ocAgents = [];
+  ocRowNotes = {};
   $('adoptPath').value = ''; $('adoptName').value = '';
   $('adoptPreview').innerHTML = ''; $('adoptBotArea').innerHTML = '';
   $('adoptErr').textContent = '';
@@ -6936,7 +6940,7 @@ function renderDiscovery() {
     return `<label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-top:1px solid var(--line)${blocked ? ';opacity:.55' : ''}">
       <input type="checkbox" data-oc="${i}" ${blocked ? 'disabled' : ''} style="width:auto;margin-top:3px" onchange="updateSelCount()">
       <span style="flex:1"><b>${esc(a.name)}</b> <span class="sub">— ${status}</span>
-        <span id="ocrow-${i}" class="sub" style="display:block;margin-top:2px"></span></span>
+        <span id="ocrow-${i}" class="sub" style="display:block;margin-top:2px${ocRowNotes[a.workspace] ? `;color:${ocRowNotes[a.workspace].color}` : ''}">${esc(ocRowNotes[a.workspace]?.text || '')}</span></span>
     </label>`;
   }).join('');
   updateSelCount();
@@ -6954,7 +6958,10 @@ async function bringInSelected() {
   if (!picks.length) { toast('Tick at least one agent to bring in.'); return; }
   $('adoptBatchBtn').disabled = true;
   $('adoptErr').textContent = '';
-  const rowSay = (i, m, color) => { const el = $(`ocrow-${i}`); if (el) { el.textContent = m; el.style.color = color || 'var(--dim)'; } };
+  const rowSay = (i, m, color) => {
+    if (ocAgents[i]) ocRowNotes[ocAgents[i].workspace] = { text: m, color: color || 'var(--dim)' };
+    const el = $(`ocrow-${i}`); if (el) { el.textContent = m; el.style.color = color || 'var(--dim)'; }
+  };
   const idxOf = a => ocAgents.indexOf(a);
 
   // 1. Hand over EVERY selected bot — disable each and restart the gateway ONCE,
@@ -6962,12 +6969,15 @@ async function bringInSelected() {
   // the config: "disabled but the gateway was never restarted" still polls, and
   // discovery can't see that, so the restart is what actually stops the poller.
   const toQuiesce = picks.filter(a => a.bot).map(a => a.bot.accountId);
-  let stillBusy = [];
+  let stillBusy = [], unconfirmed = [];
   if (toQuiesce.length) {
     for (const a of picks) if (a.bot) rowSay(idxOf(a), 'waiting for OpenClaw hand-over…');
     try {
       const r = await api('/v1/openclaw/quiesce', { method: 'POST', body: { accountIds: toQuiesce } });
       stillBusy = r.stillBusy || [];
+      // Telegram did not answer for these, so OpenClaw's poller is not known
+      // to have stopped: taking the bot over could leave two pollers on it.
+      unconfirmed = r.unconfirmed || [];
     } catch (e) {
       $('adoptErr').style.color = ''; $('adoptErr').textContent = `Bot hand-over failed: ${e.message}`;
       $('adoptBatchBtn').disabled = false; return;
@@ -6981,6 +6991,7 @@ async function bringInSelected() {
   for (const a of picks) {
     const i = idxOf(a);
     if (a.bot && stillBusy.includes(a.bot.accountId)) { rowSay(i, '✗ bot still polled by OpenClaw — try again', 'var(--warn)'); continue; }
+    if (a.bot && unconfirmed.includes(a.bot.accountId)) { rowSay(i, "✗ couldn't confirm OpenClaw stopped using this bot (Telegram didn't answer) — try again", 'var(--warn)'); continue; }
     try {
       const { res, agentId } = await doAdopt({ path: a.workspace, name: a.name, reuse: !!a.bot, web: !a.bot, token: '', bot: a.bot, onStatus: m => rowSay(i, m) });
       const c = res.crons?.carried || 0;

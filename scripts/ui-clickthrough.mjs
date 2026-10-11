@@ -2851,6 +2851,35 @@ const SCENARIOS = String.raw`(() => {
         await refresh(false);
       }
     },
+    // Bringing in a bot when Telegram did not answer (C065): OpenClaw's poller is
+    // not known to have stopped, so the bot is not taken over, and the row says
+    // why even after the list is drawn again. Made-up workspace and bot.
+    adoptUnconfirmedBot: async () => {
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-recipe-box';
+      window.__override['/v1/openclaw/agents'] = { agents: [{ id: 'recipes', name: 'Recipe Box', workspace: WS, bot: { accountId: 'recipe_box_bot', enabledInSource: true } }] };
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      try {
+        openAdoptDlg(); await sleep(250);
+        const box = document.querySelector('#adoptDiscover input[data-oc]');
+        ok('the agent with a bot can be ticked', !!box && !box.disabled);
+        box.checked = true; updateSelCount();
+        window.__answer['POST /v1/openclaw/quiesce'] = [{ status: 200, body: { quiet: [], stillBusy: [], unconfirmed: ['recipe_box_bot'] } }];
+        window.__calls.length = 0;
+        await bringInSelected(); await sleep(100);
+        ok('the hand-over was asked for that bot', window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/openclaw/quiesce' && c.body?.accountIds?.[0] === 'recipe_box_bot'));
+        ok('no agent was made from it', !window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/agents'));
+        const row = $('ocrow-0')?.textContent || '';
+        ok('its row says it could not be confirmed, after the list was redrawn: ' + row, /couldn't confirm OpenClaw stopped using this bot/.test(row));
+      } finally {
+        hosts = hadHosts;
+        delete window.__answer['POST /v1/openclaw/quiesce'];
+        delete window.__override['/v1/openclaw/agents'];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
     // A runner's own memory search (2.147) and an old image on it (Settings → Hosts). Made-up machines.
     runnerMemorySearch: async () => {
       window.__override['/v1/hosts'] = [{ id: 'h1', name: 'This machine', kind: 'local', agentCount: 12 },
