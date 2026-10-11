@@ -183,5 +183,12 @@ describe('versionBehind (image-skew guard)', () => {
     expect(versionBehind('2026.10.0', '2026.7.1-2')).toBe(false);
     expect(versionBehind('2026.7.1-2', '2026.7.1-2')).toBe(false); // equal is fine
     expect(versionBehind('2026.7.1', '2026.7.1-2')).toBe(true);    // build suffix counts
+    // A prerelease comes before its release (#158).
+    expect(versionBehind('2026.9.6', '2026.9.6-rc.1')).toBe(false);
+    expect(versionBehind('2026.9.6-rc.1', '2026.9.6')).toBe(true);
+    expect(versionBehind('2026.9.6-rc.2', '2026.9.6-rc.10')).toBe(true);
+    expect(versionBehind('2026.9.6-beta.1', '2026.9.6-rc.1')).toBe(true);
+    expect(versionBehind('2026.9.6-rc.1', '2026.9.5-2')).toBe(false);
+    expect(versionBehind('2026.9.6-rc.1', '2026.9.6-rc.1')).toBe(false);
   });
 });

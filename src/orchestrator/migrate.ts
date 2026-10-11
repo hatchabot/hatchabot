@@ -66,16 +66,40 @@ export interface PreflightAnswer {
 /**
  * Dotted-version compare for OpenClaw image versions (e.g. "2026.7.1-2").
  * Lexicographic string compare lies ("2026.10" < "2026.7"), so compare each
- * numeric segment. True when `a` is strictly behind `b`.
+ * numeric segment. After the release, a number ("-2") is a later build of
+ * it, but a word ("-rc.1", "-beta.2") is a prerelease that comes BEFORE it:
+ * read as numbers, "2026.9.6-rc.1" was ahead of 2026.9.6 (#158). True when
+ * `a` is strictly behind `b`.
  */
 export function versionBehind(a: string, b: string): boolean {
-  const seg = (v: string) => v.split(/[.-]/).map((s) => Number.parseInt(s, 10) || 0);
-  const [as, bs] = [seg(a), seg(b)];
-  for (let i = 0; i < Math.max(as.length, bs.length); i++) {
-    const d = (as[i] ?? 0) - (bs[i] ?? 0);
-    if (d !== 0) return d < 0;
+  return compareVersions(a, b) < 0;
+}
+
+function compareVersions(a: string, b: string): number {
+  const split = (v: string) => {
+    const i = v.indexOf('-');
+    const main = (i < 0 ? v : v.slice(0, i)).split('.').map((s) => Number.parseInt(s, 10) || 0);
+    const tail = i < 0 ? '' : v.slice(i + 1);
+    // 0 = a prerelease, 1 = the release itself, 2 = a later build of it.
+    const rank = !tail ? 1 : /^\d+([.-]\d+)*$/.test(tail) ? 2 : 0;
+    return { main, tail: tail.split(/[.-]/), rank };
+  };
+  const [x, y] = [split(a), split(b)];
+  for (let i = 0; i < Math.max(x.main.length, y.main.length); i++) {
+    const d = (x.main[i] ?? 0) - (y.main[i] ?? 0);
+    if (d !== 0) return d;
   }
-  return false;
+  if (x.rank !== y.rank) return x.rank - y.rank;
+  if (x.rank === 1) return 0;
+  // Same kind of suffix: identifier by identifier, numbers as numbers (rc.2 < rc.10).
+  for (let i = 0; i < Math.max(x.tail.length, y.tail.length); i++) {
+    const [p, q] = [x.tail[i], y.tail[i]];
+    if (p === undefined || q === undefined) return p === undefined ? -1 : 1;
+    const [pn, qn] = [/^\d+$/.test(p), /^\d+$/.test(q)];
+    const d = pn && qn ? Number(p) - Number(q) : pn !== qn ? (pn ? -1 : 1) : p < q ? -1 : p > q ? 1 : 0;
+    if (d !== 0) return d;
+  }
+  return 0;
 }
 
 export function preflight(
