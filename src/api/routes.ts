@@ -9076,7 +9076,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const agent = runningAgent(req, req.params.id, reply, 'read its scheduled tasks');
       if (!agent) return reply;
       const limit = Math.min(Math.max(Number(req.query.limit ?? 10) || 10, 1), 50);
-      return { runs: await listCronRuns(providerFor(agent.hostId), agent.runtimeRef!, req.params.jobId, limit) };
+      try {
+        return { runs: await listCronRuns(providerFor(agent.hostId), agent.runtimeRef!, req.params.jobId, limit) };
+      } catch (err) {
+        app.log.warn({ agent: agent.id, err: String((err as Error).message ?? err) }, 'cron runs failed');
+        // Not "it has not run yet": its runs just couldn't be read.
+        return reply.code(503).send({ error: "Couldn't read that task's runs just now — try again in a moment." });
+      }
     },
   );
 

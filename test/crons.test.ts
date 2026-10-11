@@ -311,6 +311,20 @@ describe('task run state and history (CLI regression groundwork)', () => {
     expect(res.json().runs.map((r: any) => [r.runAtMs, r.status])).toEqual([[200, 'error'], [100, 'ok']]);
     expect(provider.execLog).toContainEqual(['cron', 'runs', '--id', 'job-1', '--limit', '5']);
   });
+
+  it('GET …/runs says the runs could not be read — never "it has not run yet" (#59)', async () => {
+    const { provider, f } = await world();
+    for (const bad of [{ code: 1, stdout: '', stderr: 'gateway down' }, { code: 0, stdout: 'not json', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }]) {
+      provider.execResponses.set('cron runs', bad);
+      const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/crons/job-1/runs', headers: as });
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error).toMatch(/Couldn't read/);
+    }
+    provider.execResponses.set('cron runs', { code: 0, stdout: '{"entries":[]}', stderr: '' });
+    const none = await f.inject({ method: 'GET', url: '/v1/agents/a1/crons/job-1/runs', headers: as });
+    expect(none.statusCode).toBe(200);
+    expect(none.json().runs).toEqual([]); // a real "not yet"
+  });
 });
 
 describe('POST /v1/agents/:id/ask', () => {
