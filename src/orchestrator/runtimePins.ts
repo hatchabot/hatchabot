@@ -44,15 +44,20 @@ export async function listRuntimePins(provider: RuntimeProvider, runtimeRef: str
   return out;
 }
 
-/** The runtimes the config names on its models — plus OpenClaw's own, always fine. */
-export async function configuredRuntimes(provider: RuntimeProvider, runtimeRef: string): Promise<Set<string>> {
+/**
+ * The runtimes the config names on its models — plus OpenClaw's own, always
+ * fine. Undefined when the config could not be read: "names nothing extra"
+ * would make a valid claude-cli pin look stale and clear it (#72).
+ */
+export async function configuredRuntimes(provider: RuntimeProvider, runtimeRef: string): Promise<Set<string> | undefined> {
   const ids = new Set(['openclaw']);
   const res = await provider.exec(runtimeRef, ['config', 'get', 'agents.defaults.models', '--json'], { timeoutMs: 30_000 });
-  if (res.code !== 0) return ids;
+  if (res.code !== 0) return undefined;
+  if (!res.stdout.trim()) return ids; // read, and no models set
   try {
     const models = JSON.parse(res.stdout) as Record<string, { agentRuntime?: { id?: string } } | null>;
     for (const m of Object.values(models ?? {})) if (m?.agentRuntime?.id) ids.add(m.agentRuntime.id);
-  } catch { /* an unreadable config names nothing extra */ }
+  } catch { return undefined; }
   return ids;
 }
 
@@ -61,6 +66,8 @@ export async function clearStaleRuntimePins(provider: RuntimeProvider, runtimeRe
   const pins = (await listRuntimePins(provider, runtimeRef, slug)).filter((p) => !p.locked);
   if (!pins.length) return [];
   const allowed = await configuredRuntimes(provider, runtimeRef);
+  // Unread, nothing is judged stale: the next start or rebuild looks again.
+  if (!allowed) { log('runtime.pin_check_skipped', { why: 'its config could not be read' }); return []; }
   const stale = pins.filter((p) => !allowed.has(p.runtime));
   const cleared: string[] = [];
   for (const p of stale) {

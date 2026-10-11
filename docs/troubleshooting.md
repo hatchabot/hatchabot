@@ -264,6 +264,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.86.1`
 - **Code:** `src/orchestrator/runtimePins.ts` — `clearStaleRuntimePins`; `src/orchestrator/eventLabels.ts` — `runtime.pins_cleared`
 
+### An agent on a machine-login Claude source starts answering through its setup token, or loses its CLI conversation routing, after a slow start
+- **Check:** its Setup log has `runtime.pins_cleared` naming `claude-cli`, although its source rides the Claude Code CLI (`openclaw config get agents.defaults.models --json` in its console names `claude-cli`).
+- **Cause:** when the agent's config could not be read at that moment (a gateway timeout), it was taken to name no runtime but OpenClaw's own, so valid `claude-cli` pins were cleared as stale.
+- **Fix:** upgrade; the next turn on that conversation picks its runtime again from the config. Since v2.160.0 an unreadable config clears nothing (`runtime.pin_check_skipped`) and the next start or rebuild looks again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/runtimePins.ts` — `configuredRuntimes`, `clearStaleRuntimePins`
+
 ### Every message fails with "LLM request failed (request format rejected, HTTP 400)" after switching to a newer Claude model (claude-opus-5-5)
 - **Check:** the agent's gateway log (`docker logs <container>`) has `claude_code_version_too_old` and "Claude Code 2.1.278 does not support this model; version 2.1.280 or newer is required"; the agent runs on a Claude subscription source.
 - **Cause:** on a subscription, OpenClaw presents itself to Anthropic as a fixed Claude Code version, and the newest models refuse an old one. OpenClaw 2026.9.6 says 2.1.278; 2026.9.7 and later say 2.1.280. Measured on 2026.9.6: Opus 5.5 is refused; Sonnet 5.5, Fable 5.1 and Sonnet 5 answer. An API-key source is not affected.
