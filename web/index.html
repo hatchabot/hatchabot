@@ -9440,7 +9440,7 @@ function editCronJob(id) {
   $('cronExpr').value = c.scheduleExpr || '';
   $('cronTz').value = c.scheduleTz || '';
   $('cronMsg').value = c.message || '';
-  $('cronAddBtn').textContent = 'Save changes (replaces the task)';
+  $('cronAddBtn').textContent = 'Save changes';
   const note = $('cronEditNote');
   note.style.display = '';
   note.innerHTML = `Editing <b>${esc(c.name || '(unnamed task)')}</b> — <button type="button" class="linkish" onclick="cancelCronEdit()">cancel</button>`;
@@ -9455,32 +9455,40 @@ async function addCronJob() {
   const every = $('cronMode').value === 'every';
   const cron = every ? '' : $('cronExpr').value.trim();
   const everyMinutes = every ? Number($('cronEvery').value) : 0;
+  const editing = cronEditingId && cronCache.find(x => x.id === cronEditingId);
   // A new task with the Timezone box blank runs in the viewer's own zone, not
   // the container's UTC ("0 8 * * *" fired at 04:00 in Toronto; night review).
-  // An edited task keeps what it had.
+  // An edited schedule task keeps what it had.
   let browserTz = '';
   try { browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { /* old browser: leave blank */ }
-  const tz = every ? '' : ($('cronTz').value.trim() || (cronEditingId ? '' : browserTz));
-  // Editing re-creates the task: a quiet one stays quiet (it came back
-  // announcing into the chat; night review, 2026-09-27).
-  const editing = cronEditingId && cronCache.find(x => x.id === cronEditingId);
-  const announce = editing && editing.announce === false ? { announce: false } : {};
+  const tz = every ? '' : ($('cronTz').value.trim() || (editing && editing.scheduleExpr ? '' : browserTz));
   if (!name || !message || (every ? !(everyMinutes >= 0.25) : !cron)) { $('cronErr').textContent = every ? 'Name, an interval (≥ 0.25 min), and message are all needed.' : 'Name, cron expression, and message are all needed.'; return; }
+  if (cronEditingId && !editing) { $('cronErr').textContent = 'That task is no longer in the list — cancel, and add it again if it is gone.'; return; }
   $('cronAddBtn').disabled = true; $('cronErr').textContent = '';
   try {
-    const made = await api(`/v1/agents/${cronAgentId}/crons`, { method: 'POST', body: every ? { name, everyMinutes, message, ...announce } : { name, cron, message, tz: tz || undefined, ...announce } });
-    // A paused task stays paused when edited (the replace used to switch it back on).
-    const was = cronEditingId && cronCache.find(x => x.id === cronEditingId);
-    if (was && was.enabled === false && made?.id) {
-      await api(`/v1/agents/${cronAgentId}/crons/${encodeURIComponent(made.id)}`, { method: 'PATCH', body: { enabled: false } }).catch(() => toast('Saved, but it could not be paused again — pause it from the list.', 6000));
-    }
-    // Editing = replace: the new task exists before the old one is removed,
-    // so a failed create can never lose the original.
-    if (cronEditingId) {
-      await api(`/v1/agents/${cronAgentId}/crons/${encodeURIComponent(cronEditingId)}`, { method: 'DELETE' }).catch(() => toast('New task saved, but removing the old one failed — delete it manually.', 10000));
+    if (editing) {
+      // Changed in place, sending only what changed. It used to be re-created,
+      // and the new one went to the owner's chat: a task that posted to a
+      // member's chat or a group moved to the owner (2026-10-10). In place,
+      // where it posts, whether it is quiet or paused, and its runs all stay.
+      const change = {};
+      if (name !== (editing.name || '')) change.name = name;
+      if (message !== (editing.message || '').trim()) change.message = message;
+      if (every) {
+        if (editing.scheduleExpr || Math.abs(everyMinutes * 60000 - (editing.everyMs || 0)) >= 1000) change.everyMinutes = everyMinutes;
+      } else {
+        if (cron !== (editing.scheduleExpr || '')) change.cron = cron;
+        if (tz && tz !== (editing.scheduleTz || '')) change.tz = tz;
+      }
+      if (Object.keys(change).length) {
+        await api(`/v1/agents/${cronAgentId}/crons/${encodeURIComponent(editing.id)}`, { method: 'PATCH', body: change });
+        toast('Task saved');
+      } else toast('Nothing was changed.');
       cancelCronEdit();
+    } else {
+      await api(`/v1/agents/${cronAgentId}/crons`, { method: 'POST', body: every ? { name, everyMinutes, message } : { name, cron, message, tz: tz || undefined } });
+      toast('Task saved');
     }
-    toast('Task saved');
     $('cronName').value = ''; $('cronExpr').value = ''; $('cronMsg').value = '';
     await loadCrons();
   } catch (e) { $('cronErr').textContent = e.message; }
@@ -9524,7 +9532,7 @@ function renderCrons(crons) {
         ${cronRunLine(c)}
         ${msg ? `<div class="sub" style="margin-top:2px;opacity:.85">${esc(msg.slice(0, 160))}${msg.length > 160 ? '…' : ''}</div>` : ''}
       </span>
-      <button onclick="editCronJob('${jsq(c.id)}')" title="Load this task into the form below — saving replaces it">✏️ Edit</button>
+      <button onclick="editCronJob('${jsq(c.id)}')" title="Load this task into the form below to change it">✏️ Edit</button>
       <button onclick="toggleCron('${jsq(c.id)}', ${!c.enabled})">${c.enabled ? 'Disable' : 'Enable'}</button>
       <button onclick="runCron('${jsq(c.id)}', ${c.payloadKind === 'command'})" title="Fire it now to test — the result arrives the task's usual way">Run now</button>
       <button onclick="deleteCron('${jsq(c.id)}', '${jsq(c.name || 'this task')}')">Delete</button>

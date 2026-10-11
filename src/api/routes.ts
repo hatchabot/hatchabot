@@ -76,7 +76,7 @@ import { contextStats, exportTranscript, recoverContext } from '../orchestrator/
 import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
 import { commandOwnersFor, reapplyCurrentSettings } from '../orchestrator/provision.js';
-import { CronSystemOwnedError, addCron, cronTargetFor, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
+import { CronSystemOwnedError, addCron, editCron, cronTargetFor, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
 import { request as httpRequest } from 'node:http';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
@@ -8814,13 +8814,57 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return health;
   });
 
-  // Enable / disable a task.
-  app.patch<{ Params: { id: string; jobId: string }; Body: { enabled?: boolean } }>(
+  // Enable / disable a task, or change it in place (name, message, schedule).
+  // An edit patches only what changed: re-creating the task gave it the
+  // owner's chat as its recipient, so one bound to a member's chat or a group
+  // started posting to the owner instead.
+  app.patch<{
+    Params: { id: string; jobId: string };
+    Body: { enabled?: boolean; name?: string; message?: string; cron?: string; everyMinutes?: number; tz?: string };
+  }>(
     '/v1/agents/:id/crons/:jobId',
     async (req, reply) => {
       const agent = runningAgent(req, req.params.id, reply);
       if (!agent) return reply;
-      const enabled = (req.body as { enabled?: boolean } | null)?.enabled;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (['name', 'message', 'cron', 'everyMinutes', 'tz'].some((k) => body[k] !== undefined)) {
+        const parsed = z
+          .object({
+            name: z.string().trim().min(1).max(80).optional(),
+            message: z.string().trim().min(1).max(4000).optional(),
+            cron: z.string().trim().min(9).max(64).optional(),
+            everyMinutes: z.number().min(0.25).max(60 * 24 * 30).optional(),
+            tz: z.string().trim().max(64).optional(),
+          })
+          .refine((b) => !(b.cron && b.everyMinutes), { message: 'give at most one of cron / everyMinutes' })
+          .safeParse(body);
+        if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+        if (busyNow(agent, reply)) return reply;
+        const provider = providerFor(agent.hostId);
+        // Only a task of this agent's, and only one that carries a message:
+        // a --message on a shell-command task would turn it into a prompt.
+        const job = (await listCrons(provider, agent.runtimeRef!, agent.slug).catch(() => undefined))?.find((c) => c.id === req.params.jobId);
+        if (!job) return reply.code(404).send({ error: 'That task no longer exists.' });
+        if (job.system) return reply.code(409).send({ error: new CronSystemOwnedError().userMessage });
+        if (job.payloadKind === 'command') return reply.code(409).send({ error: 'Shell-command tasks are edited by asking the agent.' });
+        try {
+          const out = await whileBusy(agent.id, () => editCron(provider, agent.runtimeRef!, job.id, {
+            name: parsed.data.name,
+            message: parsed.data.message,
+            cron: parsed.data.cron,
+            everyMs: parsed.data.everyMinutes ? Math.round(parsed.data.everyMinutes * 60_000) : undefined,
+            tz: parsed.data.tz || undefined,
+          }));
+          if (!out.ok) return reply.code(502).send({ error: out.error });
+          trace(agent.id)('cron.edited', { id: job.id, name: parsed.data.name ?? job.name, fields: Object.keys(parsed.data) });
+          return { ok: true, edited: true };
+        } catch (err) {
+          if (err instanceof CronSystemOwnedError) return reply.code(409).send({ error: err.userMessage });
+          if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+          throw err;
+        }
+      }
+      const enabled = body.enabled;
       if (typeof enabled !== 'boolean') {
         return reply.code(400).send({ error: 'enabled must be true or false.' });
       }

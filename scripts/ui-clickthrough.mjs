@@ -478,18 +478,24 @@ const SCENARIOS = String.raw`(() => {
       }
     },
     scheduleEdit: async () => {
-      window.__crons = [{ id: 'c1', name: 'Morning brief', scheduleExpr: '0 8 * * *', scheduleTz: 'America/Toronto', message: 'Good morning', enabled: true, payloadKind: 'message' }];
+      // A task that posts to a member's chat, not the owner's: the edit must not move it.
+      window.__crons = [{ id: 'c1', name: 'Morning brief', scheduleExpr: '0 8 * * *', scheduleTz: 'America/Toronto', message: 'Good morning', enabled: false, announce: true, sessionTarget: 'isolated', payloadKind: 'message' }];
       openV2Agent('a1', 'schedule');
       await until(() => cronCache.some((c) => c.id === 'c1'));
       editCronJob('c1');
       eq('the form carries the task', [document.getElementById('cronName').value, document.getElementById('cronExpr').value, document.getElementById('cronMsg').value], ['Morning brief', '0 8 * * *', 'Good morning']);
-      ok('the button says it replaces', document.getElementById('cronAddBtn').textContent.includes('Save changes'));
+      ok('the button says Save changes', document.getElementById('cronAddBtn').textContent === 'Save changes');
       const cancelBtn = document.querySelector('#cronEditNote button');
       ok('"cancel" is a real button a keyboard reaches (review, 2026-10-09)', !!cancelBtn && cancelBtn.type === 'button' && cancelBtn.textContent === 'cancel' && !document.querySelector('#cronEditNote a'));
+      const mark = window.__calls.length;
       document.getElementById('cronName').value = 'Morning brief 2';
       document.getElementById('cronAddBtn').click();
-      const posted = await until(() => calls('POST', /\/v1\/agents\/a1\/crons$/)[0]);
-      ok('the edited task is sent', posted.body.name === 'Morning brief 2' && posted.body.cron === '0 8 * * *');
+      const patched = await until(() => window.__calls.slice(mark).find((c) => c.method === 'PATCH' && c.path === '/v1/agents/a1/crons/c1'));
+      eq('the edit changes the task in place, sending only what changed (2026-10-10)', patched.body, { name: 'Morning brief 2' });
+      await until(() => document.getElementById('cronAddBtn').textContent === 'Add task');
+      const after = window.__calls.slice(mark);
+      ok('nothing is re-created or deleted (that moved its results to the owner\'s chat)',
+        !after.some((c) => (c.method === 'POST' && /\/crons$/.test(c.path)) || c.method === 'DELETE'));
       v2Close(); window.__crons = [];
     },
     keyboardLinks: async () => {
