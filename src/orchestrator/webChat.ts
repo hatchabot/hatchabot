@@ -240,7 +240,9 @@ export interface WebChatMessage {
  *  - 2026.9 keeps sessions in the agent's openclaw-agent.sqlite: every
  *    session window of the key (session_windows — a reset starts a new one)
  *    and their transcript_events, plus any archived window.
- *  - 2026.7 keeps sessions/sessions.json (key → sessionId) and <id>.jsonl.
+ *  - 2026.7 keeps sessions/sessions.json (key → sessionId) and <id>.jsonl;
+ *    a reset renames the file <id>.jsonl.reset.<ts>, and its key is only
+ *    in the session's <id>.trajectory.jsonl ("session.started"), when kept.
  */
 export const HISTORY_SCRIPT = String.raw`
 // hatchabot-webchat-history
@@ -289,12 +291,41 @@ if (sqlite && fs.existsSync(dbf)) {
 }
 if (!fromDb) {
   const sd = path.join(root, "sessions");
+  // Absent is a conversation not started yet; unreadable or corrupt is a
+  // read that failed, and says so (the panel offers to try again).
+  const failed = (what, e) => { process.stderr.write("history read failed: " + what + ": " + String((e && (e.code || e.message)) || e)); process.exit(3); };
+  const read = (f) => { try { return fs.readFileSync(path.join(sd, f), "utf8"); } catch (e) { if (e && e.code === "ENOENT") return null; failed(f, e); } };
   let sid = null;
-  try { const j = JSON.parse(fs.readFileSync(path.join(sd, "sessions.json"), "utf8")); sid = j && j[key] && j[key].sessionId; } catch {}
-  if (sid && /^[A-Za-z0-9-]+$/.test(sid)) { try { lines(fs.readFileSync(path.join(sd, sid + ".jsonl"), "utf8")); } catch {} }
+  const index = read("sessions.json");
+  if (index != null) {
+    let j; try { j = JSON.parse(index); } catch (e) { failed("sessions.json", e); }
+    sid = j && j[key] && j[key].sessionId;
+  }
+  // Conversations of this key that a reset ended, oldest first.
+  let files = [];
+  try { files = fs.readdirSync(sd); } catch (e) { if (!e || e.code !== "ENOENT") failed("the sessions folder", e); }
+  const ofKey = (id) => {
+    for (const f of files) {
+      if (f.indexOf(id + ".trajectory.jsonl") !== 0) continue;
+      let fd; try { fd = fs.openSync(path.join(sd, f), "r"); } catch { continue; }
+      try {
+        const b = Buffer.alloc(65536); const n = fs.readSync(fd, b, 0, b.length, 0);
+        for (const l of b.subarray(0, n).toString("utf8").split(String.fromCharCode(10))) {
+          let t; try { t = JSON.parse(l); } catch { continue; }
+          if (t && t.type === "session.started") return t.sessionKey === key;
+        }
+      } finally { try { fs.closeSync(fd); } catch {} }
+    }
+    return false;
+  };
+  const resets = files.map((f) => /^([A-Za-z0-9-]+)\.jsonl\.reset\.(.+)$/.exec(f)).filter((m) => m && m[1] !== sid && ofKey(m[1]))
+    .sort((a, b) => (a[2] < b[2] ? -1 : 1));
+  for (const m of resets) { const t = read(m[0]); if (t != null) lines(t); }
+  if (sid && /^[A-Za-z0-9-]+$/.test(sid)) { const t = read(sid + ".jsonl"); if (t != null) lines(t); }
 }
+// An image-only reply is still a reply: shown as [image], not dropped.
 const textOf = (c) => typeof c === "string" ? c : Array.isArray(c)
-  ? c.map((p) => p && p.type === "text" ? p.text : "").filter(Boolean).join(String.fromCharCode(10)) : "";
+  ? c.map((p) => !p ? "" : p.type === "text" ? p.text : /image/.test(p.type || "") ? "[image]" : "").filter(Boolean).join(String.fromCharCode(10)) : "";
 const out = [];
 for (const e of events) {
   const m = e.message, role = m.role;
@@ -305,11 +336,13 @@ for (const e of events) {
   // arrives as a "user" message with provenance inter_session) is not
   // something this person wrote. What they wrote carries the web-app line.
   if (role === "user" && m.provenance && !/^\s*\[[^\]\n]{1,60} via the web app\]/.test(t)) continue;
-  const at = e.timestamp || m.timestamp || "";
+  const raw = e.timestamp || m.timestamp || "";
+  const at = typeof raw === "string" ? raw : new Date(raw).toISOString();
   const prev = out[out.length - 1];
-  // A delivered reply is recorded twice, same text: keep one.
-  if (prev && role === "assistant" && prev.role === role && prev.text === t) continue;
-  out.push({ role, text: t, at: typeof at === "string" ? at : new Date(at).toISOString() });
+  // A delivered reply is recorded twice, same text, at the same moment: keep
+  // one. The same words sent again later (a daily notice) are a new message.
+  if (prev && role === "assistant" && prev.role === role && prev.text === t && Math.abs((Date.parse(at) || 0) - (Date.parse(prev.at) || 0)) < 60000) continue;
+  out.push({ role, text: t, at });
 }
 out.sort((a, b) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0));
 process.stdout.write(JSON.stringify({ messages: out.slice(-cap) }));

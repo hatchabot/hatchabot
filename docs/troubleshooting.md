@@ -888,6 +888,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `web/index.html` — `webChatSend`, `openWebChatPanel`
 
+### Web chat: reopening the chat shows less than was said (a picture, an earlier conversation, a repeated notice)
+- **Check:** the agent's reply was only a picture, the conversation was reset (`/reset`, or a long quiet spell), or the agent sent the same notice on different days; after closing and reopening 💬 Chat, those messages are missing.
+- **Cause:** the history reader kept only text (a picture-only reply had none), merged any two same-text replies in a row as OpenClaw's mirrored copy whatever their time, and on OpenClaw 2026.7 read only the session that is current now.
+- **Fix:** upgrade. A picture shows as "[image]", only copies written at the same moment are merged, and on 2026.7 the conversations before a reset are read too when OpenClaw kept the session's trace file (`<id>.trajectory.jsonl`), the one place that names whose conversation it was. 2026.9 keeps every window already.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/webChat.ts` — `HISTORY_SCRIPT`
+
+### Web chat: the conversation is empty after an upgrade or a crash, on OpenClaw 2026.7
+- **Check:** after the upgrade the panel says "Couldn't read your conversation just now — try again", and the service log has "web chat history read failed … history read failed: sessions.json".
+- **Cause:** a session index (`sessions/sessions.json`) that could not be read or parsed was taken as no conversation, so the panel showed an empty chat instead of a read that failed.
+- **Fix:** upgrade. Try again in a moment (OpenClaw may have been writing it); if it stays, the agent's session index is damaged: restart the agent, which rewrites it.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/webChat.ts` — `HISTORY_SCRIPT`
+
 ### An agent's Setup log is full of "a web chat guest was refused part of the console"
 - **Check:** the agent's Setup log or Activity shows `console.guest_opened` and `console.guest_refused` lines every few minutes, for a member with web chat.
 - **Cause:** OpenClaw's console app asks for a few owner-only things each time a guest opens the chat; each was recorded, and the 200-line history filled with them.
