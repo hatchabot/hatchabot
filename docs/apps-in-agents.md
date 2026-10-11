@@ -67,7 +67,12 @@ codebase gets deployed, updated and rolled back from Hatchabot.
   as `K=V …`).
 - `config.fields`: written to `{data_dir}/<file>` as JSON. A field is asked for
   (`required`, `default`) or filled by Hatchabot (`from`). Values already in the
-  file are kept on update; new fields get their defaults. `"secret": true`
+  file are kept on update; new fields get their defaults. A value given as empty
+  (`key=`) clears an optional field (`""`, `[]` for a list, `null` for a number or
+  switch); left out, the value it has stays. A value must fit its `type`
+  (`number`, `bool`, `list`, `email`), or the install is refused. A `required`
+  field filled by Hatchabot stops the install when Hatchabot has nothing to
+  fill it with (e.g. `owner.telegram` before the owner links Telegram). `"secret": true`
   marks a password or key: the dialog asks for it in a hidden box, never
   filled in, and a new agent's install that waits for the agent to be ready
   keeps it in Hatchabot's secret store, not in the database, until it goes in.
