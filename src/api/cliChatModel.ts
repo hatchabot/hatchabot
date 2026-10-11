@@ -72,12 +72,14 @@ const defaultRunner: CliRunner = (argv, stdin, env, cwd) =>
 function renderConversation(messages: MgmtChatRequest['messages']): string {
   const lines: string[] = [];
   for (const m of messages as Array<{ role: string; content: unknown }>) {
+    // The speaker is the message's role, whichever form its content takes.
+    const who = m.role === 'user' ? 'Owner' : 'You';
     if (typeof m.content === 'string') {
-      lines.push(`${m.role === 'user' ? 'Owner' : 'You'}: ${m.content}`);
+      lines.push(`${who}: ${m.content}`);
       continue;
     }
     for (const b of m.content as Array<Record<string, unknown>>) {
-      if (b.type === 'text') lines.push(`You: ${b.text}`);
+      if (b.type === 'text') lines.push(`${who}: ${b.text}`);
       else if (b.type === 'tool_use') lines.push(`You called tool ${b.name} with ${JSON.stringify(b.input)}`);
       else if (b.type === 'tool_result') {
         // Fenced: flattened-to-text roles are spoofable ("\n\nOwner: …"
@@ -109,6 +111,22 @@ export function parseToolEmission(text: string): { tool: string; input: unknown 
   return undefined;
 }
 
+/** Where the object opened at `from` closes (JSON strings and escapes respected), or -1. */
+function closingBrace(text: string, from: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let k = from; k < text.length; k++) {
+    const c = text[k];
+    if (inString) {
+      if (c === '\\') k++;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return k;
+  }
+  return -1;
+}
+
 /**
  * The model doesn't always follow "JSON only": it may say a sentence first
  * ("Sure — I'll build a candidate:") and then emit the call, which the strict
@@ -124,11 +142,12 @@ export function parseToolAfterProse(
   const fence = t.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```\s*$/i);
   const candidates: Array<{ json: string; at: number }> = [];
   if (fence) candidates.push({ json: fence[1]!, at: fence.index! });
-  // A bare object at the very end: scan back from the last "}" to each "{".
+  // A bare object at the very end: each "{" whose balanced close is the last
+  // character. Counting the nested ones instead (at most 20) never reached
+  // the outer "{" of a call with many nested objects.
   if (t.endsWith('}')) {
-    for (let i = t.lastIndexOf('{'); i >= 0; i = t.lastIndexOf('{', i - 1)) {
-      candidates.push({ json: t.slice(i), at: i });
-      if (candidates.length > 20) break;
+    for (let i = t.lastIndexOf('{'); i >= 0 && candidates.length < 20; i = i > 0 ? t.lastIndexOf('{', i - 1) : -1) {
+      if (closingBrace(t, i) === t.length - 1) candidates.push({ json: t.slice(i), at: i });
     }
   }
   for (const c of candidates) {

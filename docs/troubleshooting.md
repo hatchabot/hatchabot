@@ -1355,6 +1355,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.3`
 - **Code:** `src/orchestrator/problemReport.ts` — `redactForPublic`
 
+### On a Claude subscription, the Hatchabot agent says it will do something, then nothing happens (no card)
+- **Check:** the reply ends with a long JSON object (`{"tool": …}`), shown as text, and no confirmation card appears; the AI source behind the Hatchabot agent is a setup-token or machine login (Settings → AI).
+- **Cause:** on a subscription the model is reached through the Claude CLI, which answers in text; a tool call after a sentence was looked for among only the last 20 opening braces, so a call with many nested objects (a schedule, a list of rows) was never found and was shown as prose.
+- **Fix:** upgrade. The call is found by matching its braces, however deep it nests.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/cliChatModel.ts` — `parseToolAfterProse`, `closingBrace`
+
+### On a Claude subscription, the Hatchabot agent acts as if it had said what you asked
+- **Check:** the AI source behind the Hatchabot agent is a setup-token or machine login, and it replies to your request as its own earlier words ("as I said…"), or repeats an action it thinks it proposed.
+- **Cause:** when the conversation was turned into the CLI's text prompt, a message of yours stored as content blocks was labelled "You:", the model's own voice.
+- **Fix:** upgrade. Each message is labelled by who sent it, in whatever form it is stored.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/cliChatModel.ts` — `renderConversation`
+
 ## Docker, disk and memory
 
 ### `hatchabot doctor`: "Only N GB free — each agent volume grows; the image is ~2 GB"

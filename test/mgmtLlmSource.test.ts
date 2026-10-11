@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
@@ -90,6 +93,43 @@ describe('CLI tool-emission protocol', () => {
     expect(parseToolEmission('Your fleet looks healthy.')).toBeUndefined();
     expect(parseToolEmission('{not json at all')).toBeUndefined();
     expect(parseToolEmission('{"noTool":"here"}')).toBeUndefined();
+  });
+});
+
+describe('CLI helper: what the model is shown, and what it answers', () => {
+  it('a tool call after prose is found however many objects it nests', async () => {
+    const { parseToolAfterProse } = await import('../src/api/cliChatModel.js');
+    const rows = Array.from({ length: 25 }, (_, i) => ({ day: i + 1, slot: { from: '09:00', to: '10:00' } }));
+    const call = JSON.stringify({ tool: 'set_schedule', input: { agent: 'kitchen', rows, note: 'braces in a string: {"x": }' } });
+    const r = parseToolAfterProse(`Sure, here is the new schedule:\n${call}`, new Set(['set_schedule']));
+    expect(r).toMatchObject({ prose: 'Sure, here is the new schedule:', tool: 'set_schedule' });
+    expect((r!.input as { rows: unknown[] }).rows).toHaveLength(25);
+    // Still only a tool on the menu, and prose stays prose.
+    expect(parseToolAfterProse(`An example: ${call}`, new Set(['list_agents']))).toBeUndefined();
+    expect(parseToolAfterProse('All {quiet} here.', new Set(['set_schedule']))).toBeUndefined();
+  });
+
+  it("an owner's message in content blocks is the owner's, not the assistant's", async () => {
+    const { completeViaCli } = await import('../src/api/cliChatModel.js');
+    const dir = mkdtempSync(join(tmpdir(), 'hb-cli-'));
+    const prevDb = process.env.HATCHABOT_DB;
+    process.env.HATCHABOT_DB = join(dir, 'hatchabot.sqlite');
+    try {
+      let prompt = '';
+      await completeViaCli({ model: 'claude-sonnet-4-6', runner: async (_argv, stdin) => { prompt = stdin; return JSON.stringify({ result: 'ok' }); } }, {
+        system: 'sys', tools: [],
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: 'please stop the kitchen agent' }] },
+          { role: 'assistant', content: [{ type: 'text', text: 'Stopping it now.' }] },
+        ],
+      } as any);
+      expect(prompt).toContain('Owner: please stop the kitchen agent');
+      expect(prompt).toContain('You: Stopping it now.');
+      expect(prompt).not.toContain('You: please stop');
+    } finally {
+      if (prevDb === undefined) delete process.env.HATCHABOT_DB; else process.env.HATCHABOT_DB = prevDb;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
