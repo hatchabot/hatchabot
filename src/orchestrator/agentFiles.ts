@@ -79,8 +79,10 @@ export function parseListing(stdout: string): AgentFileEntry[] {
     const name = rest.join('\t');
     if (!name || t === undefined) continue;
     const type: AgentFileEntry['type'] = t === 'd' ? 'dir' : t === 'f' ? 'file' : t === 'l' ? 'link' : 'other';
-    const at = Number(mtime);
-    out.push({ name, type, size: Number(size) || 0, mtime: Number.isFinite(at) ? new Date(at * 1000).toISOString() : '' });
+    // A time outside what a Date can hold (a file stamped by a broken clock
+    // or tool) has no time, rather than failing the whole folder (#71).
+    const at = new Date(Number(mtime) * 1000);
+    out.push({ name, type, size: Number(size) || 0, mtime: Number.isNaN(at.getTime()) ? '' : at.toISOString() });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
 }
@@ -105,11 +107,15 @@ export function downloadName(rel: string, slug: string): string {
   return (last ?? slug).replace(/[^\w.+-]+/g, '_').slice(0, 120) || slug;
 }
 
-/** A file name the owner uploads: one segment, no slash, no NUL, not a dot name, ≤255 bytes. */
+/**
+ * A file name the owner uploads: one segment, no slash, no NUL, not a dot
+ * name, not blank, ≤255 bytes. Kept exactly as given: trimming its spaces
+ * wrote ' notes.md' over a different file, 'notes.md' (#111).
+ */
 export function cleanFileName(input: unknown): string | undefined {
   if (typeof input !== 'string') return undefined;
-  const n = input.trim();
-  if (!n || n === '.' || n === '..' || n.includes('/') || n.includes('\0') || Buffer.byteLength(n) > 255) return undefined;
+  const n = input;
+  if (!n.trim() || n === '.' || n === '..' || n.includes('/') || n.includes('\0') || Buffer.byteLength(n) > 255) return undefined;
   return n;
 }
 

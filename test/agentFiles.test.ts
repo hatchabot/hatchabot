@@ -41,6 +41,10 @@ describe('paths the owner may ask for', () => {
     expect(downloadName('out/report v2.pdf', 'slug')).toBe('report_v2.pdf');
     expect(downloadName('', 'to-do-agent')).toBe('to-do-agent');
   });
+  it('a time a Date cannot hold leaves that entry without one; the folder still lists (#71)', () => {
+    const rows = parseListing('f\t1\t1e300\tfar-future.txt\0f\t2\t1790000100\tnotes.md\0');
+    expect(rows.map((r) => [r.name, r.mtime])).toEqual([['far-future.txt', ''], ['notes.md', new Date(1790000100000).toISOString()]]);
+  });
 });
 
 const OWNER = 'user-owner';
@@ -111,8 +115,9 @@ describe('downloads', () => {
 describe('uploads and opening in the browser', () => {
   it('a file name is one plain segment; uploads stay out of OpenClaw\'s state except the workspace', () => {
     expect(cleanFileName('report.pdf')).toBe('report.pdf');
-    expect(cleanFileName(' notes.md ')).toBe('notes.md');
-    for (const bad of ['', '.', '..', 'a/b', 'a\0b', 'x'.repeat(300), 7]) expect(cleanFileName(bad)).toBeUndefined();
+    // Spaces are part of the name: trimmed, ' notes.md ' replaced notes.md (#111).
+    expect(cleanFileName(' notes.md ')).toBe(' notes.md ');
+    for (const bad of ['', '   ', '.', '..', 'a/b', 'a\0b', 'x'.repeat(300), 7]) expect(cleanFileName(bad)).toBeUndefined();
     expect(uploadAllowed('', 'kitchen')).toBe(true);
     expect(uploadAllowed('projects/x', 'kitchen')).toBe(true);
     expect(uploadAllowed('.openclaw', 'kitchen')).toBe(false);

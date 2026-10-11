@@ -919,6 +919,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/providers/localDockerProvider.ts` — `streamFromVolume`
 
+### An upload whose name starts or ends with a space replaced a different file
+- **Check:** the file you uploaded was named with a leading or trailing space (` notes.md`), and the agent's `notes.md` now holds its content.
+- **Cause:** the upload trimmed the spaces from the name, so it landed on the file without them.
+- **Fix:** upgrade: the name is kept exactly as given. Restore the overwritten file from a backup if it mattered.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/agentFiles.ts` — `cleanFileName`
+
+### Files: a folder will not open ("Invalid time value"), though the ones around it do
+- **Check:** in a terminal, `docker run --rm -v <agent volume>:/v alpine ls -la --time-style=+%s /v/<folder>` shows a file with a time far in the past or future.
+- **Cause:** one file's modified time was outside what the app could show, and that failed the whole folder's listing.
+- **Fix:** upgrade: that file is listed with no time. To clear it, `touch` the file inside the agent.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/agentFiles.ts` — `parseListing`
+
 ### Looking inside an archived agent shows "No readable files", an empty MEMORY.md, or "No conversation found on the volume"
 - **Check:** the agent's machine or Docker was not answering at the time (`hatchabot doctor`; a runner asleep), or the volume is damaged; after the upgrade the same view says "Couldn't read the agent's stored files…".
 - **Cause:** a read of the volume that failed was shown as an agent with no files, an empty file or no chat history.
