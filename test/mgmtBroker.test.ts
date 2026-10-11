@@ -284,6 +284,39 @@ describe('broker mutate tier — propose, never act', () => {
     expect(api.calls).toEqual([]);
   });
 
+  it('a confirmed rebuild follows its operation: done says rebuilt, a failed one says Failed (#127)', async () => {
+    for (const [end, said] of [
+      [{ status: 'succeeded', outcome: 'Rebuilt.' }, /^✅ .*\nRebuilt\.$/s],
+      [{ status: 'failed', outcome: 'The new container did not become healthy.' }, /^⚠ Failed — .*: The new container did not become healthy\.$/s],
+    ] as const) {
+      const { broker, api } = make({ rw: true });
+      const polled: string[] = [];
+      (api as any).rebuildAgent = async (id: string) => { api.calls.push(`rebuild:${id}`); return { rebuilding: true, operation: { id: 'op_r', status: 'queued' } }; };
+      const raw = api.raw.bind(api);
+      (api as any).raw = async (method: string, path: string, body?: unknown) => {
+        if (method === 'GET' && path === '/v1/operations/op_r') { polled.push(path); return polled.length < 2 ? { id: 'op_r', status: 'running' } : { id: 'op_r', ...end }; }
+        return raw(method, path, body);
+      };
+      await broker.handleTool('rebuild_agent', { agent: 'a1' }, WHO);
+      const out = await broker.confirm('c_1', 'confirm', { fromUserId: 555, chatId: 100 });
+      expect(out.ok && out.text).toMatch(said);
+      expect(polled).toHaveLength(2);
+    }
+  });
+
+  it('a long change whose operation failed is not shown as done (#150)', async () => {
+    const { broker, api } = make({ rw: true });
+    const raw = api.raw.bind(api);
+    (api as any).raw = async (method: string, path: string, body?: unknown) => {
+      if (method === 'POST' && path.endsWith('/archive')) return { operation: { id: 'op_a', status: 'running' } };
+      if (method === 'GET' && path === '/v1/operations/op_a') return { id: 'op_a', status: 'failed', outcome: "Couldn't confirm its runtime stopped, so its bot was not given up." };
+      return raw(method, path, body);
+    };
+    await broker.handleTool('archive_agent', { agent: 'a1' }, WHO);
+    const out = await broker.confirm('c_1', 'confirm', { fromUserId: 555, chatId: 100 });
+    expect(out.ok && out.text).toMatch(/^⚠ Failed — .*its bot was not given up\.$/s);
+  });
+
   it('validates set_model against the source menu BEFORE proposing', async () => {
     const { broker, pending } = make({ rw: true });
     const bad = await broker.handleTool('set_model', { agent: 'a1', model: 'claude-fable-5' }, WHO);

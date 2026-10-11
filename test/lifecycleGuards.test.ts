@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
@@ -372,6 +372,14 @@ describe('audit 2026-09-11 follow-ups', () => {
     expect(store.getAgent('a1')!.appliedProfileId).toBe('p1'); // still honest: the switch is pending
     const list = (await f.inject({ method: 'GET', url: '/v1/agents', headers: as })).json();
     expect(list.find((a: any) => a.id === 'a1').pendingModel).toBeTruthy(); // the 🔄 stays
+  });
+
+  it('POST /rebuild answers with its operation, so a caller can follow it to its end (#127)', async () => {
+    const { f, store } = await world();
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/rebuild', headers: as, payload: {} });
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toMatchObject({ rebuilding: true, operation: { kind: 'rebuild', id: expect.any(String) } });
+    await vi.waitFor(() => expect(store.getAgent('a1')!.state).toBe('RUNNING'), { timeout: 5000 });
   });
 
   it('a source switch saved while `models set` runs is not stamped as applied (#87)', async () => {
