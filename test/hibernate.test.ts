@@ -138,6 +138,7 @@ describe('waking', () => {
     const id = await seedRunningAgent(w);
     w.provider.execResponses.set('sh', { code: 0, stdout: '', stderr: '' });
     // Its tasks cannot be read: not "none", so it stays up (#122).
+    w.provider.execResponses.set('cron list', { code: 1, stdout: '', stderr: 'gateway not answering' });
     const unread = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/hibernate`, headers: as() });
     expect(unread.statusCode).toBe(409);
     expect(unread.json().error).toMatch(/Couldn't read its scheduled tasks/);
