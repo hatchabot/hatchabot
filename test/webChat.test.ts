@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
 import Database from 'better-sqlite3';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -289,6 +289,64 @@ describe('the conversation', () => {
       expect(JSON.parse(out).messages.map((m: { role: string; text: string }) => [m.role, m.text])).toEqual([
         ['user', '[Sam via the web app]\nhello'],
         ['assistant', 'Hi Sam.'],
+      ]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe('the in-container reader on 2026.7: what was missing or merged', () => {
+  const run = (root: string, key: string) => spawnSync(process.execPath, ['-e', HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: '100' }, encoding: 'utf8' });
+  const ev = (id: string, role: string, content: unknown, ts: string) => JSON.stringify({ type: 'message', id, timestamp: ts, message: { role, content } });
+  const setup = () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-legacy-'));
+    const sd = join(root, 'kitchen', 'sessions');
+    mkdirSync(sd, { recursive: true });
+    return { root, sd, key: webChatStoreKey('kitchen', SAM) };
+  };
+
+  it('keeps the conversation from before a reset of this person\'s session, and no one else\'s', () => {
+    const { root, sd, key } = setup();
+    try {
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 'now' } }));
+      writeFileSync(join(sd, 'before.jsonl.reset.2026-09-20T08-00-00.000Z'), ev('b1', 'user', '[Sam via the web app]\nbefore the reset', '2026-09-19T10:00:00.000Z'));
+      writeFileSync(join(sd, 'before.trajectory.jsonl'), JSON.stringify({ type: 'session.started', sessionId: 'before', sessionKey: key }));
+      writeFileSync(join(sd, 'other.jsonl.reset.2026-09-20T09-00-00.000Z'), ev('x1', 'user', '[Ana via the web app]\nnot Sam', '2026-09-19T11:00:00.000Z'));
+      writeFileSync(join(sd, 'other.trajectory.jsonl'), JSON.stringify({ type: 'session.started', sessionId: 'other', sessionKey: 'agent:kitchen:web:ffeeddccbbaa9988' }));
+      writeFileSync(join(sd, 'now.jsonl'), ev('n1', 'user', '[Sam via the web app]\nafter the reset', '2026-09-21T10:00:00.000Z'));
+      const r = run(root, key);
+      expect(r.status).toBe(0);
+      expect(JSON.parse(r.stdout).messages.map((m: { text: string }) => m.text)).toEqual(['[Sam via the web app]\nbefore the reset', '[Sam via the web app]\nafter the reset']);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('a corrupt session index is a failed read, not an empty conversation; no index is just nothing yet', () => {
+    const { root, sd, key } = setup();
+    try {
+      expect(JSON.parse(run(root, key).stdout).messages).toEqual([]);
+      writeFileSync(join(sd, 'sessions.json'), '{"agent:kitchen:web:');
+      const r = run(root, key);
+      expect(r.status).toBe(3);
+      expect(r.stderr).toMatch(/history read failed: sessions\.json/);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('an image-only reply shows as [image]; the same notice on two days is two messages, a mirrored reply one', () => {
+    const { root, sd, key } = setup();
+    try {
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 's' } }));
+      writeFileSync(join(sd, 's.jsonl'), [
+        ev('e1', 'user', '[Sam via the web app]\ndraw the garden', '2026-09-20T10:00:00.000Z'),
+        ev('e2', 'assistant', [{ type: 'image', data: 'aGk=', mimeType: 'image/png' }], '2026-09-20T10:00:05.000Z'),
+        ev('e3', 'assistant', [{ type: 'text', text: 'Bins go out tonight.' }], '2026-09-21T18:00:00.000Z'),
+        ev('e4', 'assistant', [{ type: 'text', text: 'Bins go out tonight.' }], '2026-09-21T18:00:00.000Z'),
+        ev('e5', 'assistant', [{ type: 'text', text: 'Bins go out tonight.' }], '2026-09-28T18:00:00.000Z'),
+      ].join('\n'));
+      const r = run(root, key);
+      expect(JSON.parse(r.stdout).messages.map((m: { role: string; text: string; at: string }) => [m.text, m.at])).toEqual([
+        ['[Sam via the web app]\ndraw the garden', '2026-09-20T10:00:00.000Z'],
+        ['[image]', '2026-09-20T10:00:05.000Z'],
+        ['Bins go out tonight.', '2026-09-21T18:00:00.000Z'],
+        ['Bins go out tonight.', '2026-09-28T18:00:00.000Z'],
       ]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
