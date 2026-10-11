@@ -2653,6 +2653,33 @@ const SCENARIOS = String.raw`(() => {
         eq('remembered in this browser', kept, '3h');
       } finally { delete window.__override['/v1/costs']; v2SetCostPeriod('1w'); await costCleanup(); }
     },
+    // A pill pressed while the last window's figures are still on their way:
+    // its own figures are read once that answer is back (#93).
+    costPeriodWhileLoading: async () => {
+      const realFetch = window.fetch;
+      try {
+        await costFixture();
+        v2SetView('cost'); await sleep(30);
+        let release; const gate = new Promise((r) => { release = r; });
+        const answer = (b) => new Response(JSON.stringify(b), { status: 200, headers: { 'content-type': 'application/json' } });
+        window.fetch = async (input, init) => {
+          const url = String(typeof input === 'string' ? input : input.url);
+          if (url.includes('/v1/costs?period=1w')) { window.__calls.push({ method: 'GET', path: '/v1/costs', url }); await gate; return answer({ ...COSTS, period: '1w' }); }
+          if (url.includes('/v1/costs?period=3h')) { window.__calls.push({ method: 'GET', path: '/v1/costs', url }); return answer({ days: 0.125, period: '3h', hours: 3, bands: [0.2, 1, 2], chipMin: 0.02, suffix: '/3h', agents: { a1: { cost: 2.5, weekly: 140, monthly: 600, tier: 4, priced: true } } }); }
+          return realFetch(input, init);
+        };
+        const first = v2LoadCosts(true); // a week's figures, slow to come
+        await sleep(20);
+        const mark = window.__calls.length;
+        byText('.v2costbar button', '3 hr').click();
+        release();
+        await first;
+        await until(() => v2Costs?.period === '3h');
+        eq('one read for 3 hours', window.__calls.slice(mark).filter((x) => x.url.includes('/v1/costs?period=3h')).length, 1);
+        await sleep(30);
+        eq('the chip shows 3 hours', chipOf('Homework Helper')?.textContent, '$3/3h');
+      } finally { window.fetch = realFetch; v2SetCostPeriod('1w'); await costCleanup(); }
+    },
     costBadgesOff: async () => {
       try {
         await costFixture();
