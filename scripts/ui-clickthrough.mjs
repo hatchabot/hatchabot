@@ -566,6 +566,40 @@ const SCENARIOS = String.raw`(() => {
       ok('nothing missing now', document.getElementById('chanErr').textContent === '');
       chanDlg.close(); v2Close();
     },
+    // Two quick opens of the channel sheet (B055): the first agent's fetch comes
+    // back last. The sheet must show the second agent, the one Connect sends to.
+    chanSetupOverlap: async () => {
+      const [first, second] = agents.filter((x) => x.name);
+      ok('two agents to open it for', !!first && !!second);
+      window.__override['/v1/channels/connectors'] = [{ kind: 'discord', label: 'Discord', fields: [
+        { key: 'botToken', label: 'Bot token', pattern: '^.{20,}$', help: 'token' } ] }];
+      window.__override['/v1/discord-bots'] = { bots: [] };
+      chanFields = undefined;
+      const realFetch = window.fetch;
+      let release; const held = new Promise((r) => { release = r; });
+      let holdNext = true;
+      window.fetch = async (input, init) => {
+        const path = String(typeof input === 'string' ? input : input.url).split('?')[0];
+        if (path === '/v1/discord-bots' && holdNext) { holdNext = false; await held; }
+        return realFetch(input, init);
+      };
+      try {
+        const slow = openChanSetup(first.id, 'discord');
+        await until(() => !holdNext); // the first open is waiting on its parked-bot list
+        await openChanSetup(second.id, 'discord');
+        await until(() => chanDlg.open);
+        release(); await slow; await sleep(50);
+        ok('Connect goes to the second agent', chanFor === second.id);
+        ok('the title names it: ' + $('chanTitle').textContent, $('chanTitle').textContent.includes(second.name));
+        ok('and the steps name it, not the first', $('chanBody').textContent.includes(second.name) && !$('chanBody').textContent.includes(first.name));
+      } finally {
+        window.fetch = realFetch;
+        release?.();
+        delete window.__override['/v1/discord-bots'];
+        chanFields = undefined;
+        if (chanDlg.open) chanDlg.close();
+      }
+    },
     machineDefaults: async () => {
       window.__override['/v1/machine-defaults'] = { defaults: [
         { key: 'sleepAfter', label: 'Put idle agents to sleep after', help: 'h', applies: 'now', fallback: 'off', value: '36h', set: true },
