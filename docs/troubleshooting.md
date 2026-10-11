@@ -1392,6 +1392,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.3`
 - **Code:** `src/api/guestConsoleLog.ts` — `GuestConsoleLog`
 
+### An agent's icon shows unread after a Telegram chat, with nothing new in its console
+- **Check:** the conversation's record (the agent's session records) names Telegram only as its `origin.provider`, with no `lastChannel` or `lastTo`.
+- **Cause:** the unread check gave up on the record before reading its origin, and counted it as the console's.
+- **Fix:** upgrade: such a conversation counts as Telegram's, which shows its own unread mark.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/unread.ts` — `consoleActivity`
+
 ## Runners
 
 ### A runner agent's tile: "Its machine isn't answering — it may be asleep or offline"
