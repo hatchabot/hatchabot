@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { ExecResult, RuntimeProvider } from '../providers/provider.js';
-import type { Store } from '../store/store.js';
+import type { SnapshotParams, Store, StoredSnapshot } from '../store/store.js';
 import { beginOperation, handleFor, rethrowIfCrash } from './operations.js';
 
 /**
@@ -59,6 +59,52 @@ export function workspacePath(slug: string, name: string): string {
  */
 export type VolumeAccess = { onVolume?: boolean; image?: string };
 
+/** Said on stderr by the read below when the file is there and empty. */
+const EMPTY_FILE_MARK = 'hatchabot:empty-file';
+
+/**
+ * One core file as it is: its text, '' when it is there and empty, undefined
+ * when it is not there at all. A file that is there but cannot be read, or a
+ * read that failed, throws: `|| true` made both look like a missing file, so
+ * a snapshot left that file out and still looked whole (#66), and a share
+ * carried an empty SOUL.md or AGENTS.md (#119).
+ */
+export async function readCoreFile(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+  slug: string,
+  name: string,
+  via: VolumeAccess = {},
+): Promise<string | undefined> {
+  const q = JSON.stringify(workspacePath(slug, name));
+  // Read one byte past the cap so an oversized file is *detectable*:
+  // silently truncating would store a partial MEMORY.md and later restore
+  // it over the real one — data loss by the system meant to prevent it.
+  const script =
+    `head -c ${MAX_FILE_BYTES + 1} ${q} 2>/dev/null || { [ ! -e ${q} ] || exit 3; }; ` +
+    `if [ -e ${q} ] && [ ! -s ${q} ]; then echo ${EMPTY_FILE_MARK} >&2; fi`;
+  const res = via.onVolume
+    ? await provider.execShellOnVolume(runtimeRef, script, { readOnly: true, image: via.image })
+    : await provider.execShell(runtimeRef, script);
+  if (res.code !== 0) {
+    throw new SnapshotError(
+      res.code === 3 ? `${name} is there but could not be read.` : `Couldn't read ${name} — is the agent healthy?`,
+    );
+  }
+  if (Buffer.byteLength(res.stdout, 'utf8') > MAX_FILE_BYTES) {
+    throw new SnapshotError(
+      `${name} is larger than ${Math.floor(MAX_FILE_BYTES / 1024)} KB — too big to snapshot safely. ` +
+        'Trim it, or back the agent up with an export instead.',
+    );
+  }
+  if (res.stdout) return res.stdout;
+  return res.stderr.includes(EMPTY_FILE_MARK) ? '' : undefined;
+}
+
+/**
+ * The core files there are. An empty one is kept as '' so restoring the
+ * snapshot empties it again (#67); a missing one is left out.
+ */
 export async function readCoreFiles(
   provider: RuntimeProvider,
   runtimeRef: string,
@@ -67,20 +113,8 @@ export async function readCoreFiles(
 ): Promise<Record<string, string>> {
   const files: Record<string, string> = {};
   for (const name of CORE_FILES) {
-    // Read one byte past the cap so an oversized file is *detectable*:
-    // silently truncating would store a partial MEMORY.md and later restore
-    // it over the real one — data loss by the system meant to prevent it.
-    const script = `head -c ${MAX_FILE_BYTES + 1} ${JSON.stringify(workspacePath(slug, name))} 2>/dev/null || true`;
-    const res = via.onVolume
-      ? await provider.execShellOnVolume(runtimeRef, script, { readOnly: true, image: via.image })
-      : await provider.execShell(runtimeRef, script);
-    if (Buffer.byteLength(res.stdout, 'utf8') > MAX_FILE_BYTES) {
-      throw new SnapshotError(
-        `${name} is larger than ${Math.floor(MAX_FILE_BYTES / 1024)} KB — too big to snapshot safely. ` +
-          'Trim it, or back the agent up with an export instead.',
-      );
-    }
-    if (res.stdout) files[name] = res.stdout;
+    const text = await readCoreFile(provider, runtimeRef, slug, name, via);
+    if (text !== undefined) files[name] = text;
   }
   return files;
 }
@@ -154,13 +188,20 @@ export async function captureSnapshot(
     throw new SnapshotError("Couldn't read the agent's files — is it healthy?");
   }
   const reason = opts.reason ?? 'manual';
+  // The setup-values layer goes with the files: restoring the files alone
+  // left the newer layer, and the next value edit re-rendered the version
+  // just undone (#68).
+  const params: SnapshotParams | null = agent.paramFiles
+    ? { values: agent.paramValues ?? {}, soul: agent.paramFiles.soul, agents: agent.paramFiles.agents }
+    : null;
   // An automatic capture identical to the newest snapshot adds nothing: two
   // thirds of them were copies (every fleet rebuild made one), and rotation
   // then evicted older, different versions to keep them (review, 2026-09-29).
   // A named one is always kept — the owner asked for that point by name.
   if (reason !== 'manual') {
     const last = store.latestSnapshot(agentId);
-    if (last && filesHash(last.files) === filesHash(files)) {
+    if (last && filesHash(last.files) === filesHash(files) && last.params !== undefined
+      && JSON.stringify(last.params) === JSON.stringify(params)) {
       log('snapshot.unchanged', { agentId, reason, same: last.id });
       return { id: last.id, label: last.label, reason: last.reason, createdAt: last.createdAt, files: Object.keys(last.files) };
     }
@@ -172,6 +213,7 @@ export async function captureSnapshot(
     reason,
     files,
     createdAt: new Date().toISOString(),
+    params,
   };
   store.insertSnapshot(snapshot);
   const pruned = store.pruneAutoSnapshots(agentId, AUTO_KEEP);
@@ -268,10 +310,36 @@ export async function restoreSnapshot(
     restored.push(name);
     op.step('file-written', { restored: [...restored] });
   }
+  restoreParamLayer(store, agentId, snapshot);
   op.step('written');
   log('snapshot.restored', { agentId, snapshotId, restored });
   op.done(`Restored its files from "${snapshot.label}".`);
   return { restored, safetySnapshotId };
+}
+
+/**
+ * Put the setup-values layer back as it was when the snapshot was taken, once
+ * its files are written: the layer is what "Apply values" re-renders SOUL/
+ * AGENTS from (#68). The persona's layer stays: snapshots do not hold the
+ * persona. A snapshot from before the layer was recorded makes the restored
+ * files the layer, the rule a direct file edit follows.
+ */
+function restoreParamLayer(store: Store, agentId: string, snapshot: StoredSnapshot): void {
+  const agent = store.getAgent(agentId);
+  if (!agent) return;
+  const p = snapshot.params;
+  if (p === undefined) {
+    if (!agent.paramFiles) return;
+    const layer = { ...agent.paramFiles };
+    if (typeof snapshot.files['SOUL.md'] === 'string') layer.soul = snapshot.files['SOUL.md'];
+    if (typeof snapshot.files['AGENTS.md'] === 'string') layer.agents = snapshot.files['AGENTS.md'];
+    store.setAgentParamState(agentId, agent.paramValues ?? {}, layer);
+  } else if (p === null) {
+    // It had no layer then: the next value edit seeds one from the restored files.
+    if (agent.paramFiles) store.setAgentParamState(agentId, agent.paramValues ?? null, null);
+  } else {
+    store.setAgentParamState(agentId, p.values, { ...(agent.paramFiles ?? {}), soul: p.soul, agents: p.agents });
+  }
 }
 
 /** The files a snapshot holds that a restore writes (only the core files, ever). */
@@ -322,7 +390,11 @@ export async function resumeSnapshotRestore(deps: SnapshotDeps, opId: string): P
   try { now = await readCoreFiles(deps.provider, agent.runtimeRef, agent.slug, via); } catch { now = undefined; }
   if (now && snapshot) {
     const names = coreFilesOf(snapshot.files);
-    if (names.every((n) => now![n] === snapshot.files[n])) { op.done(`Restored its files from "${label}".`); return; }
+    if (names.every((n) => now![n] === snapshot.files[n])) {
+      restoreParamLayer(deps.store, agent.id, snapshot);
+      op.done(`Restored its files from "${label}".`);
+      return;
+    }
     if (safety && names.every((n) => (now![n] ?? '') === (safety.files[n] ?? ''))) {
       op.rolledBack(`The restore of "${label}" was interrupted by a restart before any file was written — nothing was changed.`);
       return;
@@ -351,12 +423,14 @@ export async function recoverSnapshotRestore(deps: SnapshotDeps, opId: string, a
     if (!safety) throw new SnapshotError('The snapshot taken before the restore is gone, so there is nothing to revert to. Finish instead.');
     const snapshot = p.snapshotId ? deps.store.getSnapshot(agent.id, p.snapshotId) : undefined;
     await writeSnapshotFiles(deps, agent.runtimeRef, agent.slug, safety.files, snapshot ? coreFilesOf(snapshot.files) : [], via);
+    restoreParamLayer(deps.store, agent.id, safety);
     op.rolledBack(`Reverted its files to how they were before restoring "${label}".`);
     return;
   }
   const snapshot = p.snapshotId ? deps.store.getSnapshot(agent.id, p.snapshotId) : undefined;
   if (!snapshot) throw new SnapshotError(`The snapshot "${label}" no longer exists, so the restore cannot be finished. Revert instead.`);
   await writeSnapshotFiles(deps, agent.runtimeRef, agent.slug, snapshot.files, [], via);
+  restoreParamLayer(deps.store, agent.id, snapshot);
   op.step('written');
   op.done(`Restored its files from "${label}".`);
 }
