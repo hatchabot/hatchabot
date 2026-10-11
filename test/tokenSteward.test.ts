@@ -293,6 +293,10 @@ describe('loop signals', () => {
     const oneWay = consults(8, MIN).map((c) => ({ ...c, from: 'a1', to: 'a2' }));
     expect(loopSignals({ agentId: 'a1', marks: [], consults: oneWay, now })).toEqual([]);
     expect(loopSignals({ agentId: 'a1', marks: [], consults: consults(8, T.pingPongGapMs + MIN), now })).toEqual([]);
+    // Ten old consults (over a day ago) do not hide six happening now (#156).
+    const old = consults(10, MIN).map((c) => ({ ...c, at: iso(Date.parse(c.at) - DAY) }));
+    const [sig] = loopSignals({ agentId: 'a1', marks: [], consults: [...old, ...consults(T.pingPongMin, MIN)], now });
+    expect(sig).toMatchObject({ kind: 'consult-ping-pong', count: 6, active: true });
   });
 
   it('(e) runaway tool loops and (f) model calls failing in a row, rate limits apart', () => {

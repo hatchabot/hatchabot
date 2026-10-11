@@ -1419,6 +1419,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/modelReview.ts` — `syncModelReviewCron`
 
+### Two agents keep consulting each other, but no loop shows under Alerts
+- **Check:** the agents' consult log has a fresh back-and-forth, and an older, longer one earlier the same day.
+- **Cause:** before v2.160.0 the watcher kept the longest run of consults, so an older long run (already over) hid a shorter one happening now.
+- **Fix:** upgrade: the latest qualifying run is the one judged and reported.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/tokenHealth.ts` — `loopSignals`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody
