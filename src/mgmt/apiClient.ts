@@ -128,8 +128,9 @@ export class HttpApiClient implements ApiClient {
   async stopAgent(id: string): Promise<void> {
     await this.#req('POST', `/v1/agents/${id}/stop`, {});
   }
-  async rebuildAgent(id: string): Promise<void> {
-    await this.#req('POST', `/v1/agents/${id}/rebuild`, {});
+  /** Accepted, not done: the answer carries the rebuild's operation to follow (#127). */
+  async rebuildAgent(id: string): Promise<unknown> {
+    return this.#req('POST', `/v1/agents/${id}/rebuild`, {});
   }
   async setModel(id: string, model: string): Promise<void> {
     // The live route: OpenClaw reads the model per turn, so it applies now (PATCH only recorded it).

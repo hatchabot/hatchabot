@@ -12306,7 +12306,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!kickRebuild(agent.id, { checkpoint })) {
         return reply.code(409).send({ error: 'Another operation is already running on this agent.' });
       }
-      return reply.code(202).send({ rebuilding: true });
+      // Its operation (queued just now) too, so a caller can follow it to
+      // its end rather than take "accepted" for "rebuilt" (#127).
+      const op = store.listOperations([agent.id], 1).find((o) => o.kind === 'rebuild');
+      return reply.code(202).send({ rebuilding: true, ...(op ? { operation: publicOperation(op) } : {}) });
     },
   );
 
