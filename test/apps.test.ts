@@ -13,7 +13,7 @@ import { clearBusy } from '../src/orchestrator/busy.js';
 import { newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/operations.js';
 import { resolvePendingValues } from '../src/orchestrator/appPending.js';
 import {
-  AppError, fieldsToAsk, hostGit, installRelease, mergeConfig, parseManifest, parseSource, repoFor, resolveRelease, switchTo, type AgentFacts,
+  AppError, fieldsToAsk, hostGit, installRelease, mergeConfig, parseManifest, parseSource, removeTasks, repoFor, resolveRelease, switchTo, type AgentFacts,
 } from '../src/orchestrator/apps.js';
 
 /**
@@ -75,7 +75,8 @@ function commit(dir: string, manifest?: unknown) {
 const APPS = '/home/node/.openclaw/apps';
 class FakeAgent extends MockProvider {
   calls: Array<{ kind: string; what: string; input?: string }> = [];
-  jobs: Array<{ id: string; name: string; argv?: string[] }> = [{ id: 'old1', name: 'demoapp-tick' }, { id: 'keep', name: 'daily-brief' }];
+  /** A disabled job is listed only with `--all`, as OpenClaw does; a job of the agent's own may have no name. */
+  jobs: Array<{ id: string; name: string; argv?: string[]; disabled?: boolean }> = [{ id: 'old1', name: 'demoapp-tick' }, { id: 'keep', name: 'daily-brief' }];
   testCode = 0;
   /** The config file the app's tests found in their {data_dir}. */
   testSaw: string[] = [];
@@ -106,7 +107,7 @@ class FakeAgent extends MockProvider {
     this.calls.push({ kind: 'exec', what: JSON.stringify(argv) });
     const lost = { code: 1, stdout: '', stderr: 'fixture response lost', timedOut: true };
     if (argv[0] === 'cron' && argv[1] === 'list' && ++this.lists > this.failListAfter) return { code: 1, stdout: '', stderr: 'gateway closed' };
-    if (argv[0] === 'cron' && argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs: this.jobs.map(({ id, name }) => ({ id, name })) }), stderr: '' };
+    if (argv[0] === 'cron' && argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs: this.jobs.filter((j) => argv.includes('--all') || !j.disabled).map(({ id, name }) => ({ id, name })) }), stderr: '' };
     if (argv[0] === 'cron' && argv[1] === 'add') {
       const name = argv[argv.indexOf('--name') + 1]!;
       if (this.failAdd(name)) return { code: 1, stdout: '', stderr: 'gateway refused the job' };
@@ -1126,6 +1127,27 @@ describe('apps: what the 2026-10-10 workflow audit found', () => {
     await expect(installRelease({ ...d(agent), facts: noTelegram }, rel, { mailbox: 'demo@example.org' })).rejects.toThrow(/nothing to fill owner_telegram/);
     expect(agent.calls.some((c) => c.what.includes('unittest'))).toBe(false);
     expect(agent.live().config).toBeNull();
+  });
+
+  it('a disabled task of the app is seen: Update replaces it and Stop app takes it off (#73)', async () => {
+    const { agent, v2 } = await v1AndV2();
+    agent.jobs.find((j) => j.name === 'demoapp-tick')!.disabled = true;
+    await installRelease(d(agent), v2, {});
+    expect(agent.every('demoapp-tick')).toEqual(['5m']); // not the old one beside it
+    agent.jobs.find((j) => j.name === 'demoapp-tick')!.disabled = true;
+    expect(await removeTasks(d(agent), 'demoapp')).toBe(1);
+    expect(agent.jobs.filter((j) => j.name.startsWith('demoapp-'))).toEqual([]);
+  });
+
+  it('a job of the agent\'s own with no name does not block the app (#74)', async () => {
+    const agent = new FakeAgent();
+    agent.jobs = [{ id: 'own1' } as never, { id: 'keep', name: 'daily-brief' }];
+    const done = await installRelease(d(agent), await resolveRelease(hostGit, repo(), 'HEAD'), { mailbox: 'demo@example.org' });
+    expect(done.tasks).toEqual(['demoapp-tick']);
+    expect(agent.jobs.map((j) => j.id)).toEqual(expect.arrayContaining(['own1', 'keep']));
+    // One of the app's own without an id is still refused: it could not be taken off.
+    agent.jobs.push({ name: 'demoapp-digest' } as never);
+    await expect(removeTasks(d(agent), 'demoapp')).rejects.toThrow(/incomplete or malformed/);
   });
 
   it('a change of values on the same commit keeps the live release folder (#92)', async () => {
