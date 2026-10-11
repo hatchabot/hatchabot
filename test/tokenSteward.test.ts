@@ -681,6 +681,45 @@ describe('the context cap', () => {
     expect(store.getContextCap('a2')!.appliedModel).toBeUndefined();
   });
 
+  it('taking the last cap away leaves an entry edited since it was read (no blind unset) (#115)', async () => {
+    const { store, provider } = await world();
+    store.setContextCap('a1', 150_000, iso(Date.now()));
+    store.markContextCapApplied('a1', 'anthropic/claude-sonnet-5', iso(Date.now()));
+    store.setContextCap('a1', null, iso(Date.now()));
+    const ours = { models: [{ id: 'claude-sonnet-5', name: 'Sonnet 5', contextTokens: 150_000 }] };
+    const edited = { baseUrl: 'https://proxy.example', ...ours };
+    const reads = [ours, edited];
+    provider.execShell = async () => ({ code: 0, stdout: JSON.stringify(reads.shift() ?? edited), stderr: '' });
+    expect(await syncContextCap({ store, provider }, store.getAgent('a1')!, store.getAgent('a1')!.runtimeRef!)).toBe('changed-by-hand');
+    expect(provider.execLog.some((a) => a[0] === 'config' && a[1] === 'unset')).toBe(false);
+    expect(store.getContextCap('a1')!.appliedModel).toBe('anthropic/claude-sonnet-5'); // still to take away
+    // Unchanged between the reads: it goes.
+    provider.execShell = async () => ({ code: 0, stdout: JSON.stringify(ours), stderr: '' });
+    expect(await syncContextCap({ store, provider }, store.getAgent('a1')!, store.getAgent('a1')!.runtimeRef!)).toBe('removed');
+    expect(provider.execLog.at(-1)).toEqual(['config', 'unset', 'models.providers.anthropic']);
+    expect(store.getContextCap('a1')).toBeUndefined();
+  });
+
+  it('a cap left on the old provider after a switch stays on record until it is off (#116)', async () => {
+    const { store, provider } = await world();
+    store.setContextCap('a1', 150_000, iso(Date.now()));
+    store.markContextCapApplied('a1', 'openai/gpt-5', iso(Date.now())); // written before a source switch
+    const old = { models: [{ id: 'gpt-5', name: 'GPT-5', contextTokens: 150_000 }] };
+    provider.execShell = async (_ref, script) => ({ code: 0, stdout: script.endsWith('models.providers.openai') ? JSON.stringify(old) : '', stderr: '' });
+    provider.execResponses.set('config unset models.providers.openai', { code: 1, stdout: '', stderr: 'gateway timeout' });
+    expect(await syncContextCap({ store, provider }, store.getAgent('a1')!, store.getAgent('a1')!.runtimeRef!)).toBe('failed');
+    // The new provider got its cap, but the old one is not forgotten.
+    expect(provider.execLog.some((a) => a[1] === 'set' && a[2] === 'models.providers.anthropic')).toBe(true);
+    expect(store.getContextCap('a1')!.appliedModel).toBe('openai/gpt-5');
+    // Next time the old one comes off, and only then is the new one on record.
+    provider.execResponses.delete('config unset models.providers.openai');
+    const now = { models: [{ id: 'claude-sonnet-5', name: 'Sonnet 5', contextTokens: 150_000 }] };
+    provider.execShell = async (_ref, script) => ({ code: 0, stdout: JSON.stringify(script.endsWith('models.providers.openai') ? old : now), stderr: '' });
+    expect(await syncContextCap({ store, provider }, store.getAgent('a1')!, store.getAgent('a1')!.runtimeRef!)).toBe('unchanged');
+    expect(provider.execLog.at(-1)).toEqual(['config', 'unset', 'models.providers.openai']);
+    expect(store.getContextCap('a1')!.appliedModel).toBe('anthropic/claude-sonnet-5');
+  });
+
   it('is re-applied for the model the agent runs at a rebuild', async () => {
     const { store, provider } = await world();
     store.setContextCap('a1', 150_000, iso(Date.now()));
