@@ -3960,6 +3960,10 @@ export class Store {
   markBudgetTold(scope: string, month: string, level: number, usd: number, at: string): void {
     this.db.prepare(`UPDATE budget_marks SET told_at = ? WHERE scope = ? AND month = ? AND level = ? AND usd = ?`).run(at, scope, month, level, usd);
   }
+  budgetMark(scope: string, month: string, level: number, usd: number): { at: string; toldAt?: string } | undefined {
+    const r = this.db.prepare(`SELECT at, told_at FROM budget_marks WHERE scope = ? AND month = ? AND level = ? AND usd = ?`).get(scope, month, level, usd) as { at: string; told_at: string | null } | undefined;
+    return r ? { at: r.at, ...(r.told_at ? { toldAt: r.told_at } : {}) } : undefined;
+  }
   budgetMarks(month: string): Array<{ scope: string; level: number; usd: number; at: string; toldAt?: string }> {
     return (this.db.prepare(`SELECT scope, level, usd, at, told_at FROM budget_marks WHERE month = ?`).all(month) as any[])
       .map((r) => ({ scope: r.scope, level: r.level, usd: r.usd, at: r.at, ...(r.told_at ? { toldAt: r.told_at } : {}) }));

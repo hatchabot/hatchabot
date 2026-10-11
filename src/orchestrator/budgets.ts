@@ -102,11 +102,15 @@ export function monthSpend(store: Store, month: string, agentIds?: string[]): Ma
   return store.costBetween(`${month}-01`, `${month}-31`, agentIds);
 }
 
-/** A round budget a little above what an agent costs a month now ($5 at least). */
+/**
+ * A round budget a little above what an agent costs a month now ($5 at least),
+ * never above MAX_BUDGET: a Set or Raise button the budget route then refused
+ * (HTTP 400) was a dead button (#182).
+ */
 export function suggestBudget(monthlyUSD: number): number {
   const want = Math.max(5, monthlyUSD * 1.25);
   const steps = [5, 10, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000, 1500, 2000, 3000, 5000];
-  return steps.find((s) => s >= want) ?? Math.ceil(want / 1000) * 1000;
+  return Math.min(MAX_BUDGET, steps.find((s) => s >= want) ?? Math.ceil(want / 1000) * 1000);
 }
 
 export type AtLimit = 'warn' | 'pause' | 'cheaper';
@@ -262,14 +266,20 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     if (level === 100 && b.atLimit === 'pause') {
       for (const a of pool.filter(pausable)) {
         const prior = store.getBudgetPause(a.id, month);
-        if (prior?.resumedBy === 'owner') continue; // started by hand after a pause: runs on until the 1st
-        if (prior && !prior.resumedAt && (prior.kind === 'cheaper' || a.state !== 'RUNNING')) continue; // already acted on (running again: a rebuild started it)
+        if (prior?.resumedBy === 'owner' && prior.kind === 'pause') continue; // started by hand after a pause: runs on until the 1st
+        // Already paused (running again: a rebuild started it). A cheaper model another
+        // budget chose does not hold a pause back: pausing is the stronger (#101).
+        if (prior && !prior.resumedAt && prior.kind === 'pause' && a.state !== 'RUNNING') continue;
         const asleep = a.state === 'STOPPED' && !!a.hibernatedAt;
         if (a.state !== 'RUNNING' && !asleep) continue;
         const lastOk = Date.parse(store.usageCursor(a.id)?.lastOk ?? '') || 0;
         // Busy, or mid-turn: the next pass.
         if (deps.isBusy(a.id) || (!asleep && now - lastOk < QUIET_MS)) { deferred++; continue; }
         if (await deps.pause(a).catch(() => false)) {
+          // Paused on a cheaper model a budget chose: its own model comes back now,
+          // so it starts again on it; a budget still reached then moves it again.
+          const cheap = prior && !prior.resumedAt && prior.kind === 'cheaper' ? prior : undefined;
+          if (cheap && deps.restoreModel && (a.model ?? null) === (cheap.toModel ?? null)) await deps.restoreModel(a, cheap.fromModel ?? null).catch(() => false);
           store.addBudgetPause(a.id, month, b.scope, nowIso);
           paused.push(a.id);
           acted.push({ a });
@@ -282,7 +292,14 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
         const prior = store.getBudgetPause(a.id, month);
         if (prior?.resumedBy === 'owner' || (prior && !prior.resumedAt)) continue;
         if (deps.isBusy(a.id)) { deferred++; continue; }
-        const r = await deps.downgrade(a).catch(() => undefined);
+        // A switch that failed is not "nothing cheaper": it is tried again on the
+        // next pass, and the 100% message waits for it (#185).
+        let r: Awaited<ReturnType<NonNullable<BudgetDeps['downgrade']>>>;
+        try { r = await deps.downgrade(a); } catch (err) {
+          deferred++;
+          deps.log?.('budget.downgrade_failed', { agentId: a.id, error: String((err as Error)?.message ?? err).slice(0, 200) });
+          continue;
+        }
         if (!r) continue; // nothing cheaper on its source
         store.addBudgetPause(a.id, month, b.scope, nowIso, { fromModel: r.from, toModel: r.to });
         downgraded.push(a.id);
@@ -294,15 +311,23 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     const hold100 = deferred > 0 && !acted.length;
     for (const lv of level === 100 ? [80, 100] : [80]) {
       if (lv === 100 && hold100) continue;
-      // 80% is told only if 100% isn't also new this pass.
       const fresh = store.addBudgetMark(b.scope, month, lv, b.usd, nowIso);
-      if (!fresh || (lv === 80 && level === 100)) continue;
+      if (store.budgetMark(b.scope, month, lv, b.usd)?.toldAt) continue;
+      // 80% is not told once 100% is reached as well: the 100% message says it all.
+      if (lv === 80 && level === 100) { store.markBudgetTold(b.scope, month, lv, b.usd, nowIso); continue; }
+      // A mark is told once it reached the owner: with no manager yet, or a
+      // message that failed, it stays due and the next pass tries again (#62).
       if (!agent) continue;
-      const text = budgetMessage(b, spent, lv as 80 | 100, month, agent, acted, now, tz);
+      // A retry says what the budget did on an earlier pass.
+      const did = acted.length || lv !== 100 ? acted : store.listBudgetPauses({ open: true, month })
+        .filter((p) => p.scope === b.scope && p.kind === b.atLimit)
+        .map((p) => ({ a: byId.get(p.agentId) ?? agent, ...(p.toModel ? { to: p.toModel } : {}) }));
+      const text = budgetMessage(b, spent, lv as 80 | 100, month, agent, did, now, tz);
       const ok = await deps.tell(b.ownerId, agent, text).catch(() => false);
+      if (ok || fresh) deps.log?.('budget.told', { agentId: agent.id, scope: b.scope === MACHINE ? MACHINE : 'agent', level: lv, told: ok });
+      if (!ok) continue;
       store.markBudgetTold(b.scope, month, lv, b.usd, nowIso);
       told++;
-      deps.log?.('budget.told', { agentId: agent.id, scope: b.scope === MACHINE ? MACHINE : 'agent', level: lv, told: ok });
     }
   }
   store.pruneBudgetMarks(prevMonth(prevMonth(month)));
@@ -323,9 +348,11 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     const agent = al.scope === MACHINE ? agents.find((a) => a.ownerId === al.ownerId && a.ops) : byId.get(al.scope);
     if (!agent) continue;
     const ok = await deps.tell(al.ownerId, agent, stepMessage(al, spent, month, agent, now, tz)).catch(() => false);
+    deps.log?.('budget.step_told', { agentId: agent.id, scope: al.scope === MACHINE ? MACHINE : 'agent', spent: r2(spent), every: al.stepUsd, told: ok });
+    // Not delivered: still due, so the next pass tries again (#62).
+    if (!ok) continue;
     store.setSpendAlertState(al.scope, month, al.stepUsd, k, nowIso);
     told++;
-    deps.log?.('budget.step_told', { agentId: agent.id, scope: al.scope === MACHINE ? MACHINE : 'agent', spent: r2(spent), every: al.stepUsd, told: ok });
   }
   store.pruneSpendAlertState(prevMonth(prevMonth(month)));
   return { paused, resumed, downgraded, told };
@@ -461,8 +488,10 @@ export async function pausedReplySweep(deps: ReplyDeps, now = Date.now()): Promi
     if (!newest.size) continue;
     for (const [chat, u] of newest) {
       const last = replies[chat];
-      replies[chat] = { u, at: last?.at ?? 0 };
-      if (last && now - last.at < REPLY_EVERY_MS) continue;
+      // Answered lately: these messages are seen, and get no second reply.
+      if (last && now - last.at < REPLY_EVERY_MS) { replies[chat] = { u, at: last.at }; continue; }
+      // Otherwise they count as answered only once the reply went out: a failed
+      // send leaves them new, so the next sweep tries again (#184).
       try {
         const res = await f(`https://api.telegram.org/bot${token}/sendMessage`, {
           method: 'POST', headers: { 'content-type': 'application/json' },
