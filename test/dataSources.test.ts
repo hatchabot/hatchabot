@@ -8,6 +8,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
+import { scrubRemovedDataSources } from '../src/orchestrator/provision.js';
 
 /**
  * Adding/removing data sources (Slice A: folders, ro/rw). Host-folder mounts are
@@ -281,5 +282,67 @@ describe('PATCH /v1/agents/:id/data-sources/:dsId (change access)', () => {
     expect((await patch(f, id, { access: 'sideways' })).statusCode).toBe(400);
     expect((await patch(f, 'nope', { access: 'rw' })).statusCode).toBe(404);
     expect((await patch(f, id, { access: 'rw' }, 'other-user')).statusCode).toBe(404);
+  });
+});
+
+describe('a removed repo source whose key could not be scrubbed is retried (A054)', () => {
+  async function live() {
+    const w = await world();
+    const provider = new MockProvider();
+    const f = Fastify();
+    await registerRoutes(f, { store: w.store, secrets: w.secrets, providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'kitchen', workspace: { files: {}, configPatch: { agentId: 'kitchen', authMode: 'api-key' } }, env: {} } as any);
+    w.store.setAgentRuntimeRef('a1', runtimeRef);
+    const added = (await addSource(f, { kind: 'git', access: 'ro', repoUrl: 'git@example.org:example-owner/recipes.git' })).json();
+    const src = w.store.listDataSources('a1')[0]!;
+    return { ...w, f, provider, runtimeRef, id: added.dataSources[0].id as string, ref: src.secretRef! };
+  }
+  const del = (f: any, id: string) => f.inject({ method: 'DELETE', url: `/v1/agents/a1/data-sources/${id}`, headers: as });
+
+  it('a failed scrub on the volume stays recorded, the answer says so, and the next start or rebuild finishes it', async () => {
+    const w = await live();
+    w.provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'container is restarting' });
+    const res = await del(w.f, w.id);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().removedKey).toEqual({ repo: 'git@example.org:example-owner/recipes.git', scrubbed: false });
+    expect(w.secrets.map.has(w.ref)).toBe(false);
+    expect(w.store.dataSourceRemovals('a1')).toMatchObject([{ id: w.id, mountName: 'recipes', secretRef: null }]);
+    // What provisioning and a start or wake run:
+    w.provider.execResponses.delete('sh');
+    const mark = w.provider.execLog.length;
+    expect(await scrubRemovedDataSources({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.runtimeRef, true)).toBe(true);
+    expect(w.provider.execLog.slice(mark).some((c) => c[0] === 'sh' && c[1]!.includes('rm -f /home/node/.openclaw/.ssh/recipes_deploy'))).toBe(true);
+    expect(w.store.dataSourceRemovals('a1')).toEqual([]);
+  });
+
+  it('a secret store that fails the delete keeps the key ref for the retry', async () => {
+    const w = await live();
+    const realDelete = w.secrets.delete.bind(w.secrets);
+    w.secrets.delete = async () => { throw new Error('database is locked'); };
+    expect((await del(w.f, w.id)).json().removedKey.scrubbed).toBe(false);
+    expect(w.secrets.map.has(w.ref)).toBe(true);
+    expect(w.store.dataSourceRemovals('a1')).toMatchObject([{ secretRef: w.ref, mountName: null }]);
+    w.secrets.delete = realDelete;
+    expect(await scrubRemovedDataSources({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.runtimeRef, true)).toBe(true);
+    expect(w.secrets.map.has(w.ref)).toBe(false);
+  });
+
+  it('a source added again under the same name keeps its new key: the retry does not remove it', async () => {
+    const w = await live();
+    w.provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'busy' });
+    await del(w.f, w.id);
+    w.provider.execResponses.delete('sh');
+    await addSource(w.f, { kind: 'git', access: 'ro', repoUrl: 'git@example.org:example-owner/recipes.git' });
+    const mark = w.provider.execLog.length;
+    expect(await scrubRemovedDataSources({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.runtimeRef, true)).toBe(true);
+    expect(w.provider.execLog.slice(mark).some((c) => String(c[1] ?? '').includes('recipes_deploy'))).toBe(false);
+  });
+
+  it('on a stopped agent the scrub runs on its volume', async () => {
+    const w = await live();
+    w.store.setAgentState('a1', 'STOPPED');
+    const res = await del(w.f, w.id);
+    expect(res.json().removedKey.scrubbed).toBe(true);
+    expect(w.provider.execLog.some((c) => c[0] === 'sh-volume' && c[1]!.includes('recipes_deploy'))).toBe(true);
   });
 });

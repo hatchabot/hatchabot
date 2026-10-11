@@ -504,6 +504,14 @@ export class Store {
         host_path TEXT, repo_url TEXT, secret_ref TEXT, pub_key TEXT,
         created_at TEXT NOT NULL
       );
+      -- A removed repo source's credentials still to scrub: the deploy key
+      -- on the volume (mount_name, NULL once gone) and its private half in
+      -- the secret store (secret_ref, NULL once gone). Kept until both are
+      -- confirmed gone; retried at start, wake and rebuild.
+      CREATE TABLE IF NOT EXISTS data_source_removals (
+        id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
+        mount_name TEXT, secret_ref TEXT, created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS agent_env (
         id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
         name TEXT NOT NULL, secret_ref TEXT NOT NULL,
@@ -1242,7 +1250,7 @@ export class Store {
     // kept counting a deleted agent for days), claim windows (they carry an
     // invitee's @handle) and the lost-context note. Tables that may not exist
     // yet on an old database are skipped.
-    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset', 'connection_removals', 'access_checks'] as const) {
+    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset', 'connection_removals', 'access_checks', 'data_source_removals'] as const) {
       try { this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId); }
       catch (err) { if (!/no such table/.test(String(err))) throw err; }
     }
@@ -3472,6 +3480,26 @@ export class Store {
         .prepare(`UPDATE data_sources SET access = ? WHERE agent_id = ? AND id = ?`)
         .run(access, agentId, id).changes > 0
     );
+  }
+
+  /** Record what removing a repo source must still scrub, BEFORE its row goes. */
+  addDataSourceRemoval(r: { id: string; agentId: string; mountName?: string | null; secretRef?: string | null }): void {
+    if (!r.mountName && !r.secretRef) return;
+    this.db
+      .prepare(`INSERT OR REPLACE INTO data_source_removals (id, agent_id, mount_name, secret_ref, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(r.id, r.agentId, r.mountName ?? null, r.secretRef ?? null, new Date().toISOString());
+  }
+
+  dataSourceRemovals(agentId: string): Array<{ id: string; mountName: string | null; secretRef: string | null; since: string }> {
+    return (this.db.prepare(`SELECT * FROM data_source_removals WHERE agent_id = ? ORDER BY created_at`).all(agentId) as any[])
+      .map((r) => ({ id: r.id, mountName: r.mount_name ?? null, secretRef: r.secret_ref ?? null, since: r.created_at }));
+  }
+
+  /** One half confirmed gone; the record goes when both are. */
+  settleDataSourceRemoval(id: string, done: { volume?: boolean; secret?: boolean }): void {
+    if (done.volume) this.db.prepare(`UPDATE data_source_removals SET mount_name = NULL WHERE id = ?`).run(id);
+    if (done.secret) this.db.prepare(`UPDATE data_source_removals SET secret_ref = NULL WHERE id = ?`).run(id);
+    this.db.prepare(`DELETE FROM data_source_removals WHERE id = ? AND mount_name IS NULL AND secret_ref IS NULL`).run(id);
   }
 
   deleteDataSource(agentId: string, id: string): boolean {

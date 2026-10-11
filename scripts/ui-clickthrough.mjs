@@ -3074,6 +3074,25 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/agents/a1/connections'];
       }
     },
+    // Removing a repo source says to delete its deploy key on the repo's host too, and when the key is still on the agent.
+    removeRepoSource: async () => {
+      const prev = editAgentId, prevData = editData;
+      const key = 'DELETE /v1/agents/a1/data-sources/ds1';
+      try {
+        editAgentId = 'a1';
+        editData = [{ id: 'ds1', kind: 'git', mountName: 'recipes', access: 'ro' }];
+        window.__answer = window.__answer || {};
+        window.__answer[key] = [{ status: 200, body: { dataSources: [], removedKey: { repo: 'git@example.org:example-owner/recipes.git', scrubbed: false } } }];
+        window.__confirmAnswer = true;
+        await removeDataSource('ds1');
+        const said = document.getElementById('toast').textContent;
+        ok('it says to delete the key on the host: ' + said, said.includes('Deploy keys'));
+        ok('and that taking it off the agent is retried', said.includes('retried at its next start'));
+      } finally {
+        editAgentId = prev; editData = prevData;
+        if (window.__answer) delete window.__answer[key];
+      }
+    },
     // The tooltip's three parts (2026-10-07): doing / cost and spending alarm / runtime (version, uptime, restarts).
     tooltipParts: async () => {
       const month = new Date().toISOString().slice(0, 7);

@@ -61,6 +61,7 @@ import {
   runProvisionSteps,
   syncDataSourceDocs,
   syncGitDataSources,
+  scrubRemovedDataSources,
   skipPoolOnce,
   slugify,
   MEDIA_KEY_REF,
@@ -2981,6 +2982,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Then what it can reach is looked at afresh (access overview): its
     // last-verified times move on every start and wake, not only on Verify now.
     const ref = a.runtimeRef;
+    // A removed repo source whose deploy key could not be scrubbed yet: again now.
+    if (store.dataSourceRemovals(a.id).length) {
+      void scrubRemovedDataSources({ store, secrets, provider: providerFor(a.hostId) }, a.id, ref, true, trace(a.id)).catch(() => {});
+    }
     const verifyLater = () => verifyAgentAccess(connSyncDeps(a.hostId), a.id, ref).then(() => undefined, () => undefined);
     if (store.listConnections(a.ownerId).length || store.connectionRemovals(a.id).length) {
       void syncConnections(connSyncDeps(a.hostId), a.id, ref).catch((err: unknown) => trace(a.id)('connection.sync_failed', { error: String(err).slice(0, 200) }))
@@ -7334,22 +7339,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       const src = store.getDataSource(agent.id, req.params.dsId);
       if (!src) return reply.code(404).send({ error: 'No such data source.' });
-      store.deleteDataSource(agent.id, req.params.dsId);
       // Drop the deploy key's private half too — in the store AND on the
-      // volume: the key file and the clone's ssh config let the agent keep
-      // pulling and pushing after "stop sharing" (use-case walk-through,
-      // 2026-09-27). The clone's files stay, as a folder it has.
-      if (src.secretRef) await secrets.delete(src.secretRef).catch(() => {});
-      if (src.kind === 'git' && src.mountName && agent.runtimeRef && /^[A-Za-z0-9._-]+$/.test(src.mountName)) {
-        const base = '/home/node/.openclaw';
-        const script = `rm -f ${base}/.ssh/${src.mountName}_deploy; [ -d ${base}/${src.mountName}/.git ] && git -C ${base}/${src.mountName} config --unset core.sshCommand; true`;
-        const prov = providerFor(agent.hostId);
-        const res = agent.state === 'RUNNING'
-          ? await prov.execShell(agent.runtimeRef, script).catch(() => undefined)
-          : await prov.execShellOnVolume(agent.runtimeRef, script).catch(() => undefined);
-        if (res?.code !== 0) trace(agent.id)('datasource.key_left', { name: src.mountName });
-      }
-      return publicAgent(store.getAgent(agent.id)!);
+      // volume (the clone's files stay, as a folder it has). What that takes
+      // is recorded BEFORE the row goes, so a failed scrub is retried at the
+      // next start, wake or rebuild instead of only traced, with the key
+      // still usable and nothing left that named it.
+      const deployKey = src.kind === 'git' && !!src.secretRef;
+      if (deployKey) store.addDataSourceRemoval({ id: src.id, agentId: agent.id, mountName: src.mountName, secretRef: src.secretRef });
+      store.deleteDataSource(agent.id, req.params.dsId);
+      const done = deployKey
+        ? await scrubRemovedDataSources({ store, secrets, provider: providerFor(agent.hostId) }, agent.id, agent.runtimeRef, agent.state === 'RUNNING', trace(agent.id))
+        : true;
+      return {
+        ...publicAgent(store.getAgent(agent.id)!),
+        // A copy of the key can outlive anything done here (the git host
+        // still trusts it): the page says to delete it there too.
+        ...(deployKey ? { removedKey: { repo: src.repoUrl, scrubbed: done } } : {}),
+      };
     },
   );
 

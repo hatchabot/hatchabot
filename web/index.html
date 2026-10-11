@@ -7955,7 +7955,12 @@ async function removeDataSource(id) {
       updated = await api(`/v1/agents/${editAgentId}/data-sources/${id}`, { method: 'DELETE' });
     }
     renderDataList(updated.dataSources);
-    toast('Removed — Rebuild to apply it');
+    // Hatchabot deletes its copies of a deploy key, but the repo's host still
+    // trusts the key until it is deleted there too.
+    const rk = updated.removedKey;
+    toast(rk
+      ? `Removed. Also delete its deploy key on the repo's host (the repo's settings → Deploy keys)${rk.scrubbed ? '' : '. The key could not be taken off the agent just now: that is retried at its next start'}. Rebuild to apply the rest.`
+      : 'Removed — Rebuild to apply it', rk ? 15000 : undefined);
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }
 }
