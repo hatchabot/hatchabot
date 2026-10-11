@@ -1373,6 +1373,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/migrate.ts` — `versionBehind`
 
+### A new runner never connects ("Permission denied (publickey)") when your home folder's name has a space
+- **Check:** in `~/.ssh/config`, the block under `# agentclaw-runner: <host>` has an `IdentityFile` line whose path has a space and no quotes around it.
+- **Cause:** ssh reads an unquoted space as the end of the value, so it looked for a key file that does not exist.
+- **Fix:** upgrade, delete that marked block from `~/.ssh/config` (a block already there is never rewritten), then remove the runner and add it again. Or put the path in double quotes by hand.
+- **Fixed in:** `v2.160.0` (#153)
+- **Code:** `src/orchestrator/runnerSetup.ts` — `sshConfigPath`, `ensureSshConfigBlock`
+
 ## Backups and restore
 
 ### `hatchabot doctor`: "No backup set in … yet", "Last backup set is N days old", or "… is incomplete"
