@@ -991,6 +991,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/transcript.ts` — `recoverContext`
 
+### Activity, or an agent's tile, shows a conversation with no last line, and it stays blank until someone writes again
+- **Check:** the agent's conversation has messages (open its console), but its row in Activity has no preview; the agent's database was busy or being repaired around the time it last moved.
+- **Cause:** a preview read that failed (a busy or damaged database, an unreadable sessions file) was recorded as a conversation with nothing to show, so it was not read again until the conversation next moved.
+- **Fix:** upgrade: a failed read is read again on the next poll. On an older version the preview comes back with the next message in that conversation.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/recent.ts` — `RECENT_SCRIPT`, `parseRecentFailed`, `RecentTracker`
+
 ### Every agent's memory search is refused ("unauthorized") until a rebuild
 - **Check:** `docker logs <prefix>-embed-door` shows no successful calls since a moment the keys file was being rewritten, and the agents' memory search answers 401; `embed-keys.json` in the data directory's `embed/` folder is valid JSON with their keys.
 - **Cause:** the memory search door rereads its keys file when its time stamp changes. One read that failed (a file caught mid-write, a moment it could not be read) left it with no keys, and it would not read the same file again until the file next changed — usually the next agent rebuild.

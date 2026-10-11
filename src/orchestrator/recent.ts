@@ -58,7 +58,7 @@ export interface RecentRecord {
  * (only its tail is read). The inbound context OpenClaw puts above a channel
  * message (`Conversation info ⟦openclaw:ctx⟧` and friends) is taken off here,
  * keeping the sender's id and name from it; everything else about the text is
- * cleaned by `cleanPreview` on this side. Prints `{"v":1,"s":{key:{…}}}`.
+ * cleaned by `cleanPreview` on this side. Prints `{"v":1,"s":{key:{…}},"f":[keys it could not read]}`.
  */
 export const RECENT_SCRIPT = String.raw`
 // hatchabot-recent
@@ -122,10 +122,13 @@ const usable = (m) => {
 let sqlite = null; try { sqlite = require("node:sqlite"); } catch {}
 const dbf = path.join(root, "agent", "openclaw-agent.sqlite");
 const jsonf = path.join(root, "sessions", "sessions.json");
-let db = null, store = null;
-if (fs.existsSync(jsonf)) { try { store = JSON.parse(fs.readFileSync(jsonf, "utf8")); } catch {} }
-else if (sqlite && fs.existsSync(dbf)) {
-  try { db = new sqlite.DatabaseSync(dbf, { readOnly: true }); try { db.exec("PRAGMA busy_timeout = 2000"); } catch {} } catch { db = null; }
+// A key whose read failed is listed in "f", not left out of "s": left out
+// reads as "nothing to show" and is never read again until it moves (#143).
+let db = null, store = null, unreadable = false;
+if (fs.existsSync(jsonf)) { try { store = JSON.parse(fs.readFileSync(jsonf, "utf8")); } catch { unreadable = true; } }
+else if (fs.existsSync(dbf)) {
+  if (!sqlite) unreadable = true;
+  else try { db = new sqlite.DatabaseSync(dbf, { readOnly: true }); try { db.exec("PRAGMA busy_timeout = 2000"); } catch {} } catch { unreadable = true; }
 }
 const decode = (r) => {
   if (r.event_json != null) return parse(r.event_json);
@@ -135,12 +138,13 @@ const decode = (r) => {
 function eventsOf(key) {
   // [newest-first tail, oldest-first head]
   if (db) {
-    let sid = null;
-    try { const r = db.prepare("SELECT current_session_id FROM session_nodes WHERE session_key = ?").get(key); sid = r && r.current_session_id; } catch {}
-    if (!sid) { try { const r = db.prepare("SELECT session_id FROM session_windows WHERE session_key = ? ORDER BY updated_at DESC LIMIT 1").get(key); sid = r && r.session_id; } catch {} }
+    let sid = null, err = null;
+    try { const r = db.prepare("SELECT current_session_id FROM session_nodes WHERE session_key = ?").get(key); sid = r && r.current_session_id; } catch (e) { err = e; }
+    if (!sid) { try { const r = db.prepare("SELECT session_id FROM session_windows WHERE session_key = ? ORDER BY updated_at DESC LIMIT 1").get(key); sid = r && r.session_id; err = null; } catch (e) { err = err || e; } }
+    if (err) throw err; // neither table answered (a lock, a damaged file): not "no conversation"
     if (!sid) return [[], []];
-    let tail = [], head = [];
-    try { tail = db.prepare("SELECT event_json, event_zstd FROM transcript_events WHERE session_id = ? ORDER BY seq DESC LIMIT 60").all(sid).map(decode); } catch {}
+    let head = [];
+    const tail = db.prepare("SELECT event_json, event_zstd FROM transcript_events WHERE session_id = ? ORDER BY seq DESC LIMIT 60").all(sid).map(decode);
     if (key.indexOf(":cron:") >= 0) { try { head = db.prepare("SELECT event_json, event_zstd FROM transcript_events WHERE session_id = ? ORDER BY seq ASC LIMIT 6").all(sid).map(decode); } catch {} }
     return [tail, head];
   }
@@ -148,7 +152,7 @@ function eventsOf(key) {
   const sid = e && e.sessionId;
   if (!sid || !/^[A-Za-z0-9-]+$/.test(sid)) return [[], []];
   const f = path.join(root, "sessions", sid + ".jsonl");
-  let fd; try { fd = fs.openSync(f, "r"); } catch { return [[], []]; }
+  let fd; try { fd = fs.openSync(f, "r"); } catch (e) { if (e && e.code === "ENOENT") return [[], []]; throw e; }
   try {
     const size = fs.fstatSync(fd).size;
     const read = (from, n) => { const b = Buffer.alloc(n); const got = fs.readSync(fd, b, 0, n, from); return b.subarray(0, got).toString("utf8"); };
@@ -160,8 +164,9 @@ function eventsOf(key) {
     return [tail, head];
   } finally { try { fs.closeSync(fd); } catch {} }
 }
-const out = {};
+const out = {}, failed = [];
 for (const key of keys) {
+  if (unreadable) { failed.push(key); continue; }
   try {
     const [tail, head] = eventsOf(key);
     let last = null, lastUserRaw = null;
@@ -188,10 +193,10 @@ for (const key of keys) {
     if (u.sender && u.sender.name) o.senderName = String(u.sender.name).slice(0, 64);
     if (task) o.task = task.slice(0, 80);
     out[key] = o;
-  } catch {}
+  } catch { failed.push(key); }
 }
 try { if (db) db.close(); } catch {}
-process.stdout.write(JSON.stringify({ v: 1, s: out }));
+process.stdout.write(JSON.stringify({ v: 1, s: out, f: failed }));
 `;
 
 /** The shell that runs RECENT_SCRIPT for these conversations. Keys travel base64, so nothing in them reaches the shell. */
@@ -200,6 +205,14 @@ export function recentReadShell(slug: string, keys: string[]): string {
   const s64 = Buffer.from(RECENT_SCRIPT, 'utf8').toString('base64');
   const k64 = Buffer.from(JSON.stringify(keys.slice(0, READ_SESSIONS)), 'utf8').toString('base64');
   return `SLUG='${slug}' KEYS_B64='${k64}' node -e "eval(Buffer.from('${s64}','base64').toString('utf8'))" 2>/dev/null || true`;
+}
+
+/** The conversations RECENT_SCRIPT could not read (its "f"): not to be marked read. */
+export function parseRecentFailed(stdout: string): Set<string> {
+  let j: unknown;
+  try { j = JSON.parse(stdout); } catch { return new Set(); }
+  const f = (j as { f?: unknown })?.f;
+  return new Set(Array.isArray(f) ? f.filter((k): k is string => typeof k === 'string') : []);
 }
 
 /** What RECENT_SCRIPT printed, checked field by field (it reads the agent's own files: not trusted). */
@@ -475,7 +488,9 @@ export class RecentTracker {
       const res = await this.deps.exec(agent.id, recentReadShell(agent.slug, keys));
       // No answer from the script (node missing, a crash): nothing is marked read, the next poll tries again.
       if (res.code !== 0 || !/^\{"v":1,/.test(res.stdout.trim())) return;
-      this.deps.set(agent.id, mergeRecent(this.record(agent.id), s, parseRecentRead(res.stdout), keys, now));
+      // Nor is a conversation the script could not read (#143).
+      const failed = parseRecentFailed(res.stdout);
+      this.deps.set(agent.id, mergeRecent(this.record(agent.id), s, parseRecentRead(res.stdout), keys.filter((k) => !failed.has(k)), now));
     } catch {
       /* a container hiccup: the next poll tries again */
     } finally {
