@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.161.0] — 2026-10-11
+
+### Changed
+- **The runtime image is built on OpenClaw 2026.9.8** (it was 2026.9.6). This release carries nothing else. 2026.9.8 has been the default on the maintainer's machine since 2026-10-07 and passed every live test there, including the candidate gate. Installing or upgrading to this release gets the 2026.9.8 image; an agent moves onto it at its next rebuild. Claude Opus 5.5 on a Claude subscription needs OpenClaw 2026.9.7 or later, so agents on this image can use it.
+
 ## [2.160.4] — 2026-10-11
 
 ### Fixed
