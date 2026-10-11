@@ -98,6 +98,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'files.cap_failed': (d) => `could not set its ${String(d.kind ?? '')} file limit: ${String(d.error ?? '')}`.trim(),
   'hibernate.token_refused': 'Telegram refused its bot token, so a message cannot wake it — check the bot under Settings',
   'runtime.pins_cleared': (d) => `${Array.isArray(d.sessions) ? d.sessions.length : 'some'} of its conversations were still pinned to the old ${String(d.runtime ?? '')} runtime; now on the configured one`,
+  'runtime.pin_check_skipped': 'its config could not be read, so no conversation pin was cleared (looked at again at its next start)',
   'runtime.pin_failed': (d) => `could not clear a stale runtime pin${d.session ? ` on ${String(d.session)}` : ''}: ${String(d.error ?? '')}`.trim(),
   'channel.rooms': (d) => `${String(d.kind ?? 'channel')} group chats: ${d.mode === 'room' ? 'one room' : 'off'}`,
   'channel.skipped': 'a messaging channel was skipped (not on this image)',
