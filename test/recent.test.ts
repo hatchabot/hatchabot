@@ -120,6 +120,25 @@ describe('the in-container reader', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('a read that fails names the conversation as failed, not as empty (#143)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-recent-fail-'));
+    const raw = (keys: string[]) => JSON.parse(execFileSync('sh', ['-c', recentReadShell('kitchen', keys)], { env: { ...process.env, AGENTS_DIR: root }, encoding: 'utf8' }));
+    try {
+      mkdirSync(join(root, 'kitchen', 'agent'), { recursive: true });
+      // A database whose transcript table cannot be read (here: not there).
+      const db = new Database(join(root, 'kitchen', 'agent', 'openclaw-agent.sqlite'));
+      db.exec(`CREATE TABLE session_nodes (session_key TEXT PRIMARY KEY, current_session_id TEXT NOT NULL, entry_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE session_windows (session_id TEXT PRIMARY KEY, session_key TEXT NOT NULL, updated_at INTEGER);`);
+      db.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?)').run('agent:kitchen:main', 'w1', '{}', NOW);
+      db.close();
+      expect(raw(['agent:kitchen:main', 'agent:kitchen:never'])).toEqual({ v: 1, s: {}, f: ['agent:kitchen:main'] });
+      // 2026.7: a sessions list that does not parse fails every key.
+      mkdirSync(join(root, 'kitchen', 'sessions'));
+      writeFileSync(join(root, 'kitchen', 'sessions', 'sessions.json'), '{"agent:kitchen:main": {');
+      expect(raw(['agent:kitchen:main'])).toEqual({ v: 1, s: {}, f: ['agent:kitchen:main'] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('the shell carries the keys base64, never in the clear', () => {
     const sh = recentReadShell('kitchen', ["agent:kitchen:x'; rm -rf /"]);
     expect(sh).not.toContain('rm -rf');
@@ -215,7 +234,7 @@ describe('what each person is shown', () => {
 describe('the tracker', () => {
   const make = (stdout: string) => {
     const db = new Map<string, unknown>();
-    const exec = vi.fn(async () => ({ code: 0, stdout }));
+    const exec = vi.fn(async (_id: string, _script: string) => ({ code: 0, stdout }));
     const t = new RecentTracker({ get: (id) => db.get(id), set: (id, r) => db.set(id, r), exec, now: () => NOW });
     return { t, db, exec };
   };
@@ -234,5 +253,15 @@ describe('the tracker', () => {
     expect(t.record('a1')).toBeUndefined();
     await t.note({ id: 'a1', slug: 'k' }, { 'agent:k:main': { updatedAt: NOW - MIN } });
     expect(exec).toHaveBeenCalledTimes(2);
+  });
+  it('a conversation the script could not read is read again on the next poll; one with nothing to show is not (#143)', async () => {
+    const { t, exec } = make(JSON.stringify({ v: 1, s: {}, f: ['agent:k:main'] }));
+    const s = { 'agent:k:main': { updatedAt: NOW - MIN }, 'agent:k:quiet': { updatedAt: NOW - 2 * MIN } };
+    await t.note({ id: 'a1', slug: 'k' }, s);
+    expect(t.record('a1')?.sessions['agent:k:main']).toBeUndefined();
+    expect(t.record('a1')?.sessions['agent:k:quiet']).toMatchObject({ text: '' });
+    await t.note({ id: 'a1', slug: 'k' }, s);
+    expect(exec).toHaveBeenCalledTimes(2);
+    expect(exec.mock.calls[1]![1]).toContain(Buffer.from(JSON.stringify(['agent:k:main'])).toString('base64'));
   });
 });
