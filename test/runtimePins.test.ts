@@ -66,6 +66,21 @@ describe('stale runtime pins', () => {
     expect(w.provider.execLog.map((argv) => argv.slice(0, 2).join(' '))).toEqual(['gateway call']);
   });
 
+  it('a config that cannot be read clears nothing: a valid claude-cli pin is not taken for stale (#72)', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { slug: 'cli' });
+    const a = w.store.getAgent(id)!;
+    w.provider.execResponses.set('gateway call sessions.list', listing([{ key: 'agent:cli:main', agentRuntime: rt('claude-cli') }]));
+    w.provider.execResponses.set('gateway call sessions.patch', { code: 0, stdout: JSON.stringify({ ok: true }), stderr: '' });
+    for (const unread of [{ code: 1, stdout: '', stderr: 'gateway timeout' }, { code: 0, stdout: '{"anthropic/claude-opus-4-8": {"agentRun', stderr: '' }]) {
+      w.provider.execResponses.set('config get agents.defaults.models', unread);
+      const events: string[] = [];
+      expect(await clearStaleRuntimePins(w.provider, a.runtimeRef!, 'cli', (e) => events.push(e))).toEqual([]);
+      expect(events).toEqual(['runtime.pin_check_skipped']);
+    }
+    expect(w.provider.execLog.some((argv) => argv[2] === 'sessions.patch')).toBe(false);
+  });
+
   it('after a start or a wake it waits for the gateway, then clears; a start over the API triggers it', async () => {
     const w = await makeWorld();
     const id = await seedRunningAgent(w, { slug: 'sleepy' });
