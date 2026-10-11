@@ -1939,6 +1939,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/routes.ts` — `'/v1/agents/:id/crons'`
 
+### A one-time task shows just "at" with no time
+- **Check:** `openclaw cron list --json` in the agent gives the task's `schedule.at` as a date string, not a number; often a task brought in from another OpenClaw.
+- **Cause:** only a time in milliseconds was read; a date string was dropped.
+- **Fix:** upgrade: both are read, and the task shows "once at" its time.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/crons.ts` — `atMsOf`
+
 ## Tailscale and public access
 
 ### The https address the setup guide gave does not open
