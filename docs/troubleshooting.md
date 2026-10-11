@@ -1932,6 +1932,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/template.ts` — `TemplateParamSchema`, `parseTemplate`, `resolveParamValues`
 
+### A task added while the agent was being moved or exported is missing from the moved copy
+- **Check:** the task was added (the Schedule tab, `hatchabot tasks`, or the Hatchabot agent) while a move, export or rebuild of that agent was under way; the agent's timeline has `cron.created` during the operation.
+- **Cause:** adding a task did not wait for the agent's other operations, unlike enabling, editing or deleting one, so it could land in the runtime that was going away.
+- **Fix:** upgrade: adding a task now says "Another operation is already running on this agent" until the operation ends. Add the task again on the copy that carries on.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/crons'`
+
 ## Tailscale and public access
 
 ### The https address the setup guide gave does not open
