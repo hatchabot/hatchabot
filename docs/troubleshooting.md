@@ -155,6 +155,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.159.0` (#47)
 - **Code:** `scripts/promote.sh` — `promote_images`
 
+### A setting saved in the app is gone again, although the save said it worked
+- **Check:** two settings were saved close together (Settings → Hosts → Defaults, rebuild policy, backup drills, public access); `grep HATCHABOT_<NAME> .env` lacks one of them. A leftover `.env.tmp` beside `.env` is a sign of the same race.
+- **Cause:** each save read the whole `.env`, changed its line and renamed a shared `.env.tmp` over the file; two saves at once each wrote their own snapshot, so the later one put back the other's old value (or renamed the other's half-written copy).
+- **Fix:** upgrade, then save the missing setting again. Saves to one `.env` now run one at a time, each through its own staging file; a stale `.env.tmp` can be deleted.
+- **Fixed in:** `v2.160.0` (#160)
+- **Code:** `src/config/envFile.ts` — `withEnvFileLock`, `replaceEnvFile`; `src/ops/tailnet.ts` — `writeEnvVar`, `unsetEnvVar`
+
+### The log says `env.sync_refused` "… has a value on more than one line"
+- **Check:** `.env` has a value in quotes that continues on the next line (`NAME="first` / `second"`) or a line ending in `\`.
+- **Cause:** at each start Hatchabot puts `.env` in order line by line. Before v2.160.0 it moved the continuation line under "Other settings", which changed that value while the tidy reported it safe.
+- **Fix:** nothing is lost: the file is now left exactly as it is. To have it tidied, put the value on one line. If an older release already split one, put its lines back together from the newest `.env.bak-*` copy.
+- **Fixed in:** `v2.160.0` (#79)
+- **Code:** `src/config/envFile.ts` — `multilineSetting`, `syncEnvText`
+
 ## Sign-in and accounts
 
 ### Password mode: requests to the app's address were served without the password

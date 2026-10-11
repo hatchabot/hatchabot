@@ -92,6 +92,25 @@ describe('putting a .env in order', () => {
     expect(activeValues(readFileSync(p, 'utf8'))).toEqual(activeValues(before));
   });
 
+  it('leaves a file alone when a value spans lines, instead of moving its continuation away (#79)', async () => {
+    for (const spread of [
+      ['HATCHABOT_REBUILD_POLICY=auto', 'GREETING="first line', 'second line"', 'HATCHABOT_SESSION_DAYS=7'],
+      ["MOTTO='one", "two'", 'HATCHABOT_SESSION_DAYS=7'],
+      ['PATH_LIST=/opt/a:\\', '/opt/b', 'HATCHABOT_SESSION_DAYS=7'],
+    ]) {
+      const text = spread.join('\n') + '\n';
+      const r = syncEnvText(text);
+      expect(r.ok, spread[0]).toBe(false);
+      expect((r as { error: string }).error).toMatch(/more than one line/);
+      const p = join(mkdtempSync(join(tmpdir(), 'hb-env-')), '.env');
+      writeFileSync(p, text, { mode: 0o600 });
+      expect((await syncEnvFile(p)).changed).toBe(false);
+      expect(readFileSync(p, 'utf8')).toBe(text);
+    }
+    // Quotes closed on their own line, an escaped quote, a commented-out half: still tidied.
+    expect(syncEnvText('A="x \\" y"\nB=\'two words\'\n# C="open\n').ok).toBe(true);
+  });
+
   it('a missing file is left alone, with the reason', async () => {
     const r = await syncEnvFile(join(mkdtempSync(join(tmpdir(), 'hb-env-')), 'nope.env'));
     expect(r.changed).toBe(false);
