@@ -117,6 +117,24 @@ export function gitSyncReason(stderr: string, mode: 'deploy-key' | 'public' = 'd
   return s.split('\n').filter(Boolean).slice(-2).join(' ').slice(0, 200) || 'Clone failed.';
 }
 
+const shq = (v: string) => `'${v.replace(/'/g, "'\\''")}'`;
+
+/**
+ * Removing a git source keeps its clone on the volume, so a source added again
+ * at that mount found a clone already there and skipped cloning: a different
+ * repo kept syncing the old one (#88). A clone of another repository is moved
+ * aside (kept, not deleted: it may hold work), so the new one is cloned fresh.
+ * The same repo by its other address (public https or deploy-key ssh) stays,
+ * and the script repoints its remote.
+ */
+export function retainedCloneCheck(clone: string, url: string): string {
+  const n = normalizeGitUrl(url);
+  const same = [...new Set(n ? [n.sshUrl, n.httpsUrl, n.sshUrl.replace(/\.git$/, ''), n.httpsUrl.replace(/\.git$/, '')] : [url])];
+  return `if [ -d ${shq(clone)}/.git ]; then cur=$(git -C ${shq(clone)} config --get remote.origin.url || true); ` +
+    `case "$cur" in ${same.map(shq).join('|')}) ;; *) aside=${shq(clone)}.replaced-$(date +%Y%m%d%H%M%S); ` +
+    `mv ${shq(clone)} "$aside"; echo "Another repository's clone was here ($cur): kept at $aside" >&2 ;; esac; fi`;
+}
+
 /**
  * The idempotent clone script for a PUBLIC repo: https, no credentials, no ssh
  * setup. Prompts are disabled so a private repo fails fast instead of hanging
@@ -131,7 +149,9 @@ export function buildPublicGitSyncScript(
   const q = (v: string) => `'${v.replace(/'/g, "'\\''")}'`;
   return [
     'set -e',
+    retainedCloneCheck(clone, src.httpsUrl),
     `if [ ! -d ${q(clone)}/.git ]; then GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=https git -c credential.helper= clone --quiet ${q(src.httpsUrl)} ${q(clone)}; fi`,
+    `git -C ${q(clone)} remote set-url origin ${q(src.httpsUrl)}`,
     `git -C ${q(clone)} config remote.origin.pushurl ${q('PUSH-DISABLED-read-only-public-clone')}`,
     `git -C ${q(clone)} config user.name ${q(commit.name)}`,
     `git -C ${q(clone)} config user.email ${q(commit.email)}`,
@@ -161,7 +181,12 @@ export function buildGitSyncScript(
     `mkdir -p ${sshDir} && chmod 700 ${sshDir}`,
     `echo ${q(privKeyB64)} | base64 -d > ${key} && chmod 600 ${key}`,
     `ssh-keyscan -t ed25519,rsa ${q(src.host)} 2>/dev/null | sort -u - ${kh} 2>/dev/null > ${kh}.tmp || ssh-keyscan -t ed25519,rsa ${q(src.host)} > ${kh}.tmp 2>/dev/null; mv ${kh}.tmp ${kh}`,
+    retainedCloneCheck(clone, src.sshUrl),
     `if [ ! -d ${q(clone)}/.git ]; then GIT_SSH_COMMAND=${q(sshCmd)} git clone ${q(src.sshUrl)} ${q(clone)}; fi`,
+    // A clone kept from the public (https) source has that address and a
+    // disabled push URL: both go, or the writable source cannot push (#89).
+    `git -C ${q(clone)} remote set-url origin ${q(src.sshUrl)}`,
+    `git -C ${q(clone)} config --unset-all remote.origin.pushurl || true`,
     `git -C ${q(clone)} config core.sshCommand ${q(sshCmd)}`,
     `git -C ${q(clone)} config user.name ${q(commit.name)}`,
     `git -C ${q(clone)} config user.email ${q(commit.email)}`,

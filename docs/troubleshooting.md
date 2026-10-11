@@ -667,6 +667,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `web/index.html` — `appGo`
 
+### A git data source added again still holds the old repo, or a writable one cannot push ("PUSH-DISABLED-read-only-public-clone")
+- **Check:** in the agent, `git -C ~/.openclaw/<mount> remote -v` shows another repo than the source's card, or a push URL of `PUSH-DISABLED-read-only-public-clone` for a source added with a deploy key.
+- **Cause:** removing a git source keeps its clone on the volume. A source added again at the same mount found that clone and skipped cloning, keeping its old address and, from a public source, its disabled push URL.
+- **Fix:** upgrade and rebuild the agent. A clone of the same repo is repointed (and can push again with a deploy key); a clone of another repo is moved aside to `<mount>.replaced-<time>` (its files are kept) and the new repo cloned.
+- **Fixed in:** `v2.160.0` (#88, #89)
+- **Code:** `src/orchestrator/gitSource.ts` — `retainedCloneCheck`, `buildGitSyncScript`, `buildPublicGitSyncScript`
+
 ### A failed app install or update shows no test output
 - **Check:** the error says the tests failed, but no output appears under it.
 - **Cause:** `api()` dropped the server's `test.output`.
