@@ -341,6 +341,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/sourceUsage.ts` — `summarizeSourceUsage`; `src/store/store.ts` — `lastOkOn`
 
+### A save was refused, but part of it changed anyway (an AI source's model, the manager's file limit)
+- **Check:** the save answered with an error (for example "Only an Anthropic source can back the management assistant", "can't be shared", "Only the server owner sets the default AI source", or "The manager has no browser"), yet the AI source's default model, or the manager's file-size limit sent with it, changed.
+- **Cause:** those checks ran after the first fields of the request had been saved.
+- **Fix:** upgrade: a refused save changes nothing. Put the field back by hand if it changed, then save the parts that are allowed on their own.
+- **Fixed in:** `v2.160.0` (#56, #57)
+- **Code:** `src/api/routes.ts` — `'/v1/ai-profiles/:id'`, `'/v1/agents/:id'`
+
 ## Telegram, Discord and Slack
 
 ### Discord or Slack ended up connected to a different agent than the one the sheet named
