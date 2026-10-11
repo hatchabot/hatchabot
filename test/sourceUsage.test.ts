@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { parseModelCalls, sampleSourceUsage, summarizeSourceUsage } from '../src/orchestrator/sourceUsage.js';
+import { logKey, parseModelCalls, sampleAgentUsage, sampleSourceUsage, summarizeSourceUsage } from '../src/orchestrator/sourceUsage.js';
 import { totalOf } from './helpers/usageFake.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
@@ -21,9 +21,52 @@ describe('parseModelCalls', () => {
       '2026-09-10T15:48:58.357980776Z [telegram] embedded run agent end: … error=⚠️ API rate limit reached.',
     ].join('\n');
     expect(parseModelCalls(text)).toEqual([
-      { at: '2026-09-10T15:48:58.345Z', provider: 'anthropic', model: 'claude-opus-4-8', status: 429 },
-      { at: '2026-09-15T17:54:56.414Z', provider: 'anthropic', model: 'claude-sonnet-5', status: 200 },
+      { at: '2026-09-10T15:48:58.345Z', key: '2026-09-10T15:48:58.345060357Z', provider: 'anthropic', model: 'claude-opus-4-8', status: 429 },
+      { at: '2026-09-15T17:54:56.414Z', key: '2026-09-15T17:54:56.414290103Z', provider: 'anthropic', model: 'claude-sonnet-5', status: 200 },
     ]);
+  });
+});
+
+describe('the log cursor, and samples that overlap (#107, #108, #109)', () => {
+  const T = '2026-09-15T15:48:58';
+  const lines = (...ns: string[]) => ns.map((n) => line(`${T}.${n}Z`, 503)).join('\n');
+  const failedIn = (store: Store, agentId: string) => store.modelCallHoursForAgents(new Set([agentId]), '2026-09-15T15').reduce((s, h) => s + h.failed, 0);
+
+  it('a later line in the millisecond the cursor stopped at is still counted (#108)', async () => {
+    const { store, provider } = await world();
+    const deps = { store, providerFor: () => provider };
+    const a = store.getAgent('a')!;
+    provider.modelCallLines = lines('345060357');
+    await sampleAgentUsage(deps, a, Date.parse('2026-09-15T16:00:00Z'));
+    expect(store.usageCursor('a')!.lastTs).toBe(`${T}.345060357Z`);
+    // docker's next read (from the cursor) has that line and a later one in the same millisecond.
+    provider.modelCallLines = lines('345060357', '345900001');
+    await sampleAgentUsage(deps, a, Date.parse('2026-09-15T16:10:00Z'));
+    expect(failedIn(store, 'a')).toBe(2);
+    // A cursor stored before (milliseconds only) still covers its whole millisecond.
+    expect(logKey(`${T}.345Z`)).toBe(`${T}.345999999Z`);
+    expect(logKey(`${T}.3Z`)).toBe(`${T}.300000000Z`);
+  });
+
+  it('two samples of one agent at once count its calls once (#109)', async () => {
+    const { store, provider } = await world();
+    const deps = { store, providerFor: () => provider };
+    const a = store.getAgent('a')!;
+    provider.modelCallLines = lines('100000000', '200000000', '300000000');
+    const now = Date.parse('2026-09-15T16:00:00Z');
+    await Promise.all([sampleAgentUsage(deps, a, now), sampleAgentUsage(deps, a, now)]);
+    expect(failedIn(store, 'a')).toBe(3);
+  });
+
+  it('calls made while a saved source switch waits for its rebuild are the running source\'s (#107)', async () => {
+    const { store, provider } = await world();
+    store.insertAIProfile({ id: 'key2', ownerId: OWNER, name: 'API key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/key2', createdAt: 'now' } as any);
+    store.setAgentApplied('a', 'max', 'claude-opus-4-8');
+    store.setAgentAIProfile('a', 'key2'); // saved, not yet rebuilt
+    provider.modelCallLines = lines('100000000');
+    await sampleAgentUsage({ store, providerFor: () => provider }, store.getAgent('a')!, Date.parse('2026-09-15T16:00:00Z'));
+    expect(store.modelCallHoursFor('max', '2026-09-15T15').map((h) => [h.agentId, h.failed])).toEqual([['a', 1]]);
+    expect(store.modelCallHoursFor('key2', '2026-09-15T15')).toEqual([]);
   });
 });
 

@@ -19,7 +19,25 @@ import { parseLoopLines } from './loopLines.js';
  * The windows match how Claude plans are limited: the last 5 hours and 7 days.
  */
 
-export interface ModelCall { at: string; provider: string; model: string; status: number }
+export interface ModelCall {
+  /** Milliseconds, for the hour and slot buckets. */
+  at: string;
+  /** docker's full stamp, nine fraction digits: the read cursor (#108). */
+  key: string;
+  provider: string; model: string; status: number;
+}
+
+/**
+ * A stamp as a cursor that sorts as text: the fraction padded to nine digits
+ * (docker trims trailing zeros). A cursor stored with milliseconds only (before
+ * v2.160.0) stands for the whole of its millisecond, as it was read then.
+ */
+export function logKey(iso: string): string {
+  const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/.exec(iso);
+  if (!m) return new Date(iso).toISOString().replace('Z', '000000Z');
+  const frac = m[2] ?? '';
+  return `${m[1]}.${frac.length === 3 ? `${frac}999999` : frac.padEnd(9, '0').slice(0, 9)}Z`;
+}
 
 // docker logs --timestamps prefixes each line with its RFC3339 time; OpenClaw's
 // line then reads "[provider-transport-fetch] [model-fetch] response provider=…
@@ -31,9 +49,11 @@ export function parseModelCalls(text: string): ModelCall[] {
   for (const line of text.split('\n')) {
     const m = CALL_RE.exec(line);
     if (!m) continue;
-    // Normalise docker's nanosecond stamp to milliseconds so string order = time order.
+    // Buckets take milliseconds; the cursor keeps docker's nanoseconds, or a
+    // later line in the cursor's millisecond was skipped for good (#108).
     const at = new Date(m[1]!).toISOString();
-    out.push({ at, provider: m[2]!, model: m[3] ?? '', status: Number(m[4]) });
+    const frac = /\.(\d+)Z$/.exec(m[1]!)?.[1] ?? '';
+    out.push({ at, key: `${m[1]!.replace(/(\.\d+)?Z$/, '')}.${frac.padEnd(9, '0').slice(0, 9)}Z`, provider: m[2]!, model: m[3] ?? '', status: Number(m[4]) });
   }
   return out;
 }
@@ -66,7 +86,22 @@ export interface SampleDeps {
  * lost at every rebuild (night review, 2026-09-27).
  */
 export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.now()): Promise<{ calls: number; limited: number }> {
+  // One sample of an agent at a time: the timer's and a rebuild's checkpoint
+  // both read the same cursor and both counted the same failed calls (#109).
+  const inFlight = sampling.get(deps.store) ?? new Map<string, Promise<unknown>>();
+  sampling.set(deps.store, inFlight);
+  const before = inFlight.get(a.id);
+  const mine = (before ? before.catch(() => {}) : Promise.resolve()).then(() => sampleOnce(deps, a, now));
+  inFlight.set(a.id, mine);
+  try { return await mine; } finally { if (inFlight.get(a.id) === mine) inFlight.delete(a.id); }
+}
+const sampling = new WeakMap<Store, Map<string, Promise<unknown>>>();
+
+async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ calls: number; limited: number }> {
   const { store } = deps;
+  // The source the container runs: a switch saved but not yet rebuilt still
+  // calls the old one, and its calls are that one's (#107).
+  const source = a.appliedProfileId ?? a.aiProfileId;
   const nowIso = new Date(now).toISOString();
   let calls = 0, limited = 0;
   const runtimeRef = a.runtimeRef;
@@ -76,33 +111,34 @@ export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.no
   const since = cursor?.lastTs ?? new Date(now - 7 * DAY).toISOString(); // first run: a week of history
   try {
     const text = await provider.modelCallLog(runtimeRef, since);
-    const fresh = parseModelCalls(text).filter((c) => c.at > since);
+    const sinceKey = logKey(since);
+    const fresh = parseModelCalls(text).filter((c) => c.key > sinceKey);
     const buckets = new Map<string, { ok: number; limited: number; failed: number }>();
     const slots = new Map<string, { ok: number; limited: number; failed: number }>();
-    let lastOk: string | undefined, lastLimited: string | undefined, maxAt = since;
+    let lastOk: string | undefined, lastLimited: string | undefined, maxKey = sinceKey;
     for (const c of fresh) {
       const b = buckets.get(hourOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
       const sb = slots.get(slotOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
       // Successes are counted from the transcripts below: OpenClaw logs only
       // those slower than a second, so the log missed 10–28% (review, 2026-09-29).
       if (c.status >= 200 && c.status < 300) { lastOk = c.at; }
-      else if (c.status === 429) { b.limited++; sb.limited++; lastLimited = c.at; store.addLimitHit(a.id, a.aiProfileId, c.at, c.model); limited++; }
+      else if (c.status === 429) { b.limited++; sb.limited++; lastLimited = c.at; store.addLimitHit(a.id, source, c.at, c.model); limited++; }
       else { b.failed++; sb.failed++; }
       buckets.set(hourOf(c.at), b);
       slots.set(slotOf(c.at), sb);
-      if (c.at > maxAt) maxAt = c.at;
+      if (c.key > maxKey) maxKey = c.key;
     }
     // The loop lines the same read kept (a chat-app message retried past its
     // handler limit, a failed compaction): token health's loop signals. A
     // re-read window adds nothing twice (keyed by kind, event and time).
     const loops = parseLoopLines(text);
     if (loops.length) store.addLoopMarks(a.id, loops);
-    store.addModelCallHours(a.id, a.aiProfileId, buckets);
-    store.addModelCallSlots(a.id, a.aiProfileId, slots);
+    store.addModelCallHours(a.id, source, buckets);
+    store.addModelCallSlots(a.id, source, slots);
     calls += fresh.length;
     // No new calls: still move the cursor on (minus a little), so an idle agent
     // isn't rescanned from a week ago every pass.
-    const next = fresh.length ? maxAt : new Date(Math.max(Date.parse(since), now - 5 * 60_000)).toISOString();
+    const next = fresh.length ? maxKey : Date.parse(since) >= now - 5 * 60_000 ? sinceKey : new Date(now - 5 * 60_000).toISOString().replace('Z', '000000Z');
     store.setUsageCursor(a.id, next, lastOk, lastLimited);
   } catch (err) {
     deps.log?.('usage.sample_log_failed', { agentId: a.id, error: String((err as Error).message ?? err).slice(0, 200) });
@@ -115,18 +151,18 @@ export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.no
     if (store.latestTokenTotal(a.id) === undefined && u.recent?.length) {
       let running = u.totalTokens - u.recent.reduce((s, [, t]) => s + t, 0);
       let prevAt = new Date(Date.parse(u.recent[0]![0]) - 300_000).toISOString();
-      store.addTokenSample(a.id, a.aiProfileId, prevAt, running);
+      store.addTokenSample(a.id, source, prevAt, running);
       for (const [at, t] of u.recent) {
         // Each slot's own start too, so a chart that spreads a rise between
         // two readings keeps it in its five minutes, not the idle hours
         // before it (review, 2026-09-29).
         const start = new Date(Date.parse(at) - 300_000).toISOString();
-        if (start > prevAt && start < nowIso) store.addTokenSample(a.id, a.aiProfileId, start, running);
+        if (start > prevAt && start < nowIso) store.addTokenSample(a.id, source, start, running);
         running += t;
-        if (at < nowIso) { store.addTokenSample(a.id, a.aiProfileId, at, running); prevAt = at; }
+        if (at < nowIso) { store.addTokenSample(a.id, source, at, running); prevAt = at; }
       }
     }
-    store.addTokenSample(a.id, a.aiProfileId, nowIso, u.totalTokens);
+    store.addTokenSample(a.id, source, nowIso, u.totalTokens);
     // The model scorecard's 30 days, from this same read: a review then needs
     // no container at all, and an asleep agent keeps its last profile.
     if (u.profile) {
@@ -146,7 +182,7 @@ export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.no
       }
       const through = store.callsThrough(a.id);
       const from = through ? slotOf(new Date(Date.parse(`${through}:00Z`) - 3_600_000).toISOString()) : '';
-      store.setModelCallOk(a.id, a.aiProfileId, ok, from, !through);
+      store.setModelCallOk(a.id, source, ok, from, !through);
       if (u.lastActive) store.noteUsageOk(a.id, u.lastActive);
     }
     const priced = u.byModel.filter((m) => m.tokens > 0);
