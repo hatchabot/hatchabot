@@ -45,7 +45,7 @@ repository and installs natively. Release channels (stable, beta) are named in
 the doctor command prints what is wrong with an install.
 
 - `install.sh` — `install_bundle`, `install_native`, `newest_release`, `in_docker_group`: the one-line installer (`mf_fetch`, `mf_paths`, `mf_matches`: the bundle checked against the release's release-manifest.json, the .sha256 only for releases made before manifests).
-- `scripts/release-manifest.sh` — `get`, `asset`, `image`, `load`, `data_dir`: what a release vouches for — its release-manifest.json, checked and kept in the data directory (release-manifests/); the same reader as `install.sh`.
+- `scripts/release-manifest.sh` — `get`, `asset`, `image`, `load`, `data_dir`, `mf_required`: what a release vouches for — its release-manifest.json, checked and kept in the data directory (release-manifests/), and refused when missing from a release that must have one (v2.159.0 on); the same reader as `install.sh`.
 - `channels.json` — `stable`, `beta`: which release each channel points at.
 - `scripts/build-bundle.sh` — `PLATFORM`, `linux-arm64`, `darwin-arm64`: builds the per-platform release bundle.
 - `.github/workflows/release.yml` — `check`, `attest`, `publish`, `draft_only`: the only way a release is made (checked commit, bundles and image built read-only, manifest, attestation, a checked draft, then the tag and publish); `scripts/release.sh` — `dispatch-run.sh`, `--draft-only`: starts and follows it (`hbt release`); `scripts/release-check.sh` — `newest`, `--wait-ci`: may this commit be released as this version; `scripts/release-manifest.mjs` — `buildManifest`, `validateManifest`, `collectAssets`, `checkAssets`, `openclawFromDockerfile`: `release-manifest.json`; `scripts/oci-index.mjs` — `describeLayout`, `mergeDescriptions`: the runtime image's index digest before anything is pushed.
@@ -446,7 +446,7 @@ build derived images (the base plus extra packages) for particular agents.
 - `docker/Dockerfile.runtime` — `OPENCLAW_VERSION`: the runtime image.
 - `docker/entrypoint.sh` — `PYTHONPATH`: container start-up.
 - `scripts/build-runtime-image.sh` — `NO_LATEST`, `use_pulled`, `legacy_published`: builds and tags the image, or pulls the one the release's manifest names by digest (`legacy_published`: by tag, for releases made before manifests).
-- `src/orchestrator/releaseManifest.ts` — `releaseManifest`, `parseReleaseManifest`, `publishedRuntimeImage`: the app's reading of its release's manifest; the published image by digest for the provider's ensureBaseImage and a runner's Install image.
+- `src/orchestrator/releaseManifest.ts` — `releaseManifest`, `parseReleaseManifest`, `publishedRuntimeImage`, `manifestRequired`: the app's reading of its release's manifest; the published image by digest for the provider's ensureBaseImage and a runner's Install image.
 - `src/orchestrator/derivedImage.ts` — `buildDerivedImage`, `renderDockerfile`, `removeDerivedImage`: derived images.
 - `src/orchestrator/imageRecipe.ts` — `ensureImageOn`, `buildRecipeOn`: rebuilding an image on another machine from its recipe.
 - `src/orchestrator/runtimeCaps.ts` — `probeImageCapabilities`: what an image can do.

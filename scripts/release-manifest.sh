@@ -8,10 +8,11 @@
 #   scripts/release-manifest.sh asset vX.Y.Z FILE NAME  FILE is that release's asset NAME
 #   scripts/release-manifest.sh image vX.Y.Z            "<repository>@<index digest> <openclaw version>"
 #
-# Exit codes: 0 yes; 10 the release has no manifest (made before manifests:
-# callers keep their old check, marked legacy); 2 refused (a manifest that is
-# unreadable or for another release, or one that does not vouch for this file
-# or names no image); 3 could not fetch it (no network) — try again later.
+# Exit codes: 0 yes; 10 the release has no manifest (made before manifests,
+# before v2.159.0: callers keep their old check, marked legacy); 2 refused (a
+# manifest that is unreadable or for another release, one that does not vouch
+# for this file or names no image, or none at all for v2.159.0 or later);
+# 3 could not fetch it (no network) — try again later.
 #
 # A checked manifest is kept in the data directory (release-manifests/<tag>.json)
 # so a restart offline does not need GitHub. The app reads the same files
@@ -33,6 +34,15 @@ mf_fetch() {
     0:404|37:*) rm -f "$2"; return 1 ;;
   esac
   rm -f "$2"; return 2
+}
+# mf_required TAG: 0 when release TAG must have a manifest — v2.159.0, the
+# first with one, or later. Its manifest missing (a 404) is then refused, never
+# taken as an old release whose .sha256 or image tag may be trusted instead.
+mf_required() {
+  local v="${1#v}" a b
+  v="${v%%[-+]*}"; a="${v%%.*}"; v="${v#*.}"; b="${v%%.*}"
+  case "$a.$b" in *[!0-9.]*|.*|*.) return 0 ;; esac
+  [ "$a" -gt 2 ] || { [ "$a" -eq 2 ] && [ "$b" -ge 159 ]; }
 }
 # mf_paths FILE: the manifest as "path<TAB>value" lines (schema, assets.0.name,
 # image.index, …); fails on anything that is not one well-formed JSON object.
@@ -138,7 +148,11 @@ load() {
   mf_fetch "$BASE/$tag/release-manifest.json" "$TMPF" || rc=$?
   case "$rc" in
     0) ;;
-    1) echo "Release $tag has no release-manifest.json (it was made before release manifests)." >&2; exit 10 ;;
+    1)
+      if mf_required "$tag"; then
+        echo "Release $tag has no release-manifest.json, though every release from v2.159.0 on has one — refusing it." >&2; exit 2
+      fi
+      echo "Release $tag has no release-manifest.json (it was made before release manifests)." >&2; exit 10 ;;
     *) echo "Could not fetch the release manifest of $tag (no network?) — try again later." >&2; exit 3 ;;
   esac
   # Present but not a manifest for this release: refused, never skipped.

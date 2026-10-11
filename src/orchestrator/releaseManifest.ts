@@ -50,6 +50,19 @@ const MAX_BYTES = 64 * 1024;
 const SHA256 = /^[0-9a-f]{64}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const TAG = /^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+/** The first release with a manifest: every release from it on has one (scripts/release-manifest.sh mf_required). */
+export const FIRST_MANIFEST_RELEASE = '2.159.0';
+
+/**
+ * Whether release `tag` must have a manifest: it is FIRST_MANIFEST_RELEASE or
+ * later. Its manifest missing is then no sign of an old release — a 404 there
+ * is refused, never taken as leave to trust tags.
+ */
+export function manifestRequired(tag: string): boolean {
+  const [a = 0, b = 0, c = 0] = tag.replace(/^v/, '').split(/[-+]/)[0]!.split('.').map(Number);
+  const [fa, fb, fc] = FIRST_MANIFEST_RELEASE.split('.').map(Number) as [number, number, number];
+  return a !== fa ? a > fa : b !== fb ? b > fb : c >= fc;
+}
 
 /** The manifest for `tag` in `text`, or what is wrong with it. */
 export function parseReleaseManifest(text: string, tag: string): ReleaseManifest | { problem: string } {
@@ -92,9 +105,11 @@ async function defaultFetchText(url: string): Promise<{ status: number; text: st
 /**
  * The manifest of this Hatchabot's release (or `opts.version`'s): the kept
  * copy when there is one, else fetched, checked and kept. A 404 is a release
- * made before manifests (`none`); anything else that goes wrong — no network,
- * a manifest that is unreadable or for another release — is an `error`, never
- * taken as `none` (that would fall back to trusting tags).
+ * made before manifests (`none`) only for a release older than
+ * FIRST_MANIFEST_RELEASE; for a newer one it is an `error`, as is anything
+ * else that goes wrong — no network, a manifest that is unreadable or for
+ * another release. None of these is taken as `none` (that would fall back to
+ * trusting tags).
  */
 export async function releaseManifest(opts: ManifestOptions = {}): Promise<ManifestLookup> {
   const version = opts.version ?? APP_VERSION;
@@ -114,7 +129,13 @@ export async function releaseManifest(opts: ManifestOptions = {}): Promise<Manif
   } catch (err) {
     return { kind: 'error', problem: `Could not fetch the release manifest of ${tag} (${(err as Error).message}).` };
   }
-  if (got.status === 404) return { kind: 'none' };
+  if (got.status === 404) {
+    if (!manifestRequired(tag)) return { kind: 'none' };
+    // A missing manifest on a release that must have one (a release still
+    // being published, an asset deleted, a mirror without it) is no reason to
+    // trust a tag that can be moved (B071).
+    return { kind: 'error', problem: `Release ${tag} has no release manifest, though every release from v${FIRST_MANIFEST_RELEASE} on has one — not trusting its tags instead.` };
+  }
   if (got.status !== 200) return { kind: 'error', problem: `Could not fetch the release manifest of ${tag} (HTTP ${got.status}).` };
   if (got.text.length > MAX_BYTES) return { kind: 'error', problem: `The release manifest of ${tag} is not readable: it is too large.` };
   const m = parseReleaseManifest(got.text, tag);

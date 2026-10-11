@@ -86,6 +86,10 @@ published release before any promote, as today.
   older installers.
 - They pull the runtime image **by digest** from the manifest; the
   "same version label" fallback goes (a label is not proof of content).
+- Only a release made before manifests (before v2.159.0) may have none and
+  keep the old checks. For v2.159.0 and later a missing manifest (a 404) is
+  refused like an unreadable one — never taken as leave to trust the
+  `.sha256` or a tag.
 - Installs do not verify the Sigstore attestation themselves (they don't have
   `gh` or `cosign`); an immutable release created only by the workflow is
   what they rely on. The attestation is for anyone who wants to check, and

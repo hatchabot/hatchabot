@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
-import { parseReleaseManifest, publishedRuntimeImage, releaseManifest } from '../src/orchestrator/releaseManifest.js';
+import { manifestRequired, parseReleaseManifest, publishedRuntimeImage, releaseManifest } from '../src/orchestrator/releaseManifest.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import { installRuntimeImage } from '../src/orchestrator/runnerSetup.js';
 
@@ -29,6 +29,8 @@ const read = (p: string) => readFileSync(p, 'utf8');
 const hasSetsid = spawnSync('sh', ['-c', 'command -v setsid']).status === 0;
 
 const TAG = 'v2.0.1';
+/** A release from v2.159.0 on, when every release has a manifest: one missing is refused, never legacy (B071). */
+const NEW_TAG = 'v2.159.0';
 const OPENCLAW = /ARG OPENCLAW_VERSION=(\S+)/.exec(read('docker/Dockerfile.runtime'))![1]!;
 const INDEX = `sha256:${'d'.repeat(64)}`;
 const DOWNLOADS = 'https://github.com/hatchabot/hatchabot/releases/download';
@@ -143,8 +145,8 @@ function installWorld() {
   for (const refuse of ['sudo', 'apt-get', 'brew']) shim(bin, refuse, `echo "${refuse} $*" >> ${JSON.stringify(log)}; exit 1`);
   const dir = join(root, 'hatchabot');
   const w = { root, home, bin, releases, log, dir };
-  const run = () => {
-    const cmd = [resolve('install.sh'), TAG];
+  const run = (tag = TAG) => {
+    const cmd = [resolve('install.sh'), tag];
     return spawnSync(hasSetsid ? 'setsid' : 'bash', hasSetsid ? ['bash', ...cmd] : cmd, {
       encoding: 'utf8', timeout: 60_000, input: '',
       env: scriptEnv(home, `${bin}:/usr/bin:/bin`, { HATCHABOT_DIR: dir, TMPDIR: root }),
@@ -200,6 +202,16 @@ describe('install.sh checks the bundle against the release manifest (#38)', () =
     expect(existsSync(join(w.dir, 'BUNDLE.json'))).toBe(false);
   });
 
+  it('a release from v2.159.0 on with no manifest is refused — its .sha256 is not trusted instead (B071)', () => {
+    const w = installWorld();
+    publish(w, NEW_TAG, 'linux-x64', { manifest: 'none' });
+    const r = w.run(NEW_TAG);
+    expect(r.stdout).toContain(`release ${NEW_TAG} has no manifest, though every release from v2.159.0 on has one — not using the bundle`);
+    expect(r.stdout).toContain('using the native install instead');
+    expect(read(w.log)).not.toContain(`hatchabot-${NEW_TAG}-linux-x64.tar.gz.sha256`);
+    expect(existsSync(join(w.dir, 'BUNDLE.json'))).toBe(false);
+  });
+
   it('a release made before manifests: its .sha256, as before', () => {
     const ok = installWorld();
     publish(ok, TAG, 'linux-x64', { manifest: 'none' });
@@ -227,7 +239,7 @@ function upgradeWorld() {
   writeFileSync(join(install, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
   mkdirSync(join(install, 'data'));
   const w = { root, home, bin, releases, log, install };
-  const run = () => spawnSync('bash', [join(install, 'scripts', 'upgrade.sh'), TAG], {
+  const run = (tag = TAG) => spawnSync('bash', [join(install, 'scripts', 'upgrade.sh'), tag], {
     encoding: 'utf8', timeout: 60_000,
     env: scriptEnv(home, `${bin}:/usr/bin:/bin`, { TMPDIR: join(home, 'tmp'), HATCHABOT_UPGRADE_IMAGE: '0' }),
   });
@@ -269,6 +281,16 @@ describe('scripts/upgrade.sh checks the next bundle against the release manifest
     });
   }
 
+  it('a release from v2.159.0 on with no manifest is refused (exit 3) — its .sha256 is not trusted instead (B071)', () => {
+    const w = upgradeWorld();
+    publish(w, NEW_TAG, 'linux-arm64', { manifest: 'none' });
+    const r = w.run(NEW_TAG);
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(r.stderr).toContain(`Release ${NEW_TAG} has no release-manifest.json, though every release from v2.159.0 on has one — refusing it.`);
+    expect(read(w.log)).not.toContain(`hatchabot-${NEW_TAG}-linux-arm64.tar.gz.sha256`);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+  });
+
   it('a release made before manifests: its .sha256, as before', () => {
     const w = upgradeWorld();
     publish(w, TAG, 'linux-arm64', { manifest: 'none' });
@@ -284,14 +306,14 @@ describe('scripts/upgrade.sh checks the next bundle against the release manifest
 });
 
 // ---- scripts/build-runtime-image.sh -----------------------------------------------
-function imageWorld(label = OPENCLAW) {
+function imageWorld(label = OPENCLAW, tag = TAG) {
   const root = temp('hb-mf-image-');
   const home = join(root, 'home'), bin = join(root, 'bin'), releases = join(root, 'releases'), app = join(root, 'app');
   for (const d of [home, bin, releases, join(app, 'scripts'), join(app, 'docker')]) mkdirSync(d, { recursive: true });
   for (const s of ['build-runtime-image.sh', 'release-manifest.sh']) writeFileSync(join(app, 'scripts', s), readFileSync(join('scripts', s)), { mode: 0o755 });
   writeFileSync(join(app, 'scripts', 'runtime-pins.mjs'), readFileSync('scripts/runtime-pins.mjs'));
   writeFileSync(join(app, 'docker', 'Dockerfile.runtime'), readFileSync('docker/Dockerfile.runtime'));
-  writeFileSync(join(app, 'package.json'), JSON.stringify({ name: 'hatchabot', version: TAG.slice(1) }, null, 2) + '\n');
+  writeFileSync(join(app, 'package.json'), JSON.stringify({ name: 'hatchabot', version: tag.slice(1) }, null, 2) + '\n');
   symlinkSync(process.execPath, join(bin, 'node'));
   const log = join(root, 'calls.log');
   writeFileSync(log, '');
@@ -368,6 +390,15 @@ describe('scripts/build-runtime-image.sh pulls the image the release manifest na
     expect(read(w.log)).not.toContain('docker build');
   });
 
+  it('a release from v2.159.0 on with no manifest: refused, no tag is pulled (B071)', () => {
+    const w = imageWorld(OPENCLAW, NEW_TAG);
+    const r = w.run();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`Release ${NEW_TAG} has no release-manifest.json, though every release from v2.159.0 on has one`);
+    expect(read(w.log)).not.toContain('docker manifest inspect');
+    expect(read(w.log)).not.toContain('docker pull');
+  });
+
   it('a release made before manifests: the legacy pull by tag, accepted on its label', () => {
     const w = imageWorld();
     const r = w.run();
@@ -412,6 +443,18 @@ describe('releaseManifest / publishedRuntimeImage (#47)', () => {
     const other = await releaseManifest({ version: '2.0.2', dataDir, fetchText: served(200, good).fetchText });
     expect(other).toMatchObject({ kind: 'error', problem: expect.stringContaining('it is for v2.0.1, not v2.0.2') });
     expect(existsSync(join(dataDir, 'release-manifests', 'v2.0.2.json'))).toBe(false);
+  });
+
+  it('a 404 for a release from v2.159.0 on is an error, never "none" — no tag is trusted (B071)', async () => {
+    expect(manifestRequired('v2.159.0')).toBe(true);
+    expect(manifestRequired('2.160.0-rc.1')).toBe(true);
+    expect(manifestRequired('v3.0.0')).toBe(true);
+    expect(manifestRequired('v2.158.9')).toBe(false);
+    expect(manifestRequired('v1.200.0')).toBe(false);
+    const missing = await releaseManifest({ version: '2.159.0', dataDir: temp('hb-mf-data-'), fetchText: served(404).fetchText });
+    expect(missing).toMatchObject({ kind: 'error', problem: expect.stringContaining('Release v2.159.0 has no release manifest') });
+    const img = await publishedRuntimeImage(OPENCLAW, { version: '2.160.0', dataDir: temp('hb-mf-data-'), fetchText: served(404).fetchText });
+    expect(img).toHaveProperty('problem');
   });
 
   it('the image: by digest from the manifest; another OpenClaw is not published; legacy by tag', async () => {
