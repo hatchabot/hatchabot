@@ -7,8 +7,9 @@ talk to them. Security reports are welcome and taken seriously.
 ## Reporting a vulnerability
 
 - **Do not open a public issue** for anything exploitable.
-- Email **security@hatchabot.com**. (GitHub's private vulnerability
-  reporting is not turned on for this repository, so email is the route.)
+- Report it privately: on GitHub, **Security → Report a vulnerability**
+  (private vulnerability reporting is on), or email
+  **security@hatchabot.com**.
 - Include: what you found, how to reproduce it, and what an attacker gains.
   A proof of concept against your *own* installation is ideal.
 

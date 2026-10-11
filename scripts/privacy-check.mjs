@@ -38,8 +38,9 @@
  * 3: incomplete — something it needed could not be read (the database, an
  * env file, GitHub's release notes or issues), so it cannot say "clean". It
  * used to say clean, or SKIP with exit 0, in those cases (audit issue #41,
- * 2026-10-09). Every result says what is not covered (binary files and
- * images: no OCR) and, for --public, how many accepted historical commits it
+ * 2026-10-09). Every result says what is not covered (pictures and
+ * compressed data: no OCR, no unpacking; the text inside binary files is
+ * read since 2026-10-10) and, for --public, how many accepted historical commits it
  * did not check (#40). The hook lets a push through, with a warning, on a
  * machine with no install at all: the `privacy` live test covers what it
  * cannot see; an install it can only partly read blocks the push.
@@ -61,7 +62,7 @@ const has = (name) => args.includes(name);
 
 export const CLEAN = 0, FOUND = 1, USAGE = 2, INCOMPLETE = 3;
 /** Never read, in any mode: said with every result, so "clean" is never unrestricted. */
-export const NOT_COVERED = 'binary files and images (no OCR)';
+export const NOT_COVERED = 'pictures and compressed data inside binary files (no OCR, no unpacking)';
 
 // ---- what is private --------------------------------------------------------
 /** "KEY=value" lines of an env file. */
@@ -251,6 +252,20 @@ function catBatch(cwd, ids) {
   return out;
 }
 const isText = (b) => !b.subarray(0, 4096).includes(0);
+/**
+ * The text inside a file git treats as binary, one run per line: runs of six
+ * or more letters, digits, spaces and punctuation, read as UTF-8 and as
+ * UTF-16 in both byte orders — what `strings` finds: a name in PDF or Office
+ * metadata, EXIF and PNG text chunks, a SQLite file, a build. Binary files
+ * were skipped until 2026-10-10. Compressed parts (zip, PDF streams, image
+ * data) stay unread: NOT_COVERED says so.
+ */
+export function textInside(b) {
+  const runs = /[\x20-\x7e\u00a0-\u024f\t]{6,}/g;
+  const out = [];
+  for (const t of [b.toString('utf8'), b.toString('utf16le'), b.subarray(1).toString('utf16le')]) out.push(...(t.match(runs) ?? []));
+  return out.join('\n');
+}
 
 /**
  * The history published before the scrub (2026-10-09): it still names real
@@ -383,7 +398,7 @@ function prePush() {
     let file = '?', line = 0;
     for (const l of diff.split('\n')) {
       if (l.startsWith('+++ ')) { file = l.slice(4).replace(/^b\//, ''); continue; }
-      if (/^Binary files .* differ$/.test(l)) { binary++; continue; }
+      if (/^Binary files .* differ$/.test(l)) continue; // read whole, below
       const h = /^@@ -\S+ \+(\d+)/.exec(l);
       if (h) { line = Number(h[1]); continue; }
       if (l.startsWith('+')) {
@@ -392,13 +407,21 @@ function prePush() {
         line++;
       }
     }
+    // Files git treats as binary: the text inside them (#9 of the 2026-10-10 review).
+    const numstat = git(cwd, 'show', '--format=', '--numstat', '--no-renames', '--diff-filter=d', '-z', c).stdout.split('\0');
+    const binaries = numstat.filter((e) => e.startsWith('-\t-\t')).map((e) => e.slice(4));
+    for (const f of binaries) {
+      binary++;
+      const data = spawnSync('git', ['-C', cwd, 'cat-file', 'blob', `${c}:${f}`], { maxBuffer: 1 << 30 }).stdout;
+      hits.push(...scan(textInside(data), `${f} (commit ${short}, text inside a binary file)`, ms).map((h) => ({ ...h, line: 0 })));
+    }
   }
   for (const t of catBatch(cwd, annotated)) {
     const [head, ...body] = t.data.toString().split('\n\n');
     hits.push(...scan(head.split('\n').filter((l) => l.startsWith('tagger ')).join('\n'), `tag ${t.id.slice(0, 7)} tagger`, people));
     hits.push(...scan(body.join('\n\n'), `tag message ${t.id.slice(0, 7)}`, ms));
   }
-  const extra = binary ? [`${binary} binary file change(s) in this push`] : [];
+  const extra = binary ? [`${binary} binary file(s) in this push read for the text inside them`] : [];
   if (hits.length) {
     console.error(`\n🔒 Privacy check blocked this push: ${hits.length} private value(s) in what it would publish:`);
     report(hits, console.error);
@@ -428,7 +451,7 @@ function text() {
   for (const f of files) {
     let b;
     try { b = readFileSync(f); } catch { gaps.push(`${f} could not be read`); continue; }
-    if (!isText(b)) { extra.push(`${f} (binary)`); continue; }
+    if (!isText(b)) { extra.push(`${f} (binary: the text inside it was read)`); hits.push(...scan(textInside(b), `${f} (text inside a binary file)`, ms).map((h) => ({ ...h, line: 0 }))); continue; }
     hits.push(...scan(b.toString('utf8'), f, ms));
   }
   if (hits.length) { console.log(`✗ privacy: ${hits.length} private value(s):`); report(hits); coverage(console.log, loaded, extra); return FOUND; }
@@ -485,7 +508,11 @@ function publicScan() {
     let files = 0, binary = 0;
     for (const b of catBatch(mirror, blobs)) {
       if (b.type !== 'blob') continue;
-      if (!isText(b.data)) { binary++; continue; }
+      if (!isText(b.data)) {
+        binary++;
+        hits.push(...scan(textInside(b.data), `${paths.get(b.id) ?? b.id.slice(0, 7)} (${b.id.slice(0, 7)}, text inside a binary file)`, ms).map((h) => ({ ...h, line: 0 })));
+        continue;
+      }
       files++;
       const body = paths.get(b.id) === IDENTITY_FILE ? withoutAllowedLines(b.data.toString(), allowed) : b.data.toString();
       hits.push(...scan(body, `${paths.get(b.id) ?? b.id.slice(0, 7)} (${b.id.slice(0, 7)})`, ms));
@@ -522,7 +549,7 @@ function publicScan() {
     if (hook) console.log(hookLine(hook));
     for (const r of refused) console.log(`✗ tag ${r}`);
     if (hits.length) { console.log(`✗ ${hits.length} private value(s):`); report(hits); }
-    coverage(console.log, loaded, binary ? [`${binary} binary file versions`] : []);
+    coverage(console.log, loaded, binary ? [`${binary} binary file versions read for the text inside them`] : []);
     if (refused.length || hits.length) return FOUND;
     if (gaps.length) { console.log('✗ privacy: incomplete — not everything GitHub serves could be checked (above); this is not a pass'); return INCOMPLETE; }
     console.log(`✓ privacy: what was checked is clean — main now and everything since ${haveBase ? accepted.slice(0, 7) : 'the start'}; the accepted history before it was not checked`);

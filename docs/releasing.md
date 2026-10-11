@@ -307,9 +307,12 @@ Each run ends in one of three results, and says which:
 | 1 | found | a private value (printed masked), or a refused tag |
 | 3 | incomplete | something it needed could not be read: the database, an env file, a note file, or GitHub's release notes and issues (`gh` missing, signed out, refused). Never a pass: the live test records it as a fail and `--text … &&` stops the release |
 
-Every result also says what is **not covered**: binary files and images (no
-OCR), and, with `--no-machine` or no `tailscale` command, this machine's
-names. `--public` always prints how many accepted historical commits it left
+Every result also says what is **not covered**: pictures and compressed data
+inside binary files (no OCR, no unpacking), and, with `--no-machine` or no `tailscale` command, this machine's
+names. The text inside a file git treats as binary (a name in a PDF's or a
+photo's metadata, a SQLite file) is read, as UTF-8 and UTF-16, since
+2026-10-10; the GitHub-side `privacy` job still skips binary files.
+`--public` always prints how many accepted historical commits it left
 out (below). The clone's own git identity (`user.name`, `user.email`) and
 the identities in `scripts/privacy-identity.txt` (the maintainer's author
 name and addresses, already public on every commit) are not findings as an

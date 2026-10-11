@@ -23,7 +23,7 @@ const sh = (...a: string[]) => {
   return r.stdout.trim();
 };
 /** Commit a file and return the pre-push line git would send for main. */
-const commit = (file: string, text: string) => {
+const commit = (file: string, text: string | Buffer) => {
   writeFileSync(join(repo, file), text);
   sh('add', file); sh('commit', '-qm', `add ${file}`);
   return `refs/heads/main ${sh('rev-parse', 'HEAD')} refs/heads/main ${'0'.repeat(40)}\n`;
@@ -96,11 +96,39 @@ describe('the pre-push check', () => {
     expect(r.stderr).toContain('not checked');
   });
 
+  it('reads the text inside a file git treats as binary: UTF-8 and UTF-16, both byte orders', () => {
+    const name = 'Mapleford Helper';
+    const utf16be = Buffer.from(name, 'utf16le').swap16();
+    for (const [file, data] of [
+      ['photo.jpg', Buffer.concat([Buffer.from([0xff, 0xd8, 0, 0, 1, 2]), Buffer.from(`Author: ${name}`), Buffer.from([0, 0, 3])])],
+      ['notes.docx', Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(name, 'utf16le'), Buffer.from([0, 0])])],
+      ['old.doc', Buffer.concat([Buffer.from([0, 1]), utf16be, Buffer.from([0, 0])])],
+    ] as const) {
+      const r = run(['--pre-push', 'origin', 'x'], commit(file, data));
+      expect(r.status, `${file}: ${r.stderr}`).toBe(1);
+      expect(r.stderr).toContain(`${file} (commit`);
+      expect(r.stderr).toContain('text inside a binary file');
+      expect(r.stderr).not.toContain('Mapleford');
+      sh('reset', '-q', '--hard', 'HEAD~1');
+    }
+    const clean = run(['--pre-push', 'origin', 'x'], commit('pixels.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 13, 0, 7, 9])));
+    expect(clean.status, clean.stderr).toBe(0);
+    expect(clean.stderr).toContain('1 binary file(s) in this push read for the text inside them');
+  });
+
+  it('--text reads the text inside a binary file too', () => {
+    const f = join(dir, 'notes.pdf');
+    writeFileSync(f, Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from('Made by Mapleford Helper'), Buffer.from([0])]));
+    const r = run(['--text', f]);
+    expect(r.status, r.stdout).toBe(1);
+    expect(r.stdout).toContain('text inside a binary file');
+  });
+
   it('says what it checked and what it never reads', () => {
     const line = commit('notes.md', 'nothing private\n');
     const r = run(['--pre-push', 'origin', 'x'], line);
     expect(r.status, r.stderr).toBe(0);
-    expect(r.stderr).toContain('not covered: binary files and images (no OCR)');
+    expect(r.stderr).toContain('not covered: pictures and compressed data inside binary files (no OCR, no unpacking)');
   });
 });
 
@@ -248,7 +276,7 @@ describe('--public and the hook check (audit issues #40, #41)', () => {
     const r = publicRun();
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(r.stdout).toMatch(/0 accepted historical commits/);
-    expect(r.stdout).toContain('not covered: binary files and images (no OCR)');
+    expect(r.stdout).toContain('not covered: pictures and compressed data inside binary files (no OCR, no unpacking)');
     expect(r.stdout).toContain('✓ privacy: what was checked is clean');
     // @ts-expect-error — a plain .mjs script
     const { resultOf } = await import('../scripts/live.mjs');
