@@ -204,13 +204,15 @@ export function loopSignals(input: {
   }
   for (const [other, list] of pairs) {
     list.sort((a, b) => a.at - b.at);
+    // The latest run that qualifies, not the longest: ten old consults must not
+    // hide six happening now (its activity is judged on the run it reports, #156).
     let best: typeof list = [];
     let run: typeof list = [];
     for (const c of list) {
       if (run.length && c.at - run[run.length - 1]!.at > T.pingPongGapMs) run = [];
       run.push(c);
       const both = run.some((x) => x.dir === 'in') && run.some((x) => x.dir === 'out');
-      if (both && run.length >= T.pingPongMin && run.length >= best.length) best = [...run];
+      if (both && run.length >= T.pingPongMin) best = [...run];
     }
     if (best.length && best[best.length - 1]!.at >= since) {
       const last = best[best.length - 1]!.at;
