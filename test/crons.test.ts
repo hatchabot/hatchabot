@@ -378,12 +378,48 @@ describe('delivery (regression: tasks on a web-only agent failed every run)', ()
       { id: 'j4', name: 'upkeep', enabled: true, declarationKey: 'openclaw.dreaming', delivery: { mode: 'announce', channel: 'last' } },
     ] }) });
     const r = await retargetImplicitCrons(p, ref, 'kitchen', { channel: 'telegram', to: TG_ID });
-    expect(r).toEqual({ changed: 1, failed: 0 });
+    expect(r).toEqual({ changed: 1, failed: 0, held: [] });
     const edits = p.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit');
     expect(edits).toEqual([['cron', 'edit', 'j1', '--announce', '--best-effort-deliver', '--channel', 'telegram', '--to', TG_ID]]);
     // No chat app: the same task goes quiet instead of failing every run.
     await retargetImplicitCrons(p, ref, 'kitchen', undefined);
     expect(p.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit').at(-1)).toEqual(['cron', 'edit', 'j1', '--no-deliver']);
+  });
+
+  it('a task made quiet before the owner was linked is pointed at them once they are (#64)', async () => {
+    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const store = new Store(new Database(':memory:'));
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    const list = (jobs: unknown[]) => p.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs }) });
+    const edits = () => p.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit');
+    // The owner's id is not known yet: the task goes quiet, and is remembered.
+    list([
+      { id: 'j1', name: 'brief', enabled: true, delivery: { mode: 'announce', channel: 'last' } },
+      { id: 'j2', name: 'chosen quiet', enabled: true, delivery: { mode: 'none' } },
+    ]);
+    const first = await retargetImplicitCrons(p, ref, 'kitchen', undefined, store.quietedCrons('a1'));
+    expect(first).toEqual({ changed: 1, failed: 0, held: ['j1'] });
+    store.setQuietedCrons('a1', first.held, 'now');
+    // The next pass, still no one: nothing changes, it stays remembered.
+    list([
+      { id: 'j1', name: 'brief', enabled: true, delivery: { mode: 'none' } },
+      { id: 'j2', name: 'chosen quiet', enabled: true, delivery: { mode: 'none' } },
+    ]);
+    const second = await retargetImplicitCrons(p, ref, 'kitchen', undefined, store.quietedCrons('a1'));
+    expect(second).toEqual({ changed: 0, failed: 0, held: ['j1'] });
+    expect(edits()).toHaveLength(1);
+    // The owner is linked: the held task announces to them; one quiet by choice stays quiet.
+    const third = await retargetImplicitCrons(p, ref, 'kitchen', { channel: 'telegram', to: TG_ID }, store.quietedCrons('a1'));
+    expect(third).toEqual({ changed: 1, failed: 0, held: [] });
+    expect(edits().at(-1)).toEqual(['cron', 'edit', 'j1', '--announce', '--best-effort-deliver', '--channel', 'telegram', '--to', TG_ID]);
+    expect(edits().some((a) => a[2] === 'j2')).toBe(false);
+    store.setQuietedCrons('a1', third.held, 'now');
+    expect(store.quietedCrons('a1')).toEqual([]);
+    // A failed repoint keeps it waiting for the next pass.
+    store.setQuietedCrons('a1', ['j1'], 'now');
+    p.execResponses.set('cron edit', { code: 1, stdout: '', stderr: 'gateway busy' });
+    expect(await retargetImplicitCrons(p, ref, 'kitchen', { channel: 'telegram', to: TG_ID }, store.quietedCrons('a1'))).toEqual({ changed: 0, failed: 1, held: ['j1'] });
   });
 
   it('an agent with no chat app on an OpenClaw without conversation delivery stays quiet', async () => {
@@ -510,19 +546,19 @@ describe('an agent in no chat app: results go to its console conversation (2026-
       { id: 'j5', name: 'upkeep', enabled: true, declarationKey: 'openclaw.dreaming', delivery: { mode: 'announce', channel: 'last' } },
     ] }) });
     const r = await retargetImplicitCrons(p, ref, 'kitchen', { session: 'agent:kitchen:main' });
-    expect(r).toEqual({ changed: 1, failed: 0 });
+    expect(r).toEqual({ changed: 1, failed: 0, held: [] });
     expect(p.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit')).toEqual([
       ['cron', 'edit', 'j1', '--session', 'current', '--session-key', 'agent:kitchen:main', '--announce', '--best-effort-deliver'],
     ]);
     expect(p.execLog.filter((a) => a.includes('sessions.create'))).toHaveLength(1);
     // The same agent once it is in a chat app: every implicit one gets the owner's chat, bound or not.
     const r2 = await retargetImplicitCrons(p, ref, 'kitchen', { channel: 'telegram', to: TG_ID });
-    expect(r2).toEqual({ changed: 3, failed: 0 });
+    expect(r2).toEqual({ changed: 3, failed: 0, held: [] });
     // Nothing to change: not even the version is asked.
     const p2 = new MockProvider();
     const ref2 = await seedRuntime(p2);
     p2.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [{ id: 'q', enabled: true, delivery: { mode: 'none' } }] }) });
-    expect(await retargetImplicitCrons(p2, ref2, 'kitchen', { session: 'agent:kitchen:main' })).toEqual({ changed: 0, failed: 0 });
+    expect(await retargetImplicitCrons(p2, ref2, 'kitchen', { session: 'agent:kitchen:main' })).toEqual({ changed: 0, failed: 0, held: [] });
     expect(p2.execLog.map((a) => a.slice(0, 2).join(' '))).toEqual(['cron list']);
   });
 

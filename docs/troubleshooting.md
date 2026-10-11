@@ -1953,6 +1953,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/crons.ts` — `listCronRuns`
 
+### A task the agent made before you linked your chat never posts to you, even after linking
+- **Check:** the task is quiet (`openclaw cron list --json` in the agent shows `delivery.mode` `none`); it was made while Hatchabot did not yet know your id on the agent's chat app; the timeline has `cron.retargeted` from then.
+- **Cause:** with no one to post to, the daily repair made such a task quiet; once quiet it no longer looked like one to repair, so linking your chat later did not bring it back.
+- **Fix:** upgrade: a task made quiet this way is remembered and pointed at your chat on the next pass after you are linked (after a start, or daily). A task made quiet before the upgrade is not known to have been: ask the agent to post its results to you.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/crons.ts` — `retargetImplicitCrons`; `src/store/store.ts` — `quietedCrons`
+
 ## Tailscale and public access
 
 ### The https address the setup guide gave does not open

@@ -3104,8 +3104,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     for (const a of store.listAllActiveAgents()) {
       if (a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) continue;
       try {
-        const r = await retargetImplicitCrons(providerFor(a.hostId), a.runtimeRef, a.slug, cronTargetFor(store, a));
-        if (r.changed || r.failed) trace(a.id)('cron.retargeted', { changed: r.changed, failed: r.failed });
+        const held = store.quietedCrons(a.id);
+        const r = await retargetImplicitCrons(providerFor(a.hostId), a.runtimeRef, a.slug, cronTargetFor(store, a), held);
+        if (held.length || r.held.length) store.setQuietedCrons(a.id, r.held, new Date().toISOString());
+        if (r.changed || r.failed) trace(a.id)('cron.retargeted', { changed: r.changed, failed: r.failed, ...(r.held.length ? { waiting: r.held.length } : {}) });
       } catch { /* its gateway is not answering: next time */ }
       // The owner is OpenClaw's command owner, live (hot-reloaded): an agent
       // built before this left the key empty, and the next person approved
