@@ -8,7 +8,7 @@ import { HOUR_FIELDS, type HourField, type WindowModelStats } from '../src/orche
 import type { StoredProfile } from '../src/orchestrator/modelScorecard.js';
 import type { Agent } from '../src/domain/types.js';
 import {
-  budgetLine, budgetView, dailyCosts, dayKey, levelOf, MACHINE, monthElapsed, monthKey, nextMonth, parseNewAgentBudget, pausedReplySweep, pausedReplyText, prevMonth, REPLY_EVERY_MS, runBudgets, suggestBudget, type BudgetDeps,
+  budgetLine, budgetView, dailyCosts, dayKey, levelOf, MACHINE, MAX_BUDGET, monthElapsed, monthKey, nextMonth, parseNewAgentBudget, pausedReplySweep, pausedReplyText, prevMonth, REPLY_EVERY_MS, runBudgets, suggestBudget, type BudgetDeps,
 } from '../src/orchestrator/budgets.js';
 import { MACHINE_DEFAULTS } from '../src/orchestrator/machineDefaults.js';
 import { primeSpendAlert, stepLine, stepView, STEP_TELL_EVERY_MS } from '../src/orchestrator/budgets.js';
@@ -590,5 +590,125 @@ describe('spike warnings can be cleared from Usage', () => {
     expect(await shown(OWNER)).toEqual([]);
     expect(await shown(OTHER)).toEqual(['x1']);
     expect(store.usageAlertsSince(t(100), { ownerId: OWNER, dismissed: true })).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Workflow audit 2026-10-10: several budgets at once, and what was not delivered
+// ---------------------------------------------------------------------------
+
+describe('budgets that act together, and messages that did not get through', () => {
+  const cheapWorld = () => {
+    const w = world();
+    w.deps.downgrade = async (a) => { const from = a.model ?? null; w.store.setAgentModel(a.id, 'claude-haiku-4-5'); return { from, to: 'claude-haiku-4-5' }; };
+    w.deps.restoreModel = async (a, pin) => { w.store.setAgentModel(a.id, pin); return true; };
+    return w;
+  };
+
+  it('a machine pause budget pauses an agent its own budget moved to a cheaper model (#101)', async () => {
+    const { store, agent, deps } = cheapWorld();
+    agent('ops', 'Hatchabot', { ops: true });
+    agent('p1', 'Recipe Box', { model: 'claude-opus-4-8' });
+    store.setBudget('p1', OWNER, 20, 'cheaper', iso(NOW));
+    store.setModelProfile('p1', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    expect((await runBudgets(deps, NOW)).downgraded).toEqual(['p1']);
+    // The machine's hard limit is reached later the same month.
+    store.setBudget(MACHINE, OWNER, 20, 'pause', iso(NOW));
+    const r = await runBudgets(deps, NOW + 10 * MIN, { record: false });
+    expect(r.paused).toEqual(['p1']);
+    expect(store.getAgent('p1')!.state).toBe('STOPPED');
+    // Paused on its own model, so it starts on it; the pause is the machine's.
+    expect(store.getAgent('p1')!.model).toBe('claude-opus-4-8');
+    expect(store.getBudgetPause('p1', '2026-10')).toMatchObject({ kind: 'pause', scope: MACHINE });
+    // The machine's budget raised: started again, and its own budget, still reached, moves it again.
+    store.setBudget(MACHINE, OWNER, 500, 'pause', iso(NOW));
+    const again = await runBudgets(deps, NOW + 20 * MIN, { record: false });
+    expect(again).toMatchObject({ resumed: ['p1'], downgraded: ['p1'] });
+    expect(store.getAgent('p1')!.state).toBe('RUNNING');
+    expect(store.getAgent('p1')!.model).toBe('claude-haiku-4-5');
+  });
+
+  it('a downgrade that failed is not "already on the cheapest model": nothing is told until it works (#185)', async () => {
+    const { store, agent, deps, told } = world();
+    let fail = true;
+    deps.downgrade = async (a) => { if (fail) throw new Error('database is locked'); store.setAgentModel(a.id, 'claude-haiku-4-5'); return { from: null, to: 'claude-haiku-4-5' }; };
+    agent('d1', 'Lab Notes');
+    store.setBudget('d1', OWNER, 10, 'cheaper', iso(NOW));
+    store.setModelProfile('d1', profile(NOW, opus(NOW - DAY, 12)), iso(NOW));
+    const r = await runBudgets(deps, NOW);
+    expect(r.downgraded).toEqual([]);
+    expect(told).toEqual([]);
+    fail = false;
+    expect((await runBudgets(deps, NOW + 10 * MIN, { record: false })).downgraded).toEqual(['d1']);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.text).toContain('it now runs on claude-haiku-4-5 until November 1');
+  });
+
+  it('a mark is told once it reached the owner: a failed message is tried again, and a machine budget waits for its manager (#62)', async () => {
+    const { store, agent, deps, told } = world();
+    let reach = false;
+    deps.tell = async (owner, a, text) => { if (!reach) return false; told.push({ owner, via: a.name, text }); return true; };
+    agent('n1', 'Garden Notes');
+    store.setBudget('n1', OWNER, 50, 'warn', iso(NOW));
+    store.setModelProfile('n1', profile(NOW, opus(NOW - 2 * DAY, 42)), iso(NOW));
+    await runBudgets(deps, NOW);
+    expect(store.budgetMark('n1', '2026-10', 80, 50)?.toldAt).toBeUndefined();
+    reach = true;
+    await runBudgets(deps, NOW + 10 * MIN, { record: false });
+    expect(told.map((t) => t.text)).toEqual([expect.stringContaining('"Garden Notes" has used 84% of its $50 budget')]);
+    await runBudgets(deps, NOW + 20 * MIN, { record: false });
+    expect(told).toHaveLength(1);
+    // The machine's budget passes 80% before there is a manager to tell it on.
+    store.setBudget(MACHINE, OWNER, 50, 'warn', iso(NOW));
+    await runBudgets(deps, NOW + 30 * MIN, { record: false });
+    expect(told).toHaveLength(1);
+    agent('ops', 'Hatchabot', { ops: true });
+    await runBudgets(deps, NOW + 40 * MIN, { record: false });
+    expect(told).toHaveLength(2);
+    expect(told[1]).toMatchObject({ via: 'Hatchabot', text: expect.stringContaining('This Hatchabot has used 84% of its $50 budget') });
+  });
+
+  it('a "tell me every $X" step that did not get through is tried again (#62)', async () => {
+    const { store, agent, deps, told } = world();
+    let reach = false;
+    deps.tell = async (owner, a, text) => { if (!reach) return false; told.push({ owner, via: a.name, text }); return true; };
+    agent('s2', 'Errands');
+    store.setSpendAlert('s2', OWNER, 10, iso(NOW));
+    store.setModelProfile('s2', profile(NOW, opus(NOW - HOUR, 12)), iso(NOW));
+    await runBudgets(deps, NOW);
+    reach = true;
+    await runBudgets(deps, NOW + 10 * MIN, { record: false });
+    expect(told.map((t) => t.text)).toEqual([expect.stringContaining('"Errands" has spent $12.00 in October')]);
+  });
+
+  it('a paused agent\'s reply that failed to send is sent on the next sweep (#184)', async () => {
+    const { store, agent, deps } = world();
+    agent('t2', 'Trip Planner');
+    store.insertChannel({ id: 'ch2', agentId: 't2', kind: 'telegram', accountId: 'trip_test_bot', secretRef: 'bot/t2', deepLink: 'https://t.me/trip_test_bot', createdAt: 'now' } as never);
+    store.setBudget('t2', OWNER, 20, 'pause', iso(NOW));
+    store.setModelProfile('t2', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    await runBudgets(deps, NOW);
+    const at = NOW + 5 * MIN;
+    const update = { update_id: 31, message: { date: Math.floor(at / 1000), chat: { id: 4242, type: 'private' }, from: { is_bot: false } } };
+    let up = false;
+    const sent: unknown[] = [];
+    const f = (async (url: string, init?: { body?: string }) => {
+      if (url.includes('/getUpdates')) return new Response(JSON.stringify({ ok: true, result: [update] }));
+      if (!up) return new Response('{"ok":false}', { status: 502 });
+      sent.push(JSON.parse(init!.body!));
+      return new Response('{"ok":true}');
+    }) as unknown as typeof fetch;
+    const sweep = { store, secretOf: async () => 'token-x', fetchImpl: f };
+    expect(await pausedReplySweep(sweep, at + MIN)).toBe(0);
+    up = true;
+    expect(await pausedReplySweep(sweep, at + 2 * MIN)).toBe(1);
+    expect(sent).toHaveLength(1);
+    expect(await pausedReplySweep(sweep, at + 3 * MIN)).toBe(0);
+  });
+
+  it('a suggested budget is never more than the budget route accepts (#182)', () => {
+    expect(suggestBudget(5000)).toBe(7000);
+    expect(suggestBudget(200_000)).toBe(MAX_BUDGET);
+    expect(suggestBudget(Number.MAX_SAFE_INTEGER)).toBe(MAX_BUDGET);
   });
 });

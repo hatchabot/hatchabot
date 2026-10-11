@@ -1342,6 +1342,41 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/compaction.ts` — `compactAgent`
 
+### The machine's budget is used up and set to pause, but an agent keeps running (it was on a cheaper model)
+- **Check:** Settings → Budgets shows the machine's budget past 100% with "pausing at the limit"; the agent still running has its own budget set to "cheaper" and was moved to a cheaper model this month.
+- **Cause:** before v2.160.0 an agent a budget had moved to a cheaper model counted as "already acted on", so the machine's pause skipped it and it went on spending past the hard limit.
+- **Fix:** upgrade. A pause now wins over a cheaper model: the agent is paused, its own model is put back so it starts on it, and when the pause ends a budget still reached moves it to the cheaper model again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/budgets.ts` — `runBudgets`
+
+### The budget message says the agent "was already on the cheapest model", but it still runs on its expensive one
+- **Check:** the agent's Setup log has `budget.downgrade_failed`; its model is unchanged.
+- **Cause:** before v2.160.0 a switch that failed was read as "nothing cheaper on its source": the 100% message went out, once, saying so.
+- **Fix:** upgrade. A failed switch is tried again on the next budget pass (every 10 minutes), and the 100% message waits until it worked.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/budgets.ts` — `budget.downgrade_failed`
+
+### A budget's 80% or 100% message, or a "tell me every $X" step, never reached the chat
+- **Check:** the Setup log's `budget.told` or `budget.step_told` line says `told: false`; or the machine's budget passed 80% before there was a Hatchabot agent to tell it on.
+- **Cause:** before v2.160.0 a mark counted as told when the message was attempted, so one that failed (or had no Hatchabot agent to go through) was never sent again.
+- **Fix:** upgrade. A mark is told only once the message got through; until then each budget pass tries again, including after the Hatchabot agent is made. Link your chat (message the Hatchabot agent once) so there is somewhere to send it.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/budgets.ts` — `budgetMark`; `src/store/store.ts` — `budgetMark`
+
+### Someone who wrote to an agent paused by its budget got no reply
+- **Check:** the agent is paused by its budget; Telegram was unreachable for a moment around their message.
+- **Cause:** before v2.160.0 the message was marked answered before the reply was sent, so a reply that failed was never sent again.
+- **Fix:** upgrade. A message counts as answered only once the reply went out; the next sweep (each minute) tries again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/budgets.ts` — `pausedReplySweep`
+
+### "Set a $… budget" or "Raise it to $…" fails: "usd: a number from 1 to 100000"
+- **Check:** the button's figure is over $100,000 (an agent that costs more than about $80,000 a month at API prices).
+- **Cause:** before v2.160.0 the suggested budget had no upper bound, while the budget route accepts at most $100,000.
+- **Fix:** upgrade: suggestions stop at $100,000. Set a lower budget by hand, or make the agent cheaper.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/budgets.ts` — `suggestBudget`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody
