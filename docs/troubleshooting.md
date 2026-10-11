@@ -849,6 +849,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/reconcile.ts` — `applyReconcileRule`
 
+### An agent was rebuilt on its own in the middle of a reply
+- **Check:** the event log has `rebuild.auto` for the agent while it was answering; its runner was slow or restarting around then (a session read failed).
+- **Cause:** the automatic rebuild sweep took a failed read of the agent's conversations as "no recent activity", so an agent it could not read counted as idle.
+- **Fix:** upgrade. Since v2.160.0 an unattended rebuild needs its conversations read and quiet for 10 minutes; one that cannot be read waits for a later sweep. `HATCHABOT_REBUILD_POLICY=manual` turns automatic rebuilds off.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/rebuildPolicy.ts` — `pickAutoRebuilds`; `src/api/routes.ts` — `activityEvidence`
+
 ### An agent in a class will not start after a rebuild: its data was migrated for a newer OpenClaw than the class's image
 - **Check:** the agent's rebuild fails on a 2026.7 image although it ran 2026.8 or newer before; its Overview shows a class with an image, and `docker inspect` of its old container names the newer image.
 - **Cause:** assigning a class, or changing a class's image, pinned members without the check a direct image pin makes: 2026.7 cannot read a volume already migrated to 2026.8+. Clearing a class image also unpinned members before the rest of the edit was checked, so a member the edit then skipped lost its pin anyway.
