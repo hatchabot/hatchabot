@@ -11900,27 +11900,45 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const { agent: clone } = importTemplate(deps, data, {
           ownerId: ownerIdOf(req), name, values: agent.paramValues ?? {}, lenient: true,
         });
-        store.setAgentParent(clone.id, agent.id); // lineage: a clone is a child
-        // A faithful copy carries its environment variables too (new secret
-        // refs, same values), before its first build reads them. Data
-        // sources (deploy keys, clones) are not copied: they are named in the
-        // answer so the owner is told, not left with tools that fail (night review).
-        for (const e of store.listAgentEnv(agent.id)) {
-          const value = await secrets.get(e.secretRef).catch(() => undefined);
-          if (value === undefined) continue;
-          const id = randomUUID();
-          const secretRef = `agent-env/${id}`;
-          await secrets.put(secretRef, value);
-          store.insertAgentEnv({ id, agentId: clone.id, name: e.name, secretRef, createdAt: new Date().toISOString() });
+        // Everything from here to the build is undone together on a failure:
+        // a failed secret copy used to leave the half-made clone (holding its
+        // name, so a retry was refused) and the secrets copied so far (#165).
+        const created: string[] = [];
+        let notCopied: string[];
+        let carried: Awaited<ReturnType<typeof readCloneMemory>>;
+        try {
+          store.setAgentParent(clone.id, agent.id); // lineage: a clone is a child
+          // A faithful copy carries its environment variables too (new secret
+          // refs, same values), before its first build reads them. Data
+          // sources (deploy keys, clones) are not copied: they are named in the
+          // answer so the owner is told, not left with tools that fail (night review).
+          for (const e of store.listAgentEnv(agent.id)) {
+            const value = await secrets.get(e.secretRef).catch(() => undefined);
+            if (value === undefined) continue;
+            const id = randomUUID();
+            const secretRef = `agent-env/${id}`;
+            created.push(secretRef);
+            await secrets.put(secretRef, value);
+            store.insertAgentEnv({ id, agentId: clone.id, name: e.name, secretRef, createdAt: new Date().toISOString() });
+          }
+          notCopied = store.listDataSources(agent.id).map((d) => d.mountName);
+          // Its daily notes (memory/) and USER.md too: most of what an agent
+          // saves lives there, not in MEMORY.md (2026-09-30). Seeded like the
+          // rest, before the first build; what could not come is named.
+          carried = await readCloneMemory(deps.provider, agent.runtimeRef!, agent.slug);
+          if (Object.keys(carried.files).length) store.setAgentSeed(clone.id, carried.files);
+          // `telegram: false`: web-only, as create — no pool bot taken (2026-10-08).
+          if ((req.body as { telegram?: unknown } | null)?.telegram === false) store.setAgentWebOnly(clone.id, true);
+        } catch (err) {
+          for (const ref of created) await secrets.delete(ref).catch(() => {});
+          try {
+            store.scrubAgentResidue(clone.id);
+            store.setAgentState(clone.id, 'DELETING');
+            store.setAgentState(clone.id, 'DELETED');
+          } catch { /* best-effort; the error below is what the user sees */ }
+          trace(clone.id)('agent.clone_failed', { sourceAgentId: agent.id, error: String((err as Error).message ?? err).slice(0, 200) });
+          throw new TransferError(`Couldn't copy ${agent.name}'s settings to the clone: ${String((err as Error).message ?? err).slice(0, 200)}. Nothing was kept; try again.`);
         }
-        const notCopied = store.listDataSources(agent.id).map((d) => d.mountName);
-        // Its daily notes (memory/) and USER.md too: most of what an agent
-        // saves lives there, not in MEMORY.md (2026-09-30). Seeded like the
-        // rest, before the first build; what could not come is named.
-        const carried = await readCloneMemory(deps.provider, agent.runtimeRef!, agent.slug);
-        if (Object.keys(carried.files).length) store.setAgentSeed(clone.id, carried.files);
-        // `telegram: false`: web-only, as create — no pool bot taken (2026-10-08).
-        if ((req.body as { telegram?: unknown } | null)?.telegram === false) store.setAgentWebOnly(clone.id, true);
         kickProvision(clone.id, { webOnlyIfNoBot: true });
         return reply.code(201).send({
           ...publicAgent(clone), notCopied,

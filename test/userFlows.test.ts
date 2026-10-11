@@ -57,6 +57,33 @@ describe('Clone — POST /v1/agents/:id/clone', () => {
     expect(w.store.listMemberships('a1').filter((m) => m.status === 'active')).toHaveLength(2);
   });
 
+  it('a failed copy of its settings leaves no half-made clone, no copied secret, and the name free (#165)', async () => {
+    const w = await makeWorld();
+    await seedRunningAgent(w);
+    for (const [name, value] of [['RECIPE_SITE', 'https://recipes.example.org'], ['PANTRY_KEY', 'made-up-pantry-1']] as const) {
+      const ref = `agent-env/src-${name}`;
+      await w.secrets.put(ref, value);
+      w.store.insertAgentEnv({ id: `src-${name}`, agentId: 'a1', name, secretRef: ref, createdAt: 'now' });
+    }
+    const put = w.secrets.put.bind(w.secrets);
+    let copies = 0;
+    w.secrets.put = async (ref: string, v: string) => {
+      if (ref.startsWith('agent-env/') && !ref.startsWith('agent-env/src-') && ++copies === 2) throw new Error('vault is full');
+      return put(ref, v);
+    };
+    const before = new Set(w.secrets.map.keys());
+    const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/clone', headers: as(), payload: { name: 'Kitchen Copy' } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/Nothing was kept/);
+    expect(w.store.listAgents(OWNER).filter((a) => a.name === 'Kitchen Copy' && a.state !== 'DELETED')).toEqual([]);
+    expect([...w.secrets.map.keys()].filter((k) => !before.has(k))).toEqual([]);
+
+    w.secrets.put = put;
+    const again = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/clone', headers: as(), payload: { name: 'Kitchen Copy' } });
+    expect(again.statusCode).toBe(201);
+    expect(w.store.listAgentEnv(again.json().id).map((e) => e.name).sort()).toEqual(['PANTRY_KEY', 'RECIPE_SITE']);
+  });
+
   it('refuses to clone an agent the caller does not own (404)', async () => {
     const w = await makeWorld();
     await seedRunningAgent(w);
