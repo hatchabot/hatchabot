@@ -639,6 +639,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/routes.ts` — `'/v1/agents/:id/message'`, `ensureAwake`
 
+### "Connect to each other" failed once, and after trying again the agents still cannot consult ("Agent call token required")
+- **Check:** the agents list each other as peers, but a consult is refused with HTTP 401 "Agent call token required", and the first Connect returned an error.
+- **Cause:** the connect saved the grants first and then made each agent's call token. When making a token failed, a second Connect found the grants already in place and skipped the token.
+- **Fix:** upgrade, press Connect to each other again, then rebuild the agents it names. Connect now makes any missing token even when nothing else changes.
+- **Fixed in:** `v2.160.0` (#167)
+- **Code:** `src/api/routes.ts` — `'/v1/agent-peers/mesh'`, `ensureAgentCallToken`
+
+### A script's peers update removed every peer an agent could consult
+- **Check:** the agent's peers emptied right after a `PUT /v1/agents/<id>/peers` whose body had no `peerIds`, or not a list there.
+- **Cause:** anything but a list was read as an empty list, which revokes every grant.
+- **Fix:** upgrade: such a body is refused (HTTP 400) and changes nothing; send `{"peerIds": []}` to remove all. Grant the lost peers again (the agent's Sharing → Other agents it can ask).
+- **Fixed in:** `v2.160.0` (#166)
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/peers'`
+
 ### An agent's browser keeps disappearing, or a test install removed it
 - **Check:** another Hatchabot (a second install, or a smoke test with its own `HATCHABOT_PREFIX`) uses the same Docker, and the Setup log shows "its browser removed".
 - **Cause:** each install's sweep listed every browser on the daemon and removed those it didn't know.
