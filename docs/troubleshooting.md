@@ -213,6 +213,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `src/api/publicAccess.ts` — `factorAt`, `secondFactorsChanged`; `src/store/store.ts` — `second_factor_generations`
 
+### "That took too long. Start adding the passkey again." or "That passkey did not verify" with Hatchabot open in two tabs
+- **Check:** another tab (or window) asked for a passkey, to add one or to sign in, after this one did.
+- **Cause:** each person had one pending passkey challenge of each kind, so the second tab's request replaced the first tab's.
+- **Fix:** upgrade; each tab's passkey request now stands on its own (up to five at once). On an older version, finish in the tab that asked last, or start again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/secondFactor.ts` — `issue`, `take`; `src/api/webauthn.ts` — `clientDataChallenge`
+
+### A passkey was added after the owner reset that person's second factors
+- **Check:** the security record shows `second_factor.reset` for them, then `second_factor.added` (passkey) within a few minutes, without them signing in again.
+- **Cause:** a passkey enrolment started before the reset kept its challenge and could finish after it.
+- **Fix:** upgrade; a reset (or a removed factor) voids every passkey request begun before it. Reset them again if the passkey is not theirs.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/secondFactor.ts` — `forgetCeremonies`, `'/v1/second-factor/reset/:id'`
+
 ## AI sources and Claude login
 
 ### An agent answers "Your model provider needs a new login" or "Not logged in · Please run /login", while the same source works for other agents
