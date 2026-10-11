@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeEnvVar } from '../src/ops/tailnet.js';
+import { unsetEnvVar, writeEnvVar } from '../src/ops/tailnet.js';
+import { activeValues, syncEnvFile } from '../src/config/envFile.js';
 
 /** The app writes settings into .env (Settings → Hosts → Defaults, rebuild policy): the line in force is the one it changes. */
 describe('writeEnvVar', () => {
@@ -22,5 +23,27 @@ describe('writeEnvVar', () => {
     expect(readFileSync(f, 'utf8')).toBe('HATCHABOT_EMBEDDER_MEMORY=3g\n');
     await writeEnvVar(f, 'HATCHABOT_FILES_MB_SLACK', '25', () => true, 'a note');
     expect(readFileSync(f, 'utf8')).toMatch(/# a note\nHATCHABOT_FILES_MB_SLACK=25\n/);
+  });
+  it('two settings saved at once both land, and no staging file is left behind (#160)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-env-'));
+    const f = join(dir, '.env');
+    writeFileSync(f, 'HATCHABOT_PORT=8080\nHATCHABOT_REBUILD_POLICY=ask\n');
+    // A stale `.env.tmp` from an old release must not be renamed into place.
+    writeFileSync(`${f}.tmp`, 'STALE=1\n');
+    const results = await Promise.all([
+      writeEnvVar(f, 'HATCHABOT_REBUILD_CONCURRENCY', '2', () => true),
+      writeEnvVar(f, 'HATCHABOT_REBUILD_POLICY', 'auto', () => true),
+      writeEnvVar(f, 'HATCHABOT_DRILL_EVERY', 'weekly', () => true),
+      unsetEnvVar(f, 'HATCHABOT_PORT'),
+      syncEnvFile(f),
+    ]);
+    expect(results.slice(0, 4).every((r) => (r as { ok: boolean }).ok)).toBe(true);
+    const env = activeValues(readFileSync(f, 'utf8'));
+    expect(env.get('HATCHABOT_REBUILD_CONCURRENCY')).toBe('2');
+    expect(env.get('HATCHABOT_REBUILD_POLICY')).toBe('auto');
+    expect(env.get('HATCHABOT_DRILL_EVERY')).toBe('weekly');
+    expect(env.has('HATCHABOT_PORT')).toBe(false);
+    expect(env.has('STALE')).toBe(false);
+    expect(readdirSync(dir).filter((n) => n.includes('.tmp-'))).toEqual([]);
   });
 });

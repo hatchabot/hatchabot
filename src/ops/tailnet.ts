@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { replaceEnvFile, withEnvFileLock } from '../config/envFile.js';
 
 /**
  * Is this machine on a tailnet, and is Hatchabot already served over HTTPS on
@@ -156,7 +157,17 @@ export async function writeEnvVar(
   replaceable: (current: string) => boolean,
   comment?: string,
 ): Promise<{ ok: boolean; replaced?: boolean; error?: string }> {
-  const { readFile, writeFile, rename, stat } = await import('node:fs/promises');
+  return withEnvFileLock(envPath, () => writeEnvVarNow(envPath, key, value, replaceable, comment));
+}
+
+async function writeEnvVarNow(
+  envPath: string,
+  key: string,
+  value: string,
+  replaceable: (current: string) => boolean,
+  comment?: string,
+): Promise<{ ok: boolean; replaced?: boolean; error?: string }> {
+  const { readFile, stat } = await import('node:fs/promises');
   let body: string;
   try { body = await readFile(envPath, 'utf8'); }
   catch { return { ok: false, error: `No .env at ${envPath}` }; }
@@ -187,10 +198,8 @@ export async function writeEnvVar(
     lines.push(line);
     lines.push('');
   }
-  const tmp = `${envPath}.tmp`;
   const mode = await stat(envPath).then((st) => st.mode & 0o777).catch(() => 0o600);
-  await writeFile(tmp, lines.join('\n'), { mode });
-  await rename(tmp, envPath);
+  await replaceEnvFile(envPath, lines.join('\n'), mode);
   return { ok: true, replaced };
 }
 
@@ -379,16 +388,16 @@ export async function funnelOff(localPort: number, funnelPort: number): Promise<
 }
 
 /** Take a setting out of force in .env: its live lines become comments (the file's next tidy lists it with its default). */
-export async function unsetEnvVar(envPath: string, key: string): Promise<{ ok: boolean; error?: string }> {
-  const { readFile, writeFile, rename, stat } = await import('node:fs/promises');
-  let body: string;
-  try { body = await readFile(envPath, 'utf8'); }
-  catch { return { ok: false, error: `No .env at ${envPath}` }; }
-  const re = new RegExp(`^\\s*${key}\\s*=`);
-  const lines = body.split('\n').map((l) => (re.test(l) ? `# ${l.trim()}` : l));
-  const tmp = `${envPath}.tmp`;
-  const mode = await stat(envPath).then((st) => st.mode & 0o777).catch(() => 0o600);
-  await writeFile(tmp, lines.join('\n'), { mode });
-  await rename(tmp, envPath);
-  return { ok: true };
+export function unsetEnvVar(envPath: string, key: string): Promise<{ ok: boolean; error?: string }> {
+  return withEnvFileLock(envPath, async () => {
+    const { readFile, stat } = await import('node:fs/promises');
+    let body: string;
+    try { body = await readFile(envPath, 'utf8'); }
+    catch { return { ok: false, error: `No .env at ${envPath}` }; }
+    const re = new RegExp(`^\\s*${key}\\s*=`);
+    const lines = body.split('\n').map((l) => (re.test(l) ? `# ${l.trim()}` : l));
+    const mode = await stat(envPath).then((st) => st.mode & 0o777).catch(() => 0o600);
+    await replaceEnvFile(envPath, lines.join('\n'), mode);
+    return { ok: true };
+  });
 }
