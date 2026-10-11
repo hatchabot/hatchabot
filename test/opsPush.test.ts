@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createOpsPush, PushBudget } from '../src/ops/push.js';
+import { createOpsPush, PushBudget, pushText } from '../src/ops/push.js';
 
 /**
  * The push the retired Telegram management bot used to do, through the
@@ -32,6 +32,20 @@ describe('pushing "something is waiting" to the owner', () => {
     expect(String(calls[0]!.body.text)).toContain('https://box.example.ts.net');
     // No markup parsing: an agent's summary is not trusted as formatting.
     expect(calls[0]!.body.parse_mode).toBeUndefined();
+  });
+
+  it('a long headline and a long detail together still fit one Telegram message, the link kept', async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const push = createOpsPush({ botToken: async () => 'BOTTOKEN', chatId: () => '99', appUrl: () => 'https://box.example.org', fetchImpl: stubFetch(calls), perHour: 1 });
+    expect(await push.waiting('o1', 'H'.repeat(3600), 'D'.repeat(3600))).toBe(true);
+    const text = String(calls[0]!.body.text);
+    expect(text.length).toBeLessThanOrEqual(4096);
+    expect(text.startsWith('H'.repeat(100))).toBe(true);
+    expect(text).toContain('D…'); // the detail is cut, not dropped
+    expect(text).toContain('the last of these for this hour'); // perHour 1: this one is the last
+    expect(text.endsWith('Confirm it in Hatchabot: https://box.example.org')).toBe(true);
+    // A cut never splits a character in two.
+    expect(pushText('🙂'.repeat(3000), undefined, ['tail']).match(/[\ud800-\udbff](?![\udc00-\udfff])/)).toBeNull();
   });
 
   it('says nothing when the manager has no bot, or the owner has no linked Telegram', async () => {
