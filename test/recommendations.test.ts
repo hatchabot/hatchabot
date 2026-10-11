@@ -276,6 +276,34 @@ describe('one cause, one item', () => {
     expect(isCostCard({ tool: 'set_cron_enabled', resolved: { agentId: 'x', agentName: 'x', rest: { call: { method: 'PATCH', path: '/x', body: { enabled: true } }, card: '' } } })).toBe(false);
   });
 
+  it('a card is merged only when it does what the item says: removing a budget is not "Raise it" (#181)', () => {
+    const w = world();
+    w.agent('a1', 'Garden Notes');
+    w.store.setBudget('a1', OWNER, 50, 'pause', iso(NOW));
+    w.store.setCostDays('a1', new Map([['2026-10-05', 55]]));
+    w.store.setTokenHealth('a1', health({ conv: { calls: 300, p50: 200_000, p90: 260_000, max: 300_000, over100k: 300 }, main: { a1: { ctx: 180_000, at: NOW - HOUR } } }), iso(NOW));
+    const raise = w.list().items.find((x) => x.id === 'budget:a1')!.action!;
+    expect(w.list().items.find((x) => x.id === 'conversation:a1')!.action).toMatchObject({ kind: 'context-cap', body: { tokens: 150_000 } });
+    const card = (id: string, tool: string, path: string, body: Record<string, unknown>) => w.store.putMgmtProposal({
+      id, ownerId: OWNER, chatId: 0, fromUserId: 0, messageId: 0, tool, resolved: { agentId: 'a1', agentName: 'Garden Notes', rest: { call: { method: 'PUT', path, body }, card: '💵 …' } },
+      summary: `💵 ${tool} card`, createdAtMs: NOW - HOUR, expiresAtMs: NOW + DAY, status: 'pending', source: 'agent',
+    } as PendingConfirm);
+    card('c_remove', 'set_budget', '/v1/agents/a1/budget', { usd: null });
+    card('c_cap', 'set_context_cap', '/v1/agents/a1/context-cap', { tokens: null });
+    let items = w.list().items;
+    const lim = items.find((x) => x.id === 'budget:a1')!;
+    expect(lim.action).toEqual(raise);
+    expect(lim.proposalId).toBeUndefined();
+    expect(items.find((x) => x.id === 'card:c_remove')).toMatchObject({ kind: 'proposal', action: { label: 'Remove its budget' } });
+    expect(items.find((x) => x.id === 'card:c_cap')).toMatchObject({ kind: 'proposal', action: { label: 'Remove its cap' } });
+    expect(items.find((x) => x.id === 'conversation:a1')!.action).toMatchObject({ kind: 'context-cap', body: { tokens: 150_000 } });
+    // The same raise, proposed by the Hatchabot agent: one item, its click.
+    card('c_raise', 'set_budget', '/v1/agents/a1/budget', { ...raise.body });
+    items = w.list().items;
+    expect(items.find((x) => x.id === 'budget:a1')).toMatchObject({ proposalId: 'c_raise', action: { kind: 'confirm-card' } });
+    expect(items.some((x) => x.id === 'card:c_raise')).toBe(false);
+  });
+
   it('the quality guard\'s switch-back card is the switch-back item', () => {
     const w = world();
     w.agent('piano', 'Piano Practice', { model: 'claude-haiku-4-5' });

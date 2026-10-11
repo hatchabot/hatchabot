@@ -458,20 +458,33 @@ function cardItem(c: Ctx, p: PendingConfirm): Recommendation | undefined {
   };
 }
 
-/** The computed item a card proposes the same change as, if any. */
+/**
+ * The computed item a card proposes the same change as, if any. The card's
+ * click replaces the item's action while its title and effect stay, so only a
+ * card that does exactly what the item's own action does is merged: a card to
+ * remove a budget is not "Raise it to $75" (#181).
+ */
 function matchCard(items: Recommendation[], p: PendingConfirm): Recommendation | undefined {
   const agentId = p.resolved.agentId;
   const body = (p.resolved.rest?.call.body ?? {}) as Record<string, unknown>;
   const on = (id: string) => items.find((x) => x.id === id && !x.proposalId);
+  /** The item, when its own action is this kind and its body has these values. */
+  const same = (it: Recommendation | undefined, kind: RecAction['kind'], want: Record<string, unknown>) =>
+    it && it.action?.kind === kind && Object.entries(want).every(([k, v]) => v === undefined || it.action?.body?.[k] === v) ? it : undefined;
   switch (p.tool) {
     case 'set_model': {
       const it = on(`cheaper:${agentId}`);
       return it && it.action?.body?.model === p.resolved.model ? it : undefined;
     }
     case 'compact_agent':
-      return on(`conversation:${agentId}`) ?? items.find((x) => x.kind === 'loop' && x.agents[0]?.id === agentId && x.action?.kind === 'compact' && !x.proposalId);
-    case 'set_context_cap': return on(`conversation:${agentId}`);
-    case 'set_budget': return on(`no-budget:${agentId}`) ?? on(`budget:${agentId}`) ?? on(`budget-pace:${agentId}`);
+      return same(on(`conversation:${agentId}`), 'compact', {}) ?? items.find((x) => x.kind === 'loop' && x.agents[0]?.id === agentId && x.action?.kind === 'compact' && !x.proposalId);
+    case 'set_context_cap': return typeof body.tokens === 'number' ? same(on(`conversation:${agentId}`), 'context-cap', { tokens: body.tokens }) : undefined;
+    case 'set_budget': {
+      // A card with no atLimit keeps the budget's own (the route's rule), which is what the item sends too.
+      if (typeof body.usd !== 'number') return undefined;
+      const want = { usd: body.usd, atLimit: body.atLimit };
+      return same(on(`no-budget:${agentId}`), 'set-budget', want) ?? same(on(`budget:${agentId}`), 'set-budget', want) ?? same(on(`budget-pace:${agentId}`), 'set-budget', want);
+    }
     case 'set_cron_enabled': {
       const job = decodeURIComponent(String(p.resolved.rest?.call.path ?? '').split('/').pop() ?? '');
       return items.find((x) => x.kind === 'loop' && x.action?.kind === 'pause-task' && x.agents[0]?.id === agentId && x.action.path?.endsWith(`/${encodeURIComponent(job)}`) && !x.proposalId);
