@@ -691,9 +691,9 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### "Restoring … was interrupted by a restart part-way through its files"
 - **Check:** a held `restore-snapshot` operation on the agent.
 - **Cause:** a restart while a snapshot's core files were being written; some are the snapshot's and some are not.
-- **Fix:** **Finish**, or **Revert to the copy taken before**. The agent must be running.
-- **Fixed in:** `v2.155.0`
-- **Code:** `src/orchestrator/snapshots.ts` — `resumeSnapshotRestore`
+- **Fix:** **Finish**, or **Revert to the copy taken before**, running or stopped. Before v2.160.0 a stopped agent answered "Start the agent first", while Start was refused until the choice was made; upgrade, then choose again (its files are written on its volume).
+- **Fixed in:** `v2.155.0`; a stopped agent: `v2.160.0`
+- **Code:** `src/orchestrator/snapshots.ts` — `resumeSnapshotRestore`, `recoverSnapshotRestore`
 
 ### An app's page waits for a choice: "The … change to … was interrupted by a restart part-way through the switch"
 - **Check:** a held `app-install`, `app-update` or `app-rollback` operation; the agent's `apps/<app>/current` differs from the app record.
