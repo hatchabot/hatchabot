@@ -101,7 +101,14 @@ export interface ReportFacts {
   agent?: { name: string; state: string; reason?: string; model?: string; image?: string; onRunner?: boolean; logs?: string };
 }
 
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+/** The first `n` UTF-16 units of `s`, one fewer when the cut would split an emoji's surrogate pair (#159). */
+const cut = (s: string, n: number) => {
+  const c = s.charCodeAt(n - 1);
+  return s.slice(0, c >= 0xd800 && c <= 0xdbff ? n - 1 : n);
+};
+const clip = (s: string, n: number) => (s.length > n ? `${cut(s, n - 1)}…` : s);
+/** A lone surrogate (pasted text can carry one) made U+FFFD: encodeURIComponent throws on one. */
+const wellFormed = (s: string) => s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
 const fence = (s: string, lang = '') => `\`\`\`${lang}\n${s.replace(/```/g, "'''")}\n\`\`\``;
 
 /** The issue body: the person's (or agent's) words, then the facts. Redacted for public use. */
@@ -144,7 +151,7 @@ export function buildReport(input: ReportInput, facts: ReportFacts, ctx: PublicR
  */
 export function issueUrl(title: string, body: string, opts: { slug?: string; max?: number; file?: string } = {}): { url: string; trimmed: boolean } {
   const base = `https://github.com/${opts.slug ?? REPORT_SLUG}/issues/new?labels=field-report`;
-  const make = (b: string) => `${base}&title=${encodeURIComponent(title)}&body=${encodeURIComponent(b)}`;
+  const make = (b: string) => `${base}&title=${encodeURIComponent(wellFormed(title))}&body=${encodeURIComponent(wellFormed(b))}`;
   const max = opts.max ?? 7500;
   if (make(body).length <= max) return { url: make(body), trimmed: false };
   const note = `\n\n> **The full report is in the attached file** (\`${opts.file ?? 'hatchabot-report.md'}\`) — this link was too long for GitHub. Drag the file into this box to attach it.`;
@@ -158,7 +165,7 @@ export function issueUrl(title: string, body: string, opts: { slug?: string; max
     const sub = b.lastIndexOf('\n\n<sub>');
     b = b.slice(0, i) + `${h} — in the attached file` + (j >= 0 ? b.slice(j) : sub > i ? b.slice(sub) : '');
   }
-  while (make(b + note).length > max && b.length > 200) b = b.slice(0, Math.floor(b.length * 0.85));
+  while (make(b + note).length > max && b.length > 200) b = cut(b, Math.floor(b.length * 0.85));
   return { url: make(b + note), trimmed: true };
 }
 
