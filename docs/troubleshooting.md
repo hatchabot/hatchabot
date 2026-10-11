@@ -872,6 +872,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/transcript.ts` — `recoverContext`
 
+### Every agent's memory search is refused ("unauthorized") until a rebuild
+- **Check:** `docker logs <prefix>-embed-door` shows no successful calls since a moment the keys file was being rewritten, and the agents' memory search answers 401; `embed-keys.json` in the data directory's `embed/` folder is valid JSON with their keys.
+- **Cause:** the memory search door rereads its keys file when its time stamp changes. One read that failed (a file caught mid-write, a moment it could not be read) left it with no keys, and it would not read the same file again until the file next changed — usually the next agent rebuild.
+- **Fix:** upgrade; in the meantime, any rebuild (or Settings → Memory search → Restart) rewrites the file and the door reads it again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/embedder/door.ts` — `doorScript`, `loadKeys`
+
+### A deleted or archived agent's memory search key still works on a runner
+- **Check:** on the runner, the door's keys file (in its `-embed-keys` volume) still lists the agent's key hash, while `embed-keys.json` under the runner's `embed-hosts/<runner id>/` folder here no longer does.
+- **Cause:** the agent was archived or deleted while the runner's memory search service was starting for the first time. The start copied the keys before the change and then took the newer file as already copied, so it was never copied again.
+- **Fix:** upgrade; until then, any key change for that runner (a rebuild of one of its agents) or Restart of its service copies the current file.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/embedder/embedder.ts` — `syncKeys`, `start`
+
 ## Console and web chat
 
 ### The console says "Control UI did not start"

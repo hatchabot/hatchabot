@@ -222,6 +222,7 @@ export class EmbedderService {
     for (const t of this.#o.store.listEmbedTokens()) if (!gone.has(t.state) && mine(t.hostId)) keys[t.tokenHash] = t.agentId;
     if (!this.#o.hostId) for (const [name, g] of Object.entries(this.#guests())) keys[g.hash] = `guest:${name}`;
     const body = JSON.stringify(keys);
+    if (body !== this.#written) { this.#written = body; this.#keysGen++; }
     const tmp = `${this.keysFile}.tmp`;
     writeFileSync(tmp, body, { mode: 0o600 });
     chmodSync(tmp, 0o600);
@@ -229,6 +230,9 @@ export class EmbedderService {
     if (this.#o.hostId && this.enabled && body !== this.#pushed) this.#pushLater = this.#pushKeys(body);
   }
 
+  /** What syncKeys last wrote, and a count of its changes: a start tells by it whether keys changed while it copied them. */
+  #written: string | undefined;
+  #keysGen = 0;
   /** A runner's door reads its own copy: what was last copied there, and the copy under way. */
   #pushed: string | undefined;
   #pushLater: Promise<void> = Promise.resolve();
@@ -302,6 +306,7 @@ export class EmbedderService {
       await this.ensureModel();
       mkdirSync(this.dir, { recursive: true, mode: 0o700 });
       this.syncKeys();
+      const gen = this.#keysGen, body = this.#written;
       const spec = await this.#spec();
       let s: EmbedderStatus;
       try {
@@ -313,8 +318,24 @@ export class EmbedderService {
       }
       writeFileSync(this.enabledFile, `${new Date().toISOString()}\n`);
       rmSync(this.stoppedFile, { force: true });
-      // The start copied the key files to a runner as they stood.
-      if (this.#o.hostId) { try { this.#pushed = readFileSync(this.keysFile, 'utf8'); } catch { /* none yet */ } }
+      // The start copied the key files to a runner as they stood. Keys that
+      // changed meanwhile (a key retired while a first start ran, when
+      // syncKeys does not push) were not taken as copied: the door kept a
+      // retired key valid (B067). Which copy landed there last is then
+      // unknown, so they are copied again, whatever was pushed since.
+      if (this.#o.hostId) {
+        if (this.#keysGen === gen) this.#pushed = body;
+        else {
+          this.#pushed = undefined;
+          const next = this.#pushLater.catch(() => {}).then(async () => {
+            const now = this.#written;
+            await this.#o.provider().pushEmbedKeys?.(this.#keyFiles());
+            this.#pushed = now;
+          });
+          this.#pushLater = next;
+          await next.catch((err) => this.#o.log?.('embedder.keys_push_failed', { host: this.#o.hostId, error: String(err).slice(0, 200) }));
+        }
+      }
       this.#o.log?.('embedder.started', { door: s.doorAddress, ...(this.#o.hostId ? { host: this.#o.hostId } : {}) });
       return this.status();
     }
