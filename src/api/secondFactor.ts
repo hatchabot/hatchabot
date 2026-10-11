@@ -140,14 +140,14 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     return true;
   };
 
+  /**
+   * The new set replaces the old in one transaction: a failure part-way used
+   * to leave the saved codes deleted and only some of the new ones stored,
+   * none of which the person was ever shown (B094).
+   */
   const newBackupCodes = (ownerId: string): string[] => {
-    store.deleteSecondFactors(ownerId, 'backup');
-    const codes: string[] = [];
-    for (let i = 0; i < BACKUP_CODES; i++) {
-      const code = newBackupCode();
-      codes.push(code);
-      store.insertSecondFactor({ id: `sf-${randomUUID()}`, ownerId, kind: 'backup', data: backupCodeHash(secret, ownerId, code) });
-    }
+    const codes = Array.from({ length: BACKUP_CODES }, () => newBackupCode());
+    store.replaceBackupCodes(ownerId, codes.map((code) => backupCodeHash(secret, ownerId, code)));
     return codes;
   };
 

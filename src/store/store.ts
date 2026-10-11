@@ -2135,6 +2135,16 @@ export class Store {
   spendBackupCode(ownerId: string, hash: string): boolean {
     return this.db.prepare(`DELETE FROM second_factors WHERE owner_id = ? AND kind = 'backup' AND data = ?`).run(ownerId, hash).changes === 1;
   }
+  /**
+   * A new set of backup codes in place of the old, in one transaction: a
+   * failure part-way leaves the saved set whole (B094).
+   */
+  replaceBackupCodes(ownerId: string, hashes: string[]): void {
+    this.db.transaction(() => {
+      this.deleteSecondFactors(ownerId, 'backup');
+      for (const data of hashes) this.insertSecondFactor({ id: `sf-${randomUUID()}`, ownerId, kind: 'backup', data });
+    })();
+  }
   deleteSecondFactor(ownerId: string, id: string): boolean {
     return this.db.prepare(`DELETE FROM second_factors WHERE owner_id = ? AND id = ?`).run(ownerId, id).changes === 1;
   }
