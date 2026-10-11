@@ -81,7 +81,7 @@ function normalizeCron(j: Record<string, any>): Cron {
     // {kind:'at', at}); the snake_case reads never matched, so interval jobs
     // showed no interval and couldn't be edited (2026-09-11).
     everyMs: typeof s.everyMs === 'number' ? s.everyMs : typeof s.every_ms === 'number' ? s.every_ms : undefined,
-    atMs: typeof s.at === 'number' ? s.at : typeof s.atMs === 'number' ? s.atMs : typeof s.at_ms === 'number' ? s.at_ms : undefined,
+    atMs: atMsOf(s),
     payloadKind: p.kind,
     // Read so an edit can keep it: the app's edit re-creates the task, and a
     // quiet one came back announcing (night review, 2026-09-27).
@@ -100,6 +100,23 @@ function normalizeCron(j: Record<string, any>): Cron {
 }
 
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+
+/**
+ * A one-shot task's time. The gateway's `at` may be epoch ms or an ISO string
+ * (a task brought in from another OpenClaw keeps the string it had,
+ * cronImport.ts); reading numbers only lost the time of the string kind, and
+ * the task showed as "at" with no time.
+ */
+function atMsOf(s: Record<string, any>): number | undefined {
+  for (const v of [s.at, s.atMs, s.at_ms]) {
+    if (num(v) !== undefined) return v;
+    if (typeof v === 'string' && v.trim()) {
+      const t = /^\d+$/.test(v.trim()) ? Number(v.trim()) : Date.parse(v);
+      if (Number.isFinite(t)) return t;
+    }
+  }
+  return undefined;
+}
 
 /** The scheduler's run state, read from `state` with the top-level mirrors as fallback. */
 function cronState(j: Record<string, any>): Partial<Cron> {
@@ -166,7 +183,13 @@ export async function listCrons(
   } catch {
     throw new Error('cron list returned something other than JSON');
   }
-  return Array.isArray(jobs) ? jobs.map(normalizeCron) : [];
+  // A list that is not there, or holds something that is not a task, is not
+  // "no tasks": the sleep check and the delivery repair would act on it.
+  if (!Array.isArray(jobs)) throw new Error('cron list returned no list of tasks');
+  if (jobs.some((j) => !j || typeof j !== 'object' || (typeof j.id !== 'string' && typeof j.id !== 'number') || j.id === '')) {
+    throw new Error('cron list returned a task with no id');
+  }
+  return jobs.map(normalizeCron);
 }
 
 export interface AddCronOptions {
