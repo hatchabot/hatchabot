@@ -2870,9 +2870,11 @@ const SCENARIOS = String.raw`(() => {
         const row = document.querySelector('#adoptDiscover input[data-oc]');
         ok('an agent without a bot can be ticked in the list', !!row && !row.disabled);
         ok('and says it comes in without Telegram: ' + $('adoptDiscover').textContent.trim().slice(0, 120), /without Telegram/.test($('adoptDiscover').textContent));
-        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md', 'AGENTS.md'], bytes: 2048, markdownFiles: ['SOUL.md', 'AGENTS.md'], existingBot: null } }];
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md', 'AGENTS.md'], bytes: 2048, markdownFiles: ['SOUL.md', 'AGENTS.md'], existingBot: null, links: ['notes -> /srv/shared/notes'] } }];
         $('adoptPath').value = WS;
         await adoptInspect(); await sleep(50);
+        ok('a link in the workspace is named as not copied (2026-10-10): ' + $('adoptPreview').textContent.trim().slice(0, 160),
+          /Not copied — a link: notes -> \/srv\/shared\/notes/.test($('adoptPreview').textContent));
         ok('a workspace with no bot: "No Telegram for now" is ticked', !!$('adoptWeb')?.checked);
         ok('and the bot choice is out of the way', $('adoptBotChoice')?.hidden === true);
         window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad1', name: 'Garden Helper', state: 'PROVISIONING' } }];

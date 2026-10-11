@@ -7019,11 +7019,16 @@ async function adoptInspect() {
     const shown = md.slice(0, 8).join(', ') + (md.length > 8 ? `, +${md.length - 8} more` : '');
     const skip = p.skipped?.length
       ? `<div class="sub" style="margin-top:4px">Skipping ${esc(p.skipped.join(', '))} — built for this machine; the agent rebuilds them.</div>` : '';
+    // Links are not copied (a link means something else inside the agent):
+    // named here, so the copy is what this preview shows.
+    const links = p.links || [];
+    const linkLine = links.length
+      ? `<div class="sub" style="margin-top:4px">Not copied — ${links.length === 1 ? 'a link' : `${links.length} links`}: ${esc(links.slice(0, 6).join(', '))}${links.length > 6 ? `, +${links.length - 6} more` : ''}. Copy what it points at into the folder if the agent needs it.</div>` : '';
     $('adoptPreview').innerHTML =
       `<div style="border:1px solid var(--line);border-radius:8px;padding:10px">
         <div><b>${esc(p.path)}</b></div>
         <div class="sub" style="margin-top:2px">${p.files.length} files · ${(p.bytes / 1e6).toFixed(1)} MB · ${md.length} markdown${md.length ? `: ${esc(shown)}` : ''}</div>
-        ${skip}
+        ${skip}${linkLine}
       </div>`;
     // Suggest a name from the folder: "…/workspace-garden-advisor" → "Garden Advisor".
     if (!$('adoptName').value) {

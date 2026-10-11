@@ -1,7 +1,6 @@
-import { execFile } from 'node:child_process';
-import { existsSync, statSync, readdirSync, readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, statSync, readdirSync, readFileSync, readlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { promisify } from 'node:util';
 import type { Store } from '../store/store.js';
 import { sharePathProblem } from './provision.js';
 import type { ProvisionDeps } from './provision.js';
@@ -9,8 +8,6 @@ import { whileBusy } from './busy.js';
 import { openclawConfigPath } from './openclawImport.js';
 import { openclawConfigAgents } from '../openclaw/configWriter.js';
 import { RUNTIME_STATE_FILES } from './agentFiles.js';
-
-const execFileP = promisify(execFile);
 
 /**
  * Adopt an OpenClaw agent that already exists on this machine — one you built
@@ -67,6 +64,13 @@ export interface WorkspacePreview {
   /** Artifact directories found and deliberately not copied, so the count
    *  never looks like something silently vanished. */
   skipped: string[];
+  /**
+   * Links (and other non-files) found and NOT copied, each as `path -> target`.
+   * The copy is exactly `files`: the archive used to carry links the preview
+   * never showed, so what was copied was not what the owner reviewed, and a
+   * link means something else (or nothing) inside the agent.
+   */
+  links: string[];
 }
 
 /**
@@ -88,6 +92,7 @@ export function inspectWorkspace(dir: string): WorkspacePreview {
   // that actually moved 17.
   const files: string[] = [];
   const skipped: string[] = [];
+  const links: string[] = [];
   let bytes = 0;
   let truncated = false;
   const walk = (dir: string, prefix: string, depth: number): void => {
@@ -109,8 +114,10 @@ export function inspectWorkspace(dir: string): WorkspacePreview {
         continue;
       }
       const rel = prefix ? `${prefix}/${e.name}` : e.name;
-      // Dirent reflects lstat, so symlinks are neither isFile nor isDirectory
-      // and are skipped — which also means no symlink loops to worry about.
+      // Dirent reflects lstat, so symlinks are neither isFile nor isDirectory:
+      // no symlink loops to worry about. They are left out of the copy too
+      // (packWorkspace copies `files` and nothing else), and named here, so
+      // the preview is the copy.
       if (e.isDirectory()) {
         walk(resolve(dir, e.name), rel, depth + 1);
       } else if (e.isFile()) {
@@ -120,6 +127,12 @@ export function inspectWorkspace(dir: string): WorkspacePreview {
         } catch {
           /* raced with a write; the estimate is advisory */
         }
+      } else if (e.isSymbolicLink()) {
+        let target = '?';
+        try { target = readlinkSync(resolve(dir, e.name)); } catch { /* gone meanwhile */ }
+        links.push(`${rel} -> ${target}`);
+      } else {
+        links.push(`${rel} (not a file)`);
       }
     }
   };
@@ -141,20 +154,35 @@ export function inspectWorkspace(dir: string): WorkspacePreview {
         `Expected SOUL.md, AGENTS.md, MEMORY.md or similar.`,
     );
   }
-  return { path, files, markdownFiles, bytes, skipped };
+  return { path, files, markdownFiles, bytes, skipped, links };
 }
 
-/** Tar the workspace, excluding session databases and credentials. */
-export async function packWorkspace(dir: string): Promise<Buffer> {
-  const path = resolve(dir);
-  const args = ['cz', '-C', path];
-  for (const e of EXCLUDE) args.push(`--exclude=${e}`);
-  args.push('.');
-  const { stdout } = await execFileP('tar', args, {
-    encoding: 'buffer',
-    maxBuffer: 1024 * 1024 * 1024,
+/**
+ * Tar exactly the files the preview listed: one policy for what is shown and
+ * what is copied (session databases, credentials, build artifacts, links and
+ * anything else not a plain file stay behind). The names go to tar on stdin,
+ * NUL-separated, so no name is read as an option or split.
+ */
+export async function packWorkspace(preview: Pick<WorkspacePreview, 'path' | 'files'>): Promise<Buffer> {
+  // --no-recursion: a listed name that became a folder since the preview
+  // does not pull in what is under it.
+  const args = ['cz', '-C', preview.path, '--no-recursion', '--null', '-T', '-'];
+  return new Promise<Buffer>((done, fail) => {
+    const tar = spawn('tar', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const out: Buffer[] = [];
+    let size = 0;
+    let err = '';
+    tar.stdout.on('data', (b: Buffer) => {
+      size += b.length;
+      if (size > 1024 * 1024 * 1024) { tar.kill(); fail(new AdoptError('The workspace grew past 1 GB while it was being copied.')); return; }
+      out.push(b);
+    });
+    tar.stderr.on('data', (b: Buffer) => { err += b.toString(); });
+    tar.on('error', fail);
+    tar.on('close', (code) => code === 0 ? done(Buffer.concat(out)) : fail(new Error(`tar exited ${code}: ${err.slice(0, 300)}`)));
+    tar.stdin.on('error', () => { /* tar exited early: its exit code says why */ });
+    tar.stdin.end(preview.files.map((f) => `./${f}\0`).join(''));
   });
-  return stdout as Buffer;
 }
 
 export interface AdoptDeps extends ProvisionDeps {
@@ -191,7 +219,7 @@ async function applyWorkspaceInner(
   }
 
   const preview = inspectWorkspace(sourceDir);
-  const tar = await packWorkspace(sourceDir);
+  const tar = await packWorkspace(preview);
 
   // Stop first: OpenClaw reads these at turn time, and copying underneath a
   // live agent risks a half-written workspace being read mid-conversation.

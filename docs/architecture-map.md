@@ -125,7 +125,7 @@ the step that failed.
 - `src/orchestrator/buildFailure.ts` — `buildFailureReason`: turns a build error into a plain reason.
 - `src/orchestrator/rebuildPolicy.ts` — `rebuildNeed`, `pickAutoRebuilds`, `inQuietHours`: when an agent needs a rebuild and automatic rebuilds.
 - `src/orchestrator/template.ts` — `exportTemplate`, `importTemplate`: templates (a trained copy for someone else); also behind clone.
-- `src/orchestrator/adopt.ts` — `inspectWorkspace`, `applyWorkspace`: adopting an existing OpenClaw workspace.
+- `src/orchestrator/adopt.ts` — `inspectWorkspace`, `packWorkspace`, `applyWorkspace`: adopting an existing OpenClaw workspace (the copy is exactly the files the preview lists; links are named and left out).
 - `src/orchestrator/openclawImport.ts` — `discoverOpenclawAgents`, `quiesceOpenclawBots`: finding OpenClaw agents already on the machine.
 - `src/orchestrator/quiesce.ts` — `stopAndConfirm`: stops and observes runtimes before snapshots and bot handoffs; unknown is refused.
 - `src/orchestrator/archive.ts` — `archiveAgent`, `resumeArchive`: archiving (stops the agent and gives its bot back); after a restart, finished once the bot was given back, undone before.
