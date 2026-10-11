@@ -4,6 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
+import { ProviderError } from '../src/providers/provider.js';
 import {
   bumpMemoryCap, defaultMemoryCap, describeMemoryCap, effectiveMemoryCap, formatMemoryCap, memberMemoryMax,
   memoryBudgetSection, memoryCapChoices, parseMemoryCap,
@@ -150,6 +151,32 @@ describe('a class memory cap', () => {
       expect(list.find((a: any) => a.id === 'own').memoryCapEffective).toBe('8g');
       // Too much for a member's class.
       expect((await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: as(MEMBER), payload: { name: 'Big', memoryCap: '64g' } })).statusCode).toBe(403);
+    } finally { done(); }
+  });
+  it('assigning a class says when its container did not take the cap, rather than "applied" (#138)', async () => {
+    const { f, provider, done } = await world();
+    try {
+      const cls = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: as(OWNER), payload: { name: 'Quants', memoryCap: '6g' } })).json().class;
+      provider.updateMemory = async () => { throw new ProviderError('docker update: daemon gone', 'Its machine did not answer.'); };
+      const r = await f.inject({ method: 'POST', url: '/v1/agents/own/class', headers: as(OWNER), payload: { classId: cls.id } });
+      expect(r.statusCode).toBe(200);
+      expect(r.json().classId).toBe(cls.id);
+      expect(r.json().memoryPending).toMatch(/kept its old memory limits \(Its machine did not answer\.\)/);
+    } finally { done(); }
+  });
+  it('deleting a class gives its members the limits that now apply, and names any that kept the old (#148)', async () => {
+    const { store, f, provider, refs, done } = await world();
+    try {
+      const cls = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: as(OWNER), payload: { name: 'Quants', memoryCap: '6g' } })).json().class;
+      store.setAgentClass('own', cls.id);
+      const del = await f.inject({ method: 'DELETE', url: `/v1/agent-classes/${cls.id}`, headers: as(OWNER) });
+      expect(del.json()).toEqual({ removed: true, skipped: [] });
+      expect(provider.memoryUpdates).toEqual([{ runtimeRef: refs.own, cap: defaultMemoryCap() }]);
+      const again = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: as(OWNER), payload: { name: 'Quants', memoryCap: '6g' } })).json().class;
+      store.setAgentClass('own', again.id);
+      provider.updateMemory = async () => { throw new ProviderError('docker update: daemon gone', 'Its machine did not answer.'); };
+      const failed = await f.inject({ method: 'DELETE', url: `/v1/agent-classes/${again.id}`, headers: as(OWNER) });
+      expect(failed.json().skipped).toEqual(['own: Its machine did not answer.']);
     } finally { done(); }
   });
 });

@@ -3542,6 +3542,25 @@ const SCENARIOS = String.raw`(() => {
         v2Close();
       } finally { if (v2AgentDlg.open) v2Close(); }
     },
+    classMemoryPending: async () => {
+      // A class whose memory cap the container did not take says so, not "applied" (#138);
+      // deleting a class names members whose containers kept its limits (#148).
+      window.__override['/v1/agent-classes'] = { classes: [{ id: 'c1', name: 'Light', memoryCap: '2g' }] };
+      window.__answer = {
+        'POST /v1/agents/a1/class': [{ body: { classId: 'c1', rebuild: false, memoryPending: 'Its container kept its old memory limits (runner asleep); a rebuild applies them.' } }],
+        'DELETE /v1/agent-classes/c1': [{ body: { removed: true, skipped: ['Homework Helper: runner asleep'] } }],
+      };
+      try {
+        openV2Agent('a1', 'overview');
+        const sel = await until(() => { const s = document.getElementById('editClass'); return s && s.querySelector('option[value="c1"]') ? s : null; });
+        sel.value = 'c1'; sel.dispatchEvent(new Event('change'));
+        await until(() => document.getElementById('toast').textContent.includes('kept its old memory limits'));
+        ok('the class is still said to be set', document.getElementById('toast').textContent.includes('Class set'));
+        v2Close();
+        await deleteClass('c1', 'Light');
+        await until(() => document.getElementById('toast').textContent.includes('memory limits not changed for Homework Helper'));
+      } finally { delete window.__override['/v1/agent-classes']; window.__answer = {}; if (v2AgentDlg.open) v2Close(); }
+    },
     homeKeyboard: async () => {
       const key = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
       try {
