@@ -835,6 +835,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/agentFiles.ts` — `RUNTIME_STATE_FILES`, `uploadAllowed`, `putArgv`
 
+### After a restart, an agent shows "Setup was interrupted — tap Retry" although its container is running
+- **Check:** `docker ps` lists its container, but the agent does not answer and `hatchabot doctor` (or its page's Checks) says its gateway is not responding; the event log has `reconcile.interrupted` with `unhealthy: true`.
+- **Cause:** Hatchabot restarted during the agent's setup or rebuild, after its container started but before its gateway answered. Before v2.160.0 such an agent was marked running, with the rest of its setup never done.
+- **Fix:** tap **Retry** (or Rebuild): it reuses the agent's volume and runs the setup again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/reconcile.ts` — `applyReconcileRule`
+
 ### An agent in a class will not start after a rebuild: its data was migrated for a newer OpenClaw than the class's image
 - **Check:** the agent's rebuild fails on a 2026.7 image although it ran 2026.8 or newer before; its Overview shows a class with an image, and `docker inspect` of its old container names the newer image.
 - **Cause:** assigning a class, or changing a class's image, pinned members without the check a direct image pin makes: 2026.7 cannot read a volume already migrated to 2026.8+. Clearing a class image also unpinned members before the rest of the edit was checked, so a member the edit then skipped lost its pin anyway.
