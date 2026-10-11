@@ -6,13 +6,16 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { probeImageCapabilities } from '../src/orchestrator/runtimeCaps.js';
 
-function stubDocker(body: string): string {
+/** A stub docker: `image inspect` prints the id in its folder's `id` file; `run` prints `body`. */
+function stubDocker(body: string, id = 'sha256:0123456789abcdef'): string {
   const dir = mkdtempSync(join(tmpdir(), 'acl-capsdocker-'));
   const bin = join(dir, 'docker');
-  writeFileSync(bin, `#!/usr/bin/env bash\ncat <<'EOF'\n${body}\nEOF\n`, { mode: 0o755 });
+  writeFileSync(join(dir, 'id'), id);
+  writeFileSync(join(dir, 'body'), body);
+  writeFileSync(bin, `#!/usr/bin/env bash\nd="$(dirname "$0")"\nif [ "$1" = image ]; then cat "$d/id"; echo; else cat "$d/body"; echo; fi\n`, { mode: 0o755 });
   return bin;
 }
 
@@ -34,14 +37,25 @@ describe('probeImageCapabilities', () => {
     expect(caps.missing).toEqual(['whisper', 'chromium']); // ffmpeg present
   });
 
-  it('omits tools whose probe printed nothing, and caches per image tag', async () => {
+  it('omits tools whose probe printed nothing, and caches per image', async () => {
     const docker = stubDocker(['openclaw=OpenClaw X', 'claude-code=', 'node=v22'].join('\n'));
     const caps = await probeImageCapabilities('test-image-b:1', { docker });
     expect(caps.tools['claude-code']).toBeUndefined(); // empty = not present
     expect(caps.tools.node).toBe('v22');
 
-    // Cached: a second call must not need docker at all.
-    const caps2 = await probeImageCapabilities('test-image-b:1', { docker: '/nonexistent' });
+    // Cached: a second call for the same image runs no probe.
+    writeFileSync(join(dirname(docker), 'body'), 'openclaw=SHOULD NOT BE PROBED');
+    const caps2 = await probeImageCapabilities('test-image-b:1', { docker });
     expect(caps2).toBe(caps);
+  });
+
+  it('a tag rebuilt onto another image is probed again, not answered from the cache (#124)', async () => {
+    const docker = stubDocker('openclaw=OpenClaw 1\nnode=v22', 'sha256:1111111111111111');
+    expect((await probeImageCapabilities('test-image-c:1', { docker })).tools.openclaw).toBe('OpenClaw 1');
+    writeFileSync(join(dirname(docker), 'id'), 'sha256:2222222222222222');
+    writeFileSync(join(dirname(docker), 'body'), 'openclaw=OpenClaw 2\nnode=v22\nhave=ffmpeg');
+    const again = await probeImageCapabilities('test-image-c:1', { docker });
+    expect(again.tools.openclaw).toBe('OpenClaw 2');
+    expect(again.missing).not.toContain('ffmpeg');
   });
 });
