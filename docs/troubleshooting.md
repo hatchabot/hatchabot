@@ -702,6 +702,55 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.1`
 - **Code:** `src/orchestrator/googleConnections.ts` — `materializeConnection`
 
+### Every Google account stopped working after a new OAuth client was saved
+- **Check:** ⚙ Settings → Connections marks accounts "made with an earlier OAuth client"; the agents' Google tools fail to refresh their token; the trail shows `google.client_replaced`. Before v2.160.0 nothing was marked: the client had been removed and a different one saved, or saved over the old one.
+- **Cause:** a refresh token works only with the OAuth client that issued it. Saving a client with a different client ID paired every stored token with the new client.
+- **Fix:** put the original client back if you still have it, or press Connect and pick each marked account again (each person, from their own login). From v2.160.0 saving a different client ID asks first, naming how many accounts will need connecting again; a new secret for the same client ID does not.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `/v1/google-oauth/client`, `countConnectionsFromOtherClient`; `src/orchestrator/googleConnections.ts` — `materializeConnection`
+
+### Removing the Google OAuth client said it was gone, but Connections still shows it configured
+- **Check:** after Remove, ⚙ Settings → Connections still shows the client; from v2.160.0 Remove says "could not be removed from the secret store".
+- **Cause:** a failed delete in the secret store was swallowed and the answer said the client was removed.
+- **Fix:** upgrade and press Remove again; if it keeps failing, the server log names the secret-store error (`google.client_remove_failed`).
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `/v1/google-oauth/client`
+
+### A Google account came back after Disconnect in the agent's Connections
+- **Check:** the account was attached under ⚙ Settings → Connections and disconnected from the agent's own Connections list; after its next start, wake or rebuild `gog auth list --json` in the agent names it again, and the account still shows attached to the agent under ⚙ Settings → Connections.
+- **Cause:** that Disconnect only removed the account from gog inside the agent and left the attachment, so the next sync imported it again. The page detached it first, but fell back to the plain remove when it could not read the connection list.
+- **Fix:** upgrade, then Detach it (or Disconnect again). From v2.160.0 the server detaches an attached account and records the removal, whatever the page sends.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `/v1/agents/:id/connections/:email`; `web/index.html` — `disconnectAccount`
+
+### A failed Google removal was cleared although the account was still in the agent
+- **Check:** the trail shows `connection.remove_failed` and then `connection.removed_from_agent` with `alreadyGone`, yet `gog auth list --json` in the agent still names the account.
+- **Cause:** when the remove failed, an account list without an `accounts` array (for example `{}`) was read as "holds nothing", which confirmed the removal and cleared its retry.
+- **Fix:** upgrade, then detach the account again (or rebuild the agent). From v2.160.0 only a real list confirms a removal; anything else keeps the retry.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/googleConnections.ts` — `gogAccounts`, `dematerializeConnection`
+
+### A removed repo source still pulls or pushes
+- **Check:** after removing a repo source, the agent still has `~/.openclaw/.ssh/<repo>_deploy`, or the trail shows `datasource.key_left`.
+- **Cause:** the source's record was deleted first; if taking the key off the volume (or out of the secret store) then failed, nothing retried it.
+- **Fix:** upgrade; the removal is recorded and retried at the agent's next start, wake or rebuild until the key is gone. Also delete the deploy key on the repo's host (its settings → Deploy keys): a copy outside Hatchabot stays trusted until then.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/provision.ts` — `scrubRemovedDataSources`; `src/api/routes.ts` — `/v1/agents/:id/data-sources/:dsId`
+
+### Deleting an agent fails: "Couldn't remove all of the agent's stored keys"
+- **Check:** the agent shows FAILED with "Delete could not remove all of its stored keys — tap Delete again"; the server log says `secret delete failed during delete`.
+- **Cause:** the secret store refused a delete (often a busy or locked database). Before v2.160.0 the failure was ignored, the agent was marked deleted, and its env values, deploy keys or call token stayed stored with nothing naming them.
+- **Fix:** press Delete again. Keys an older version left behind are deleted at the next start of Hatchabot (`deleted orphaned agent secrets` in the log).
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `/v1/agents/:id`; `src/store/store.ts` — `sweepOrphanAgentSecrets`
+
+### An app from a repo reads a different mailbox than the Google account it was given
+- **Check:** the app's mailbox setting names one address, while the agent's Connections shows a different Google account attached.
+- **Cause:** in "run an app from a repo", the mailbox field followed only the first account picked; picking another one after it left the first address.
+- **Fix:** upgrade and change the app's mailbox setting (or reinstall it) so it names the attached account. From v2.160.0 every pick fills the field, and an install whose field and account differ is stopped.
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `appConnPicked`, `appConnMismatch`
+
 ### A removed member's "still lets them in" warning disappeared after Verify now, or Verify now says "people on telegram (pairing store: …)" was skipped
 - **Check:** Sharing → Access → Verify now; from v2.158.1 the skipped list names the unread source, e.g. `pairing store: EACCES`, `pairing store: ERR_SQLITE_ERROR`, `allowFrom file: not valid JSON`.
 - **Cause:** a source OpenClaw uses to admit chat users (`~/.openclaw/openclaw.json`, `credentials/*-allowFrom.json`, `state/openclaw.sqlite`) could not be read inside the agent — permissions, a node without `node:sqlite`, a schema change. Older releases took that to mean nobody was admitted.
