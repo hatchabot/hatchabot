@@ -31,6 +31,8 @@ describe('reading the session records', () => {
     expect(sh).toContain('/home/node/.openclaw/agents/to-do-agent/agent/openclaw-agent.sqlite');
     expect(sh).toContain('session_nodes');
     expect(sh).toContain('readOnly:true');
+    // No file at all is "no sessions", not the empty answer of a failed read (#99).
+    expect(sh).toContain('else printf "{}"; fi');
     const node = sh.slice(sh.indexOf("node -e '") + 9, sh.lastIndexOf("'"));
     expect(node).not.toContain("'");
   });

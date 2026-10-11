@@ -3061,7 +3061,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const hibernateDeps: HibernateDeps = {
     store, secrets, providerFor,
     afterWake: clearPinsWhenUp,
-    lastActiveFor: (a) => lastActiveFor(a), // defined further down (a const in this scope; called only at sweep time)
+    // Read fresh, and a read that fails says so: the list's lastActiveFor
+    // answers "nothing" then, and an agent mid-conversation slept (#99).
+    // readSessions is defined further down (a const in this scope; called only at sweep time).
+    lastActiveFor: async (a) => {
+      const sessions = await readSessions(a);
+      if (!sessions) throw new Error('its conversations could not be read');
+      return newestActivity(sessions);
+    },
     ownCrons: async (a) => (await listCrons(providerFor(a.hostId), a.runtimeRef!, a.slug)).map((c) => ({ enabled: c.enabled, system: c.system })),
     // Busy is the flag AND a turn in flight: an ask or a consult is not on the
     // flag, and the idle sweep stopped a container mid-answer (30th audit).
@@ -13459,7 +13466,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const kinds = store.listChannelsForAgent(agent.id).map((c) => c.kind);
     if (kinds.some((k) => k !== 'telegram')) return reply.code(409).send({ error: 'An agent on Discord or Slack cannot sleep: nothing queues their messages while it is down.' });
     const crons = await hibernateDeps.ownCrons(agent).catch(() => undefined);
-    if (crons?.some((c) => c.enabled && !c.system)) return reply.code(409).send({ error: 'It has scheduled tasks of its own: they would not run while it sleeps. Pause them first.' });
+    // Unreadable is not "none" (#122): the idle sweep refuses then too.
+    if (!crons) return reply.code(409).send({ error: "Couldn't read its scheduled tasks just now, and they would not run while it sleeps — try again in a moment." });
+    if (crons.some((c) => c.enabled && !c.system)) return reply.code(409).send({ error: 'It has scheduled tasks of its own: they would not run while it sleeps. Pause them first.' });
     return publicAgent(await hibernateAgent(hibernateDeps, agent, 'by hand'));
   });
   app.post<{ Params: { id: string } }>('/v1/agents/:id/wake', async (req, reply) => {

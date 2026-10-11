@@ -137,6 +137,12 @@ describe('waking', () => {
     const w = await makeWorld();
     const id = await seedRunningAgent(w);
     w.provider.execResponses.set('sh', { code: 0, stdout: '', stderr: '' });
+    // Its tasks cannot be read: not "none", so it stays up (#122).
+    const unread = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/hibernate`, headers: as() });
+    expect(unread.statusCode).toBe(409);
+    expect(unread.json().error).toMatch(/Couldn't read its scheduled tasks/);
+    expect(w.store.getAgent(id)!.state).toBe('RUNNING');
+    w.provider.execResponses.set('cron list', { code: 0, stdout: '{"jobs":[]}', stderr: '' });
     const asleep = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/hibernate`, headers: as() });
     expect(asleep.statusCode, asleep.body).toBe(200);
     expect(asleep.json()).toMatchObject({ state: 'STOPPED' });
@@ -227,6 +233,76 @@ describe('the 30th audit: sleepers and the rest of the machine', () => {
     await wakeSweep(deps); await wakeSweep(deps);
     expect(calls).toBe(1);
     expect(deps.events.filter(([, e]) => e === 'hibernate.token_refused')).toHaveLength(1);
+  });
+});
+
+describe('the 2026-10-10 workflow audit', () => {
+  afterEach(() => resetHibernateState());
+  const tg = (result: unknown[]) => (async () => new Response(JSON.stringify({ ok: true, result }))) as typeof fetch;
+
+  it('activity that cannot be read keeps the agent up; none at all is the record\'s own time (#99)', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w);
+    const now = Date.now();
+    const failing = depsFor(w, { lastActiveFor: async () => { throw new Error('gateway down'); } });
+    expect(await hibernateBlocker(failing, w.store.getAgent(id)!, now + 30 * 24 * HOUR, 6 * HOUR)).toBe('its activity could not be read');
+    expect(await hibernateSweep(failing, now + 30 * 24 * HOUR, 6 * HOUR)).toEqual([]);
+    const none = depsFor(w, { lastActiveFor: async () => undefined });
+    expect(await hibernateBlocker(none, w.store.getAgent(id)!, now + 30 * 24 * HOUR, 6 * HOUR)).toBeUndefined();
+  });
+
+  it('a message sent after bedtime is mail even when the bedtime read already finds it waiting (#98)', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { botToken: 'fake-token-B' });
+    const sec = Math.floor(Date.now() / 1000);
+    // The gateway's last message (sent a minute ago, handled, unconfirmed) and one sent after the stop.
+    let result: unknown[] = [
+      { update_id: 300, message: { message_id: 1, date: sec - 60, text: 'earlier' } },
+      { update_id: 301, message: { message_id: 2, date: sec + 5, text: 'are you there?' } },
+    ];
+    const deps = depsFor(w, { fetchImpl: (async () => new Response(JSON.stringify({ ok: true, result }))) as typeof fetch });
+    await hibernateAgent(deps, w.store.getAgent(id)!, 'test');
+    expect(w.store.getAgent(id)!.hibernateMark).toBe(300);
+    expect(await wakeSweep(deps)).toEqual([id]);
+    // Only messages from before bedtime, or a button press with no date: the mark, nothing to wake for.
+    const id2 = await seedRunningAgent(w, { id: 'b2', slug: 'second', accountId: 'secondbot', botToken: 'fake-token-C' });
+    result = [{ update_id: 500, message: { message_id: 3, date: sec - 30 } }, { update_id: 501, callback_query: { id: 'q1', data: 'yes' } }];
+    await hibernateAgent(deps, w.store.getAgent(id2)!, 'test');
+    expect(w.store.getAgent(id2)!.hibernateMark).toBe(501);
+    expect(await wakeSweep(deps)).toEqual([]);
+  });
+
+  it('a full page of waiting updates wakes the agent: newer mail may be behind it (#63)', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { botToken: 'fake-token-P' });
+    const page = Array.from({ length: 100 }, (_, i) => ({ update_id: 1000 + i }));
+    const deps = depsFor(w, { fetchImpl: tg(page) });
+    await hibernateAgent(deps, w.store.getAgent(id)!, 'test');
+    expect(w.store.getAgent(id)!.hibernateMark).toBe(1099);
+    expect(await wakeSweep(deps)).toEqual([id]);
+    // Less than a page, all from bedtime: asleep it stays.
+    const id2 = await seedRunningAgent(w, { id: 'p2', slug: 'second', accountId: 'secondbot', botToken: 'fake-token-Q' });
+    deps.fetchImpl = tg(page.slice(0, 99));
+    await hibernateAgent(deps, w.store.getAgent(id2)!, 'test');
+    expect(await wakeSweep(deps)).toEqual([]);
+  });
+
+  it('a new token saved where Telegram refused the old one is polled again (#100)', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { botToken: 'fake-token-OLD' });
+    const asked: string[] = [];
+    const deps = depsFor(w, { fetchImpl: (async (u: string | URL | Request) => {
+      asked.push(String(u));
+      if (String(u).includes('fake-token-OLD')) return new Response(JSON.stringify({ ok: false, error_code: 401, description: 'Unauthorized' }));
+      return new Response(JSON.stringify({ ok: true, result: [{ update_id: 9 }] }));
+    }) as typeof fetch });
+    await hibernateAgent(deps, w.store.getAgent(id)!, 'test');
+    await wakeSweep(deps);
+    expect(asked).toHaveLength(1); // refused once, then left alone
+    const ch = w.store.listChannelsForAgent(id).find((c) => c.kind === 'telegram')!;
+    await w.secrets.put(ch.secretRef, 'fake-token-NEW');
+    expect(await wakeSweep(deps)).toEqual([id]);
+    expect(asked.at(-1)).toContain('fake-token-NEW');
   });
 });
 
