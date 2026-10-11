@@ -85,7 +85,7 @@ describe('scripts/follow-channel.sh', () => {
 });
 
 /** A throwaway origin with v1.0.0 and v1.1.0, and production cloned from it at v1.0.0. */
-function prodWorld(v11: Record<string, string> = {}) {
+function prodWorld(v11: Record<string, string> = {}, [oldTag, newTag] = ['v1.0.0', 'v1.1.0']) {
   const root = mkdtempSync(join(tmpdir(), 'hb-deploy-')); dirs.push(root);
   const home = join(root, 'home'); mkdirSync(home);
   const bin = join(root, 'bin'); mkdirSync(bin);
@@ -101,19 +101,19 @@ function prodWorld(v11: Record<string, string> = {}) {
   writeFileSync(join(src, '.gitignore'), 'node_modules/\nnode_modules.prev/\n');
   writeFileSync(join(src, 'package.json'), '{"name":"x","version":"1.0.0"}\n');
   writeFileSync(join(src, 'scripts', 'deploy-release.sh'), readFileSync('scripts/deploy-release.sh'), { mode: 0o755 });
-  git(src, 'add', '-A'); git(src, 'commit', '-q', '-m', 'v1'); git(src, 'tag', 'v1.0.0');
+  git(src, 'add', '-A'); git(src, 'commit', '-q', '-m', 'v1'); git(src, 'tag', oldTag);
   writeFileSync(join(src, 'package.json'), '{"name":"x","version":"1.1.0"}\n');
   // The new release's ensure-deps: recorded, and it fails when FAKE_DEPS_RC says so.
   writeFileSync(join(src, 'scripts', 'ensure-deps.sh'), `#!/usr/bin/env bash\necho "ensure-deps $*" >> ${JSON.stringify(log)}\nexit "\${FAKE_DEPS_RC:-0}"\n`, { mode: 0o755 });
   for (const [f, body] of Object.entries(v11)) writeFileSync(join(src, f), body, { mode: 0o755 });
-  git(src, 'add', '-A'); git(src, 'commit', '-q', '-m', 'v2'); git(src, 'tag', 'v1.1.0');
+  git(src, 'add', '-A'); git(src, 'commit', '-q', '-m', 'v2'); git(src, 'tag', newTag);
   const origin = join(root, 'origin.git');
   git(root, 'clone', '-q', '--bare', src, origin);
   const prod = join(root, 'prod');
   git(root, 'clone', '-q', origin, prod);
-  git(prod, 'checkout', '-q', 'v1.0.0');
+  git(prod, 'checkout', '-q', oldTag);
   mkdirSync(join(prod, 'node_modules')); writeFileSync(join(prod, 'node_modules', 'marker'), 'deps');
-  const deploy = (extra: Record<string, string> = {}) => spawnSync('bash', [join(prod, 'scripts', 'deploy-release.sh'), 'v1.1.0'], {
+  const deploy = (extra: Record<string, string> = {}) => spawnSync('bash', [join(prod, 'scripts', 'deploy-release.sh'), newTag], {
     encoding: 'utf8', env: { ...env, HATCHABOT_PROD_DIR: prod, ...extra },
   });
   const at = () => git(prod, 'describe', '--tags', '--exact-match');
@@ -187,5 +187,125 @@ describe('scripts/follow-latest.sh (review, 2026-10-09)', () => {
     expect(readFileSync(join(state, 'follow-latest-failed'), 'utf8').trim()).toBe('v1.1.0');
     follow(0);
     expect(lines(deploys)).toHaveLength(2);
+  });
+});
+
+describe('scripts/follow-latest.sh runs only a release the workflow published (#37)', () => {
+  /**
+   * Production at v2.159.1, a new tag v2.160.0 whose deploy script only records
+   * that it ran, and a fake curl standing in for GitHub: the API's answer for
+   * the release and the release's manifest come from files (none = a 404;
+   * an `offline` file = no network). Every URL asked for is logged.
+   */
+  function world(newTag = 'v2.160.0', oldTag = 'v2.159.1') {
+    const root = mkdtempSync(join(tmpdir(), 'hb-follow-verify-')); dirs.push(root);
+    const ran = join(root, 'ran.log');
+    const w = prodWorld({ 'scripts/deploy-release.sh': `#!/usr/bin/env bash\necho "deploy $*" >> ${JSON.stringify(ran)}\n` }, [oldTag, newTag]);
+    const gh = join(root, 'gh'); mkdirSync(gh);
+    writeFileSync(join(w.bin, 'curl'), [
+      '#!/usr/bin/env bash',
+      `GH=${JSON.stringify(gh)}`,
+      'out=""; fmt=""; url=""',
+      'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; -w) fmt="$2"; shift ;; -H|--max-time|--max-filesize|--retry) shift ;; http*) url="$1" ;; esac; shift; done',
+      'echo "$url" >> "$GH/urls.log"',
+      '[ -e "$GH/offline" ] && { echo "curl: (6) Could not resolve host" >&2; exit 6; }',
+      'case "$url" in */releases/tags/*) src="$GH/release.json" ;; */release-manifest.json) src="$GH/manifest.json" ;; *) src=/nonexistent ;; esac',
+      'if [ -f "$src" ]; then cp "$src" "$out"; code=200; else echo "Not Found" > "$out"; code=404; fi',
+      'printf "%s" "${fmt//%\\{http_code\\}/$code}"',
+    ].join('\n') + '\n', { mode: 0o755 });
+    writeFileSync(join(w.root, 'follow-latest.sh'), readFileSync('scripts/follow-latest.sh'), { mode: 0o755 });
+    const commit = w.git(w.prod, 'rev-parse', `${newTag}^{commit}`);
+    const release = (over: Record<string, unknown> = {}) => writeFileSync(join(gh, 'release.json'), JSON.stringify({
+      tag_name: newTag, draft: false, immutable: true,
+      assets: [{ name: 'hatchabot-v2.160.0-linux-x64.tar.gz' }, { name: 'release-manifest.json' }], ...over,
+    }));
+    const manifest = (over: Record<string, unknown> = {}) => writeFileSync(join(gh, 'manifest.json'), JSON.stringify({
+      schema: 1, version: newTag.slice(1), tag: newTag, commit, createdAt: '2026-10-10T12:00:00Z', ...over,
+    }));
+    const state = join(w.home, '.local', 'state', 'hatchabot');
+    const follow = () => spawnSync('bash', [join(w.root, 'follow-latest.sh')], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod } });
+    const urls = () => lines(join(gh, 'urls.log'));
+    return { ...w, gh, ran, commit, release, manifest, follow, urls, state };
+  }
+
+  it('deploys a published, immutable release whose manifest names the tag and its commit', () => {
+    const w = world();
+    w.release(); w.manifest();
+    const r = w.follow();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(lines(w.ran)).toEqual(['deploy v2.160.0']);
+    expect(w.urls()).toEqual([
+      'https://api.github.com/repos/hatchabot/hatchabot/releases/tags/v2.160.0',
+      'https://github.com/hatchabot/hatchabot/releases/download/v2.160.0/release-manifest.json',
+    ]);
+  });
+
+  it('refuses, without running any of the tag\'s code, a manifest for another commit, tag or version', () => {
+    for (const [over, why] of [
+      [{ commit: 'f'.repeat(40) }, /was built from f{40}, but the tag here is/],
+      [{ tag: 'v2.159.9', version: '2.159.9' }, /is for "v2\.159\.9"/],
+      [{ version: '2.160.1' }, /is for "v2\.160\.0" \("2\.160\.1"\)/],
+    ] as const) {
+      const w = world();
+      w.release(); w.manifest(over);
+      const r = w.follow();
+      expect(r.status).toBe(1);
+      expect(r.stdout).toMatch(why);
+      expect(r.stdout).toContain('None of its code was run. It will not be retried');
+      expect(lines(w.ran)).toEqual([]);
+      expect(readFileSync(join(w.state, 'follow-latest-failed'), 'utf8').trim()).toBe('v2.160.0');
+      // Set aside: the next tick does not look again.
+      const before = w.urls().length;
+      w.follow();
+      expect(w.urls()).toHaveLength(before);
+    }
+  });
+
+  it('refuses a release that is not immutable, or has no manifest', () => {
+    for (const [setup, why] of [
+      [(w: ReturnType<typeof world>) => { w.release({ immutable: false }); w.manifest(); }, /is not immutable/],
+      [(w: ReturnType<typeof world>) => { w.release({ assets: [{ name: 'hatchabot-v2.160.0-linux-x64.tar.gz' }] }); w.manifest(); }, /has no release-manifest\.json/],
+      [(w: ReturnType<typeof world>) => { w.release(); }, /listed but not there/],
+    ] as const) {
+      const w = world();
+      setup(w);
+      const r = w.follow();
+      expect(r.stdout).toMatch(why);
+      expect(lines(w.ran)).toEqual([]);
+      expect(readFileSync(join(w.state, 'follow-latest-failed'), 'utf8').trim()).toBe('v2.160.0');
+    }
+  });
+
+  it('a tag that is not (yet) a published release waits, longer each time, then is set aside', () => {
+    const w = world();
+    const first = w.follow();
+    expect(first.stdout).toContain('Not deploying v2.160.0 yet: it is not a published release on GitHub. Looking again later (1 of 8)');
+    w.follow();
+    expect(w.urls()).toHaveLength(1); // too soon to look again
+    writeFileSync(join(w.state, 'follow-latest-tries'), 'v2.160.0 7 0\n');
+    expect(w.follow().stdout).toContain('8 times in a row. It will not be looked at again');
+    expect(readFileSync(join(w.state, 'follow-latest-failed'), 'utf8').trim()).toBe('v2.160.0');
+    expect(lines(w.ran)).toEqual([]);
+  });
+
+  it('no network: nothing deployed, nothing set aside, tried again next time', () => {
+    const w = world();
+    w.release(); w.manifest();
+    writeFileSync(join(w.gh, 'offline'), '');
+    const r = w.follow();
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('GitHub did not answer');
+    expect(existsSync(join(w.state, 'follow-latest-failed'))).toBe(false);
+    rmSync(join(w.gh, 'offline'));
+    expect(w.follow().status).toBe(0);
+    expect(lines(w.ran)).toEqual(['deploy v2.160.0']);
+  });
+
+  it('a tag from before manifests (older than v2.159.0) is deployed as before, without asking GitHub', () => {
+    const w = world('v2.158.9', 'v2.158.0');
+    const r = w.follow();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(lines(w.ran)).toEqual(['deploy v2.158.9']);
+    expect(w.urls()).toEqual([]);
   });
 });
