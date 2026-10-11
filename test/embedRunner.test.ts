@@ -81,6 +81,31 @@ describe('a runner\'s own memory search service', () => {
     expect(w.runner.pushedKeys.length).toBe(before + 1);
   });
 
+  it('a key retired while a first start copies the keys does not stay valid at the runner\'s door (B067)', async () => {
+    const w = world();
+    const sha = await sha256File(join(w.dataDir, 'models', EMBED_MODEL_FILE));
+    const away = w.make('runner1', w.runner, sha);
+    w.store.setEmbedToken('a-away', embedKeyHash('k-retiring'), 'runner1');
+    // The start copies the keys file to the runner first (as #embedFilesToRunner
+    // does); the agent is deleted while the rest of the start runs.
+    let copied = '';
+    const ensure = w.runner.ensureEmbedder.bind(w.runner);
+    w.runner.ensureEmbedder = async (spec) => {
+      copied = readFileSync(spec.keysFile, 'utf8');
+      w.store.deleteEmbedToken('a-away');
+      away.syncKeys();
+      return ensure(spec);
+    };
+    await away.start();
+    expect(JSON.parse(copied)).toEqual({ [embedKeyHash('k-retiring')]: 'a-away' });
+    const onRunner = w.runner.pushedKeys.at(-1) ?? copied;
+    expect(JSON.parse(onRunner)).toEqual({});
+    // Nothing changed during a start: nothing is copied again.
+    const pushes = w.runner.pushedKeys.length;
+    await away.start();
+    expect(w.runner.pushedKeys.length).toBe(pushes);
+  });
+
   it('ignores an external server and the bind override (both this machine\'s), and an asleep runner is not "fell over"', async () => {
     process.env.HATCHABOT_EMBED_URL = 'http://elsewhere.example.org/v1';
     process.env.HATCHABOT_EMBED_BIND = '10.0.0.9';
