@@ -248,6 +248,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/requestLog.ts` — `redactUrlForLog`
 
+### `hatchabot login` says "(chmod 600)", but `~/.config/hatchabot/env` is readable by other users
+- **Check:** `ls -l ~/.config/hatchabot/env` shows `-rw-r--r--` after a `hatchabot login`.
+- **Cause:** the file existed before with wider permissions (made by hand, or copied), and the login only set 0600 on a file it created; the token was written into the readable file.
+- **Fix:** `chmod 600 ~/.config/hatchabot/env`, and make a new token (⚙ Settings → Security) if others share the machine. From v2.160.0 every write leaves the file 0600.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/cli.ts` — `writeConfigValue`
+
 ## AI sources and Claude login
 
 ### An agent answers "Your model provider needs a new login" or "Not logged in · Please run /login", while the same source works for other agents

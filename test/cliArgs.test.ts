@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { durationMinutes, matchAgent, matchTask, parseArgs, pickProfile } from '../src/cli.js';
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { durationMinutes, matchAgent, matchTask, parseArgs, pickProfile, writeConfigValue } from '../src/cli.js';
 
 describe('CLI flags (audit: unknown flags swallowed the next argument)', () => {
   it('knows its on/off flags, so they no longer eat what follows', () => {
@@ -94,6 +97,23 @@ describe('--yes and its short forms', () => {
       const r = parseArgs(argv);
       expect(r.flags.get('yes'), argv.join(' ')).toBe('1');
       expect(r.positional).toEqual(['kick', 'Ledger', 'u1']);
+    }
+  });
+});
+
+describe('the CLI config file holds a sign-in token (A068)', () => {
+  it('is left 0600 even when it was already there and readable by everyone', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-cli-config-'));
+    try {
+      const file = join(dir, 'env');
+      writeFileSync(file, 'HATCHABOT_URL=http://hatchabot.example.org\n', { mode: 0o644 });
+      chmodSync(file, 0o644);
+      writeConfigValue('HATCHABOT_TOKEN', 'hatchabot_made-up-token', file);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      expect(readFileSync(file, 'utf8')).toBe('HATCHABOT_URL=http://hatchabot.example.org\nHATCHABOT_TOKEN=hatchabot_made-up-token\n');
+      expect(readdirSync(dir)).toEqual(['env']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
