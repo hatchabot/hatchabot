@@ -7548,7 +7548,7 @@ async function loadConnections() {
         : '<div class="sub">not attached to any agent yet</div>';
       return `
       <div class="pair" style="flex-wrap:wrap;gap:6px;align-items:flex-start">
-        <span class="grow"><b class="pii">${esc(c.email)}</b>${c.staleCount ? ` <span style="color:var(--warn);font-size:12px">· ${c.staleCount} stale</span>` : ''}
+        <span class="grow"><b class="pii">${esc(c.email)}</b>${c.staleCount ? ` <span style="color:var(--warn);font-size:12px">· ${c.staleCount} stale</span>` : ''}${c.needsReconnect ? ` <span class="conn-reconnect" style="color:var(--warn);font-size:12px">· ⚠ made with an earlier OAuth client — press Connect and pick this account again</span>` : ''}
           <span class="sub">${esc((c.services ?? []).join(', ') || 'default services')} · last consent ${esc((c.createdAt || '').slice(0, 10))}${c.createdAt ? ` (${ago(c.createdAt)})` : ''}</span>
           <div style="margin-top:4px;display:flex;flex-direction:column;gap:2px">${rows}</div></span>
         <button class="danger" onclick="removeConnection('${jsq(c.id)}','${jsq(c.email)}')">Remove</button>
@@ -7559,15 +7559,27 @@ async function loadConnections() {
 }
 
 async function saveOAuthClient() {
+  const body = { clientId: $('connClientId').value.trim(), clientSecret: $('connClientSecret').value.trim() };
   try {
-    await api('/v1/google-oauth/client', { method: 'PUT', body: { clientId: $('connClientId').value.trim(), clientSecret: $('connClientSecret').value.trim() } });
-    toast('OAuth client saved — Connect now works for everyone on this server.');
+    let r;
+    try {
+      r = await api('/v1/google-oauth/client', { method: 'PUT', body });
+    } catch (e) {
+      // A different client breaks the connections the old one made: the
+      // server names how many, and saves only when that is what's wanted.
+      if (e.code !== 'google_client_change') throw e;
+      if (!confirm(`${e.message}\n\nSave this client anyway?`)) return;
+      r = await api('/v1/google-oauth/client', { method: 'PUT', body: { ...body, confirm: true } });
+    }
+    toast(r?.reconnect
+      ? `OAuth client saved. ${r.reconnect} connection${r.reconnect === 1 ? '' : 's'} must be connected again (marked below).`
+      : 'OAuth client saved — Connect now works for everyone on this server.', r?.reconnect ? 10000 : undefined);
     await loadConnections();
   } catch (e) { toast(e.message, 10000); }
 }
 
 async function removeOAuthClient() {
-  if (!confirm('Remove the Google OAuth client?\n\nNew connects stop working until one is configured again; already-connected accounts keep working until their tokens expire.')) return;
+  if (!confirm('Remove the Google OAuth client?\n\nNew connects stop working until one is configured again. Put the same client back to keep the accounts already connected: a different one means each must be connected again.')) return;
   try { await api('/v1/google-oauth/client', { method: 'DELETE' }); await loadConnections(); } catch (e) { toast(e.message, 10000); }
 }
 
@@ -7592,14 +7604,15 @@ async function removeConnection(id, email) {
 async function disconnectAccount(email) {
   if (!confirm(`Disconnect ${email} from this agent?\n\nThe agent loses access immediately. The account itself stays connected to the server (⚙ Settings → Connections) for other agents.`)) return;
   try {
-    // A platform-attached account must be DETACHED (removing only the
-    // container copy would re-materialize it on the next rebuild); anything
-    // else is an agent-made connection and gets the raw container remove.
-    const { connections } = await api('/v1/connections').catch(() => ({ connections: [] }));
-    const plat = connections.find(c => c.email === email && c.attachedTo.some(a => a.id === editAgentId));
-    if (plat) await api(`/v1/agents/${editAgentId}/connections/detach`, { method: 'POST', body: { connectionId: plat.id } });
-    else await api(`/v1/agents/${editAgentId}/connections/${encodeURIComponent(email)}`, { method: 'DELETE' });
-    toast(`${email} disconnected.`);
+    // The server tells the two apart: a platform-attached account is DETACHED
+    // (removing only the container copy re-imported it on the next rebuild),
+    // anything else is an agent-made connection and is removed from gog. The
+    // page used to decide from /v1/connections, and when that read failed it
+    // sent a platform account down the raw remove.
+    const r = await api(`/v1/agents/${editAgentId}/connections/${encodeURIComponent(email)}`, { method: 'DELETE' });
+    toast(r.detached && r.removed === false
+      ? `${email} detached. It could not be taken off the agent just now; that is retried at its next start.`
+      : `${email} disconnected.`, r.removed === false ? 10000 : undefined);
     await renderConnections();
   } catch (e) { toast(e.message, 10000); }
 }

@@ -1003,6 +1003,11 @@ export class Store {
       // token into its container. materialized_at < the connection's
       // created_at (last consent) means the agent is running a STALE token —
       // e.g. the account was reconnected but the agent never re-attached.
+      // Which Google OAuth client issued a connection's refresh token: a
+      // token only works with the client that issued it, so replacing the
+      // installation's client breaks every connection made with the old one.
+      // NULL = made before this was recorded.
+      `ALTER TABLE connections ADD COLUMN client_id TEXT`,
       `ALTER TABLE agent_connections ADD COLUMN attached_at TEXT`,
       `ALTER TABLE agent_connections ADD COLUMN materialized_at TEXT`,
       // An agent-scoped cli-token: when set, this token authenticates a CALLER
@@ -4199,25 +4204,38 @@ export class Store {
 
   // ---- platform-managed connections (Google via gog) ----------------------
 
-  insertConnection(c: { id: string; ownerId: string; kind: string; email: string; services: string[]; secretRef: string }): void {
+  insertConnection(c: { id: string; ownerId: string; kind: string; email: string; services: string[]; secretRef: string; clientId?: string | null }): void {
     this.db
       .prepare(
-        `INSERT INTO connections (id, owner_id, kind, email, services, secret_ref, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO connections (id, owner_id, kind, email, services, secret_ref, created_at, client_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(owner_id, kind, email) DO UPDATE
            SET services = excluded.services, secret_ref = excluded.secret_ref,
-               created_at = excluded.created_at`,
+               created_at = excluded.created_at, client_id = excluded.client_id`,
       )
-      .run(c.id, c.ownerId, c.kind, c.email, JSON.stringify(c.services), c.secretRef, new Date().toISOString());
+      .run(c.id, c.ownerId, c.kind, c.email, JSON.stringify(c.services), c.secretRef, new Date().toISOString(), c.clientId ?? null);
   }
 
-  getConnection(id: string): { id: string; ownerId: string; kind: string; email: string; services: string[]; secretRef: string; createdAt: string } | undefined {
+  getConnection(id: string): { id: string; ownerId: string; kind: string; email: string; services: string[]; secretRef: string; createdAt: string; clientId: string | null } | undefined {
     const r = this.db.prepare(`SELECT * FROM connections WHERE id = ?`).get(id) as any;
     if (!r) return undefined;
     return {
       id: r.id, ownerId: r.owner_id, kind: r.kind, email: r.email,
       services: JSON.parse(r.services ?? '[]'), secretRef: r.secret_ref, createdAt: r.created_at,
+      clientId: r.client_id ?? null,
     };
+  }
+
+  /** Connections from before the issuing client was recorded were made with
+   *  `clientId` (the one configured now): record it, so a later change of
+   *  client can tell which tokens it breaks. */
+  adoptConnectionClient(kind: string, clientId: string): void {
+    this.db.prepare(`UPDATE connections SET client_id = ? WHERE kind = ? AND client_id IS NULL`).run(clientId, kind);
+  }
+
+  /** How many connections, across every account, a client other than `clientId` issued. */
+  countConnectionsFromOtherClient(kind: string, clientId: string): number {
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM connections WHERE kind = ? AND client_id IS NOT NULL AND client_id != ?`).get(kind, clientId) as { n: number }).n;
   }
 
   /** A re-connect of the same account upserts — this finds the surviving row. */
@@ -4228,9 +4246,10 @@ export class Store {
     return r ? { id: r.id, secretRef: r.secret_ref } : undefined;
   }
 
-  listConnections(ownerId: string): Array<{ id: string; kind: string; email: string; services: string[]; createdAt: string }> {
+  listConnections(ownerId: string): Array<{ id: string; kind: string; email: string; services: string[]; createdAt: string; clientId: string | null }> {
     return (this.db.prepare(`SELECT * FROM connections WHERE owner_id = ? ORDER BY email`).all(ownerId) as any[]).map((r) => ({
       id: r.id, kind: r.kind, email: r.email, services: JSON.parse(r.services ?? '[]'), createdAt: r.created_at,
+      clientId: r.client_id ?? null,
     }));
   }
 

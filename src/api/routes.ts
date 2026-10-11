@@ -9873,9 +9873,6 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
-      if (!agent.runtimeRef || agent.state !== 'RUNNING') {
-        return reply.code(409).send({ error: 'Start the agent to disconnect an account.' });
-      }
       // Strict shape gate — the email is interpolated into a shell line, so
       // only unambiguous mailbox characters may pass (no $, backticks,
       // quotes), and the FIRST char must be alphanumeric: a leading dash
@@ -9884,6 +9881,30 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const email = req.params.email;
       if (!/^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+$/.test(email) || email.length > 254) {
         return reply.code(400).send({ error: 'Not a recognizable account email.' });
+      }
+      // A platform connection attached to this agent is detached, as the
+      // Detach route does: only taking it out of gog left the attachment,
+      // and the next start, wake or rebuild imported it again. The removal
+      // is recorded first, so a failed or deferred one is retried.
+      const platform = store.listAgentConnections(agent.id)
+        .map((a) => store.getConnection(a.connectionId))
+        .filter((c): c is NonNullable<typeof c> => !!c && c.email.toLowerCase() === email.toLowerCase());
+      if (platform.length) {
+        const removed = await withConnectionLock(agent.id, async () => {
+          for (const c of platform) {
+            store.addConnectionRemoval(agent.id, c.email);
+            store.detachConnection(agent.id, c.id);
+          }
+          const now = store.getAgent(agent.id) ?? agent;
+          let all = true;
+          for (const e of new Set(platform.map((c) => c.email))) all = (await removeQueuedNow(connSyncDeps(now.hostId), now, e)) && all;
+          return all;
+        });
+        trace(agent.id)('connection.detached', { email, removed });
+        return { removed, detached: true };
+      }
+      if (!agent.runtimeRef || agent.state !== 'RUNNING') {
+        return reply.code(409).send({ error: 'Start the agent to disconnect an account.' });
       }
       // --force: without it gog refuses removal in a non-interactive shell
       // (verified live — every docker-exec disconnect failed with exit 2).
@@ -10016,19 +10037,45 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   // The client is an installation resource, like the runtime image — only
   // the machine owner sets or clears it.
-  app.put<{ Body: { clientId?: string; clientSecret?: string } }>('/v1/google-oauth/client', async (req, reply) => {
+  // A refresh token works only with the client that issued it: a different
+  // client ID breaks every connection made with the old one, for everyone on
+  // the server. So that change is asked for (`confirm`), naming how many will
+  // need reconnecting; a new secret for the same client ID is not.
+  app.put<{ Body: { clientId?: string; clientSecret?: string; confirm?: boolean } }>('/v1/google-oauth/client', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const parsed = z
       .object({ clientId: z.string().trim().min(10).max(200), clientSecret: z.string().trim().min(10).max(200) })
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: 'Both the client ID and client secret are required.' });
+    const old = await getOAuthClient();
+    if (old) store.adoptConnectionClient('google', old.clientId);
+    const breaks = store.countConnectionsFromOtherClient('google', parsed.data.clientId);
+    if (breaks && req.body?.confirm !== true) {
+      return reply.code(409).send({
+        error: `${breaks} Google connection${breaks === 1 ? ' was' : 's were'} made with a different OAuth client. With this one, ${breaks === 1 ? 'it stops' : 'they stop'} working until each account is connected again.`,
+        code: 'google_client_change',
+        reconnect: breaks,
+      });
+    }
     await secrets.put(GOOGLE_CLIENT_REF, JSON.stringify(parsed.data));
-    return { configured: true, clientId: parsed.data.clientId };
+    if (breaks) trace()('google.client_replaced', { reconnect: breaks });
+    return { configured: true, clientId: parsed.data.clientId, reconnect: breaks };
   });
 
   app.delete('/v1/google-oauth/client', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
-    await secrets.delete(GOOGLE_CLIENT_REF).catch(() => {});
+    // Remember which client made the connections there are, so saving a
+    // different one later still knows what it breaks.
+    const old = await getOAuthClient();
+    if (old) store.adoptConnectionClient('google', old.clientId);
+    // A failed delete leaves the client in place: say so, rather than
+    // "removed" with the next read still showing it configured.
+    try {
+      await secrets.delete(GOOGLE_CLIENT_REF);
+    } catch (err) {
+      trace()('google.client_remove_failed', { error: String((err as Error)?.message ?? err).slice(0, 200) });
+      return reply.code(500).send({ error: 'The Google OAuth client could not be removed from the secret store, so it is still set. Try again; if it keeps failing, check the server log.' });
+    }
     return { configured: false };
   });
 
@@ -10105,7 +10152,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const id = existing?.id ?? randomUUID();
         const secretRef = existing?.secretRef ?? `connection/${id}`;
         await secrets.put(secretRef, refreshToken);
-        store.insertConnection({ id, ownerId: claim.ownerId, kind: 'google', email, services: claim.services, secretRef });
+        store.insertConnection({ id, ownerId: claim.ownerId, kind: 'google', email, services: claim.services, secretRef, clientId: client.clientId });
         trace()('connection.linked', { email, services: claim.services });
         return page(`✅ ${email} connected`,
           'You can close this tab. Back in Hatchabot, attach this account to any agent under its ⚙ Settings → Connections.', true);
@@ -10118,8 +10165,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** The caller's connection vault, with where each one reaches. */
   app.get('/v1/connections', async (req) => {
     const mine = store.listConnections(ownerIdOf(req));
+    const client = await getOAuthClient();
     return {
-      connections: mine.map((c) => {
+      connections: mine.map(({ clientId, ...c }) => {
         const attachedTo = store
           .listConnectionAttachments(c.id)
           .map((at) => ({ at, a: store.getAgent(at.agentId) }))
@@ -10140,7 +10188,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             // attachment would false-flag on first load.
             stale: !!at.materializedAt && at.materializedAt < c.createdAt,
           }));
-        return { ...c, attachedTo, staleCount: attachedTo.filter((x) => x.stale).length };
+        // Made with a client other than the one set now: its token no longer
+        // works, and only connecting the account again mends it.
+        const needsReconnect = !!client && !!clientId && clientId !== client.clientId;
+        return { ...c, attachedTo, staleCount: attachedTo.filter((x) => x.stale).length, needsReconnect };
       }),
     };
   });

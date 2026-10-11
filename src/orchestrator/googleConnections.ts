@@ -208,6 +208,12 @@ export async function materializeConnection(
   const clientRaw = await secrets.get(GOOGLE_CLIENT_REF).catch(() => null);
   const client = clientRaw ? parseOAuthClient(clientRaw) : null;
   if (!client) return { ok: false, error: 'Google OAuth client not configured' };
+  // A token another client issued fails at Google with this one: say what
+  // mends it, rather than import a token that cannot work.
+  if (conn.clientId && conn.clientId !== client.clientId) {
+    deps.log?.('connection.materialize_failed', { agentId: agent.id, email: conn.email, error: 'issued by a different OAuth client' });
+    return { ok: false, error: `${conn.email} was connected with a different Google OAuth client — connect it again (⚙ Settings → Connections)` };
+  }
   const refreshToken = await secrets.get(conn.secretRef).catch(() => null);
   if (!refreshToken) return { ok: false, error: 'connection token missing from the vault' };
 
