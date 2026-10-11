@@ -1838,6 +1838,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/problemReport.ts` — `buildReport`, `issueUrl`
 
+### Report a problem shows a different draft from the one you clicked
+- **Check:** you clicked one draft, then another before the first had opened.
+- **Cause:** whichever draft's load came back last was shown, even when it was the first one clicked; Open on GitHub and Discard then acted on it.
+- **Fix:** upgrade: only the draft clicked last is shown. Check the title before filing.
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `reportShow`, `reportGen`
+
+### A discarded report draft comes back in the Drafts list
+- **Check:** the draft reappears when Report a problem is opened again.
+- **Cause:** a discard the server did not carry out (it was busy, or the connection dropped) was shown as done.
+- **Fix:** upgrade: a failed discard says "The draft was not discarded" and keeps it open. Press Discard again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `reportDiscard`
+
 ### On a Claude subscription, the Hatchabot agent says it will do something, then nothing happens (no card)
 - **Check:** the reply ends with a long JSON object (`{"tool": …}`), shown as text, and no confirmation card appears; the AI source behind the Hatchabot agent is a setup-token or machine login (Settings → AI).
 - **Cause:** on a subscription the model is reached through the Claude CLI, which answers in text; a tool call after a sentence was looked for among only the last 20 opening braces, so a call with many nested objects (a schedule, a list of rows) was never found and was shown as prose.

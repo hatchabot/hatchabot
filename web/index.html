@@ -2778,6 +2778,8 @@ const api = async (path, opts = {}) => {
     // A route that wants the caller to decide something (a pinned image the
     // runner lacks) names the case in `code`; keep it, and what it refers to.
     if (typeof data.code === 'string') { err.code = data.code; err.image = data.image; }
+    // And the status, for a caller that treats "gone already" (404) apart from a failure.
+    err.status = res.status;
     // The whole answer too: a failed app install says why in data.test.output,
     // which the dialogs read as e.data (never set until 2026-10-09).
     err.data = data;
@@ -13876,8 +13878,11 @@ const V2_BACK_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden
 // (prepare_problem_report). The server adds the facts and masks what must not
 // be public; the person reads it all, then opens the GitHub issue themselves.
 let reportCur = null;
+// Each draft load (and each new report) numbered: only the newest paints, so
+// a slow load of the draft clicked first cannot replace the one clicked last (#146).
+let reportGen = 0;
 async function openReport(id) {
-  reportCur = null;
+  reportCur = null; reportGen++;
   $('reportReview').hidden = true; $('reportForm').hidden = false;
   $('reportAgent').innerHTML = '<option value="">— none —</option>' + (agents ?? []).filter(a => a.state !== 'DELETED' && !a.ops)
     .map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('');
@@ -13909,15 +13914,18 @@ function reportPaint(r) {
   $('reportLinkNote').textContent = r.trimmed ? `It is too long for a GitHub link: Open on GitHub also saves ${r.fileName} — drag that file into the issue to attach the rest.` : '';
 }
 async function reportShow(id) {
-  try { reportPaint(await api(`/v1/problem-reports/${encodeURIComponent(id)}`)); }
-  catch (e) { toast(e.message); }
+  const gen = ++reportGen;
+  try { const r = await api(`/v1/problem-reports/${encodeURIComponent(id)}`); if (gen === reportGen) reportPaint(r); }
+  catch (e) { if (gen === reportGen) toast(e.message); }
 }
 async function reportCreate() {
   const title = $('reportTitle').value.trim(), whatHappened = $('reportWhat').value.trim();
   if (!title || !whatHappened) { toast('Say what went wrong in a line, and what happened.'); return; }
   const btn = $('reportGatherBtn'); btn.disabled = true; btn.textContent = 'Gathering…';
+  const gen = ++reportGen;
   try {
-    reportPaint(await api('/v1/problem-reports', { method: 'POST', body: { title, whatHappened, ...($('reportAgent').value ? { agent: $('reportAgent').value } : {}) } }));
+    const r = await api('/v1/problem-reports', { method: 'POST', body: { title, whatHappened, ...($('reportAgent').value ? { agent: $('reportAgent').value } : {}) } });
+    if (gen === reportGen) reportPaint(r);
     $('reportTitle').value = ''; $('reportWhat').value = '';
     void reportLoadDrafts();
   } catch (e) { toast(e.message); }
@@ -13965,8 +13973,11 @@ async function reportDiscard() {
   if (!reportCur) return;
   // Asked first, like every other delete: a draft (the agent's too) is gone for good (review, 2026-10-09).
   if (!confirm(`Discard the draft "${reportCur.title || 'this report'}"? It is deleted, and cannot be brought back.`)) return;
-  try { await api(`/v1/problem-reports/${encodeURIComponent(reportCur.id)}`, { method: 'DELETE' }); } catch { /* gone already */ }
-  reportCur = null; $('reportReview').hidden = true; $('reportForm').hidden = false;
+  // Only "gone already" (404) counts as discarded: any other failure left the
+  // draft on the server while the page showed it gone (#145).
+  try { await api(`/v1/problem-reports/${encodeURIComponent(reportCur.id)}`, { method: 'DELETE' }); }
+  catch (e) { if (e.status !== 404) { toast(`The draft was not discarded: ${e.message}`, 8000); return; } }
+  reportCur = null; reportGen++; $('reportReview').hidden = true; $('reportForm').hidden = false;
   void reportLoadDrafts();
 }
 /** The agent's link (…/#report=<id>): open that draft once signed in, and take it out of the address bar. */
