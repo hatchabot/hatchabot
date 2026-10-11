@@ -37,8 +37,8 @@ export interface RestTool extends ToolDef {
   agentArg?: boolean;
   /** Build the call; may throw an Error whose message goes back to the model. */
   call: (c: RestCtx) => RestCall | Promise<RestCall>;
-  /** The confirmation card's text (mutate tier). Names resolved targets. */
-  card?: (c: RestCtx) => string;
+  /** The confirmation card's text (mutate tier). Names resolved targets; `call` is what Confirm will send. */
+  card?: (c: RestCtx, call?: RestCall) => string;
   /** Rebuild the agent after the call (source/image changes apply on rebuild). */
   rebuildAfter?: boolean;
   /** Extra line for the "done" message, from the call's JSON result. */
@@ -490,7 +490,7 @@ export const REST_TOOLS: RestTool[] = [
     name: 'set_budget', tier: 'mutate', agentArg: true,
     description:
       "Set an agent's monthly budget in US dollars at API prices (the cost badges' figures). At 80% and 100% the owner gets a line under Alerts and one message. "
-      + 'at_limit "warn" (default) only tells; "pause" stops the agent at 100% until the 1st of next month — or until the budget is raised, or the owner starts it (it then runs on until the 1st); '
+      + 'at_limit "warn" only tells (left out: an existing budget keeps its own, a new one warns); "pause" stops the agent at 100% until the 1st of next month — or until the budget is raised, or the owner starts it (it then runs on until the 1st); '
       + '"cheaper" moves it to the cheapest model its source offers until the 1st (its own model comes back then, or when the budget is raised; a model the owner sets by hand wins) — a softer stop for an agent people rely on. '
       + 'Your own agent (the manager) can only warn. usd 0 removes the budget. Suggest from get_budgets: suggested, or what the owner asked. Requires the owner\'s confirm.',
     input_schema: obj({
@@ -498,15 +498,25 @@ export const REST_TOOLS: RestTool[] = [
       usd: { type: 'number', minimum: 0, maximum: 100000, description: 'US dollars a month; 0 removes the budget' },
       at_limit: { type: 'string', enum: ['warn', 'pause', 'cheaper'] },
     }, ['agent', 'usd']),
-    call: ({ agent, input }) => {
+    call: ({ agent, input, get }) => {
       const usd = input.usd === 0 || input.usd === null ? null : input.usd;
       if (usd !== null && (typeof usd !== 'number' || !Number.isFinite(usd) || usd < 1 || usd > 100_000)) throw new Error('usd: from 1 to 100000 US dollars a month, or 0 to remove the budget.');
       if (input.at_limit !== undefined && input.at_limit !== 'warn' && input.at_limit !== 'pause' && input.at_limit !== 'cheaper') throw new Error('at_limit is "warn", "pause" or "cheaper".');
-      return { method: 'PUT', path: `/v1/agents/${agent!.id}/budget`, body: { usd, ...(input.at_limit ? { atLimit: input.at_limit } : {}) } };
+      const path = `/v1/agents/${agent!.id}/budget`;
+      if (usd === null || input.at_limit) return { method: 'PUT', path, body: { usd, ...(input.at_limit ? { atLimit: input.at_limit } : {}) } };
+      // No at_limit: the route keeps the budget's own. Resolved now, so the card
+      // says what Confirm does and the call carries exactly that (#183).
+      return (async () => {
+        const list = await get('/v1/budgets').catch(() => { throw new Error('Could not read its budget now: give at_limit ("warn", "pause" or "cheaper").'); }) as { agents?: Array<{ id: string; budget?: { atLimit?: string } }> } | undefined;
+        const kept = list?.agents?.find((x) => x.id === agent!.id)?.budget?.atLimit;
+        return { method: 'PUT' as const, path, body: { usd, atLimit: kept === 'pause' || kept === 'cheaper' ? kept : 'warn' } };
+      })();
     },
-    card: ({ agent, input }) => typeof input.usd === 'number' && input.usd > 0
-      ? `💵 Give "${agent!.name}" a budget of $${input.usd} a month (at API prices): you hear at 80% and 100%${input.at_limit === 'pause' ? ', and at 100% it pauses until the 1st (raise the budget or start it to bring it back sooner)' : input.at_limit === 'cheaper' ? ', and at 100% it moves to the cheapest model its source offers until the 1st (raise the budget to switch back sooner)' : '; it keeps working past it'}.`
-      : `💵 Remove "${agent!.name}"'s monthly budget.`,
+    card: ({ agent, input }, call) => {
+      if (!(typeof input.usd === 'number' && input.usd > 0)) return `💵 Remove "${agent!.name}"'s monthly budget.`;
+      const at = (call?.body as { atLimit?: unknown } | undefined)?.atLimit ?? input.at_limit;
+      return `💵 Give "${agent!.name}" a budget of $${input.usd} a month (at API prices): you hear at 80% and 100%${at === 'pause' ? ', and at 100% it pauses until the 1st (raise the budget or start it to bring it back sooner)' : at === 'cheaper' ? ', and at 100% it moves to the cheapest model its source offers until the 1st (raise the budget to switch back sooner)' : '; it keeps working past it'}.`;
+    },
     done: (r) => (r && typeof r === 'object' && 'message' in r ? String((r as { message: string }).message) : undefined),
   },
 

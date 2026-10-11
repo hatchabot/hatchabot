@@ -1377,6 +1377,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/budgets.ts` — `suggestBudget`
 
+### The Hatchabot agent's budget card said "it keeps working past it", but at the limit the agent paused or changed model
+- **Check:** the card had no pausing or cheaper wording; the agent's budget was already set to pause or cheaper before the card.
+- **Cause:** before v2.160.0 a `set_budget` card without an action described a warn-only budget, while the change kept the budget's existing pause or cheaper action.
+- **Fix:** upgrade. The card reads the budget's current action when it is written and the change carries exactly that; to change the action, ask for it by name.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/mgmt/restTools.ts` — `set_budget`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody
