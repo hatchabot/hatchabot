@@ -157,7 +157,7 @@ import { forgetDmPolicy } from '../orchestrator/dmPolicyMemo.js';
 import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError, scrubChannelAllowlist, allowlistScrubScript, setDmPolicy } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy, replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import {
-  DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar,
+  DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar, grantedServices, isGoogleService,
   exchangeGoogleCode, googleAuthUrl, materializeConnection, offAgainIfDetached, removeQueuedNow, syncConnections, withConnectionLock,
   parseOAuthClient, revokeGoogleToken, type OAuthClient,
 } from '../orchestrator/googleConnections.js';
@@ -10271,7 +10271,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Guard the shape: a non-array `services` with a truthy `.length` (e.g. a
     // string) used to TypeError → 500 (audit 2026-09-06).
     const requested = Array.isArray(body.services) && body.services.length ? body.services : DEFAULT_SERVICES;
-    const services = requested.filter((s) => typeof s === 'string' && s in GOOGLE_SERVICES).slice(0, 8);
+    const services = [...new Set(requested.filter(isGoogleService))].slice(0, 8);
     if (!services.length) return reply.code(400).send({ error: 'Pick at least one service.' });
     // The browser that asks is the browser that must come back: a Lax cookie
     // (it rides Google's top-level redirect home), scoped to the callback.
@@ -10326,7 +10326,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const client = await getOAuthClient();
       if (!client) return page('Not connected', 'The OAuth client was removed mid-flow.', false);
       try {
-        const { refreshToken, email } = await exchangeGoogleCode(client, oauthRedirectUri(req as any), req.query.code, oauthFetch);
+        const { refreshToken, email, scope } = await exchangeGoogleCode(client, oauthRedirectUri(req as any), req.query.code, oauthFetch);
+        // Record only what Google granted: an unticked service would be
+        // offered to agents and fail them with permission errors (#174).
+        const { granted, refused } = grantedServices(claim.services, scope);
+        const names = (list: string[]) => list.map((s) => s[0]!.toUpperCase() + s.slice(1)).join(', ');
+        if (!granted.length) {
+          return page('Not connected', `Google granted none of the services asked for (${names(refused)}). Nothing was stored — press Connect again and leave them ticked.`, false);
+        }
         // Upsert: reconnecting the same account refreshes its token in place
         // (and every agent it's attached to picks the new token up on its
         // next rebuild/materialization).
@@ -10334,9 +10341,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const id = existing?.id ?? randomUUID();
         const secretRef = existing?.secretRef ?? `connection/${id}`;
         await secrets.put(secretRef, refreshToken);
-        store.insertConnection({ id, ownerId: claim.ownerId, kind: 'google', email, services: claim.services, secretRef, clientId: client.clientId });
-        trace()('connection.linked', { email, services: claim.services });
+        store.insertConnection({ id, ownerId: claim.ownerId, kind: 'google', email, services: granted, secretRef, clientId: client.clientId });
+        trace()('connection.linked', { email, services: granted, ...(refused.length ? { refused } : {}) });
         return page(`✅ ${email} connected`,
+          (refused.length ? `Connected for ${names(granted)} only: ${names(refused)} ${refused.length === 1 ? 'was' : 'were'} not granted (to add ${refused.length === 1 ? 'it' : 'them'}, press Connect again and leave ${refused.length === 1 ? 'it' : 'them'} ticked). ` : '') +
           'You can close this tab. Back in Hatchabot, attach this account to any agent under its ⚙ Settings → Connections.', true);
       } catch (err) {
         return page('Not connected', String((err as Error).message ?? err).slice(0, 300), false);

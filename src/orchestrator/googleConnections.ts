@@ -34,6 +34,26 @@ export const GOOGLE_SERVICES: Record<string, string> = {
 };
 export const DEFAULT_SERVICES = ['gmail', 'calendar', 'drive'];
 
+/**
+ * One of the services above, by its own name. `s in GOOGLE_SERVICES` also
+ * took inherited names: `constructor` passed and put the Object constructor's
+ * source into the consent URL's scopes (#173).
+ */
+export const isGoogleService = (s: unknown): s is string => typeof s === 'string' && Object.hasOwn(GOOGLE_SERVICES, s);
+
+/**
+ * Of the services asked for, those whose scope Google granted. The consent
+ * screen lets a person untick a scope; the connection used to record every
+ * service asked for, and the agents then failed with permission errors on the
+ * unticked ones (#174). A token answer without `scope` is taken as granted.
+ */
+export function grantedServices(requested: string[], scope: string | undefined): { granted: string[]; refused: string[] } {
+  if (scope === undefined) return { granted: requested, refused: [] };
+  const have = new Set(scope.split(/\s+/).filter(Boolean));
+  const granted = requested.filter((s) => isGoogleService(s) && have.has(GOOGLE_SERVICES[s]!));
+  return { granted, refused: requested.filter((s) => !granted.includes(s)) };
+}
+
 export interface OAuthClient {
   clientId: string;
   clientSecret: string;
@@ -56,7 +76,7 @@ export function googleAuthUrl(
   state: string,
   services: string[],
 ): string {
-  const scopes = ['openid', 'email', ...services.map((s) => GOOGLE_SERVICES[s]).filter(Boolean)];
+  const scopes = ['openid', 'email', ...services.filter(isGoogleService).map((s) => GOOGLE_SERVICES[s]!)];
   const u = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   u.searchParams.set('client_id', clientId);
   u.searchParams.set('redirect_uri', redirectUri);
@@ -80,7 +100,7 @@ export async function exchangeGoogleCode(
   redirectUri: string,
   code: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<{ refreshToken: string; email: string }> {
+): Promise<{ refreshToken: string; email: string; scope?: string }> {
   const tokenRes = await fetchImpl('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -94,7 +114,7 @@ export async function exchangeGoogleCode(
     signal: AbortSignal.timeout(10_000),
   });
   const tok = (await tokenRes.json().catch(() => ({}))) as {
-    refresh_token?: string; access_token?: string; error?: string; error_description?: string;
+    refresh_token?: string; access_token?: string; scope?: string; error?: string; error_description?: string;
   };
   if (!tokenRes.ok || !tok.access_token) {
     throw new Error(`Google refused the code exchange: ${tok.error_description ?? tok.error ?? tokenRes.status}`);
@@ -108,7 +128,7 @@ export async function exchangeGoogleCode(
   });
   const info = (await infoRes.json().catch(() => ({}))) as { email?: string };
   if (!info.email) throw new Error("Couldn't read the account's email from Google.");
-  return { refreshToken: tok.refresh_token, email: info.email };
+  return { refreshToken: tok.refresh_token, email: info.email, scope: typeof tok.scope === 'string' ? tok.scope : undefined };
 }
 
 /** Best-effort revoke at Google when a connection is removed from the vault. */

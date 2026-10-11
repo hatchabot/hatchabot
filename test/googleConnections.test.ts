@@ -27,13 +27,13 @@ class MemSecrets implements SecretStore {
 const OWNER = 'user-owner';
 const H = { 'x-hatchabot-owner': OWNER };
 
-const googleMock = (opts: { email?: string; refresh?: string } = {}) => {
+const googleMock = (opts: { email?: string; refresh?: string; scope?: string } = {}) => {
   const calls: Array<{ url: string; body?: string }> = [];
   const fetchImpl = (async (url: any, init?: any) => {
     const u = String(url);
     calls.push({ url: u, body: init?.body ? String(init.body) : undefined });
     if (u.includes('oauth2.googleapis.com/token')) {
-      return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: opts.refresh ?? 'rt-secret-1' }), { headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: opts.refresh ?? 'rt-secret-1', ...(opts.scope !== undefined ? { scope: opts.scope } : {}) }), { headers: { 'content-type': 'application/json' } });
     }
     if (u.includes('userinfo')) {
       return new Response(JSON.stringify({ email: opts.email ?? 'chris@example.com' }), { headers: { 'content-type': 'application/json' } });
@@ -205,6 +205,41 @@ describe('the consent round-trip', () => {
     const list = await f.inject({ method: 'GET', url: '/v1/connections', headers: H });
     expect(list.json().connections[0].email).toBe('chris@example.com');
     expect(list.body).not.toContain('rt-secret-1');
+  });
+
+  it('an inherited name such as constructor is not a service (#173)', async () => {
+    const { f } = await world(googleMock().fetchImpl);
+    await configureClient(f);
+    const only = await f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: { services: ['constructor', 'toString', '__proto__'] } });
+    expect(only.statusCode).toBe(400);
+    const mixed = await f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: { services: ['constructor', 'gmail'] } });
+    expect(mixed.statusCode).toBe(200);
+    const scope = new URL(mixed.json().url).searchParams.get('scope')!;
+    expect(scope).toBe('openid email https://mail.google.com/');
+    expect(new URL(googleAuthUrl('cid', 'https://x/cb', 'st', ['constructor', 'docs'])).searchParams.get('scope')).toBe('openid email https://www.googleapis.com/auth/documents');
+  });
+
+  it('records only the services Google granted, and says which were not (#174)', async () => {
+    const granted = 'openid https://www.googleapis.com/auth/userinfo.email https://mail.google.com/';
+    const { fetchImpl } = googleMock({ email: 'grandma@example.org', scope: granted });
+    const { f, store } = await world(fetchImpl);
+    await configureClient(f);
+    const start = await f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: { services: ['gmail', 'calendar'] } });
+    const state = new URL(start.json().url).searchParams.get('state')!;
+    const cb = await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}`, headers: H, cookies: { hb_oauth: nonceOf(start) } });
+    expect(cb.statusCode).toBe(200);
+    expect(cb.body).toContain('Connected for Gmail only: Calendar was not granted');
+    expect(store.listConnections(OWNER)[0]).toMatchObject({ email: 'grandma@example.org', services: ['gmail'] });
+
+    // Nothing granted: nothing stored.
+    const none = googleMock({ email: 'grandpa@example.org', scope: 'openid https://www.googleapis.com/auth/userinfo.email' });
+    const w2 = await world(none.fetchImpl);
+    await configureClient(w2.f);
+    const s2 = await w2.f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: { services: ['drive'] } });
+    const cb2 = await w2.f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${new URL(s2.json().url).searchParams.get('state')}`, headers: H, cookies: { hb_oauth: nonceOf(s2) } });
+    expect(cb2.statusCode).toBe(400);
+    expect(cb2.body).toContain('granted none of the services');
+    expect(w2.store.listConnections(OWNER)).toEqual([]);
   });
 
   it('the callback needs NO session (cross-site redirect drops the strict cookie) — the state alone binds it to the starter', async () => {
