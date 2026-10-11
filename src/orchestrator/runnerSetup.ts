@@ -68,6 +68,18 @@ export function parseSshEndpoint(
 }
 
 /**
+ * A path as an ssh_config value. Unquoted, a space ends the value (a home
+ * folder with a space in it pointed IdentityFile at a file that does not
+ * exist, and the runner could not sign in, #153), and `%` starts one of
+ * ssh's tokens. A double quote or a line break cannot be written safely, so
+ * such a folder is refused rather than written wrong.
+ */
+export function sshConfigPath(path: string): string {
+  if (/["\r\n]/.test(path)) throw new Error(`The ssh folder ${JSON.stringify(path)} has a quote or line break in its name, which ~/.ssh/config cannot hold: set HATCHABOT_SSH_DIR to another folder.`);
+  return `"${path.replace(/%/g, '%%')}"`;
+}
+
+/**
  * Pin the dedicated key for this runner's hostname in ~/.ssh/config, so the
  * headless service authenticates deterministically: IdentitiesOnly beats any
  * ssh-agent (a passphrase-protected default key exhausts the server's auth
@@ -94,7 +106,7 @@ export async function ensureSshConfigBlock(endpoint: string, p: RunnerPaths = {}
     `Host ${parsed.host}`,
     ...(parsed.user ? [`    User ${parsed.user}`] : []),
     ...(parsed.port ? [`    Port ${parsed.port}`] : []),
-    `    IdentityFile ${join(dir, KEY_NAME)}`,
+    `    IdentityFile ${sshConfigPath(join(dir, KEY_NAME))}`,
     '    IdentitiesOnly yes',
     '    StrictHostKeyChecking accept-new',
     '',
