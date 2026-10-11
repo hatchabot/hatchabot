@@ -1,7 +1,7 @@
 import type { Agent, AIProfile } from '../domain/types.js';
 import type { Store } from '../store/store.js';
 import type { ModelProfile, WindowModelStats, TurnErrors } from './usage.js';
-import { modelOption, priceMix, sourceModels, type TokenMix } from './modelOptions.js';
+import { modelKey, modelOption, priceMix, sourceModels, type TokenMix } from './modelOptions.js';
 
 /**
  * The model scorecard: one compact row per agent the caller owns, for the
@@ -136,7 +136,9 @@ export function scoreAgent(a: Agent, profile: AIProfile | undefined, stored: { p
   const atCurrent = billing === 'local' || !p ? undefined : priceMix(model, mix);
   const monthly = atCurrent === undefined ? undefined : (atCurrent * 30) / days;
   const cur = modelOption(model);
-  const onModel = entries.filter(([m]) => modelOption(m)?.id === cur?.id || m === model).map(([, m]) => m);
+  // Two models outside the catalog both have no id: compare their names then,
+  // or every unknown model's turns count as experience on the new one (#123).
+  const onModel = entries.filter(([m]) => m === model || (cur ? modelOption(m)?.id === cur.id : modelKey(m) === modelKey(model))).map(([, m]) => m);
   const turnsOnModel = onModel.reduce((s, m) => s + m.turns, 0);
   const evidence: ScorecardRow['evidence'] = !calls ? 'none' : turnsOnModel < 10 || days < 3 ? 'thin' : 'ok';
   const options: ScorecardOption[] = [];

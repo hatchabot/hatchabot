@@ -225,6 +225,21 @@ describe('the model scorecard', () => {
     expect(after.cheaperOptions).toEqual([]);
   });
 
+  it('two models outside the catalog are not evidence for each other (#123)', async () => {
+    const { store, now } = await world();
+    store.setModelProfile('quiet', {
+      since: now - 31 * DAY, promptErrors: 0, crons: 0, firstCall: now - 40 * DAY,
+      models: { 'acme-large-1': stats({ calls: 400, input: 2e6, output: 2e5, turns: 200, last: now - 2 * DAY }) },
+    } as StoredProfile, new Date(now - 3_600_000).toISOString());
+    store.setAgentModel('quiet', 'acme-small-1');
+    const row = buildScorecard(store, OWNER, { now }).rows.find((r) => r.id === 'quiet')!;
+    expect(row.turnsOnModel).toBe(0);
+    expect(row.evidence).toBe('thin');
+    // The same unknown model under a vendor prefix is still itself.
+    store.setAgentModel('quiet', 'acme/acme-large-1');
+    expect(buildScorecard(store, OWNER, { now }).rows.find((r) => r.id === 'quiet')!.turnsOnModel).toBe(200);
+  });
+
   it('a plan source: an API-price equivalent and the agent\'s share of everything on the plan, any account\'s', async () => {
     const { store, now } = await world();
     const sleepy = buildScorecard(store, OWNER, { now }).rows.find((r) => r.id === 'sleepy')!;
