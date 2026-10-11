@@ -4092,6 +4092,25 @@ const SCENARIOS = String.raw`(() => {
         ok('the count and the reason, after the redraw: ' + note.textContent, !note.hidden && note.textContent.includes('1 of 2 uploaded') && note.textContent.includes('huge.zip: Too big (300 MB'));
       } finally { window.fetch = realFetch; release?.(); window.__answer = {}; if (v2AgentDlg.open) v2Close(); v2FilesPath.delete('a1'); }
     },
+    chanConnectorsRetry: async () => {
+      // The connector list failing once is not kept: trying again works without a reload (#144).
+      const [first] = agents.filter((x) => x.name && !x.ops);
+      window.__override['/v1/discord-bots'] = { bots: [] };
+      chanFields = undefined;
+      try {
+        window.__answer = { 'GET /v1/channels/connectors': [{ status: 503, body: { error: 'busy' } }] };
+        await openChanSetup(first.id, 'discord');
+        ok('told to try again: ' + $('toast').textContent, $('toast').textContent.includes('try again') && !chanDlg.open);
+        window.__override['/v1/channels/connectors'] = [{ kind: 'discord', label: 'Discord', fields: [{ key: 'botToken', label: 'Bot token', pattern: '^.{20,}$', help: 'token' }] }];
+        await openChanSetup(first.id, 'discord');
+        await until(() => chanDlg.open);
+        ok('the second try opens the steps', chanDlg.open && $('chanBody').textContent.includes(first.name));
+      } finally {
+        window.__answer = {}; chanFields = undefined;
+        delete window.__override['/v1/discord-bots']; delete window.__override['/v1/channels/connectors'];
+        if (chanDlg.open) chanDlg.close();
+      }
+    },
   });
   (async () => {
     for (const [name, run] of Object.entries(T)) {

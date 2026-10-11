@@ -13462,13 +13462,15 @@ async function openChanSetup(id, kind) {
   // second (B055). Only the newest open paints, and the dialog's target is
   // set together with what it shows, just before it opens.
   const gen = ++chanOpenGen;
-  if (!Array.isArray(chanFields)) {
-    let got;
-    try { got = await api('/v1/channels/connectors'); } catch { got = []; }
-    chanFields = Array.isArray(got) ? got : [];
+  // Kept only once it came back: a failed fetch kept [] for good, so "try
+  // again" could never work until the page was reloaded (#144).
+  let connectors = chanFields;
+  if (!Array.isArray(connectors)) {
+    try { const got = await api('/v1/channels/connectors'); if (Array.isArray(got)) chanFields = connectors = got; } catch { /* said below */ }
+    connectors = Array.isArray(connectors) ? connectors : [];
   }
   if (gen !== chanOpenGen) return;
-  const fields = chanFields.find(c => c.kind === kind)?.fields ?? [];
+  const fields = connectors.find(c => c.kind === kind)?.fields ?? [];
   const steps = kind === 'slack' ? `
     <ol class="v2steps">
       <li><b>Create the app.</b> <button type="button" onclick="chanCopyManifest(this)">Copy app manifest</button>
