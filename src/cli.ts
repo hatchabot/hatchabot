@@ -1596,6 +1596,10 @@ async function main() {
       if (preview.skipped?.length) {
         console.log(`  skipping ${preview.skipped.join(', ')} — built for this machine, and the agent can rebuild them`);
       }
+      if (preview.links?.length) {
+        const l: string[] = preview.links;
+        console.log(`  not copied (links): ${l.slice(0, 6).join(', ')}${l.length > 6 ? `, +${l.length - 6} more` : ''} — copy what they point at into the folder if the agent needs it`);
+      }
 
       const bot = preview.existingBot;
       if (bot) {

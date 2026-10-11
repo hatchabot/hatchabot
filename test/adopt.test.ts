@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeAll } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -95,13 +95,30 @@ describe('inspectWorkspace', () => {
 
 describe('packWorkspace', () => {
   it('produces a tarball carrying the markdown but not the excluded files', async () => {
-    const tar = await packWorkspace(ws);
+    const tar = await packWorkspace(inspectWorkspace(ws));
     expect(tar.length).toBeGreaterThan(0);
     const listing = execFileSync('tar', ['tz'], { input: tar, encoding: 'utf8' });
     expect(listing).toContain('SOUL.md');
     expect(listing).toContain('INVESTING_RULES.md');
     expect(listing).not.toContain('openclaw-agent.sqlite');
     expect(listing).not.toContain('auth-profiles.json');
+  });
+
+  it('copies what the preview showed and nothing else: links are named in it and left out (2026-10-10)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-links-'));
+    writeFileSync(join(dir, 'SOUL.md'), '# soul');
+    mkdirSync(join(dir, 'notes'));
+    writeFileSync(join(dir, 'notes', 'day.md'), '# day');
+    symlinkSync('/etc/hostname', join(dir, 'outside.md'));
+    symlinkSync('notes', join(dir, 'notes-link'));
+    symlinkSync('SOUL.md', join(dir, 'notes', 'soul-again.md'));
+    writeFileSync(join(dir, '-rf'), 'a name that looks like an option');
+    const p = inspectWorkspace(dir);
+    expect(p.files.sort()).toEqual(['-rf', 'SOUL.md', 'notes/day.md']);
+    expect(p.links.sort()).toEqual(['notes-link -> notes', 'notes/soul-again.md -> SOUL.md', 'outside.md -> /etc/hostname']);
+    const listing = execFileSync('tar', ['tz'], { input: await packWorkspace(p), encoding: 'utf8' })
+      .split('\n').filter(Boolean).map((l) => l.replace(/^\.\//, '')).sort();
+    expect(listing).toEqual(p.files.sort());
   });
 });
 

@@ -958,6 +958,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.149.0`
 - **Code:** `src/cli.ts` — `--no-telegram`; `web/index.html` — `adoptWebChanged`
 
+### An adopted agent has files or links its adopt preview never listed, or a link that leads nowhere
+- **Check:** the workspace holds symbolic links (`find <workspace> -type l`); the adopted agent's Files show them, though the preview's file count did not include them.
+- **Cause:** the preview counted only plain files, but the copy archived the whole folder, links included. A link means something else inside the agent (its target is a path on your machine), so it led nowhere or somewhere unexpected.
+- **Fix:** upgrade: the copy is exactly the files the preview lists, and the preview names each link it leaves out ("Not copied — a link: …"). Copy what a link points at into the workspace if the agent needs it, then adopt again. In an agent already adopted, delete the stray links from Files.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/adopt.ts` — `inspectWorkspace`, `packWorkspace`
+
 ### A build fails: "The memory search service's port … is taken", or "embed door failed … port is already allocated"
 - **Check:** `docker ps --format '{{.Names}} {{.Ports}}' | grep 8093` shows another Hatchabot's `…-embed-door` holding the port.
 - **Cause:** two Hatchabots on one Docker (a second install, a test server) each start a memory search service on the same port, 8093 by default. From OpenClaw 2026.8 every agent needs that service.
