@@ -1330,6 +1330,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.33.1`
 - **Code:** `src/orchestrator/crons.ts` — `--no-deliver`
 
+### After editing a task in the app, its results go to the owner's chat instead of a member's chat or a group
+- **Check:** the task was edited with ✏️ Edit in the agent's Schedule tab; its delivery (`openclaw cron list --json` in the agent) now names the owner, and its id changed.
+- **Cause:** the app's edit deleted the task and added a new one, and a new task is always sent to the owner's chat (or the console conversation), so wherever the old one posted was lost.
+- **Fix:** upgrade: an edit now changes the task in place and sends only the changed name, message or schedule, so where it posts, whether it is quiet or paused, and its run history stay. A task already moved has to be pointed back by asking the agent.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/crons.ts` — `editCron`; `web/index.html` — `addCronJob`
+
 ## Tailscale and public access
 
 ### The https address the setup guide gave does not open

@@ -382,6 +382,41 @@ export async function setCronEnabled(
   return res.code === 0;
 }
 
+export interface EditCronOptions {
+  name?: string;
+  message?: string;
+  /** A new schedule: at most one of cron/everyMs. */
+  cron?: string;
+  everyMs?: number;
+  tz?: string;
+}
+
+/**
+ * Change a task in place, patching only the fields given. The app's edit used
+ * to delete the task and add a new one; the new one got the owner's chat as
+ * its recipient, so a task bound to another conversation (a member's chat, a
+ * group, a console conversation) quietly started posting somewhere else.
+ * `cron edit` leaves delivery, session, enabled state and run history alone.
+ */
+export async function editCron(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+  jobId: string,
+  opts: EditCronOptions,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const argv = ['cron', 'edit', jobId];
+  if (opts.name !== undefined) argv.push('--name', opts.name);
+  if (opts.message !== undefined) argv.push('--message', opts.message);
+  if (opts.cron) argv.push('--cron', opts.cron);
+  else if (opts.everyMs) argv.push('--every', msToEvery(opts.everyMs));
+  if (opts.tz) argv.push('--tz', opts.tz);
+  if (argv.length === 3) return { ok: false, error: 'Nothing to change.' };
+  const res = await provider.exec(runtimeRef, argv);
+  if (refusedAsSystem(res)) throw new CronSystemOwnedError();
+  if (res.code !== 0) return { ok: false, error: (res.stderr || res.stdout || 'cron edit failed').slice(0, 300) };
+  return { ok: true };
+}
+
 /** Fire a task immediately ("test fire"). Its result is delivered the task's own
  *  way (e.g. a Telegram announce), not returned here. */
 export async function runCronNow(

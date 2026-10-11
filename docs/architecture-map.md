@@ -510,7 +510,7 @@ API through one fetch helper.
 - `web/index.html` — `agentNotices`, `prepareEdit`, `prepareCrons`: the notices and the editDlg / cronDlg sections the agent sheet borrows.
 - `src/api/routes.ts` — `'/'`, `'/v1/config'`, `'/v1/agents'`, `'/v1/agents/:id'`, `'/v1/recent'`, `'/v1/agents/:id/crons'`, `indexPage`: the page itself and the main reads behind it.
 - `src/orchestrator/recent.ts` — `RecentTracker`, `orderRecent`, `previewLine`: the Activity view and tile previews.
-- `src/orchestrator/crons.ts` — `listCrons`, `addCron`, `setCronEnabled`, `runCronNow`: scheduled tasks inside the agent.
+- `src/orchestrator/crons.ts` — `listCrons`, `addCron`, `editCron`, `setCronEnabled`, `runCronNow`: scheduled tasks inside the agent.
 - `web/sw.js` — `fetch`: the service worker for the installable app.
 - `scripts/check-web.mjs` — `checkHandlers`: static checks on the page (run by the tests).
 - `scripts/ui-clickthrough.mjs` — `--headless`: the click-through UI test (headless Chrome against the real page).

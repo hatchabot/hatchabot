@@ -137,6 +137,41 @@ describe('cron routes', () => {
     expect(provider.execLog).toContainEqual(['cron', 'disable', 'job-1']);
   });
 
+  it('PATCH with new fields changes the task in place — its recipient and session are not touched (2026-10-10)', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('cron list', { code: 0, stdout: CRON_JSON, stderr: '' });
+    const res = await f.inject({
+      method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as,
+      payload: { name: 'Morning scan 2', message: 'Do the longer scan', cron: '30 9 * * 1-5', tz: 'Europe/Lisbon' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, edited: true });
+    expect(provider.execLog).toContainEqual(['cron', 'edit', 'job-1', '--name', 'Morning scan 2', '--message', 'Do the longer scan', '--cron', '30 9 * * 1-5', '--tz', 'Europe/Lisbon']);
+    // Not re-created: a new task got the owner's chat, moving one that posted to a member or a group.
+    expect(provider.execLog.some((c) => c[0] === 'cron' && (c[1] === 'add' || c[1] === 'rm'))).toBe(false);
+    const edit = provider.execLog.find((c) => c[1] === 'edit')!;
+    expect(edit.some((a) => /^--(channel|to|session|session-key|announce|no-deliver)$/.test(a))).toBe(false);
+    // An interval, alone.
+    await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: { everyMinutes: 1.5 } });
+    expect(provider.execLog).toContainEqual(['cron', 'edit', 'job-1', '--every', '90s']);
+  });
+
+  it('PATCH edit: only a task of this agent, never a shell-command task, and never two schedules', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('cron list', { code: 0, stdout: CRON_JSON, stderr: '' });
+    const gone = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-elsewhere', headers: as, payload: { name: 'x' } });
+    expect(gone.statusCode).toBe(404);
+    const shell = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-2', headers: as, payload: { message: 'hi' } });
+    expect(shell.statusCode).toBe(409);
+    const both = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: { cron: '0 8 * * *', everyMinutes: 5 } });
+    expect(both.statusCode).toBe(400);
+    expect(provider.execLog.some((c) => c[1] === 'edit')).toBe(false);
+    provider.execResponses.set('cron edit', { code: 1, stdout: '', stderr: 'bad expression' });
+    const bad = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: { cron: '0 99 * * *' } });
+    expect(bad.statusCode).toBe(502);
+    expect(bad.json().error).toContain('bad expression');
+  });
+
   it('PATCH rejects a missing enabled flag', async () => {
     const { f } = await world();
     const res = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: {} });

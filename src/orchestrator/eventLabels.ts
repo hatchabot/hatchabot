@@ -167,6 +167,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'connection.unlinked': (d) => `${String(d.kind ?? 'a')} account disconnected`,
   'context.reset_after_rebuild': 'started a fresh conversation after the rebuild',
   'cron.created': (d) => `task “${String(d.name ?? '')}” created`,
+  'cron.edited': (d) => `task “${String(d.name ?? '')}” changed`,
   'cron.migrate_error': 'a task could not be brought over',
   'cron.migrate_failed': 'a task could not be brought over',
   'cron.migrate_gateway_not_ready': 'tasks not brought over yet — the gateway was not ready',
