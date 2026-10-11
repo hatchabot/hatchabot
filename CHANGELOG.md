@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.160.2] — 2026-10-11
+
+### Changed
+- **Usage pages are split into outlined sections**, like the agent sheet's: the two cost pies, the chart over time, the last day and conversation size, where the tokens went, and the calls per model each sit in their own card.
+
 ## [2.160.1] — 2026-10-11
 
 ### Changed
