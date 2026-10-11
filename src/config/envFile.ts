@@ -129,8 +129,35 @@ export type SyncResult =
   | { ok: true; changed: true; text: string }
   | { ok: false; error: string };
 
+/**
+ * The first setting whose value goes on past its line: an opening quote that
+ * is not closed on it, or a trailing backslash. systemd (and dotenv) read
+ * those as one value across several lines; this file is rewritten line by
+ * line, which moves the continuation away under "Other settings" and changes
+ * the value while every single line still compares equal (#79).
+ */
+export function multilineSetting(text: string): string | undefined {
+  for (const line of text.split('\n')) {
+    const m = LINE.exec(line);
+    if (!m || m[1]) continue;
+    const v = m[3]!.trim();
+    if (/(^|[^\\])(\\\\)*\\$/.test(v)) return m[2];
+    const q = v[0];
+    if (q !== '"' && q !== "'") continue;
+    let closed = false;
+    for (let i = 1; i < v.length && !closed; i++) {
+      if (q === '"' && v[i] === '\\') i++;
+      else if (v[i] === q) closed = true;
+    }
+    if (!closed) return m[2];
+  }
+  return undefined;
+}
+
 /** The new text for a file, refused unless every value in force stays byte-for-byte the same. */
 export function syncEnvText(existing: string): SyncResult {
+  const spans = multilineSetting(existing);
+  if (spans) return { ok: false, error: `${spans} has a value on more than one line, which this tidy cannot keep together — left as it was` };
   const text = renderEnv(existing);
   if (text === existing) return { ok: true, changed: false };
   const before = activeValues(existing), after = activeValues(text);
@@ -143,13 +170,51 @@ export function syncEnvText(existing: string): SyncResult {
   return { ok: true, changed: true, text };
 }
 
+const envLocks = new Map<string, Promise<unknown>>();
+
+/**
+ * Run one read-modify-write of the .env at `path` with no other in flight on
+ * the same file. Each writer reads the whole file, changes a line and renames
+ * a copy over it: two settings saved at once each wrote their own snapshot,
+ * so the second rename silently dropped the first change (#160).
+ */
+export async function withEnvFileLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
+  const { resolve } = await import('node:path');
+  const key = resolve(path);
+  const run = (envLocks.get(key) ?? Promise.resolve()).then(fn, fn);
+  const tail = run.then(() => undefined, () => undefined);
+  envLocks.set(key, tail);
+  void tail.then(() => { if (envLocks.get(key) === tail) envLocks.delete(key); });
+  return run;
+}
+
+/** Write `text` to a staging file of its own beside `path`, then rename it over `path`. */
+export async function replaceEnvFile(path: string, text: string, mode: number): Promise<void> {
+  const { writeFile, rename, unlink } = await import('node:fs/promises');
+  const { randomUUID } = await import('node:crypto');
+  // Never a shared `.env.tmp`: another writer (or another process) staging at
+  // the same name could rename our half-written copy, or its own, into place.
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`;
+  try {
+    await writeFile(tmp, text, { mode, flag: 'wx' });
+    await rename(tmp, path);
+  } catch (err) {
+    await unlink(tmp).catch(() => {});
+    throw err;
+  }
+}
+
 /**
  * Rewrite the .env at `path` in place, keeping its mode (0600), with a dated
  * copy of the old file beside it (the newest 3 kept). Never throws: a file
  * it can't read or write is left alone and the reason returned.
  */
-export async function syncEnvFile(path: string, now = new Date()): Promise<{ changed: boolean; error?: string; backup?: string }> {
-  const { readFile, writeFile, rename, stat, readdir, unlink } = await import('node:fs/promises');
+export function syncEnvFile(path: string, now = new Date()): Promise<{ changed: boolean; error?: string; backup?: string }> {
+  return withEnvFileLock(path, () => syncEnvFileNow(path, now));
+}
+
+async function syncEnvFileNow(path: string, now: Date): Promise<{ changed: boolean; error?: string; backup?: string }> {
+  const { readFile, writeFile, stat, readdir, unlink } = await import('node:fs/promises');
   const { dirname, basename, join } = await import('node:path');
   let existing: string;
   try { existing = await readFile(path, 'utf8'); } catch (err) { return { changed: false, error: `can't read ${path}: ${(err as Error).message}` }; }
@@ -161,9 +226,7 @@ export async function syncEnvFile(path: string, now = new Date()): Promise<{ cha
     const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
     const backup = `${path}.bak-${stamp}`;
     await writeFile(backup, existing, { mode: 0o600 });
-    const tmp = `${path}.tmp`;
-    await writeFile(tmp, r.text, { mode });
-    await rename(tmp, path);
+    await replaceEnvFile(path, r.text, mode);
     // Keep the newest three copies: they hold secrets, so not forever.
     const dir = dirname(path), base = basename(path);
     const olds = (await readdir(dir)).filter((f) => f.startsWith(`${base}.bak-`)).sort();
