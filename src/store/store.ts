@@ -379,6 +379,13 @@ export class Store {
         agent_id TEXT NOT NULL, name TEXT NOT NULL, job_id TEXT, at TEXT NOT NULL,
         PRIMARY KEY (agent_id, name)
       );
+      -- Tasks the delivery repair made quiet because there was no one to post
+      -- to yet (crons.ts retargetImplicitCrons): pointed at the owner's chat
+      -- once there is one, instead of staying quiet for good.
+      CREATE TABLE IF NOT EXISTS cron_quieted (
+        agent_id TEXT NOT NULL, job_id TEXT NOT NULL, at TEXT NOT NULL,
+        PRIMARY KEY (agent_id, job_id)
+      );
       -- Token health (tokenHealth.ts, docs/features.md "Token steward"): what
       -- the usage sampler's transcript read said about each agent's
       -- conversations, cache, scheduled runs, instruction files and loops, as
@@ -3838,6 +3845,19 @@ export class Store {
   setManagedCron(agentId: string, name: string, jobId: string | undefined, at: string, messageHash?: string): void {
     this.db.prepare(`INSERT INTO managed_crons (agent_id, name, job_id, at, message_hash) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(agent_id, name) DO UPDATE SET job_id = excluded.job_id, at = excluded.at, message_hash = excluded.message_hash`).run(agentId, name, jobId ?? null, at, messageHash ?? null);
+  }
+
+  /** The agent's tasks made quiet for want of a recipient (crons.ts retargetImplicitCrons). */
+  quietedCrons(agentId: string): string[] {
+    return (this.db.prepare(`SELECT job_id FROM cron_quieted WHERE agent_id = ? ORDER BY job_id`).all(agentId) as Array<{ job_id: string }>).map((r) => r.job_id);
+  }
+  /** Replace that set: what a repair pass says is still waiting. */
+  setQuietedCrons(agentId: string, jobIds: readonly string[], at: string): void {
+    this.db.transaction(() => {
+      const keep = new Set(jobIds);
+      for (const id of this.quietedCrons(agentId)) if (!keep.has(id)) this.db.prepare(`DELETE FROM cron_quieted WHERE agent_id = ? AND job_id = ?`).run(agentId, id);
+      for (const id of keep) this.db.prepare(`INSERT OR IGNORE INTO cron_quieted (agent_id, job_id, at) VALUES (?, ?, ?)`).run(agentId, id, at);
+    })();
   }
 
   // ---- token health, loops and the token ledger (tokenHealth.ts, tokenWatch.ts, compaction.ts) ----
