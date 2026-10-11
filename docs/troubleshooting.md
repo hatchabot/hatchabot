@@ -1440,6 +1440,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/usageAlerts.ts` — `findUsageSpikes`
 
+### An AI source's failed or rate-limited calls are counted twice, missing, or on the wrong source
+- **Check:** after a rebuild (whose sample overlapped the timer's), the failed calls are about double; or calls logged in the same millisecond are missing; or after a source switch not yet rebuilt, the old source's calls show under the new one.
+- **Cause:** before v2.160.0 two samples of one agent could run at once and both count the same lines; the read cursor kept milliseconds, so a later line in that millisecond was skipped; and calls were filed under the saved source rather than the one the container runs.
+- **Fix:** upgrade. Samples of one agent run one at a time, the cursor keeps docker's nanoseconds, and calls are filed under the running source until the rebuild.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/sourceUsage.ts` — `sampleAgentUsage`, `logKey`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody
