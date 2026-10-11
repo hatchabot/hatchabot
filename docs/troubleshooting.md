@@ -630,6 +630,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/claim.ts` — `claimFirstContact`, `scrubApproval`
 
+### `hatchabot bots` lists a sleeping agent's bot as reclaimable
+- **Check:** the bot's agent shows `[STOPPED]` in the list and is asleep (its tile says so; `HATCHABOT_HIBERNATE_AFTER` is set).
+- **Cause:** every stopped agent's bot was counted as a slot doing nothing, though a sleeping agent is woken by a message on that bot.
+- **Fix:** upgrade: a sleeping agent's bot is listed as in use, marked `[asleep]`. Don't delete it in @BotFather: the agent would never wake on a message again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/bots.ts` — `auditBots`
+
 ## Agents, builds and rebuilds
 
 ### A rebuild or setup fails with `seed failed at "<step>": …`
