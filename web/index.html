@@ -12737,7 +12737,10 @@ function appConnPicked() {
   const c = appConns.find(x => x.id === $('appConn')?.value);
   const g = (appInspected?.connections || []).find(x => x.kind === 'google');
   const f = g?.field && $('appF_' + g.field);
-  if (c && f && !f.value.trim()) f.value = c.email;
+  // The account picked is the one the app uses: its field follows every
+  // pick, not only the first (picking B after A left A in the mailbox, and
+  // the agent was attached to B while the app read A).
+  if (c && f) f.value = c.email;
   const others = c ? (c.attachedTo || []).filter(x => x.id !== appDlgAgent && x.state !== 'ARCHIVED' && x.state !== 'DELETED') : [];
   const same = others.filter(x => x.app && x.app === appInspected?.manifest?.app);
   const el = $('appConnWarn'); if (!el) return;
@@ -12746,6 +12749,14 @@ function appConnPicked() {
   el.innerHTML = same.length
     ? `⚠ ${same.map(x => esc(x.name)).join(' and ')} already run${same.length > 1 ? '' : 's'} ${esc(appInspected.manifest.name)} on this account. Two copies both answer every email: stop the app there first (its page → App → Stop app), or pick another account.`
     : others.length ? `Also used by ${others.map(x => esc(x.name)).join(', ')}.` : '';
+}
+/** The field that names the account and the account picked disagree (the field was typed after the pick)? Say so. */
+function appConnMismatch() {
+  const c = appConns.find(x => x.id === $('appConn')?.value);
+  const g = (appInspected?.connections || []).find(x => x.kind === 'google');
+  const f = g?.field && $('appF_' + g.field);
+  if (!c || !f || f.value.trim().toLowerCase() === c.email.toLowerCase()) return '';
+  return `${g.field} says ${f.value.trim() || 'nothing'}, but the Google account picked is ${c.email}: pick the account that matches, or change ${g.field}.`;
 }
 /** Two copies of this app on the account picked? Asked once, before anything is made. */
 function appSharedOk() {
@@ -12767,6 +12778,8 @@ async function appGo() {
   const values = appValues();
   const missing = (appInspected.ask || []).filter(f => f.required && !values[f.key]).map(f => f.key);
   if (missing.length) { $('appErr').textContent = `Fill in: ${missing.join(', ')}.`; return; }
+  const mismatch = appConnMismatch();
+  if (mismatch) { $('appErr').textContent = mismatch; return; }
   const m = appInspected.manifest;
   const shared = appSharedOk(); if (!shared.ok) return;
   const connId = $('appConn')?.value || '';
