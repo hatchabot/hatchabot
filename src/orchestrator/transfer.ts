@@ -18,7 +18,7 @@ import {
 } from './provision.js';
 import { clearBusy, markBusy } from './busy.js';
 import { beginOperation, handleFor, rethrowIfCrash } from './operations.js';
-import { ENV_NAME_RE, reservedEnvProblem } from './envPolicy.js';
+import { ENV_NAME_RE, envValueProblem, MAX_IMPORTED_ENV_VARS, reservedEnvProblem } from './envPolicy.js';
 import { buildRecipeOn, derivedByTag, recipeFor, recipeProblem, type ImageRecipe } from './imageRecipe.js';
 import { DERIVED_TAG_PREFIX } from './derivedImage.js';
 
@@ -164,10 +164,13 @@ const ManifestSchema = z.object({
     icon: z.string().max(16).optional().catch(undefined),
     iconColor: z.string().max(7).optional().catch(undefined),
   }),
+  // A hint only (the destination picks its own source by vendor): an AI
+  // source may name models longer than 64 characters, and refusing those
+  // made such an agent's own export unimportable (#162).
   ai: z.object({
     vendor: z.string().max(32),
-    model: z.string().max(64),
-    models: z.array(z.string().max(64)).max(16).optional(),
+    model: z.string().max(256).catch(''),
+    models: z.array(z.string().max(256)).max(16).optional().catch(undefined),
   }),
   channel: z.object({
     kind: z.literal('telegram'),
@@ -198,7 +201,7 @@ const ManifestSchema = z.object({
         value: z.string().min(1).max(8192),
       }),
     )
-    .max(64)
+    .max(MAX_IMPORTED_ENV_VARS)
     .optional(),
   // Shape only; the CONTENT is judged by recipeProblem before anything builds.
   image: z
@@ -606,6 +609,8 @@ async function importAgentInner(
     if (reserved) {
       throw new TransferError(`This archive sets env var "${v.name}", which is not allowed: ${reserved}`);
     }
+    const badValue = envValueProblem(v.name, v.value);
+    if (badValue) throw new TransferError(`This archive can't be imported: ${badValue}`);
   }
   if (manifest.channel && opts.verifyToken) {
     let username: string;

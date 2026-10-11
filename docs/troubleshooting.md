@@ -807,6 +807,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.1`
 - **Code:** `src/orchestrator/transfer.ts` — `importAgentInner`
 
+### Importing an agent's own download says "That export is malformed or from an incompatible version (ai.model)" or "(envVars)"
+- **Check:** the agent's AI source names a model id longer than 64 characters (Settings → AI), or the agent has more than 64 environment variables (its Environment tab).
+- **Cause:** the source machine accepted both, but the import read model ids up to 64 characters and at most 64 variables, so a valid agent's own copy was refused.
+- **Fix:** upgrade the machine you import on; the same file then imports. The AI source's model is only a hint there, and an import takes up to 256 variables. From v2.160.0 an agent can have at most 64 variables set (an older one with more keeps them).
+- **Fixed in:** `v2.160.0` (#162, #141)
+- **Code:** `src/orchestrator/transfer.ts` — `ManifestSchema`; `src/orchestrator/envPolicy.ts` — `MAX_AGENT_ENV_VARS`, `MAX_IMPORTED_ENV_VARS`
+
+### An agent fails to build after an environment variable was saved ("must be a string without null bytes")
+- **Check:** the build error says an argument "must be a string without null bytes" (ERR_INVALID_ARG_VALUE); a variable's value was pasted from a file or a program.
+- **Cause:** the value held a NUL character, which a program's environment cannot carry. The setting stored it; the next build could not hand it to Docker.
+- **Fix:** upgrade: such a value is refused when it is set, and an archive carrying one is refused on import with the variable's name. Remove that variable (Environment tab) and set it again without the NUL, then rebuild.
+- **Fixed in:** `v2.160.0` (#142)
+- **Code:** `src/orchestrator/envPolicy.ts` — `envValueProblem`; `src/api/routes.ts` — `'/v1/agents/:id/env'`
+
 ### An app's scheduled tasks are missing after an interrupted app install ("Put its scheduled tasks back")
 - **Check:** the agent's app operation waits for you with this choice and names the missing jobs; `openclaw cron list` in the agent's console has no `<app>-…` jobs for the app on record.
 - **Cause:** installing an app over another takes the old app's tasks off first; a restart before the switch puts them back, and re-adding them failed (the gateway refused the job, or the list could not be read). Before v2.158.1 this was reported as "nothing changed".
