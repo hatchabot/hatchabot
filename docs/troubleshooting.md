@@ -541,6 +541,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `src/api/routes.ts` — `ensureAgentCallToken`
 
+### An agent you disconnected from a peer still got a consult answered
+- **Check:** the peer's timeline shows `a2a.consult` from that agent after you removed it from the peer's list; the peer was asleep when the consult came in.
+- **Cause:** the consult's permission was checked before waking the sleeping peer, and not again once it was awake; a change made during the wake did not stop it.
+- **Fix:** upgrade; the caller's permission and call token are checked again once the peer is awake.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/message'`, `ensureAwake`
+
 ### An agent's browser keeps disappearing, or a test install removed it
 - **Check:** another Hatchabot (a second install, or a smoke test with its own `HATCHABOT_PREFIX`) uses the same Docker, and the Setup log shows "its browser removed".
 - **Cause:** each install's sweep listed every browser on the daemon and removed those it didn't know.

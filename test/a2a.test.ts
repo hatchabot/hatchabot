@@ -131,6 +131,26 @@ describe('agent-to-agent consult', () => {
     } finally { delete process.env.HATCHABOT_A2A_PER_HOUR; }
   });
 
+  it('a grant withdrawn while the sleeping peer wakes stops the consult (B042)', async () => {
+    let onStart: () => void = () => {};
+    class WakeProvider extends MockProvider {
+      override async start(ref: string) { onStart(); return super.start(ref); }
+    }
+    const provider = new WakeProvider();
+    const { store, f } = await world(provider);
+    store.setAgentPeers('x', ['y']);
+    const token = store.createAgentCallToken('x', OWNER);
+    // Ledger is asleep: the consult wakes it, and the owner withdraws the grant meanwhile.
+    await provider.stop(store.getAgent('y')!.runtimeRef!);
+    store.setAgentState('y', 'STOPPED');
+    store.setHibernated('y', new Date().toISOString());
+    onStart = () => store.setAgentPeers('x', []);
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/y/message', headers: { authorization: `Bearer ${token}` }, payload: { text: 'still there?' } });
+    expect(store.getAgent('y')!.state).toBe('RUNNING'); // it did wake
+    expect(res.statusCode).toBe(403);
+    expect(provider.execLog.some((a) => a[0] === 'agent')).toBe(false); // no turn ran
+  });
+
   it('refuses a consult to an agent that is itself mid-consult (breaks A→B→A loops)', async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
