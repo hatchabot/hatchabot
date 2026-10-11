@@ -912,6 +912,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/routes.ts` — `/v1/agents/:id/class`, `/v1/agent-classes/:id`
 
+### A file or folder downloaded from Files is short, or its `.tar.gz` will not open ("unexpected end of file")
+- **Check:** the download is smaller than the size Files lists, and the service log shows the agent's machine or Docker failing at that time.
+- **Cause:** the copy out of the agent's volume could fail part-way (the machine went to sleep, Docker stopped, a read error), and the download still ended as if it were complete.
+- **Fix:** upgrade: a copy that fails now breaks off the download, so the browser reports it as failed instead of saving a short file. Download it again once the machine answers.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `streamFromVolume`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")
