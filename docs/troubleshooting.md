@@ -120,9 +120,16 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.159.0` (#38)
 - **Code:** `scripts/release-manifest.sh` — `load`, `mf_valid`
 
+### "has no release-manifest.json, though every release from v2.159.0 on has one"
+- **Check:** `scripts/release-manifest.sh get vX.Y.Z` prints that line and exits 2; `curl -sSI https://github.com/hatchabot/hatchabot/releases/download/vX.Y.Z/release-manifest.json` answers 404. The installer says "release vX.Y.Z has no manifest … not using the bundle"; an upgrade stops with exit 3; Settings → Images or **Install image** says the release has no release manifest.
+- **Cause:** a release from v2.159.0 on always carries its manifest, so a 404 means it is missing from where it was fetched: a release still being published, a mirror (`HATCHABOT_BUNDLE_BASE`) without it, or a release that was tampered with. Before v2.160.0 any 404 was taken as an old release, and the `.sha256` beside the bundle or the image's moveable tag was trusted instead.
+- **Fix:** wait a few minutes and run it again (a release being published); with a mirror, copy the release's `release-manifest.json` to it. If GitHub's release page has no manifest, report it; do not work around the check. `BUILD_LOCAL=1 ./scripts/build-runtime-image.sh` builds the runtime image here without trusting anything published.
+- **Fixed in:** `v2.160.0`
+- **Code:** `scripts/release-manifest.sh` — `mf_required`, `load`; `install.sh` — `install_bundle`; `src/orchestrator/releaseManifest.ts` — `manifestRequired`, `releaseManifest`
+
 ### "Could not fetch the release's manifest" during an install, upgrade or image pull
 - **Check:** `curl -sSI` of the manifest's address fails, or answers something other than 200 or 404.
-- **Cause:** no network to GitHub, or a server error. Only a 404 means "this release has no manifest" (a release from before manifests); anything else is refused, never skipped.
+- **Cause:** no network to GitHub, or a server error. Only a 404 means "this release has no manifest", and only for a release from before manifests (before v2.159.0); anything else is refused, never skipped.
 - **Fix:** try again later; an upgrade retries on its own (exit 3). An image pull for a release whose manifest was kept on this machine works offline.
 - **Fixed in:** `v2.159.0` (#38)
 - **Code:** `scripts/release-manifest.sh` — `mf_fetch`; `src/orchestrator/releaseManifest.ts` — `releaseManifest`

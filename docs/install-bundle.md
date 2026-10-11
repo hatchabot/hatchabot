@@ -59,7 +59,12 @@ themselves (`gh attestation verify` does, for anyone who wants to).
 - **A manifest that is there but unreadable, or for another release,** is
   refused. It is never passed over for the weaker `.sha256` check. A manifest
   that cannot be fetched (no network, a server error) is refused the same way;
-  only a 404 means "no manifest".
+  only a 404 means "no manifest", and only for a release made before v2.159.0.
+- **A release from v2.159.0 on with no manifest** (a 404) is refused too: every
+  such release has one, so its absence is not taken as an old release. Its
+  bundle is not installed on its `.sha256` and its image is not pulled by tag
+  (`mf_required` in `scripts/release-manifest.sh`, `manifestRequired` in
+  `src/orchestrator/releaseManifest.ts`).
 - **The runtime image** is pulled by the digest the manifest names
   (`ghcr.io/hatchabot/runtime@sha256:…`), never by a tag. Its OpenClaw version
   label must agree with the manifest, or it is refused. The same goes for
@@ -71,7 +76,7 @@ themselves (`gh attestation verify` does, for anyone who wants to).
 - **Kept for offline restarts.** A checked manifest is kept in the data
   directory as `release-manifests/<tag>.json` (`scripts/release-manifest.sh`,
   `src/orchestrator/releaseManifest.ts`), so nothing fetches it again.
-- **Releases made before manifests** (before v2.159.0) have none. Their bundles
+- **Releases made before manifests** (before v2.159.0, and only those) have none. Their bundles
   are checked against the `.sha256` beside them, and their images are pulled by
   tag and accepted on their version label, as before. The code marks this
   path as legacy. Each release still carries the `.sha256` files for older

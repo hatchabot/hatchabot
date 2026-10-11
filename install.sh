@@ -207,6 +207,15 @@ mf_fetch() {
   esac
   rm -f "$2"; return 2
 }
+# mf_required TAG: 0 when release TAG must have a manifest — v2.159.0, the
+# first with one, or later. Its manifest missing (a 404) is then refused, never
+# taken as an old release whose .sha256 or image tag may be trusted instead.
+mf_required() {
+  local v="${1#v}" a b
+  v="${v%%[-+]*}"; a="${v%%.*}"; v="${v#*.}"; b="${v%%.*}"
+  case "$a.$b" in *[!0-9.]*|.*|*.) return 0 ;; esac
+  [ "$a" -gt 2 ] || { [ "$a" -eq 2 ] && [ "$b" -ge 159 ]; }
+}
 # mf_paths FILE: the manifest as "path<TAB>value" lines (schema, assets.0.name,
 # image.index, …); fails on anything that is not one well-formed JSON object.
 mf_paths() {
@@ -297,12 +306,15 @@ install_bundle() {
   # bundle's size and sha256, and a manifest that is there but unreadable, or
   # for another release, is refused — never passed over for the weaker check.
   # A release made before manifests (before v2.159.0) has none: the .sha256
-  # beside the bundle, as before (legacy). Refused, the native install takes over.
+  # beside the bundle, as before (legacy); a later one without it is refused.
+  # Refused, the native install takes over.
   mrc=0; mf_fetch "$BUNDLES/$TAG/release-manifest.json" "$tmp/release-manifest.json" || mrc=$?
   if [ "$mrc" = 0 ]; then
     mf="$(mf_paths "$tmp/release-manifest.json")" && mf_valid "$mf" "$TAG" \
       || { echo "   (the release's manifest is not a readable manifest for $TAG — not using the bundle)"; rm -rf "$tmp"; return 1; }
     mf_matches "$mf" "$name" "$tmp/$name" || { echo "   (the bundle does not match the release's manifest — not using it)"; rm -rf "$tmp"; return 1; }
+  elif [ "$mrc" = 1 ] && mf_required "$TAG"; then
+    echo "   (release $TAG has no manifest, though every release from v2.159.0 on has one — not using the bundle)"; rm -rf "$tmp"; return 1
   elif [ "$mrc" = 1 ]; then
     want="$(curl -fsSL --retry 3 "$BUNDLES/$TAG/$name.sha256" 2>/dev/null | cut -d' ' -f1)"
     [ -n "$want" ] && [ "$want" = "$(sha256 "$tmp/$name")" ] || { echo "   (the bundle's checksum does not match — not using it)"; rm -rf "$tmp"; return 1; }
