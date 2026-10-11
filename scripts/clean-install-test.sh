@@ -48,7 +48,9 @@ while [ $# -gt 0 ]; do
 done
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-VM="hb-clean-$(date +%m%d%H%M%S)"
+# Several run side by side (one per image, started in the same second by
+# `live.mjs run-due`): the process id keeps their VM names apart.
+VM="hb-clean-$(date +%m%d%H%M%S)-$$"
 OUT="$HOME/hatchabot-clean-install/$(date +%Y-%m-%d-%H%M%S)"
 mkdir -p "$OUT"; chmod 700 "$OUT"
 PASS=0; FAIL=0; RESULTS=()

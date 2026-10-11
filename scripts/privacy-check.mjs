@@ -521,7 +521,10 @@ function publicScan() {
     hits.push(...scan(git(mirror, 'log', '--all', '--format=%an%n%ae%n%cn%n%ce', ...base).stdout, 'commit authors/committers', people));
     const newTags = tags.filter((t) => !haveBase || git(mirror, 'merge-base', '--is-ancestor', t.commit, accepted).status !== 0).map((t) => `refs/tags/${t.name}`);
     if (newTags.length) {
-      hits.push(...scan(git(mirror, 'for-each-ref', '--format=%(contents)', ...newTags).stdout, 'tag messages', ms));
+      // A lightweight tag's "message" is its commit's: the owner's identity in a
+      // squash merge's Co-authored-by trailer is no more a finding here than in
+      // the commit messages above (it failed the v2.160.2 live run).
+      hits.push(...scan(withoutOwnTrailers(git(mirror, 'for-each-ref', '--format=%(contents)', ...newTags).stdout, allowed), 'tag messages', ms));
       hits.push(...scan(git(mirror, 'for-each-ref', '--format=%(taggername)%0a%(taggeremail)', ...newTags).stdout, 'taggers', people));
     }
     // What GitHub publishes beside the code. Not reading it is incomplete,

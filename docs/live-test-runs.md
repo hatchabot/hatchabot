@@ -107,3 +107,17 @@ tests that run on their own.
 | 2026-10-10 | upgrade-check | pass | v2.158.1 | 1 |  |
 | 2026-10-10 | runner-scenarios | pass | v2.158.1 | 11 | OpenClaw 2026.9.8 |
 | 2026-10-10 | transfer | pass | v2.158.1 | 6 | OpenClaw 2026.9.8 |
+| 2026-10-11 | upgrade-check | pass | v2.160.2 | 1 |  |
+| 2026-10-11 | clean-install-ubuntu-2204 | fail | v2.160.2 | 1 |  |
+| 2026-10-11 | clean-install | fail | v2.160.2 | 1 |  |
+| 2026-10-11 | privacy | fail | v2.160.2 | 1 | OpenClaw 2026.9.8 |
+| 2026-10-11 | clean-install-debian-12 | pass | v2.160.2 | 2 |  |
+| 2026-10-11 | runner-scenarios | pass | v2.160.2 | 13 | OpenClaw 2026.9.8 |
+| 2026-10-11 | transfer | pass | v2.160.2 | 5 | OpenClaw 2026.9.8 |
+| 2026-10-11 | apps | fail | v2.160.2 | 5 | OpenClaw 2026.9.8 |
+| 2026-10-11 | console | pass | v2.160.2 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-11 | browser | pass | v2.160.2 | 4 | OpenClaw 2026.9.8 |
+| 2026-10-11 | candidate-gate | pass | v2.160.2 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-11 | regress-autonomous | pass | v2.160.2 | 6 | OpenClaw 2026.9.8 |
+| 2026-10-11 | restore-drill | pass | v2.160.2 | 3 | OpenClaw 2026.9.8 |
+| 2026-10-11 | smoke-adopt | pass | v2.160.2 | 1 |  |

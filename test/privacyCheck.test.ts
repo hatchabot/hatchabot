@@ -327,6 +327,8 @@ describe('--public and the hook check (audit issues #40, #41)', () => {
     g('add', '-f', 'scripts/privacy-identity.txt');
     const squash = 'Fix a thing (#1)\n\n* one\n\n---------\n\nCo-authored-by: Ada Owner <owner@example.org>\n';
     g(...owner, 'commit', '-qm', squash); g('push', '-q', 'origin', 'main');
+    // A release tag on it: a lightweight tag's message is that commit's (the v2.160.2 live run).
+    g('tag', 'v2.0.1'); g('push', '-q', 'origin', 'v2.0.1');
     const r = publicRun();
     expect(r.status, r.stdout).toBe(0);
     // Someone the file does not name, in the same trailer, still is.
