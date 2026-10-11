@@ -1081,6 +1081,14 @@ describe('an app change cut off by a restart (kill at every step)', () => {
 describe('apps: what the 2026-10-10 workflow audit found', () => {
   const d = (agent: FakeAgent) => ({ provider: agent, runtimeRef: 'x', facts: FACTS });
 
+  it('a manifest names each task and each config key once (#75 #104)', () => {
+    const tick = MANIFEST.tasks[0]!;
+    expect(() => parseManifest(JSON.stringify({ ...MANIFEST, tasks: [tick, { ...tick, every: '5m' }] }))).toThrow(/tasks: two tasks are named "tick"/);
+    const fields = [...MANIFEST.config.fields, { key: 'mailbox', from: 'owner.email' }];
+    expect(() => parseManifest(JSON.stringify({ ...MANIFEST, config: { fields } }))).toThrow(/config\.fields: two fields have the key "mailbox"/);
+    expect(parseManifest(JSON.stringify(MANIFEST)).tasks).toHaveLength(1);
+  });
+
   it('a change of values on the same commit keeps the live release folder (#92)', async () => {
     const dir = repo();
     const agent = new FakeAgent();
