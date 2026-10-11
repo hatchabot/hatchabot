@@ -835,6 +835,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/agentFiles.ts` — `RUNTIME_STATE_FILES`, `uploadAllowed`, `putArgv`
 
+### An agent in a class will not start after a rebuild: its data was migrated for a newer OpenClaw than the class's image
+- **Check:** the agent's rebuild fails on a 2026.7 image although it ran 2026.8 or newer before; its Overview shows a class with an image, and `docker inspect` of its old container names the newer image.
+- **Cause:** assigning a class, or changing a class's image, pinned members without the check a direct image pin makes: 2026.7 cannot read a volume already migrated to 2026.8+. Clearing a class image also unpinned members before the rest of the edit was checked, so a member the edit then skipped lost its pin anyway.
+- **Fix:** upgrade; pin the agent back to the image it ran (Overview → Runtime), or restore the copy downloaded before the move. Since v2.160.0 the class is refused for that agent ("cannot read it"), and a skipped member keeps its pin.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `imagePinCheck`, `applyClassToAgent`
+
+### Promote to an older default is accepted, then an archived agent cannot be restored
+- **Check:** the archived agent follows the fleet default (no image pin) and ran OpenClaw 2026.8 or newer; the default now runs 2026.7.
+- **Cause:** Promote checked only active followers for data the older image cannot read; an archived follower keeps its volume and is restored onto the default.
+- **Fix:** upgrade, then promote the newer image back (or pin the archived agent to it) before restoring. Since v2.160.0 Promote names archived followers too.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `/v1/runtime/images/promote`
+
+### A class's memory cap says applied, but the container still has the old limit
+- **Check:** `docker inspect -f '{{.HostConfig.Memory}}' <container>` differs from the agent's Overview memory cap, after setting, clearing or deleting a class with a memory cap (often while its runner was asleep).
+- **Cause:** assigning a class swallowed a failed `docker update`, and deleting a class changed no container at all, so members kept the deleted class's cap and swap.
+- **Fix:** rebuild the agent (or set its cap again). Since v2.160.0 assigning says the container kept its old limits, and deleting applies the limits that now hold and names any member it could not change.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `/v1/agents/:id/class`, `/v1/agent-classes/:id`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")

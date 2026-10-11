@@ -5467,7 +5467,12 @@ async function updateClass(id, field, value) {
 }
 async function deleteClass(id, name) {
   if (!confirm(`Delete class "${name}"?\n\nAgents in it keep their current model/source — they just lose the class tag.`)) return;
-  try { await api(`/v1/agent-classes/${id}`, { method: 'DELETE' }); await loadClasses(); await refresh(false); }
+  try {
+    const r = await api(`/v1/agent-classes/${id}`, { method: 'DELETE' });
+    // Members on the class's memory cap get the limits that now apply; one whose container said no keeps the old until a rebuild.
+    if ((r.skipped || []).length) toast(`Class deleted — memory limits not changed for ${r.skipped.join('; ')}. A rebuild applies them.`, 12000);
+    await loadClasses(); await refresh(false);
+  }
   catch (e) { toast(e.message, 9000); }
 }
 
@@ -5487,7 +5492,8 @@ async function assignClass() {
   sel.disabled = true;
   try {
     const r = await api(`/v1/agents/${id}/class`, { method: 'POST', body: { classId } });
-    toast(classId ? (r.rebuild ? 'Class set — it changes the AI source, so Rebuild to apply.' : 'Class set — model applied.') : 'Class cleared.', 7000);
+    const said = classId ? (r.rebuild ? 'Class set — it changes the AI source or image, so Rebuild to apply.' : 'Class set — model applied.') : 'Class cleared.';
+    toast(r.memoryPending ? `${said} ${r.memoryPending}` : said, r.memoryPending ? 12000 : 7000);
     await refresh(false);
     renderModelPickerForAgent(agents.find(x => x.id === id));
   } catch (e) { toast(e.message, 9000); }

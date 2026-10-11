@@ -93,6 +93,18 @@ describe('POST /v1/runtime/images/promote', () => {
     expect(down.json().error).toMatch(/Garage/);
     expect(down.json().error).not.toMatch(/Kitchen/);
   });
+  it('an archived follower already on 2026.8+ also stops a promote below the line (its restore runs the default)', async () => {
+    const { f, provider, store } = await world();
+    provider.tags.find((t) => t.tag === 'hatchabot-runtime:2026.7.1-2')!.openclawVersion = '2026.7.1-2';
+    const ref = (id: string) => store.getAgent(id)!.runtimeRef!;
+    provider.infoOverride.set(ref('a1'), { openclawVersion: '2026.7.1-2' });
+    provider.infoOverride.set(ref('a2'), { openclawVersion: '2026.9.6' });
+    store.setAgentState('a2', 'STOPPED'); store.setAgentState('a2', 'ARCHIVED');
+    const down = await f.inject({ method: 'POST', url: '/v1/runtime/images/promote', headers: as, payload: { tag: 'hatchabot-runtime:2026.7.1-2' } });
+    expect(down.statusCode).toBe(409);
+    expect(down.json().error).toMatch(/Garage/);
+    expect(provider.tagged).toEqual([]);
+  });
   it('refuses the default itself, derived images, unknown tags and bad refs', async () => {
     const { f } = await world();
     const post = (tag: string) => f.inject({ method: 'POST', url: '/v1/runtime/images/promote', headers: as, payload: { tag } });
@@ -193,6 +205,38 @@ describe('classes carry an image', () => {
     expect(store.getAgent('a1')!.image ?? null).toBeNull();
     // Members can't set class images (that's a machine-owner call).
     expect((await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: { 'x-hatchabot-owner': 'user-other' }, payload: { name: 'X', image: 'hatchabot-runtime:2026.9.4' } })).statusCode).toBe(403);
+  });
+});
+
+describe('a class image is checked like any pin', () => {
+  it('assigning a class whose image cannot read the agent\'s migrated data is refused, nothing written (#147)', async () => {
+    const { f, store, provider } = await world();
+    provider.tags.find((t) => t.tag === 'hatchabot-runtime:2026.7.1-2')!.openclawVersion = '2026.7.1-2';
+    provider.tags.find((t) => t.tag === 'hatchabot-runtime:2026.9.4')!.openclawVersion = '2026.9.4';
+    provider.infoOverride.set(store.getAgent('a1')!.runtimeRef!, { openclawVersion: '2026.9.6' });
+    const cls = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: as, payload: { name: 'Old', image: 'hatchabot-runtime:2026.7.1-2' } })).json().class;
+    const assign = await f.inject({ method: 'POST', url: '/v1/agents/a1/class', headers: as, payload: { classId: cls.id } });
+    expect(assign.statusCode).toBe(400);
+    expect(assign.json().error).toMatch(/cannot read it/);
+    expect(store.getAgent('a1')!.image ?? null).toBeNull();
+    expect(store.getAgent('a1')!.classId ?? null).toBeNull();
+    // …and a class edit onto that image skips the member, its pin unchanged.
+    const ok = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: as, payload: { name: 'New', image: 'hatchabot-runtime:2026.9.4' } })).json().class;
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/class', headers: as, payload: { classId: ok.id } })).statusCode).toBe(200);
+    const edit = await f.inject({ method: 'PUT', url: `/v1/agent-classes/${ok.id}`, headers: as, payload: { image: 'hatchabot-runtime:2026.7.1-2' } });
+    expect(edit.json()).toMatchObject({ applied: 0, needRebuild: 0 });
+    expect(edit.json().skipped[0]).toMatch(/^Kitchen: .*cannot read it/);
+    expect(store.getAgent('a1')!.image).toBe('hatchabot-runtime:2026.9.4');
+  });
+  it('clearing a class image keeps a member\'s pin when the rest of the edit is refused for it (#149)', async () => {
+    const { f, store } = await world();
+    const cls = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: as, payload: { name: 'PDF workers', image: 'hatchabot-runtime:derived-pdf' } })).json().class;
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/class', headers: as, payload: { classId: cls.id } });
+    expect(store.getAgent('a1')!.image).toBe('hatchabot-runtime:derived-pdf');
+    const edit = await f.inject({ method: 'PUT', url: `/v1/agent-classes/${cls.id}`, headers: as, payload: { image: '', model: 'not-on-the-menu' } });
+    expect(edit.json()).toMatchObject({ applied: 0, needRebuild: 0 });
+    expect(edit.json().skipped).toHaveLength(1);
+    expect(store.getAgent('a1')!.image).toBe('hatchabot-runtime:derived-pdf'); // (a clean clear: 'classes carry an image')
   });
 });
 

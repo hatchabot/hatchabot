@@ -1949,9 +1949,36 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { applied: effective };
   };
 
+  /**
+   * The checks every image pin makes before it is stored (PATCH image, a
+   * class's image): no way back across the 2026.8 line. Moving onto 2026.8+
+   * migrates the volume (state database, roster, auth store) and 2026.7
+   * cannot read it; the way back is the export taken before the move (28th
+   * audit). Deliberately NOT checked against `docker images`: the point of a
+   * pin is often an image that is about to exist (a candidate being built),
+   * and a wrong name fails the next rebuild with a clear error and Retry.
+   * sameImage: the tag IS the image already running (the default under
+   * another name, the candidate just promoted), so it needs no rebuild —
+   * every pin-and-rebuild path asks this rather than comparing tag names
+   * (Chris, 2026-09-24).
+   */
+  const imagePinCheck = async (agent: Agent, image: string | null): Promise<{ problem?: string; sameImage?: boolean }> => {
+    if (!agent.runtimeRef) return {};
+    try {
+      const prov = providerFor(agent.hostId);
+      const [running, target] = await Promise.all([prov.info(agent.runtimeRef), prov.currentImageInfo(image ?? undefined)]);
+      const sameImage = !!running.imageId && !!target.imageId && running.imageId === target.imageId;
+      if (needsPortHeal(running.openclawVersion) && target.openclawVersion && !needsPortHeal(target.openclawVersion)) {
+        return { sameImage, problem: `This agent's data was migrated for OpenClaw ${running.openclawVersion}; ${image ?? 'the fleet default'} runs ${target.openclawVersion}, which cannot read it. To go back, restore the copy downloaded before the move.` };
+      }
+      return { sameImage };
+    } catch { return {}; /* no image info: the rebuild will say */ }
+  };
+
   const applyClassToAgent = async (
     agent: Agent,
     cls: { model?: string; aiProfileId?: string; image?: string },
+    opts: { unpin?: boolean } = {},
   ): Promise<{ rebuild: boolean; error?: string }> => {
     // Validate the WHOLE class against the agent's TARGET source before writing
     // anything — a failed model check must not leave the agent half-switched.
@@ -1976,15 +2003,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (prob) return { rebuild: false, error: prob }; // e.g. local source, or model not on this source
     }
     // The class image pins the agent (applied on its next rebuild); no class
-    // image leaves whatever pin the agent has.
-    const imageChange = !!cls.image && cls.image !== (agent.image ?? undefined);
+    // image leaves whatever pin the agent has, unless the class edit cleared
+    // the image that pinned it (unpin: back to the fleet default). Checked
+    // like any pin before anything is written: a class image the agent's data
+    // cannot go back to is refused for it, as PATCH image refuses it (#147),
+    // and a refusal leaves its pin where it was (#149).
+    const unpin = !!opts.unpin && !!agent.image;
+    const imageChange = unpin || (!!cls.image && cls.image !== (agent.image ?? undefined));
+    if (imageChange) {
+      const pin = await imagePinCheck(agent, unpin ? null : cls.image!);
+      if (pin.problem) return { rebuild: false, error: pin.problem };
+    }
     store.transact(() => {
       if (switching) {
         store.setAgentAIProfile(agent.id, cls.aiProfileId!);
         if (agent.model && !cls.model && modelOverrideProblem(target, agent.model)) store.setAgentModel(agent.id, null);
       }
       if (cls.model) store.setAgentModel(agent.id, cls.model);
-      if (imageChange) store.setAgentImage(agent.id, cls.image!);
+      if (imageChange) store.setAgentImage(agent.id, unpin ? null : cls.image!);
     });
     // A source change is applied by a rebuild (auth/env are provision-time);
     // a model-only change applies now (live, or staged on the stopped volume).
@@ -2157,13 +2193,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             if (swapMoved) trace(a.id)('memory.swap_set', { swap: 'class', effective: lim.swap ?? 'off', live: true });
           } catch (err) { skipped.push(`${a.name}: ${err instanceof ProviderError ? err.userMessage : 'memory cap not applied'}`); }
         }
-        // Image cleared: members the class had pinned go back to the fleet default (needs a rebuild).
-        // The class image cleared: its pin goes, and the rest of the edit
-        // (model, source) still applies — it was skipped (night review).
-        const unpinned = !image && !!cls.image && a.image === cls.image;
-        if (unpinned) store.setAgentImage(a.id, null);
-        const r = await applyClassToAgent(unpinned ? store.getAgent(a.id)! : a, { model, aiProfileId, image });
-        if (unpinned && !r.error) { applied++; needRebuild++; continue; }
+        // The class image cleared: members it had pinned go back to the fleet
+        // default (needs a rebuild), and the rest of the edit (model, source)
+        // still applies — it was skipped (night review). Unpinned only once
+        // the whole change passed: a refused model kept the pin gone (#149).
+        const unpin = !image && !!cls.image && a.image === cls.image;
+        const r = await applyClassToAgent(a, { model, aiProfileId, image }, { unpin });
         if (r.error) skipped.push(`${a.name}: ${r.error}`);
         else { applied++; if (r.rebuild) needRebuild++; }
       }
@@ -2175,8 +2210,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.delete<{ Params: { id: string } }>('/v1/agent-classes/:id', async (req, reply) => {
     const cls = store.getAgentClass(req.params.id);
     if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
+    const members = store.listAgentsInClass(cls.id);
     store.deleteAgentClass(cls.id); // also clears class_id on its agents (their models are left as-is)
-    return { removed: true };
+    // Members without a cap (or swap allowance) of their own ran on the
+    // class's: their containers get the limits that now apply, as a class
+    // edit does, rather than keep the deleted class's until a rebuild (#148).
+    const skipped: string[] = [];
+    if (cls.memoryCap || cls.swapAllowance) {
+      for (const m of members) {
+        const a = store.getAgent(m.id);
+        if (!a?.runtimeRef || (a.memoryCap && a.swapAllowance) || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) continue;
+        const lim = agentMemoryLimits(store, a);
+        try { await providerFor(a.hostId).updateMemory?.(a.runtimeRef, lim.memory, lim.swap); }
+        catch (err) { skipped.push(`${a.name}: ${err instanceof ProviderError ? err.userMessage : 'memory cap not applied'}`); }
+      }
+    }
+    return { removed: true, skipped };
   });
 
   /** Assign (or clear, with classId=null) an agent's class, applying its model/source. */
@@ -2187,21 +2236,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // The class's memory cap governs an agent with none of its own: applied
     // to the container now, as a class edit does, not at some later rebuild
     // (night review, 2026-09-28).
-    const applyCap = async (): Promise<void> => {
+    // A container that could not take it keeps its old limits until it is
+    // rebuilt: said in memoryPending, not swallowed as applied (#138).
+    const applyCap = async (): Promise<{ memoryPending?: string }> => {
       const now = store.getAgent(agent.id);
-      if (!now?.runtimeRef || (now.memoryCap && now.swapAllowance) || (now.state !== 'RUNNING' && now.state !== 'STOPPED')) return;
+      if (!now?.runtimeRef || (now.memoryCap && now.swapAllowance) || (now.state !== 'RUNNING' && now.state !== 'STOPPED')) return {};
       // The cap and the swap allowance (swap.ts) together: either may be the class's.
       const lim = agentMemoryLimits(store, now);
-      await providerFor(now.hostId).updateMemory?.(now.runtimeRef, lim.memory, lim.swap).catch(() => {});
+      try { await providerFor(now.hostId).updateMemory?.(now.runtimeRef, lim.memory, lim.swap); return {}; }
+      catch (err) { return { memoryPending: `Its container kept its old memory limits (${err instanceof ProviderError ? err.userMessage : 'not applied'}); a rebuild applies them.` }; }
     };
-    if (classId === null) { store.setAgentClass(agent.id, null); await applyCap(); return { classId: null, rebuild: false }; }
+    if (classId === null) { store.setAgentClass(agent.id, null); return { classId: null, rebuild: false, ...(await applyCap()) }; }
     const cls = store.getAgentClass(classId);
     if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'No such class.' });
     const r = await ledgered(req, 'class', [agent.id], () => applyClassToAgent(agent, cls));
     if (r.error) return reply.code(400).send({ error: r.error });
     store.setAgentClass(agent.id, cls.id);
-    await applyCap();
-    return { classId: cls.id, rebuild: r.rebuild };
+    return { classId: cls.id, rebuild: r.rebuild, ...(await applyCap()) };
   });
 
   // ---- AI-source usage: requests, tokens and rate-limit hits per source -------
@@ -3374,7 +3425,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const tags = await provider.listImageTags();
     if (!tags.some((t) => t.tag === tag)) return reply.code(404).send({ error: `${tag} is not built on this machine.` });
     // Promote retags the LOCAL daemon only; agents on runners keep their runner's :latest.
-    const followers = store.listAllActiveAgents().filter((a) => a.state !== 'ARCHIVED' && !a.image && a.hostId === localHost.id);
+    const following = store.listAllActiveAgents().filter((a) => !a.image && a.hostId === localHost.id);
+    const followers = following.filter((a) => a.state !== 'ARCHIVED');
     // The checks PATCH image makes, for everyone who follows the default
     // (night review, 2026-09-28): no way back across the 2026.8 line (a
     // migrated volume cannot be read by 2026.7), and no engine-free image
@@ -3389,7 +3441,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // 2026.9.8 over agents still on 2026.7 — 2026-10-07.)
     if (target.openclawVersion && !needsPortHeal(target.openclawVersion)) {
       const stuck: string[] = [];
-      for (const a of followers) {
+      // Archived followers too: they keep their stopped container and volume,
+      // and a restore runs them on the default (2026-10-10).
+      for (const a of following) {
         if (!a.runtimeRef) continue;
         const running = await provider.info(a.runtimeRef).catch(() => ({} as { openclawVersion?: string }));
         if (running.openclawVersion && needsPortHeal(running.openclawVersion)) stuck.push(a.name);
@@ -5728,27 +5782,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (!ownsLocalHost(req)) {
           return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
         }
-        // Deliberately NOT validated against `docker images`: the point of a
-        // pin is often an image that is about to exist (candidate being built).
-        // A wrong name fails the next rebuild with a clear error and Retry.
-        // One thing IS checked: no way back across the 2026.8 line. Moving
-        // onto 2026.8+ migrates the volume (state database, roster, auth
-        // store) and 2026.7 cannot read it; the way back is the export taken
-        // before the move (28th audit).
-        if (agent.runtimeRef) {
-          try {
-            const prov = providerFor(agent.hostId);
-            const [running, target] = await Promise.all([prov.info(agent.runtimeRef), prov.currentImageInfo(parsed.data.image ?? undefined)]);
-            // Does the pin change what it runs? A tag that IS the image already
-            // running (the default under another name, the candidate just
-            // promoted) needs no rebuild — every pin-and-rebuild path asks this
-            // rather than comparing tag names (Chris, 2026-09-24).
-            sameImage = !!running.imageId && !!target.imageId && running.imageId === target.imageId;
-            if (needsPortHeal(running.openclawVersion) && target.openclawVersion && !needsPortHeal(target.openclawVersion)) {
-              return reply.code(400).send({ error: `This agent's data was migrated for OpenClaw ${running.openclawVersion}; ${parsed.data.image ?? 'the fleet default'} runs ${target.openclawVersion}, which cannot read it. To go back, restore the copy downloaded before the move.` });
-            }
-          } catch { /* no image info: the rebuild will say */ }
-        }
+        // Not against `docker images`, but across the 2026.8 line (imagePinCheck).
+        const pin = await imagePinCheck(agent, parsed.data.image);
+        if (pin.problem) return reply.code(400).send({ error: pin.problem });
+        sameImage = pin.sameImage;
       }
 
       const sharedPathList = parsed.data.sharedPaths?.map((p) => p.trim()).filter(Boolean);
