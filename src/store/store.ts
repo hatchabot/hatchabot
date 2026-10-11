@@ -4495,7 +4495,7 @@ export class Store {
       .run(schedules ? JSON.stringify(schedules) : null, id);
   }
 
-  getPendingSchedules(id: string): Array<{ name: string; message: string; cron?: string; everyMs?: number; tz?: string }> {
+  getPendingSchedules(id: string): Array<{ name: string; message: string; cron?: string; everyMs?: number; tz?: string; announce?: boolean }> {
     const r = this.db.prepare(`SELECT pending_schedules FROM agents WHERE id = ?`).get(id) as any;
     return r?.pending_schedules ? (safeJson(r.pending_schedules, []) as any[]) : [];
   }

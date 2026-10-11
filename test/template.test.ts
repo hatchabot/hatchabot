@@ -60,6 +60,19 @@ describe('exportTemplate', () => {
     expect(m.files['MEMORY.md']).toBeUndefined();
   });
 
+  it('a quiet task travels quiet; an announcing one says nothing, as before (2026-10-10)', async () => {
+    const { store, provider } = await world();
+    provider.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [
+      { id: 'j1', name: 'Quiet check', enabled: true, schedule: { kind: 'every', everyMs: 900000 }, payload: { kind: 'agentTurn', message: 'Check the inbox.' }, delivery: { mode: 'none' } },
+      { id: 'j2', name: 'Morning brief', enabled: true, schedule: { kind: 'cron', expr: '0 8 * * *' }, payload: { kind: 'agentTurn', message: 'Post the brief.' }, delivery: { mode: 'announce', channel: 'telegram', to: '1' } },
+    ] }) });
+    const m = parseTemplate((await exportTemplate({ store, provider }, 'a1')).data);
+    expect(m.schedules).toEqual([
+      { name: 'Quiet check', message: 'Check the inbox.', everyMs: 900000, announce: false },
+      { name: 'Morning brief', message: 'Post the brief.', cron: '0 8 * * *' },
+    ]);
+  });
+
   it('refuses to export a stopped agent', async () => {
     const { store, provider } = await world();
     store.setAgentState('a1', 'STOPPED');

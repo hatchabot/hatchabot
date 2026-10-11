@@ -123,7 +123,7 @@ export interface TemplateManifest {
   parameters: TemplateParam[];
   /** Scheduled agent-turn tasks (declarations — no scripts, no state). An
    *  imported/derived copy recreates them once it is RUNNING. */
-  schedules?: Array<{ name: string; message: string; cron?: string; everyMs?: number; tz?: string }>;
+  schedules?: Array<{ name: string; message: string; cron?: string; everyMs?: number; tz?: string; announce?: boolean }>;
 }
 
 const TemplateSchema = z.object({
@@ -166,6 +166,9 @@ const TemplateSchema = z.object({
         cron: z.string().min(9).max(64).optional(),
         everyMs: z.number().int().positive().optional(),
         tz: z.string().max(64).optional(),
+        // false = a quiet task (its runs are read in the app). Absent in older
+        // templates: those announce, as they always did.
+        announce: z.boolean().optional(),
       }),
     )
     .max(12)
@@ -229,6 +232,9 @@ export async function exportTemplate(
         cron: c.scheduleExpr,
         everyMs: c.everyMs,
         tz: c.scheduleTz,
+        // A quiet task stays quiet in every copy: it came back announcing
+        // into the importer's chat (2026-10-10).
+        ...(c.announce === false ? { announce: false } : {}),
       })),
     dataNeeds: store.listDataSources(agentId).map((d) => ({
       kind: d.kind,
