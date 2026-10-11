@@ -149,6 +149,7 @@ the host.
 
 - `src/orchestrator/gitSource.ts` — `normalizeGitUrl`, `buildGitSyncScript`, `buildPublicGitSyncScript`: the accepted URL shapes, and the idempotent clone scripts for the private (deploy key) and public (https) cases.
 - `src/orchestrator/provision.ts` — `syncGitDataSources`, `datasource.git_synced`: where each repo is cloned during provisioning, and the event it logs (`datasource.git_sync_failed` carries git's own error).
+- `src/orchestrator/provision.ts` — `scrubRemovedDataSources`, `datasource.key_left`: a removed source's deploy key taken off the volume and out of the secret store, retried at start, wake and rebuild until confirmed (`data_source_removals` in the store).
 - `src/openclaw/workspace.ts` — `dataSourcesSection`, `DATA_SOURCES_HEADING`: the AGENTS.md section that tells the agent each path.
 - `src/api/routes.ts` — `'/v1/agents/:id/data-sources'`, `'/v1/agents/:id/data-sources/:dsId'`: add, change and remove a source.
 - `web/index.html` — `addGitSource`: the agent sheet's "add a repo" form.
@@ -166,7 +167,8 @@ and compares it with what it intends; mismatches become an Alerts line.
 
 - `src/orchestrator/googleConnections.ts` — `materializeConnection`, `dematerializeConnection`, `gogAccounts`, `recordGoogleSeen`, `syncConnections`, `withConnectionLock`, `offAgainIfDetached`: import, removal, the per-agent turn, and the checks they record.
 - `src/orchestrator/accessOverview.ts` — `verifyAgentAccess`, `accessProbeScript`, `accessOverview`, `accessAlertOf`, `agentsWithAccessFindings`: Verify now (read-only), the overview, and its Alerts line.
-- `src/store/store.ts` — `access_checks`, `recordAccessCheck`, `connectionRemovalsSince`: the records.
+- `src/store/store.ts` — `access_checks`, `recordAccessCheck`, `connectionRemovalsSince`, `countConnectionsFromOtherClient`: the records, and which OAuth client issued each connection (`client_id`).
+- `src/api/routes.ts` — `'/v1/google-oauth/client'`, `'/v1/agents/:id/connections/:email'`: the installation's OAuth client (a different client ID is confirmed first), and an agent's Disconnect (detaches an attached account).
 - `src/api/routes.ts` — `'/v1/connections'`, `'/v1/agents/:id/connections/attach'`, `'/v1/agents/:id/connections/detach'`, `'/v1/access'`, `'/v1/agents/:id/access'`, `'/v1/agents/:id/access/verify'`, `accessAlert`: the vault, attach and detach, the overview and Verify now, the agent list's Alerts field.
 - `web/index.html` — `v2LoadAccess`, `v2VerifyAccess`, `loadAccessMap`, `accessRowsHTML`: the Sharing tab's Access row and Settings → Security → What your agents can reach.
 
