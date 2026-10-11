@@ -51,12 +51,13 @@ export interface UsageSpike {
 export function findUsageSpikes(store: Store, agents: Agent[], rules: UsageAlertRules, now = Date.now()): UsageSpike[] {
   const out: UsageSpike[] = [];
   const dayStart = now - DAY;
-  // Measuring began with the oldest reading anywhere (the first real reading
-  // wrote 8 days back, but only from an agent's first call in them).
-  const measuringSince = Date.parse(store.firstTokenSample() ?? '');
-  if (!Number.isFinite(measuringSince)) return out;
   for (const a of agents) {
-    if (!store.firstTokenSample(a.id)) continue;
+    // Measuring began with this agent's own first reading (the first real
+    // reading wrote 8 days back, from its first call in them). The fleet's
+    // oldest reading made an old agent first measured today look like one
+    // with a week of empty days, so any day was a spike (#91).
+    const measuringSince = Date.parse(store.firstTokenSample(a.id) ?? '');
+    if (!Number.isFinite(measuringSince)) continue;
     const deltas = store.tokenDeltas(new Set([a.id]), new Date(now - 8 * DAY).toISOString());
     let tokens = 0;
     const days = new Array<number>(7).fill(0);
