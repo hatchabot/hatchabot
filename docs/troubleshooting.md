@@ -1638,6 +1638,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/template.ts` — `exportTemplate`
 
+### Import or New child: "… must be yes or no (true/false)"
+- **Check:** the answer given for a yes/no setup field (from the CLI, a script, or the field's declared default) is not one of yes, no, true, false, on, off, 1, 0.
+- **Cause:** before v2.160.0 any other answer, such as a misspelt "tru", was taken as no and turned the option off without a word.
+- **Fix:** give yes or no; if the template's own default is the misspelt one, fix it in the master's Setup fields and share again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/template.ts` — `resolveParamValues`
+
+### A choice in a template's setup fields is never accepted, or a template with two fields of the same key imports wrongly
+- **Check:** the field's options in the template have spaces before or after them (`" daily"`), or two of its setup fields share one key.
+- **Cause:** answers were compared trimmed against options that were not, so such an option could never be picked; and two fields of one key overwrote each other's answer. Before v2.160.0 both were accepted when the template was made or imported.
+- **Fix:** upgrade: options are trimmed where they are declared and compared trimmed, and a template whose keys repeat is refused as malformed. Fix the repeated key in the master and share again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/template.ts` — `TemplateParamSchema`, `parseTemplate`, `resolveParamValues`
+
 ## Tailscale and public access
 
 ### The https address the setup guide gave does not open
