@@ -104,6 +104,18 @@ describe('a zero reading between two real ones (2026-09-28)', () => {
     store.addTokenSample('b1', 'p1', '2026-09-28T11:00:00.000Z', 1200);
     expect(store.tokenIncreasesByAgent('p1', '2026-09-28T00:00:00.000Z', new Set(['b1'])).get('b1')).toBe(1200);
   });
+
+  it('a new agent\'s zero just before the window is its baseline: its first spending counts (#177)', async () => {
+    const Database = (await import('better-sqlite3')).default;
+    const { Store } = await import('../src/store/store.js');
+    const store = new Store(new Database(':memory:'));
+    store.addTokenSample('c1', 'p1', '2026-09-28T09:55:00.000Z', 0);
+    store.addTokenSample('c1', 'p1', '2026-09-28T10:05:00.000Z', 1200);
+    store.addTokenSample('c1', 'p1', '2026-09-28T10:15:00.000Z', 1500);
+    const ids = new Set(['c1']);
+    expect(store.tokenDeltas(ids, '2026-09-28T10:00:00.000Z').map((d) => [d.prevAt, d.delta])).toEqual([['2026-09-28T09:55:00.000Z', 1200], ['2026-09-28T10:05:00.000Z', 300]]);
+    expect(store.tokenIncreasesByAgent('p1', '2026-09-28T10:00:00.000Z', ids).get('c1')).toBe(1500);
+  });
 });
 
 describe('real usage, backfilled (2026-09-28)', () => {

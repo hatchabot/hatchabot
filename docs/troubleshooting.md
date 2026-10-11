@@ -1426,6 +1426,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/tokenHealth.ts` — `loopSignals`
 
+### A new agent's first tokens are missing from Usage and from its AI source's figures
+- **Check:** the agent's first reading (zero) is just before the window shown; its first rise inside the window is missing.
+- **Cause:** before v2.160.0 a window started from the last reading above zero before it, and a new agent had none, so its first rise had no starting point and was dropped.
+- **Fix:** upgrade: with no earlier reading above zero, a new agent's first zero is the starting point.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/store/store.ts` — `BASELINE_AT`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody
