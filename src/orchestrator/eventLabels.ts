@@ -87,7 +87,12 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'channel.unlink_scrub_failed': (d) => `could not take the unlinked ${String(d.kind ?? '')} account out of its allowlist; it may still be let in until its next rebuild`,
   'rebuild.skipped': (d) => `a queued rebuild was called off: ${String(d.why ?? '')}`,
   'hibernate.wake_abandoned': (d) => `could not wake it ${String(d.attempts ?? '')} times in a row, so it is just stopped now — press Start to try again: ${String(d.error ?? '')}`.trim(),
-  'datasource.key_left': (d) => `could not remove the deploy key of ${String(d.name ?? 'a git source')} from its volume — a rebuild does`,
+  'datasource.key_left': (d) => d.where === 'secret store'
+    ? 'could not delete a removed source\'s deploy key from the secret store — tried again at its next start, wake or rebuild'
+    : `could not remove the deploy key of ${String(d.name ?? 'a git source')} from its volume — tried again at its next start, wake or rebuild`,
+  'datasource.key_removed': (d) => `removed the deploy key of ${String(d.name ?? 'a removed source')} from its volume`,
+  'google.client_replaced': (d) => `saved a different Google OAuth client: ${String(d.reconnect ?? '')} connection(s) must be connected again`,
+  'google.client_remove_failed': (d) => `could not remove the Google OAuth client from the secret store: ${String(d.error ?? '')}`.trim(),
   'machine.default_set': (d) => `set a machine default: ${String(d.key ?? '')} = ${String(d.value ?? '')}${d.applied ? ` (applied to ${String(d.applied)})` : ''}`,
   'files.cap_backfilled': (d) => d.ok ? `set its ${String(d.kind ?? '')} file limit (it had none)` : `could not set its ${String(d.kind ?? '')} file limit (it had none)`,
   'files.cap_failed': (d) => `could not set its ${String(d.kind ?? '')} file limit: ${String(d.error ?? '')}`.trim(),
