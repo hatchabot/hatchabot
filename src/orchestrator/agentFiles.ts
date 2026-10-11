@@ -114,14 +114,33 @@ export function cleanFileName(input: unknown): string | undefined {
 }
 
 /**
+ * OpenClaw's live state in the agent's folder: its session database with its
+ * journals, and its logins. An upload must never replace them (the workspace
+ * exception below let one overwrite the live database), and an adopt never
+ * carries them (adopt.ts). One list for both.
+ */
+export const RUNTIME_STATE_FILES: readonly string[] = [
+  'openclaw-agent.sqlite',
+  'openclaw-agent.sqlite-wal',
+  'openclaw-agent.sqlite-shm',
+  'openclaw-agent.sqlite-journal',
+  'auth-profiles.json',
+  'auth-state.json',
+];
+export const isRuntimeStateFile = (name: string): boolean => RUNTIME_STATE_FILES.includes(name);
+
+/**
  * Where an upload may land: anywhere in the home EXCEPT OpenClaw's own state
  * (`.openclaw/…`), other than the agent's workspace inside it — that is
  * where a file for the agent belongs, and overwriting its config or
- * databases by hand would break it.
+ * databases by hand would break it. Not even there under the name of its
+ * live state (RUNTIME_STATE_FILES).
  */
-export function uploadAllowed(relDir: string, slug: string): boolean {
+export function uploadAllowed(relDir: string, slug: string, name?: string): boolean {
   const ws = `.openclaw/agents/${slug}/agent`;
-  if (relDir === '.openclaw' || relDir.startsWith('.openclaw/')) return relDir === ws || relDir.startsWith(`${ws}/`);
+  if (relDir === '.openclaw' || relDir.startsWith('.openclaw/')) {
+    return (relDir === ws || relDir.startsWith(`${ws}/`)) && !(name !== undefined && isRuntimeStateFile(name));
+  }
   return true;
 }
 
@@ -136,7 +155,11 @@ export function putArgv(relDir: string, name: string, overwrite: boolean, slug: 
   // The .openclaw rule again, on the RESOLVED directory: a symlink an agent
   // made (`~/inbox -> ~/.openclaw`) must not route an upload into its state.
   const ws = `${AGENT_HOME}/.openclaw/agents/${slug}/agent`;
-  const stateGuard = `case "$P" in ${ws}|${ws}/*) ;; ${AGENT_HOME}/.openclaw|${AGENT_HOME}/.openclaw/*) exit 6;; esac;`;
+  // Under the name of its live state, not even the workspace: the resolved
+  // directory decides, so `~/inbox -> the agent's folder` is caught too.
+  const stateGuard = isRuntimeStateFile(name)
+    ? `case "$P" in ${AGENT_HOME}/.openclaw|${AGENT_HOME}/.openclaw/*) exit 6;; esac;`
+    : `case "$P" in ${ws}|${ws}/*) ;; ${AGENT_HOME}/.openclaw|${AGENT_HOME}/.openclaw/*) exit 6;; esac;`;
   // A directory (or a link to one) under the target name is refused, not
   // written into.
   return ['sh', '-c', `${guard(relDir)} [ -d "$P" ] || exit 4; ${stateGuard} T="$P"/${n}; if [ -d "$T" ]; then exit 4; fi; if [ -e "$T" ] && [ "${overwrite ? 1 : 0}" != 1 ]; then exit 5; fi; TMP="$T.part-$$-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \\n')"; set -C; cat > "$TMP" && mv -f "$TMP" "$T"`];
