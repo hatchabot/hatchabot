@@ -1391,6 +1391,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/routes.ts` — `/v1/usage/alerts/dismiss`
 
+### A Recommended item's button does something other than what the item says (for example "Raise it" removes the budget)
+- **Check:** the item is marked as the Hatchabot agent's proposal, and the card it confirms (on the agent's chat) differs from the item's title.
+- **Cause:** before v2.160.0 a pending card was merged into an item for the same agent whatever it did, so a card that removed a budget took the place of "Raise it to $…".
+- **Fix:** upgrade. A card is merged only when it makes exactly the item's change; any other card is listed as its own item, in its own words.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/recommendations.ts` — `matchCard`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody
