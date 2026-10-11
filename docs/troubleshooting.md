@@ -1105,6 +1105,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/adopt.ts` — `inspectWorkspace`, `packWorkspace`
 
+### Adopting a folder with tens of thousands of files in one place fails late, with an unreadable error
+- **Check:** `find <workspace> -maxdepth 1 -type f | wc -l` is over 20,000.
+- **Cause:** the 20,000-file limit was checked only on entering a folder, so one flat folder of more files got past the preview and failed while being copied.
+- **Fix:** upgrade: the preview now refuses it with "holds over 20000 files". Move the bulk data out and share that folder with the agent instead (`hatchabot folders`).
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/adopt.ts` — `inspectWorkspace`
+
 ### A build fails: "The memory search service's port … is taken", or "embed door failed … port is already allocated"
 - **Check:** `docker ps --format '{{.Names}} {{.Ports}}' | grep 8093` shows another Hatchabot's `…-embed-door` holding the port.
 - **Cause:** two Hatchabots on one Docker (a second install, a test server) each start a memory search service on the same port, 8093 by default. From OpenClaw 2026.8 every agent needs that service.
