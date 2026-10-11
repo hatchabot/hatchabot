@@ -447,7 +447,7 @@ build derived images (the base plus extra packages) for particular agents.
 - `docker/entrypoint.sh` — `PYTHONPATH`: container start-up.
 - `scripts/build-runtime-image.sh` — `NO_LATEST`, `use_pulled`, `legacy_published`: builds and tags the image, or pulls the one the release's manifest names by digest (`legacy_published`: by tag, for releases made before manifests).
 - `src/orchestrator/releaseManifest.ts` — `releaseManifest`, `parseReleaseManifest`, `publishedRuntimeImage`, `manifestRequired`: the app's reading of its release's manifest; the published image by digest for the provider's ensureBaseImage and a runner's Install image.
-- `src/orchestrator/derivedImage.ts` — `buildDerivedImage`, `renderDockerfile`, `removeDerivedImage`: derived images.
+- `src/orchestrator/derivedImage.ts` — `buildDerivedImage`, `renderDockerfile`, `removeDerivedImage`, `dockerfileProblem`: derived images (the lines that may go into one).
 - `src/orchestrator/imageRecipe.ts` — `ensureImageOn`, `buildRecipeOn`: rebuilding an image on another machine from its recipe.
 - `src/orchestrator/runtimeCaps.ts` — `probeImageCapabilities`: what an image can do.
 - `src/providers/provider.ts` — `parseEmbedEngineLabel`, `parseChannelsLabel`: image labels read at build time.
