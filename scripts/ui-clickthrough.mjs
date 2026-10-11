@@ -4092,6 +4092,44 @@ const SCENARIOS = String.raw`(() => {
         ok('the count and the reason, after the redraw: ' + note.textContent, !note.hidden && note.textContent.includes('1 of 2 uploaded') && note.textContent.includes('huge.zip: Too big (300 MB'));
       } finally { window.fetch = realFetch; release?.(); window.__answer = {}; if (v2AgentDlg.open) v2Close(); v2FilesPath.delete('a1'); }
     },
+    reportDraftRaceAndDiscard: async () => {
+      // Report a problem (made-up drafts): the draft clicked last is the one shown, even when the
+      // first one's load comes back later (#146); a discard that failed keeps the draft (#145).
+      const A = 'aa11bb22-3333-4444-8555-000000000001', B = 'aa11bb22-3333-4444-8555-000000000002';
+      const view = (id, title) => ({ id, title, body: '### What happened\nIt stopped.', createdAt: new Date().toISOString(), by: 'person',
+        issueUrl: 'https://github.com/hatchabot/hatchabot/issues/new?labels=field-report', trimmed: false, fileName: 'hatchabot-report-x.md' });
+      window.__override['/v1/problem-reports'] = [];
+      window.__override['/v1/problem-reports/' + A] = view(A, 'Backups stopped');
+      window.__override['/v1/problem-reports/' + B] = view(B, 'Uploads fail');
+      const realFetch = window.fetch;
+      let release; const held = new Promise((r) => { release = r; });
+      let holdA = true;
+      window.fetch = async (input, init = {}) => {
+        const path = String(typeof input === 'string' ? input : input.url).split('?')[0];
+        if (path === '/v1/problem-reports/' + A && (init.method || 'GET').toUpperCase() === 'GET' && holdA) { holdA = false; await held; }
+        return realFetch(input, init);
+      };
+      try {
+        await openReport();
+        const slow = reportShow(A);
+        await until(() => !holdA);
+        await reportShow(B);
+        release(); await slow;
+        eq('the draft chosen last is shown', $('reportRTitle').value, 'Uploads fail');
+        eq('and is the one acted on', reportCur?.id, B);
+        window.__confirmAnswer = true;
+        window.__answer = { ['DELETE /v1/problem-reports/' + B]: [{ status: 500, body: { error: 'database is locked' } }, { status: 404, body: { error: 'Not found' } }] };
+        await reportDiscard();
+        ok('a failed discard keeps the draft shown', reportCur?.id === B && !$('reportReview').hidden);
+        ok('and says so: ' + $('toast').textContent, $('toast').textContent.includes('not discarded') && $('toast').textContent.includes('database is locked'));
+        await reportDiscard();
+        ok('one already gone counts as discarded', reportCur === null && $('reportReview').hidden);
+      } finally {
+        window.fetch = realFetch; release?.(); window.__answer = {}; window.__confirmAnswer = true;
+        for (const k of ['/v1/problem-reports', '/v1/problem-reports/' + A, '/v1/problem-reports/' + B]) delete window.__override[k];
+        if (reportDlg.open) reportDlg.close();
+      }
+    },
     chanConnectorsRetry: async () => {
       // The connector list failing once is not kept: trying again works without a reload (#144).
       const [first] = agents.filter((x) => x.name && !x.ops);
