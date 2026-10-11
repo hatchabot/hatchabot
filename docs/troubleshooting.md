@@ -1433,6 +1433,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/store/store.ts` — `BASELINE_AT`
 
+### Telegram: "used N tokens in the last 24 hours — after a quiet week" for an agent that is always this busy
+- **Check:** the agent is older than its first token reading (it was added from another install, or measuring started late); Usage shows no readings for it before today.
+- **Cause:** before v2.160.0 how long an agent had been measured came from the oldest reading of any agent, so an agent first measured today was compared with a week of zeros it was never measured for.
+- **Fix:** upgrade: each agent's own first reading decides; until it has three measured days it is judged on size alone.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/usageAlerts.ts` — `findUsageSpikes`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody

@@ -64,6 +64,16 @@ describe('usage spikes', () => {
     expect(usageSpikeText(spikes[0]!)).toContain('a lot for an agent this new');
   });
 
+  it('an old agent first measured today is judged as new, not against a week it was not measured (#91)', () => {
+    const store = world([{ id: 'sched', name: 'Scheduler', perDay: [20e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6] }]);
+    store.insertAgent({ id: 'late', ownerId: OWNER, name: 'Late Reader', slug: 'late', state: 'RUNNING', aiProfileId: 'p', hostId: 'h1', runtimeRef: 'mock://late', persona: '', sharedMemory: true,
+      createdAt: new Date(NOW - 90 * D).toISOString(), updatedAt: 'now' } as never);
+    // Its first reading is this morning: 60M since then.
+    store.addTokenSample('late', 'p', new Date(NOW - 6 * H).toISOString(), 1_000);
+    store.addTokenSample('late', 'p', new Date(NOW - H).toISOString(), 60_001_000);
+    expect(findUsageSpikes(store, store.listAllActiveAgents(), RULES, NOW)).toEqual([]);
+  });
+
   it('tells the owner once a day per agent, and records whether it reached them', async () => {
     const store = world([{ id: 'sched', name: 'Scheduler', perDay: [100e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6] }]);
     const told: string[] = [];
