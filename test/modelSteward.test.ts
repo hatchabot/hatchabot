@@ -475,6 +475,15 @@ describe('the weekly model review task', () => {
     expect(await syncModelReviewCron({ store, provider }, agent, runtimeRef, 'weekly')).toBe('created');
   });
 
+  it('off removes a review task a restored volume brought, with no record of it here (#126)', async () => {
+    const { store, provider, runtimeRef, jobs, agent } = await opsWorld();
+    jobs.push({ id: 'old-1', name: MODEL_REVIEW_NAME, enabled: true, payload: {}, schedule: {} });
+    jobs.push({ id: 'mine', name: 'Weekly model-fit audit', enabled: true, payload: {}, schedule: {} });
+    expect(store.managedCron('ops1', MODEL_REVIEW_NAME)).toBeUndefined();
+    expect(await syncModelReviewCron({ store, provider }, agent, runtimeRef, 'off')).toBe('removed');
+    expect(jobs.map((j) => j.name)).toEqual(['Weekly model-fit audit']);
+  });
+
   it('is only for the management agent', async () => {
     const { store, provider, runtimeRef, jobs, agent } = await opsWorld();
     expect(await syncModelReviewCron({ store, provider }, { ...agent, ops: false }, runtimeRef, 'weekly')).toBe('skipped');

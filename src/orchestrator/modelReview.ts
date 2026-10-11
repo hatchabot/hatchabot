@@ -15,7 +15,8 @@ import { OPS_MODEL_REVIEW_MESSAGE } from '../ops/opsAgent.js';
  *
  * Made ONCE: the managed_crons row remembers it, so a build costs no CLI call
  * once it exists, and an owner who deletes the task by hand is not argued with
- * on every rebuild (the setting is the way to turn it off for good).
+ * on every rebuild (the setting is the way to turn it off for good). With the
+ * setting off, each build reads the task list and removes one by its name.
  */
 export const MODEL_REVIEW_NAME = 'Weekly token review';
 /** Its name before v2.120: an existing task is found by it and renamed in place. */
@@ -50,10 +51,13 @@ export async function syncModelReviewCron(
   const now = new Date().toISOString();
   const isOurs = (name?: string) => name === MODEL_REVIEW_NAME || name === LEGACY_REVIEW_NAME;
   if (setting === 'off') {
-    if (!mine) return 'off';
+    // No record is not "no task": a volume imported or restored from an
+    // install where it was on still holds it, and it would keep running (#126).
+    // So the task list is read even then (a build with the review off only).
     const jobs = await listCrons(provider, runtimeRef, agent.slug).catch(() => undefined);
-    if (!jobs) return 'failed';
-    const job = jobs.find((j) => (mine.jobId && j.id === mine.jobId) || isOurs(j.name));
+    if (!jobs) return mine ? 'failed' : 'off';
+    const job = jobs.find((j) => (mine?.jobId && j.id === mine.jobId) || isOurs(j.name));
+    if (!mine && !job) return 'off';
     if (job && !(await deleteCron(provider, runtimeRef, job.id).catch(() => false))) return 'failed';
     store.deleteManagedCron(agent.id, MODEL_REVIEW_NAME);
     store.deleteManagedCron(agent.id, LEGACY_REVIEW_NAME);
