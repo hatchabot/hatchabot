@@ -10,6 +10,25 @@
 
 export const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/**
+ * How many variables one agent may have. Its full export carries every one,
+ * and an import read at most 64 while the setting took any number, so an
+ * agent's own export could fail to import (#141).
+ */
+export const MAX_AGENT_ENV_VARS = 64;
+/** What an import takes: more than may be set now, so an agent that went past 64 before the limit still moves. */
+export const MAX_IMPORTED_ENV_VARS = 256;
+
+/**
+ * A value an agent can actually be given. A NUL cannot travel in a process's
+ * environment: the value was stored, then broke the agent's next build when
+ * Docker was handed it (#142).
+ */
+export function envValueProblem(name: string, value: string): string | undefined {
+  if (value.includes('\0')) return `The value of "${name}" contains a NUL character, which can't be passed to the agent.`;
+  return undefined;
+}
+
 const RESERVED_ENV_EXACT = new Set([
   'PATH', 'HOME', 'PYTHONPATH', 'NODE_OPTIONS', 'NODE_EXTRA_CA_CERTS', 'BASH_ENV',
   'SHELL', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
