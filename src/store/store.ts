@@ -582,6 +582,17 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS accounts_email ON accounts (email);
 
+      -- Telegram ids an account UNLINKED. knownChannelUserId's membership
+      -- fallback skips them: the owner seats still bound to an unlinked id
+      -- otherwise went on seeding it into every new agent (A069). Linking an
+      -- id again takes it off this list.
+      CREATE TABLE IF NOT EXISTS telegram_unlinks (
+        owner_id TEXT NOT NULL,
+        channel_user_id TEXT NOT NULL,
+        unlinked_at TEXT NOT NULL,
+        PRIMARY KEY (owner_id, channel_user_id)
+      );
+
       -- An agent handed to another user in-app: a secret-free TEMPLATE blob
       -- waiting in their inbox. to_owner is bound once the recipient email is
       -- a known account (possibly on their first sign-in). status:
@@ -2493,6 +2504,7 @@ export class Store {
         `UPDATE mgmt_proposals SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE model_changes SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE OR IGNORE agent_seen SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE OR IGNORE telegram_unlinks SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE ops_tokens SET owner_id = ? WHERE owner_id = ?`,
       ]) {
         try {
@@ -5243,28 +5255,51 @@ export class Store {
         | undefined
     )?.telegram_user_id;
     if (linked) return linked;
+    // An id the owner unlinked is never inferred back: their existing owner
+    // seats keep it (existing agents keep working), but new agents and cron
+    // targets must not pick it up again (A069).
     const r = this.db
       .prepare(
         `SELECT channel_user_id FROM memberships
          WHERE user_id = ? AND channel_user_id IS NOT NULL AND status = 'active'
+           AND channel_user_id NOT IN (SELECT channel_user_id FROM telegram_unlinks WHERE owner_id = ?)
          ORDER BY joined_at DESC LIMIT 1`,
       )
-      .get(userId) as { channel_user_id: string } | undefined;
+      .get(userId, userId) as { channel_user_id: string } | undefined;
     return r?.channel_user_id;
   }
 
   /**
    * Link (or with null, unlink) the account's Telegram identity. Upserts: a
    * password-mode owner has no sign-in-created accounts row, and linking must
-   * still work there.
+   * still work there. Unlinking records every id it lets go — the linked one
+   * and any the membership fallback would infer next — so the fallback cannot
+   * bring one straight back; linking an id again lifts its record. An id
+   * bound to a seat AFTER the unlink is inferred as before.
    */
   setAccountTelegram(ownerId: string, channelUserId: string | null): void {
-    this.db
-      .prepare(
-        `INSERT INTO accounts (owner_id, telegram_user_id, last_seen) VALUES (?, ?, ?)
-         ON CONFLICT(owner_id) DO UPDATE SET telegram_user_id = excluded.telegram_user_id`,
-      )
-      .run(ownerId, channelUserId, new Date().toISOString());
+    this.db.transaction(() => {
+      const now = new Date().toISOString();
+      if (channelUserId === null) {
+        const record = this.db.prepare(
+          `INSERT OR REPLACE INTO telegram_unlinks (owner_id, channel_user_id, unlinked_at) VALUES (?, ?, ?)`,
+        );
+        const linked = this.accountTelegram(ownerId);
+        if (linked) record.run(ownerId, linked, now);
+        const seats = this.db
+          .prepare(`SELECT DISTINCT channel_user_id FROM memberships WHERE user_id = ? AND channel_user_id IS NOT NULL AND status = 'active'`)
+          .all(ownerId) as Array<{ channel_user_id: string }>;
+        for (const r of seats) record.run(ownerId, r.channel_user_id, now);
+      } else {
+        this.db.prepare(`DELETE FROM telegram_unlinks WHERE owner_id = ? AND channel_user_id = ?`).run(ownerId, channelUserId);
+      }
+      this.db
+        .prepare(
+          `INSERT INTO accounts (owner_id, telegram_user_id, last_seen) VALUES (?, ?, ?)
+           ON CONFLICT(owner_id) DO UPDATE SET telegram_user_id = excluded.telegram_user_id`,
+        )
+        .run(ownerId, channelUserId, now);
+    })();
   }
 
   /** The account's linked Telegram id, if the explicit link has been made. */
