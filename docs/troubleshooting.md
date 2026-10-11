@@ -1412,6 +1412,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/modelScorecard.ts` — `scoreAgent`
 
+### The weekly token review still runs although `HATCHABOT_MODEL_REVIEW=off`
+- **Check:** the Hatchabot agent's scheduled tasks list "Weekly token review" (or "Weekly model review"); the agent was imported or restored from a copy made while the review was on.
+- **Cause:** before v2.160.0 turning it off removed the task only when this install had a record of making it; a task that came with the agent's volume was kept.
+- **Fix:** upgrade and rebuild the Hatchabot agent: with the setting off, a build looks for the task by name and removes it. Or delete the task by hand.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/modelReview.ts` — `syncModelReviewCron`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody
