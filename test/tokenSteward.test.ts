@@ -575,6 +575,22 @@ describe('compaction', () => {
     expect(told[0]).toMatch(/aborted .* last 200 lines/);
   });
 
+  it('a run that throws is recorded as failed in the ledger, not left running', async () => {
+    const { store, provider } = await world();
+    const agent = store.getAgent('a2')!;
+    provider.exec = ((_ref: string, argv: string[]) => {
+      if (argv[0] === 'sessions') throw new Error('docker exec could not start');
+      return Promise.resolve({ code: 0, stdout: '', stderr: '' });
+    }) as typeof provider.exec;
+    const meta = { by: 'owner' as const, via: 'app' as const };
+    await expect(compactAgent({ store, provider }, agent, { mode: 'lines', meta })).rejects.toThrow(/could not start/);
+    expect(store.listTokenActions({ ownerId: OWNER })[0]).toMatchObject({ kind: 'compaction', outcome: 'failed', detail: { reason: 'docker exec could not start' } });
+    // Summarise, in the background: the same.
+    await compactAgent({ store, provider }, agent, { mode: 'summarise', meta });
+    for (let i = 0; i < 50 && store.listTokenActions({ ownerId: OWNER }).some((a) => a.outcome === 'running'); i++) await new Promise((r) => setTimeout(r, 5));
+    expect(store.listTokenActions({ ownerId: OWNER }).map((a) => a.outcome)).toEqual(['failed', 'failed']);
+  });
+
   it('two requests at the same moment start one compaction, not two (2026-10-09)', async () => {
     const { store, provider } = await world();
     const agent = store.getAgent('a2')!;
