@@ -828,6 +828,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/googleConnections.ts` — `gogAccounts`, `dematerializeConnection`
 
+### A Google account shows Drive (or Calendar, …) as connected, but the agent gets permission errors there
+- **Check:** in the agent, `gog auth list --json` lists the account with the service, yet every call to it fails with "insufficient permission" / 403; at Google, myaccount.google.com → Security → Third-party connections shows the Hatchabot app without that access.
+- **Cause:** Google's consent screen lets you untick a service. The connection recorded every service asked for, not the ones Google granted.
+- **Fix:** upgrade, then press Connect for the account again and leave the service ticked. The connection now lists only what was granted, and the page after consent names any service that was not.
+- **Fixed in:** `v2.160.0` (#174)
+- **Code:** `src/orchestrator/googleConnections.ts` — `grantedServices`, `exchangeGoogleCode`, `isGoogleService`
+
 ### A removed repo source still pulls or pushes
 - **Check:** after removing a repo source, the agent still has `~/.openclaw/.ssh/<repo>_deploy`, or the trail shows `datasource.key_left`.
 - **Cause:** the source's record was deleted first; if taking the key off the volume (or out of the secret store) then failed, nothing retried it.
