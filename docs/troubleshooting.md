@@ -877,6 +877,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/runtimeCaps.ts` — `probeImageCapabilities`
 
+### An agent shows "healthy" but does not answer
+- **Check:** in its console, `openclaw health --json` prints `{}` (or a bare `{"ts":…}`) with no `ok`, `eventLoop` or `channels`.
+- **Cause:** a health answer with no report in it was counted as healthy, because nothing in it said otherwise.
+- **Fix:** upgrade, then rebuild the agent if it still shows degraded. Since v2.160.0 healthy needs the gateway's own verdict or a report on its event loop or channels; an empty answer shows degraded, and one that is not an object shows unreachable.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/health.ts` — `agentHealth`
+
 ### An agent in a class will not start after a rebuild: its data was migrated for a newer OpenClaw than the class's image
 - **Check:** the agent's rebuild fails on a 2026.7 image although it ran 2026.8 or newer before; its Overview shows a class with an image, and `docker inspect` of its old container names the newer image.
 - **Cause:** assigning a class, or changing a class's image, pinned members without the check a direct image pin makes: 2026.7 cannot read a volume already migrated to 2026.8+. Clearing a class image also unpinned members before the rest of the edit was checked, so a member the edit then skipped lost its pin anyway.

@@ -165,6 +165,8 @@ export async function agentHealth(
   } catch {
     return { reachable: false, status: 'unreachable' };
   }
+  // A report is an object; anything else is not a gateway answering.
+  if (!h || typeof h !== 'object' || Array.isArray(h)) return { reachable: false, status: 'unreachable' };
 
   const tg = h.channels?.telegram;
   const telegram = tg
@@ -183,7 +185,11 @@ export async function agentHealth(
     : undefined;
   const pluginErrors = Array.isArray(h.plugins?.errors) ? h.plugins.errors.map(String) : [];
 
+  // Healthy needs evidence: its own verdict, or the event loop or channels
+  // it reports on. An empty answer ({}) said nothing, and read as healthy (#113).
+  const evidence = typeof h.ok === 'boolean' || !!eventLoop || (!!h.channels && typeof h.channels === 'object');
   const degraded =
+    !evidence ||
     h.ok === false ||
     !!eventLoop?.degraded ||
     (telegram ? !telegram.connected : false) ||
