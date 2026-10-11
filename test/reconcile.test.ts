@@ -120,6 +120,22 @@ describe('unhealthy detection', () => {
     // state is left alone — a wedged gateway may recover on its own
     expect(store.getAgent('a1')!.state).toBe('RUNNING');
   });
+
+  it('an interrupted setup or rebuild whose container is up but not answering is not marked running (#90)', async () => {
+    for (const was of ['PROVISIONING', 'REBUILDING'] as const) {
+      const store = new Store(new Database(':memory:'));
+      store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+      store.insertAgent({ id: 'a1', ownerId: 'o', name: 'A', slug: 'a1', state: 'PROVISIONING', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+      const provider = new MockProvider({ healthyAfter: 99 });
+      const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {} });
+      await provider.start(runtimeRef);
+      store.setAgentRuntimeRef('a1', runtimeRef);
+      if (was === 'REBUILDING') { store.setAgentState('a1', 'RUNNING'); store.setAgentState('a1', 'REBUILDING'); }
+      await reconcileAgents(store, new Map([['mock', provider as RuntimeProvider]]), () => {});
+      expect(store.getAgent('a1')!.state).toBe('FAILED');
+      expect(store.getAgent('a1')!.stateReason).toMatch(/interrupted — tap Retry/);
+    }
+  });
 });
 
 describe('boot reconcile: parked agents', () => {
