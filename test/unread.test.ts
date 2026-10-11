@@ -24,6 +24,15 @@ describe('unread: what counts as console activity', () => {
   });
 });
 
+describe('a conversation known only by its origin (#58)', () => {
+  it('a Telegram-origin record with no lastChannel or lastTo is Telegram\'s, not the console\'s', () => {
+    expect(consoleActivity({ 'agent:a:main': { updatedAt: 5, origin: { provider: 'telegram' } } }, { webOnly: false })).toBe(0);
+    expect(consoleActivity({ 'agent:a:main': { updatedAt: 5, origin: { provider: 'webchat' } } }, { webOnly: false })).toBe(5);
+    expect(consoleActivity({ 'agent:a:main': { updatedAt: 5, origin: { from: 'telegram:4242', provider: 'webchat' } } }, { webOnly: false })).toBe(0);
+    expect(consoleActivity({ 'agent:a:main': { updatedAt: 5 } }, { webOnly: false })).toBe(5);
+  });
+});
+
 describe('reading the session records', () => {
   it('prefers sessions.json and falls back to the agent SQLite (2026.8+), never a shell-breaking quote', () => {
     const sh = sessionsReadShell('to-do-agent');
