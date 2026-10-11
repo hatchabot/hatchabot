@@ -195,10 +195,14 @@ done < <(vm ./firstrun.sh 2>&1)
 if [ "$UPGRADE" = 1 ]; then
   vmi "${BUNDLE_BASE:+HATCHABOT_BUNDLE_BASE=$BUNDLE_BASE }hbt upgrade $UPGRADE_TO" >"$OUT/upgrade.log"
   NOW=$(vmi 'hatchabot doctor' | ver)
-  if grep -qE "Now on|Already on" "$OUT/upgrade.log" && vm 'systemctl --user is-active hatchabot' | grep -q '^active'; then
+  # The service restarts at the end of the upgrade: asked at once it can still
+  # be "activating" (Debian 12, the v2.160.3 run). Give it a minute.
+  STATE=""
+  for _ in $(seq 1 30); do STATE="$(vm 'systemctl --user is-active hatchabot' | tr -d '\r')"; [ "$STATE" = active ] && break; sleep 2; done
+  if grep -qE "Now on|Already on" "$OUT/upgrade.log" && [ "$STATE" = active ]; then
     ok "hbt upgrade $UPGRADE_TO: $REL → $NOW"; REL="$NOW"
   else
-    bad "hbt upgrade $UPGRADE_TO — $(tail -2 "$OUT/upgrade.log" | tr '\n' ' ')"
+    bad "hbt upgrade $UPGRADE_TO — service ${STATE:-not answering}; $(grep -v '^\s*$' "$OUT/upgrade.log" | tail -2 | tr '\n' ' ')"
   fi
 fi
 
