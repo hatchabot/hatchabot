@@ -374,6 +374,22 @@ describe('audit 2026-09-11 follow-ups', () => {
     expect(list.find((a: any) => a.id === 'a1').pendingModel).toBeTruthy(); // the 🔄 stays
   });
 
+  it('a source switch saved while `models set` runs is not stamped as applied (#87)', async () => {
+    const { f, store, provider } = await world();
+    store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Other', vendor: 'anthropic', kind: 'api_key', model: 'claude-sonnet-5', secretRef: 'ai/p2', createdAt: 'now' });
+    store.setAgentApplied('a1', 'p1', 'claude-opus-4-8');
+    const exec = provider.exec.bind(provider);
+    provider.exec = async (ref, argv, opts) => {
+      if (argv[0] === 'models' && argv[1] === 'set') store.setAgentAIProfile('a1', 'p2'); // the switch lands mid-call
+      return exec(ref, argv, opts);
+    };
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/model', headers: as, payload: { model: null } });
+    expect(res.json()).toMatchObject({ live: true });
+    expect(store.getAgent('a1')!.appliedProfileId).toBe('p1'); // the runtime still runs p1: the rebuild stays due
+    const list = (await f.inject({ method: 'GET', url: '/v1/agents', headers: as })).json();
+    expect(list.find((a: any) => a.id === 'a1').pendingModel).toBeTruthy();
+  });
+
   it('POST /model on a STOPPED agent stages the model on its volume (staged:true)', async () => {
     const { f, store, provider } = await world();
     store.setAgentState('a1', 'STOPPED');
