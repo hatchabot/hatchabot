@@ -89,6 +89,18 @@ function zeroAfterReading(prev: { agent_id: string; total: number } | undefined,
   return r.total === 0 && !!prev && prev.agent_id === r.agent_id && prev.total > 0;
 }
 
+/**
+ * Where a window's token readings start: the last real reading before it, so
+ * its first rise counts. Zeros are passed over (see zeroAfterReading) — but
+ * when no reading before the window is above zero, its last zero is a new
+ * agent's real start, and a window without it lost that agent's first
+ * spending (#177). Bound three times to the window's start.
+ */
+const BASELINE_AT = `COALESCE(
+  (SELECT MAX(t2.at) FROM token_samples t2 WHERE t2.agent_id = token_samples.agent_id AND t2.at < ? AND t2.total > 0),
+  (SELECT MAX(t3.at) FROM token_samples t3 WHERE t3.agent_id = token_samples.agent_id AND t3.at < ?),
+  ?)`;
+
 export function tokenRise(prev: number, next: number): number {
   return next > prev ? next - prev : 0;
 }
@@ -3715,9 +3727,9 @@ export class Store {
     if (!agentIds.size) return [];
     const rows = this.db.prepare(
       `SELECT agent_id, profile_id, at, total FROM token_samples WHERE agent_id IN (${[...agentIds].map(() => '?').join(',')})
-         AND at >= COALESCE((SELECT MAX(t2.at) FROM token_samples t2 WHERE t2.agent_id = token_samples.agent_id AND t2.at < ? AND t2.total > 0), ?)
+         AND at >= ${BASELINE_AT}
        ORDER BY agent_id, at`,
-    ).all(...agentIds, fromIso, fromIso) as Array<{ agent_id: string; profile_id: string | null; at: string; total: number }>;
+    ).all(...agentIds, fromIso, fromIso, fromIso) as Array<{ agent_id: string; profile_id: string | null; at: string; total: number }>;
     const out: Array<{ agentId: string; at: string; delta: number; prevAt: string; profileId?: string }> = [];
     let prev: (typeof rows)[number] | undefined;
     for (const r of rows) {
@@ -4150,9 +4162,9 @@ export class Store {
     if (!agentIds.size) return out;
     const rows = this.db.prepare(
       `SELECT agent_id, profile_id, at, total FROM token_samples WHERE agent_id IN (${[...agentIds].map(() => '?').join(',')})
-         AND at >= COALESCE((SELECT MAX(t2.at) FROM token_samples t2 WHERE t2.agent_id = token_samples.agent_id AND t2.at < ? AND t2.total > 0), ?)
+         AND at >= ${BASELINE_AT}
        ORDER BY agent_id, at`,
-    ).all(...agentIds, fromIso, fromIso) as Array<{ agent_id: string; profile_id: string | null; at: string; total: number }>;
+    ).all(...agentIds, fromIso, fromIso, fromIso) as Array<{ agent_id: string; profile_id: string | null; at: string; total: number }>;
     let prev: (typeof rows)[number] | undefined;
     for (const r of rows) {
       if (zeroAfterReading(prev, r)) continue;
