@@ -59,6 +59,12 @@ export const manifestSchema = z.object({
     purpose: z.string().max(200),
     field: z.string().max(64).optional(),
   })).max(5).optional(),
+}).superRefine((m, ctx) => {
+  // One of each: a second task of one name was scheduled too (two runs of one
+  // job, #75), and a second field of one key overwrote the first's value (#104).
+  const twice = (names: string[]) => [...new Set(names.filter((n, i) => names.indexOf(n) !== i))];
+  for (const n of twice(m.tasks.map((t) => t.name))) ctx.addIssue({ code: 'custom', path: ['tasks'], message: `two tasks are named "${n}"` });
+  for (const k of twice((m.config?.fields ?? []).map((f) => f.key))) ctx.addIssue({ code: 'custom', path: ['config', 'fields'], message: `two fields have the key "${k}"` });
 });
 export type AppManifest = z.infer<typeof manifestSchema>;
 

@@ -504,6 +504,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/apps.ts` — `currentLink`
 
+### Reading an app's repo says "two tasks are named …" or "two fields have the key …"
+- **Check:** the app's `hatchabot.json` lists one name twice under `tasks`, or one key twice under `config.fields`. Before v2.160.0 the same manifest was accepted: `openclaw cron list --all` in the agent showed `<app>-<task>` twice (it ran twice), or a value you typed was replaced by a later field of the same key.
+- **Cause:** the manifest check did not require task names and config keys to be unique.
+- **Fix:** give each task its own name and each field its own key in `hatchabot.json`, commit, and install or Update again (the update takes off the doubled task).
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/apps.ts` — `manifestSchema`
+
 ### Promoting a newer OpenClaw is refused: "… cannot read the data of agents already on 2026.8 or newer"
 - **Check:** the agents it names run OpenClaw 2026.7 (`hatchabot list`), not 2026.8 or newer.
 - **Cause:** before 2.146.1 the promote check was inverted: it refused moving the fleet UP across 2026.8 over agents still on 2026.7 (the normal path; their volume is healed on rebuild), instead of refusing a move DOWN below 2026.8 over agents already migrated.
