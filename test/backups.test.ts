@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import {
   agentArchiveName,
+  BackupBusyError,
   listBackups,
   pruneBackup,
   restoreAgentFromBackup,
@@ -79,6 +80,24 @@ describe('pruneBackup', () => {
     expect(() => pruneBackup('not-a-date', base)).toThrow();
     // the real set is untouched by any of the above
     expect(existsSync(join(base, '2026-08-22'))).toBe(true);
+  });
+
+  it('refuses a set a run is still writing, and keeps its lock (#139)', () => {
+    makeSet('2026-08-24', { 'hatchabot.sqlite': 'db', 'backup-status.json': JSON.stringify({ state: 'running', startedAt: new Date().toISOString() }) });
+    mkdirSync(join(base, '2026-08-24', '.backup-lock'));
+    writeFileSync(join(base, '2026-08-24', '.backup-lock', 'pid'), String(process.pid)); // a live pid
+    expect(() => pruneBackup('2026-08-24', base)).toThrow(BackupBusyError);
+    expect(readFileSync(join(base, '2026-08-24', '.backup-lock', 'pid'), 'utf8')).toBe(String(process.pid));
+    expect(existsSync(join(base, '2026-08-24', 'hatchabot.sqlite'))).toBe(true);
+  });
+
+  it('deletes a set whose run was killed (its lock names a pid that is gone)', () => {
+    makeSet('2026-08-25', { 'hatchabot.sqlite': 'db' });
+    mkdirSync(join(base, '2026-08-25', '.backup-lock'));
+    writeFileSync(join(base, '2026-08-25', '.backup-lock', 'pid'), '2147483646');
+    expect(pruneBackup('2026-08-25', base)).toBe(true);
+    expect(existsSync(join(base, '2026-08-25'))).toBe(false);
+    expect(listBackups(base).map((s) => s.date)).not.toContain('2026-08-25');
   });
 });
 

@@ -7,7 +7,7 @@
  * trigger a run or prune an old one.
  */
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { defaultBackupsDir } from '../envCompat.js';
 import { fileURLToPath } from 'node:url';
@@ -205,8 +205,38 @@ export function pruneBackup(date: string, base = backupsDir()): boolean {
   // level under the (resolved) base — no `..`, no symlink hop out.
   if (dirname(target) !== resolve(base)) throw new Error('Refusing to delete outside the backups directory.');
   if (!existsSync(target)) return false;
-  rmSync(target, { recursive: true, force: true });
+  // A set a run is still writing is not deleted: removing it took the run's
+  // lock with it, so the run wrote into nothing and a second run could start
+  // on the same day (#139). The lock is taken here, as the script takes it,
+  // so a run that starts while this deletes stops instead.
+  const lock = join(target, BACKUP_LOCK);
+  try { mkdirSync(lock); } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    if (lockHeld(lock)) throw new BackupBusyError(`The ${date} backup is still being written. Wait for the run to finish, then delete it.`);
+  }
+  writeFileSync(join(lock, 'pid'), String(process.pid));
+  // Out of the way in one step, then removed: no moment where the set's
+  // name holds half a set.
+  const doomed = join(resolve(base), `.deleting-${date}-${process.pid}`);
+  renameSync(target, doomed);
+  rmSync(doomed, { recursive: true, force: true });
   return true;
+}
+
+/** The script's per-set lock (scripts/backup-volumes.sh: `$DEST/.backup-lock`, holding the run's pid). */
+export const BACKUP_LOCK = '.backup-lock';
+
+/** Refused because a backup run holds the set. */
+export class BackupBusyError extends Error {}
+
+/** Whether a set's lock belongs to a run that is still going: its pid lives, or it has no pid yet and is under a minute old (the script's own rule). */
+function lockHeld(lock: string): boolean {
+  let pid = NaN;
+  try { pid = Number(readFileSync(join(lock, 'pid'), 'utf8').trim()); } catch { /* no pid yet */ }
+  if (!Number.isInteger(pid) || pid <= 0) {
+    try { return Date.now() - statSync(lock).mtimeMs < 60_000; } catch { return false; }
+  }
+  try { process.kill(pid, 0); return true; } catch (err) { return (err as NodeJS.ErrnoException).code === 'EPERM'; }
 }
 
 // ---- "Back up now" -------------------------------------------------------
