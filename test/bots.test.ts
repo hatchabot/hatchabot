@@ -81,4 +81,24 @@ describe('auditBots', () => {
     expect(by.flakybot!.cls).toBe('in-use');
     expect(by.flakybot!.valid).toBeUndefined();
   });
+
+  it('a sleeping agent\'s bot is in use: a message on it wakes the agent (#125)', async () => {
+    const { store, secrets, pool } = await fixture();
+    store.insertAgent({ id: 'nap', ownerId: 'o', name: 'NAP', slug: 'nap', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: 'x', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+    store.setAgentRuntimeRef('nap', 'docker://nap');
+    store.setAgentState('nap', 'RUNNING');
+    store.setAgentState('nap', 'STOPPED');
+    store.setHibernated('nap', new Date().toISOString(), 0);
+    store.insertChannel({ id: 'c-nap', agentId: 'nap', kind: 'telegram', accountId: 'napbot', secretRef: 'chan/nap', deepLink: 'https://t.me/napbot', createdAt: 'now' });
+    await secrets.put('chan/nap', 'nap-token');
+    let probed = false;
+    const fetchImpl = (async (u: string | URL) => { if (String(u).includes('nap-token/getUpdates')) probed = true; return fetchStub(u); }) as typeof fetch;
+    const res = await auditBots({ store, secrets, pool, hostName: 'DGX', fetchImpl }, 'o', { live: true });
+    const by = Object.fromEntries(res.bots.map((b) => [b.username, b]));
+    expect(by.napbot).toMatchObject({ cls: 'in-use', asleep: true, state: 'STOPPED' });
+    expect(probed).toBe(false); // its queue is the wake signal: not polled here
+    // A stopped agent that is not asleep is still a slot doing nothing.
+    expect(by.stopbot).toMatchObject({ cls: 'dead' });
+    expect((await auditBots({ store, secrets, pool, hostName: 'DGX' }, 'o')).bots.find((b) => b.username === 'stopbot')!.cls).toBe('reclaimable');
+  });
 });

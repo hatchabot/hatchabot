@@ -11,7 +11,7 @@ import type { Store } from '../store/store.js';
 import type { TelegramPoolProvisioner } from '../channels/telegramPool.js';
 
 export type BotClass =
-  | 'in-use' // a RUNNING agent owns it — keep
+  | 'in-use' // a RUNNING agent owns it, or a sleeping one a message wakes — keep
   | 'reclaimable' // a stopped/failed agent, or a free/orphaned pool bot — a slot doing nothing
   | 'dead'; // Telegram no longer recognises the token — the slot is already gone
 
@@ -22,6 +22,8 @@ export interface BotRow {
   agentName?: string;
   /** owning agent's lifecycle state, when source === 'agent' */
   state?: string;
+  /** The owning agent is asleep (STOPPED by hibernation): a message on this bot wakes it. */
+  asleep?: boolean;
   pooled: boolean;
   cls: BotClass;
   /** live getMe result, present only when the audit ran with live checks */
@@ -85,14 +87,18 @@ export async function auditBots(
     const ch = store.getChannelForAgent(agent.id);
     if (!ch || ch.kind !== 'telegram') continue;
     seen.add(ch.accountId);
+    // A sleeping agent is STOPPED, but its bot is how it is woken (hibernate.ts):
+    // taking it away as "reclaimable" would leave the agent deaf (#125).
+    const asleep = agent.state === 'STOPPED' && !!agent.hibernatedAt;
     const row: BotRow = {
       username: ch.accountId,
       source: 'agent',
       agentId: agent.id,
       agentName: agent.name,
       state: agent.state,
+      ...(asleep ? { asleep: true } : {}),
       pooled: pool.owns(ch.accountId),
-      cls: agent.state === 'RUNNING' ? 'in-use' : 'reclaimable',
+      cls: agent.state === 'RUNNING' || asleep ? 'in-use' : 'reclaimable',
     };
     if (opts.live) await checkLive(row, ch.secretRef);
     rows.push(row);
