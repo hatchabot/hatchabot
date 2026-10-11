@@ -7758,18 +7758,28 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       .refine((b) => !!b.cron !== !!b.everyMinutes, { message: 'give exactly one of cron / everyMinutes' })
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
-    const out = await addCron(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, {
-      name: parsed.data.name,
-      message: parsed.data.message,
-      cron: parsed.data.cron,
-      everyMs: parsed.data.everyMinutes ? Math.round(parsed.data.everyMinutes * 60_000) : undefined,
-      tz: parsed.data.tz,
-      // The owner's chat, or — an agent in no chat app — its console
-      // conversation. With neither (older OpenClaw, owner's id unknown) the
-      // task is quiet and its runs are read with `tasks … runs`.
-      announce: parsed.data.announce !== false,
-      deliverTo: cronTargetFor(store, agent),
-    });
+    // Like enable, edit and delete: an agent being moved, exported or rebuilt
+    // is refused, or the new task lands in a runtime that is going away and
+    // never reaches the copy that carries on.
+    if (busyNow(agent, reply)) return reply;
+    let out: Awaited<ReturnType<typeof addCron>>;
+    try {
+      out = await whileBusy(agent.id, () => addCron(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, {
+        name: parsed.data.name,
+        message: parsed.data.message,
+        cron: parsed.data.cron,
+        everyMs: parsed.data.everyMinutes ? Math.round(parsed.data.everyMinutes * 60_000) : undefined,
+        tz: parsed.data.tz,
+        // The owner's chat, or — an agent in no chat app — its console
+        // conversation. With neither (older OpenClaw, owner's id unknown) the
+        // task is quiet and its runs are read with `tasks … runs`.
+        announce: parsed.data.announce !== false,
+        deliverTo: cronTargetFor(store, agent),
+      }));
+    } catch (err) {
+      if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+      throw err;
+    }
     if (!out.ok) return reply.code(502).send({ error: out.error });
     trace(agent.id)('cron.created', { name: parsed.data.name, cron: parsed.data.cron, everyMinutes: parsed.data.everyMinutes });
     return reply.code(201).send({ created: true, id: out.id });
