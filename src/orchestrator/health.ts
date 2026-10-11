@@ -24,18 +24,30 @@ import type { Agent } from '../domain/types.js';
 // security check ever reports (a world-readable creds file, an exposed port),
 // on every agent, forever: exactly the silent-degradation class this exists
 // to catch.
+//
+// Each pattern is the WHOLE text of one line of that warning (doctor makes a
+// finding of each line), anchored at both ends: a keyword anywhere hid a new
+// finding that merely named the token, such as a world-readable
+// gateway.auth.token (A072). And nothing above a warning is ever muted.
 const MUTED = [
   {
     // Hatchabot seeds gateway/bot tokens into openclaw.json on the private
-    // volume by design.
+    // volume by design. OpenClaw's collectPlaintextConfigSecretWarnings, line by line.
     checkId: 'core/doctor/security',
-    pattern: /plaintext|secret-bearing|SecretRef|API keys\/tokens|gateway\.auth\.token|botToken/i,
+    patterns: [
+      /^(?:WARNING: )?openclaw\.json contains plaintext secret-bearing config(?: fields)?\.?$/,
+      /^Paths: [\w.*[\]-]+(?:, [\w.*[\]-]+)*(?: \(\+\d+ more\))?$/,
+      /^Agents or workspace tools that can read config files may see these API keys\/tokens\.$/,
+      /^Migrate them to SecretRefs with [^\n]*openclaw secrets configure[^\n]*, then verify with [^\n]*openclaw secrets audit --check[^\n]*\.$/,
+    ],
   },
 ];
-function isMuted(f: { checkId?: unknown; message?: unknown }): boolean {
+const MUTABLE_SEVERITY = /^(?:warning|info)$/i;
+function isMuted(f: { checkId?: unknown; severity?: unknown; message?: unknown }): boolean {
   const id = String(f.checkId ?? '');
-  const msg = String(f.message ?? '');
-  return MUTED.some((m) => m.checkId === id && m.pattern.test(msg));
+  const msg = String(f.message ?? '').trim();
+  if (!MUTABLE_SEVERITY.test(String(f.severity ?? ''))) return false;
+  return MUTED.some((m) => m.checkId === id && m.patterns.some((p) => p.test(msg)));
 }
 
 export interface DoctorFinding {

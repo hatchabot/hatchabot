@@ -79,6 +79,37 @@ describe('doctorLint', () => {
     expect(d.findings).toHaveLength(1);
   });
 
+  it('mutes the by-design warning line by line, and nothing that only mentions the token or is an error (A072)', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    const sec = (severity: string, message: string) => ({ checkId: 'core/doctor/security', severity, message });
+    p.execResponses.set('doctor', {
+      code: 0,
+      stdout: JSON.stringify({
+        ok: false, checksRun: 24,
+        findings: [
+          // OpenClaw's plaintext-secrets warning, one finding per line: by design here.
+          sec('warning', 'WARNING: openclaw.json contains plaintext secret-bearing config fields.'),
+          sec('warning', 'Paths: gateway.auth.token, channels.telegram.botToken (+2 more)'),
+          sec('warning', 'Agents or workspace tools that can read config files may see these API keys/tokens.'),
+          sec('warning', 'Migrate them to SecretRefs with `openclaw secrets configure` or `openclaw secrets apply`, then verify with `openclaw secrets audit --check`.'),
+          // Not by design: they name the token, or are above a warning.
+          sec('error', 'CRITICAL: gateway.auth.token is readable by every user (0644)'),
+          sec('warning', 'gateway.auth.token is sent over plain HTTP to a non-loopback address'),
+          sec('error', 'WARNING: openclaw.json contains plaintext secret-bearing config fields.'),
+        ],
+      }),
+      stderr: '',
+    });
+    const d = (await doctorLint(p, ref))!;
+    expect(d.mutedCount).toBe(4);
+    expect(d.findings.map((f) => f.message)).toEqual([
+      'CRITICAL: gateway.auth.token is readable by every user (0644)',
+      'gateway.auth.token is sent over plain HTTP to a non-loopback address',
+      'WARNING: openclaw.json contains plaintext secret-bearing config fields.',
+    ]);
+  });
+
   it('reports ok:undefined (not a confident green) from empty/garbage JSON', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);

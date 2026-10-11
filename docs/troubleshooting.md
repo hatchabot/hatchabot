@@ -779,6 +779,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/derivedImage.ts` — `dockerfileProblem`, `buildDerivedImage`
 
+### An agent's Health shows a new "core/doctor/security" finding after an upgrade
+- **Check:** the agent's Health → Config lint lists a `core/doctor/security` finding that mentions `gateway.auth.token` or `botToken`; `openclaw doctor --lint --json` in the agent's console shows it with its severity.
+- **Cause:** before v2.160.0, Config lint hid every security finding that merely mentioned a token or "plaintext", whatever it said and however severe — only OpenClaw's by-design warning about tokens kept in openclaw.json was meant to be hidden (it is still counted as "known").
+- **Fix:** read the finding and act on it: it is a real one (a token readable by others, sent over plain HTTP, and so on). Errors are never hidden.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/health.ts` — `MUTED`, `isMuted`, `doctorLint`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")
