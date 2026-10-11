@@ -54,7 +54,10 @@ export function consoleActivity(sessions: Record<string, SessionEntry> | undefin
     // web-only agent's scheduled output has nowhere else to be read.
     if (key.includes(':cron:') && !opts.webOnly) continue;
     const to = String(s.lastTo ?? s.origin?.from ?? '');
-    const channel = String(s.lastChannel ?? (to.includes(':') ? to.split(':')[0] : '') ?? s.origin?.provider ?? '').toLowerCase();
+    // Undefined, not '', when the recipient names no app: '' stopped the ?? at
+    // once, and a Telegram conversation recorded only by its origin counted as
+    // the console's (#58).
+    const channel = String(s.lastChannel ?? (to.includes(':') ? to.split(':')[0] : undefined) ?? s.origin?.provider ?? '').toLowerCase();
     if (!WEB.has(channel)) continue;
     // 2026.8+ records carry a delivery instead: anything but "none" went to an app.
     const delivered = String(s.delivery?.channel ?? s.delivery?.kind ?? 'none').toLowerCase();
