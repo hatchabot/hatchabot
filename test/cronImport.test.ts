@@ -1,17 +1,20 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import {
   cronAddArgs,
   readOpenclawCrons,
   openclawAgentIdForWorkspace,
   migrateCrons,
+  pathPattern,
   selfPathReplacements,
   applyReplacements,
   rewriteWorkspaceFiles,
 } from '../src/orchestrator/cronImport.js';
+import { WORKSPACE_DIR_TEMPLATE } from '../src/openclaw/configWriter.js';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 
@@ -100,11 +103,34 @@ describe('self-path rewriting', () => {
     expect(r.rewrote).toBe(true);
     const shell = provider.execLog.map((a) => a.join(' ')).find((s) => s.includes('node -e'));
     expect(shell).toContain('/home/node/.openclaw/agents/tech-2/agent'); // WSDIR
-    expect(shell).toContain(entry.agentDir); // pair present in PAIRS json
+    expect(shell).toContain(JSON.stringify(pathPattern(entry.agentDir)).slice(1, -1)); // pair present in PAIRS json
     // empty pairs → nothing issued
     provider.execLog.length = 0;
     expect((await rewriteWorkspaceFiles({ provider }, runtimeRef, 'tech-2', [])).rewrote).toBe(false);
     expect(provider.execLog.length).toBe(0);
+  });
+
+  it('rewrites only whole paths, never a sibling that starts the same (#80)', async () => {
+    const src = { id: 'agent', workspace: '/source/agent' };
+    const pairs = selfPathReplacements(src, 'agent-2');
+    const to = WORKSPACE_DIR_TEMPLATE.replace('{slug}', 'agent-2');
+    const text = 'Read /source/agent/notes.md, /source/agent-two/x.md, /source/agent.bak and /old/source/agent. Done in /source/agent.';
+    const want = `Read ${to}/notes.md, /source/agent-two/x.md, /source/agent.bak and /old/source/agent. Done in ${to}.`;
+    expect(applyReplacements(text, pairs)).toBe(want);
+
+    // The same rule inside the container: run the command's node script on a real folder.
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'agent-2', workspace: { files: {}, configPatch: { agentId: 'agent-2', authMode: 'api-key' } }, env: {} });
+    await rewriteWorkspaceFiles({ provider }, runtimeRef, 'agent-2', pairs);
+    const shell = provider.execLog.map((a) => a.join(' ')).find((s) => s.includes('node -e'))!;
+    const json = /PAIRS='([^']*)'/.exec(shell)![1]!;
+    const script = /node -e '([^']*)'/.exec(shell)![1]!;
+    const dir = mkdtempSync(join(tmpdir(), 'acl-rw-'));
+    try {
+      writeFileSync(join(dir, 'MEMORY.md'), text);
+      execFileSync(process.execPath, ['-e', script], { env: { PAIRS: json, WSDIR: dir } });
+      expect(readFileSync(join(dir, 'MEMORY.md'), 'utf8')).toBe(want);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
 

@@ -6,7 +6,7 @@ import { sharePathProblem } from './provision.js';
 import type { ProvisionDeps } from './provision.js';
 import { whileBusy } from './busy.js';
 import { openclawConfigPath } from './openclawImport.js';
-import { openclawConfigAgents } from '../openclaw/configWriter.js';
+import { openclawConfigAgents, openclawUserPath } from '../openclaw/configWriter.js';
 import { RUNTIME_STATE_FILES } from './agentFiles.js';
 
 /**
@@ -311,8 +311,8 @@ export function findExistingBot(
   const want = resolve(workspaceDir);
   const agent = openclawConfigAgents(cfg).find(
     (a) =>
-      (a.workspace && resolve(a.workspace) === want) ||
-      (a.agentDir && resolve(a.agentDir) === want),
+      (a.workspace && openclawUserPath(a.workspace) === want) ||
+      (a.agentDir && openclawUserPath(a.agentDir) === want),
   );
   if (!agent?.id) return undefined;
 
