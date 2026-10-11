@@ -105,7 +105,11 @@ export function accessProbeScript(input: { paths: string[]; env: string[] }): st
     'const adm=(k,x)=>{if(x===undefined||x===null)return;let v=String(x);if(v.startsWith(k+":"))v=v.slice(k.length+1);(out.admitted[k]=out.admitted[k]||[]).includes(v)||out.admitted[k].push(v)};',
     'const ch=(cfg&&cfg.channels)||{};',
     'for(const k of ["telegram","slack","discord"]){const x=ch[k];if(!x||typeof x!=="object")continue;const a={};',
-    'try{for(const [id,v] of Object.entries(x.accounts||{})){a[id]={enabled:!!v&&v.enabled!==false,h:h(v&&(v.botToken||v.token))};for(const y of ((v&&v.allowFrom)||[]))adm(k,y)}}catch(e){bad(k,"openclaw.json",e)}',
+    // Channel-level allowFrom/groupAllowFrom admit on every account of that app
+    // (OpenClaw's defaults), and an account's groupAllowFrom admits in its
+    // groups: read them all, or a list set there reads as "nobody" (B017).
+    'const al=(o)=>{if(!o||typeof o!=="object")return;for(const f of ["allowFrom","groupAllowFrom"]){const l=o[f];if(l===undefined||l===null)continue;if(!Array.isArray(l))throw new Error(f+" not a list");for(const y of l)adm(k,y)}};',
+    'try{al(x);for(const [id,v] of Object.entries(x.accounts||{})){a[id]={enabled:!!v&&v.enabled!==false,h:h(v&&(v.botToken||v.token))};al(v)}}catch(e){bad(k,"openclaw.json",e)}',
     'out.channels[k]={enabled:x.enabled!==false,accounts:a}}',
     'const cd=d+"/credentials";try{for(const f of fs.readdirSync(cd)){const m=/^(telegram|slack|discord)-.*-allowFrom\\.json$/.exec(f);if(!m)continue;try{for(const y of (JSON.parse(fs.readFileSync(path.join(cd,f),"utf8")).allowFrom||[]))adm(m[1],y)}catch(e){bad(m[1],"allowFrom file",e)}}}catch(e){if(!gone(e))bad(null,"allowFrom files",e)}',
     `let st=null;try{st=fs.statSync(${JSON.stringify(PAIRING_DB)})}catch(e){if(!gone(e))bad(null,"pairing store",e)}`,

@@ -674,6 +674,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.1`
 - **Code:** `src/orchestrator/accessOverview.ts` — `accessProbeScript`, `verifyAgentAccess`
 
+### Access says nobody else is admitted, but someone not in the members can still message the agent
+- **Check:** in the agent's `~/.openclaw/openclaw.json`, `channels.<app>.allowFrom` or `channels.<app>.groupAllowFrom` (not under `accounts`), or an account's `groupAllowFrom`, lists their id.
+- **Cause:** the access check read only each bot account's `allowFrom`; a list set for the whole chat app, or for its groups, admits people too and was missed.
+- **Fix:** upgrade and Verify now: those lists are read, and a person they admit who is not a member shows as ⚠. Take the id out of that list (Hatchabot does not write it), then Verify again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/accessOverview.ts` — `accessProbeScript`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")
