@@ -604,6 +604,30 @@ describe('base-image candidates from chat — candidate first, promote stays in 
     expect(api.calls).toEqual(['image:a1:default', 'rebuild:a1']);
   });
 
+  it('end_base_trial refuses the Hatchabot agent through the real HTTP client, which keeps `ops` (B006)', async () => {
+    const { HttpApiClient } = await import('../src/mgmt/apiClient.js');
+    const asked: string[] = [];
+    const api = new HttpApiClient(async (method, path) => {
+      asked.push(`${method} ${path}`);
+      if (path === '/v1/agents') {
+        return [{ id: 'm1', name: 'Hatchabot', slug: 'hatchabot', state: 'RUNNING', aiProfileId: 'p1', ops: true, image: 'hatchabot-runtime:2026.9.0' }];
+      }
+      if (path === '/v1/runtime/images') {
+        return { default: 'hatchabot-runtime:latest', tags: [
+          { tag: 'hatchabot-runtime:latest', exists: true, isDefault: true, isLatest: true, derived: null, pinned: [] },
+          { tag: 'hatchabot-runtime:2026.9.0', exists: true, isDefault: false, isLatest: false, derived: null, pinned: [{ id: 'm1', name: 'Hatchabot' }] },
+        ] };
+      }
+      throw new Error(`not expected: ${method} ${path}`);
+    });
+    expect(await api.listAgents()).toEqual([{ id: 'm1', name: 'Hatchabot', slug: 'hatchabot', state: 'RUNNING', model: undefined, aiProfileId: 'p1', ops: true }]);
+    const broker = new Broker(api, new PendingStore(), { pollIntervalMs: 1, pollTimeoutMs: 2000 });
+    broker.setMode(true);
+    const r = await broker.handleTool('end_base_trial', { agent: 'm1' }, WHO);
+    expect(r).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: expect.stringContaining('keeps its own image on purpose') } });
+    expect(asked.filter((a) => a.startsWith('PUT') || a.startsWith('POST'))).toEqual([]);
+  });
+
   it('there is no promote tool at all', async () => {
     const { MANIFEST } = await import('../src/mgmt/tools.js');
     expect(MANIFEST.map((t) => t.name).filter((n) => /promote/i.test(n))).toEqual([]);

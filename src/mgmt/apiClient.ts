@@ -68,6 +68,9 @@ export class HttpApiClient implements ApiClient {
       state: a.state,
       model: a.model,
       aiProfileId: a.aiProfileId,
+      // The end_base_trial guard reads it: dropped here, it never fired for
+      // the real client and the manager's own pin could be ended (B006).
+      ...(a.ops ? { ops: true } : {}),
     }));
   }
   async getAgent(id: string): Promise<AgentSummary> {
