@@ -4,13 +4,15 @@ import { isPublic, publicClientAddress } from './trust.js';
  * full URL, so OpenClaw's `mediaTicket=<JWT>` capability links (console media)
  * landed in the journal in the clear (review, 2026-09-29). Query strings are
  * dropped wholesale — any of them may carry a ticket, a state token or a
- * code — and the invitation code in a join link is masked the same way.
+ * code — and an invitation code in the path is masked the same way: a join
+ * link's, and the segment after any `/invites/`, nested routes included
+ * (`/v1/agents/:id/invites/:code/knock-window` kept it, C046).
  */
 export function redactUrlForLog(url: string | undefined): string {
   if (!url) return '';
   const q = url.indexOf('?');
   const path = q === -1 ? url : url.slice(0, q);
-  const masked = path.replace(/^(\/join|\/v1\/invites)\/[^/]+/, '$1/…');
+  const masked = path.replace(/^\/join\/[^/]+/, '/join/…').replace(/\/invites\/[^/]+/g, '/invites/…');
   return q === -1 ? masked : `${masked}?…`;
 }
 

@@ -234,6 +234,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/store/store.ts` — `replaceBackupCodes`; `src/api/secondFactor.ts` — `newBackupCodes`
 
+### The service log shows an invitation code in a `/v1/agents/<id>/invites/<code>/knock-window` line
+- **Check:** `journalctl --user -u hatchabot | grep knock-window` shows the code in full.
+- **Cause:** the request log masked the code only in `/join/<code>` and `/v1/invites/<code>`, not on the nested route Copy or Share on an invite calls.
+- **Fix:** upgrade; any path segment after `/invites/` is masked. An invite whose code reached a log you share can be removed and made again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/requestLog.ts` — `redactUrlForLog`
+
 ## AI sources and Claude login
 
 ### An agent answers "Your model provider needs a new login" or "Not logged in · Please run /login", while the same source works for other agents
