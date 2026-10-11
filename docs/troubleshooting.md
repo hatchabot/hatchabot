@@ -681,6 +681,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `web/index.html` — `appGo`
 
+### Clone failed, and cloning again says the name is taken
+- **Check:** the first Clone answered with an error, and the agents list shows an agent with the clone's name that never built (Provisioning or failed), with no runtime.
+- **Cause:** the clone was made first and its settings (environment variables) copied after; when a copy failed, the half-made clone and the secrets copied so far were left behind.
+- **Fix:** upgrade: a failed clone is undone completely and says "Nothing was kept". Until then, delete the half-made clone, then clone again.
+- **Fixed in:** `v2.160.0` (#165)
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/clone'`
+
 ### A git data source added again still holds the old repo, or a writable one cannot push ("PUSH-DISABLED-read-only-public-clone")
 - **Check:** in the agent, `git -C ~/.openclaw/<mount> remote -v` shows another repo than the source's card, or a push URL of `PUSH-DISABLED-read-only-public-clone` for a source added with a deploy key.
 - **Cause:** removing a git source keeps its clone on the volume. A source added again at the same mount found that clone and skipped cloning, keeping its old address and, from a public source, its disabled push URL.
