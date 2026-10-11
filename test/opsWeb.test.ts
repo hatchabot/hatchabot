@@ -45,6 +45,23 @@ describe('web_search / read_result', () => {
     expect(seen.filter((u) => !u.startsWith(SEARCH))).toEqual([]);
   });
 
+  it('a result number stays bound to its page; once let go it has expired, never another page', async () => {
+    let call = 0;
+    const urls = (k: number) => Array.from({ length: 8 }, (_, i) => `https://docs.example.com/s${k}-${i}`);
+    const routes: Record<string, () => Response> = { [SEARCH]: () => results(urls(call++))() };
+    for (let k = 0; k < 8; k++) for (const u of urls(k)) routes[u] = () => page(`<p>page ${u.split('/').pop()}</p>`);
+    const { opsWeb } = web(routes);
+    let last = '';
+    for (let k = 0; k < 8; k++) last = (await opsWeb('o', 'web_search', { query: `q${k}` })).text;
+    expect(last).toMatch(/^57\. T0\n\s+https:\/\/docs\.example\.com\/s7-0/); // 64 given out; numbers keep counting
+    // 64 results, 60 kept: 1–4 are gone and say so.
+    const gone = await opsWeb('o', 'read_result', { n: 4 });
+    expect(gone).toMatchObject({ isError: true, text: expect.stringMatching(/Result 4 has expired/) });
+    expect((await opsWeb('o', 'read_result', { n: 5 })).text).toContain('page s0-4');
+    expect((await opsWeb('o', 'read_result', { n: 64 })).text).toContain('page s7-7');
+    expect((await opsWeb('o', 'read_result', { n: 65 })).isError).toBe(true);
+  });
+
   it('refuses a result that resolves to a private address, and a redirect to one', async () => {
     const { opsWeb, seen } = web(
       {

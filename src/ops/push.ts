@@ -27,8 +27,33 @@ export interface OpsPushDeps {
   log?(event: string, detail: Record<string, unknown>): void;
 }
 
-/** Telegram's own cap is 4096 characters; leave room for the tail. */
-const MAX = 3500;
+/** Telegram refuses a message over 4096 characters: the whole message, tail included, stays under this. */
+const MAX = 4000;
+
+/** At most `n` characters, never ending on half of a surrogate pair. */
+function cut(text: string, n: number): string {
+  if (text.length <= n) return text;
+  if (n <= 1) return '';
+  const end = Math.max(0, n - 1);
+  const code = text.charCodeAt(end - 1);
+  return `${text.slice(0, code >= 0xd800 && code <= 0xdbff ? end - 1 : end)}…`;
+}
+
+/**
+ * The message: headline, detail, then the fixed tail. The tail (where to
+ * confirm) is never cut; the headline and detail share what is left, the
+ * headline first. Capping each part alone let two long parts add up to
+ * more than Telegram takes, and the push was refused.
+ */
+export function pushText(headline: string, detail: string | undefined, tail: string[]): string {
+  const sep = '\n\n';
+  const end = tail.filter(Boolean);
+  let room = MAX - end.reduce((n, t) => n + t.length + sep.length, 0);
+  const head = cut(headline.trim(), Math.max(0, room));
+  room -= head.length + sep.length;
+  const more = detail?.trim() && room > 1 ? cut(detail.trim(), room) : '';
+  return [head, more, ...end].filter(Boolean).join(sep);
+}
 
 export interface OpsPush {
   /** Fire-and-forget; resolves false when there was nowhere to send. */
@@ -78,12 +103,10 @@ export function createOpsPush(deps: OpsPushDeps): OpsPush {
       const slot = budget.take(ownerId);
       if (slot === 'drop') { deps.log?.('ops.push', { ok: false, error: 'hourly push limit; more is waiting in the app' }); return false; }
       const where = deps.appUrl?.();
-      const text = [
-        headline.trim().slice(0, MAX),
-        detail?.trim() ? detail.trim().slice(0, MAX) : '',
+      const text = pushText(headline, detail, [
         slot === 'last' ? 'That is the last of these for this hour — anything more waits in the app.' : '',
         where ? `Confirm it in Hatchabot: ${where}` : 'Confirm it in the Hatchabot app.',
-      ].filter(Boolean).join('\n\n');
+      ]);
       if (!token) {
         // No Telegram to carry it: the manager's Discord bot, when the owner is linked there.
         const ok = await deps.sendDiscord!(ownerId, text).catch(() => false);

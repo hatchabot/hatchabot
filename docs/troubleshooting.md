@@ -1369,6 +1369,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/cliChatModel.ts` — `renderConversation`
 
+### The Hatchabot agent quotes a web page that is not the search result it named
+- **Check:** after many searches in one session (more than 60 results in all), the agent opens result N and reports a page about something else.
+- **Cause:** only the latest 60 results are kept, and dropping the oldest renumbered the rest, so a number given out earlier pointed at a different page.
+- **Fix:** upgrade. A result keeps its number for good; once it is too old to open, `read_result` says "Result N has expired … Search again."
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/ops/opsWeb.ts` — `makeOpsWeb`
+
+### A change waited for confirmation, but no Telegram message came
+- **Check:** the service log has `ops.push` with `ok: false` and an error like "message is too long", for a change with a long summary.
+- **Cause:** the headline and the detail were each cut at 3,500 characters, so together (with the link) they could pass Telegram's 4,096-character limit and the message was refused.
+- **Fix:** upgrade. The whole message is kept under the limit: the link to confirm is never cut, the detail is shortened first.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/ops/push.ts` — `pushText`
+
+### The Hatchabot agent never said how a change or build ended after it moved or was rebuilt
+- **Check:** the change shows as done on the home screen, but the agent's conversation has no "[Hatchabot note …]" for it; the service log has `ops.note` with `ok: false` for that time, and the agent had just moved, been rebuilt or been made again.
+- **Cause:** a note waiting behind another was sent to the agent as it was when the note was queued, on its old machine or container.
+- **Fix:** upgrade. Each note looks up the Hatchabot agent when its turn comes; if it is not running then, the note is dropped (`ops.note_dropped`) and the outcome stays on the home screen.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/ops/notify.ts` — `createOpsNotifier`
+
 ## Docker, disk and memory
 
 ### `hatchabot doctor`: "Only N GB free — each agent volume grows; the image is ~2 GB"

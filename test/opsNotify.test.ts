@@ -53,6 +53,35 @@ describe('management agent notes', () => {
     expect(most).toBe(1);
   });
 
+  it('a queued note goes to the manager as it is when its turn comes (moved, rebuilt), or is dropped if it stopped', async () => {
+    let current = live();
+    const turns: Array<{ id: string; hostId: string; runtimeRef?: string }> = [];
+    const events: Array<[string, Record<string, unknown>]> = [];
+    const n = createOpsNotifier({
+      opsAgent: () => current,
+      runTurn: async (a) => {
+        turns.push({ id: a.id, hostId: a.hostId, runtimeRef: a.runtimeRef });
+        // While the first turn runs, the manager moves to another machine.
+        if (turns.length === 1) current = live({ hostId: 'h2', runtimeRef: 'docker://y' });
+        return { ok: true };
+      },
+      log: (e, d) => events.push([e, d]),
+    });
+    await Promise.all([n.notify('o', 'one'), n.notify('o', 'two')]);
+    expect(turns).toEqual([{ id: 'a1', hostId: 'h1', runtimeRef: 'docker://x' }, { id: 'a1', hostId: 'h2', runtimeRef: 'docker://y' }]);
+    // Recreated under a new id while a note waits: the new one gets it.
+    const first = n.notify('o', 'three');
+    current = live({ id: 'a9', runtimeRef: 'docker://z' });
+    await first;
+    expect(turns.at(-1)).toMatchObject({ id: 'a9', runtimeRef: 'docker://z' });
+    // Stopped by the time its turn comes: dropped, and said so.
+    const late = n.notify('o', 'four');
+    current = live({ id: 'a9', state: 'STOPPED' });
+    await late;
+    expect(turns).toHaveLength(3);
+    expect(events.some(([e, d]) => e === 'ops.note_dropped' && /not running/.test(String(d.reason)))).toBe(true);
+  });
+
   it('a failed turn is logged and dropped — it never breaks the change', async () => {
     const events: Array<[string, Record<string, unknown>]> = [];
     const n = createOpsNotifier({

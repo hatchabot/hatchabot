@@ -64,31 +64,41 @@ export interface OpsNotifier {
 const MAX_QUEUED = 3;
 
 export function createOpsNotifier(deps: OpsNotifyDeps): OpsNotifier {
+  // Per owner (each has one manager): a manager rebuilt or moved while a note
+  // waits is the same queue, and a recreated one is too.
   const chains = new Map<string, Promise<void>>();
   const queued = new Map<string, number>();
+  // No manager, or one that cannot take a turn right now (stopped,
+  // rebuilding, moving): the outcome is still on the home screen.
+  const ready = (ownerId: string): OpsNoteAgent | undefined => {
+    const agent = deps.opsAgent(ownerId);
+    return agent && agent.state === 'RUNNING' && agent.runtimeRef ? agent : undefined;
+  };
   return {
     notify(ownerId, body) {
-      const agent = deps.opsAgent(ownerId);
-      // No manager, or one that cannot take a turn right now (stopped,
-      // rebuilding, moving): the outcome is still on the home screen.
-      if (!agent || agent.state !== 'RUNNING' || !agent.runtimeRef) return Promise.resolve();
-      if ((queued.get(agent.id) ?? 0) >= MAX_QUEUED) {
-        deps.log?.('ops.note_dropped', { agentId: agent.id, queued: queued.get(agent.id) });
+      const agent = ready(ownerId);
+      if (!agent) return Promise.resolve();
+      if ((queued.get(ownerId) ?? 0) >= MAX_QUEUED) {
+        deps.log?.('ops.note_dropped', { agentId: agent.id, queued: queued.get(ownerId) });
         return Promise.resolve();
       }
-      queued.set(agent.id, (queued.get(agent.id) ?? 0) + 1);
-      const prev = chains.get(agent.id) ?? Promise.resolve();
+      queued.set(ownerId, (queued.get(ownerId) ?? 0) + 1);
+      const prev = chains.get(ownerId) ?? Promise.resolve();
       const next = prev
         .then(async () => {
+          // The manager as it is NOW: the one seen when the note was queued
+          // may have moved host or been rebuilt while the turn before ran.
+          const now = ready(ownerId);
+          if (!now) { deps.log?.('ops.note_dropped', { agentId: agent.id, reason: 'the manager is not running now' }); return; }
           const r = await deps
-            .runTurn(agent, opsNoteText(body))
+            .runTurn(now, opsNoteText(body))
             .catch((err) => ({ ok: false, error: String((err as Error)?.message ?? err) }));
-          deps.log?.('ops.note', { agentId: agent.id, ok: r.ok, ...(r.ok ? {} : { error: String(r.error ?? '').slice(0, 200) }) });
+          deps.log?.('ops.note', { agentId: now.id, ok: r.ok, ...(r.ok ? {} : { error: String(r.error ?? '').slice(0, 200) }) });
         })
-        .finally(() => queued.set(agent.id, Math.max(0, (queued.get(agent.id) ?? 1) - 1)))
+        .finally(() => queued.set(ownerId, Math.max(0, (queued.get(ownerId) ?? 1) - 1)))
         .catch(() => {});
-      chains.set(agent.id, next);
-      void next.then(() => { if (chains.get(agent.id) === next) chains.delete(agent.id); });
+      chains.set(ownerId, next);
+      void next.then(() => { if (chains.get(ownerId) === next) chains.delete(ownerId); });
       return next;
     },
   };
