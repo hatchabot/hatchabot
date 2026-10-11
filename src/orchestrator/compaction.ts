@@ -192,18 +192,22 @@ export async function compactAgent(deps: CompactDeps, agent: Agent, req: Compact
       ...(r.tokensAfter !== undefined ? { afterK: Math.round(r.tokensAfter / 1000) } : {}),
       ...(r.kept !== undefined ? { keptLines: r.kept } : {}), ...(r.reason ? { reason: r.reason } : {}) };
     const outcome = r.outcome === 'nothing' ? 'ok' : r.outcome;
-    store.updateTokenAction(action.id, { detail, outcome });
-    inFlight.delete(agent.id);
+    try { store.updateTokenAction(action.id, { detail, outcome }); } finally { inFlight.delete(agent.id); }
     deps.log?.('token.compaction_done', { agentId: agent.id, mode: req.mode, outcome, ...(r.tokensAfter !== undefined ? { afterK: Math.round(r.tokensAfter / 1000) } : {}) });
     return { ...action, detail, outcome };
   };
+  // A run that threw (the exec could not even start) is a failed compaction
+  // in the ledger too, never one left "running" for good.
+  const failed = (err: unknown, extra: Record<string, unknown> = {}) => {
+    try { finish({ outcome: 'failed', reason: String((err as Error)?.message ?? err).slice(0, 200) }, extra); }
+    catch { inFlight.delete(agent.id); }
+  };
 
   if (req.mode === 'lines') {
-    try {
-      const r = await run();
-      const done = finish(r);
-      return { action: done, background: false, message: resultLine(agent.name, done) };
-    } catch (err) { inFlight.delete(agent.id); throw err; }
+    let r: CompactResult;
+    try { r = await run(); } catch (err) { failed(err); throw err; }
+    const done = finish(r);
+    return { action: done, background: false, message: resultLine(agent.name, done) };
   }
 
   // Summarise: minutes. In the background; when a retry is looping, right after its next stall.
@@ -216,9 +220,9 @@ export async function compactAgent(deps: CompactDeps, agent: Agent, req: Compact
       }
       const r = await run();
       const done = finish(r, waited);
-      if (deps.tell) await deps.tell(agent.ownerId, agent, `🗜 Hatchabot: ${resultLine(agent.name, done)}`).catch(() => false);
+      if (deps.tell) await Promise.resolve().then(() => deps.tell!(agent.ownerId, agent, `🗜 Hatchabot: ${resultLine(agent.name, done)}`)).catch(() => false);
     } catch (err) {
-      finish({ outcome: 'failed', reason: String((err as Error)?.message ?? err).slice(0, 200) }, waited);
+      failed(err, waited);
     }
   })();
   return {

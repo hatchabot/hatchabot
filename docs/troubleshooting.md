@@ -1244,6 +1244,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.159.1`
 - **Code:** `src/orchestrator/tokenHealth.ts` — `tokenHealthRow`; `src/orchestrator/compaction.ts` — `parseCompactResult`; `src/orchestrator/recommendations.ts` — `conversationItems`
 
+### The token ledger shows a compaction "running" that ended long ago
+- **Check:** the manager's `get_token_health` or the ledger lists a compaction with outcome `running` from hours or days ago, while a new compaction of the same agent starts normally.
+- **Cause:** when the compaction command could not even be started (the exec threw instead of answering), the in-memory lock was let go but the ledger row was never closed.
+- **Fix:** upgrade. Every way out of a compaction now records it, a run that threw as `failed` with the reason. A row left from before stays as it is; it does no harm.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/compaction.ts` — `compactAgent`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody
