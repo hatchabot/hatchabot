@@ -609,3 +609,25 @@ describe('exporting a volume that is not there (2026-10-09)', () => {
     expect(argv()).toMatch(/^run .*:\/vol:ro alpine tar cz/m);
   });
 });
+
+describe('a download stream from a volume (#178)', () => {
+  /** A docker stub whose one-shot prints part of a file, then exits `code`. */
+  function streaming(code: number) {
+    const d = mkdtempSync(join(tmpdir(), 'acl-stream-'));
+    const bin = join(d, 'docker');
+    writeFileSync(bin, `#!/usr/bin/env bash\nprintf 'first half'\necho 'cat: read error' >&2\nexit ${code}\n`, { mode: 0o755 });
+    chmodSync(bin, 0o755);
+    return new LocalDockerProvider({ docker: bin, image: 'test-image:latest' });
+  }
+  const drain = async (s: NodeJS.ReadableStream) => { let got = ''; for await (const c of s) got += String(c); return got; };
+
+  it('a copy that fails half-way errors instead of ending as a good, short download', async () => {
+    const s = streaming(1).streamFromVolume('docker://hatchabot-kitchen-helper-df918a55', ['cat', 'x']);
+    await expect(drain(s)).rejects.toThrow(/exit 1: cat: read error/);
+  });
+
+  it('a copy that finishes ends with every byte', async () => {
+    const s = streaming(0).streamFromVolume('docker://hatchabot-kitchen-helper-df918a55', ['cat', 'x']);
+    expect(await drain(s)).toBe('first half');
+  });
+});

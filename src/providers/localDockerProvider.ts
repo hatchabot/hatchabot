@@ -747,11 +747,20 @@ export class LocalDockerProvider implements RuntimeProvider {
     ]), { stdio: ['ignore', 'pipe', 'pipe'] });
     let err = '';
     child.stderr.on('data', (c: Buffer) => { if (err.length < 2000) err += c.toString('utf8'); });
-    const out = child.stdout;
+    // Not child.stdout itself: it ends (and the reader is done) before the
+    // exit code is known, so a cat or tar that failed half-way finished as a
+    // good, truncated download (#178). The copy ends only on exit 0.
+    const out = new PassThrough();
+    child.stdout.pipe(out, { end: false });
     child.on('error', (e) => out.destroy(e));
-    child.on('close', (code) => { if (code !== 0 && !out.destroyed) out.destroy(new Error(`exit ${code}: ${err.trim().slice(-300)}`)); });
+    child.on('close', (code, signal) => {
+      if (out.destroyed) return;
+      if (code === 0) out.end();
+      else out.destroy(new Error(`exit ${code ?? signal}: ${err.trim().slice(-300)}`));
+    });
     out.on('close', () => {
-      if (child.exitCode !== null) return;
+      child.stdout.unpipe(out);
+      if (child.exitCode !== null || child.signalCode !== null) return;
       child.kill('SIGKILL');
       void this.#docker(['rm', '-f', name]).catch(() => {});
     });
