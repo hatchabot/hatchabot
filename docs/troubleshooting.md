@@ -1803,6 +1803,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.3`
 - **Code:** `src/orchestrator/problemReport.ts` — `redactForPublic`
 
+### Report a problem fails with "URI malformed" when the report holds emoji
+- **Check:** the title is long or the report is long enough to be cut for the link, and it has emoji or other characters outside the basic plane near the cut.
+- **Cause:** the report was cut in the middle of such a character, and the half left behind cannot go in a link.
+- **Fix:** upgrade: cuts now fall between characters. On an older version, shorten the title or remove the emoji near its end.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/problemReport.ts` — `buildReport`, `issueUrl`
+
 ### On a Claude subscription, the Hatchabot agent says it will do something, then nothing happens (no card)
 - **Check:** the reply ends with a long JSON object (`{"tool": …}`), shown as text, and no confirmation card appears; the AI source behind the Hatchabot agent is a setup-token or machine login (Settings → AI).
 - **Cause:** on a subscription the model is reached through the Claude CLI, which answers in text; a tool call after a sentence was looked for among only the last 20 opening braces, so a call with many nested objects (a schedule, a list of rows) was never found and was shown as prose.
