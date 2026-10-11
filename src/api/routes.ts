@@ -162,7 +162,7 @@ import {
   parseOAuthClient, revokeGoogleToken, type OAuthClient,
 } from '../orchestrator/googleConnections.js';
 import { accessAlertOf, accessOverview, agentsWithAccessFindings, verifyAgentAccess } from '../orchestrator/accessOverview.js';
-import { INSPECTABLE_FILES, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
+import { INSPECTABLE_FILES, InspectReadError, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
 import { computePosture, riskKeys, diffRisks, diskWarnBytes, measureAgentDisks } from '../orchestrator/posture.js';
 import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, ImportCleanupPending, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
@@ -10541,10 +10541,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     if (!agent.runtimeRef) return reply.code(409).send({ error: 'This agent has no stored volume to inspect.' });
     const provider = providerFor(agent.hostId);
-    const [files, transcript] = await Promise.all([
-      listInspectableFiles(provider, agent.runtimeRef, agent.slug).catch(() => []),
-      readTranscript(provider, agent.runtimeRef, agent.slug, { maxTurns: 0 }).catch(() => ({ turns: [], totalTurns: 0 })),
-    ]);
+    // A read that failed is said, not shown as an agent with no files (#151).
+    let files: Awaited<ReturnType<typeof listInspectableFiles>>, transcript: { totalTurns: number };
+    try {
+      [files, transcript] = await Promise.all([
+        listInspectableFiles(provider, agent.runtimeRef, agent.slug),
+        readTranscript(provider, agent.runtimeRef, agent.slug, { maxTurns: 0 }),
+      ]);
+    } catch (err) {
+      return reply.code(502).send({ error: err instanceof InspectReadError ? err.message : "Couldn't read the agent's stored files." });
+    }
     return { files, transcriptTurns: transcript.totalTurns, name: agent.name, state: agent.state };
   });
 
@@ -10555,7 +10561,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!(INSPECTABLE_FILES as readonly string[]).includes(req.params.name)) {
       return reply.code(400).send({ error: 'Not an inspectable file.' });
     }
-    const file = await readInspectableFile(providerFor(agent.hostId), agent.runtimeRef, agent.slug, req.params.name);
+    let file: Awaited<ReturnType<typeof readInspectableFile>>;
+    try { file = await readInspectableFile(providerFor(agent.hostId), agent.runtimeRef, agent.slug, req.params.name); }
+    catch (err) { return reply.code(502).send({ error: err instanceof InspectReadError ? err.message : "Couldn't read the agent's stored files." }); }
     if (!file) return reply.code(404).send({ error: 'No such file on the volume.' });
     return file;
   });
@@ -10565,7 +10573,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     if (!agent.runtimeRef) return reply.code(409).send({ error: 'This agent has no stored volume to inspect.' });
     const maxTurns = Math.min(Math.max(Number(req.query.maxTurns ?? 400) || 400, 1), 2000);
-    return readTranscript(providerFor(agent.hostId), agent.runtimeRef, agent.slug, { maxTurns });
+    try { return await readTranscript(providerFor(agent.hostId), agent.runtimeRef, agent.slug, { maxTurns }); }
+    catch (err) { return reply.code(502).send({ error: err instanceof InspectReadError ? err.message : "Couldn't read the agent's stored files." }); }
   });
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/bot-token', async (req, reply) => {

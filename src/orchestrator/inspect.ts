@@ -20,6 +20,28 @@ function agentDir(slug: string): string {
   return `/home/node/.openclaw/agents/${slug}/agent`;
 }
 
+/** A volume read that did not work (the one-shot did not run, a file could not be read). */
+export class InspectReadError extends Error {
+  constructor() { super("Couldn't read the agent's stored files. Its machine or Docker may not be answering — try again in a moment."); }
+}
+
+/** The script's answer, or an error: a failed read is not an empty one (#151). */
+function ok(res: { code: number; stdout: string }): string {
+  if (res.code !== 0) throw new InspectReadError();
+  return res.stdout;
+}
+
+/**
+ * The first `max` bytes of `buf` as text, ending on a whole character: the
+ * byte after the cut is a UTF-8 continuation byte when the cut splits one,
+ * so back up to that character's first byte (#152).
+ */
+export function utf8Prefix(buf: Buffer, max: number): string {
+  let end = Math.min(max, buf.length);
+  while (end > 0 && end < buf.length && (buf[end]! & 0xc0) === 0x80) end--;
+  return buf.subarray(0, end).toString('utf8');
+}
+
 /**
  * Which of the inspectable files exist and their sizes — one cheap volume
  * mount, so the UI can list before fetching any body.
@@ -30,11 +52,12 @@ export async function listInspectableFiles(
   slug: string,
 ): Promise<Array<{ name: string; bytes: number }>> {
   const dir = agentDir(slug);
-  // `wc -c` each candidate; missing files print an error we drop.
-  const script = INSPECTABLE_FILES.map((f) => `wc -c ${q(`${dir}/${f}`)} 2>/dev/null || true`).join('\n');
+  // `wc -c` each candidate that is there; one that is there but cannot be
+  // read fails the listing rather than vanishing from it.
+  const script = INSPECTABLE_FILES.map((f) => `if [ -e ${q(`${dir}/${f}`)} ]; then wc -c ${q(`${dir}/${f}`)} || exit 1; fi`).join('\n');
   const res = await provider.execShellOnVolume(runtimeRef, script, { readOnly: true });
   const out: Array<{ name: string; bytes: number }> = [];
-  for (const line of res.stdout.split('\n')) {
+  for (const line of ok(res).split('\n')) {
     const m = /^\s*(\d+)\s+(.+)$/.exec(line);
     if (!m) continue;
     const name = m[2]!.split('/').pop()!;
@@ -52,13 +75,14 @@ export async function readInspectableFile(
 ): Promise<{ name: string; content: string; truncated: boolean } | null> {
   if (!(INSPECTABLE_FILES as readonly string[]).includes(name)) return null;
   const path = `${agentDir(slug)}/${name}`;
-  const res = await provider.execShellOnVolume(runtimeRef, `head -c ${MAX_FILE_BYTES + 1} ${q(path)} 2>/dev/null || true`, { readOnly: true });
-  const truncated = Buffer.byteLength(res.stdout, 'utf8') > MAX_FILE_BYTES;
-  // Slice on BYTES, not JS chars, so a multibyte file caps at the real budget
-  // and doesn't split a codepoint (matches the files route's byte handling).
-  const content = truncated
-    ? Buffer.from(res.stdout, 'utf8').subarray(0, MAX_FILE_BYTES).toString('utf8')
-    : res.stdout;
+  // Exit 3: not there (the route's 404). Any other failure is an error.
+  const res = await provider.execShellOnVolume(runtimeRef, `[ -e ${q(path)} ] || exit 3; head -c ${MAX_FILE_BYTES + 1} ${q(path)}`, { readOnly: true });
+  if (res.code === 3) return null;
+  const stdout = ok(res);
+  const truncated = Buffer.byteLength(stdout, 'utf8') > MAX_FILE_BYTES;
+  // Slice on BYTES, not JS chars, so a multibyte file caps at the real budget,
+  // and on a character boundary, so the last character is not mangled.
+  const content = truncated ? utf8Prefix(Buffer.from(stdout, 'utf8'), MAX_FILE_BYTES) : stdout;
   return { name, content, truncated };
 }
 
@@ -91,10 +115,10 @@ export async function readTranscript(
     `ls -S ${q(dir)}/*.jsonl 2>/dev/null | head -1`,
     { readOnly: true },
   );
-  const sessionFile = pick.stdout.trim().split('\n')[0]?.trim();
+  const sessionFile = ok(pick).trim().split('\n')[0]?.trim();
   if (!sessionFile) return { turns: [], totalTurns: 0 };
   const countRes = await provider.execShellOnVolume(runtimeRef, `wc -l ${q(sessionFile)} 2>/dev/null || true`, { readOnly: true });
-  const totalTurns = Number(/^\s*(\d+)/.exec(countRes.stdout)?.[1] ?? 0);
+  const totalTurns = Number(/^\s*(\d+)/.exec(ok(countRes))?.[1] ?? 0);
   const res = await provider.execShellOnVolume(
     runtimeRef,
     // Cap the byte transfer too: a huge session shouldn't balloon the response.
@@ -102,7 +126,7 @@ export async function readTranscript(
     { readOnly: true },
   );
   const turns: TranscriptTurn[] = [];
-  for (const line of res.stdout.split('\n')) {
+  for (const line of ok(res).split('\n')) {
     if (!line.trim()) continue;
     let e: Record<string, unknown>;
     try {
