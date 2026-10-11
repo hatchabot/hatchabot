@@ -75,7 +75,8 @@ export const TemplateParamSchema = z
     required: z.boolean(),
     type: z.enum(['text', 'longtext', 'choice', 'multichoice', 'boolean']),
     default: z.string().max(2000).optional(),
-    options: z.array(z.string().min(1).max(120)).max(12).optional(),
+    // Trimmed: answers are compared trimmed, so " Daily" could never be picked (#169).
+    options: z.array(z.string().trim().min(1).max(120)).max(12).optional(),
     /** Where the value lands: substituted into a file's {{key}} placeholder,
      *  (Phase 2b) as an agent env var named KEY-uppercased — a write-only
      *  secret, never stored in paramValues — or `datasource`: the value is a
@@ -160,7 +161,14 @@ const TemplateSchema = z.object({
   // Optional + defaulted: templates from before Phase 2a parse as having none,
   // and older apps reading a newer template strip the unknown key (zod objects
   // are non-strict) — no version bump needed in either direction.
-  parameters: z.array(TemplateParamSchema).max(MAX_TEMPLATE_PARAMS).default([]),
+  // Keys unique, as PATCH and the management agent already require: two
+  // fields with one key overwrote each other's value, and an env-target twin
+  // took the key out of the file substitutions altogether (#168).
+  parameters: z
+    .array(TemplateParamSchema)
+    .max(MAX_TEMPLATE_PARAMS)
+    .refine((a) => new Set(a.map((p) => p.key)).size === a.length, { message: 'parameter keys must be unique' })
+    .default([]),
   schedules: z
     .array(
       z.object({
@@ -441,20 +449,34 @@ export function resolveParamValues(
   for (const p of params) {
     let v = values[p.key] ?? p.default;
     if (p.type === 'boolean' && v !== undefined) {
-      v = /^(true|yes|1|on)$/i.test(v) ? 'true' : 'false';
+      // Only a known yes or no: anything else ("tru") was read as no and
+      // turned the option off without a word (#83). Blank stays no.
+      const b = v.trim().toLowerCase();
+      if (/^(true|yes|1|on)$/.test(b)) v = 'true';
+      else if (/^(false|no|0|off|)$/.test(b)) v = 'false';
+      else {
+        problems.push(`"${p.label}" must be yes or no (true/false), not "${v.slice(0, 40)}"`);
+        continue;
+      }
     }
-    if (p.type === 'choice' && v !== undefined && p.options?.length && !p.options.includes(v)) {
-      problems.push(`"${p.label}" must be one of: ${p.options.join(', ')}`);
-      continue;
+    // Options compared as declared now (trimmed): a field stored before
+    // declarations were trimmed must still be fillable (#169).
+    const options = p.options?.map((o) => o.trim());
+    if (p.type === 'choice' && v !== undefined && options?.length) {
+      if (!options.includes(v.trim())) {
+        problems.push(`"${p.label}" must be one of: ${options.join(', ')}`);
+        continue;
+      }
+      v = v.trim();
     }
     // multichoice: the value is a comma-separated SUBSET of the options,
     // normalized to "a, b" — that string is what lands in the {{placeholder}},
     // so it must read naturally in prose.
-    if (p.type === 'multichoice' && v !== undefined && v !== '' && p.options?.length) {
+    if (p.type === 'multichoice' && v !== undefined && v !== '' && options?.length) {
       const picks = v.split(',').map((s) => s.trim()).filter(Boolean);
-      const bad = picks.filter((s) => !p.options!.includes(s));
+      const bad = picks.filter((s) => !options.includes(s));
       if (bad.length) {
-        problems.push(`"${p.label}" allows only: ${p.options.join(', ')} (got ${bad.join(', ')})`);
+        problems.push(`"${p.label}" allows only: ${options.join(', ')} (got ${bad.join(', ')})`);
         continue;
       }
       v = picks.join(', ');

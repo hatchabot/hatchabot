@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { exportTemplate, importTemplate, parseTemplate, TemplateParamSchema } from '../src/orchestrator/template.js';
+import { exportTemplate, importTemplate, parseTemplate, resolveParamValues, TemplateParamSchema } from '../src/orchestrator/template.js';
 import { buildWorkspaceSeed } from '../src/openclaw/workspace.js';
 
 /**
@@ -296,5 +296,36 @@ describe('an export says what it cannot carry (workflow audit, 2026-10-10)', () 
     const { agent } = importTemplate({ store, provider }, data, { ownerId: 'owner-b', name: 'Brisk one', values: { style: 'brisk' } });
     expect(store.getAgentSeed(agent.id)['SOUL.md']).toBe('A brisk advisor.');
     expect(agent.persona).toBe('a brisk one');
+  });
+});
+
+describe('setup-field answers and declarations (workflow audit, 2026-10-10)', () => {
+  const { gzipSync } = require('node:zlib');
+  const field = (extra: Record<string, unknown>) => ({ key: 'k', label: 'K', required: true, type: 'text', target: 'soul', ...extra });
+
+  it('a template with two fields of one key is refused (#168)', () => {
+    const t = (parameters: unknown[]) => gzipSync(Buffer.from(JSON.stringify({
+      format: 'hatchabot-template', version: 1, exportedAt: 'now',
+      agent: { name: 'Twins', persona: '', sharedMemory: false }, files: { 'SOUL.md': '{{k}}' },
+      ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [], parameters,
+    })));
+    expect(() => parseTemplate(t([field({}), field({ label: 'K again', target: 'env' })]))).toThrow(/malformed/);
+    expect(parseTemplate(t([field({})])).parameters).toHaveLength(1);
+  });
+
+  it('an option with spaces around it can be picked (#169)', () => {
+    const parsed = TemplateParamSchema.safeParse(field({ type: 'multichoice', options: [' daily', 'weekly '] }));
+    expect(parsed.success && parsed.data.options).toEqual(['daily', 'weekly']);
+    // A field stored before declarations were trimmed still resolves.
+    const stored = [field({ type: 'multichoice', options: [' daily', 'weekly '] }), field({ key: 'c', type: 'choice', options: [' one '] })] as any;
+    expect(resolveParamValues(stored, { k: 'daily, weekly', c: 'one' })).toEqual({ k: 'daily, weekly', c: 'one' });
+  });
+
+  it('a yes/no answer must be a yes or a no (#83)', () => {
+    const p = [field({ type: 'boolean' })] as any;
+    expect(() => resolveParamValues(p, { k: 'tru' })).toThrow(/"K" must be yes or no/);
+    expect(resolveParamValues(p, { k: 'Yes' })).toEqual({ k: 'true' });
+    expect(resolveParamValues(p, { k: 'off' })).toEqual({ k: 'false' });
+    expect(resolveParamValues(p, { k: 'false' })).toEqual({ k: 'false' });
   });
 });
