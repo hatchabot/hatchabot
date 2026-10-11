@@ -497,7 +497,7 @@ function repoDir(): string {
  */
 const userPath = (p: string): string => resolve(process.env.HATCHABOT_CWD || process.cwd(), p);
 
-const BOOL_FLAGS = new Set(['private', 'no-wait', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet', 'draft-only']);
+const BOOL_FLAGS = new Set(['private', 'no-wait', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet', 'draft-only', 'invited-only']);
 const VALUE_FLAGS = new Set(['ref', 'kind', 'at-once', 'agents', 'base', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
@@ -514,10 +514,11 @@ export function parseArgs(argv: string[]) {
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
       const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
-      if (name === 'force') { flags.set('yes', '1'); continue; }
-      if (BOOL_FLAGS.has(name)) {
+      // --force is --yes. Like every on/off flag it takes no value, so
+      // `--force=false` is refused rather than read as "skip the question".
+      if (name === 'force' || BOOL_FLAGS.has(name)) {
         if (eq > 0) throw new Error(`--${name} takes no value`);
-        flags.set(name, '1');
+        flags.set(name === 'force' ? 'yes' : name, '1');
       } else if (VALUE_FLAGS.has(name)) {
         flags.set(name, eq > 0 ? a.slice(eq + 1) : value(name, ++i));
       } else {
