@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { Jar, PUBLIC_HOST, PUBLIC_URL, publicApp, type PublicApp } from './helpers/publicApp.js';
-import { base32Decode, totp } from '../src/api/totp.js';
+import { backupCodeHash, base32Decode, totp } from '../src/api/totp.js';
 import { SoftAuthenticator } from './helpers/softAuthenticator.js';
 
 let h: PublicApp | undefined;
@@ -217,6 +217,27 @@ describe('second factors: at the public address', () => {
     const m = await h.addAccount('member');
     const mcall = await priv(h, 'member', m.password);
     expect((await mcall('POST', '/v1/second-factor/reset/owner', {})).statusCode).toBe(403);
+  });
+});
+
+describe('new backup codes', () => {
+  it('a failure part-way keeps the old set whole (B094)', async () => {
+    h = await publicApp({ off: true });
+    const o = await h.addAccount('owner', { owner: true, totp: false });
+    const call = await priv(h, 'owner', o.password);
+    const start = (await call('POST', '/v1/second-factor/totp', { current: o.password })).json();
+    const { backupCodes } = (await call('POST', '/v1/second-factor/totp/confirm', { id: start.id, code: totp(base32Decode(start.secret)) })).json();
+    expect(backupCodes).toHaveLength(10);
+    const before = h.store.listSecondFactors(o.id, { kind: 'backup' }).map((f) => f.data).sort();
+    // The disk fills (say) on the fourth new code.
+    const insert = h.store.insertSecondFactor.bind(h.store);
+    let n = 0;
+    h.store.insertSecondFactor = (row) => { if (++n === 4) throw new Error('SQLITE_FULL: database or disk is full'); return insert(row); };
+    expect((await call('POST', '/v1/second-factor/backup-codes', { current: o.password })).statusCode).toBe(500);
+    h.store.insertSecondFactor = insert;
+    expect(h.store.listSecondFactors(o.id, { kind: 'backup' }).map((f) => f.data).sort()).toEqual(before);
+    // And a saved code still works.
+    expect(h.store.spendBackupCode(o.id, backupCodeHash(h.secret, o.id, backupCodes[0]))).toBe(true);
   });
 });
 

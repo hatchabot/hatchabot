@@ -227,6 +227,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/secondFactor.ts` — `forgetCeremonies`, `'/v1/second-factor/reset/:id'`
 
+### "Make new backup codes" failed, and now neither the old codes nor any new ones work
+- **Check:** the request failed (a full disk, say) and Settings → You shows fewer than 10 backup codes, or none of your saved codes is accepted.
+- **Cause:** the old codes were deleted before the new ones were stored, one at a time; a failure part-way left only some new codes, which were never shown.
+- **Fix:** upgrade; the new set now replaces the old in one step, so a failure keeps your saved codes. On an older version, free the disk and make new codes again (your authenticator app or passkey proves it is you).
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/store/store.ts` — `replaceBackupCodes`; `src/api/secondFactor.ts` — `newBackupCodes`
+
 ## AI sources and Claude login
 
 ### An agent answers "Your model provider needs a new login" or "Not logged in · Please run /login", while the same source works for other agents
