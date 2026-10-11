@@ -235,6 +235,15 @@ describe('POST /v1/agents/:id/crons (create — the verb no interface had)', () 
     expect(call).toContain('--agent');
   });
 
+  it('refuses while the agent is being moved or exported, like the other task changes (#65)', async () => {
+    const { beginOperation } = await import('../src/orchestrator/operations.js');
+    const { provider, f, store } = await world();
+    beginOperation(store, 'migrate', 'a1', {});
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'x', message: 'y', everyMinutes: 60 } });
+    expect(res.statusCode).toBe(409);
+    expect(provider.execLog.some((c) => c[0] === 'cron' && c[1] === 'add')).toBe(false);
+  });
+
   it('refuses zero or two schedules, and surfaces CLI failure as 502', async () => {
     const { provider, f } = await world();
     const none = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'x', message: 'y' } });
