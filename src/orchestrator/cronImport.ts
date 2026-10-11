@@ -10,7 +10,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { openclawConfigAgents, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
+import { openclawConfigAgents, openclawUserPath, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 import { openclawConfigPath } from './openclawImport.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
@@ -63,7 +63,7 @@ export function openclawAgentEntryForWorkspace(
   }
   const want = resolve(workspaceDir);
   const a = openclawConfigAgents(cfg).find(
-    (x) => (x.workspace && resolve(x.workspace) === want) || (x.agentDir && resolve(x.agentDir) === want),
+    (x) => (x.workspace && openclawUserPath(x.workspace) === want) || (x.agentDir && openclawUserPath(x.agentDir) === want),
   );
   return a?.id ? { id: a.id, workspace: a.workspace, agentDir: a.agentDir } : undefined;
 }
@@ -92,21 +92,34 @@ export function selfPathReplacements(entry: OpenclawAgentEntry, containerSlug: s
   return [...new Set(froms)].sort((a, b) => b.length - a.length).map((from) => [from, to] as [string, string]);
 }
 
+/**
+ * A pattern (for the `gu` flags) matching `from` only as a whole path or a
+ * parent of one. A plain substring replace also rewrote a sibling that merely
+ * starts the same (`/src/agent` inside `/src/agent-two`), pointing adopted
+ * tasks at a folder that does not exist (#80). A trailing `.` still counts as
+ * the end of the path (the end of a sentence), `.bak` does not.
+ */
+export function pathPattern(from: string): string {
+  const name = '[\\p{L}\\p{N}_~-]';
+  return `(?<![\\p{L}\\p{N}_.~-])${from.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?!${name}|\\.${name})`;
+}
+
 export function applyReplacements(text: string | undefined, pairs: Array<[string, string]>): string | undefined {
   if (!text) return text;
   let out = text;
-  for (const [from, to] of pairs) if (from) out = out.split(from).join(to);
+  for (const [from, to] of pairs) if (from) out = out.replace(new RegExp(pathPattern(from), 'gu'), () => to);
   return out;
 }
 
-// Runs INSIDE the container: fixed-string replace each pair across the
-// workspace's text files. Double-quoted only, so it survives the single-quoted
-// `-e` wrapper below. Best-effort; a bad file is skipped, not fatal.
+// Runs INSIDE the container: replace each pair across the workspace's text
+// files. PAIRS holds [pathPattern(from), to]. Double-quoted only, so it
+// survives the single-quoted `-e` wrapper below. Best-effort; a bad file is
+// skipped, not fatal.
 const REWRITE_SCRIPT =
   'const fs=require("fs"),path=require("path");const pairs=JSON.parse(process.env.PAIRS);const root=process.env.WSDIR;' +
   'function walk(d){for(const e of fs.readdirSync(d,{withFileTypes:true})){const p=path.join(d,e.name);' +
   'if(e.isDirectory())walk(p);else if(/\\.(md|txt|json)$/i.test(e.name)){' +
-  'let t;try{t=fs.readFileSync(p,"utf8")}catch(_){continue}let o=t;for(const x of pairs){if(!x[0])continue;o=o.split(x[0]).join(x[1])}' +
+  'let t;try{t=fs.readFileSync(p,"utf8")}catch(_){continue}let o=t;for(const x of pairs){if(!x[0])continue;o=o.replace(new RegExp(x[0],"gu"),function(){return x[1]})}' +
   'if(o!==t)try{fs.writeFileSync(p,o)}catch(_){}}}}' +
   'try{walk(root)}catch(e){process.exit(2)}';
 
@@ -126,7 +139,7 @@ export async function rewriteWorkspaceFiles(
   const log = deps.log ?? (() => {});
   if (!pairs.length) return { rewrote: false };
   const wsdir = WORKSPACE_DIR_TEMPLATE.replace('{slug}', slug);
-  const json = JSON.stringify(pairs);
+  const json = JSON.stringify(pairs.filter(([from]) => from).map(([from, to]) => [pathPattern(from), to]));
   if ([json, wsdir, REWRITE_SCRIPT].some((s) => s.includes("'"))) {
     log('adopt.path_rewrite_skipped', { reason: 'quote in path' });
     return { rewrote: false };
