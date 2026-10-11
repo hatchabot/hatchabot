@@ -12017,7 +12017,7 @@ function v2PreviewOf(a) {
 // reads a container or wakes an agent. Read with the list poll, at most every
 // 5 minutes (the server caches as long). Agents on a local model have no
 // cost; an unknown model's price has no badge.
-let v2Costs = null, v2CostsBusy = false, v2CostsAt = 0;
+let v2Costs = null, v2CostsBusy = false, v2CostsAt = 0, v2CostsAgain = false;
 const V2_COSTS_EVERY_MS = 5 * 60_000;
 // The window the chips and View by → Cost show (COST_PERIODS in agentCosts.ts),
 // chosen with the pills above the Cost view; a week unless changed, per browser.
@@ -12047,15 +12047,21 @@ function v2CostBandLabel(tier) {
   return `$${n(b[tier - 2])}–${n(b[tier - 1])}${per}`;
 }
 async function v2LoadCosts(force = false) {
-  if (v2CostsBusy || (!force && Date.now() - v2CostsAt < V2_COSTS_EVERY_MS)) return;
+  // A pill pressed while a read is out: read again once it is back (#93).
+  if (v2CostsBusy) { if (force) v2CostsAgain = true; return; }
+  if (!force && Date.now() - v2CostsAt < V2_COSTS_EVERY_MS) return;
   v2CostsBusy = true;
+  v2CostsAgain = false;
+  const asked = v2CostPeriod;
+  let kept = true;
   try {
-    const asked = v2CostPeriod;
     const r = await api(`/v1/costs?period=${asked}`);
-    if (asked !== v2CostPeriod) return; // another pill was pressed meanwhile: its answer is the one that counts
-    v2Costs = r && typeof r.agents === 'object' ? { off: !!r.off, agents: r.agents || {}, bands: r.bands, period: r.period || '1w', chipMin: r.chipMin, suffix: r.suffix } : null;
+    // Another pill was pressed meanwhile: this answer is not shown, nor counted as fresh.
+    if (asked !== v2CostPeriod) kept = false;
+    else v2Costs = r && typeof r.agents === 'object' ? { off: !!r.off, agents: r.agents || {}, bands: r.bands, period: r.period || '1w', chipMin: r.chipMin, suffix: r.suffix } : null;
   } catch { v2Costs = null; }
-  finally { v2CostsBusy = false; v2CostsAt = Date.now(); }
+  finally { v2CostsBusy = false; if (kept) v2CostsAt = Date.now(); }
+  if (!kept || v2CostsAgain) { void v2LoadCosts(true); return; }
   if (v2Costs?.off && v2View === 'cost') v2View = 'group'; // the owner turned them off: not a view to land on
   renderV2();
 }

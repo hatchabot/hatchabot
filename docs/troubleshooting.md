@@ -1447,6 +1447,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/sourceUsage.ts` — `sampleAgentUsage`, `logKey`
 
+### The Cost view's figures stay on the old window after pressing another (1 hr, 1 day …)
+- **Check:** the pill is on the new window but the chips still show the old one's suffix (for example `/wk`), until the next poll five minutes later.
+- **Cause:** before v2.160.0 a pill pressed while the previous figures were still loading was dropped, and the discarded answer still counted as fresh.
+- **Fix:** upgrade: the new window's figures are read as soon as the earlier answer is back. Reloading the page also shows them.
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `v2LoadCosts`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody
