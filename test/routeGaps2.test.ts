@@ -298,7 +298,7 @@ describe('the volume inspector', () => {
   /** A volume with a MEMORY.md, a SOUL.md and one session file. */
   function volume(w: Ctx) {
     w.provider.execShellOnVolume = async (_ref: string, script: string) => {
-      if (script.startsWith('wc -c')) return { code: 0, stdout: '12 /home/node/.openclaw/agents/kitchen/agent/MEMORY.md\n5 /home/node/.openclaw/agents/kitchen/agent/SOUL.md\n', stderr: '' };
+      if (script.includes('wc -c')) return { code: 0, stdout: '12 /home/node/.openclaw/agents/kitchen/agent/MEMORY.md\n5 /home/node/.openclaw/agents/kitchen/agent/SOUL.md\n', stderr: '' };
       if (script.startsWith('ls -S')) return { code: 0, stdout: '/home/node/.openclaw/agents/kitchen/sessions/main.jsonl\n', stderr: '' };
       if (script.startsWith('wc -l')) return { code: 0, stdout: '2 /home/node/.openclaw/agents/kitchen/sessions/main.jsonl\n', stderr: '' };
       if (script.startsWith('tail -n')) {
@@ -307,7 +307,7 @@ describe('the volume inspector', () => {
           JSON.stringify({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'Pasta.' }] } }),
         ].join('\n') + '\n', stderr: '' };
       }
-      if (script.startsWith('head -c')) return { code: 0, stdout: script.includes('MEMORY.md') ? 'remembered' : '', stderr: '' };
+      if (script.includes('head -c')) return { code: 0, stdout: script.includes('MEMORY.md') ? 'remembered' : '', stderr: '' };
       return { code: 0, stdout: '', stderr: '' };
     };
   }
@@ -324,6 +324,16 @@ describe('the volume inspector', () => {
     expect(t.statusCode).toBe(200);
     expect(t.json().totalTurns).toBe(2);
     expect(t.json().turns.map((x: { role: string; text: string }) => [x.role, x.text])).toEqual([['user', 'what is for dinner'], ['assistant', 'Pasta.']]);
+  });
+  it('a volume that cannot be read says so (502), not "no files" (#151)', async () => {
+    const w = await world();
+    const id = await seedRunningAgent(w);
+    w.provider.execShellOnVolume = async () => ({ code: 125, stdout: '', stderr: 'docker: error during connect' });
+    for (const url of [`/v1/agents/${id}/inspect`, `/v1/agents/${id}/inspect/file/MEMORY.md`, `/v1/agents/${id}/inspect/transcript`]) {
+      const r = await w.f.inject({ method: 'GET', url, headers: as() });
+      expect(r.statusCode).toBe(502);
+      expect(r.json().error).toMatch(/Couldn't read the agent's stored files/);
+    }
   });
   it('only the six known files, only the owner, and only agents with a volume', async () => {
     const w = await world();

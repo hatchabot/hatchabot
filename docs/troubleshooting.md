@@ -919,6 +919,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/providers/localDockerProvider.ts` — `streamFromVolume`
 
+### Looking inside an archived agent shows "No readable files", an empty MEMORY.md, or "No conversation found on the volume"
+- **Check:** the agent's machine or Docker was not answering at the time (`hatchabot doctor`; a runner asleep), or the volume is damaged; after the upgrade the same view says "Couldn't read the agent's stored files…".
+- **Cause:** a read of the volume that failed was shown as an agent with no files, an empty file or no chat history.
+- **Fix:** upgrade, so a failed read says so; then try again once the machine answers. Nothing is lost: the files were never read, not gone.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/inspect.ts` — `InspectReadError`, `readInspectableFile`, `listInspectableFiles`
+
+### A large file shown when looking inside an archived agent ends in "�"
+- **Check:** the file is marked "truncated — too large to show in full" and holds accented letters, other scripts or emoji.
+- **Cause:** the size cut fell inside a character, and its first bytes were shown as a replacement character.
+- **Fix:** upgrade: the cut now ends before that character. The file on the volume was never changed.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/inspect.ts` — `utf8Prefix`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")
