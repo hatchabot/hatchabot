@@ -1418,6 +1418,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/ops/notify.ts` — `createOpsNotifier`
 
+### Asking the Hatchabot agent to "end the image trial" for itself moved it onto the fleet image
+- **Check:** the Hatchabot agent's image (its agent page, Image row) is the fleet default after an `end_base_trial` confirm card that named it; Activity shows its image change and rebuild.
+- **Cause:** the manager's own image pin is deliberate, and the chat tool refuses to end it — but the web chat and Telegram manager read agents through a client that dropped the "this is the Hatchabot agent" flag, so the refusal never fired.
+- **Fix:** upgrade; pin the Hatchabot agent's image back on its agent page if it should stay where it was.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/mgmt/apiClient.ts` — `listAgents`; `src/mgmt/broker.ts` — `end_base_trial`
+
 ## Docker, disk and memory
 
 ### `hatchabot doctor`: "Only N GB free — each agent volume grows; the image is ~2 GB"
