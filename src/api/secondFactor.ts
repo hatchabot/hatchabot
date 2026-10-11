@@ -7,7 +7,7 @@ import { isPublic, publicClientAddress } from './trust.js';
 import { verifyPassword } from './accountsAuth.js';
 import type { PublicAccessApi } from './publicAccess.js';
 import { backupCodeHash, base32Encode, newBackupCode, newTotpSecret, normalizeBackupCode, otpauthUri, totpVerify } from './totp.js';
-import { b64u, verifyAssertion, verifyRegistration, WebAuthnError, type StoredPublicKey } from './webauthn.js';
+import { b64u, clientDataChallenge, verifyAssertion, verifyRegistration, WebAuthnError, type StoredPublicKey } from './webauthn.js';
 
 /**
  * Second factors: passkeys, an authenticator app, one-time backup codes
@@ -33,6 +33,8 @@ import { b64u, verifyAssertion, verifyRegistration, WebAuthnError, type StoredPu
 
 const BACKUP_CODES = 10;
 const CHALLENGE_TTL_MS = 5 * 60_000;
+/** Passkey ceremonies one person may have pending of each kind (a tab each); the oldest makes way. */
+const PENDING_CEREMONIES = 5;
 
 function seal(secret: Buffer, plain: Buffer): string {
   const key = createHmac('sha256', secret).update('second-factor-seal').digest();
@@ -57,18 +59,42 @@ export interface SecondFactorDeps { store: Store; secret: Buffer; api: PublicAcc
 
 export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFactorDeps): void {
   const { store, secret, api } = deps;
-  const challenges = new Map<string, { challenge: string; exp: number }>();
-  const issue = (key: string): string => {
+  /**
+   * Pending passkey ceremonies, per person and kind, keyed by the challenge
+   * itself: the browser's signed client data carries it back, so it names
+   * the ceremony an answer belongs to. One slot per person let a second tab
+   * overwrite the first tab's challenge (A083). Each remembers the person's
+   * factor generation when issued: a reset or a removed factor voids it, so
+   * an enrolment started before a reset cannot finish after it (C074).
+   */
+  const challenges = new Map<string, Map<string, { exp: number; gen: number }>>();
+  const issue = (kind: 'get' | 'create', ownerId: string): string => {
     const challenge = randomBytes(32).toString('base64url');
-    challenges.set(key, { challenge, exp: Date.now() + CHALLENGE_TTL_MS });
-    if (challenges.size > 2000) for (const [k, v] of challenges) if (Date.now() > v.exp) challenges.delete(k);
+    const key = `${kind}:${ownerId}`;
+    const mine = challenges.get(key) ?? new Map<string, { exp: number; gen: number }>();
+    for (const [c, v] of mine) if (Date.now() > v.exp) mine.delete(c);
+    while (mine.size >= PENDING_CEREMONIES) mine.delete(mine.keys().next().value!);
+    mine.set(challenge, { exp: Date.now() + CHALLENGE_TTL_MS, gen: store.secondFactorGeneration(ownerId) });
+    challenges.set(key, mine);
+    if (challenges.size > 2000) {
+      for (const [k, m] of challenges) {
+        for (const [c, v] of m) if (Date.now() > v.exp) m.delete(c);
+        if (!m.size) challenges.delete(k);
+      }
+    }
     return challenge;
   };
-  /** One use: taken out whether or not what follows succeeds. */
-  const take = (key: string): string | undefined => {
-    const c = challenges.get(key);
-    challenges.delete(key);
-    return c && Date.now() <= c.exp ? c.challenge : undefined;
+  /** Their factors were reset or one removed: nothing begun before goes on (the generation also says so). */
+  const forgetCeremonies = (ownerId: string): void => { challenges.delete(`get:${ownerId}`); challenges.delete(`create:${ownerId}`); };
+  /** One use: the ceremony the answer names is taken out whether or not what follows succeeds. */
+  const take = (kind: 'get' | 'create', ownerId: string, clientDataJSON: unknown): string | undefined => {
+    const sent = clientDataChallenge(clientDataJSON);
+    const key = `${kind}:${ownerId}`;
+    const mine = challenges.get(key);
+    const c = sent ? mine?.get(sent) : undefined;
+    if (sent) mine?.delete(sent);
+    if (mine && !mine.size) challenges.delete(key);
+    return c && Date.now() <= c.exp && c.gen === store.secondFactorGeneration(ownerId) ? sent : undefined;
   };
 
   /** The signed-in person, never the management agent's in-process reads. */
@@ -168,7 +194,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     const keys = real(ownerId).filter((f) => f.kind === 'passkey' && f.rpId === rpId);
     if (!rpId || !keys.length) return reply.code(409).send({ error: 'You have no passkey for this address. Use your authenticator app or a backup code.' });
     return {
-      challenge: issue(`get:${ownerId}`), rpId, timeout: 120_000, userVerification: uvFor(ownerId),
+      challenge: issue('get', ownerId), rpId, timeout: 120_000, userVerification: uvFor(ownerId),
       allowCredentials: keys.map((k) => ({ type: 'public-key', id: k.credentialId })),
     };
   });
@@ -186,7 +212,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     const body = req.body ?? {};
     let method: 'passkey' | 'totp' | 'backup' | undefined;
     if (body.passkey) {
-      const challenge = take(`get:${ownerId}`);
+      const challenge = take('get', ownerId, body.passkey.clientDataJSON);
       const row = typeof body.passkey.id === 'string' ? store.secondFactorByCredential(body.passkey.id) : undefined;
       const rpId = api.rpId();
       if (challenge && row && row.ownerId === ownerId && row.kind === 'passkey' && rpId && row.rpId === rpId) {
@@ -283,7 +309,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     if (!(await proveManage(req, reply, ownerId, req.body?.current))) return reply;
     const name = nameOf(ownerId);
     return {
-      challenge: issue(`create:${ownerId}`),
+      challenge: issue('create', ownerId),
       rp: { id: rpId, name: 'Hatchabot' },
       user: { id: createHash('sha256').update(`passkey-user:${ownerId}`).digest().subarray(0, 16).toString('base64url'), name, displayName: name },
       pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -8 }, { type: 'public-key', alg: -257 }],
@@ -297,7 +323,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
   app.post<{ Body: { label?: string; clientDataJSON?: string; attestationObject?: string } }>('/v1/second-factor/passkey', async (req, reply) => {
     const ownerId = me(req, reply);
     if (!ownerId) return reply;
-    const challenge = take(`create:${ownerId}`);
+    const challenge = take('create', ownerId, req.body?.clientDataJSON);
     const rpId = api.rpId();
     if (!challenge || !rpId) return reply.code(409).send({ error: 'That took too long. Start adding the passkey again.' });
     try {
@@ -346,6 +372,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     // What was proved with the old set of factors is void on every pass, not
     // only on the consoles open now; the person removing it keeps their own (#9).
     api.secondFactorsChanged(ownerId, { req, reply });
+    forgetCeremonies(ownerId);
     app.log.warn({ ownerId, kind: row.kind }, 'second_factor.removed');
     recordChange(req, 'second_factor.removed', ownerId, row.kind);
     // What was proved with the old set of factors is void: consoles opened at the public address close.
@@ -379,6 +406,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     // counting: closing their consoles was not enough, as the old cookies
     // were verified again the moment a new factor was added (#9).
     api.secondFactorsChanged(target);
+    forgetCeremonies(target);
     try { store.recordSecurity('second_factor.reset', target, { by: ownerId, removed }); } catch { /* best effort */ }
     app.log.warn({ by: ownerId, target, removed }, 'second_factor.reset');
     // A reset is for a lost phone or a suspicion: either way, that person's open public consoles end now.

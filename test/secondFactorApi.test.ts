@@ -219,3 +219,56 @@ describe('second factors: at the public address', () => {
     expect((await mcall('POST', '/v1/second-factor/reset/owner', {})).statusCode).toBe(403);
   });
 });
+
+describe('passkey ceremonies', () => {
+  const at = { origin: `https://${PUBLIC_HOST}`, host: PUBLIC_HOST };
+
+  it('two tabs: each has its own ceremony, and finishing one does not spoil the other (A083)', async () => {
+    h = await publicApp({ env: { HATCHABOT_PUBLIC_URL: `https://${PUBLIC_HOST}` } });
+    const o = await h.addAccount('owner', { owner: true, totp: false });
+    const call = await priv(h, 'owner', o.password);
+    const tab1 = (await call('POST', '/v1/second-factor/passkey/options', { current: o.password }, at)).json();
+    const tab2 = (await call('POST', '/v1/second-factor/passkey/options', { current: o.password }, at)).json();
+    const k1 = new SoftAuthenticator('ES256');
+    const k2 = new SoftAuthenticator('ES256');
+    // The first tab answers after the second asked: still its own challenge.
+    expect((await call('POST', '/v1/second-factor/passkey', { label: 'Laptop', ...k1.create({ challenge: tab1.challenge, origin: at.origin, rpId: PUBLIC_HOST }) }, at)).statusCode).toBe(200);
+    expect((await call('POST', '/v1/second-factor/passkey', { label: 'Phone', ...k2.create({ challenge: tab2.challenge, origin: at.origin, rpId: PUBLIC_HOST }) }, at)).statusCode).toBe(200);
+    // Each one is still single use.
+    expect((await call('POST', '/v1/second-factor/passkey', k2.create({ challenge: tab2.challenge, origin: at.origin, rpId: PUBLIC_HOST }), at)).statusCode).toBe(409);
+    await h.app.publicAccess!.evaluate();
+
+    // Signing in: two tabs ask; the first answers.
+    const jar = new Jar();
+    await h.pub('/v1/login', { body: { username: 'owner', password: o.password }, jar });
+    const ch1 = (await h.pub('/v1/second-factor/challenge', { jar, body: {} })).json;
+    const ch2 = (await h.pub('/v1/second-factor/challenge', { jar, body: {} })).json;
+    expect(ch1.challenge).not.toBe(ch2.challenge);
+    expect((await h.pub('/v1/second-factor/verify', { jar, body: { passkey: k1.get({ challenge: ch1.challenge, origin: PUBLIC_URL, rpId: PUBLIC_HOST }) } })).status).toBe(200);
+    // A challenge the browser made up is no ceremony of ours.
+    const jar2 = new Jar();
+    await h.pub('/v1/login', { body: { username: 'owner', password: o.password }, jar: jar2 });
+    const forged = Buffer.alloc(32, 7).toString('base64url');
+    expect((await h.pub('/v1/second-factor/verify', { jar: jar2, body: { passkey: k1.get({ challenge: forged, origin: PUBLIC_URL, rpId: PUBLIC_HOST }) } })).status).toBe(401);
+  });
+
+  it('a passkey enrolment begun before a second-factor reset cannot finish after it (C074)', async () => {
+    h = await publicApp({ off: true, env: { HATCHABOT_PUBLIC_URL: `https://${PUBLIC_HOST}` } });
+    const o = await h.addAccount('owner', { owner: true, totp: false });
+    const m = await h.addAccount('member', { totp: true });
+    const call = await priv(h, 'owner', o.password);
+    const mcall = await priv(h, 'member', m.password);
+    const begun = (await mcall('POST', '/v1/second-factor/passkey/options', { current: m.password }, at)).json();
+    expect(begun.challenge).toBeTruthy();
+    // The owner clears the member's factors (a lost phone, or a suspicion).
+    expect((await call('POST', '/v1/second-factor/reset/member', {})).statusCode).toBe(200);
+    expect(h.store.listSecondFactors(m.id)).toHaveLength(0);
+    const key = new SoftAuthenticator('ES256');
+    const late = await mcall('POST', '/v1/second-factor/passkey', key.create({ challenge: begun.challenge, origin: at.origin, rpId: PUBLIC_HOST }), at);
+    expect(late.statusCode).toBe(409);
+    expect(h.store.listSecondFactors(m.id)).toHaveLength(0);
+    // Starting again after the reset works.
+    const again = (await mcall('POST', '/v1/second-factor/passkey/options', { current: m.password }, at)).json();
+    expect((await mcall('POST', '/v1/second-factor/passkey', key.create({ challenge: again.challenge, origin: at.origin, rpId: PUBLIC_HOST }), at)).statusCode).toBe(200);
+  });
+});

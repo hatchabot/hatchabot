@@ -175,6 +175,21 @@ function checkRp(auth: AuthenticatorData, rpId: string, requireUv: boolean): voi
   if (auth.backedUp && !auth.backupEligible) fail('inconsistent backup flags');
 }
 
+/**
+ * The challenge a browser's answer says it signed, before anything is
+ * verified: only to find which of the person's pending ceremonies it answers
+ * (several tabs may each have one). verify* still checks it in full.
+ */
+export function clientDataChallenge(clientDataJSON: unknown): string | undefined {
+  if (typeof clientDataJSON !== 'string' || clientDataJSON.length > 16_384) return undefined;
+  try {
+    const c = JSON.parse(fromB64u(clientDataJSON).toString('utf8')) as { challenge?: unknown } | null;
+    return c && typeof c === 'object' && typeof c.challenge === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(c.challenge) ? c.challenge : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface Expectation {
   /** The challenge we issued, base64url. */
   challenge: string;
