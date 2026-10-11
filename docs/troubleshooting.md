@@ -975,6 +975,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/inspect.ts` — `utf8Prefix`
 
+### A command run with `--force=false` went ahead without asking
+- **Check:** the command line had `--force=false` (or another on/off flag with `=value`); a destructive command such as delete or kick skipped its y/N question.
+- **Cause:** the CLI read `--force` as `--yes` before looking at its value, so any `--force=…` meant "don't ask".
+- **Fix:** upgrade: on/off flags with a value are now refused ("--force takes no value"). To be asked, leave the flag out.
+- **Fixed in:** `v2.160.0` (#85)
+- **Code:** `src/cli.ts` — `parseArgs`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")
@@ -1772,6 +1779,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade. Until then, do these from the private address, or do any other sensitive action first (it asks for the factor, which then counts for 10 minutes).
 - **Fixed in:** `v2.153.0`
 - **Code:** `web/index.html` — `sfFetch`, `sfLink`
+
+### `hatchabot reach on --invited-only` fails with "unknown option --invited-only"
+- **Check:** the command stops before asking anything, with that error.
+- **Cause:** the help text documented the flag, but the CLI's list of known flags left it out.
+- **Fix:** upgrade. Until then, turn on "only invited people" in the app (Settings → You → Reach it from anywhere), then run `hatchabot reach on`.
+- **Fixed in:** `v2.160.0` (#84)
+- **Code:** `src/cli.ts` — `parseArgs`
 
 ## The Hatchabot agent
 

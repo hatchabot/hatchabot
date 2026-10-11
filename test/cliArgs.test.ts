@@ -117,3 +117,23 @@ describe('the CLI config file holds a sign-in token (A068)', () => {
     }
   });
 });
+
+describe('on/off flags never take a value (#85), and every flag the CLI reads is known (#84)', () => {
+  it('refuses --force=false and --yes=false instead of skipping the question', () => {
+    expect(() => parseArgs(['delete', 'Ledger', '--force=false'])).toThrow(/--force takes no value/);
+    expect(() => parseArgs(['delete', 'Ledger', '--yes=false'])).toThrow(/--yes takes no value/);
+  });
+  it('takes the documented `reach on --invited-only`', () => {
+    const a = parseArgs(['reach', 'on', '--invited-only']);
+    expect(a.positional).toEqual(['reach', 'on']);
+    expect(a.flags.get('invited-only')).toBe('1');
+  });
+  it('parses every --flag that src/cli.ts reads', () => {
+    const src = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+    const read = new Set([...src.matchAll(/flags\.(?:has|get)\('([a-z-]+)'\)/g)].map((m) => m[1]!));
+    expect(read.size).toBeGreaterThan(20);
+    for (const f of read) {
+      expect(() => parseArgs([`--${f}`, 'x']), `--${f}`).not.toThrow(/unknown option/);
+    }
+  });
+});
