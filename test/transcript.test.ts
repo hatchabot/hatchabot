@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +38,9 @@ function fixture() {
     msg('assistant', 'NO_REPLY', '2026-08-27T12:15:00Z'),
   ].join('\n'));
   writeFileSync(join(dir, 'ccc.trajectory.jsonl'), line({ type: 'session.started', sessionKey: 'agent:kitchen:main' }));
+  // The index names the current session of each key: ccc only. eee below is
+  // a conversation it has let go of.
+  writeFileSync(join(dir, 'sessions.json'), line({ 'agent:kitchen:main': { sessionId: 'ccc' }, 'agent:kitchen:cron:1': { sessionId: 'bbb' } }));
   // A chat participant typing a fake system note, and a genuinely repeated user line.
   writeFileSync(join(dir, 'eee.jsonl'), [
     sess('2026-08-20T12:00:00Z'),
@@ -130,6 +133,76 @@ describe('transcript renderer (in-container script)', () => {
   });
 });
 
+describe('every current conversation is current, wherever it is kept', () => {
+  it('a second live conversation (a web chat) is not counted as lost or recovered', () => {
+    const root = fixture();
+    const dir = join(root, 'kitchen', 'sessions');
+    writeFileSync(join(dir, 'fff.jsonl'), [sess('2026-08-28T09:00:00Z'), msg('user', '[Ana via the web app]\nshopping list?', '2026-08-28T09:00:00Z'), msg('assistant', 'eggs, rice', '2026-08-28T09:00:02Z')].join('\n'));
+    writeFileSync(join(dir, 'sessions.json'), line({ 'agent:kitchen:main': { sessionId: 'ccc' }, 'agent:kitchen:web:00112233aabbccdd': { sessionId: 'fff' } }));
+    const stats = render(root, { MODE: 'stats' });
+    expect(stats.lostMessages).toBe(2); // aaa, ended by a reset; not the web chat
+    expect(stats.liveMessages).toBe(4); // ccc and fff
+    const out = join(root, 'agent', 'recovered', 'h.md');
+    expect(render(root, { MODE: 'recover', OUT: out })).toMatchObject({ conversations: 2, messages: 6 });
+    expect(readFileSync(out, 'utf8')).not.toContain('shopping list');
+    expect(render(root).text).toMatch(/started 2026-08-28 09:00 · current/);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads 2026.9\'s database: current windows, archived (reset) ones, and old reset files', () => {
+    const root = mkdtempSync(join(tmpdir(), 'tx-db-'));
+    mkdirSync(join(root, 'kitchen', 'agent'), { recursive: true });
+    mkdirSync(join(root, 'kitchen', 'sessions'), { recursive: true });
+    const ev = (id: string, role: string, text: string, ts: string) => line({ type: 'message', id, timestamp: ts, message: { role, content: [{ type: 'text', text }] } });
+    // A conversation reset before the upgrade, still a file.
+    writeFileSync(join(root, 'kitchen', 'sessions', 'old.jsonl.reset.2026-09-01T08-00-00.000Z'), [sess('2026-08-30T08:00:00Z'), ev('o1', 'user', 'oldest question', '2026-08-30T08:00:00Z'), ev('o2', 'assistant', 'oldest answer', '2026-08-30T08:00:01Z')].join('\n'));
+    const db = new Database(join(root, 'kitchen', 'agent', 'openclaw-agent.sqlite'));
+    db.exec(`CREATE TABLE session_nodes (session_key TEXT PRIMARY KEY, current_session_id TEXT NOT NULL, entry_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE session_windows (session_id TEXT PRIMARY KEY, session_key TEXT NOT NULL, updated_at INTEGER);
+      CREATE TABLE transcript_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_json TEXT, created_at INTEGER NOT NULL, event_zstd BLOB, PRIMARY KEY (session_id, seq));
+      CREATE TABLE session_transcript_archives (session_id TEXT, session_key TEXT, encoding TEXT, archive_blob BLOB, archived_at INTEGER);`);
+    db.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?)').run('agent:kitchen:main', 'live-main', '{}', 1);
+    db.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?)').run('agent:kitchen:web:00112233aabbccdd', 'live-web', '{}', 1);
+    const put = db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?, NULL)');
+    put.run('live-main', 1, ev('m1', 'user', 'what is for dinner', '2026-09-10T18:00:00Z'), 1);
+    put.run('live-main', 2, ev('m2', 'assistant', 'soup', '2026-09-10T18:00:02Z'), 2);
+    put.run('live-web', 1, ev('w1', 'user', '[Ana via the web app]\nand dessert?', '2026-09-10T19:00:00Z'), 1);
+    put.run('live-web', 2, ev('w2', 'assistant', 'fruit', '2026-09-10T19:00:02Z'), 2);
+    db.prepare('INSERT INTO session_transcript_archives VALUES (?, ?, ?, ?, ?)').run('gone', 'agent:kitchen:main', 'identity',
+      Buffer.from([ev('g1', 'user', 'remember the plumber on Tuesday', '2026-09-05T10:00:00Z'), ev('g2', 'assistant', 'noted', '2026-09-05T10:00:01Z')].join('\n')), Date.parse('2026-09-06T07:00:00Z'));
+    db.close();
+    const all = render(root);
+    expect(all.conversations).toBe(4);
+    expect(all.text).toContain('remember the plumber');
+    expect(all.text).toMatch(/started 2026-09-05 10:00 · ended by a reset 2026-09-06 07:00/);
+    expect(all.text).toMatch(/started 2026-09-10 18:00 · current/);
+    const stats = render(root, { MODE: 'stats' });
+    expect(stats).toMatchObject({ lastReset: '2026-09-06T07:00:00.000Z', lostMessages: 4, liveMessages: 4 });
+    const out = join(root, 'agent', 'recovered', 'h.md');
+    expect(render(root, { MODE: 'recover', OUT: out })).toMatchObject({ conversations: 2, messages: 4 });
+    const text = readFileSync(out, 'utf8');
+    expect(text).toContain('oldest question');
+    expect(text).toContain('plumber');
+    expect(text).not.toContain('soup');
+    expect(text).not.toContain('dessert');
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('a sessions folder that cannot be read fails the read instead of looking empty', () => {
+    const root = mkdtempSync(join(tmpdir(), 'tx-bad-'));
+    mkdirSync(join(root, 'kitchen'), { recursive: true });
+    writeFileSync(join(root, 'kitchen', 'sessions'), 'not a folder'); // ENOTDIR
+    const r = spawnSync(process.execPath, ['-e', RENDER_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', TZ: 'UTC' }, encoding: 'utf8' });
+    expect(r.status).toBe(3);
+    expect(r.stdout).toBe('');
+    expect(r.stderr).toMatch(/chat history unreadable: the sessions folder: ENOTDIR/);
+    // No folder at all is simply no conversations yet.
+    rmSync(join(root, 'kitchen', 'sessions'));
+    expect(render(root)).toMatchObject({ conversations: 0, messages: 0 });
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
 // ---- the routes ------------------------------------------------------------
 const OWNER = 'user-o';
 const H = { 'x-hatchabot-owner': OWNER };
@@ -207,6 +280,29 @@ describe('POST /v1/agents/:id/recover-context', () => {
     expect(res.statusCode).toBe(202);
     const stage = provider.execLog.find((c) => c[0] === 'sh' && String(c[1]).includes("MODE='recover'"));
     expect(String(stage?.[1])).toContain("INCLUDE_LIVE='1'");
+  });
+
+  it('says so when the agent cannot be asked to read the staged file', async () => {
+    const { provider, f } = await world();
+    const exec = provider.execShell.bind(provider);
+    provider.execShell = async (ref, script, opts) => script.includes('openclaw agent')
+      ? { code: 1, stdout: '', stderr: 'container is not running' }
+      : exec(ref, script, opts);
+    provider.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ conversations: 1, messages: 12 }) });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/recover-context', headers: H });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toMatch(/saved to recovered\/chat-history-.*could not be asked to read it: container is not running/);
+    // Not left "already running" for a quarter of an hour.
+    provider.execShell = exec;
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/recover-context', headers: H })).statusCode).toBe(202);
+  });
+
+  it('a history that cannot be read is an error, not "no chat history"', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('sh', { code: 3, stdout: '', stderr: 'chat history unreadable: the sessions folder: ENOTDIR' });
+    const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/transcript', headers: H });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toMatch(/ENOTDIR/);
   });
 
   it('reports nothing to recover when there is no earlier conversation', async () => {
