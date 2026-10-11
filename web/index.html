@@ -752,6 +752,8 @@
   .v2row { display:grid; grid-template-columns:170px 1fr; gap:12px; align-items:baseline; padding-bottom:12px; border-bottom:1px solid var(--line) }
   .v2row:last-child { border-bottom:0 }
   .v2k { font-size:13px; color:var(--dim) }
+  /* A section of a usage page (the cost pies, the chart, the token split…), outlined like the agent sheet's rows (2026-10-11). */
+  .ucard { border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin:8px 0; background:var(--panel); min-width:0 }
   label.v2k { margin:0 } /* a row key that names its select: looks like the others */
   .v2v { display:flex; gap:8px; align-items:center; flex-wrap:wrap; min-width:0 }
   .v2v .sub { flex-basis:100% }
@@ -8648,7 +8650,7 @@ function spendChartHTML(d, opts = {}) {
   if (opts.byAgent && !(t.cost > 0) && !(t.tokens > 0)) return head + `<div class="sub">Nothing spent at API prices in ${esc(rangeName || 'this range')}.</div>`;
   // By agent (an AI source's chart): who spends on this source, the biggest seven and the rest.
   const agentSlices = opts.byAgent ? agentPieSlices(d.choices || []) : [];
-  const summary = `<div style="display:flex;gap:18px 34px;flex-wrap:wrap;margin-bottom:8px">${block('What it went on', partSlices)}${modelSlices.length ? block('By model', modelSlices) : ''}${agentSlices.length ? block('By agent', agentSlices) : ''}</div>`;
+  const summary = `<div class="ucard" style="display:flex;gap:18px 34px;flex-wrap:wrap">${block('What it went on', partSlices)}${modelSlices.length ? block('By model', modelSlices) : ''}${agentSlices.length ? block('By agent', agentSlices) : ''}</div>`;
   // Over time: stacked bars (left axis, dollars), tokens as a line (right axis).
   const W = 640, H = 224, L = 46, R2 = 50, T = 24, B = 24, iw = W - L - R2, ih = H - T - B;
   const topC = niceTop(Math.max(0, ...b.map(cost))), topT = niceTop(Math.max(0, ...b.map((x) => x.tokens)));
@@ -8676,8 +8678,8 @@ function spendChartHTML(d, opts = {}) {
   // The range's tokens in all, over the token axis, inside the chart.
   const tokTotal = `<text x="${W - R2}" y="12" text-anchor="end" font-size="12" style="fill:var(--text)"><tspan font-weight="700">${fmtTokens(t.tokens || 0)}</tspan> tokens in ${esc(rangeName)}</text>`;
   const slice = d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : `${d.bucketHours} hours`;
-  const chart = `<div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;display:block" role="img" aria-label="Spend at API prices per ${slice}, by part, with tokens as a line">${tokTotal}${grid}${bars}${line}${xl}</svg></div>
-    <div class="sub" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:2px 0 4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis); bars are what each ${slice} cost (left axis)${d.range !== 'month' && d.monthly ? ` · ≈ ${v2Money(d.monthly)}${star} a month at this pace` : ''}${d.refused ? ` · <span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:var(--dim);opacity:.35;vertical-align:middle"></span> shaded: <b>${fmtN(d.refused)}</b> call${d.refused === 1 ? '' : 's'} refused (rate limit)` : ''}</div>`;
+  const chart = `<div class="ucard"><div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;display:block" role="img" aria-label="Spend at API prices per ${slice}, by part, with tokens as a line">${tokTotal}${grid}${bars}${line}${xl}</svg></div>
+    <div class="sub" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:2px 0 4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis); bars are what each ${slice} cost (left axis)${d.range !== 'month' && d.monthly ? ` · ≈ ${v2Money(d.monthly)}${star} a month at this pace` : ''}${d.refused ? ` · <span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:var(--dim);opacity:.35;vertical-align:middle"></span> shaded: <b>${fmtN(d.refused)}</b> call${d.refused === 1 ? '' : 's'} refused (rate limit)` : ''}</div></div>`;
   return head + summary + chart;
 }
 /** A donut of slices ({ label, value, color }), the total in the middle; a hover tip per slice. `fmt` says a value (dollars unless given). */
@@ -8758,7 +8760,7 @@ function usageHTML(u, agentId) {
   // A donut beside "At API prices", the four parts in the same colours (2026-10-11).
   const parts = SPEND_PARTS.map(([k, label, color]) => ({ label, color, value: n(u[k]) }));
   const whole = parts.reduce((s, p) => s + p.value, 0);
-  const split = whole > 0 ? `<div style="display:flex;flex-direction:column;gap:4px;margin:10px 0">
+  const split = whole > 0 ? `<div class="ucard" style="display:flex;flex-direction:column;gap:4px">
       <div class="sub" style="font-size:12px">Where the tokens went</div>
       <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">${donutHTML(parts, whole, fmtTokens(whole), 'tokens', 'Where the tokens went', fmtTokens)}${pieLegend(parts, whole, fmtTokens)}</div></div>` : '';
   const day = u.lastDay ? `<div style="margin:2px 0"><b>Last 24 hours:</b> ${fmtTokens(u.lastDay.tokens)} tokens · ${fmtN(u.lastDay.calls)} call${u.lastDay.calls === 1 ? '' : 's'}${u.lastDay.calls ? ` · about ${fmtTokens(u.lastDay.tokens / u.lastDay.calls)} a call` : ''}</div>` : '';
@@ -8772,8 +8774,8 @@ function usageHTML(u, agentId) {
      <div class="sub" style="margin:2px 0 8px">${fmtN(n(u.calls))} call${u.calls === 1 ? '' : 's'} · ${u.sessions} session${u.sessions > 1 ? 's' : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(agentId, models)}</div>
      ${alerts ? `<div style="margin:0 0 8px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
      ${agentId ? `<h4 class="v2sec" style="margin-top:6px">At API prices</h4>${spendChartBox(agentId)}` : ''}
-     ${day}${ctx}${split}
-     ${rows}`;
+     ${day || ctx ? `<div class="ucard">${day}${ctx}</div>` : ''}${split}
+     ${rows ? `<div class="ucard">${rows}</div>` : ''}`;
 }
 
 function openFleetUsage() {
