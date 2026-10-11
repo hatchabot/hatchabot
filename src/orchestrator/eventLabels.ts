@@ -133,6 +133,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'adopt.path_rewrite_skipped': 'task paths left as they were',
   'adopt.repoint_busy': 'workspace re-point skipped — the agent is busy',
   'agent.adopted_workspace': 'workspace adopted',
+  'agent.clone_failed': 'clone failed and was undone',
   'agent.derived': (d) => `derived from ${String(d.masterName ?? d.master ?? 'its master')}`,
   'agent.imported': 'imported',
   // The event carries `to` (a host id) and, since v2.154.0, `toName`; this
