@@ -322,22 +322,46 @@ export async function retargetCron(provider: RuntimeProvider, runtimeRef: string
  * key: what an agent makes when asked in its console) is left alone on an
  * agent in no chat app — its result is written there. On an agent in a chat
  * app it still gets the owner's chat: "last" there is whoever wrote last.
+ *
+ * `held`: the tasks an earlier pass made quiet for want of a recipient (the
+ * owner's id not known yet). Quiet, they no longer look implicit, so once the
+ * owner was linked nothing pointed them anywhere and they stayed quiet for
+ * good (#64). They are pointed at the recipient once there is one; `held`
+ * comes back as the ids still waiting, for the caller to keep.
  */
 export async function retargetImplicitCrons(
   provider: RuntimeProvider, runtimeRef: string, slug: string, target: CronTarget | undefined,
-): Promise<{ changed: number; failed: number }> {
+  held: readonly string[] = [],
+): Promise<{ changed: number; failed: number; held: string[] }> {
   const jobs = await listCrons(provider, runtimeRef, slug);
+  const wasHeld = new Set(held);
+  // Still quiet: a held task someone has since given a recipient (or removed) is theirs again.
+  const waiting = jobs.filter((j) => !j.system && wasHeld.has(j.id) && j.announce === false);
   const todo = jobs.filter((j) => !j.system && j.implicitDelivery);
-  if (!todo.length) return { changed: 0, failed: 0 };
+  if (!todo.length && !waiting.length) return { changed: 0, failed: 0, held: [] };
   const to = await usableTarget(provider, runtimeRef, target);
+  let changed = 0, failed = 0;
+  const stillHeld = new Set<string>();
+  if (!to) {
+    // Nowhere to post: quiet, and remembered so a later pass can undo it.
+    for (const j of waiting) stillHeld.add(j.id);
+    for (const j of todo) {
+      if (await retargetCron(provider, runtimeRef, j.id, undefined)) { changed++; stillHeld.add(j.id); } else failed++;
+    }
+    return { changed, failed, held: [...stillHeld] };
+  }
   const bound = (j: Cron) => j.sessionTarget === 'current' && !!j.sessionKey;
   const change = isConversation(to) ? todo.filter((j) => !bound(j)) : todo;
-  if (change.length && isConversation(to)) await ensureConversation(provider, runtimeRef, slug, to.session);
-  let changed = 0, failed = 0;
+  if (isConversation(to) && (change.length || waiting.some((j) => !bound(j)))) await ensureConversation(provider, runtimeRef, slug, to.session);
   for (const j of change) {
     if (await retargetCron(provider, runtimeRef, j.id, to)) changed++; else failed++;
   }
-  return { changed, failed };
+  for (const j of waiting) {
+    // A task bound to a conversation of its own goes back to announcing there.
+    const its = isConversation(to) && bound(j) ? { session: j.sessionKey! } : to;
+    if (await retargetCron(provider, runtimeRef, j.id, its)) changed++; else { failed++; stillHeld.add(j.id); }
+  }
+  return { changed, failed, held: [...stillHeld] };
 }
 
 /**
