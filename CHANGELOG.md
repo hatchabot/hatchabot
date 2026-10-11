@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.160.1] — 2026-10-11
+
+### Changed
+- **An agent's Usage shows where its tokens went as a donut chart**, beside the one for what they cost: cache writes, cache reads, output and new input, the total in the middle, each part's tokens and share in the legend, in the same colours as the cost chart. It was a thin bar with a line of text.
+
 ## [2.160.0] — 2026-10-10
 
 A reliability and hardening release: about 170 fixes from a security review of v2.159.0 and from the 129 issues an automated review filed on GitHub. None of the findings let one household account reach another's agents or data, and none needed no sign-in; most were places where a failure (a read that failed, a stop that did not take, a step cut off by a restart) was reported as success, or where a recovery path skipped a check the normal path makes. Each fix has a test that failed before it, and a docs/troubleshooting.md entry.
