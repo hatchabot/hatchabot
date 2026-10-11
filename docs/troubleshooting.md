@@ -306,6 +306,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/routes.ts` — `apply-default-model`; `src/orchestrator/provision.ts` — `effectiveModel`
 
+### After switching an agent's AI source, it still uses the old one and no rebuild is offered
+- **Check:** the agent's page shows the new source, but its replies (or `openclaw models status` in its console) use the old source, and there is no "rebuild to apply" mark; the model was changed around the same time as the source.
+- **Cause:** a model change applied live (`models set`) while the source switch was being saved recorded the new source as applied, although only the old runtime's model had changed.
+- **Fix:** rebuild the agent. Since v2.160.0 a live model change records only the settings it applied, so the switch keeps asking for its rebuild.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `applyModelToRuntime`
+
 ## Telegram, Discord and Slack
 
 ### Discord or Slack ended up connected to a different agent than the one the sheet named

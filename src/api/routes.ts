@@ -1824,7 +1824,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     else if (a.state === 'STOPPED') res = await provider.execShellOnVolume(a.runtimeRef, `openclaw models set '${ref.replace(/'/g, '')}' >/dev/null`, { image: a.image ?? undefined });
     else return 'none';
     if (res.code !== 0) { trace(agentId)('model.live_set_failed', { model: ref, stderr: (res.stderr || res.stdout).slice(0, 200) }); return 'failed'; }
-    recordApplied(store, agentId);
+    // What was applied is what was read before the call. A source switch (or
+    // another model) saved while `models set` ran is not on the runtime:
+    // stamping the record as it is now hid the rebuild the switch needs (#87).
+    const now = store.getAgent(agentId);
+    const nowProfile = now && store.getAIProfile(now.aiProfileId);
+    if (now && nowProfile && now.aiProfileId === a.aiProfileId && effectiveModel(now, nowProfile) === effectiveModel(a, p)) recordApplied(store, agentId);
+    else if (now) store.setAgentApplied(agentId, a.aiProfileId, effectiveModel(a, p));
     return a.state === 'RUNNING' ? 'live' : 'staged';
   };
 
