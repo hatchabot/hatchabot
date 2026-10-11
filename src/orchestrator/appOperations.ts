@@ -83,6 +83,13 @@ async function putTasksBack(d: InstallDeps, m: AppManifest): Promise<string | un
   return `${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not on the agent${failed ? ` (${failed})` : ''}`;
 }
 
+/** Are the app's listed tasks exactly the manifest's, each once? */
+async function tasksAre(d: InstallDeps, m: AppManifest): Promise<boolean> {
+  const have = (await appJobs(d, m.app)).map((j) => j.name).sort();
+  const want = m.tasks.map((t) => `${m.app}-${t.name}`).sort();
+  return have.length === want.length && have.every((n, i) => n === want[i]);
+}
+
 /** "Put its scheduled tasks back": rolled back only once the record's app's tasks are confirmed on again. */
 async function tasksBackAgain(deps: AppOpDeps, op: OpHandle, p: AppOpParams): Promise<void> {
   const d = deps.install;
@@ -131,13 +138,21 @@ export async function resumeAppOperation(deps: AppOpDeps, opId: string): Promise
   const recShort = rec?.app === p.app ? short(rec.sha) : undefined;
   const newManifest = row.kind === 'app-rollback' ? undefined : await releaseManifest(d, `${appPaths(p.app).releases}/${to}`);
   const cfg = row.kind === 'app-rollback' ? 'none' : await configState(d, p.app, to, newManifest);
-  if (recShort === to && cur === to) {
+  // The record's app has exactly its record's tasks (a sync cut off part way leaves two of one, or none).
+  const tasksOk = recShort ? await tasksAre(d, rec!.manifest as AppManifest) : true;
+  // The record and the link name the new release, nothing is left staged (a
+  // finished install clears its staging folder before the record is written)
+  // and the tasks are the record's. An update of values on the commit already
+  // running (#120) has the record and the link at that commit throughout, so
+  // they alone said "done" over a config still staged, or moved in with its
+  // tasks never re-synced: the staging and the tasks decide too.
+  if (recShort === to && cur === to && cfg === 'none' && tasksOk) {
     await clearStaging(d, p.app, to);
     op.done(`${p.app} is on ${to}.`);
     return;
   }
   // The switch never landed: the link, the config and the record all as before.
-  if (cur === short(p.fromSha ?? undefined) && recShort === cur && cfg !== 'moved' && cfg !== 'restoring') {
+  if (cur === short(p.fromSha ?? undefined) && recShort === cur && cfg !== 'moved' && cfg !== 'restoring' && tasksOk) {
     if (!(await replacedBack())) return;
     await clearStaging(d, p.app, to);
     op.rolledBack(`The ${p.app} change was interrupted by a restart before it switched — nothing changed. Try it again.`);
@@ -185,12 +200,15 @@ async function useNew(deps: AppOpDeps, op: OpHandle, kind: string, p: AppOpParam
   await syncTasks(d, m, before);
   op.step('tasks');
   const now = new Date().toISOString();
+  // A change of values on the commit it had: what it would roll back to stays the one before.
+  const same = rec?.app === p.app && rec.sha === p.toSha;
   const next: AgentApp = kind === 'app-rollback' && rec
     ? { ...rec, sha: p.toSha, manifest: m, previousSha: rec.sha, previousManifest: rec.manifest, installedAt: now, testOk: undefined }
     : {
         agentId: op.get().agentId!, app: p.app, source: p.source ?? rec?.source ?? '', ref: p.ref ?? rec?.ref ?? 'HEAD',
         sha: p.toSha, manifest: m,
-        previousSha: rec?.app === p.app ? rec.sha : undefined, previousManifest: rec?.app === p.app ? rec.manifest : undefined,
+        previousSha: same ? rec!.previousSha : rec?.app === p.app ? rec.sha : undefined,
+        previousManifest: same ? rec!.previousManifest : rec?.app === p.app ? rec.manifest : undefined,
         installedAt: now, testOk: true,
       };
   deps.store.setAgentApp(next);
