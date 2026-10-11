@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeAll } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -67,6 +67,14 @@ describe('inspectWorkspace', () => {
     mkdirSync(join(big, 'data'), { recursive: true });
     for (let i = 0; i < 40; i++) writeFileSync(join(big, 'data', `f${i}.bin`), Buffer.alloc(20 * 1024 * 1024));
     expect(() => inspectWorkspace(big)).toThrow(/too big|share it as a folder/);
+  });
+
+  it('refuses a flat folder of more than 20,000 files, not only a nested one (#112)', () => {
+    const flat = mkdtempSync(join(tmpdir(), 'acl-flat-'));
+    writeFileSync(join(flat, 'SOUL.md'), '# soul');
+    for (let i = 0; i < 20_000; i++) writeFileSync(join(flat, `n${i}.md`), '');
+    expect(() => inspectWorkspace(flat)).toThrow(/over 20000 files/);
+    rmSync(flat, { recursive: true, force: true });
   });
 
   it('excludes credentials at any depth, not just the top level', () => {

@@ -121,6 +121,12 @@ export function inspectWorkspace(dir: string): WorkspacePreview {
       if (e.isDirectory()) {
         walk(resolve(dir, e.name), rel, depth + 1);
       } else if (e.isFile()) {
+        // Counted as each file is found: checked only on entering a folder,
+        // a flat folder of 20,001 files got through (#112).
+        if (files.length >= MAX_FILES) {
+          truncated = true;
+          return;
+        }
         files.push(rel);
         try {
           bytes += statSync(resolve(dir, e.name)).size;
