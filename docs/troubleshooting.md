@@ -511,6 +511,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/apps.ts` — `manifestSchema`
 
+### An app setting cannot be cleared: an empty value keeps the old one
+- **Check:** `hatchabot app update <agent> filter=` (or an empty box in the dialog) and the app's `data/config.json` still has the old value.
+- **Cause:** before v2.160.0 an empty value was treated as "not given", and a value not given keeps what the file has.
+- **Fix:** upgrade: an empty value clears an optional field (`""`, `[]` for a list, `null` for a number or switch); a value left out is still kept. A required field cannot be cleared.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/apps.ts` — `mergeConfig`
+
+### An app's number setting is `null` in its config, or an install says "Not a valid value: … must be a number"
+- **Check:** the value typed for a `"type": "number"` (or `bool`, `list`, `email`) field in `hatchabot.json` does not fit it, e.g. `max_per_day=abc`.
+- **Cause:** before v2.160.0 values were converted without a check, so `abc` became NaN and was written as `null` (and `maybe` for a switch as `false`).
+- **Fix:** upgrade: a value that does not fit its type is refused with what was expected. Give it again as a number, `true`/`false`, a comma list or an email address.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/apps.ts` — `mergeConfig`, `coerce`
+
+### Installing an app says "Hatchabot has nothing to fill … with"
+- **Check:** the field it names is `"required": true` with `"from"` in `hatchabot.json` (e.g. `owner.telegram`), and the reason in brackets: the owner has not linked Telegram, the agent has no Telegram bot, or the account has no email address. Before v2.160.0 the install went ahead and wrote an empty value (an app sending notices then had no recipient).
+- **Cause:** a field the app needs is filled from something Hatchabot does not have for this agent or its owner.
+- **Fix:** set it up (Settings → You for Telegram; give the agent a bot), then install again or press Try again on the agent's page.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/apps.ts` — `mergeConfig`, `installRelease`
+
 ### Promoting a newer OpenClaw is refused: "… cannot read the data of agents already on 2026.8 or newer"
 - **Check:** the agents it names run OpenClaw 2026.7 (`hatchabot list`), not 2026.8 or newer.
 - **Cause:** before 2.146.1 the promote check was inverted: it refused moving the fleet UP across 2026.8 over agents still on 2026.7 (the normal path; their volume is healed on rebuild), instead of refusing a move DOWN below 2026.8 over agents already migrated.

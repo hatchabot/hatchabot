@@ -1089,6 +1089,45 @@ describe('apps: what the 2026-10-10 workflow audit found', () => {
     expect(parseManifest(JSON.stringify(MANIFEST)).tasks).toHaveLength(1);
   });
 
+  const TYPED = parseManifest(JSON.stringify({ ...MANIFEST, config: { fields: [
+    ...MANIFEST.config.fields,
+    { key: 'filter', label: 'only mail from', type: 'text' },
+    { key: 'labels', type: 'list' },
+    { key: 'max_per_day', type: 'number' },
+    { key: 'wait_minutes', type: 'number', required: true, default: 15 },
+    { key: 'dry_run', type: 'bool' },
+    { key: 'owner_telegram', from: 'owner.telegram', required: true },
+  ] } }));
+
+  it('an optional value given as empty clears it; left out, it is kept (#76)', () => {
+    const had = { mailbox: 'kept@example.org', filter: 'from:school', labels: ['a'], max_per_day: 5, wait_minutes: 30 };
+    const { config } = mergeConfig(TYPED, FACTS, had, { filter: '', labels: '', max_per_day: ' ', wait_minutes: '' });
+    expect(config).toMatchObject({ mailbox: 'kept@example.org', filter: '', labels: [], max_per_day: null });
+    expect(config.wait_minutes).toBe(30); // a required one is not cleared: it keeps what it has
+    expect(mergeConfig(TYPED, FACTS, had, {}).config).toMatchObject({ filter: 'from:school', labels: ['a'], max_per_day: 5 });
+  });
+
+  it('a value not of its field\'s type is refused, never written as null (#77)', () => {
+    expect(() => mergeConfig(TYPED, FACTS, {}, { mailbox: 'demo@example.org', max_per_day: 'abc' })).toThrow(/max_per_day must be a number \(got "abc"\)/);
+    expect(() => mergeConfig(TYPED, FACTS, {}, { mailbox: 'demo@example.org', dry_run: 'maybe' })).toThrow(/dry_run must be true or false/);
+    expect(() => mergeConfig(TYPED, FACTS, {}, { mailbox: 'not an address' })).toThrow(/mailbox must be an email address/);
+    expect(() => mergeConfig(TYPED, FACTS, {}, { mailbox: 'demo@example.org', max_per_day: { $gt: 1 } })).toThrow(/max_per_day must be a number/);
+    const ok = mergeConfig(TYPED, FACTS, {}, { mailbox: 'demo@example.org', max_per_day: ' 12 ', dry_run: 'off', labels: 'a, b' }).config;
+    expect(ok).toMatchObject({ max_per_day: 12, dry_run: false, labels: ['a', 'b'] });
+    expect(JSON.parse(JSON.stringify(ok)).max_per_day).toBe(12);
+  });
+
+  it('a required field Hatchabot fills, with nothing to fill it with, stops the install (#78)', async () => {
+    const noTelegram = { ...FACTS, ownerTelegram: undefined };
+    expect(mergeConfig(TYPED, noTelegram, {}, { mailbox: 'demo@example.org' }).unfilled).toEqual(['owner_telegram (its owner has not linked a Telegram account (Settings → You))']);
+    expect(mergeConfig(TYPED, FACTS, {}, { mailbox: 'demo@example.org' }).unfilled).toEqual([]);
+    const agent = new FakeAgent();
+    const rel = await resolveRelease(hostGit, repo({ ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'owner_telegram', from: 'owner.telegram', required: true }] } }), 'HEAD');
+    await expect(installRelease({ ...d(agent), facts: noTelegram }, rel, { mailbox: 'demo@example.org' })).rejects.toThrow(/nothing to fill owner_telegram/);
+    expect(agent.calls.some((c) => c.what.includes('unittest'))).toBe(false);
+    expect(agent.live().config).toBeNull();
+  });
+
   it('a change of values on the same commit keeps the live release folder (#92)', async () => {
     const dir = repo();
     const agent = new FakeAgent();

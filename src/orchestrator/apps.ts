@@ -174,30 +174,77 @@ export function appVars(m: AppManifest, facts: AgentFacts, at: { app_dir?: strin
   return { ...base, env: Object.entries(env).map(([k, v]) => `${k}=${sq(v)}`).join(' '), envMap: env };
 }
 
-/** The config file's new contents: asked values, Hatchabot's facts, existing values kept, defaults for the rest. */
+/** What Hatchabot has no value for, when a required field is filled from it. */
+const UNFILLED: Partial<Record<(typeof FROM)[number], string>> = {
+  'agent.telegramAccount': 'the agent has no Telegram bot',
+  'owner.telegram': "its owner has not linked a Telegram account (Settings → You)",
+  'owner.email': "its owner's account has no email address",
+};
+
+/**
+ * The config file's new contents: asked values, Hatchabot's facts, existing
+ * values kept, defaults for the rest. A value given as '' clears an optional
+ * field ('', [] for a list, null for a number or switch); left out, it keeps
+ * the one it has (#76). A value that is not of its field's type throws (#77).
+ * `unfilled`: required fields Hatchabot fills, with nothing to fill them
+ * with (#78; an empty owner id became the app's recipient).
+ */
 export function mergeConfig(m: AppManifest, facts: AgentFacts, existing: Record<string, unknown>, values: Record<string, unknown>) {
   const out: Record<string, unknown> = { ...existing };
   const missing: string[] = [];
+  const unfilled: string[] = [];
+  const invalid: string[] = [];
   const fact: Record<(typeof FROM)[number], unknown> = {
     'agent.openclawId': facts.slug, 'agent.telegramAccount': facts.telegramAccount ?? '', 'agent.name': facts.name,
     'owner.telegram': facts.ownerTelegram ?? '', 'owner.email': facts.ownerEmail ?? '', 'host.timezone': facts.timezone,
   };
   for (const f of m.config?.fields ?? []) {
-    if (f.from) { out[f.key] = fact[f.from]; continue; }
-    if (values[f.key] !== undefined && values[f.key] !== '') out[f.key] = coerce(f.type, values[f.key]);
+    if (f.from) {
+      out[f.key] = fact[f.from];
+      if (f.required && !String(fact[f.from] ?? '').trim()) unfilled.push(`${f.key} (${UNFILLED[f.from] ?? `no ${f.from}`})`);
+      continue;
+    }
+    const given = Object.prototype.hasOwnProperty.call(values, f.key) && values[f.key] !== undefined;
+    const cleared = given && typeof values[f.key] === 'string' && !(values[f.key] as string).trim();
+    if (given && !cleared) {
+      const v = coerce(f.type, values[f.key]);
+      if (v === INVALID) invalid.push(`${f.key} must be ${TYPE_WORD[f.type ?? 'text']} (got ${JSON.stringify(values[f.key]).slice(0, 60)})`);
+      else out[f.key] = v;
+    } else if (cleared && !f.required) out[f.key] = f.type === 'list' ? [] : f.type === 'number' || f.type === 'bool' ? null : '';
     else if (out[f.key] !== undefined) continue;
     else if (f.default !== undefined) out[f.key] = f.default;
     else if (f.required) missing.push(f.label ? `${f.key} (${f.label})` : f.key);
   }
-  return { config: out, missing };
+  if (invalid.length) throw new AppError(`Not a valid value: ${invalid.join('; ')}.`);
+  return { config: out, missing, unfilled };
 }
 
+const INVALID = Symbol('invalid');
+const TYPE_WORD: Record<string, string> = { number: 'a number', bool: 'true or false', list: 'a list (a, b, c)', email: 'an email address', text: 'text' };
+
+/** A value as its field's type, or INVALID ("abc" for a number became NaN, written as null). */
 function coerce(type: string | undefined, v: unknown): unknown {
-  if (typeof v !== 'string') return v;
-  if (type === 'number') return Number(v);
-  if (type === 'bool') return /^(1|true|yes|on)$/i.test(v);
-  if (type === 'list') return v.split(',').map((x) => x.trim()).filter(Boolean);
-  return v;
+  const s = typeof v === 'string' ? v.trim() : undefined;
+  switch (type) {
+    case 'number': {
+      const n = s !== undefined ? (s === '' ? NaN : Number(s)) : v;
+      return typeof n === 'number' && Number.isFinite(n) ? n : INVALID;
+    }
+    case 'bool':
+      if (typeof v === 'boolean') return v;
+      if (s !== undefined && /^(1|true|yes|on)$/i.test(s)) return true;
+      if (s !== undefined && /^(0|false|no|off)$/i.test(s)) return false;
+      return INVALID;
+    case 'list':
+      if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return v;
+      return s !== undefined ? s.split(',').map((x) => x.trim()).filter(Boolean) : INVALID;
+    case 'email':
+      return s !== undefined && /^[^\s@]+@[^\s@]+$/.test(s) ? v : INVALID;
+    case 'text':
+      return typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' ? (typeof v === 'string' ? v : String(v)) : INVALID;
+    default:
+      return v;
+  }
 }
 
 export interface Installed { app: string; sha: string; previousSha?: string; manifest: AppManifest; test?: { ok: boolean; output: string }; tasks: string[] }
@@ -316,8 +363,9 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
       if (read.code !== 0) throw new AppError(`Could not read ${live} in the agent (${errText(read) || 'no output'}), so its settings were left as they are. Check it, then try again.`);
       let existing: Record<string, unknown> = {};
       try { existing = read.stdout.trim() ? JSON.parse(read.stdout) : {}; } catch { throw new AppError(`${live} in the agent is not valid JSON; fix or remove it.`); }
-      const { config, missing } = mergeConfig(m, d.facts, existing, values);
+      const { config, missing, unfilled } = mergeConfig(m, d.facts, existing, values);
       if (missing.length) throw new AppError(`Needs a value for: ${missing.join(', ')} (give them as key=value).`);
+      if (unfilled.length) throw new AppError(`Hatchabot has nothing to fill ${unfilled.join(', ')} with; set that up, then try again.`);
       d.checkConfig?.(config, existing);
       const w = await d.provider.writeToVolume(d.runtimeRef,
         ['sh', '-c', `umask 077 && cat > ${sq(staged)}`], Buffer.from(JSON.stringify(config, null, 2) + '\n'));
