@@ -427,6 +427,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/store/store.ts` — `knownChannelUserId`, `setAccountTelegram`, `telegram_unlinks`
 
+### Someone removed just as they first messaged the bot can still chat with it
+- **Check:** they are not in the agent's members, yet the bot answers them; the trail shows their removal at the moment their invite's window let them in.
+- **Cause:** the window approved their message with OpenClaw before binding it to their seat. A removal that landed in between left the approval with no member row to remove them by.
+- **Fix:** upgrade. An approval that cannot be bound is now taken back and the window closes. On an older version, invite them again and remove them once they are in.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/claim.ts` — `claimFirstContact`, `scrubApproval`
+
 ## Agents, builds and rebuilds
 
 ### A rebuild or setup fails with `seed failed at "<step>": …`

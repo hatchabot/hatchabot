@@ -98,6 +98,55 @@ describe('claimFirstContact', () => {
     expect(store.getActiveMembershipByChannelUser('a1', '999')!.userId).toBe('u1'); // still the owner
   });
 
+  // A088: the seat is checked before the approval is awaited; a removal that
+  // lands during that await left OpenClaw admitting an id no member row held.
+  async function approvalRace(during: (store: Store) => void) {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'a1',
+      workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } },
+      env: {},
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'RUNNING',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
+    store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'invitee', role: 'user', status: 'active' });
+    provider.execResponses.set('sh', {
+      code: 0, stdout: JSON.stringify({ requests: [{ id: '4242', code: 'RACE' }] }), stderr: '',
+    });
+    const exec = provider.exec.bind(provider);
+    provider.exec = async (ref, argv, o) => {
+      if (argv[0] === 'pairing' && argv[1] === 'approve') during(store);
+      return exec(ref, argv, o);
+    };
+    provider.execResponses.set('pairing approve', { code: 0, stdout: 'ok', stderr: '' });
+    const claimed = await claimFirstContact(
+      { store, provider, sleep: async () => {} },
+      { agentId: 'a1', runtimeRef, accountId: 'famBot', forUserId: 'invitee', timeoutMs: 1000, pollIntervalMs: 1 },
+    );
+    const scrubs = provider.execLog.filter((a) => a[0] === 'sh-volume' && a[1]!.includes('delete from channel_pairing_allow_entries') && a[1]!.includes('"4242"'));
+    return { store, claimed, scrubs };
+  }
+
+  it('an approval whose seat was removed meanwhile is taken back, and the window closes', async () => {
+    const { store, claimed, scrubs } = await approvalRace((s) => s.revokeMembership('a1', 'invitee'));
+    expect(claimed).toBeNull();
+    expect(scrubs).toHaveLength(1);
+    expect(scrubs[0]![1]).toContain('telegram-fambot-allowFrom.json');
+    expect(store.pairingWindowOpen('a1')).toBe(false);
+  });
+
+  it('an approval somebody else\'s window bound meanwhile is theirs: not scrubbed', async () => {
+    const { store, claimed, scrubs } = await approvalRace((s) => { s.bindMembershipChannelUser('a1', 'u1', '4242'); });
+    expect(claimed).toBeNull(); // the window gives up on its own timer; the id stays the owner's
+    expect(scrubs).toHaveLength(0);
+    expect(store.getActiveMembershipByChannelUser('a1', '4242')!.userId).toBe('u1');
+  });
+
   it('waits through a transient REBUILDING instead of abandoning the window', async () => {
     const db = new Database(':memory:');
     const store = new Store(db);
