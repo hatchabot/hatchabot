@@ -13406,18 +13406,22 @@ async function chanFindRooms(id, btn) {
   finally { btn.disabled = false; }
 }
 
+/** Each open of the channel dialog: an older open still fetching is dropped, not painted. */
+let chanOpenGen = 0;
 async function openChanSetup(id, kind) {
   const a = v2Find(id); if (!a) return;
-  chanFor = id; chanKind = kind;
+  // Opening for one agent, then another before the first's fetches came back,
+  // painted the first agent's form while Connect sent the tokens to the
+  // second (B055). Only the newest open paints, and the dialog's target is
+  // set together with what it shows, just before it opens.
+  const gen = ++chanOpenGen;
   if (!Array.isArray(chanFields)) {
-    try { chanFields = await api('/v1/channels/connectors'); } catch { chanFields = []; }
-    if (!Array.isArray(chanFields)) chanFields = [];
+    let got;
+    try { got = await api('/v1/channels/connectors'); } catch { got = []; }
+    chanFields = Array.isArray(got) ? got : [];
   }
+  if (gen !== chanOpenGen) return;
   const fields = chanFields.find(c => c.kind === kind)?.fields ?? [];
-  $('chanTitle').textContent = `Connect ${a.name} to ${V2_CHAN_LABEL[kind]}`;
-  $('chanErr').textContent = '';
-  $('chanGo').hidden = false; $('chanGo').disabled = false; $('chanGo').textContent = 'Connect';
-  $('chanClose').textContent = 'Cancel';
   const steps = kind === 'slack' ? `
     <ol class="v2steps">
       <li><b>Create the app.</b> <button type="button" onclick="chanCopyManifest(this)">Copy app manifest</button>
@@ -13438,6 +13442,7 @@ async function openChanSetup(id, kind) {
   if (kind === 'discord' || kind === 'slack') {
     let pool = [];
     try { pool = (await api(POOL_UI[kind].path)).bots ?? []; } catch { pool = []; }
+    if (gen !== chanOpenGen) return;
     if (kind === 'discord') discordPool = pool; else slackPool = pool;
     // Only what this person can take: their own and the shared ones (the
     // machine's owner also sees other people's in Settings, not here).
@@ -13457,9 +13462,14 @@ async function openChanSetup(id, kind) {
       oninput="chanCheckField(this)">
     <div class="sub" id="chanH-${esc(f.key)}">${esc(f.help)}</div>`).join('') +
     `<div class="sub" style="margin-top:10px">The tokens are stored with this agent's other secrets and never shown to an AI. Connecting restarts the agent; it keeps its memory.</div>`;
-  chanDlg.showModal();
+  $('chanTitle').textContent = `Connect ${a.name} to ${V2_CHAN_LABEL[kind]}`;
+  $('chanErr').textContent = '';
+  $('chanGo').hidden = false; $('chanGo').disabled = false; $('chanGo').textContent = 'Connect';
+  $('chanClose').textContent = 'Cancel';
+  chanFor = id; chanKind = kind;
+  if (!chanDlg.open) chanDlg.showModal();
   chanDlg.querySelector('input')?.focus();
-  if (kind === 'slack') void chanPrefillSlackLink(a.name);
+  if (kind === 'slack') void chanPrefillSlackLink(a.name, gen);
 }
 /** The agent's own sleep and file policy (Advanced tab): saved and applied at once. */
 /** Its own browser (docs/browser.md): switching rebuilds it. */
@@ -13487,11 +13497,11 @@ async function v2SetAgentPolicy(id, body) {
   catch (e) { toast(e.message, 6000); await refresh(false); }
 }
 /** Slack creates an app from a manifest given in the address: no copy, no paste. */
-async function chanPrefillSlackLink(name) {
+async function chanPrefillSlackLink(name, gen) {
   try {
     const m = await api(`/v1/channels/slack/manifest?name=${encodeURIComponent(name)}`);
     const link = $('chanSlackNew');
-    if (link) link.href = `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(JSON.stringify(m))}`;
+    if (link && gen === chanOpenGen) link.href = `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(JSON.stringify(m))}`;
   } catch { /* the plain link and Copy app manifest still work */ }
 }
 /** Both Slack tokens from one paste: whichever the person copied, in any order. */

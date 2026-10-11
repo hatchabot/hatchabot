@@ -308,6 +308,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ## Telegram, Discord and Slack
 
+### Discord or Slack ended up connected to a different agent than the one the sheet named
+- **Check:** the agent named in the Connect sheet has no Discord or Slack row, while another agent you had just clicked does; Activity shows the connect on that other agent.
+- **Cause:** opening Connect for one agent, then for another before the first had loaded, could paint the first agent's sheet while Connect sent the tokens to the second.
+- **Fix:** upgrade; on the wrong agent, remove the channel (the bot is parked) and connect the right agent using the parked bot.
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `openChanSetup`, `chanOpenGen`
+
 ### Bring in from OpenClaw: "couldn't confirm OpenClaw stopped using this bot (Telegram didn't answer)"
 - **Check:** the row of that agent in Add → From OpenClaw says it; `curl -sS https://api.telegram.org` from this machine fails or hangs.
 - **Cause:** after OpenClaw's gateway restarts with the bot turned off, Hatchabot asks Telegram whether anything still polls the bot. When Telegram does not answer, nothing is known, and taking the bot over could leave two programs answering it. Before v2.160.0 no answer counted as "stopped".
