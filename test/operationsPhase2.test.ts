@@ -266,6 +266,34 @@ describe('archive: killed at every step, then a restart', () => {
       });
     }
   }
+
+  it('its bot given back, a stop that cannot be confirmed: held, not archived, Start refused; Try again finishes it (B025)', async () => {
+    const a = await archiveWorld(true);
+    crashAt('bot-released'); // given back to the pool; not yet recorded, nor archived
+    await expect(archiveAgent(a.deps, a.id)).rejects.toBeInstanceOf(SimulatedCrash);
+    reboot(a.id);
+    // Up again before the boot pass (its restart policy), and its machine stops answering.
+    await a.w.provider.start(a.ref);
+    const realStop = a.w.provider.stop.bind(a.w.provider);
+    const realStatus = a.w.provider.status.bind(a.w.provider);
+    a.w.provider.stop = async () => { throw new Error('cannot connect to the docker daemon'); };
+    a.w.provider.status = async () => ({ phase: 'unknown' });
+    await resumeOperations(a.ctx);
+    const op = a.w.store.listOperations([a.id])[0]!;
+    expect(op.status).toBe('held');
+    expect(op.outcome).toMatch(/could not be confirmed stopped/);
+    expect(a.w.store.getAgent(a.id)!.state).not.toBe('ARCHIVED');
+    expect(a.w.store.getChannelForAgent(a.id)?.accountId).toBe('testagentbot');
+    expect(operationRefusal(a.w.store, a.id)).toMatch(/could not be confirmed stopped/);
+
+    a.w.provider.stop = realStop;
+    a.w.provider.status = realStatus;
+    const after = await recoverOperation(a.ctx, op.id, 'retry');
+    expect(after.status).toBe('succeeded');
+    expect(a.w.store.getAgent(a.id)!.state).toBe('ARCHIVED');
+    expect((await a.w.provider.status(a.ref)).phase).toBe('stopped');
+    expect(a.w.store.getChannelForAgent(a.id)).toBeUndefined();
+  });
 });
 
 // ---- the rebuild queue and setup ----------------------------------------------
