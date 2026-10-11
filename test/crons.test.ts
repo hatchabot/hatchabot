@@ -68,6 +68,20 @@ describe('crons helpers', () => {
     expect(p.execLog).toContainEqual(['cron', 'list', '--agent', 'kitchen', '--all', '--json']);
   });
 
+  it('a one-shot task keeps its time whether the gateway gives epoch ms or an ISO string (#61)', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    const at = Date.UTC(2026, 10, 3, 14, 30);
+    p.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [
+      { id: 'o1', name: 'iso', enabled: true, schedule: { kind: 'at', at: new Date(at).toISOString() }, payload: { kind: 'agentTurn', message: 'm' } },
+      { id: 'o2', name: 'ms', enabled: true, schedule: { kind: 'at', at }, payload: { kind: 'agentTurn', message: 'm' } },
+      { id: 'o3', name: 'ms string', enabled: true, schedule: { kind: 'at', at: String(at) }, payload: { kind: 'agentTurn', message: 'm' } },
+      { id: 'o4', name: 'nonsense', enabled: true, schedule: { kind: 'at', at: 'soon' }, payload: { kind: 'agentTurn', message: 'm' } },
+    ] }) });
+    const crons = await listCrons(p, ref, 'kitchen');
+    expect(crons.map((c) => c.atMs)).toEqual([at, at, at, undefined]);
+  });
+
   it('listCrons says it could not read the list — never "no tasks" (2026-09-23)', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);
@@ -77,6 +91,15 @@ describe('crons helpers', () => {
     await expect(listCrons(p, ref, 'kitchen')).rejects.toThrow(/JSON/);
     p.execResponses.set('cron list', { code: 0, stdout: '{"jobs":[]}', stderr: '' });
     expect(await listCrons(p, ref, 'kitchen')).toEqual([]); // a real "none"
+    // No list, or something in it that is not a task, is not "none" either (#60).
+    p.execResponses.set('cron list', { code: 0, stdout: '{}', stderr: '' });
+    await expect(listCrons(p, ref, 'kitchen')).rejects.toThrow(/no list/);
+    p.execResponses.set('cron list', { code: 0, stdout: '{"jobs":{"id":"job-1"}}', stderr: '' });
+    await expect(listCrons(p, ref, 'kitchen')).rejects.toThrow(/no list/);
+    p.execResponses.set('cron list', { code: 0, stdout: '{"jobs":[{"id":"job-1"},null]}', stderr: '' });
+    await expect(listCrons(p, ref, 'kitchen')).rejects.toThrow(/no id/);
+    p.execResponses.set('cron list', { code: 0, stdout: '{"jobs":[{"name":"x"}]}', stderr: '' });
+    await expect(listCrons(p, ref, 'kitchen')).rejects.toThrow(/no id/);
   });
 
   it('GET …/crons answers 503 with a try-again, not an empty list, when the gateway hiccups', async () => {
