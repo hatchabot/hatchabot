@@ -12,7 +12,7 @@
  */
 import './envCompat.js'; // must stay the first import: aliases AGENTCLAW_* env on load
 import { chmod, readFile, writeFile } from 'node:fs/promises';
-import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -402,8 +402,13 @@ function configPath(): string {
   return join(homedir(), '.config', 'hatchabot', 'env');
 }
 
-function writeConfigValue(key: string, value: string): void {
-  const path = configPath();
+/**
+ * Set KEY in the config file, which holds a sign-in token. Written to a new
+ * private file and renamed over the old one: writeFileSync's mode applies
+ * only when it creates the file, so a file made 0644 by hand or by an older
+ * release stayed readable by everyone with the token in it (A068).
+ */
+export function writeConfigValue(key: string, value: string, path = configPath()): void {
   let lines: string[] = [];
   try {
     lines = readFileSync(path, 'utf8').split('\n').filter((l) => !l.startsWith(`${key}=`));
@@ -411,7 +416,11 @@ function writeConfigValue(key: string, value: string): void {
   lines = lines.filter((l) => l.trim().length > 0);
   lines.push(`${key}=${value}`);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, lines.join('\n') + '\n', { mode: 0o600 });
+  const tmp = `${path}.${process.pid}.tmp`;
+  rmSync(tmp, { force: true }); // a leftover keeps its own mode; start fresh
+  writeFileSync(tmp, lines.join('\n') + '\n', { mode: 0o600, flag: 'wx' });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, path);
 }
 
 async function serverConfig(url: string): Promise<IdentityConfig> {
