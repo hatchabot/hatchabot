@@ -8,12 +8,14 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import {
   ensureRunnerKey,
   ensureSshConfigBlock,
   installRuntimeImage,
   parseSshEndpoint,
   runnerSetupSnippet,
+  sshConfigPath,
 } from '../src/orchestrator/runnerSetup.js';
 
 describe('parseSshEndpoint', () => {
@@ -53,6 +55,21 @@ describe('ensureSshConfigBlock', () => {
     const before = cfg.length;
     await ensureSshConfigBlock('ssh://bob@runner.example:2222', { sshDir: dir });
     expect(readFileSync(join(dir, 'config'), 'utf8').length).toBe(before);
+  });
+
+  it('quotes a key path with spaces (or %) so ssh reads the real file (#153)', async () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'acl-sshcfg-')), 'Ada Lovelace 100%', '.ssh');
+    await ensureSshConfigBlock('ssh://bob@runner.example', { sshDir: dir });
+    const cfg = readFileSync(join(dir, 'config'), 'utf8');
+    expect(cfg).toContain(`IdentityFile "${dir.replace(/%/g, '%%')}/agentclaw_runner"`);
+    // What ssh itself makes of it, where ssh is installed (no connection is made).
+    let resolved = '';
+    try {
+      resolved = execFileSync('ssh', ['-G', '-F', join(dir, 'config'), 'runner.example'], { encoding: 'utf8', env: { PATH: process.env.PATH!, HOME: dir } });
+    } catch { /* no ssh client here */ }
+    // (-G prints the value before ssh expands its %% token back to %.)
+    if (resolved) expect(resolved).toContain(`identityfile ${dir.replace(/%/g, '%%')}/agentclaw_runner\n`);
+    expect(() => sshConfigPath('/home/x"y/.ssh/key')).toThrow(/quote or line break/);
   });
 
   it('ignores tcp endpoints (no ssh side to configure)', async () => {
