@@ -945,6 +945,69 @@ describe('an app change cut off by a restart (kill at every step)', () => {
     } finally { await w.f.close(); }
   });
 
+  // #120 (workflow audit, 2026-10-10): new values on the commit already running.
+  // The record and the link say that commit throughout, so they alone said "done".
+  it('new values on the running commit, cut off at the switch: undone, not "done" over a config still staged (#120)', async () => {
+    const w = await world();
+    try {
+      expect((await w.install()).statusCode).toBe(200);
+      const first = w.agrees()!;
+      const config = readFileSync(w.provider.configFile('mock://a1'), 'utf8');
+      // The process dies as the switch is about to run: the step is recorded, the new config still staged.
+      const shell = w.provider.execShell.bind(w.provider);
+      w.provider.execShell = async (ref: string, script: string) => {
+        if (script.includes('mv -T current.new current') && script.includes('mv -f')) throw new SimulatedCrash();
+        return shell(ref, script);
+      };
+      const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: { values: { mailbox: 'other@example.org' } } });
+      expect(res.statusCode).toBeGreaterThanOrEqual(500);
+      w.provider.execShell = shell;
+      reboot();
+      await w.routes.resumeOperations();
+      const op = opOf(w.store);
+      expect(op).toMatchObject({ kind: 'app-update', status: 'rolled_back' });
+      expect(op.outcome).toMatch(/nothing changed/);
+      expect(readFileSync(w.provider.configFile('mock://a1'), 'utf8')).toBe(config);
+      expect(w.provider.live('mock://a1').staging).toBe(false);
+      expect(w.agrees()!.sha).toBe(first.sha);
+    } finally { setStepHookForTests(undefined); await w.f.close(); }
+  });
+
+  it('new values on the running commit, cut off once the config was moved in: held, and "Use the new release" finishes it (#120)', async () => {
+    const w = await world();
+    try {
+      expect((await w.install()).statusCode).toBe(200);
+      const first = w.agrees()!;
+      crashAt('switched');
+      await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: { values: { mailbox: 'other@example.org' } } });
+      reboot();
+      await w.routes.resumeOperations();
+      const op = opOf(w.store);
+      expect(op).toMatchObject({ kind: 'app-update', status: 'held' });
+      const rec = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'use-new' } });
+      expect(rec.json().operation.status).toBe('succeeded');
+      const now = w.agrees()!;
+      expect(now.sha).toBe(first.sha);
+      expect(now.previousSha).toBeUndefined(); // the same commit is not "the one before"
+      expect(JSON.parse(readFileSync(w.provider.configFile('mock://a1'), 'utf8')).mailbox).toBe('other@example.org');
+      expect(w.provider.live('mock://a1').staging).toBe(false);
+    } finally { setStepHookForTests(undefined); await w.f.close(); }
+  });
+
+  it('a sync cut off part way leaves a task twice: not called done (#120)', async () => {
+    const w = await world();
+    try {
+      expect((await w.install()).statusCode).toBe(200);
+      commit(w.dir, SECOND);
+      crashAt('#succeeded');
+      await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: {} });
+      w.provider.jobs.push({ id: 'dup', name: 'demoapp-tick' });
+      reboot();
+      await w.routes.resumeOperations();
+      expect(opOf(w.store).status).toBe('held');
+    } finally { setStepHookForTests(undefined); await w.f.close(); }
+  });
+
 });
 
 // ---- the workflow audit of 2026-10-10 (issues #73–#121) ----

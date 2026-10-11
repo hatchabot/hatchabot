@@ -786,6 +786,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.155.0`
 - **Code:** `src/orchestrator/appOperations.ts` — `resumeAppOperation`, `recoverAppOperation`
 
+### An app update cut off by a restart says it finished, but the app still runs with its old values
+- **Check:** an Update that gave new values on the commit already running, a restart while it ran, and the operation then marked done; `data/config.json` under `~/.openclaw/apps/<app>` in the agent has the old values (or `openclaw cron list --all` shows one of its tasks twice).
+- **Cause:** before v2.160.0 the restart compared only the record and the `current` link with the new commit. A change of values keeps the same commit, so they matched from the start, and the operation was called done while the new config was still staged, which was then deleted.
+- **Fix:** upgrade: the staged config and the app's tasks are checked too. A change cut off before the switch is undone ("nothing changed"; run Update again), and one cut off after it waits for **Use the new release** or **Go back to the previous one**. On an older version, run Update again with the new values.
+- **Fixed in:** v2.160.0
+- **Code:** `src/orchestrator/appOperations.ts` — `resumeAppOperation`, `tasksAre`
+
 ### Alerts listed general alerts above failed agents, and people knocking near the bottom
 - **Check:** View by → Alerts; the order of its sections.
 - **Cause:** the view sorted its sections by label, so the emoji decided the order.
