@@ -4245,8 +4245,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             // has() check here — it would always see our own reservation.
             if (!fresh?.runtimeRef || fresh.state !== 'RUNNING') { recovering.delete(id); return; }
             setTimeout(() => recovering.delete(id), 15 * 60_000).unref();
-            const r = await recoverContext(providerFor(fresh.hostId), fresh, { includeLive: true }).catch(() => null);
-            trace(id)('transcript.recover_after_switch', r ?? { error: 'staging failed' });
+            const r = await recoverContext(providerFor(fresh.hostId), fresh, { includeLive: true })
+              .catch((err) => ({ error: String((err as Error)?.message ?? err).slice(0, 200) }));
+            trace(id)('transcript.recover_after_switch', r);
           }).catch(() => {});
           recovering.add(a.id); // reserve the slot now so a manual click can't double up
         }
@@ -7829,7 +7830,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     let r;
     const includeLive = (req.body as { includeLive?: boolean } | undefined)?.includeLive === true;
     try { r = await recoverContext(providerFor(agent.hostId), agent, { includeLive }); }
-    catch (err) { recovering.delete(agent.id); return reply.code(502).send({ error: `Couldn't stage the history: ${String((err as Error).message ?? err).slice(0, 200)}` }); }
+    catch (err) { recovering.delete(agent.id); return reply.code(502).send({ error: `Couldn't recover the history: ${String((err as Error).message ?? err).slice(0, 300)}` }); }
     trace(agent.id)('transcript.recover_started', r);
     store.clearContextReset(agent.id); // the offer is taken; stop making it
     if (!r.messages) {

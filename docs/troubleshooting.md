@@ -809,6 +809,34 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `web/index.html` — `askChoice`, `recoverContext`, `shareTemplate`
 
+### Download history or Recover context finds nothing, or only old conversations, on OpenClaw 2026.9
+- **Check:** the agent's sheet shows OpenClaw 2026.9 or newer; Data → History says "No chat history found", or the download stops at the day the agent moved to 2026.9; Recover context says there is nothing to recover after a reset you saw.
+- **Cause:** 2026.9 keeps conversations in the agent's own database (`openclaw-agent.sqlite`), and a reset moves the old one to its archive table. The reader looked only at 2026.7's `sessions/*.jsonl` files.
+- **Fix:** upgrade. History, Recover context and the after-rebuild context check read the database (current and archived conversations) as well as the older files, each conversation once.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/transcript.ts` — `RENDER_SCRIPT`
+
+### Recover context hands the agent a chat that is still going on (another person's web chat, a group)
+- **Check:** the recovered file (`recovered/chat-history-<date>.md` in the agent's workspace) has a conversation the agent is still having; the after-rebuild notice counts it as lost.
+- **Cause:** only the single newest conversation was treated as current. An agent has several at once (its Telegram chat, each person's web chat), and every other one was handled as lost to a reset.
+- **Fix:** upgrade. Every conversation the session index names as current is left out of recovery and counted as live; only conversations a reset ended are recovered.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/transcript.ts` — `RENDER_SCRIPT`
+
+### Download history says "No chat history found" though the agent has chatted
+- **Check:** after the upgrade the same click says "Couldn't read the chat history: chat history unreadable: …" with a reason (`ENOTDIR`, `EACCES`, a database error).
+- **Cause:** a sessions folder or database that could not be read was taken as no conversations at all, which hid a damaged or inaccessible store.
+- **Fix:** upgrade, then act on the reason: a permissions or disk problem on the agent's volume (`hatchabot doctor`), or a database OpenClaw is still writing (try again in a moment).
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/transcript.ts` — `RENDER_SCRIPT`, `exportTranscript`
+
+### Recover context said it started, but the agent never confirmed
+- **Check:** the toast said "Recovering N messages…", no confirmation arrived in the agent's chat, and `recovered/chat-history-<date>.md` is in its workspace.
+- **Cause:** the file was written, then the step that asks the agent to read it failed (the container stopped or would not run the command), and that failure was not checked.
+- **Fix:** upgrade. The click now says "the history was saved to …, but the agent could not be asked to read it", with the reason; start the agent and press Recover context again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/transcript.ts` — `recoverContext`
+
 ## Console and web chat
 
 ### The console says "Control UI did not start"
