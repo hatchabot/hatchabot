@@ -4,6 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
+import { effectiveModel } from '../src/orchestrator/provision.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 class MemSecrets implements SecretStore {
@@ -159,6 +160,18 @@ describe('POST /v1/ai-profiles/:id/apply-default-model', () => {
     // Our call rewrites the menu to exclude claude-opus-4-8 entirely.
     await apply(f, 'p1', { model: 'claude-sonnet-5', models: [], apply: ['a1'], rebuild: false });
     expect(store.getAgent('x1')!.model).toBe('claude-opus-4-8'); // their pin survives
+  });
+
+  it('keeps another owner\'s pin on the menu, so it still runs that model (A098)', async () => {
+    const { store, f } = await world({ shared: true });
+    store.insertAgent({ id: 'x1', ownerId: 'other', name: 'Theirs', slug: 'theirs', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef: 'mock://x1', model: 'claude-opus-4-8', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    // A pin already off the menu was not running that model; it is not revived.
+    store.insertAgent({ id: 'x2', ownerId: 'other', name: 'Stale', slug: 'stale', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef: 'mock://x2', model: 'claude-retired-1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    await apply(f, 'p1', { model: 'claude-sonnet-5', models: [], apply: ['a1', 'a2', 'a3'], rebuild: false });
+    const p = store.getAIProfile('p1')!;
+    expect(p.models).toContain('claude-opus-4-8');
+    expect(p.models).not.toContain('claude-retired-1');
+    expect(effectiveModel(store.getAgent('x1')!, p)).toBe('claude-opus-4-8');
   });
 
   it('a PATCH that trims the menu also leaves another owner\'s pin alone', async () => {

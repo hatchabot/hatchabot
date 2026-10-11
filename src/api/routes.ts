@@ -4375,6 +4375,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         }
       }
 
+      // On a shared source, another account's pins are held the same way: its
+      // stored pin was kept, but left off the menu effectiveModel ignored it
+      // and moved that agent onto our new default (A098). Only a pin that was
+      // valid before this call — one already stale stays stale.
+      const oldMenu = [oldDefault, ...(profile.models ?? [])];
+      for (const a of store.listAllActiveAgents()) {
+        if (a.aiProfileId === profile.id && a.ownerId !== ownerIdOf(req) && a.model && oldMenu.includes(a.model)) heldModels.add(a.model);
+      }
+
       // Menu must contain the new default, the owner's extras, AND every held
       // model — otherwise effectiveModel treats a held pin as stale and the
       // agent drifts to the new default, defeating the hold.
