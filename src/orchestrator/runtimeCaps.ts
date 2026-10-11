@@ -6,8 +6,9 @@ const execFileP = promisify(execFile);
 /**
  * What can the runtime image actually do? Probed from the image itself (a
  * one-shot container printing versions), never hand-maintained — a static
- * list would drift the first time the image changes. Cached per image tag:
- * the answer only changes when the image does.
+ * list would drift the first time the image changes. Cached per image, by
+ * its id: a tag is a name that moves (a rebuild or a promote points it at
+ * another image), and caching by the name kept the old answer (#124).
  */
 export interface RuntimeCapabilities {
   image: string;
@@ -40,13 +41,19 @@ const PROBES: Array<{ key: string; cmd: string }> = [
 /** Deliberately-absent extras — surfaced so "can it?" has a truthful no. */
 const ABSENT_PROBES = ['ffmpeg', 'whisper', 'chromium'];
 
+/** Keyed `<tag>@<image id>`. */
 const cache = new Map<string, RuntimeCapabilities>();
 
 export async function probeImageCapabilities(
   image: string,
   opts: { docker?: string; timeoutMs?: number } = {},
 ): Promise<RuntimeCapabilities> {
-  const hit = cache.get(image);
+  // The image id the tag names now: an inspect, far cheaper than the probe.
+  // Unreadable, nothing is cached (and the probe says why it failed).
+  const id = await execFileP(opts.docker ?? 'docker', ['image', 'inspect', '--format', '{{.Id}}', image], { timeout: 15_000, killSignal: 'SIGKILL' })
+    .then((r) => r.stdout.trim(), () => '');
+  const key = /^sha256:[0-9a-f]{12,}$/.test(id) ? `${image}@${id}` : undefined;
+  const hit = key ? cache.get(key) : undefined;
   if (hit) return hit;
 
   const script =
@@ -76,6 +83,6 @@ export async function probeImageCapabilities(
     missing: ABSENT_PROBES.filter((b) => !have.has(b)),
     probedAt: new Date().toISOString(),
   };
-  cache.set(image, caps);
+  if (key) cache.set(key, caps);
   return caps;
 }

@@ -863,6 +863,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/imageRecipe.ts` — `recipeFor`, `buildRecipeOn`
 
+### The runtime's tool list still shows the old image after a rebuild or a promote
+- **Check:** `GET /v1/runtime/capabilities` (the Runtime list of tools) disagrees with `docker run --rm --entrypoint bash <image> -c '<tool> --version'` for the same tag.
+- **Cause:** the probe was cached by the tag's name for the life of the service, and a rebuilt or promoted tag names another image.
+- **Fix:** restart the service, or upgrade: since v2.160.0 the cache is keyed by the image id, so a tag that moved is probed again.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/runtimeCaps.ts` — `probeImageCapabilities`
+
 ### An agent in a class will not start after a rebuild: its data was migrated for a newer OpenClaw than the class's image
 - **Check:** the agent's rebuild fails on a 2026.7 image although it ran 2026.8 or newer before; its Overview shows a class with an image, and `docker inspect` of its old container names the newer image.
 - **Cause:** assigning a class, or changing a class's image, pinned members without the check a direct image pin makes: 2026.7 cannot read a volume already migrated to 2026.8+. Clearing a class image also unpinned members before the rest of the edit was checked, so a member the edit then skipped lost its pin anyway.
