@@ -1398,6 +1398,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/recommendations.ts` — `matchCard`
 
+### A set_model card warns of more failed turns than the agent had
+- **Check:** `get_model_scorecard` (or the agent's Usage) shows the same model twice, once with a vendor prefix (`anthropic/…`); the card's count is about double.
+- **Cause:** before v2.160.0 the check summed each spelling of a model together with its other spellings, so failures were counted once per spelling.
+- **Fix:** upgrade: each model is counted once, whatever its spellings.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/modelLedger.ts` — `assessModelChange`
+
+### The scorecard says "ok" evidence for a model the agent has only just moved to (a model Hatchabot has no price for)
+- **Check:** the agent's model and its earlier one are both outside Hatchabot's model list (a local or other vendor's model); "turns on its model" counts the earlier model's turns.
+- **Cause:** before v2.160.0 two models outside the list looked the same (neither had a catalog id), so one's history counted as experience on the other.
+- **Fix:** upgrade: models outside the list are compared by name.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/modelScorecard.ts` — `scoreAgent`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody

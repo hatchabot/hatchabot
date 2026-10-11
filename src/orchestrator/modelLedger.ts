@@ -583,7 +583,11 @@ export function assessModelChange(store: Store, agent: Agent, profile: AIProfile
   let bad7 = 0;
   if (stored && hasHours(stored.profile)) {
     const from7 = new Date(now - 7 * DAY).toISOString().slice(0, 13);
-    for (const m of Object.keys(stored.profile.models ?? {})) {
+    // sumHours takes a model with all its spellings ("claude-x" and "anthropic/claude-x"):
+    // once per model, not once per spelling, or a failure counts twice (#179).
+    const once = new Map<string, string>();
+    for (const m of Object.keys(stored.profile.models ?? {})) if (!once.has(modelKey(m))) once.set(modelKey(m), m);
+    for (const m of once.values()) {
       const { counts } = sumHours(stored.profile, m, from7);
       bad7 += Math.max(0, counts.failed - counts.limitedTurns) + counts.truncated;
     }

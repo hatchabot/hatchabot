@@ -484,6 +484,15 @@ describe('a set_model card states the evidence, and a downgrade\'s risks', () =>
     expect(c.warnings).toEqual(['Recent errors: 3 failed turns in the last 7 days (not rate limits), 2 malformed tool calls in 30 days.']);
   });
 
+  it('a model read under two spellings counts its failures once (#179)', () => {
+    const { store, agent, source } = one({
+      'claude-sonnet-5': hourly({ [now - 20 * DAY]: { calls: 50, turns: 40, input: 1e5 }, [now - 2 * DAY]: { calls: 3, turns: 3, failed: 2 } }),
+      'anthropic/claude-sonnet-5': hourly({ [now - 3 * DAY]: { calls: 1, turns: 1, failed: 1 } }),
+    });
+    const c = assessModelChange(store, agent, source, 'claude-haiku-4-5', now);
+    expect(c.warnings).toEqual(['Recent errors: 3 failed turns in the last 7 days (not rate limits).']);
+  });
+
   it('only rate limits: no error warning; and an upgrade carries no warnings at all', () => {
     const lim = one({ 'claude-sonnet-5': hourly({ [now - 20 * DAY]: { calls: 50, turns: 40, input: 1e5 }, [now - 2 * DAY]: { calls: 2, turns: 2, failed: 2, limitedTurns: 2 } }) });
     expect(assessModelChange(lim.store, lim.agent, lim.source, 'claude-haiku-4-5', now).warnings).toEqual([]);
