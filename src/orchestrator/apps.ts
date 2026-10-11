@@ -266,12 +266,18 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
   let switching = false;
   let crashed = false;
   try {
-    // 1. the code, and an empty staging folder for its data while it is tested
-    log('app.unpack', { app: m.app, sha: short });
-    const un = await d.provider.writeToVolume(d.runtimeRef,
-      ['sh', '-c', `rm -rf ${sq(dir)}.tmp && mkdir -p ${sq(dir)}.tmp && tar -x -C ${sq(dir)}.tmp && rm -rf ${sq(dir)} && mv ${sq(dir)}.tmp ${sq(dir)}`
-        + ` && mkdir -p ${sq(p.data)} && rm -rf ${sq(stage)} && mkdir -p ${sq(stage)}`],
-      rel.tar);
+    // 1. the code, and an empty staging folder for its data while it is tested.
+    // The same commit as the live one (a change of values only) keeps the live
+    // folder: unpacking over it removed the running code, and anything its
+    // tests had built in it, before the new values were even tested (#92).
+    const sameRelease = previousLink === `releases/${short}`;
+    log('app.unpack', { app: m.app, sha: short, ...(sameRelease ? { kept: true } : {}) });
+    const folders = `mkdir -p ${sq(p.data)} && rm -rf ${sq(stage)} && mkdir -p ${sq(stage)}`;
+    const un = sameRelease
+      ? await sh(d, `{ test -d ${sq(dir)} || { echo "its live release folder ${dir} is missing" >&2; exit 1; }; } && ${folders}`)
+      : await d.provider.writeToVolume(d.runtimeRef,
+        ['sh', '-c', `rm -rf ${sq(dir)}.tmp && mkdir -p ${sq(dir)}.tmp && tar -x -C ${sq(dir)}.tmp && rm -rf ${sq(dir)} && mv ${sq(dir)}.tmp ${sq(dir)} && ${folders}`],
+        rel.tar);
     if (un.code !== 0) throw new AppError(`Could not unpack the code: ${errText(un)}`);
     step('unpacked');
 

@@ -946,3 +946,31 @@ describe('an app change cut off by a restart (kill at every step)', () => {
   });
 
 });
+
+// ---- the workflow audit of 2026-10-10 (issues #73–#121) ----
+describe('apps: what the 2026-10-10 workflow audit found', () => {
+  const d = (agent: FakeAgent) => ({ provider: agent, runtimeRef: 'x', facts: FACTS });
+
+  it('a change of values on the same commit keeps the live release folder (#92)', async () => {
+    const dir = repo();
+    const agent = new FakeAgent();
+    agent.jobs = [];
+    const v1 = await resolveRelease(hostGit, dir, 'HEAD');
+    await installRelease(d(agent), v1, { mailbox: 'first@example.org' });
+    const live = join(agent.root('x'), `demoapp/releases/${v1.sha.slice(0, 12)}`);
+    writeFileSync(join(live, 'built-by-its-tests.txt'), 'kept');
+    // While its tests run, the code it is running from is still there.
+    let duringTests = false;
+    const shell = agent.execShell.bind(agent);
+    agent.execShell = async (ref: string, script: string) => {
+      if (script.includes('unittest')) duringTests = existsSync(join(live, 'built-by-its-tests.txt'));
+      return shell(ref, script);
+    };
+    await installRelease(d(agent), v1, { mailbox: 'second@example.org' });
+    expect(duringTests).toBe(true);
+    expect(readFileSync(join(live, 'built-by-its-tests.txt'), 'utf8')).toBe('kept');
+    expect(agent.live().current).toBe(`releases/${v1.sha.slice(0, 12)}`);
+    expect(JSON.parse(agent.live().config!).mailbox).toBe('second@example.org');
+    expect(agent.calls.filter((c) => c.kind === 'write' && c.what.includes('tar -x'))).toHaveLength(1);
+  });
+});
