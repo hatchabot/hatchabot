@@ -1205,6 +1205,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/moveHost.ts` — `orphanChoices`, `settleOrphan`, `putBack`
 
+### A move to another Hatchabot says "This server's runtime image is OpenClaw 2026.9.6, older than the agent's 2026.9.6-rc.1"
+- **Check:** the agent runs a release candidate (`-rc.N`, `-beta.N`) and the destination runs that version's final release or later.
+- **Cause:** versions were compared number by number, so "rc.1" read as a later build than the release it comes before.
+- **Fix:** upgrade the sending Hatchabot: since v2.160.0 a prerelease sorts before its release, and a numbered build ("-2") after it.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/migrate.ts` — `versionBehind`
+
 ## Backups and restore
 
 ### `hatchabot doctor`: "No backup set in … yet", "Last backup set is N days old", or "… is incomplete"
