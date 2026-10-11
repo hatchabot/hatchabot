@@ -73,7 +73,7 @@ describe('pickAutoRebuilds', () => {
   const req = { level: 'required' as const, reasons: ['x'] };
   const rec = { level: 'recommended' as const, reasons: ['y'] };
   const c = (id: string, over: Partial<RebuildCandidate> = {}): RebuildCandidate =>
-    ({ id, need: req, state: 'RUNNING', busy: false, lastActiveAt: ago(60), ...over });
+    ({ id, need: req, state: 'RUNNING', busy: false, lastActiveAt: ago(60), activityRead: true, ...over });
 
   it('never one mid-conversation, stopped, busy, or the Hatchabot agent', () => {
     expect(pickAutoRebuilds([
@@ -84,6 +84,13 @@ describe('pickAutoRebuilds', () => {
       c('current', { need: undefined }),
       c('idle'),
     ], 'required-only', now)).toEqual(['idle']);
+  });
+  it('never one whose activity could not be read: no reading is not idleness (#157)', () => {
+    expect(pickAutoRebuilds([
+      c('unread', { lastActiveAt: undefined, activityRead: false }),
+      c('switch', { need: undefined, switchPending: true, lastActiveAt: undefined, activityRead: false }),
+      c('fresh', { lastActiveAt: undefined }),
+    ], 'auto', now, { quiet: true })).toEqual(['fresh']);
   });
   it('recommended ones only under auto, only in the quiet hours', () => {
     const list = [c('r', { need: rec })];
@@ -140,6 +147,7 @@ describe('over the API', () => {
     b.agent('old'); b.agent('fine'); b.agent('parked', 'STOPPED');
     b.agent('hatchabot', 'RUNNING', { ops: true });
     for (const id of ['old', 'parked', 'hatchabot']) b.provider.infoOverride.set(`docker://${id}`, { onAgentNetwork: false });
+    b.provider.execShell = async () => ({ code: 0, stdout: '', stderr: '' }); // its conversations: none, so idle
     const sweep = (b.f as any).rebuildSweep as (now?: Date) => Promise<string[]>;
 
     process.env.HATCHABOT_REBUILD_POLICY = 'manual';
@@ -148,6 +156,19 @@ describe('over the API', () => {
     expect(await sweep()).toEqual(['old']);
     await new Promise((r) => setTimeout(r, 50));
     expect(b.provision.mock.calls.map((c) => c[0].agentId)).toEqual(['old']);
+  });
+
+  it('the sweep leaves an agent whose conversations could not be read (#157)', async () => {
+    const b = await box();
+    b.agent('unread');
+    b.provider.infoOverride.set('docker://unread', { onAgentNetwork: false });
+    let readable = false;
+    b.provider.execShell = async () => (readable ? { code: 0, stdout: '', stderr: '' } : { code: 1, stdout: '', stderr: 'Error response from daemon: container is restarting' });
+    process.env.HATCHABOT_REBUILD_POLICY = 'required-only';
+    const sweep = (b.f as any).rebuildSweep as (now?: Date) => Promise<string[]>;
+    expect(await sweep()).toEqual([]);
+    readable = true; // read: no conversations at all — idle
+    expect(await sweep()).toEqual(['unread']);
   });
 
   it('starting a stopped agent that needs a required rebuild brings it up rebuilt', async () => {

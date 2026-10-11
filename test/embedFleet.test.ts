@@ -70,7 +70,7 @@ describe('moving the rest', () => {
     expect(r).toMatchObject({ switched: 1, queued: 0, deferred: 1, pending: 1 });
     expect(b.provision).not.toHaveBeenCalled();
     const now = new Date('2026-09-24T03:30:00');
-    const c = { id: 'a', state: 'RUNNING', busy: false, switchPending: true, lastActiveAt: '2026-09-11T00:00:00Z' };
+    const c = { id: 'a', state: 'RUNNING', busy: false, switchPending: true, lastActiveAt: '2026-09-11T00:00:00Z', activityRead: true };
     expect(pickAutoRebuilds([c], 'required-only', now, { quiet: true })).toEqual(['a']);
     expect(pickAutoRebuilds([c], 'required-only', now, { quiet: false })).toEqual([]);
     expect(pickAutoRebuilds([c], 'manual', now, { quiet: true })).toEqual([]);
