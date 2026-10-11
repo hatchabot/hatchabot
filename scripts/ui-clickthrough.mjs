@@ -3162,6 +3162,39 @@ const SCENARIOS = String.raw`(() => {
         if (window.__answer) delete window.__answer[key];
       }
     },
+    // A manifest field marked secret (an app password) was a plain text box (2026-10-10).
+    appSecretField: async () => {
+      const MAN = { app: 'demoapp', name: 'Demo App', tasks: [], config: { fields: [] }, connections: [] };
+      const inspect = () => [{ status: 200, body: { sha: 'c0ffee0123456789c0ffee0123456789c0ffee01', manifest: MAN, connections: [],
+        ask: [{ key: 'mailbox', type: 'email', required: true }, { key: 'app_password', label: 'the mailbox app password', required: true, secret: true, default: 'made-up-default' }] } }];
+      const open = async () => {
+        window.__answer['POST /v1/apps/inspect'] = inspect();
+        openAppDlg('install', 'a1');
+        document.getElementById('appSource').value = '~/demoapp';
+        await appRead();
+        document.getElementById('appF_mailbox').value = 'demo@example.org';
+      };
+      const sent = (mark) => window.__calls.slice(mark).find((c) => c.method === 'POST' && c.path === '/v1/agents/a1/app');
+      try {
+        window.__answer = window.__answer || {};
+        await open();
+        const pw = document.getElementById('appF_app_password');
+        ok('a secret field is a hidden box the browser does not autofill', pw.type === 'password' && pw.getAttribute('autocomplete') === 'new-password');
+        eq('never filled in, not even with its default', pw.value, '');
+        pw.value = ' made-up-secret ';
+        let mark = window.__calls.length;
+        await appGo();
+        eq('it is sent as typed', sent(mark)?.body.values, { mailbox: 'demo@example.org', app_password: ' made-up-secret ' });
+        await open();
+        mark = window.__calls.length;
+        await appGo();
+        eq('left blank, it is not sent: the app keeps the one it has, or its default', sent(mark)?.body.values, { mailbox: 'demo@example.org' });
+      } finally {
+        if (window.__answer) delete window.__answer['POST /v1/apps/inspect'];
+        if (appDlg.open) appDlg.close();
+        await refresh(false);
+      }
+    },
     // The tooltip's three parts (2026-10-07): doing / cost and spending alarm / runtime (version, uptime, restarts).
     tooltipParts: async () => {
       const month = new Date().toISOString().slice(0, 7);

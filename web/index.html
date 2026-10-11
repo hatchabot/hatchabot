@@ -12741,6 +12741,10 @@ async function appRead() {
       const id = esc('appF_' + f.key); // a manifest's key is the app author's text (review, 2026-10-09)
       const label = `<label for="${id}">${esc(f.key)}${f.required ? ' <span style="color:var(--warn)">*</span>' : ''}${f.label ? ` <span class="sub">— ${esc(f.label)}</span>` : ''}</label>`;
       if (f.type === 'bool') return `<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="${id}" style="width:auto" ${f.default ? 'checked' : ''}> ${esc(f.key)}${f.label ? ` <span class="sub">— ${esc(f.label)}</span>` : ''}</label>`;
+      // A secret (an app password, a key) is typed into a hidden box, never
+      // filled in and never offered by the browser's autofill; left blank, the
+      // app keeps the one it has (or its default). It was a plain text box.
+      if (f.secret) return label + `<input type="password" id="${id}" autocomplete="new-password" spellcheck="false" value=""${f.default !== undefined ? ' placeholder="leave blank to keep the default"' : ''}>`;
       const v = Array.isArray(f.default) ? f.default.join(', ') : f.default ?? '';
       return label + `<input type="${f.type === 'number' ? 'number' : f.type === 'email' ? 'email' : 'text'}" id="${id}" value="${esc(String(v))}">`;
     };
@@ -12806,6 +12810,8 @@ function appValues() {
   const out = {};
   for (const f of appInspected?.ask || []) {
     const el = $('appF_' + f.key); if (!el) continue;
+    // A secret is sent as typed (no trim: it may matter), and only when typed.
+    if (f.secret) { if (el.value) out[f.key] = el.value; continue; }
     out[f.key] = f.type === 'bool' ? (el.checked ? 'true' : 'false') : el.value.trim();
   }
   return out;
@@ -12813,7 +12819,9 @@ function appValues() {
 async function appGo() {
   if (!appInspected) return;
   const values = appValues();
-  const missing = (appInspected.ask || []).filter(f => f.required && !values[f.key]).map(f => f.key);
+  // A blank secret keeps the default, or in an agent that has the app the one
+  // it has (the box is never filled in): the server says if there is none.
+  const missing = (appInspected.ask || []).filter(f => f.required && !values[f.key] && !(f.secret && (f.default !== undefined || appDlgMode !== 'create'))).map(f => f.key);
   if (missing.length) { $('appErr').textContent = `Fill in: ${missing.join(', ')}.`; return; }
   const mismatch = appConnMismatch();
   if (mismatch) { $('appErr').textContent = mismatch; return; }

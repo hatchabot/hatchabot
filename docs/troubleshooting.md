@@ -406,6 +406,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/routes.ts` — `sharedConfigCheck`, `oneAppAtATime`; `src/orchestrator/apps.ts` — `checkConfig`
 
+### "Run an app from a repo" shows an app password or key as you type it
+- **Check:** the field is marked `"secret": true` in the app's `hatchabot.json`, and its box in the dialog shows the text.
+- **Cause:** the dialog ignored `secret` and drew every field as a plain text box, filled with its default.
+- **Fix:** upgrade: a secret field is a hidden box the browser does not autofill, never filled in; left blank, the app keeps the value it has (or its default).
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `appRead`, `appValues`
+
 ### A new agent's page says "Its app could not be installed"
 - **Check:** the message under it on the agent's page (App), and `app.install_failed` in its Setup log.
 - **Cause:** the app made for it from a repo failed to install once the agent was running: its tests failed, a value it needs was missing, or the repo could not be read.
