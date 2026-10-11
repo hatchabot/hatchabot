@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { Agent, TemplateParam } from '../domain/types.js';
 import type { Store } from '../store/store.js';
 import type { RuntimeProvider } from '../providers/provider.js';
-import { CORE_FILES, MAX_FILE_BYTES, workspacePath } from './snapshots.js';
+import { CORE_FILES, CoreFileTooBigError, MAX_FILE_BYTES, readCoreFile, SnapshotError, workspacePath } from './snapshots.js';
 import { DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, PEERS_HEADING, removeSection } from '../openclaw/workspace.js';
 import { scanPersonalData, type PersonalScan } from '../domain/personalData.js';
 
@@ -46,6 +46,9 @@ export const TEMPLATE_FORMAT = 'hatchabot-template';
 /** Files exported before the rename. */
 export const LEGACY_TEMPLATE_FORMAT = 'agentclaw-template';
 export const TEMPLATE_VERSION = 1;
+/** What a template file may hold: older apps refuse a file with more. */
+export const MAX_TEMPLATE_PARAMS = 24;
+export const MAX_TEMPLATE_SCHEDULES = 12;
 
 /** Always carried: the agent's persona and instructions. */
 const TRAINED_FILES = ['SOUL.md', 'AGENTS.md'];
@@ -157,7 +160,7 @@ const TemplateSchema = z.object({
   // Optional + defaulted: templates from before Phase 2a parse as having none,
   // and older apps reading a newer template strip the unknown key (zod objects
   // are non-strict) — no version bump needed in either direction.
-  parameters: z.array(TemplateParamSchema).max(24).default([]),
+  parameters: z.array(TemplateParamSchema).max(MAX_TEMPLATE_PARAMS).default([]),
   schedules: z
     .array(
       z.object({
@@ -171,7 +174,7 @@ const TemplateSchema = z.object({
         announce: z.boolean().optional(),
       }),
     )
-    .max(12)
+    .max(MAX_TEMPLATE_SCHEDULES)
     .optional(),
 });
 
@@ -199,34 +202,71 @@ export async function exportTemplate(
   // is personal and headed to someone else).
   const includeMemory = opts.includeMemory !== false;
   const wanted = includeMemory ? [...TRAINED_FILES, 'MEMORY.md'] : TRAINED_FILES;
+  const tooBig = (name: string) => new TransferError(`Its ${name} is over ${MAX_FILE_BYTES / 1024} KB, too big for a template. Trim it first.`);
+  // A configured copy (or a master that filled its own values) travels as its
+  // raw layer, {{placeholders}} and all — the same source push-definition
+  // uses. Its live files carry the values filled here, so a child or a
+  // recipient got the fields but no placeholders, and their own answers
+  // never replaced the author's (#164).
+  const layer = agent.parameters?.length ? agent.paramFiles : undefined;
   const files: Record<string, string> = {};
   for (const name of wanted) {
-    const res = await provider.execShell(
-      agent.runtimeRef,
-      `cat ${JSON.stringify(workspacePath(agent.slug, name))} 2>/dev/null || true`,
-    );
-    files[name] = name === 'AGENTS.md' ? stripManagedSections(res.stdout) : res.stdout;
-    if (Buffer.byteLength(files[name]!, 'utf8') > MAX_FILE_BYTES) {
-      throw new TransferError(`Its ${name} is over ${MAX_FILE_BYTES / 1024} KB, too big for a template. Trim it first.`);
+    const raw = name === 'SOUL.md' ? layer?.soul : name === 'AGENTS.md' ? layer?.agents : undefined;
+    let text: string;
+    if (typeof raw === 'string') {
+      text = raw;
+    } else {
+      try {
+        // A file that is not there exports empty; one that is there but could
+        // not be read stops the export — it went out empty, as if the agent
+        // had no persona or instructions (#119).
+        text = (await readCoreFile(provider, agent.runtimeRef, agent.slug, name)) ?? '';
+      } catch (err) {
+        if (err instanceof CoreFileTooBigError) throw tooBig(name);
+        if (err instanceof SnapshotError) {
+          throw new TransferError(`${err.userMessage.replace(/\.$/, '')} — nothing was exported, so the copy would not be missing it. Try again once the agent is healthy.`);
+        }
+        throw err;
+      }
     }
+    files[name] = name === 'AGENTS.md' ? stripManagedSections(text) : text;
+    if (Buffer.byteLength(files[name]!, 'utf8') > MAX_FILE_BYTES) throw tooBig(name);
+  }
+  const persona = typeof layer?.persona === 'string' ? layer.persona : agent.persona;
+
+  // agentTurn crons travel as DECLARATIONS (name/schedule/message) — a daily
+  // briefing's crons arrive scheduled. Command crons carry scripts and stay
+  // behind; so do OpenClaw's own (its skill review, memory dreaming): every
+  // copy gets those from OpenClaw, and a copy of one is a second (#82).
+  let crons: Awaited<ReturnType<typeof listCrons>>;
+  try {
+    crons = await listCrons(provider, agent.runtimeRef, agent.slug);
+  } catch {
+    // An unreadable list exported none, and the copy lost its tasks with
+    // nothing said (#81).
+    throw new TransferError("Couldn't read its scheduled tasks, so the copy would have none — nothing was exported. Try again in a moment.");
+  }
+  const tasks = crons
+    // enabled only: a task the owner deliberately switched off must not
+    // come back firing on every imported copy (10th audit).
+    .filter((c) => !c.system && c.enabled && c.payloadKind === 'agentTurn' && c.message && (c.scheduleExpr || c.everyMs));
+  // A template holds 12 (older apps refuse a file with more): the rest were
+  // dropped without a word (#102).
+  if (tasks.length > MAX_TEMPLATE_SCHEDULES) {
+    throw new TransferError(
+      `It has ${tasks.length} scheduled tasks switched on; a template carries at most ${MAX_TEMPLATE_SCHEDULES}. ` +
+        'Switch off or remove the ones a copy does not need, then try again.',
+    );
   }
 
   const manifest: TemplateManifest = {
     format: TEMPLATE_FORMAT,
     version: TEMPLATE_VERSION,
     exportedAt: new Date().toISOString(),
-    agent: { name: agent.name, persona: agent.persona, sharedMemory: agent.sharedMemory, icon: agent.icon, iconColor: agent.iconColor },
+    agent: { name: agent.name, persona, sharedMemory: agent.sharedMemory, icon: agent.icon, iconColor: agent.iconColor },
     files,
     ai: { vendor: profile?.vendor ?? 'anthropic' },
-    // agentTurn crons travel as DECLARATIONS (name/schedule/message) — a daily
-    // briefing's crons arrive scheduled. Command crons carry scripts
-    // and stay behind. Best-effort: an unreadable cron list exports none.
-    schedules: (await listCrons(provider, agent.runtimeRef, agent.slug).catch(() => []))
-      // enabled only: a task the owner deliberately switched off must not
-      // come back firing on every imported copy (10th audit).
-      .filter((c) => c.enabled && c.payloadKind === 'agentTurn' && c.message && (c.scheduleExpr || c.everyMs))
-      .slice(0, 12)
-      .map((c) => ({
+    schedules: tasks.map((c) => ({
         name: (c.name || 'task').slice(0, 80),
         message: c.message!.slice(0, 4000),
         cron: c.scheduleExpr,
@@ -243,7 +283,7 @@ export async function exportTemplate(
       repoUrl: d.repoUrl,
     })),
     envNeeds: store.listAgentEnv(agentId).map((e) => e.name),
-    parameters: collectParameters(agent, files),
+    parameters: collectParameters(agent, files, persona),
   };
   const personal = scanTemplate(manifest);
   deps.log?.('template.exported', { agentId, emails: personal.emails, phones: personal.phones, tokens: personal.tokens });
@@ -346,8 +386,9 @@ export function scanTemplate(m: TemplateManifest): PersonalScan {
 function collectParameters(
   agent: Agent,
   files: Record<string, string>,
+  persona: string,
 ): TemplateParam[] {
-  const declared = (agent.parameters ?? []).slice(0, 24);
+  const declared = agent.parameters ?? [];
   const seen = new Set(declared.map((p) => p.key));
   const derived: TemplateParam[] = [];
   const scan = (text: string | undefined, target: 'soul' | 'agents') => {
@@ -359,9 +400,19 @@ function collectParameters(
     }
   };
   scan(files['SOUL.md'], 'soul');
-  scan(agent.persona, 'soul');
+  scan(persona, 'soul');
   scan(files['AGENTS.md'], 'agents');
-  return [...declared, ...derived].slice(0, 24);
+  const all = [...declared, ...derived];
+  // Past the cap the rest were cut off: the copy never asked for them and
+  // kept their {{placeholders}} in its instructions (#172).
+  if (all.length > MAX_TEMPLATE_PARAMS) {
+    const over = all.slice(MAX_TEMPLATE_PARAMS).map((p) => `{{${p.key}}}`);
+    throw new TransferError(
+      `Its files use ${all.length} setup fields; a template carries at most ${MAX_TEMPLATE_PARAMS}. ` +
+        `Fill in or remove some {{placeholders}} first (past the limit: ${over.slice(0, 8).join(', ')}${over.length > 8 ? ', …' : ''}).`,
+    );
+  }
+  return all;
 }
 
 /**

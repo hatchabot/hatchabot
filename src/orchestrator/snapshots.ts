@@ -49,6 +49,9 @@ export class SnapshotError extends Error {
   }
 }
 
+/** A core file past MAX_FILE_BYTES (a template export words it its own way). */
+export class CoreFileTooBigError extends SnapshotError {}
+
 export function workspacePath(slug: string, name: string): string {
   return `/home/node/.openclaw/agents/${slug}/agent/${name}`;
 }
@@ -92,7 +95,7 @@ export async function readCoreFile(
     );
   }
   if (Buffer.byteLength(res.stdout, 'utf8') > MAX_FILE_BYTES) {
-    throw new SnapshotError(
+    throw new CoreFileTooBigError(
       `${name} is larger than ${Math.floor(MAX_FILE_BYTES / 1024)} KB — too big to snapshot safely. ` +
         'Trim it, or back the agent up with an export instead.',
     );

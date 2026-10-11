@@ -234,3 +234,67 @@ describe('template parameters (sharing Phase 2a)', () => {
     expect(m.parameters[1]).toMatchObject({ label: 'home city', required: true, type: 'text' });
   });
 });
+
+describe('an export says what it cannot carry (workflow audit, 2026-10-10)', () => {
+  const job = (i: number, extra: Record<string, unknown> = {}) => ({
+    id: `j${i}`, name: `Task ${i}`, enabled: true, schedule: { kind: 'cron', expr: '0 8 * * *' },
+    payload: { kind: 'agentTurn', message: `Do thing ${i}.` }, ...extra,
+  });
+  const cronList = (jobs: unknown[]) => ({ code: 0, stderr: '', stdout: JSON.stringify({ jobs }) });
+
+  it('a SOUL.md or AGENTS.md that is there but cannot be read stops the export (#119)', async () => {
+    const { store, provider } = await world();
+    provider.execResponses.set('sh', { code: 3, stdout: '', stderr: '' });
+    await expect(exportTemplate({ store, provider }, 'a1')).rejects.toThrow(/SOUL\.md is there but could not be read — nothing was exported/);
+    provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'container is not running' });
+    await expect(exportTemplate({ store, provider }, 'a1')).rejects.toThrow(/Couldn't read SOUL\.md/);
+  });
+
+  it('a task list that cannot be read stops the export instead of sending none (#81)', async () => {
+    const { store, provider } = await world();
+    provider.execResponses.set('cron list', { code: 1, stdout: '', stderr: 'gateway not ready' });
+    await expect(exportTemplate({ store, provider }, 'a1')).rejects.toThrow(/Couldn't read its scheduled tasks/);
+  });
+
+  it("OpenClaw's own tasks stay behind (#82)", async () => {
+    const { store, provider } = await world();
+    provider.execResponses.set('cron list', cronList([job(1), job(2, { declarationKey: 'memory-dreaming' })]));
+    const m = parseTemplate((await exportTemplate({ store, provider }, 'a1')).data);
+    expect(m.schedules?.map((s) => s.name)).toEqual(['Task 1']);
+  });
+
+  it('more tasks than a template holds is refused, not cut to twelve (#102)', async () => {
+    const { store, provider } = await world();
+    provider.execResponses.set('cron list', cronList(Array.from({ length: 13 }, (_, i) => job(i))));
+    await expect(exportTemplate({ store, provider }, 'a1')).rejects.toThrow(/13 scheduled tasks switched on; a template carries at most 12/);
+    // Switched-off ones do not count.
+    provider.execResponses.set('cron list', cronList(Array.from({ length: 13 }, (_, i) => job(i, i === 0 ? { enabled: false } : {}))));
+    expect(parseTemplate((await exportTemplate({ store, provider }, 'a1')).data).schedules).toHaveLength(12);
+  });
+
+  it('more {{placeholders}} than a template holds is refused, naming the ones past the limit (#172)', async () => {
+    const { store, provider } = await world();
+    const keys = Array.from({ length: 25 }, (_, i) => `field_${i}`);
+    provider.execResponses.set('sh', { code: 0, stdout: keys.map((k) => `{{${k}}}`).join(' '), stderr: '' });
+    await expect(exportTemplate({ store, provider }, 'a1')).rejects.toThrow(/25 setup fields; a template carries at most 24.*\{\{field_24\}\}/);
+  });
+
+  it("a configured copy shares its placeholders, not the values filled in here (#164)", async () => {
+    const { store, provider } = await world();
+    store.setAgentParameters('a1', [{ key: 'style', label: 'Style', required: true, type: 'choice', options: ['calm', 'brisk'], target: 'soul' }]);
+    // The live files are rendered with this agent's own answer…
+    provider.execResponses.set('sh', { code: 0, stdout: 'A calm advisor.', stderr: '' });
+    // …the layer keeps the placeholders (and, from a master's first edit, the managed sections).
+    store.setAgentParamState('a1', { style: 'calm' }, {
+      soul: 'A {{style}} advisor.', agents: 'Answer in a {{style}} voice.\n\n## Memory policy\n- shared\n', persona: 'a {{style}} one',
+    });
+    const { data } = await exportTemplate({ store, provider }, 'a1', { includeMemory: false });
+    const m = parseTemplate(data);
+    expect(m.files['SOUL.md']).toBe('A {{style}} advisor.');
+    expect(m.files['AGENTS.md']).not.toContain('Memory policy');
+    expect(m.agent.persona).toBe('a {{style}} one');
+    const { agent } = importTemplate({ store, provider }, data, { ownerId: 'owner-b', name: 'Brisk one', values: { style: 'brisk' } });
+    expect(store.getAgentSeed(agent.id)['SOUL.md']).toBe('A brisk advisor.');
+    expect(agent.persona).toBe('a brisk one');
+  });
+});

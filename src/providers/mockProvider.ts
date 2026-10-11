@@ -117,6 +117,9 @@ export class MockProvider implements RuntimeProvider {
       const canned = this.execResponses.get(key);
       if (canned) return canned;
     }
+    // A gateway with no tasks answers an empty list, not nothing: a template
+    // export refuses a task list it cannot read (#81).
+    if (openclawArgv[0] === 'cron' && openclawArgv[1] === 'list') return { code: 0, stdout: '{"jobs":[]}', stderr: '' };
     return { code: 0, stdout: '', stderr: '' };
   }
 
