@@ -139,7 +139,7 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
     // No new calls: still move the cursor on (minus a little), so an idle agent
     // isn't rescanned from a week ago every pass.
     const next = fresh.length ? maxKey : Date.parse(since) >= now - 5 * 60_000 ? sinceKey : new Date(now - 5 * 60_000).toISOString().replace('Z', '000000Z');
-    store.setUsageCursor(a.id, next, lastOk, lastLimited);
+    store.setUsageCursor(a.id, next, lastOk, lastLimited, source);
   } catch (err) {
     deps.log?.('usage.sample_log_failed', { agentId: a.id, error: String((err as Error).message ?? err).slice(0, 200) });
   }
@@ -183,7 +183,7 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
       const through = store.callsThrough(a.id);
       const from = through ? slotOf(new Date(Date.parse(`${through}:00Z`) - 3_600_000).toISOString()) : '';
       store.setModelCallOk(a.id, source, ok, from, !through);
-      if (u.lastActive) store.noteUsageOk(a.id, u.lastActive);
+      if (u.lastActive) store.noteUsageOk(a.id, u.lastActive, source);
     }
     const priced = u.byModel.filter((m) => m.tokens > 0);
     if (u.totalTokens > 0 && priced.length) {
@@ -295,7 +295,8 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
     const mineSlots = slotRows.filter((r) => myIds.has(r.agentId));
     const ws = (fromIso: string, list = mineSlots): Omit<SourceWindow, 'tokens'> => list.filter((r) => r.slot >= slotOf(fromIso))
       .reduce((s, r) => ({ requests: s.requests + r.ok + r.limited + r.failed, limited: s.limited + r.limited, failed: s.failed + r.failed }), { requests: 0, limited: 0, failed: 0 });
-    const lastOkOf = (agents: Agent[]) => agents.map((a) => store.usageCursor(a.id)?.lastOk).filter(Boolean).sort().at(-1) as string | undefined;
+    // Successes ON this source: an agent switched to it brings no success from its old one (#114).
+    const lastOkOf = (agents: Agent[]) => agents.map((a) => store.lastOkOn(a.id, p.id)).filter(Boolean).sort().at(-1) as string | undefined;
     const lastOkAt = lastOkOf(my);
     const allHits = store.limitHitsFor(p.id, t7);
     const hits = allHits.filter((h) => myIds.has(h.agentId));

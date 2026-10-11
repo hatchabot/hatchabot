@@ -137,7 +137,7 @@ export interface AiSourceHealth {
 
 export function aiSourceHealth(store: Store, agent: Agent): AiSourceHealth {
   const profile = store.getAIProfile(agent.aiProfileId);
-  const lastAnsweredAt = store.usageCursor(agent.id)?.lastOk;
+  const lastAnsweredAt = store.lastOkOn(agent.id, agent.aiProfileId);
   const since = lastAnsweredAt ?? '';
   const refused = store.limitHitsForAgent(agent.id, agent.aiProfileId, since)[0];
   // A slot is a five-minute bucket ("2026-09-25T01:25"): a failure in the
