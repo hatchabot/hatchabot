@@ -420,6 +420,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `src/channels/telegramPool.ts` — `release`
 
+### After unlinking your Telegram, new agents still admit it
+- **Check:** Settings → You says "Not linked", yet a new agent's owner seat is bound to the old Telegram id from its first build, or its scheduled tasks message that id.
+- **Cause:** unlinking cleared only the account's link. The fallback that infers your Telegram from your existing agents' owner seats found the same id again and seeded it into every new agent.
+- **Fix:** upgrade, then unlink again. The ids an unlink lets go are now remembered and never inferred back; linking one again ("That's me") lifts that. Existing agents keep admitting it until you remove it from their members.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/store/store.ts` — `knownChannelUserId`, `setAccountTelegram`, `telegram_unlinks`
+
 ## Agents, builds and rebuilds
 
 ### A rebuild or setup fails with `seed failed at "<step>": …`

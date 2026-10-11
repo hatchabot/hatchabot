@@ -344,8 +344,38 @@ describe('"That\'s me — link & approve" (account-level Telegram link)', () => 
     await admitMember({ store, provider }, { ...opts, asSelf: true });
     store.setAccountTelegram('u1', null);
     expect(store.accountTelegram('u1')).toBeUndefined();
-    // the membership fallback still knows it (existing agents keep working)
+    // the existing owner seat keeps its binding (existing agents keep working)
     expect(store.getMembership('a1', 'u1')).toMatchObject({ channelUserId: '555' });
+    // ...but the membership fallback must not infer the unlinked id back, or
+    // every new agent (and its cron targets) would still be seeded with it
+    expect(store.knownChannelUserId('u1')).toBeUndefined();
+  });
+
+  it('unlink forgets an id that was only inferred from owner seats, and a re-link lifts it', async () => {
+    const { store } = await setup();
+    // A pre-link account: no account-level link, two seats bound to two ids.
+    store.bindMembershipChannelUser('a1', 'u1', '555');
+    store.insertAgent({
+      id: 'a2', ownerId: 'u1', name: 'Second', slug: 'a2', state: 'RUNNING',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm9', agentId: 'a2', userId: 'u1', role: 'owner', status: 'active', channelUserId: '444' });
+    expect(store.knownChannelUserId('u1')).toBeDefined();
+    store.setAccountTelegram('u1', null);
+    // neither comes back by inference
+    expect(store.knownChannelUserId('u1')).toBeUndefined();
+    // a seat bound AFTER the unlink is inferred as before
+    store.insertAgent({
+      id: 'a3', ownerId: 'u1', name: 'Third', slug: 'a3', state: 'RUNNING',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm10', agentId: 'a3', userId: 'u1', role: 'owner', status: 'active', channelUserId: '666' });
+    expect(store.knownChannelUserId('u1')).toBe('666');
+    // linking an unlinked id again makes it known again
+    store.setAccountTelegram('u1', '555');
+    expect(store.knownChannelUserId('u1')).toBe('555');
   });
 });
 

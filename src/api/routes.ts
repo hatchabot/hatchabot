@@ -11385,6 +11385,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * Unlink the account's Telegram identity. Existing memberships keep working
    * (they carry their own binding); this only stops FUTURE agents from
    * auto-admitting that Telegram user — e.g. after handing a phone number on.
+   * The store records the ids let go, so the owner seats still bound to them
+   * are not inferred back as "known" (A069): a removal from an existing agent
+   * is the member list's job.
    */
   app.delete('/v1/account/telegram', async (req) => {
     store.setAccountTelegram(ownerIdOf(req), null);
