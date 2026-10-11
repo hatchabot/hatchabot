@@ -933,6 +933,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/agentFiles.ts` — `parseListing`
 
+### Files shows a folder's contents under another folder's name
+- **Check:** you clicked through folders quickly (or the agent's machine is slow to answer); the path at the top and the files listed do not belong together.
+- **Cause:** a slow read of the folder you left came back after the one you opened and was drawn over it.
+- **Fix:** upgrade: only the folder opened last is drawn. Click the folder again to redraw it.
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `v2LoadFiles`
+
+### Files offers no Upload in a folder such as `.openclaw-notes`
+- **Check:** the folder's name starts with `.openclaw` but is not `.openclaw` itself.
+- **Cause:** the page held back uploads in every folder whose name began `.openclaw`, though only OpenClaw's own `.openclaw` folder is off limits (the server allowed it).
+- **Fix:** upgrade. On an older version, upload from the folder above and move the file in from the agent.
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `v2LoadFiles`; `src/orchestrator/agentFiles.ts` — `uploadAllowed`
+
+### An upload failed, but Files only says "N of M uploaded"
+- **Check:** fewer files arrived than you chose, and no reason was shown.
+- **Cause:** each failed file's reason was shown for a moment, then replaced by the count when the folder was drawn again.
+- **Fix:** upgrade: the count and each failed file's reason stay under the folder. Common reasons: over the size limit (`HATCHABOT_FILE_MAX_MB`), a name that is OpenClaw's live state, or the machine not answering.
+- **Fixed in:** `v2.160.0`
+- **Code:** `web/index.html` — `v2UploadFiles`
+
 ### Looking inside an archived agent shows "No readable files", an empty MEMORY.md, or "No conversation found on the volume"
 - **Check:** the agent's machine or Docker was not answering at the time (`hatchabot doctor`; a runner asleep), or the volume is damaged; after the upgrade the same view says "Couldn't read the agent's stored files…".
 - **Cause:** a read of the volume that failed was shown as an agent with no files, an empty file or no chat history.
