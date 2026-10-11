@@ -103,6 +103,7 @@ import {
   agentArchiveName,
   agentsMissingFromSet,
   backupRunState,
+  BackupBusyError,
   backupsDir,
   keepDays,
   listBackups,
@@ -10793,6 +10794,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!removed) return reply.code(404).send({ error: 'No backup for that date.' });
       return { ok: true };
     } catch (err) {
+      if (err instanceof BackupBusyError) return reply.code(409).send({ error: err.message });
       return reply.code(400).send({ error: String((err as Error)?.message ?? err) });
     }
   });

@@ -1326,6 +1326,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `scripts/backup-volumes.sh` — `release_lock`
 
+### Deleting a backup says "The … backup is still being written"
+- **Check:** Settings → Backups shows that day's set as running, or `<backup dir>/<date>/.backup-lock/pid` names a process that `ps -p` finds.
+- **Cause:** a backup run is writing that set. Before v2.160.0 Delete removed it anyway, lock and all: the run went on writing into nothing, and another run could start on the same day.
+- **Fix:** wait for the run to finish, then delete. A lock left by a killed run does not block the delete.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/orchestrator/backups.ts` — `pruneBackup`, `lockHeld`
+
 ### Others lost access to a shared backups folder (NAS) after a backup run
 - **Check:** `ls -ld "$HATCHABOT_BACKUP_DIR"` shows `drwx------` on a folder others use.
 - **Cause:** before v2.153.0 every run chmod'ed the base folder to 700.
