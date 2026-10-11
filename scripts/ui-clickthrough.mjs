@@ -2974,6 +2974,18 @@ const SCENARIOS = String.raw`(() => {
         document.getElementById('appConn').value = 'c1';
         appConnPicked();
         eq('the mailbox follows the account', document.getElementById('appF_mailbox').value, 'demo@example.org');
+        // Another pick moves it again: picking B after A once left A's address in the mailbox.
+        document.getElementById('appConn').value = 'c2'; appConnPicked();
+        eq('a second pick replaces the mailbox', document.getElementById('appF_mailbox').value, 'other@example.org');
+        document.getElementById('appConn').value = 'c1'; appConnPicked();
+        eq('and back', document.getElementById('appF_mailbox').value, 'demo@example.org');
+        // A mailbox typed after the pick that names another address stops the install.
+        document.getElementById('appF_mailbox').value = 'typed@example.org';
+        const markMis = window.__calls.length;
+        await appGo();
+        ok('a mailbox and account that differ stop it: ' + document.getElementById('appErr').textContent,
+          document.getElementById('appErr').textContent.includes('the Google account picked is demo@example.org') && window.__calls.length === markMis);
+        document.getElementById('appF_mailbox').value = 'demo@example.org';
         const warn = document.getElementById('appConnWarn');
         ok('a warning names the other copy: ' + warn.textContent, !warn.hidden && warn.textContent.includes('Old Demo already runs Demo App'));
         window.__confirms.length = 0;
