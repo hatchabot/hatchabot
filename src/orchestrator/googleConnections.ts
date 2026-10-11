@@ -281,9 +281,18 @@ export async function gogAccounts(deps: ConnectionSyncDeps, runtimeRef: string):
       '~/.local/bin/gog auth list --json 2>/dev/null || gog auth list --json 2>/dev/null',
     );
     if (res.code !== 0) return null;
-    const parsed = JSON.parse(res.stdout) as { accounts?: Array<{ email?: string }> } | null;
+    const parsed = JSON.parse(res.stdout) as { accounts?: unknown } | null;
     if (!parsed || typeof parsed !== 'object') return null;
-    return (parsed.accounts ?? []).map((a) => a.email).filter((e): e is string => typeof e === 'string');
+    // Only a list gog actually gave is an answer. `{}`, a missing key or any
+    // other shape is unknown, not "holds nothing": read as empty, it let a
+    // failed remove pass as verified and cleared the retry while the
+    // credential could still be on the volume. gog is Go, where an empty
+    // list may marshal as null, so an explicit `"accounts": null` is empty.
+    if (parsed.accounts === null && 'accounts' in parsed) return [];
+    if (!Array.isArray(parsed.accounts)) return null;
+    return (parsed.accounts as Array<{ email?: unknown } | null>)
+      .map((a) => (a && typeof a === 'object' ? a.email : undefined))
+      .filter((e): e is string => typeof e === 'string');
   } catch {
     return null;
   }
