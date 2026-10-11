@@ -4987,15 +4987,31 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const quick = await Promise.race([pending.catch(() => undefined), new Promise<undefined>((r) => setTimeout(() => r(undefined), SESSIONS_FIRST_WAIT_MS).unref?.())]);
     return quick;
   };
-  /** "Last active" = the newest session update in that file. */
-  const lastActiveFor = async (a: Agent): Promise<string | undefined> => {
-    const sessions = await sessionsFor(a);
+  /** The newest session update in a session list. */
+  const newestActivity = (sessions: Record<string, SessionEntry> | undefined): string | undefined => {
     let newest = 0;
     for (const s of Object.values(sessions ?? {})) {
       if (!s || typeof s !== 'object') continue;
       newest = Math.max(newest, Number(s.updatedAt) || 0, Number(s.lastInteractionAt) || 0);
     }
     return newest > 0 ? new Date(newest).toISOString() : undefined;
+  };
+  /** "Last active" = the newest session update in that file. */
+  const lastActiveFor = async (a: Agent): Promise<string | undefined> => newestActivity(await sessionsFor(a));
+  /**
+   * Its last activity, for a decision that interrupts it (an unattended
+   * rebuild): `read` only when its conversations were actually read. The
+   * cached list cannot tell a failed read from an agent with none, so on a
+   * miss it is read here, strictly (#157).
+   */
+  const activityEvidence = async (a: Agent): Promise<{ read: boolean; lastActiveAt?: string }> => {
+    const cached = await sessionsFor(a).catch(() => undefined);
+    if (cached) return { read: true, lastActiveAt: newestActivity(cached) };
+    if (!a.runtimeRef) return { read: false };
+    const res = await providerFor(a.hostId).execShell(a.runtimeRef, sessionsReadShell(a.slug)).catch(() => undefined);
+    if (!res || res.code !== 0 || res.timedOut) return { read: false };
+    try { return { read: true, lastActiveAt: newestActivity(res.stdout.trim() ? JSON.parse(res.stdout) as Record<string, SessionEntry> : {}) }; }
+    catch { return { read: false }; }
   };
   /**
    * Notes to the owner's management agent, in its own conversation: the
@@ -5342,6 +5358,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const candidates = await Promise.all(agents.map(async (a) => {
       const need = await rebuildNeedOf(a).then((r) => r?.need, () => undefined);
       const switchPending = switchPendingFor(a);
+      // Asking an agent when it last talked is a docker exec: only for the ones that matter.
+      const activity = need || switchPending ? await activityEvidence(a) : { read: false };
       return {
         id: a.id,
         state: a.state,
@@ -5349,8 +5367,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         busy: isBusy(a.id) || inflight.has(a.id) || renderRefusedRecently(a.id),
         need,
         switchPending,
-        // Asking an agent when it last talked is a docker exec: only for the ones that matter.
-        lastActiveAt: need || switchPending ? await lastActiveFor(a).catch(() => undefined) : undefined,
+        lastActiveAt: activity.lastActiveAt,
+        activityRead: activity.read,
       };
     }));
     const picked = pickAutoRebuilds(candidates, policy, now);

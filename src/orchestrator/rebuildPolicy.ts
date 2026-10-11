@@ -110,8 +110,11 @@ export interface RebuildCandidate {
   ops?: boolean;
   /** Already rebuilding, provisioning, moving, or otherwise held. */
   busy: boolean;
-  /** Its newest conversation activity (ISO), if known. */
+  /** Its newest conversation activity (ISO); absent when it has none. */
   lastActiveAt?: string;
+  /** Its conversations were read: only then does no recent activity mean idle.
+   *  A read that failed (asleep runner, docker hiccup) is no evidence (#157). */
+  activityRead: boolean;
   /** Its memory search engine was switched and the rebuild is still owed: done
    *  in the quiet hours under any policy but manual (the owner asked for it). */
   switchPending?: boolean;
@@ -133,7 +136,7 @@ export function pickAutoRebuilds(
   const quiet = opts.quiet ?? inQuietHours(now);
   const idleMs = (opts.idleMinutes ?? 10) * 60_000;
   const due = candidates.filter((c) => {
-    if ((!c.need && !c.switchPending) || c.ops || c.busy || c.state !== 'RUNNING') return false;
+    if ((!c.need && !c.switchPending) || c.ops || c.busy || c.state !== 'RUNNING' || !c.activityRead) return false;
     if (c.lastActiveAt && now.getTime() - Date.parse(c.lastActiveAt) < idleMs) return false;
     if (c.switchPending && quiet) return true;
     return !!c.need && (c.need.level === 'required' || (policy === 'auto' && quiet));
