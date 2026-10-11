@@ -188,14 +188,16 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
     const r = await putBack(deps, source, target, agentId, { ...p, newRef: progress.newRef }, { targetMayRun: progress.targetMayRun });
     if (r.orphaned) {
       // Do NOT restart the source — leave it stopped and shout, so an operator
-      // resolves the orphan instead of a silent flip-flop.
+      // resolves the orphan instead of a silent flip-flop. Held, not failed: a
+      // failed operation is over, and Start was then allowed while the copy
+      // on the target may still answer the same bot (A087).
       log('move.rollback_orphan', { agentId, target: targetHostId, ref: progress.newRef });
       const e = new TransferError(
         `Move failed and the copy on ${targetHost.name} couldn't be cleaned up — "${agent.name}" ` +
-          `is left STOPPED to avoid two bots polling at once. Check ${targetHost.name} and remove ` +
-          `the leftover container, then Start the agent.`,
+          `is left STOPPED to avoid two bots polling at once. Remove the copy on ${targetHost.name}, ` +
+          `then choose what to do on its page (Alerts) — Start stays refused until then.`,
       );
-      op.fail(e);
+      op.hold(orphanOutcome(p, `The move to ${targetHost.name} failed`), orphanChoices(p));
       throw e;
     }
     log('move.rolled_back', { agentId, to: targetHostId, error: String(err) });
@@ -332,9 +334,9 @@ async function putBack(
     // worse than downtime. Verify before deciding. A copy that was never
     // started (the move stopped before the start) is only a leftover.
     if (opts.targetMayRun) {
-      const alive = target
-        ? await target.status(ref).then((s) => s.phase === 'running' || s.phase === 'unknown').catch(() => true)
-        : true;
+      // Down means stopped or gone: a container restarting in a loop
+      // ('starting') or paused ('error') may poll the bot again (A087).
+      const alive = target ? !(await targetDown(target, ref)) : true;
       if (alive) orphaned = true;
       else leftover = true;
     } else {
@@ -387,6 +389,30 @@ export const machineAnswers = async (p: RuntimeProvider): Promise<boolean> => {
     if (timer) clearTimeout(timer);
   }
 };
+
+/** Is the copy at `ref` confirmed stopped or gone? A machine that does not answer is not. */
+async function targetDown(target: RuntimeProvider, ref: string): Promise<boolean> {
+  const s = await target.status(ref).catch((err: unknown) => { rethrowIfCrash(err); return { phase: 'unknown' as const }; });
+  return s.phase === 'stopped' || s.phase === 'absent';
+}
+
+/**
+ * A move undone while its copy on the target could not be removed and may be
+ * running: held, so Start and Wake stay refused (a failed operation is over,
+ * and they were allowed), with the two ways out — Hatchabot removes it, or
+ * the owner did (A087).
+ */
+const orphanChoices = (p: MoveParams) => ({
+  actions: [
+    { action: 'remove-copy', label: `Remove the copy on ${p.toName}${p.wasRunning ? `, then start it on ${p.fromName}` : ''}` },
+    { action: 'copy-removed', label: `I removed the copy on ${p.toName}${p.wasRunning ? ` — start it on ${p.fromName}` : ''}` },
+  ],
+  recommended: 'remove-copy',
+});
+
+const orphanOutcome = (p: MoveParams, start: string) =>
+  `${start}, and its copy on ${p.toName} could not be removed — it is left stopped on ${p.fromName} so two copies never answer at once. ` +
+  `Remove that copy, or let Hatchabot try to.`;
 
 const moveHoldChoices = (p: MoveParams) => ({
   actions: [
@@ -457,7 +483,7 @@ export async function resumeMoveHost(deps: MoveResumeDeps, opId: string): Promis
       // As a move in one go: a target that will not come up is rolled back.
       const r = await putBack(deps, source, target, agentId, p, progress);
       if (r.orphaned) {
-        op.fail(`The move to ${p.toName} could not be finished, and its copy there could not be removed — it is left stopped here so two copies never answer at once. Remove the copy on ${p.toName}, then Start it.`);
+        op.hold(orphanOutcome(p, `The move to ${p.toName} could not be finished after a restart`), orphanChoices(p));
         return;
       }
       log('move.rolled_back', { agentId, to: p.to, error: String(err) });
@@ -475,6 +501,7 @@ export async function recoverMoveHost(deps: MoveResumeDeps, opId: string, action
   const row = op.get();
   const p = row.params as unknown as MoveParams;
   if (action === 'retry') return resumeMoveHost(deps, opId);
+  if (action === 'remove-copy' || action === 'copy-removed') return settleOrphan(deps, op, p, action);
   if (action !== 'put-back') throw new TransferError(`"${action}" is not one of this operation's choices.`);
   const agentId = row.agentId!;
   const target = deps.providerForHost(p.to);
@@ -489,9 +516,16 @@ export async function recoverMoveHost(deps: MoveResumeDeps, opId: string, action
   }
   const r = await putBack(deps, deps.providerForHost(p.from), targetUp ? target : undefined, agentId, p, { targetMayRun });
   if (r.orphaned) {
-    op.fail(`Its copy on ${p.toName} could not be removed — it is left stopped here. Remove the copy on ${p.toName}, then Start it.`);
+    op.hold(orphanOutcome(p, `Putting it back on ${p.fromName} was asked for`), orphanChoices(p));
     return;
   }
+  endPutBack(deps, op, agentId, p, r);
+}
+
+function endPutBack(
+  deps: MoveResumeDeps, op: OpHandle, agentId: string, p: MoveParams,
+  r: { leftover: boolean; sourceStartFailed: boolean },
+): void {
   if (r.sourceStartFailed) {
     // The record is back on the source now: a retry undoes, it does not finish.
     op.hold(`Put back on ${p.fromName}, but it did not start there.`, { actions: [{ action: 'retry', label: 'Try again' }], recommended: 'retry' });
@@ -502,4 +536,44 @@ export async function recoverMoveHost(deps: MoveResumeDeps, opId: string, action
     `Put back on ${p.fromName}${p.wasRunning ? ' and running' : ''}.` +
       (r.leftover ? ` A copy that never started may be left on ${p.toName}; it is replaced the next time it moves there.` : ''),
   );
+}
+
+/**
+ * The owner's choice on a move held with its copy on the target maybe still
+ * running (A087). `remove-copy`: Hatchabot removes it, and only a copy then
+ * confirmed stopped or gone lets the source start. `copy-removed`: the owner
+ * removed it; checked when that machine answers (a copy still up there is
+ * refused), taken at their word when it does not — the same word a move to
+ * another Hatchabot takes ("it is not there"), so a machine gone for good
+ * does not keep the agent stopped forever.
+ */
+async function settleOrphan(deps: MoveResumeDeps, op: OpHandle, p: MoveParams, action: 'remove-copy' | 'copy-removed'): Promise<void> {
+  const agentId = op.get().agentId!;
+  const target = deps.providerForHost(p.to);
+  const answers = deps.answers ?? machineAnswers;
+  const targetUp = !!target && await answers(target);
+  const ref = p.newRef ?? p.oldRef;
+  if (action === 'copy-removed' && targetUp && !(await targetDown(target!, ref))) {
+    throw new TransferError(
+      `Its copy on ${p.toName} is still there and may be running, so it stays stopped on ${p.fromName}. ` +
+        `Remove it on ${p.toName} (or choose "Remove the copy on ${p.toName}"), then try again.`,
+    );
+  }
+  if (action === 'remove-copy' && !targetUp) {
+    throw new TransferError(
+      `${p.toName} isn't answering, so its copy there can't be removed yet. Try again when it is back — ` +
+        `or, if you removed that copy yourself, choose "I removed the copy on ${p.toName}".`,
+    );
+  }
+  // The owner's word (copy-removed, machine away) stands in for the check: nothing there may run.
+  const r = await putBack(deps, deps.providerForHost(p.from), targetUp ? target : undefined, agentId, p, {
+    targetMayRun: action === 'remove-copy' || targetUp,
+  });
+  if (r.orphaned) {
+    throw new TransferError(
+      `Its copy on ${p.toName} could not be removed or confirmed stopped, so it stays stopped on ${p.fromName}. ` +
+        `Remove it on ${p.toName}, then choose "I removed the copy on ${p.toName}".`,
+    );
+  }
+  endPutBack(deps, op, agentId, p, r);
 }

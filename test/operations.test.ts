@@ -242,6 +242,81 @@ describe('move-host: killed at every step, then a restart', () => {
   });
 });
 
+describe('move-host: a copy on the target that could not be removed is held, not failed (A087)', () => {
+  /** The target starts it, never comes up healthy, and will not be removed. */
+  const stuckTarget = (m: Awaited<ReturnType<typeof moveWorld>>) => {
+    const status = m.target.status.bind(m.target);
+    const destroy = m.target.destroy.bind(m.target);
+    m.target.status = async () => ({ phase: 'running', healthy: false });
+    m.target.destroy = async () => { throw new Error('daemon hung'); };
+    return () => { m.target.status = status; m.target.destroy = destroy; };
+  };
+
+  it('in one go: held with its two choices, Start refused, then removed and started on the source', async () => {
+    const m = await moveWorld();
+    const unstick = stuckTarget(m);
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toThrow(/STOPPED to avoid two bots/);
+    const op = m.w.store.listOperations([m.id])[0]!;
+    // Failed is over, and Start was allowed while the target's copy polled the bot.
+    expect(op.status).toBe('held');
+    expect(op.recovery!.actions.map((a) => a.action)).toEqual(['remove-copy', 'copy-removed']);
+    expect(operationRefusal(m.w.store, m.id)).toMatch(/could not be removed/);
+    expect(m.w.store.getAgent(m.id)).toMatchObject({ hostId: 'h1', state: 'STOPPED' });
+    expect((await m.w.provider.status(m.ref)).phase).toBe('stopped');
+
+    // The owner's word is checked when that machine answers.
+    await expect(recoverOperation(m.ctx, op.id, 'copy-removed')).rejects.toThrow(/still there/);
+    // Still stuck: removing it fails again, and it stays held.
+    await expect(recoverOperation(m.ctx, op.id, 'remove-copy')).rejects.toThrow(/could not be removed/);
+    expect(m.w.store.getOperation(op.id)!.status).toBe('held');
+    expect((await m.w.provider.status(m.ref)).phase).toBe('stopped');
+
+    unstick();
+    const after = await recoverOperation(m.ctx, op.id, 'remove-copy');
+    expect(after.status).toBe('rolled_back');
+    expect(m.w.store.getAgent(m.id)).toMatchObject({ hostId: 'h1', state: 'RUNNING' });
+    expect(await m.running2()).toEqual([true, false]);
+    expect(operationRefusal(m.w.store, m.id)).toBeUndefined();
+  });
+
+  it('a target that no longer answers: Hatchabot cannot remove it, the owner may say they did', async () => {
+    const m = await moveWorld();
+    stuckTarget(m);
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toThrow(/STOPPED to avoid two bots/);
+    const op = m.w.store.listOperations([m.id])[0]!;
+    m.up.h2 = false;
+    await expect(recoverOperation(m.ctx, op.id, 'remove-copy')).rejects.toThrow(/isn't answering/);
+    expect(m.w.store.getOperation(op.id)!.status).toBe('held');
+    const after = await recoverOperation(m.ctx, op.id, 'copy-removed');
+    expect(after.status).toBe('rolled_back');
+    expect(m.w.store.getAgent(m.id)).toMatchObject({ hostId: 'h1', state: 'RUNNING' });
+  });
+
+  it('finishing after a restart that cannot remove the copy there is held too', async () => {
+    const m = await moveWorld();
+    crashAt('target-started');
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toBeInstanceOf(SimulatedCrash);
+    reboot(m.id);
+    stuckTarget(m);
+    await resumeOperations(m.ctx);
+    const op = m.w.store.listOperations([m.id])[0]!;
+    expect(op.status).toBe('held');
+    expect(op.recovery!.actions.map((a) => a.action)).toEqual(['remove-copy', 'copy-removed']);
+    expect(operationRefusal(m.w.store, m.id)).toMatch(/could not be removed/);
+    expect((await m.w.provider.status(m.ref)).phase).not.toBe('running');
+  });
+
+  it('a copy restarting in a loop is not taken for stopped', async () => {
+    const m = await moveWorld();
+    stuckTarget(m);
+    // Removal fails, and the copy says it is restarting, not running.
+    m.target.status = async () => ({ phase: 'starting' });
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toThrow();
+    expect(m.w.store.listOperations([m.id])[0]!.status).toBe('held');
+    expect((await m.w.provider.status(m.ref)).phase).toBe('stopped');
+  });
+});
+
 // ---- migrate ---------------------------------------------------------------
 
 const PEER = { id: 'peer1', name: 'Test Peer', url: 'http://peer.example.org:8080', secretRef: 'peer/tok' };
