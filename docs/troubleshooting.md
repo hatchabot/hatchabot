@@ -299,6 +299,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/api/routes.ts` — `checkLocalServer`, `OLLAMA_HOST`
 
+### On a shared AI source, my agent's chosen model changed when the source's owner changed its default
+- **Check:** the agent's AI tab still names the model you picked, but it answers as the source's new default; ⚙ Settings → AI shows that model is no longer on the source's list.
+- **Cause:** changing a shared source's default (the "apply default model" step) kept your choice stored but left it off the source's model list, and an agent's choice only counts while it is on that list.
+- **Fix:** upgrade; the owner's next default change keeps every other member's current choice on the list. Until then, ask the source's owner to add the model back to the list, or pick another one.
+- **Fixed in:** `v2.160.0`
+- **Code:** `src/api/routes.ts` — `apply-default-model`; `src/orchestrator/provision.ts` — `effectiveModel`
+
 ## Telegram, Discord and Slack
 
 ### The agent welcomes its owner, then every later message is dropped without a word
