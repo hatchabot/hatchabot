@@ -29,6 +29,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/doctor.ts` — `checkoutFacts`
 
+### macOS: setup says it installed the service, but Hatchabot never starts (the install folder's path has `&`, `<` or a quote in it)
+- **Check:** `plutil -lint ~/Library/LaunchAgents/com.hatchabot.control-plane.plist` reports a parse error, and `launchctl list com.hatchabot.control-plane` finds nothing; the install folder's path has `&`, `<`, `>` or `"` in it (the backup job, `com.hatchabot.backup.plist`, is the same).
+- **Cause:** setup-host.sh pasted the folder's path into the launchd files as it was, so an `&` made a file launchd cannot read, and a quote or `$` in the path broke the job's command.
+- **Fix:** upgrade and run `./scripts/setup-host.sh` again (it keeps `.env`): the files are now written with the path escaped, and the job is given the folder as an argument. On older releases, move the install to a folder whose path has none of those characters.
+- **Fixed in:** `v2.162.0`
+- **Code:** `scripts/launchd-plist.sh` — `xml`; `scripts/setup-host.sh` — `launchd`
+
 ### An upgrade that took over an hour broke the install, or "Another upgrade … is running" never goes away
 - **Check:** the upgrade's log shows two `Upgrading …` lines overlapping (a slow download, then the channel timer or a hand-run upgrade); or `ls ~/.local/state/hatchabot/upgrade-*.lock.d` exists while no upgrade runs, and its `owner` file names a process that `ps -p <pid>` no longer shows.
 - **Cause:** the upgrade lock was judged by age alone: after an hour the next run removed it even though the first upgrade was still downloading, and both swapped the code at once.
