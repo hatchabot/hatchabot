@@ -227,6 +227,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.98.0`
 - **Code:** `src/api/auth.ts` — `sessionTtlMs`, `HATCHABOT_SESSION_DAYS`
 
+### Google sign-in says "Your login could not be verified — try signing in again." just after a restart
+- **Check:** the install uses `HATCHABOT_AUTH=identity`; it happened within a minute of the service starting (or of Google rotating its keys), while someone else, or another tab, was signing in too; trying again a moment later works.
+- **Cause:** the first sign-in fetched Google's signing certificates, and the once-a-minute limit on that fetch sent every other sign-in arriving meanwhile straight to the still-empty cache, where it was refused.
+- **Fix:** upgrade; sign-ins that arrive during the fetch wait for it (still one request to Google). On an older version, sign in again.
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/api/identity.ts` — `IdentityVerifier`
+
 ### Creating the first account asks for a "setup code"
 - **Check:** you are on the first-run page from another device than the Hatchabot machine (or under rootless Docker).
 - **Cause:** by design: before any account exists, only someone on the machine itself, or holding the code printed at start-up, may create the owner account.

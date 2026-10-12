@@ -60,6 +60,8 @@ export class IdentityVerifier {
 
   /** Google rotates these daily; an hour of caching is well inside that. */
   #lastAttempt = 0;
+  /** The fetch under way, if any; true when it brought new certs. */
+  #inflight: Promise<boolean> | undefined;
 
   async #certFor(kid: string): Promise<string> {
     const now = this.#config.now?.() ?? Date.now();
@@ -67,7 +69,7 @@ export class IdentityVerifier {
     // Refetch when the key is unknown (rotation) or the cache aged out — but
     // never more than once a minute, so unauthenticated callers can't drive
     // outbound requests by spamming made-up kids.
-    if ((!this.#certs[kid] || stale) && now - this.#lastAttempt > 60_000) {
+    if ((!this.#certs[kid] || stale) && !this.#inflight && now - this.#lastAttempt > 60_000) {
       this.#lastAttempt = now;
       const fetcher =
         this.#config.fetchCerts ??
@@ -76,15 +78,20 @@ export class IdentityVerifier {
           if (!res.ok) throw new Error(`cert fetch failed: ${res.status}`);
           return (await res.json()) as Record<string, string>;
         });
-      try {
-        this.#certs = await fetcher();
-        this.#fetchedAt = now;
-      } catch (err) {
-        // A Google outage must not log everyone out: keep serving the cached
-        // keys and only fail if this particular kid was never seen.
-        if (!this.#certs[kid]) {
-          throw new IdentityError('Could not reach Google to verify your login.');
-        }
+      this.#inflight = Promise.resolve()
+        .then(fetcher)
+        .then((certs) => { this.#certs = certs; this.#fetchedAt = now; return true; }, () => false)
+        .finally(() => { this.#inflight = undefined; });
+    }
+    // A fetch under way, this request's or another's, is waited for: the
+    // throttle used to send the second of two first sign-ins straight to
+    // the empty cache, and it was refused while the first got in.
+    if (this.#inflight) {
+      const fetched = await this.#inflight;
+      // A Google outage must not log everyone out: keep serving the cached
+      // keys and only fail if this particular kid was never seen.
+      if (!fetched && !this.#certs[kid]) {
+        throw new IdentityError('Could not reach Google to verify your login.');
       }
     }
     const cert = this.#certs[kid];

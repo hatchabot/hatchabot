@@ -99,6 +99,40 @@ describe('IdentityVerifier', () => {
   it('requires a project id', () => {
     expect(() => new IdentityVerifier({ projectId: '' })).toThrow(/HATCHABOT_GCP_PROJECT/);
   });
+
+  it('two first sign-ins at once both wait for the one cert fetch (#223)', async () => {
+    let calls = 0;
+    let release!: (c: Record<string, string>) => void;
+    const v = new IdentityVerifier({
+      projectId: PROJECT,
+      fetchCerts: () => { calls++; return new Promise((r) => { release = r; }); },
+      now: () => NOW,
+    });
+    const first = v.verify(makeToken());
+    const second = v.verify(makeToken({ sub: 'uid-def' }));
+    await new Promise((r) => setImmediate(r));
+    release(certs());
+    const [a, b] = await Promise.allSettled([first, second]);
+    expect(a.status).toBe('fulfilled');
+    expect(b.status).toBe('fulfilled');
+    expect(calls).toBe(1);
+    // The throttle still holds: a made-up kid right after makes no new request.
+    await expect(v.verify(makeToken({}, { kid: 'kid-made-up' }))).rejects.toBeInstanceOf(IdentityError);
+    expect(calls).toBe(1);
+  });
+
+  it('a fetch that fails is reported to everyone waiting on it (#223)', async () => {
+    let fail!: (e: Error) => void;
+    const v = new IdentityVerifier({ projectId: PROJECT, fetchCerts: () => new Promise((_, j) => { fail = j; }), now: () => NOW });
+    const first = v.verify(makeToken());
+    const second = v.verify(makeToken());
+    await new Promise((r) => setImmediate(r));
+    fail(new Error('offline'));
+    for (const r of await Promise.allSettled([first, second])) {
+      expect(r.status).toBe('rejected');
+      expect((r as PromiseRejectedResult).reason.userMessage).toMatch(/Could not reach Google/);
+    }
+  });
 });
 
 describe('identity auth mode', () => {
