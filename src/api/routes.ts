@@ -8605,6 +8605,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // What went wrong — not a guest refused by design (console.guest_refused), which is the guard working.
   const FAILURE_EVENT = /fail|error|crash|unreachable|interrupt|kill|timed?_?out|missing|stuck/i;
   const PERSON_KEYS = new Set(['userId', 'user', 'email', 'by', 'from', 'fromUserId', 'chatId']);
+  // The agents a report's facts may mention, and so whose names and credentials its masking must know: one list for both (#204).
+  const reportAgents = (req: FastifyRequest) => (ownsLocalHost(req) ? store.listAllActiveAgents() : store.listAgents(ownerIdOf(req)));
   const reportFacts = async (req: FastifyRequest, agentRef?: string): Promise<ReportFacts> => {
     const owner = ownsLocalHost(req);
     const facts: ReportFacts = {
@@ -8626,7 +8628,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       });
       try { facts.doctor = (JSON.parse(out) as { lines?: ReportFacts['doctor'] }).lines; } catch { /* doctor did not answer */ }
     }
-    const agents = owner ? store.listAllActiveAgents() : store.listAgents(ownerIdOf(req));
+    const agents = reportAgents(req);
     const names = new Map(agents.map((a) => [a.id, a.name]));
     const since = Date.now() - 3 * 86_400_000;
     // The same failure again and again is one line with a count, not fifteen.
@@ -8659,13 +8661,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /**
    * What a public report must not carry, as this app knows it (security audit, 2026-10-09):
    * the names and slugs of the agents it could mention, their members' names, the
-   * machines' names, and the credentials of the agent it is about (its bot token,
-   * its own settings, its AI key) plus the credential settings of this server.
+   * machines' names, and the credentials of every agent whose failures it may
+   * carry (its bot token, its own settings, its AI key) plus the credential
+   * settings of this server. Only the selected agent's were loaded, so a general
+   * report kept another agent's key from a failure's detail (#204).
    * Built for one report and dropped: never stored, never logged.
    */
   const reportRedaction = async (req: FastifyRequest, agentRef?: string): Promise<PublicRedactContext> => {
     const owner = ownsLocalHost(req);
-    const agents = owner ? store.listAllActiveAgents() : store.listAgents(ownerIdOf(req));
+    const agents = reportAgents(req);
     const names: string[] = [];
     for (const a of agents) {
       names.push(a.name, a.slug);
@@ -8675,11 +8679,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const hosts = store.listHosts(ownerIdOf(req)).map((h) => h.name);
     const secretValues = credentialValuesFromEnv(process.env);
     const a = agentRef ? ownedAgent(req, agentRef) ?? (owner ? store.getAgent(agentRef) : undefined) : undefined;
-    if (a) {
-      names.push(a.name, a.slug);
-      const refs = [...store.listChannelsForAgent(a.id).map((c) => c.secretRef), ...store.listAgentEnv(a.id).map((v) => v.secretRef), store.getAIProfile(a.aiProfileId)?.secretRef];
-      for (const ref of refs) if (ref) { const v = await secrets.get(ref).catch(() => undefined); if (v) secretValues.push(v); }
+    if (a) names.push(a.name, a.slug);
+    const refs = new Set<string>();
+    for (const x of a ? [...agents, a] : agents) {
+      for (const ref of [...store.listChannelsForAgent(x.id).map((c) => c.secretRef), ...store.listAgentEnv(x.id).map((v) => v.secretRef), store.getAIProfile(x.aiProfileId)?.secretRef]) if (ref) refs.add(ref);
     }
+    for (const v of await Promise.all([...refs].map((ref) => secrets.get(ref).catch(() => undefined)))) if (v) secretValues.push(v);
     return { ...localContext(), names, hosts, secrets: secretValues };
   };
   // Masked again as it leaves — the link, the file, a person's edit — so a draft made before a rule, or an edit, is held to it too.
