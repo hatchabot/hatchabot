@@ -193,6 +193,9 @@ export interface Agent {
   appliedProfileId?: string;
   /** The model that configuration actually used. */
   appliedModel?: string;
+  /** The applied source before its last change, and when that change was applied. */
+  appliedProfilePrevId?: string;
+  appliedProfileAt?: string;
   /** Owner-defined organization: an optional group label, and a manual order
    *  (ascending) used within the group. Absent group = "ungrouped". */
   group?: string;
