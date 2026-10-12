@@ -1865,6 +1865,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/backups.ts` — `applyCurrentSettingsOver`; `src/orchestrator/members.ts` — `DROP_CHAT_ACCOUNTS_SCRIPT`
 
+### After a restore or import that said "Docker did not respond in time", the agent's files are a mix of old and new
+- **Check:** the restore, move or import failed with "Docker did not respond in time" (or the import's Docker client was killed), and the agent's memory or settings afterwards match neither the backup nor what it had before.
+- **Cause:** the timeout killed the Docker client and reported the failure at once, while the import container was still being removed. The rollback then extracted into the volume the import container was still writing.
+- **Fix:** upgrade; a failed import is reported only after its container is gone, so the rollback has the volume to itself. Restore the agent's last good backup to put a mixed volume right.
+- **Fixed in:** `v2.162.0` (#205)
+- **Code:** `src/providers/localDockerProvider.ts` — `#oneShotExit`, `importState`, `importWorkspace`, `#runStdin`
+
 ## Usage, costs and budgets
 
 ### Usage shows small, flat token numbers for an agent that is busy all day
