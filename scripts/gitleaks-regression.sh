@@ -17,8 +17,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="$(cd "$(dirname "${2:-$ROOT/.gitleaks.toml}")" && pwd)/$(basename "${2:-$ROOT/.gitleaks.toml}")"
 case "$BIN" in /*) ;; *) BIN="$(pwd)/$BIN" ;; esac
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
-# No vowels, so a random value never spells one of the generic rule's stopwords.
-rnd() { LC_ALL=C tr -dc 'BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz2346789' </dev/urandom | head -c 32 || true; }
+# One letter, one digit, sixteen times: no two letters ever touch, so a random
+# value can never spell one of the generic rule's stopwords. Leaving out the
+# vowels was not enough: some stopwords have none ("src", "pdf", "xml"), and
+# one such draw went unreported and failed CI (2026-10-12).
+rnd() {
+  local letters digits out="" i
+  letters="$(LC_ALL=C tr -dc 'BCDFGHJKLMNPQRSTVWXZbcdfghjklmnpqrstvwxz' </dev/urandom | head -c 16 || true)"
+  digits="$(LC_ALL=C tr -dc '2346789' </dev/urandom | head -c 16 || true)"
+  for i in $(seq 0 15); do out="$out${letters:$i:1}${digits:$i:1}"; done
+  printf '%s' "$out"
+}
 
 mkdir -p "$WORK/src" "$WORK/test"
 # Must be reported: an ordinary value, whatever its setting is called, and
