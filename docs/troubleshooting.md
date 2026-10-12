@@ -269,6 +269,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `src/api/accountsAuth.ts` — `'/v1/local-accounts/recover-with-code'`; `src/store/store.ts` — `recoverLocalAccount`
 
+### A password reset did not hold: the password chosen with the old one works instead, or "Your password was changed while this was being checked"
+- **Check:** the owner reset someone's password (in the app or with `hatchabot accounts reset-password`) while that person was changing it, or making a recovery code, with the old one; the security record and log show both at nearly the same time.
+- **Cause:** before v2.162.0 the change checked the old password, then stored the new one without looking again: a reset made during the check was overwritten, so whoever held the old password kept the account (and could mint a recovery code).
+- **Fix:** upgrade; a change or a new recovery code is stored only while the password that was checked is still the account's, and otherwise answers "Your password was changed while this was being checked". On an older version, reset the password again and make the person a new recovery code.
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/api/accountsAuth.ts` — `PASSWORD_CHANGED_MEANWHILE`; `src/store/store.ts` — `setLocalAccountPassword`, `setLocalAccountRecovery`
+
 ### After a second-factor reset, an old sign-in at the public address works again without the new factor
 - **Check:** after the owner reset someone's factors (`hatchabot second-factor reset <user>`) and that person added a new one, a browser or copied cookie signed in before the reset reaches the public address, or opens a console there, without being asked for the new factor.
 - **Cause:** before v2.153.0, the public pass's "second factor given" mark was not tied to the person's set of factors; resetting closed open consoles but the mark counted again once any factor existed.
@@ -289,6 +296,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade; a reset (or a removed factor) voids every passkey request begun before it. Reset them again if the passkey is not theirs.
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/secondFactor.ts` — `forgetCeremonies`, `'/v1/second-factor/reset/:id'`
+
+### Public access is on, but the owner has no second factor left
+- **Check:** Settings → You lists no passkey or authenticator app for an owner, public access is on, and the security record shows two `second_factor.removed` entries for them seconds apart.
+- **Cause:** before v2.162.0, removing a factor checked "is another one left?" before the password check, not after it: two removals sent at once each saw the other factor, and both went through.
+- **Fix:** upgrade; the check is made again after the password, with nothing in between it and the removal, so the second request is refused. On an older version, add a factor again at the private address (or turn public access off until you do).
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/api/secondFactor.ts` — `lastOne`, `'/v1/second-factor/:id'`
 
 ### "Make new backup codes" failed, and now neither the old codes nor any new ones work
 - **Check:** the request failed (a full disk, say) and Settings → You shows fewer than 10 backup codes, or none of your saved codes is accepted.

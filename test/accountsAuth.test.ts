@@ -201,6 +201,33 @@ describe('passwords and removal', () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it('a change proved with the old password does not overwrite a reset made while it was checked (#199)', async () => {
+    const { f, store } = await app();
+    const first = await bootstrap(f, 'owner', 'correct-horse');
+    const cookie = cookieOf(first);
+    const id = first.json().id as string;
+    // The request reads the account; the reset (the command line's, say) lands
+    // before its checks finish. Modelled by handing the request the row as it was.
+    const before = store.localAccount(id)!;
+    const reset = await hashPassword('reset-meanwhile');
+    store.setLocalAccountPassword(id, reset.hash, reset.salt);
+    const read = store.localAccount.bind(store);
+    store.localAccount = (x: string) => (x === id ? before : read(x));
+    const change = await f.inject({
+      method: 'POST', url: '/v1/local-accounts/me/password', headers: { cookie },
+      payload: { current: 'correct-horse', password: 'chosen-with-old-one' },
+    });
+    const code = await f.inject({ method: 'POST', url: '/v1/local-accounts/me/recovery-code', headers: { cookie }, payload: { current: 'correct-horse' } });
+    store.localAccount = read;
+    expect(change.statusCode).toBe(409);
+    expect(code.statusCode).toBe(409);
+    expect(code.json().recoveryCode).toBeUndefined();
+    expect(store.localAccount(id)!.recoveryHash).toBe(before.recoveryHash);
+    _resetLoginThrottle();
+    expect((await signIn(f, 'owner', 'chosen-with-old-one')).statusCode).toBe(401);
+    expect((await signIn(f, 'owner', 'reset-meanwhile')).statusCode).toBe(200);
+  });
+
   it('lets the host owner reset someone else, and refuses the reverse', async () => {
     const { f } = await app();
     const first = await bootstrap(f);
