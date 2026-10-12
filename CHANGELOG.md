@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.163.0] — 2026-10-12
+
+### Fixed
+- **A web-chat-only agent can deliver scheduled results to its web chat.** An agent with no chat app now knows its scheduled results arrive in its web chat conversation, and no longer tells you that you need Telegram for, say, a daily summary. It gets this at its next rebuild.
+- A scheduled task an agent makes in chat is pointed at the right place within about 5 minutes, instead of waiting up to a day for the daily pass. Its first run no longer fails with "no configured channels detected". The check reads each running agent's task list directly (about 65 ms each) and starts OpenClaw's slower command line only when a task needs changing.
+
+### Changed
+- **Archive and Delete are at the foot of an agent's Overview**, in an "Archive or delete" box, instead of at the end of its Advanced tab: removing an agent is an everyday action.
+
 ## [2.162.0] — 2026-10-11
 
 Fixes for the 31 issues an automated review filed on GitHub (#198–#228), and for gaps left open in v2.160.0. Each fix has a test that failed before it, and a docs/troubleshooting.md entry.
