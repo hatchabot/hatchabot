@@ -1101,6 +1101,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/routes.ts` — `/v1/agents/:id/class`, `/v1/agent-classes/:id`
 
+### Setting a class's memory cap again after "kept its old limits" says nothing was skipped, but the container still has the old limit
+- **Check:** a class edit named a member under `skipped` (its machine did not answer); the same edit again lists no one, yet `docker inspect -f '{{.HostConfig.Memory}}' <container>` still shows the old cap.
+- **Cause:** the class saved the new cap before applying it, so the repeat saw no change and did not touch the containers.
+- **Fix:** upgrade, then set the cap again: a class edit that names the cap or swap applies it to every member that takes it from the class. The limits check also puts it right within its next pass.
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/api/routes.ts` — `/v1/agent-classes/:id`
+
 ### A file or folder downloaded from Files is short, or its `.tar.gz` will not open ("unexpected end of file")
 - **Check:** the download is smaller than the size Files lists, and the service log shows the agent's machine or Docker failing at that time.
 - **Cause:** the copy out of the agent's volume could fail part-way (the machine went to sleep, Docker stopped, a read error), and the download still ended as if it were complete.

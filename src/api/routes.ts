@@ -2192,7 +2192,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // Its swap allowance too (swap.ts), which a class cap can also shrink.
         const capMoved = memoryCap !== cls.memoryCap && !a.memoryCap;
         const swapMoved = swapAllowance !== cls.swapAllowance && !a.swapAllowance;
-        if ((capMoved || swapMoved || (memoryCap !== cls.memoryCap && !!effectiveSwapAllowance(a, { memoryCap, swapAllowance }))) && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
+        // Named in the request, they are applied even when the class already
+        // says so: a retry after a container refused them saw no change, did
+        // nothing and answered with no skips (#220).
+        const asked = (b.memoryCap !== undefined || b.swapAllowance !== undefined) && (!a.memoryCap || !a.swapAllowance);
+        if ((capMoved || swapMoved || asked || (memoryCap !== cls.memoryCap && !!effectiveSwapAllowance(a, { memoryCap, swapAllowance }))) && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
           const prov = providerFor(a.hostId);
           const lim = agentMemoryLimits({ getAgentClass: () => ({ ...cls, memoryCap, swapAllowance }) }, a);
           try {
