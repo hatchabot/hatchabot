@@ -404,8 +404,8 @@ describe('the app routes', () => {
     store.insertAIProfile({ id: 'p', ownerId: OWNER, name: 'Plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-sonnet-5', secretRef: 'ai/p', createdAt: 'now' } as never);
     store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Demo', slug: 'demo-agent', state: 'RUNNING', runtimeRef: 'mock://a1', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
     const f = Fastify();
-    await registerRoutes(f, { store, secrets, providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0 } }, appGit } as never);
-    return { f, store, provider };
+    const routes = await registerRoutes(f, { store, secrets, providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0 } }, appGit } as never);
+    return { f, store, provider, routes };
   }
   const as = { 'x-hatchabot-owner': OWNER };
 
@@ -565,6 +565,45 @@ describe('the app routes', () => {
     expect(del.statusCode).toBe(200);
     expect(store.getAppPending('a2')).toBeUndefined();
     expect(kept.size).toBe(0);
+  });
+
+  it('a waiting app from before v2.160.0 has its plain-text secret moved to the secret store at boot', async () => {
+    const kept = new Map<string, string>();
+    const secrets = {
+      put: async (r: string, v: string) => { kept.set(r, v); },
+      get: async (r: string) => { const v = kept.get(r); if (v === undefined) throw new Error('missing'); return v; },
+      delete: async (r: string) => { kept.delete(r); },
+    };
+    const { store, routes } = await app(undefined, secrets);
+    const PASSWORD = 'made-up-old-app-password';
+    const withSecret = { ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'app_password', type: 'text', required: true, secret: true }] } };
+    const dir = repo(withSecret);
+    store.setAgentState('a1', 'STOPPED');
+    // As the old release wrote it: every value in the row, a failure on it.
+    store.setAppPending('a1', { source: dir, ref: 'HEAD', values: { mailbox: 'demo@example.org', app_password: PASSWORD, __allowShared: true } });
+    store.setAppPendingError('a1', 'tests failed');
+    const since = store.getAppPending('a1')!.createdAt;
+    // One whose repo isn't on this machine (no mirror of the address): its manifest can't be known.
+    store.insertAgent({ id: 'a2', ownerId: OWNER, name: 'Demo Two', slug: 'demo-two', state: 'STOPPED', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    store.setAppPending('a2', { source: 'https://example.org/demo-app.git', ref: 'HEAD', values: { mailbox: 'other@example.org', app_password: PASSWORD } });
+    const rowOf = (id: string) => ((store as unknown as { db: Database.Database }).db.prepare(`SELECT vals FROM agent_app_pending WHERE agent_id = ?`).get(id) as { vals: string }).vals;
+    const a2Before = rowOf('a2');
+
+    await routes.stashOldPendingSecrets();
+    expect(rowOf('a1')).not.toContain(PASSWORD);
+    expect(JSON.parse(rowOf('a1'))).toEqual({ mailbox: 'demo@example.org', app_password: { $secretRef: 'app-pending/a1/app_password' }, __allowShared: true });
+    expect(kept.get('app-pending/a1/app_password')).toBe(JSON.stringify(PASSWORD));
+    expect(store.getAppPending('a1')).toMatchObject({ error: 'tests failed', createdAt: since });
+    // The install reads it back as it went in.
+    expect(await resolvePendingValues(secrets, 'a1', store.getAppPending('a1')!.values)).toMatchObject({ app_password: PASSWORD, mailbox: 'demo@example.org' });
+    // Left alone, and tried again next boot.
+    expect(rowOf('a2')).toBe(a2Before);
+    expect(store.storeMigrationDone('2026-10-11-app-pending-secrets')).toBe(false);
+    // Once every row is settled, it is recorded and runs no more; a repeat changes nothing.
+    store.deleteAppPending('a2');
+    await routes.stashOldPendingSecrets();
+    expect(store.storeMigrationDone('2026-10-11-app-pending-secrets')).toBe(true);
+    expect(kept.size).toBe(1);
   });
 
   it('a waiting value made to look like a secret reference reads nothing (2026-10-10)', async () => {

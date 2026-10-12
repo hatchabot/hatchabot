@@ -110,6 +110,10 @@ export const hostGit: Git = (args, cwd) => new Promise((done) => {
   });
 });
 
+/** Where the mirror of a git address is kept. */
+export const mirrorDir = (cacheDir: string, url: string): string =>
+  join(cacheDir, createHash('sha256').update(url).digest('hex').slice(0, 16) + '.git');
+
 /** The local repository to read from: the folder itself, or a mirror of the URL kept beside the database. */
 export async function repoFor(git: Git, src: AppSource, cacheDir: string): Promise<string> {
   if (src.kind === 'dir') {
@@ -119,7 +123,7 @@ export async function repoFor(git: Git, src: AppSource, cacheDir: string): Promi
     return src.path;
   }
   mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
-  const dir = join(cacheDir, createHash('sha256').update(src.url).digest('hex').slice(0, 16) + '.git');
+  const dir = mirrorDir(cacheDir, src.url);
   const r = existsSync(dir)
     ? await git(['-C', dir, 'fetch', '--prune', '--force', 'origin', '+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*'])
     : await git(['clone', '--mirror', '--', src.url, dir]);
@@ -127,17 +131,22 @@ export async function repoFor(git: Git, src: AppSource, cacheDir: string): Promi
   return dir;
 }
 
-export interface Resolved { sha: string; manifest: AppManifest; tar: Buffer }
-
-/** A ref to its commit, the manifest at that commit, and the commit's files as a tarball. */
-export async function resolveRelease(git: Git, repo: string, ref = 'HEAD'): Promise<Resolved> {
+/** A ref to its commit and the manifest there, without the files. */
+export async function manifestAt(git: Git, repo: string, ref = 'HEAD'): Promise<{ sha: string; manifest: AppManifest }> {
   if (!/^[A-Za-z0-9._\/^~-]{1,200}$/.test(ref) || ref.startsWith('-')) throw new AppError(`Not a ref: ${ref}`);
   const rev = await git(['-C', repo, 'rev-parse', '--verify', `${ref}^{commit}`]);
   if (rev.code !== 0) throw new AppError(`No commit "${ref}" in the repo.`);
   const sha = rev.stdout.toString().trim();
   const man = await git(['-C', repo, 'show', `${sha}:${MANIFEST_FILE}`]);
   if (man.code !== 0) throw new AppError(`The repo has no ${MANIFEST_FILE} at ${sha.slice(0, 12)} (see docs/apps-in-agents.md).`);
-  const manifest = parseManifest(man.stdout.toString());
+  return { sha, manifest: parseManifest(man.stdout.toString()) };
+}
+
+export interface Resolved { sha: string; manifest: AppManifest; tar: Buffer }
+
+/** A ref to its commit, the manifest at that commit, and the commit's files as a tarball. */
+export async function resolveRelease(git: Git, repo: string, ref = 'HEAD'): Promise<Resolved> {
+  const { sha, manifest } = await manifestAt(git, repo, ref);
   const tar = await git(['-C', repo, 'archive', '--format=tar', sha]);
   if (tar.code !== 0) throw new AppError(`git archive failed: ${tar.stderr.trim()}`);
   if (tar.stdout.length > MAX_TAR_BYTES) throw new AppError(`The code is ${Math.round(tar.stdout.length / 1048576)} MB; apps are limited to ${MAX_TAR_BYTES / 1048576} MB.`);

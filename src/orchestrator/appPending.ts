@@ -68,3 +68,36 @@ export async function dropAppPending(store: Store, secrets: SecretStore, agentId
   for (const ref of pendingSecretRefs(agentId, p.values)) await secrets.delete(ref).catch(() => {});
   store.deleteAppPending(agentId);
 }
+
+/**
+ * Rows written before v2.160.0 kept their secret values in plain text until
+ * the install went in or the agent went. Move those values to the secret
+ * store and leave references, as stashPendingSecrets does for a new row. The
+ * row doesn't carry its manifest: `manifestFor` reads the one it would
+ * install (source and ref), on this machine only. A row whose manifest can't
+ * be read now is left as it is and named in `unknown`, for the next boot.
+ *
+ * Run before anything else touches waiting installs (the refs are per agent
+ * and key, so a row rewritten alongside would share them).
+ */
+export async function stashOldPendingSecrets(
+  store: Store, secrets: SecretStore, manifestFor: (source: string, ref: string) => Promise<AppManifest | undefined>,
+): Promise<{ moved: string[]; unknown: string[] }> {
+  const moved: string[] = [], unknown: string[] = [];
+  for (const row of store.listAppPendingRows()) {
+    let values: Record<string, unknown>;
+    try { values = JSON.parse(row.vals) as Record<string, unknown>; } catch { unknown.push(row.agentId); continue; }
+    // Values still in the row itself (a marker is already a reference).
+    const plain = Object.fromEntries(Object.entries(values).filter(([k, v]) =>
+      k !== '__allowShared' && v !== undefined && v !== '' && !(v && typeof v === 'object' && REF in (v as Record<string, unknown>))));
+    if (!Object.keys(plain).length) continue;
+    const m = await manifestFor(row.source, row.ref).catch(() => undefined);
+    if (!m) { unknown.push(row.agentId); continue; }
+    const kept = await stashPendingSecrets(secrets, row.agentId, m, plain);
+    if (!pendingSecretRefs(row.agentId, kept).length) continue; // none of them secret
+    if (store.replaceAppPendingValues(row.agentId, row.vals, { ...values, ...kept })) { moved.push(row.agentId); continue; }
+    // The row went while its secrets were being stored: they would be left behind.
+    if (!store.getAppPending(row.agentId)) for (const ref of pendingSecretRefs(row.agentId, kept)) await secrets.delete(ref).catch(() => {});
+  }
+  return { moved, unknown };
+}

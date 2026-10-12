@@ -277,6 +277,9 @@ startReconcileLoop(store, providerForHost, reconcileLog, undefined, bootReconcil
 // certain, held for the owner otherwise. After the first reconcile; in the
 // background, since asking another server whether an agent arrived can take
 // minutes. Held questions are asked again every 10 minutes.
+// Waiting app installs from before v2.160.0 kept secret values in plain text:
+// moved to the secret store before any request or install can touch the rows.
+await routes.stashOldPendingSecrets().catch((err) => app.log.error({ err: String(err) }, 'app_pending.secrets_migration_failed'));
 void routes.resumeOperations().catch((err) => app.log.error({ err: String(err) }, 'operations.resume_failed'));
 routes.startOperationRetryLoop();
 

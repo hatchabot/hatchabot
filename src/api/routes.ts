@@ -2,7 +2,7 @@ import { allowedPeerAddress } from './peerAddress.js';
 import { GuestConsoleLog } from './guestConsoleLog.js';
 import { deviceLabel } from './publicAccess.js';
 import { stopAndConfirm } from '../orchestrator/quiesce.js';
-import { AppError, fieldsToAsk, hostGit, installRelease, mergeConfig, outcome, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
+import { AppError, fieldsToAsk, hostGit, installRelease, manifestAt, mergeConfig, mirrorDir, outcome, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
 import { agentTimeZone } from '../orchestrator/timezone.js';
 import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
 import { claudePlanAllowed, CLAUDE_PLAN_HOSTED } from '../config/claudePlan.js';
@@ -77,7 +77,7 @@ import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
 import { commandOwnersFor, reapplyCurrentSettings } from '../orchestrator/provision.js';
 import { CronSystemOwnedError, addCron, editCron, cronTargetFor, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
-import { dropAppPending, pendingSecretRefs, resolvePendingValues, stashPendingSecrets } from '../orchestrator/appPending.js';
+import { dropAppPending, pendingSecretRefs, resolvePendingValues, stashOldPendingSecrets, stashPendingSecrets } from '../orchestrator/appPending.js';
 import { request as httpRequest } from 'node:http';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
@@ -13811,6 +13811,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   return {
+    /**
+     * At boot, before anything is served: waiting app installs from before
+     * v2.160.0 move their secret values out of the row. Their manifest is read
+     * where it is on this machine (the folder, or the git address's mirror),
+     * never fetched; a row whose manifest can't be read is retried next boot.
+     */
+    stashOldPendingSecrets: async () => {
+      const name = '2026-10-11-app-pending-secrets';
+      if (store.storeMigrationDone(name)) return;
+      const r = await stashOldPendingSecrets(store, secrets, async (source, ref) => {
+        const src = parseSource(source);
+        const repo = src.kind === 'dir' ? src.path : mirrorDir(appCacheDir, src.url);
+        return existsSync(repo) ? (await manifestAt(appGit, repo, ref)).manifest : undefined;
+      });
+      if (r.moved.length) app.log.warn({ agents: r.moved }, 'moved waiting app secrets into the secret store');
+      if (r.unknown.length) app.log.warn({ agents: r.unknown }, 'waiting app installs whose manifest could not be read: their values stay in the row until it goes in');
+      else store.recordStoreMigration(name);
+    },
     /** At boot, after the first reconcile: settle what the last process left running. */
     resumeOperations: async () => {
       await resumeOperations(opsCtx);
@@ -13828,6 +13846,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
 /** What registerRoutes hands back to index.ts. */
 export interface RoutesHandle {
+  stashOldPendingSecrets(): Promise<void>;
   resumeOperations(): Promise<void>;
   startOperationRetryLoop(intervalMs?: number): NodeJS.Timeout;
 }
