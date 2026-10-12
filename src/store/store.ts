@@ -2652,6 +2652,26 @@ export class Store {
     return (this.db.prepare(`SELECT agent_id FROM agent_app_pending WHERE error IS NULL`).all() as Array<{ agent_id: string }>).map((r) => r.agent_id);
   }
 
+  /** Every waiting app install, its values as stored (the boot's secrets migration). */
+  listAppPendingRows(): Array<{ agentId: string; source: string; ref: string; vals: string }> {
+    return (this.db.prepare(`SELECT agent_id, source, ref, vals FROM agent_app_pending`).all() as Array<{ agent_id: string; source: string; ref: string; vals: string }>)
+      .map((r) => ({ agentId: r.agent_id, source: r.source, ref: r.ref, vals: r.vals }));
+  }
+
+  /** Its values rewritten, only while the row still holds `was`; its age and error are kept. */
+  replaceAppPendingValues(agentId: string, was: string, values: Record<string, unknown>): boolean {
+    return this.db.prepare(`UPDATE agent_app_pending SET vals = ? WHERE agent_id = ? AND vals = ?`).run(JSON.stringify(values), agentId, was).changes > 0;
+  }
+
+  /** A one-time migration that runs outside the store (async): has it finished? */
+  storeMigrationDone(name: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM store_migrations WHERE name = ?`).get(name);
+  }
+
+  recordStoreMigration(name: string): void {
+    this.db.prepare(`INSERT OR IGNORE INTO store_migrations (name, at) VALUES (?, ?)`).run(name, new Date().toISOString());
+  }
+
   setAppPendingError(agentId: string, error: string | null): void {
     this.db.prepare(`UPDATE agent_app_pending SET error = ? WHERE agent_id = ?`).run(error, agentId);
   }

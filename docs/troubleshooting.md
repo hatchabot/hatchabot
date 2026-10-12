@@ -476,6 +476,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/api/routes.ts` — `runPendingApp`; `web/index.html` — `v2LoadApp`
 
+### A new agent's waiting app still has its app password in plain text in the database
+- **Check:** the agent's app has not gone in yet (its page shows it waiting, or "Its app could not be installed"), it was set up before v2.160.0, and `sqlite3 <db> "SELECT vals FROM agent_app_pending"` shows the value of a field the app's `hatchabot.json` marks `"secret": true`. After an upgrade, the service log names such agents under "waiting app installs whose manifest could not be read".
+- **Cause:** before v2.160.0 a waiting install kept all its values in its row, secrets included, until it went in or the agent went. v2.160.0 kept new ones in the secret store but left the rows already written.
+- **Fix:** upgrade. At start, before serving, the service moves those values to the secret store and leaves references, reading the app's manifest from its folder or the local mirror of its repo address (never fetched). A row whose manifest can't be read there (the folder moved, the mirror gone) is left as it is and tried again at the next start: put the folder back, press **Try again** on the agent's page, or archive or delete the agent.
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/orchestrator/appPending.ts` — `stashOldPendingSecrets`; `src/orchestrator/apps.ts` — `manifestAt`, `mirrorDir`
+
 ### `hatchabot app install` says "Needs a value for: …"
 - **Check:** `hatchabot app inspect <dir|url>` lists what the app asks for.
 - **Cause:** a required setting in the app's manifest has no value yet (and none in its existing config).
