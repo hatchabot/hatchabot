@@ -1872,6 +1872,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.162.0` (#205)
 - **Code:** `src/providers/localDockerProvider.ts` — `#oneShotExit`, `importState`, `importWorkspace`, `#runStdin`
 
+### Restoring or importing a damaged file emptied the agent before failing
+- **Check:** a restore or import failed with "Couldn't restore the agent's state", and the server log shows `volume import failed` with a tar error ("invalid tar magic", "short read") after the file passed its gzip check.
+- **Cause:** the import checked the compression, not the archive inside it. A listing that failed was read as an old-layout archive, so the volume was emptied before extraction found the damage; only the rollback put it back.
+- **Fix:** upgrade; the whole archive is read before anything is deleted, and a file that is not a tar archive is refused with "not a valid agent archive" and the agent left as it was. Make a fresh download or backup if the file is damaged.
+- **Fixed in:** `v2.162.0` (#213)
+- **Code:** `src/providers/localDockerProvider.ts` — `importState`
+
 ## Usage, costs and budgets
 
 ### Usage shows small, flat token numbers for an agent that is busy all day
