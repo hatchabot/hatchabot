@@ -1413,6 +1413,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/unread.ts` — `consoleActivity`
 
+### A console's link (…/#console=<name>) opened right after closing a console does nothing
+- **Check:** the console had just been closed; the address bar lost the `#console=` part and no console opened. Opening the link again works.
+- **Cause:** the browser sends a dialog's close event a moment after it closes (Chrome, with its next frame). When that came after the new address but before the page read it, the event took the address out as if it were the closed console's.
+- **Fix:** upgrade, or open the link again. The close event now clears only an address the closed console put there.
+- **Fixed in:** `v2.162.0`
+- **Code:** `web/index.html` — `consoleUnmark`, `consoleFromHash`
+
 ## Runners
 
 ### A runner agent's tile: "Its machine isn't answering — it may be asleep or offline"

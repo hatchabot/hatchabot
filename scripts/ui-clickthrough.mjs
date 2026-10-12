@@ -1661,7 +1661,17 @@ const SCENARIOS = String.raw`(() => {
         if (consoleDlg.open) closeConsole();
         await until(() => !consoleOpening, 20000);
         history.replaceState(null, '', location.pathname + location.search);
+        // A console closed just before (as the scenario before this one
+        // ends): Chrome fires the dialog's close event at its next frame,
+        // and when that frame came between setting the address and its
+        // hashchange, the late event cleared the address and nothing opened
+        // (timed out once on GitHub's runner, 2026-10-10). That order, made
+        // certain: the close event is sent right after the address is set.
+        await openGateway(A.id, A.slug);
+        await until(() => consoleDlg.open && consoleAgentId === A.id);
+        closeConsole();
         location.hash = '#console=' + key;
+        consoleDlg.dispatchEvent(new Event('close'));
         // Opening chains several awaited steps (wake, health, access): slower
         // machines (GitHub's runners) need more than the usual 8 s (2026-10-09).
         await until(() => consoleDlg.open && consoleAgentId === A.id, 20000);
@@ -1675,6 +1685,15 @@ const SCENARIOS = String.raw`(() => {
         await openGateway(A.id, A.slug);
         await until(() => location.hash === '#console=' + encodeURIComponent(key));
         ok('opening one any other way puts its address in the bar', true);
+        // Esc closes the dialog without closeConsole(): its close event takes
+        // the address out. Headless Chrome sends that event with a frame it
+        // may never draw here, so it is sent at once (a second one is harmless).
+        consoleDlg.close();
+        consoleDlg.dispatchEvent(new Event('close'));
+        ok('Esc takes the address out', !location.hash.includes('console='));
+        eq('Esc gives the page its title back', document.title, title);
+        await openGateway(A.id, A.slug);
+        await until(() => consoleDlg.open && location.hash.includes('console='));
         location.hash = '#console=no-such-agent-here';
         await until(() => !location.hash.includes('no-such'));
         ok('an unknown name is said, not opened', consoleAgentId === A.id);
