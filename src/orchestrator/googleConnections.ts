@@ -312,9 +312,9 @@ export async function gogAccounts(deps: ConnectionSyncDeps, runtimeRef: string):
     // Only a list gog actually gave is an answer. `{}`, a missing key or any
     // other shape is unknown, not "holds nothing": read as empty, it let a
     // failed remove pass as verified and cleared the retry while the
-    // credential could still be on the volume. gog is Go, where an empty
-    // list may marshal as null, so an explicit `"accounts": null` is empty.
-    if (parsed.accounts === null && 'accounts' in parsed) return [];
+    // credential could still be on the volume. gog 0.22 prints
+    // `{"accounts": []}` with none (checked 2026-10-11), so `null` is no
+    // answer either.
     if (!Array.isArray(parsed.accounts)) return null;
     return (parsed.accounts as Array<{ email?: unknown } | null>)
       .map((a) => (a && typeof a === 'object' ? a.email : undefined))

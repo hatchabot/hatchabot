@@ -784,11 +784,11 @@ describe('syncConnections retries a removal until it is verified (issue #11)', (
     }
   });
 
-  it('gogAccounts reads only a real list: an array, or an explicit null as empty', async () => {
+  it('gogAccounts reads only a real list: an array (gog prints {"accounts": []} with none); null is no answer', async () => {
     const at = (stdout: string) => gogAccounts({ provider: { execShell: async () => ({ code: 0, stdout, stderr: '' }) } } as never, 'r');
     expect(await at('{}')).toBeNull();
     expect(await at('{"accounts":"x"}')).toBeNull();
-    expect(await at('{"accounts":null}')).toEqual([]);
+    expect(await at('{"accounts":null}')).toBeNull();
     expect(await at(JSON.stringify({ accounts: [{ email: 'mara@example.org' }, null, { email: 3 }] }))).toEqual(['mara@example.org']);
   });
 
