@@ -1,4 +1,5 @@
 import { routedPath } from './routedPath.js';
+import { redactUrlForLog } from './requestLog.js';
 import type { FastifyInstance } from 'fastify';
 import type { RequestLike } from './sessionCookie.js';
 
@@ -120,7 +121,9 @@ export function registerOriginCheck(app: FastifyInstance): void {
     const path = routedPath(req.url) ?? '';
     const why = READS.has(req.method) ? foreignRead(req.method, path, req.headers) : foreignRequest(req);
     if (!why) return;
-    app.log.warn({ method: req.method, path, why }, 'request.foreign_refused');
+    // Masked as the request log masks it: an invitation's code is a way in,
+    // and this line wrote it out in full (#208).
+    app.log.warn({ method: req.method, path: redactUrlForLog(path), why }, 'request.foreign_refused');
     return reply.code(403).send({ error: 'This request came from another site, so it was refused. Open Hatchabot at its own address and try again.' });
   });
 }

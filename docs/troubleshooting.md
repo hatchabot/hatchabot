@@ -318,6 +318,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/requestLog.ts` — `redactUrlForLog`
 
+### A `request.foreign_refused` log line shows an invitation code
+- **Check:** `journalctl --user -u hatchabot | grep foreign_refused` shows a `path` with a code after `/invites/` or `/join/`.
+- **Cause:** a request another site's page sent was refused (correctly), but the line saying so logged its path unmasked, unlike the request log.
+- **Fix:** upgrade; the refusal is logged with the code masked. An invite whose code reached a log you share can be removed and made again.
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/api/requestOrigin.ts` — `registerOriginCheck`; `src/api/requestLog.ts` — `redactUrlForLog`
+
 ### `hatchabot login` says "(chmod 600)", but `~/.config/hatchabot/env` is readable by other users
 - **Check:** `ls -l ~/.config/hatchabot/env` shows `-rw-r--r--` after a `hatchabot login`.
 - **Cause:** the file existed before with wider permissions (made by hand, or copied), and the login only set 0600 on a file it created; the token was written into the readable file.

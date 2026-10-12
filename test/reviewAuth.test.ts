@@ -6,6 +6,7 @@ import { principalOf } from '../src/api/principal.js';
 import { Store } from '../src/store/store.js';
 import { computePosture } from '../src/orchestrator/posture.js';
 import { redactUrlForLog } from '../src/api/requestLog.js';
+import { registerOriginCheck } from '../src/api/requestOrigin.js';
 import { opsDoorTools, opsToolsFingerprint } from '../src/ops/opsTools.js';
 import { MANIFEST } from '../src/mgmt/tools.js';
 
@@ -120,6 +121,26 @@ describe('request log', () => {
     expect(redactUrlForLog('/v1/agents/a1/invites')).toBe('/v1/agents/a1/invites');
     expect(redactUrlForLog('/v1/agents')).toBe('/v1/agents');
     expect(redactUrlForLog(undefined)).toBe('');
+  });
+});
+
+describe('origin refusals in the log', () => {
+  it('a refused cross-site request is logged without its invitation code (#208)', async () => {
+    const lines: string[] = [];
+    const f = Fastify({ logger: { level: 'warn', stream: { write: (l: string) => { lines.push(l); } } } });
+    registerOriginCheck(f);
+    f.post('/v1/agents/:id/invites/:code/knock-window', async () => ({ ok: true }));
+    f.get('/join/:code', async () => 'page');
+    const knock = await f.inject({ method: 'POST', url: '/v1/agents/a1/invites/MADE-UP-INVITE-CODE/knock-window', headers: { 'sec-fetch-site': 'cross-site' } });
+    expect(knock.statusCode).toBe(403);
+    const img = await f.inject({ method: 'GET', url: '/join/MADE-UP-JOIN-CODE', headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image' } });
+    expect(img.statusCode).toBe(403);
+    const refused = lines.filter((l) => l.includes('request.foreign_refused'));
+    expect(refused).toHaveLength(2);
+    expect(refused.join('\n')).not.toMatch(/MADE-UP-(INVITE|JOIN)-CODE/);
+    expect(JSON.parse(refused[0]!).path).toBe('/v1/agents/a1/invites/…/knock-window');
+    expect(JSON.parse(refused[1]!).path).toBe('/join/…');
+    await f.close();
   });
 });
 
