@@ -457,6 +457,36 @@ describe('revoking across channels', () => {
     expect(store.listAllowedChannelUserIds('a1', 'slack')).toEqual([]);
   });
 
+  it('takes their id out of the app-wide allowFrom and groupAllowFrom and an account\'s groupAllowFrom too, leaving the others', async () => {
+    const { store, provider } = await member();
+    await revokeMember({ store, provider }, 'a1', 'u2');
+    const script = provider.execLog.find((a) => a[0] === 'sh-volume')![1]!;
+    const dir = mkdtempSync(join(tmpdir(), 'revoke-'));
+    try {
+      // OpenClaw admits ids from all of these (the access overview reads them: accessProbeScript).
+      writeFileSync(join(dir, 'openclaw.json'), JSON.stringify({ channels: {
+        telegram: { allowFrom: ['555', '777'], groupAllowFrom: ['telegram:555', '777'],
+          accounts: { FamBot: { allowFrom: ['777'], groupAllowFrom: ['555', '778'] }, OtherBot: { groupAllowFrom: ['555'] } } },
+        slack: { allowFrom: ['U0GRAN'], groupAllowFrom: ['U0OWNER', 'U0GRAN'], accounts: { hatchabot: { groupAllowFrom: ['U0GRAN'] } } },
+        discord: { groupAllowFrom: ['123456789012345678', '223456789012345678'], accounts: { hatchabot: {} } },
+      } }));
+      execFileSync('sh', ['-c', script.replaceAll('/home/node/.openclaw', dir)]);
+      const cfg = JSON.parse(readFileSync(join(dir, 'openclaw.json'), 'utf8')).channels;
+      expect(cfg.telegram.allowFrom).toEqual(['777']);
+      expect(cfg.telegram.groupAllowFrom).toEqual(['777']);
+      expect(cfg.telegram.accounts.FamBot).toEqual({ allowFrom: ['777'], groupAllowFrom: ['778'] });
+      // Another bot's own list is not this member's account: left as it is.
+      expect(cfg.telegram.accounts.OtherBot.groupAllowFrom).toEqual(['555']);
+      expect(cfg.slack.allowFrom).toEqual([]);
+      expect(cfg.slack.groupAllowFrom).toEqual(['U0OWNER']);
+      expect(cfg.slack.accounts.hatchabot.groupAllowFrom).toEqual([]);
+      expect(cfg.discord.groupAllowFrom).toEqual(['223456789012345678']);
+      expect(cfg.discord.accounts.hatchabot).toEqual({});
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a Slack-only member is scrubbed too (they have no Telegram id)', async () => {
     const { store, provider } = await member();
     store.insertMembership({ id: 'm3', agentId: 'a1', userId: 'u3', role: 'user', status: 'active' });

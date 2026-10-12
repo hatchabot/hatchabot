@@ -754,8 +754,9 @@ export const DROP_CHAT_ACCOUNTS_SCRIPT = `node -e '
 
 /**
  * The on-volume scrub of chat ids from an agent's allowlists: the approval
- * credentials file, the 2026.9 approval rows, the config's account allowFrom,
- * and every Slack channel's / Discord server's users (a room left with nobody
+ * credentials file, the 2026.9 approval rows, the config's allowFrom and
+ * groupAllowFrom (the account's and the whole app's), and every Slack
+ * channel's / Discord server's users (a room left with nobody
  * is removed — an empty list means "anyone"). Shared by member removal and by
  * unlinking an account's identity (regression review, 2026-09-28).
  */
@@ -776,7 +777,8 @@ export function allowlistScrubScript(targets: Array<{ channel: string; acct: str
     let db = null;
     if (fs.existsSync(${JSON.stringify(PAIRING_DB)})) { const { DatabaseSync } = require("node:sqlite"); db = new DatabaseSync(${JSON.stringify(PAIRING_DB)}); db.exec("PRAGMA busy_timeout=5000"); }
     for (const t of targets) {
-      const drop = (arr) => (Array.isArray(arr) ? arr.filter((x) => String(x) !== t.id) : arr);
+      // OpenClaw reads an entry as the id with or without the app as a prefix ("telegram:<id>").
+      const drop = (arr) => (Array.isArray(arr) ? arr.filter((x) => String(x) !== t.id && String(x) !== t.channel + ":" + t.id) : arr);
       if (fs.existsSync(t.cred)) {
         const d = JSON.parse(fs.readFileSync(t.cred, "utf8"));
         d.allowFrom = drop(d.allowFrom || []);
@@ -786,6 +788,21 @@ export function allowlistScrubScript(targets: Array<{ channel: string; acct: str
       const acc = cfg && cfg.channels && cfg.channels[t.channel] && cfg.channels[t.channel].accounts
         && cfg.channels[t.channel].accounts[t.acct];
       if (acc && Array.isArray(acc.allowFrom)) { acc.allowFrom = drop(acc.allowFrom); cfgChanged = true; }
+      // OpenClaw also admits ids listed for the whole app (channels.<app>.allowFrom
+      // and groupAllowFrom, on every account) and the groupAllowFrom of the account
+      // (its groups): the access overview reads them all, and a removed member listed
+      // there was still let in. Only their id goes; the rest of each list stays.
+      const lists = [cfg && cfg.channels && cfg.channels[t.channel], acc];
+      for (const o of lists) {
+        if (!o || typeof o !== "object") continue;
+        for (const f of ["allowFrom", "groupAllowFrom"]) {
+          if (o === acc && f === "allowFrom") continue; // above
+          if (!Array.isArray(o[f])) continue;
+          const had = o[f].length;
+          o[f] = drop(o[f]);
+          if (o[f].length !== had) cfgChanged = true;
+        }
+      }
       // Never a command owner once removed (2026-09-29).
       const owners = cfg && cfg.commands && cfg.commands.ownerAllowFrom;
       if (Array.isArray(owners)) {
