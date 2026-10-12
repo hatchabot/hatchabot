@@ -2230,6 +2230,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.162.0`
 - **Code:** `src/api/routes.ts` — `reportRedaction`, `reportAgents`; `src/domain/redact.ts` — `redactCredentialFields`, `isReference`, `isCode`; `src/orchestrator/problemReport.ts` — `buildReport`, `boundInput`
 
+### A problem report shows a private IPv6 address (`fd…`, `fe80::…`)
+- **Check:** the draft shows an address starting `fc`, `fd` or `fe80`, or `::ffff:` with a private IPv4 address, where a private IPv4 address would show `<private-ip>`.
+- **Cause:** reports masked private IPv4 addresses only; a runner reached over IPv6 (a tailnet's `fd7a:…`, say) kept its address.
+- **Fix:** upgrade: private, link-local, loopback and mapped private IPv6 addresses show `<private-ip>`. Before that, delete the address from the draft before filing.
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/orchestrator/problemReport.ts` — `redactForPublic`, `isPrivateV6`
+
 ### On a Claude subscription, the Hatchabot agent says it will do something, then nothing happens (no card)
 - **Check:** the reply ends with a long JSON object (`{"tool": …}`), shown as text, and no confirmation card appears; the AI source behind the Hatchabot agent is a setup-token or machine login (Settings → AI).
 - **Cause:** on a subscription the model is reached through the Claude CLI, which answers in text; a tool call after a sentence was looked for among only the last 20 opening braces, so a call with many nested objects (a schedule, a list of rows) was never found and was shown as prose.
