@@ -344,7 +344,11 @@ secret can test guesses against it, so it is kept as a secret.
   `--export-digests --out <file>` writes the same set to a 0600 file.
 - **Daily**: `scripts/privacy-sync.sh --install` (Linux, a systemd user
   timer) runs it once a day, so a new agent's name is covered within a day;
-  `scripts/privacy-sync.sh --uninstall` stops it. On a Mac there is no
+  `scripts/privacy-sync.sh --uninstall` stops it. `--install --also
+  owner/name` (repeatable) syncs another repository too: the project's
+  website runs the same check on GitHub (its own `privacy` workflow, the
+  scanner fetched from a release tag and checked by sha256) and a pre-push
+  hook that calls this clone's script. On a Mac there is no
   timer: run the command after adding an agent or a person, and before each
   release (step 1 above).
 - **CI's `privacy` job** (`.github/workflows/ci.yml`, `scripts/privacy-ci.mjs`)
