@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildGitSyncScript, normalizeGitUrl, gitSyncReason, buildPublicGitSyncScript, isPublicGitUrl } from '../src/orchestrator/gitSource.js';
@@ -158,5 +158,50 @@ describe('public repos over https (no deploy key)', () => {
     expect(gitSyncReason('remote: Repository not found.\nfatal: repository not found', 'public')).toMatch(/wasn't found.*deploy key/);
     // the deploy-key wording is unchanged
     expect(gitSyncReason('git@github.com: Permission denied (publickey).')).toMatch(/deploy key/);
+  });
+});
+
+describe('the git host key is trusted on first use only (#202)', () => {
+  // The script's host-key line, run in a sandbox: a temp folder for the
+  // container's, and an ssh-keyscan shim on PATH that answers with whatever
+  // key "the network" serves today. ssh-keygen is the real one.
+  const newKey = (dir: string, name: string) => {
+    execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', name, '-f', join(dir, name)]);
+    return readFileSync(join(dir, `${name}.pub`), 'utf8').split(' ').slice(0, 2).join(' ');
+  };
+  const keyPair = () => {
+    const keys = mkdtempSync(join(tmpdir(), 'hb-keys-'));
+    try { return [newKey(keys, 'one'), newKey(keys, 'two')] as const; } finally { rmSync(keys, { recursive: true, force: true }); }
+  };
+  const sync = (served: string, knownHosts?: string) => {
+    const base = mkdtempSync(join(tmpdir(), 'hb-hostkey-'));
+    try {
+      const bin = join(base, 'bin');
+      mkdirSync(bin); mkdirSync(join(base, '.ssh'));
+      writeFileSync(join(bin, 'ssh-keyscan'), `#!/bin/sh\necho "git.example.org ${served}"\n`, { mode: 0o755 });
+      if (knownHosts !== undefined) writeFileSync(join(base, '.ssh', 'known_hosts'), knownHosts);
+      const line = buildGitSyncScript({ mountName: 'defs', sshUrl: 'git@git.example.org:example-owner/defs.git', host: 'git.example.org' }, 'QkFTRTY0', { name: 'Stock Watcher', email: 'stock-watcher@example.org' })
+        .split('\n').find((l) => l.includes('ssh-keyscan'))!.split('/home/node/.openclaw').join(base);
+      execFileSync('bash', ['-c', `set -e\n${line}`], { env: { PATH: `${bin}:/usr/bin:/bin`, HOME: base }, stdio: ['ignore', 'pipe', 'pipe'] });
+      return readFileSync(join(base, '.ssh', 'known_hosts'), 'utf8');
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  };
+
+  it('a different key served for a host it already trusts is not added; the trusted one stays', () => {
+    const [trusted, swapped] = keyPair();
+    const before = `git.example.org ${trusted}\n`;
+    const after = sync(swapped, before);
+    expect(after).toBe(before);
+    expect(after).not.toContain(swapped.split(' ')[1]);
+  });
+
+  it('a host it has never seen is trusted on first contact', () => {
+    const [first] = keyPair();
+    expect(sync(first)).toBe(`git.example.org ${first}\n`);
+    expect(sync(first, '')).toBe(`git.example.org ${first}\n`);
+  });
+
+  it('a refused key says how to proceed', () => {
+    expect(gitSyncReason('@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.')).toMatch(/not the key this agent trusted/);
   });
 });

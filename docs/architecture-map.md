@@ -148,7 +148,7 @@ rebuild, and only when it is missing: after that, the agent updates it with
 `git pull`. A **folder** is a live, read-only (or writable) view of a path on
 the host.
 
-- `src/orchestrator/gitSource.ts` — `normalizeGitUrl`, `buildGitSyncScript`, `buildPublicGitSyncScript`: the accepted URL shapes, and the idempotent clone scripts for the private (deploy key) and public (https) cases.
+- `src/orchestrator/gitSource.ts` — `normalizeGitUrl`, `buildGitSyncScript`, `buildPublicGitSyncScript`: the accepted URL shapes, and the idempotent clone scripts for the private (deploy key) and public (https) cases. `hostKeyTrustLine`: the git host's SSH key is trusted on first sync only, never replaced.
 - `src/orchestrator/provision.ts` — `syncGitDataSources`, `datasource.git_synced`: where each repo is cloned during provisioning, and the event it logs (`datasource.git_sync_failed` carries git's own error).
 - `src/orchestrator/provision.ts` — `scrubRemovedDataSources`, `datasource.key_left`: a removed source's deploy key taken off the volume and out of the secret store, retried at start, wake and rebuild until confirmed (`data_source_removals` in the store).
 - `src/openclaw/workspace.ts` — `dataSourcesSection`, `DATA_SOURCES_HEADING`: the AGENTS.md section that tells the agent each path.
