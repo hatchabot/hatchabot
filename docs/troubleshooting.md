@@ -821,6 +821,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `web/index.html` — `refresh`, `refreshNow`
 
+### A removed AI source or machine, or an answered pairing knock, shows again for a few seconds
+- **Check:** right after removing an AI source or machine, or approving someone who knocked in a chat app, the old entry (or "🔑 Knocking") comes back and goes away again by itself.
+- **Cause:** the guard against overlapping refreshes covered the agent list only: an older refresh's sources, machines or knocks that arrived after a newer one's replaced them.
+- **Fix:** upgrade. Otherwise it corrects itself on the next refresh.
+- **Fixed in:** `v2.162.0`
+- **Code:** `web/index.html` — `refreshNow`, `metaSeq`, `pairSeq`
+
 ### After a failed move ("couldn't import it: proxy timed out"), the agent runs on both machines
 - **Check:** both servers list the agent RUNNING after a move that said "couldn't import it … Your agent is unchanged"; the error text is a proxy's timeout, not a Hatchabot reason; messages to the bot are answered twice, or the two copies alternate.
 - **Cause:** the import's reply was a proxy's 408 or 499 timeout with a JSON `error` body. It was read as the other server refusing, so the source restarted without asking whether the import had finished.

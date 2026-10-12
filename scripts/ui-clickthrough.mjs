@@ -1368,6 +1368,53 @@ const SCENARIOS = String.raw`(() => {
         ok('the older answer was dropped', !v2Find('gone1') && !tile('Deleted Agent'));
       } finally { window.fetch = prev; await refresh(false); }
     },
+    staleMetaAndPairingDropped: async () => {
+      // An older refresh's sources, machines or pairing knocks that land after a newer one's are dropped;
+      // one no newer refresh read is still used (#228).
+      const J = (b) => new Response(JSON.stringify(b), { status: 200, headers: { 'content-type': 'application/json' } });
+      const prev = window.fetch;
+      const current = await (await fetch('/v1/ai-profiles')).json();
+      const stale = [{ ...current[0], id: 'stale-p', name: 'Stale Source' }];
+      let hold = null, release;
+      window.fetch = async (input, init) => {
+        const path = String(typeof input === 'string' ? input : input.url).split('?')[0];
+        if (hold && path === hold.path && (!init || !init.method || init.method === 'GET')) {
+          const h = hold; hold = null;
+          await h.until;
+          return J(h.body);
+        }
+        return prev(input, init);
+      };
+      const holdNext = (path, body) => { let r; hold = { path, body, until: new Promise((ok) => { r = ok; }) }; release = r; };
+      try {
+        // The older pass's sources land last, after a newer pass read them: the newer stay.
+        holdNext('/v1/ai-profiles', stale);
+        const older = refresh(true);
+        await sleep(20);
+        await refresh(true);
+        release(); await older;
+        ok('the older sources were dropped', !profiles.some((p) => p.id === 'stale-p'));
+        eq('the newer sources are kept', profiles.map((p) => p.id), current.map((p) => p.id));
+        // No newer pass read them: the older pass's answer is the newest there is, and is used.
+        const added = [...current, { ...current[0], id: 'added-p', name: 'Added Source' }];
+        holdNext('/v1/ai-profiles', added);
+        const withMeta = refresh(true);
+        await sleep(20);
+        await refresh(false);
+        release(); await withMeta;
+        ok('a source read by the older pass alone is shown', profiles.some((p) => p.id === 'added-p'));
+        // The pairing knocks: the older pass's (one knock) land after the newer pass's (none).
+        const knocking = agents.find((a) => a.state === 'RUNNING' && v2ChannelKinds(a).length);
+        holdNext('/v1/agents/' + knocking.id + '/pairing', [{ kind: 'telegram', code: 'STALE1', id: '1', name: 'Stale Knock' }]);
+        pairTick = 0;
+        const olderPair = refresh(false);
+        await sleep(20);
+        pairTick = 0;
+        await refresh(false);
+        release(); await olderPair;
+        eq('the older knocks were dropped', (pairings[knocking.id] ?? []).length, 0);
+      } finally { window.fetch = prev; if (release) release(); await refresh(true); }
+    },
     inspectLateAnswer: async () => {
       // A file or transcript that lands after the dialog moved to another agent is dropped, as openInspect does (review, 2026-10-09).
       const prev = window.fetch;
