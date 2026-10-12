@@ -71,6 +71,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `scripts/follow-channel.sh` — `MAX_TRIES`; `scripts/upgrade.sh` — `rollback`
 
+### Restart says "Service was restarted but isn't answering on port …" while the app works, and the upgrade rolls back
+- **Check:** `.env` sets `HATCHABOT_TLS_CERT` (the service serves HTTPS itself) or `HATCHABOT_BIND` to one address; `curl -k https://localhost:<PORT>/healthz` (or `http://<bind address>:<PORT>/healthz`) answers.
+- **Cause:** before v2.162.0, `scripts/restart.sh` always asked `http://localhost:<PORT>/healthz`, which a native-TLS listener or one bound to another address never answers; the upgrade took that as a failed release and rolled it back.
+- **Fix:** upgrade (the upgrade restarts with the new release's script, so this upgrade is not rolled back). The probe now uses https when TLS is set and the bind address when it is one host.
+- **Fixed in:** `v2.162.0`
+- **Code:** `scripts/restart.sh` — `LISTENER`
+
 ### The follow-latest timer says "Not deploying vX.Y.Z" for a new tag
 - **Check:** `journalctl --user -u hatchabot-follow-latest` gives the reason; `curl -s https://api.github.com/repos/hatchabot/hatchabot/releases/tags/vX.Y.Z` shows the release (`"immutable": true`, a `release-manifest.json` asset), and `git -C ~/hatchabot-prod rev-parse vX.Y.Z^{commit}` is the manifest's `commit`.
 - **Cause:** from v2.160.0 the timer deploys a v2.159.0-or-later tag only when it is a published, immutable release whose manifest is for that tag and names its commit. "Not a published release yet" is normal for a few minutes after tagging, while the release workflow runs. A manifest for another commit, a release that is not immutable, or one with no manifest means the tag did not come from the release workflow.
