@@ -2194,7 +2194,7 @@ with people you trust with the underlying key. Full detail:
 ## Archiving — more agents than bots
 
 Telegram caps an account at roughly 20 bots, and every agent holds one whether
-it is busy or idle. **Archive** (the agent's Advanced tab, or drag its icon onto Archived) breaks that ceiling: the
+it is busy or idle. **Archive** (the foot of the agent's Overview, or drag its icon onto Archived) breaks that ceiling: the
 agent is kept whole — container, volume, memory, members, settings — and stops,
 but its bot goes back in the pool for another agent to lease. A pasted,
 hand-minted token is parked in the pool too; it burns the same BotFather slot,
