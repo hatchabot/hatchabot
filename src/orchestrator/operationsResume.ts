@@ -7,7 +7,7 @@ import { recoverAppOperation, resumeAppOperation } from './appOperations.js';
 import { resumeArchive } from './archive.js';
 import { recoverBackupRestore, resumeBackupRestore } from './backups.js';
 import { AgentBusyError, whileBusy } from './busy.js';
-import { recoverMigrate, resumeMigrate } from './migrate.js';
+import { recoverMigrate, resumeMigrate, type MigrateDeps } from './migrate.js';
 import { recoverMoveHost, resumeMoveHost } from './moveHost.js';
 import { BACKGROUND_KINDS, currentBootId, handleFor, markInterrupted, rethrowIfCrash, type Operation } from './operations.js';
 import { reapplyCurrentSettings, type ProvisionDeps } from './provision.js';
@@ -28,6 +28,8 @@ export interface ResumeContext {
   secrets: SecretStore;
   channel: ChannelProvisioner;
   embedder?: ProvisionDeps['embedder'];
+  /** How a resumed move calls the other server (migrate's peerFetch). */
+  peerFetch?: MigrateDeps['peerFetch'];
   providerForHost: (hostId: string) => RuntimeProvider | undefined;
   /** The agent's timeline + journal writer (routes' trace). */
   logFor?: (agentId: string | null) => (event: string, detail: Record<string, unknown>) => void;
@@ -58,13 +60,14 @@ const CHOICES = new Set(['move-host', 'migrate', 'restore-backup', 'restore-snap
 /** Kinds that handle "Try again" themselves. */
 const OWN_RETRY = new Set(['move-host', 'migrate']);
 
-function depsFor(ctx: ResumeContext, op: Operation): ProvisionDeps | undefined {
+function depsFor(ctx: ResumeContext, op: Operation): MigrateDeps | undefined {
   const agent = op.agentId ? ctx.store.getAgent(op.agentId) : undefined;
   const provider = agent ? ctx.providerForHost(agent.hostId) : undefined;
   if (!provider) return undefined;
   return {
     store: ctx.store, secrets: ctx.secrets, provider, channel: ctx.channel, embedder: ctx.embedder,
     log: ctx.logFor?.(op.agentId), ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
+    ...(ctx.peerFetch ? { peerFetch: ctx.peerFetch } : {}),
   };
 }
 

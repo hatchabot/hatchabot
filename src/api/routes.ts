@@ -1,4 +1,4 @@
-import { allowedPeerAddress } from './peerAddress.js';
+import { allowedPeerAddress, pinnedPeerFetch, type PeerFetch } from './peerAddress.js';
 import { GuestConsoleLog } from './guestConsoleLog.js';
 import { deviceLabel } from './publicAccess.js';
 import { stopAndConfirm } from '../orchestrator/quiesce.js';
@@ -266,6 +266,8 @@ export interface ApiDeps {
   publicUrl?: string;
   /** Test seam for the Google OAuth round-trip (token exchange, userinfo, revoke). */
   oauthFetch?: typeof fetch;
+  /** Test seam for calls to another Hatchabot server (pinnedPeerFetch by default). */
+  peerFetch?: PeerFetch;
   /**
    * Checks an imported file's bot token with Telegram (its username comes
    * back). Set by the app; the harnesses leave it unset and import fixtures
@@ -4010,8 +4012,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         try {
           const token = await secrets.get(peer.secretRef);
           // NOT consolidated — the peer returns only its own install, so a ring
-          // of peers can't recurse or double-count.
-          const res = await fetch(`${peer.url.replace(/\/$/, '')}/v1/bots?live=${live ? 1 : 0}`, {
+          // of peers can't recurse or double-count. Pinned and redirect-refusing,
+          // like every call to a peer (pinnedPeerFetch).
+          const res = await (deps.peerFetch ?? pinnedPeerFetch)(`${peer.url.replace(/\/$/, '')}/v1/bots?live=${live ? 1 : 0}`, {
             headers: { authorization: `Bearer ${token}` },
             signal: AbortSignal.timeout(15000),
           });
@@ -11196,8 +11199,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Prove the token works before storing it, so a typo fails here rather
       // than halfway through a migration.
       try {
-        const probe = await fetch(`${url.replace(/\/$/, '')}/v1/agents`, {
-          redirect: 'error',
+        // The name's resolved address is checked as the socket dials it, and
+        // a redirect is refused (pinnedPeerFetch): the text check above can't
+        // see a name that resolves to 127.0.0.1.
+        const probe = await (deps.peerFetch ?? pinnedPeerFetch)(`${url.replace(/\/$/, '')}/v1/agents`, {
           headers: { authorization: `Bearer ${token}` },
           signal: AbortSignal.timeout(8000),
         });
@@ -11411,7 +11416,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       let operation: string | undefined;
       const run = (onOperation?: (id: string) => void) => migrateAgent(
         { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
-          log: trace(agent.id) },
+          log: trace(agent.id), peerFetch: deps.peerFetch },
         agent.id,
         peer,
         { allowDroppedPin, requestedBy: ownerIdOf(req), onOperation: (id) => { operation = id; onOperation?.(id); } },
@@ -11437,7 +11442,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // settled by resumeOperations (index.ts, at boot); one the machine cannot
   // settle by itself is held, and its owner chooses here.
   const opsCtx: ResumeContext = {
-    store, secrets, channel: deps.channel, embedder: embedderForProvision,
+    store, secrets, channel: deps.channel, embedder: embedderForProvision, peerFetch: deps.peerFetch,
     providerForHost: (hostId) => { try { return providerFor(hostId); } catch { return undefined; } },
     logFor: (agentId) => trace(agentId ?? undefined),
     // A rebuild queued before the restart takes its place in the queue again.

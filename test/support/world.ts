@@ -98,7 +98,8 @@ export async function makeWorld(owner: string = OWNER, availableBots = 0): Promi
   const providers = new Map<string, MockProvider>([['mock', provider]]);
   // No test talks to Telegram: the wake poll (hibernate.ts) and getMe get an empty, well-formed answer.
   const oauthFetch = (async (u: string | URL | Request) => new Response(JSON.stringify(String(u).includes('api.telegram.org') ? { ok: true, result: [] } : { error: 'stubbed' }), { status: String(u).includes('api.telegram.org') ? 200 : 404, headers: { 'content-type': 'application/json' } })) as typeof fetch;
-  const routes = await registerRoutes(f, { store, secrets, providers, channel, oauthFetch });
+  // Peer calls go through the global fetch, so a test can stand in for the other server with a spy.
+  const routes = await registerRoutes(f, { store, secrets, providers, channel, oauthFetch, peerFetch: viaGlobalFetch });
   return { store, secrets, provider, providers, f, owner, channel, routes };
 }
 
@@ -147,3 +148,6 @@ export async function seedRunningAgent(w: World, opts: SeedOpts = {}): Promise<s
   }
   return id;
 }
+
+/** Calls another Hatchabot through globalThis.fetch (spied on by the tests) instead of the pinned transport. */
+export const viaGlobalFetch = (url: string, init?: object) => globalThis.fetch(url, init as RequestInit);

@@ -1,5 +1,5 @@
 import {it,expect,vi} from 'vitest';
-import {makeWorld,seedRunningAgent,as} from './support/world.js';
+import {makeWorld,seedRunningAgent,as,viaGlobalFetch} from './support/world.js';
 import {exportAgent,importAgent} from '../src/orchestrator/transfer.js';
 import {migrateAgent} from '../src/orchestrator/migrate.js';
 import {moveAgentToHost} from '../src/orchestrator/moveHost.js';
@@ -30,7 +30,7 @@ it('stale stopped record is quiesced before migration',async()=>{
   throw new Error('unexpected fixture request');
  });
  try {
-  await migrateAgent({store:src.store,secrets:src.secrets,provider:src.provider,channel:src.channel,sleep:async()=>{}},id,{id:'fixture-peer',name:'Fixture peer',url:'http://fixture.invalid',secretRef:'fixture-peer'});
+  await migrateAgent({store:src.store,secrets:src.secrets,provider:src.provider,channel:src.channel,sleep:async()=>{},peerFetch:viaGlobalFetch},id,{id:'fixture-peer',name:'Fixture peer',url:'http://fixture.invalid',secretRef:'fixture-peer'});
   expect(src.store.getAgent(id)!.migratedTo).toBeTruthy();
   expect(await src.provider.status(ref)).toMatchObject({phase:'stopped'});
   expect(await dst.provider.status(targetRef)).toMatchObject({phase:'running'});
@@ -75,7 +75,7 @@ it('failed destination cleanup holds a migration and keeps both identities until
     throw new Error('unexpected fixture request');
   });
   try {
-    await expect(migrateAgent({ store: src.store, secrets: src.secrets, provider: src.provider, channel: src.channel, sleep: async () => {} }, id,
+    await expect(migrateAgent({ store: src.store, secrets: src.secrets, provider: src.provider, channel: src.channel, sleep: async () => {}, peerFetch: viaGlobalFetch }, id,
       { id: 'fixture-peer', name: 'Fixture peer', url: 'http://fixture.invalid', secretRef: 'fixture-peer' })).rejects.toThrow();
     expect(restoreCode).toBe(503);
     expect(await src.provider.status(ref)).toMatchObject({ phase: 'stopped' });

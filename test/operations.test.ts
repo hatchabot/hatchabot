@@ -27,7 +27,7 @@ import {
 } from '../src/orchestrator/operations.js';
 import { recoverOperation, resumeOperations, retryHeldOperations, type ResumeContext } from '../src/orchestrator/operationsResume.js';
 import { Store } from '../src/store/store.js';
-import { MemSecrets, makeWorld, seedRunningAgent } from './support/world.js';
+import { MemSecrets, makeWorld, seedRunningAgent, viaGlobalFetch } from './support/world.js';
 
 afterEach(() => {
   setStepHookForTests(undefined);
@@ -339,8 +339,8 @@ async function migrateWorld() {
   await provider.start(runtimeRef);
   store.setAgentState('a1', 'RUNNING');
   const channel = { kind: 'telegram' } as any;
-  const deps = { store, secrets, provider, channel, sleep: async () => {} };
-  const ctx: ResumeContext = { store, secrets, channel, sleep: async () => {}, providerForHost: (h) => (h === 'h1' ? provider : undefined) };
+  const deps = { store, secrets, provider, channel, sleep: async () => {}, peerFetch: viaGlobalFetch };
+  const ctx: ResumeContext = { store, secrets, channel, sleep: async () => {}, peerFetch: viaGlobalFetch, providerForHost: (h) => (h === 'h1' ? provider : undefined) };
   // The other server: did the import reach it, and does it answer now?
   const peer = { received: false, answers: 'yes' as 'yes' | 'no' | 'down' };
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init?: any) => {
