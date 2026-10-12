@@ -105,6 +105,50 @@ describe('scripts/upgrade.sh', () => {
   }, 20_000);
 });
 
+describe('the upgrade lock knows its holder (#226)', () => {
+  /** The holder line upgrade.sh writes: pid and its start time, as ps tells it. */
+  const holder = (pid: number) => `${pid} ${execFileSync('bash', ['-c', `LC_ALL=C ps -o lstart= -p ${pid} | tr -s ' ' | sed 's/^ //;s/ $//'`], { encoding: 'utf8' }).trim()}`;
+  const hold = (lock: string, owner: string, age?: string) => {
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, 'owner'), `${owner}\n`);
+    if (age) execFileSync('touch', ['-d', age, lock]);
+  };
+
+  it('a lock whose upgrade is still running is not taken, however old it is', () => {
+    const w = world();
+    const lock = lockOf(w);
+    hold(lock, holder(process.pid), '2 hours ago');
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(4);
+    expect(r.stdout).toMatch(/Another upgrade/);
+    expect(readFileSync(join(lock, 'owner'), 'utf8').trim()).toBe(holder(process.pid));
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
+  });
+
+  it('a lock whose holder is gone is taken at once, young or not; so is one whose pid now belongs to another process', () => {
+    for (const owner of [`${spawnSync('true').pid} Thu Jan 1 00:00:00 2026`, `${process.pid} Thu Jan 1 00:00:00 2026`]) {
+      const w = world();
+      const lock = lockOf(w);
+      hold(lock, owner);
+      const r = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['stable']);
+      expect(r.status, owner + r.stdout + r.stderr).toBe(0);
+      expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.1.0');
+      expect(existsSync(lock)).toBe(false);
+      expect(existsSync(`${lock}.clearing`)).toBe(false);
+    }
+  }, 20_000);
+
+  it('only its holder lets the lock go: one another run took over is left in place', () => {
+    const w = world();
+    const lock = lockOf(w);
+    // Mid-upgrade, the lock comes to name someone else (as if it were cleared and taken).
+    writeFileSync(join(w.bin, 'take-over'), `#!/bin/sh\necho "1 someone else" > ${JSON.stringify(join(lock, 'owner'))}\n`, { mode: 0o755 });
+    const r = run(w, { HATCHABOT_INSTALL_CMD: join(w.bin, 'take-over') }, ['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readFileSync(join(lock, 'owner'), 'utf8').trim()).toBe('1 someone else');
+  });
+});
+
 describe('scripts/upgrade.sh says 1 only for a release that did not come up (review, 2026-10-09)', () => {
   it('no network to origin: 3, not 1 (the channel timer blacklisted releases it never tried)', () => {
     const w = world();

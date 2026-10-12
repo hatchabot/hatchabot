@@ -45,7 +45,8 @@ finish() {
   if [ "$rc" != 0 ] && [ "$CHANGING" = 1 ]; then
     CHANGING=0; rc=3; echo "The upgrade stopped part-way — putting ${CUR:-the previous release} back."; undo
   fi
-  [ -z "$LOCK" ] || rmdir "$LOCK" 2>/dev/null
+  # Only its holder lets it go: a lock cleared and taken by another run is theirs.
+  [ -z "$LOCK" ] || [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$ME" ] || rm -rf "$LOCK"
   rm -f "$HATCHABOT_UPGRADE_COPY"; [ -z "$STAGE" ] || rm -rf "$STAGE"
   case "$rc" in 0|2|3|4) ;; 1) [ "$ROLLED_BACK" = 1 ] || rc=3 ;; *) rc=3 ;; esac
   exit "$rc"
@@ -101,15 +102,43 @@ fi
 # each other's node_modules.prev (30th audit). The lock lives outside the tree
 # (an untracked file here would read as a local change next time).
 # The lock is a directory (mkdir is atomic everywhere; macOS has no flock — the
-# first version of this refused every Mac upgrade, 2026-09-27). A lock older
-# than an hour is a crash's leftover, not a running upgrade. It is in this
+# first version of this refused every Mac upgrade, 2026-09-27). It is in this
 # user's own state folder, not /tmp: on a shared host anyone could make the
 # /tmp name first and stop every upgrade (review, 2026-10-09).
+# Its holder is written in it (pid and start time: a pid reused since is not
+# the holder), and only a holder that is gone makes it a leftover. Age alone
+# used to: a slow download past an hour lost its lock to the next run, and two
+# upgrades swapped the tree at once (#226). A lock with no holder written
+# (from an older release) is still a leftover after an hour. Leftovers are
+# cleared under a second lock, judged again once it is held, so two runs
+# clearing one leftover cannot remove the lock the first then took.
+# deploy-release.sh takes the same lock the same way.
 LOCKS="${XDG_STATE_HOME:-$HOME/.local/state}/hatchabot"; mkdir -p "$LOCKS"
 LOCK_PATH="$LOCKS/upgrade-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock.d"
-if [ -d "$LOCK_PATH" ] && [ -n "$(find "$LOCK_PATH" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then rmdir "$LOCK_PATH" 2>/dev/null || true; fi
-mkdir "$LOCK_PATH" 2>/dev/null || { echo "Another upgrade of $DIR is running (lock $LOCK_PATH)."; exit 4; }
-LOCK="$LOCK_PATH"
+proc_start() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; }
+ME="$$"; MY_START="$(proc_start $$)"; [ -z "$MY_START" ] || ME="$$ $MY_START"
+lock_left_over() {
+  local owner pid
+  owner="$(cat "$LOCK_PATH/owner" 2>/dev/null)" || owner=""
+  if [ -z "$owner" ]; then [ -n "$(find "$LOCK_PATH" -maxdepth 0 -mmin +60 2>/dev/null)" ]; return; fi
+  pid="${owner%% *}"
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; else [ "$owner" != "$pid $(proc_start "$pid")" ]; fi
+}
+take_lock() {
+  mkdir "$LOCK_PATH" 2>/dev/null || return 1
+  LOCK="$LOCK_PATH"
+  printf '%s\n' "$ME" > "$LOCK_PATH/owner.$$" && mv -f "$LOCK_PATH/owner.$$" "$LOCK_PATH/owner"
+}
+if ! take_lock; then
+  # Clearing takes milliseconds: a clearing lock this old is a crash's.
+  [ -z "$(find "$LOCK_PATH.clearing" -maxdepth 0 -mmin +10 2>/dev/null)" ] || rmdir "$LOCK_PATH.clearing" 2>/dev/null || true
+  if [ -d "$LOCK_PATH" ] && lock_left_over && mkdir "$LOCK_PATH.clearing" 2>/dev/null; then
+    if lock_left_over; then rm -rf "$LOCK_PATH"; fi
+    rmdir "$LOCK_PATH.clearing" 2>/dev/null || true
+  fi
+  take_lock || { echo "Another upgrade of $DIR is running (lock $LOCK_PATH)."; exit 4; }
+fi
 RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tests only
 # ensure-deps writes the stamp restart.sh checks: a bare `npm ci` left none,
 # so restart.sh installed everything a second time, and a registry blip on

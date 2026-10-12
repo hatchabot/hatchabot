@@ -29,6 +29,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/doctor.ts` — `checkoutFacts`
 
+### An upgrade that took over an hour broke the install, or "Another upgrade … is running" never goes away
+- **Check:** the upgrade's log shows two `Upgrading …` lines overlapping (a slow download, then the channel timer or a hand-run upgrade); or `ls ~/.local/state/hatchabot/upgrade-*.lock.d` exists while no upgrade runs, and its `owner` file names a process that `ps -p <pid>` no longer shows.
+- **Cause:** the upgrade lock was judged by age alone: after an hour the next run removed it even though the first upgrade was still downloading, and both swapped the code at once.
+- **Fix:** upgrade, then run `hatchabot upgrade` again if the tree was left mixed (the previous release is put back on failure). The lock now names its holder: a running upgrade keeps it however long it takes, and one whose holder is gone is cleared at once. A lock with no `owner` file is still cleared after an hour.
+- **Fixed in:** `v2.162.0`
+- **Code:** `scripts/upgrade.sh` — `lock_left_over`, `take_lock`; `scripts/deploy-release.sh` — `lock_left_over`
+
 ### After an upgrade, agents still run the old OpenClaw version
 - **Check:** `hatchabot doctor` "Runtime image: OpenClaw …" against the release notes; the agent's sheet shows "newer image available" or not.
 - **Cause:** before v2.80.1, `hatchabot upgrade` updated only the app and never fetched the release's runtime image.
