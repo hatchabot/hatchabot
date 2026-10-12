@@ -60,17 +60,37 @@ umask 077
 # flock); the lock holds this run's pid, so one a SIGKILL left behind is
 # taken over. A run that finds the set locked stops before it writes anything.
 LOCK="$DEST/.backup-lock"
-if ! mkdir "$LOCK" 2>/dev/null; then
+holder=""
+lock_busy() {
   holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
   # No pid yet: a run that has just made the lock — unless the lock is old.
-  if { [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; } || { [ -z "$holder" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; }; then
-    echo "✗ Another backup run${holder:+ (pid $holder)} is writing $DEST — this one stops; that run's record will say how it went." >&2
-    exit 1
+  { [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; } || { [ -z "$holder" ] && [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; }
+}
+locked_out() {
+  echo "✗ Another backup run${holder:+ (pid $holder)} is writing $DEST — this one stops; that run's record will say how it went." >&2
+  exit 1
+}
+if ! mkdir "$LOCK" 2>/dev/null; then
+  lock_busy && locked_out
+  # Taking over a dead run's lock is one run at a time, and is decided again
+  # inside: two runs that both read the same dead pid each wrote their own
+  # and both went on, into the same set (#215). A takeover a SIGKILL cut
+  # short is cleared when old; the run that clears it stops, the next goes on.
+  if ! mkdir "$LOCK.takeover" 2>/dev/null; then
+    find "$LOCK.takeover" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null || true
+    holder=""; locked_out
   fi
-  echo "  • an earlier run that was killed left its lock on $DEST — taking it over" >&2
+  if lock_busy; then rmdir "$LOCK.takeover"; locked_out; fi
+  rm -rf "$LOCK"
+  # A run that came in by the front door meanwhile has it now.
+  if ! mkdir "$LOCK" 2>/dev/null; then rmdir "$LOCK.takeover"; holder=""; locked_out; fi
+  echo "$$" > "$LOCK/pid"
+  rmdir "$LOCK.takeover"
+  echo "  • an earlier run that was killed left its lock on $DEST — taken over" >&2
 fi
 echo "$$" > "$LOCK/pid"
-release_lock() { rm -rf "$LOCK"; }
+# Only this run's own lock: one that names another run is that run's (#215).
+release_lock() { [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK"; return 0; }
 trap release_lock EXIT
 
 # The set's own record. "running" until the end; whatever way the script ends
@@ -95,7 +115,18 @@ write_status() {
 # The record starts only once the run can really begin (below): a run that
 # refuses before it starts (no database, no docker) must not replace the
 # verdict of an earlier run of the same day with "incomplete, 0 volumes".
-finish() { local rc=$?; if [ "$rc" -eq 0 ]; then write_status complete; else write_status incomplete; fi; release_lock; exit "$rc"; }
+# A runner's archive container, while one is running ("<host>|<name>"). Named
+# so it can be removed: a timeout kills only the docker client, and the
+# container went on reading the agent's volume after the backup had failed
+# (#216). Removed (and waited for) on a failure, and on any way out of the run.
+remote_oneshot=""
+reap_remote() {
+  [ -n "$remote_oneshot" ] || return 0
+  local t=""; command -v timeout >/dev/null 2>&1 && t="timeout"
+  ${t:+$t 120} docker -H "${remote_oneshot%%|*}" rm -f "${remote_oneshot#*|}" </dev/null >/dev/null 2>&1 || true
+  remote_oneshot=""
+}
+finish() { local rc=$?; reap_remote; if [ "$rc" -eq 0 ]; then write_status complete; else write_status incomplete; fi; release_lock; exit "$rc"; }
 
 # The control plane's own database first: it holds the encrypted bot tokens,
 # the agent registry, memberships and snapshots. Volumes survive without it,
@@ -354,10 +385,17 @@ if [ -n "$remote" ]; then
       continue
     fi
     rc=0
+    # Named and labelled as the app's one-shots are (its boot sweep removes
+    # one that is left exited), so a failed run can remove it by name.
+    remote_oneshot="$rhost|${PREFIX}-bk-$$-$RANDOM$RANDOM"
     # </dev/null: over ssh, docker would read the rest of this loop's list.
     # shellcheck disable=SC2086  # the excludes are separate words
-    ${T:+$T 3600} docker -H "$rhost" run --rm --network none -v "$vol:/vol:ro" alpine \
+    ${T:+$T 3600} docker -H "$rhost" run --rm --name "${remote_oneshot#*|}" --label "hatchabot.oneshot=$PREFIX" --network none -v "$vol:/vol:ro" alpine \
       tar cz ${TAR_EXCLUDES#--anchored } -C /vol . </dev/null > "$DEST/$vol.tgz.part" || rc=$?
+    # A client that failed or timed out may have left its container running
+    # on the runner: it is gone before the next volume, or the run ends.
+    if [ "$rc" -ne 0 ]; then reap_remote; fi
+    remote_oneshot=""
     # busybox tar has no "changed as we read it" exit 1: anything but 0 failed.
     if [ "$rc" -ne 0 ] || ! gzip -t "$DEST/$vol.tgz.part" 2>/dev/null; then
       rm -f "$DEST/$vol.tgz.part"

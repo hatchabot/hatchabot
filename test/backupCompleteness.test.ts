@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -105,6 +105,8 @@ case "$1 $2" in
   "volume ls") printf '%s\\n' ${volumes.map((v) => `'${v}'`).join(' ')} ;;
   "image inspect") exit 0 ;;
   run*)
+    # A slow volume: the run holds its lock long enough for another to look.
+    if [ -f "${root}/slow" ]; then sleep 1; fi
     vol=""; out=""
     for a in "$@"; do case "$a" in *:/data:ro) vol="\${a%%:/data:ro}";; *:/out) out="\${a%%:/out}";; esac; done
     # The file the script's own command writes, under /out.
@@ -122,15 +124,20 @@ case "$1 $2" in
 esac
 `, { mode: 0o755 });
   const backups = join(root, 'backups');
-  const run = (extraEnv: Record<string, string> = {}) => spawnSync('bash', [join(repo, 'scripts', 'backup-volumes.sh')], {
-    encoding: 'utf8',
-    env: {
-      HOME: home, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
-      HATCHABOT_BACKUP_DIR: backups, HATCHABOT_PREFIX: 'hatchabot',
-      NODE_PATH: join(dirname(createRequire(import.meta.url).resolve('better-sqlite3/package.json')), '..'),
-      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
-      ...extraEnv,
-    },
+  const env = (extraEnv: Record<string, string>) => ({
+    HOME: home, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
+    HATCHABOT_BACKUP_DIR: backups, HATCHABOT_PREFIX: 'hatchabot',
+    NODE_PATH: join(dirname(createRequire(import.meta.url).resolve('better-sqlite3/package.json')), '..'),
+    GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
+    ...extraEnv,
+  });
+  const run = (extraEnv: Record<string, string> = {}) => spawnSync('bash', [join(repo, 'scripts', 'backup-volumes.sh')], { encoding: 'utf8', env: env(extraEnv) });
+  /** The same run, not waited for: two at once. */
+  const start = (extraEnv: Record<string, string> = {}) => new Promise<{ status: number | null; out: string }>((resolve) => {
+    const c = spawn('bash', [join(repo, 'scripts', 'backup-volumes.sh')], { env: env(extraEnv) });
+    let out = '';
+    c.stdout.on('data', (d) => (out += d)); c.stderr.on('data', (d) => (out += d));
+    c.on('close', (status) => resolve({ status, out }));
   });
   // This run's set: the newest dated directory (an older one may sit beside it).
   const setDir = () => join(backups, readdirSync(backups).filter((d) => /^20\d\d-/.test(d)).sort().pop()!);
@@ -167,7 +174,7 @@ esac
   };
   /** Today's set directory, as the script names it (before any run made it). */
   const today = () => join(backups, spawnSync('date', ['+%F'], { encoding: 'utf8' }).stdout.trim());
-  return { run, setDir, fillVolume, repo, onRunners, remoteLog, oldSet, record, setState, backups, today };
+  return { run, start, bin, root, setDir, fillVolume, repo, onRunners, remoteLog, oldSet, record, setState, backups, today };
 }
 
 describe('scripts/backup-volumes.sh records how the run ended', () => {
@@ -215,7 +222,7 @@ describe('scripts/backup-volumes.sh records how the run ended', () => {
     expect(existsSync(join(w.setDir(), 'hatchabot-garden-4-vol.tgz'))).toBe(false);
     expect(r.stderr).toMatch(/asleep\.test: not answering/);
     // Read-only, no network, the root caches left out, and nothing read from stdin.
-    expect(w.remoteLog()).toContain('ssh://laptop.test run --rm --network none -v agentclaw-book-2-vol:/vol:ro alpine tar cz --exclude=./.openclaw/cache/control-ui-assets');
+    expect(w.remoteLog()).toMatch(/ssh:\/\/laptop.test run --rm --name hatchabot-bk-\S+ --label hatchabot.oneshot=hatchabot --network none -v agentclaw-book-2-vol:\/vol:ro alpine tar cz --exclude=.\/.openclaw\/cache\/control-ui-assets/);
     expect(w.remoteLog()).not.toContain('STDIN');
     expect(w.remoteLog()).not.toContain('--anchored');
     // A sleeping laptop must not stop the pruning of this machine's sets: complete, with it named.
@@ -353,6 +360,32 @@ describe('scripts/backup-volumes.sh: review of 2026-10-09', () => {
     }
   });
 
+  it('a runner archive that times out: its named container is removed before the run goes on (#216)', () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    w.onRunners([['ssh://laptop.test', 'docker://hatchabot-notes-3'], ['ssh://laptop.test', 'docker://hatchabot-recipes-4']]);
+    // A `timeout` whose archive deadline passes for the notes volume: the
+    // docker client starts, then is killed (exit 124), as a stalled runner's would be.
+    writeFileSync(join(w.bin, 'timeout'), `#!/usr/bin/env bash
+d="$1"; shift
+if [ "$d" = 3600 ] && [[ "$*" == *hatchabot-notes-3-vol* ]]; then "$@" > /dev/null; exit 124; fi
+exec "$@"
+`, { mode: 0o755 });
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(w.record()).toMatchObject({ state: 'incomplete', failedVolumes: ['hatchabot-notes-3-vol'] });
+    const log = w.remoteLog().split('\n');
+    const runAt = log.findIndex((l) => l.includes(' run ') && l.includes('hatchabot-notes-3-vol'));
+    const name = /--name (\S+)/.exec(log[runAt]!)![1]!;
+    expect(name).toMatch(/^hatchabot-bk-/);
+    expect(log[runAt]).toContain('--label hatchabot.oneshot=hatchabot');
+    const rmAt = log.indexOf(`ssh://laptop.test rm -f ${name}`);
+    expect(rmAt, log.join('\n')).toBeGreaterThan(runAt);
+    // Removed before the next volume was read.
+    expect(rmAt).toBeLessThan(log.findIndex((l) => l.includes(' run ') && l.includes('hatchabot-recipes-4-vol')));
+    // An archive that worked leaves nothing to remove.
+    expect(log.filter((l) => l.includes(' rm -f '))).toHaveLength(1);
+  });
+
   it('a runner asleep past the retention: the set with its agent\'s newest copy is kept, the rest are pruned', () => {
     const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1', 'docker://hatchabot-gone-9']);
     w.setState('docker://hatchabot-gone-9', 'DELETED');
@@ -428,6 +461,48 @@ describe('scripts/backup-volumes.sh: review of 2026-10-09', () => {
     expect(again.status, again.stdout + again.stderr).toBe(0);
     expect(w.record()).toMatchObject({ state: 'complete' });
     expect(existsSync(lock)).toBe(false);
+  });
+
+  it('two runs that both find a dead run\'s lock: only one takes it over, and neither removes the other\'s lock (#215)', async () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    const lock = join(w.today(), '.backup-lock');
+    mkdirSync(lock, { recursive: true });
+    const dead = spawnSync('bash', ['-c', 'echo $$']).stdout.toString().trim();
+    writeFileSync(join(lock, 'pid'), dead);
+    writeFileSync(join(w.root, 'slow'), '');
+    // A `cat` that reads the lock's pid, then holds the answer until both runs
+    // have read it: the two have seen the same dead holder before either
+    // writes its own pid. Every other read is the real cat.
+    const reads = join(w.root, 'reads'); mkdirSync(reads);
+    writeFileSync(join(w.bin, 'cat'), `#!/usr/bin/env bash
+case "$*" in
+  *.backup-lock/pid) seen="$(/bin/cat "$@" 2>/dev/null)"; rc=$?
+    mktemp "${reads}/r.XXXXXX" > /dev/null
+    for _ in $(seq 50); do [ "$(ls "${reads}" | wc -l)" -ge 2 ] && break; sleep 0.1; done
+    printf '%s\\n' "$seen"; exit $rc ;;
+esac
+exec /bin/cat "$@"
+`, { mode: 0o755 });
+    const [a, b] = await Promise.all([w.start(), w.start()]);
+    const ran = [a, b].filter((r) => r.status === 0);
+    const stopped = [a, b].filter((r) => r.status === 1);
+    expect(ran, a.out + b.out).toHaveLength(1);
+    expect(stopped).toHaveLength(1);
+    expect(stopped[0]!.out).toMatch(/Another backup run/);
+    expect(w.record()).toMatchObject({ state: 'complete' });
+    expect(existsSync(lock), 'the run that took it over removed its own lock').toBe(false);
+  });
+
+  it('a run releases only its own lock: one that now names another run is left to it (#215)', async () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    const lock = join(w.today(), '.backup-lock');
+    writeFileSync(join(w.root, 'slow'), '');
+    const running = w.start();
+    // While it backs up, the lock comes to name another (live) run.
+    for (let i = 0; i < 50 && !existsSync(join(lock, 'pid')); i++) await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(join(lock, 'pid'), String(process.pid));
+    expect((await running).status).toBe(0);
+    expect(readFileSync(join(lock, 'pid'), 'utf8')).toBe(String(process.pid));
   });
 
   it('a base directory that is already there keeps its mode; a new one is 0700; the set is 0700', () => {

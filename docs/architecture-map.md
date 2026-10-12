@@ -330,7 +330,7 @@ per run: a copy of the database, the secret key, and one archive per agent
 volume. The app only reads metadata about those sets, can start a run, prune a
 set, or restore one agent's volume from a set.
 
-- `scripts/backup-volumes.sh` — `write_status`, `json_list`, `release_lock`: the backup run itself (one run per set; retention keeps each agent's newest copy).
+- `scripts/backup-volumes.sh` — `write_status`, `json_list`, `release_lock`, `lock_busy`, `reap_remote`: the backup run itself (one run per set, a dead run's lock taken over one run at a time; a runner's archive container named and removed when it fails; retention keeps each agent's newest copy).
 - `deploy/hatchabot-backup.timer` — `OnCalendar`: when it runs.
 - `deploy/hatchabot-backup.service` — `Type=oneshot`, `ExecStart`: what the timer starts (the backup script).
 - `src/orchestrator/backups.ts` — `listBackups`, `startBackup`, `pruneBackup`, `restoreAgentFromBackup`, `resumeBackupRestore`, `recoverBackupRestore`, `agentsMissingFromSet`, `keepDays`, `restoreSafetyDir`: reading and acting on backup sets. A restore writes its copy of how the agent was to `restoreSafetyDir` before the volume is replaced (removed once the restore ends either way; kept when its undo failed, or while a restore cut off by a restart is held for "Finish the restore" / "Put back the copy from before").

@@ -1879,6 +1879,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.162.0` (#213)
 - **Code:** `src/providers/localDockerProvider.ts` — `importState`
 
+### Two backup runs wrote the same day's set after a killed run
+- **Check:** the backup log shows two runs that each said "an earlier run that was killed left its lock … taking it over" for the same set, or the set's record does not match its files.
+- **Cause:** a run that found a dead run's lock took it over without checking again; two runs reading the same dead pid both went on, and each one's exit removed the lock while the other was still writing.
+- **Fix:** upgrade; taking over a lock is one run at a time and decided again inside, and a run removes only a lock that names it. Run "Back up now" once to rewrite the day's set. A `.backup-lock.takeover` folder older than a minute is cleared by the next run.
+- **Fixed in:** `v2.162.0` (#215)
+- **Code:** `scripts/backup-volumes.sh` — `lock_busy`, `release_lock`
+
+### A runner's agent stays busy after a backup of it timed out
+- **Check:** the backup says `✗ <volume> on <runner> failed (exit 124)`, and `docker -H <runner> ps` still shows an `alpine` container running `tar cz` with that volume mounted.
+- **Cause:** the timeout killed only the local docker client; the archive container on the runner went on reading the volume.
+- **Fix:** upgrade; the archive container is named and removed (and waited for) when its archive fails or the run ends early. On an older version, `docker -H <runner> rm -f <container>` by hand.
+- **Fixed in:** `v2.162.0` (#216)
+- **Code:** `scripts/backup-volumes.sh` — `reap_remote`
+
 ## Usage, costs and budgets
 
 ### Usage shows small, flat token numbers for an agent that is busy all day
