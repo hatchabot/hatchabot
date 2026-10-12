@@ -315,7 +315,8 @@ Every result also says what is **not covered**: pictures and compressed data
 inside binary files (no OCR, no unpacking), and, with `--no-machine` or no `tailscale` command, this machine's
 names. The text inside a file git treats as binary (a name in a PDF's or a
 photo's metadata, a SQLite file) is read, as UTF-8 and UTF-16, since
-2026-10-10; the GitHub-side `privacy` job still skips binary files.
+2026-10-10, and by the GitHub-side `privacy` job too since v2.162.0: each
+run of text is split into words like a line and looked up the same way.
 `--public` always prints how many accepted historical commits it left
 out (below). The clone's own git identity (`user.name`, `user.email`) and
 the identities in `scripts/privacy-identity.txt` (the maintainer's author
@@ -350,7 +351,9 @@ secret can test guesses against it, so it is kept as a secret.
   splits into words — letters and digits, with `. @ - _` kept inside a word,
   and each joined word's parts tried as well (so a slug inside a file name
   is found) — every added line of a pull request (`base...head`) or a push
-  to `main` (`before..after`), every changed file's path, each commit's
+  to `main` (`before..after`), the text inside every changed binary file
+  (runs of six or more characters, as UTF-8 and UTF-16), every changed
+  file's path, each commit's
   message, author and committer, and the pull request's title, body and
   branch name; it fingerprints every run of words of a length some value has
   and fails on a match. A hit prints the kind, a masked hint (`'Ma…(16)'`)
@@ -369,8 +372,8 @@ secret can test guesses against it, so it is kept as a secret.
 
 What it cannot catch: a private value the install has no record of (a
 person mentioned only in conversation, say); a paraphrase or a misspelling;
-a name broken across two lines (text is read a line at a time); images and
-other binary files; review summaries, discussions and the wiki; anything the
+a name broken across two lines (text is read a line at a time); pictures
+and compressed data inside binary files (no OCR, no unpacking); review summaries, discussions and the wiki; anything the
 watch's two days have passed. The rule in `AGENTS.md` — examples come from
 the invented household — stays the first line of defence.
 
