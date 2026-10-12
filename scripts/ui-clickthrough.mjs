@@ -45,7 +45,8 @@ const RECORDER = `(() => {
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
     // Scripted answers: window.__answer['POST /v1/x'] = [{ status, body }, …], taken in order.
     const q = (window.__answer || {})[method + ' ' + path];
-    if (q && q.length) { const a = q.shift(); return json(a.body ?? {}, a.status ?? 200); }
+    // { reject: 'Failed to fetch' }: the request never reached the server (fetch rejects).
+    if (q && q.length) { const a = q.shift(); if (a.reject) throw new TypeError(a.reject); return json(a.body ?? {}, a.status ?? 200); }
     if (method === 'GET') {
       if (path in window.__override) return json(window.__override[path]);
       if (/\\/crons$/.test(path)) return json({ crons: window.__crons || [] });
@@ -1496,6 +1497,64 @@ const SCENARIOS = String.raw`(() => {
       eq('two calls', everywhere(), 2);
       eq('plain logout never called', calls('POST', /^\/v1\/logout$/).length, 0);
       window.__answer = {};
+    },
+    signOutUnreached: async () => {
+      // A logout that never reached the server is not a sign-out (#224): the cookie is HttpOnly, only the server ends it.
+      window.__noReload = true;
+      const before = localStorage.getItem('hatchabot_email');
+      const logouts = () => calls('POST', /^\/v1\/logout$/).length;
+      const base = logouts();
+      localStorage.setItem('hatchabot_email', 'owner@example.org');
+      try {
+        window.__answer = { 'POST /v1/logout': [{ reject: 'Failed to fetch' }] };
+        document.getElementById('v2AvatarBtn').click();
+        const item = await until(() => { const b = document.querySelector('#v2AcctPop .v2signout'); return b && b.offsetParent ? b : null; });
+        item.click();
+        const said = await until(() => { const t = document.getElementById('toast'); return t.textContent.includes('Not signed out') ? t.textContent : null; });
+        ok('it says this browser is still signed in, and how to retry: ' + said, said.includes('still signed in') && said.includes('Try Sign out again'));
+        eq('nothing forgotten here', localStorage.getItem('hatchabot_email'), 'owner@example.org');
+        eq('one call', logouts() - base, 1);
+        // Again, and this time it gets there.
+        document.querySelector('#v2AcctPop .v2signout').click();
+        await until(() => localStorage.getItem('hatchabot_email') === null);
+        eq('two calls', logouts() - base, 2);
+      } finally {
+        window.__answer = {};
+        if (before !== null) localStorage.setItem('hatchabot_email', before); else localStorage.removeItem('hatchabot_email');
+        document.getElementById('v2AcctPop').hidden = true;
+      }
+    },
+    identitySignUpVerify: async () => {
+      // A new email/password account is sent the verification link it needs before it may sign in (#222).
+      const idp = (m) => 'https://identitytoolkit.googleapis.com/v1/accounts:' + m;
+      const savedIdentity = appConfig.identity;
+      appConfig.identity = { ...(savedIdentity || {}), apiKey: 'made-up-web-key' };
+      const sessions = () => calls('POST', /^\/v1\/session$/).length;
+      const oob = () => calls('POST', /accounts:sendOobCode$/);
+      const base = { sessions: sessions(), oob: oob().length };
+      try {
+        $('loginEmail').value = 'new.member@example.org'; $('loginIdPw').value = 'made-up-password';
+        window.__answer = { ['POST ' + idp('signUp')]: [{ body: { idToken: 'made-up-id-token-1', email: 'new.member@example.org', localId: 'u-new' } }] };
+        await idSignUp();
+        const sent = oob().slice(base.oob);
+        eq('the verification email was asked for', sent.map((c) => c.body), [{ requestType: 'VERIFY_EMAIL', idToken: 'made-up-id-token-1' }]);
+        eq('no session tried before the address is confirmed', sessions() - base.sessions, 0);
+        ok('it says where the link went: ' + $('idVerifyText').textContent, !$('idVerify').hidden && $('idVerifyText').textContent.includes('new.member@example.org'));
+        // Signing in before clicking the link: the refusal offers the link again.
+        window.__answer = {
+          ['POST ' + idp('signInWithPassword')]: [{ body: { idToken: 'made-up-id-token-2', email: 'new.member@example.org' } }],
+          'POST /v1/session': [{ status: 401, body: { error: 'Verify your email address, then sign in again.' } }],
+        };
+        $('idVerify').hidden = true;
+        await idSignIn();
+        ok('not verified yet, said plainly: ' + $('idVerifyText').textContent, !$('idVerify').hidden && $('idVerifyText').textContent.includes('not verified yet'));
+        byText('#idVerify button', 'Send the link again').click();
+        await until(() => oob().length - base.oob === 2);
+        eq('sent again with the new sign-in', oob().at(-1).body.idToken, 'made-up-id-token-2');
+      } finally {
+        window.__answer = {}; appConfig.identity = savedIdentity;
+        $('loginEmail').value = ''; $('loginIdPw').value = ''; $('idVerify').hidden = true; $('loginErr').textContent = '';
+      }
     },
     // Chat on the web (2026-09-29): a member the owner gave it opens 💬 Chat, sees their conversation, sends, reads the reply.
     webChatMember: async () => {

@@ -241,6 +241,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.162.0`
 - **Code:** `src/api/identity.ts` — `IdentityVerifier`
 
+### Google sign-in mode: a new email-and-password account says "Verify your email address, then sign in again", and no email came
+- **Check:** the install uses `HATCHABOT_AUTH=identity`; the account was made with **Create account** (not the Google button); no email from the project's Identity Platform arrived, spam folder included.
+- **Cause:** the server refuses an unverified email address (anyone could otherwise sign up as anyone), but before v2.162.0 the app never asked Identity Platform to send the verification email.
+- **Fix:** upgrade; **Create account** now sends the link and says where it went, and signing in before it was opened offers **Send the link again**. Or sign in with the Google button, which arrives verified.
+- **Fixed in:** `v2.162.0`
+- **Code:** `web/index.html` — `idSendVerification`, `idSignUp`; `src/api/identity.ts` — `principalFor`
+
+### "Sign out" seemed to work, but the app is back, still signed in
+- **Check:** the page said nothing and reloaded into the app; the service was restarting or the network dropped at that moment.
+- **Cause:** the session cookie can only be ended by the server; before v2.162.0 a sign-out that never reached it was treated as done, and the reload found the cookie still valid.
+- **Fix:** upgrade; such a sign-out now says "Not signed out … This browser is still signed in" and stays put, so Sign out can be pressed again. On an older version, press Sign out again once the app answers (or "Sign out on every device").
+- **Fixed in:** `v2.162.0`
+- **Code:** `web/index.html` — `signOut`
+
 ### Creating the first account asks for a "setup code"
 - **Check:** you are on the first-run page from another device than the Hatchabot machine (or under rootless Docker).
 - **Cause:** by design: before any account exists, only someone on the machine itself, or holding the code printed at start-up, may create the owner account.

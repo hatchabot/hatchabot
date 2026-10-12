@@ -1097,6 +1097,9 @@
       <button onclick="idSignUp()">Create account</button>
       <button class="primary" onclick="idSignIn()">Sign in</button>
     </div>
+    <div id="idVerify" class="sub" hidden style="margin-top:12px"><span id="idVerifyText"></span>
+      <div class="actions" style="justify-content:flex-end"><button type="button" onclick="idResendVerification()">Send the link again</button></div>
+    </div>
   </div>
   <div class="err" id="loginErr"></div>
 </dialog>
@@ -3245,6 +3248,7 @@ function friendlyIdpError(code) {
     USER_DISABLED: 'That account is disabled.',
     WEAK_PASSWORD: 'Password must be at least 6 characters.',
     OPERATION_NOT_ALLOWED: 'That sign-in method is not enabled for this project.',
+    TOO_MANY_ATTEMPTS_TRY_LATER: 'Too many tries for now — wait a few minutes and try again.',
   };
   return map[String(code).split(' :')[0]] ?? String(code);
 }
@@ -3261,14 +3265,23 @@ async function startSession(idToken) {
 }
 
 async function signOut() {
-  // Best-effort server side; the reload lands on the login dialog either way.
-  try { await api('/v1/logout', { method: 'POST' }); } catch { /* already out */ }
+  // Only the server can end the session: its cookie is HttpOnly, so this page
+  // cannot clear it. A logout that never got there (the network, the service
+  // restarting) used to reload anyway, and the still-valid cookie showed the
+  // app again as if signing out had worked. Say so instead; Sign out again retries.
+  try { await api('/v1/logout', { method: 'POST' }); }
+  catch (e) {
+    if (e.message !== 'auth required') { // that one means already signed out
+      toast(`Not signed out: Hatchabot did not answer (${e.message}). This browser is still signed in. Try Sign out again.`, 15000);
+      return;
+    }
+  }
   localStorage.removeItem('hatchabot_email');
   // Forget Google's remembered pick, so the next sign-in shows the account
   // chooser (with "Use another account") instead of silently re-selecting
   // the same email — this is what makes account SWITCHING actually work.
   try { google.accounts.id.disableAutoSelect(); } catch { /* GSI not loaded */ }
-  location.reload();
+  if (!window.__noReload) location.reload(); // the click-through check stays on the page
 }
 
 /**
@@ -3299,21 +3312,49 @@ async function onGoogleCredential(response) {
   } catch (e) { $('loginErr').textContent = e.message; }
 }
 
+/**
+ * An account made with an email and a password must confirm its address
+ * before it may sign in (the server refuses an unverified email: anyone could
+ * sign up as anyone). Identity Platform sends that email only when asked, and
+ * the app never asked: a new account met "Verify your email address" with no
+ * email to verify it by. The token is kept so "Send the link again" can ask.
+ */
+let idVerifyToken = '';
+function idShowVerify(idToken, text) {
+  idVerifyToken = idToken;
+  $('loginErr').textContent = '';
+  $('idVerifyText').textContent = text;
+  $('idVerify').hidden = false;
+}
+async function idSendVerification(idToken, email) {
+  await idpCall('sendOobCode', { requestType: 'VERIFY_EMAIL', idToken });
+  idShowVerify(idToken, `We sent a link to ${email}. Open it, then come back here and press Sign in.`);
+}
+async function idResendVerification() {
+  try { await idSendVerification(idVerifyToken, $('loginEmail').value.trim()); }
+  catch (e) { $('loginErr').textContent = e.message; }
+}
+
 async function idSignIn() {
   try {
     const out = await idpCall('signInWithPassword', {
       email: $('loginEmail').value.trim(), password: $('loginIdPw').value, returnSecureToken: true,
     });
-    await startSession(out.idToken);
+    try { await startSession(out.idToken); }
+    catch (e) {
+      if (!/^Verify your email/.test(e.message)) throw e;
+      // The password was right; the address is not confirmed yet.
+      idShowVerify(out.idToken, `${out.email || 'Your email address'} is not verified yet. Open the link we sent, then press Sign in.`);
+    }
   } catch (e) { $('loginErr').textContent = e.message; }
 }
 
 async function idSignUp() {
   try {
-    const out = await idpCall('signUp', {
-      email: $('loginEmail').value.trim(), password: $('loginIdPw').value, returnSecureToken: true,
-    });
-    await startSession(out.idToken);
+    const email = $('loginEmail').value.trim();
+    const out = await idpCall('signUp', { email, password: $('loginIdPw').value, returnSecureToken: true });
+    // No session yet: the server would refuse it until the address is confirmed.
+    await idSendVerification(out.idToken, out.email || email);
   } catch (e) { $('loginErr').textContent = e.message; }
 }
 
@@ -3321,6 +3362,7 @@ function showLogin() {
   if ($('sfBlock')) $('sfBlock').hidden = true; // the next sign-in is judged afresh
   if (!loginDlg.open) {
     $('loginErr').textContent = '';
+    $('idVerify').hidden = true;
     loadConfig().then(() => {
       loginDlg.showModal();
       (appConfig.authMode === 'identity' ? $('loginEmail') : $('loginPw')).focus();
