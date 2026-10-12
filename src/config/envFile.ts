@@ -24,6 +24,26 @@ export function activeValues(text: string): Map<string, string> {
   return out;
 }
 
+/** `export NAME=value`: a shell-sourced file (the macOS launcher) assigns it in place, in order. */
+const EXPORTED = /^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
+
+/**
+ * The values a shell sourcing the file ends with: plain and exported
+ * assignments alike, the last per name. The tidy moves `export` lines under
+ * "Other settings", after the plain ones: an `export PORT=1` above a later
+ * `PORT=2` would then win (#221), though every line compares equal.
+ */
+function sourcedValues(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const line of text.split('\n')) {
+    const m = LINE.exec(line);
+    if (m) { if (!m[1]) out.set(m[2]!, m[3]!); continue; }
+    const e = EXPORTED.exec(line);
+    if (e) out.set(e[1]!, e[2]!);
+  }
+  return out;
+}
+
 interface Parsed {
   active: Map<string, string>;
   /** A commented `# NAME=value` the owner wrote, per name (the last one). */
@@ -162,9 +182,12 @@ export function syncEnvText(existing: string): SyncResult {
   if (text === existing) return { ok: true, changed: false };
   const before = activeValues(existing), after = activeValues(text);
   const rawSame = JSON.stringify(rawLines(existing)) === JSON.stringify(rawLines(text));
-  const same = rawSame && before.size === after.size && [...before].every(([k, v]) => after.get(k) === v);
+  const sameMap = (x: Map<string, string>, y: Map<string, string>) => x.size === y.size && [...x].every(([k, v]) => y.get(k) === v);
+  const sourcedBefore = sourcedValues(existing), sourcedAfter = sourcedValues(text);
+  const same = rawSame && sameMap(before, after) && sameMap(sourcedBefore, sourcedAfter);
   if (!same) {
-    const diff = [...new Set([...before.keys(), ...after.keys()])].filter((k) => before.get(k) !== after.get(k));
+    const diff = [...new Set([...before.keys(), ...after.keys(), ...sourcedBefore.keys(), ...sourcedAfter.keys()])]
+      .filter((k) => before.get(k) !== after.get(k) || sourcedBefore.get(k) !== sourcedAfter.get(k));
     return { ok: false, error: `would change ${diff.length ? diff.join(', ') : 'a line it does not understand'} — left as it was` };
   }
   return { ok: true, changed: true, text };

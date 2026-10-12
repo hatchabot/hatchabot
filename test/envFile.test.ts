@@ -111,6 +111,21 @@ describe('putting a .env in order', () => {
     expect(syncEnvText('A="x \\" y"\nB=\'two words\'\n# C="open\n').ok).toBe(true);
   });
 
+  it('leaves a file alone when moving an export line would change the value a shell ends with (#221)', async () => {
+    const { parseEnv } = await import('node:util');
+    const mixed = 'export HATCHABOT_PORT=8181\nHATCHABOT_PORT=8282\n';
+    const r = syncEnvText(mixed);
+    expect(r.ok).toBe(false);
+    expect((r as { error: string }).error).toMatch(/would change HATCHABOT_PORT/);
+    expect(parseEnv(mixed).HATCHABOT_PORT).toBe('8282');
+    // The other order already ends on the export, and stays so; an export of its own is just kept.
+    for (const fine of ['HATCHABOT_PORT=8282\nexport HATCHABOT_PORT=8181\n', 'export EXTRA_FLAG=1\nHATCHABOT_PORT=8282\n']) {
+      const t = syncEnvText(fine);
+      expect(t.ok, fine).toBe(true);
+      expect(parseEnv((t as { text: string }).text), fine).toEqual(parseEnv(fine));
+    }
+  });
+
   it('a missing file is left alone, with the reason', async () => {
     const r = await syncEnvFile(join(mkdtempSync(join(tmpdir(), 'hb-env-')), 'nope.env'));
     expect(r.changed).toBe(false);
