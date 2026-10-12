@@ -637,6 +637,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `src/orchestrator/members.ts` — `revokeMember`
 
+### A removed member can still message the agent, and Access says it still lets them in
+- **Check:** Sharing → Access (or Verify now) still lists the removed person's chat id; `openclaw.json` on the agent has it under `channels.<app>.allowFrom`, `channels.<app>.groupAllowFrom` or the bot account's `groupAllowFrom`.
+- **Cause:** removing a member took their id out of the bot account's `allowFrom` and the approval store only. OpenClaw also admits ids listed for the whole app and an account's group list, which a hand edit or an imported setup may have put there.
+- **Fix:** upgrade, then remove them again: their id is taken out of those lists too (only theirs; the other entries stay).
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/orchestrator/members.ts` — `allowlistScrubScript`, `revokeMember`
+
 ### A pool bot serving an agent is renamed "Hatchabot (unassigned)"
 - **Check:** in Settings → Telegram, the bot is leased but its pending name is "Hatchabot (unassigned)".
 - **Cause:** the release parked the idle name after another agent had already leased the bot.
