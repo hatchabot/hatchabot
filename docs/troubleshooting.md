@@ -127,6 +127,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.3`
 - **Code:** `scripts/privacy-check.mjs` — `hookStatus`
 
+### CI's `privacy` job names a value at `file (commit <sha>)` that the change no longer has, or says "✗ incomplete: … git could not read it"
+- **Check:** the job's log; `git show <sha>` shows the value added in that commit and taken out by a later one.
+- **Cause:** the job read only the change's end result, so a value added in one commit and removed in the next passed while staying public in the history; and a git command that failed read as an empty, clean change (a branch's first commit always did).
+- **Fix:** for a hit, rewrite the branch so no commit carries the value (squash or amend it out), then push again. For incomplete, re-run the job; a range of more than 1,000 commits is split into smaller pull requests.
+- **Fixed in:** `v2.162.0`
+- **Code:** `scripts/privacy-ci.mjs` — `scanRange`, `numstatFiles`
+
 ### The installer or an upgrade says the bundle does not match the release's manifest
 - **Check:** `scripts/release-manifest.sh asset vX.Y.Z <downloaded bundle> hatchabot-vX.Y.Z-<platform>.tar.gz` says it does not match; compare `wc -c` and `sha256sum` of the download with the manifest's entry. The installer says "the bundle does not match the release's manifest — not using it"; an upgrade says "the release's manifest does not vouch for it" and exits 3.
 - **Cause:** the downloaded bundle is not the one the release vouched for: a truncated or altered download, or a proxy rewriting it.

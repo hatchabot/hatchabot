@@ -352,9 +352,11 @@ secret can test guesses against it, so it is kept as a secret.
   and each joined word's parts tried as well (so a slug inside a file name
   is found) — every added line of a pull request (`base...head`) or a push
   to `main` (`before..after`), the text inside every changed binary file
-  (runs of six or more characters, as UTF-8 and UTF-16), every changed
-  file's path, each commit's
-  message, author and committer, and the pull request's title, body and
+  (runs of six or more characters, as UTF-8 and UTF-16) and every changed
+  file's path — in the end result and in each commit on its own, since a
+  value added and taken out again is still public in the history (`file
+  (commit <sha>):line`; at most 1,000 commits, more is exit 3) — each
+  commit's message, author and committer, and the pull request's title, body and
   branch name; it fingerprints every run of words of a length some value has
   and fails on a match. A hit prints the kind, a masked hint (`'Ma…(16)'`)
   and where — `file:line`, `commit message <sha>`, `PR body` — never the
@@ -367,8 +369,8 @@ secret can test guesses against it, so it is kept as a secret.
   and fails on a match; GitHub then emails the owner.
 - **No secret is a failure**, never a pass (exit 3): a pull request from a
   fork gets no secrets, so its `privacy` check fails until the maintainer
-  re-makes it on a branch here. A garbled secret, or a range that is not in
-  the checkout, is exit 3 too.
+  re-makes it on a branch here. A garbled secret, a range that is not in
+  the checkout, or a git command that fails, is exit 3 too.
 
 What it cannot catch: a private value the install has no record of (a
 person mentioned only in conversation, say); a paraphrase or a misspelling;
