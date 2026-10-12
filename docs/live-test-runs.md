@@ -142,3 +142,9 @@ tests that run on their own.
 | 2026-10-12 | candidate-gate | pass | v2.162.0 | 2 | OpenClaw 2026.9.8 |
 | 2026-10-12 | restore-drill | pass | v2.162.0 | 3 | OpenClaw 2026.9.8 |
 | 2026-10-12 | transfer | pass | v2.162.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-10-12 | privacy | pass | v2.163.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-10-12 | runner-scenarios | pass | v2.163.0 | 10 | OpenClaw 2026.9.8 |
+| 2026-10-12 | transfer | pass | v2.163.0 | 5 | OpenClaw 2026.9.8 |
+| 2026-10-12 | browser | pass | v2.163.0 | 3 | OpenClaw 2026.9.8 |
+| 2026-10-12 | candidate-gate | pass | v2.163.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-12 | regress-autonomous | pass | v2.163.0 | 6 | OpenClaw 2026.9.8 |
