@@ -37,6 +37,18 @@ describe('redactForPublic', () => {
     expect(redactForPublic('2026-10-01T00:23:10.123+00:00 ok; peer 10.1.2.3', ctx)).toBe('2026-10-01T00:23:10.123+00:00 ok; peer <private-ip>');
   });
 
+  it('masks private IPv6 addresses as it does private IPv4 ones; times, public addresses and code stay (#211)', () => {
+    const out = redactForPublic([
+      'runner at fd00:1234::5 and http://[fd7a:115c:a1e0::12]:8091/health',
+      'link fe80::1c2b:3dff:fe4e:5f60%eth0, loopback ::1, mapped ::ffff:192.168.1.40',
+      'full fd12:3456:789a:0001:0000:0000:0000:0005.',
+    ].join('\n'), {});
+    expect(out).not.toMatch(/fd00|fd7a|fe80|::1\b|::ffff|192\.168|fd12/);
+    expect(out).toBe('runner at <private-ip> and http://[<private-ip>]:8091/health\nlink <private-ip>, loopback <private-ip>, mapped <private-ip>\nfull <private-ip>.');
+    const keep = 'at 10:00:00 and 2026-10-01T00:23:10.123+00:00; public 2001:db8::7 and ::ffff:140.82.112.3; std::vector, a::b::c; mac aa:bb:cc:dd:ee:ff';
+    expect(redactForPublic(keep, {})).toBe(keep);
+  });
+
   it('leaves public addresses and ordinary words alone', () => {
     expect(redactForPublic('pulled ghcr.io/hatchabot/runtime:2026.9.6 from 140.82.112.3; patience', ctx)).toBe('pulled ghcr.io/hatchabot/runtime:2026.9.6 from 140.82.112.3; patience');
   });

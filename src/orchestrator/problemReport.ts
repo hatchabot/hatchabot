@@ -1,4 +1,5 @@
 import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { isIPv6 } from 'node:net';
 import { hostname, homedir, userInfo } from 'node:os';
 import { isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -37,6 +38,20 @@ export function localContext(): PublicRedactContext {
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const isPrivateV4 = (a: number, b: number) =>
   a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254);
+/**
+ * A private IPv6 address: unique local (fc00::/7, a tailnet's fd7a:…), link-
+ * or site-local (fe80::/9), loopback, or a private IPv4 mapped (::ffff:10.0.0.7).
+ * Only IPv4 was masked, so a runner's fd00:… address went public (#211).
+ */
+const isPrivateV6 = (addr: string) => {
+  const ip = addr.replace(/%.*$/, '');
+  if (!isIPv6(ip)) return false;
+  const v4 = /^::ffff:(\d+)\.(\d+)\.\d+\.\d+$/i.exec(ip);
+  if (v4) return isPrivateV4(+v4[1]!, +v4[2]!);
+  if (ip === '::1') return true;
+  const first = ip.startsWith('::') ? 0 : parseInt(ip.split(':')[0]!, 16);
+  return (first & 0xfe00) === 0xfc00 || (first & 0xff80) === 0xfe80;
+};
 // Never masked as a private name: the manager's own names, and the words the masks and headings are made of.
 const NOT_PRIVATE = /^(hatchabot([ -](agent|manager))?|openclaw|agent|name|host|user|bot|email)$/i;
 
@@ -67,6 +82,8 @@ export function redactForPublic(text: string, ctx: PublicRedactContext = localCo
     .replace(/\b[\w.+-]+@[\w-]+(\.[\w-]+)+\b/g, '<email>')                                          // addresses, incl. ssh user@host
     .replace(/\b[\w-]+(\.[\w-]+)*\.ts\.net\b/g, '<tailnet-host>')                                   // Tailscale names
     // Whole addresses only ("00:23:10.123" in a timestamp is not one), and only private ones.
+    // IPv6 before IPv4, so a mapped ::ffff:10.0.0.7 is judged whole. Only what parses as an address: "10:00:00" is a time.
+    .replace(/(?<![\w:.])(?:[0-9a-f]{0,4}:){2,7}(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f]{0,4})(?:%[\w.-]+)?(?![\w:])/gi, (m) => (isPrivateV6(m) ? '<private-ip>' : m))
     .replace(/\b(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}\b/g, (m, a: string, b: string) => (isPrivateV4(+a, +b) ? '<private-ip>' : m))
     // A Telegram bot's username (they all end in "bot"): public, so anyone could write to it. Not our own name.
     .replace(/@?\b(?!hatchabot\b)[A-Za-z][A-Za-z0-9_]{2,}bot\b/gi, '<bot>');
