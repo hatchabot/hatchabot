@@ -10125,7 +10125,10 @@ document.addEventListener('keydown', consoleKeys);
 $('consoleDlg')?.addEventListener('close', () => {
   markConsoleSeen(consoleAgentId);
   if ($('consoleDlg').open || consoleOpening) return;
-  consoleUnmark();
+  // Only an address this console put there (Esc): after closeConsole() it is
+  // gone already, and one in the bar now was set since — a #console= link
+  // whose hashchange has not run yet, which clearing left unopened (2026-10-10).
+  if (consolePageTitle !== null) consoleUnmark();
   closeConsoleSwitcher(); $('consoleProps').hidden = true;
   consoleUnloadAll(); $('consoleCover').hidden = true;
 });
