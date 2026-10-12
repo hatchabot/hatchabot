@@ -2093,9 +2093,18 @@ export class Store {
     this.db.prepare(`UPDATE local_accounts SET claim_code = ?, claim_expires = ? WHERE id = ?`).run(code, expires, id);
   }
 
-  setLocalAccountPassword(id: string, pwHash: string, pwSalt: string): void {
+  /**
+   * With `ifHash`: only while the stored hash is still that one (the password
+   * the caller checked), as one compare-and-swap. A change proved with the
+   * old password must not overwrite a reset made while it was being checked
+   * (#199). False when it was not stored.
+   */
+  setLocalAccountPassword(id: string, pwHash: string, pwSalt: string, ifHash?: string): boolean {
     // A new password makes any pending reset link moot (it outlived the change).
-    this.db.prepare(`UPDATE local_accounts SET pw_hash = ?, pw_salt = ?, claim_code = NULL, claim_expires = NULL WHERE id = ?`).run(pwHash, pwSalt, id);
+    const sql = `UPDATE local_accounts SET pw_hash = ?, pw_salt = ?, claim_code = NULL, claim_expires = NULL WHERE id = ?`;
+    return ifHash === undefined
+      ? this.db.prepare(sql).run(pwHash, pwSalt, id).changes === 1
+      : this.db.prepare(`${sql} AND pw_hash = ?`).run(pwHash, pwSalt, id, ifHash).changes === 1;
   }
 
   /**
@@ -2114,11 +2123,17 @@ export class Store {
       .run(pw.hash, pw.salt, recovery.hash, recovery.salt, new Date().toISOString(), id, spentRecoveryHash).changes === 1;
   }
 
-  /** Replace (or, with null, remove) an account's recovery code hash. */
-  setLocalAccountRecovery(id: string, hash: string | null, salt: string | null): void {
-    this.db
-      .prepare(`UPDATE local_accounts SET recovery_hash = ?, recovery_salt = ?, recovery_created = ? WHERE id = ?`)
-      .run(hash, salt, hash ? new Date().toISOString() : null, id);
+  /**
+   * Replace (or, with null, remove) an account's recovery code hash. With
+   * `ifPwHash`: only while the password is still the one the caller checked
+   * (#199). False when it was not stored.
+   */
+  setLocalAccountRecovery(id: string, hash: string | null, salt: string | null, ifPwHash?: string): boolean {
+    const sql = `UPDATE local_accounts SET recovery_hash = ?, recovery_salt = ?, recovery_created = ? WHERE id = ?`;
+    const created = hash ? new Date().toISOString() : null;
+    return ifPwHash === undefined
+      ? this.db.prepare(sql).run(hash, salt, created, id).changes === 1
+      : this.db.prepare(`${sql} AND pw_hash = ?`).run(hash, salt, created, id, ifPwHash).changes === 1;
   }
 
   setLocalAccountDisabled(id: string, disabled: boolean): void {

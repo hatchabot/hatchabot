@@ -259,12 +259,16 @@ export function registerAccountRoutes(
     const code = newRecoveryCode();
     return { code, ...(await hashPassword(normalizeRecoveryCode(code))) };
   };
-  /** A new recovery code for an account: stored as a hash, returned once. */
-  const issueRecoveryCode = async (id: string): Promise<string> => {
+  /**
+   * A new recovery code for an account: stored as a hash, returned once. With
+   * `ifPwHash`, only while the password is still the one that was checked;
+   * undefined when it changed meanwhile (#199).
+   */
+  const issueRecoveryCode = async (id: string, ifPwHash?: string): Promise<string | undefined> => {
     const { code, hash, salt } = await prepareRecoveryCode();
-    store.setLocalAccountRecovery(id, hash, salt);
-    return code;
+    return store.setLocalAccountRecovery(id, hash, salt, ifPwHash) ? code : undefined;
   };
+  const PASSWORD_CHANGED_MEANWHILE = 'Your password was changed while this was being checked (a reset?). Sign in again with the new one.';
 
   /**
    * A password changed or recovered takes the account's command-line tokens
@@ -489,7 +493,10 @@ export function registerAccountRoutes(
     if (!right) {
       return reply.code(401).send({ error: 'Current password is wrong.' });
     }
-    const recoveryCode = await issueRecoveryCode(me.id);
+    // Only while the password just checked is still the account's: a reset
+    // made meanwhile must not leave the old password's holder a new code (#199).
+    const recoveryCode = await issueRecoveryCode(me.id, me.pwHash);
+    if (!recoveryCode) return reply.code(409).send({ error: PASSWORD_CHANGED_MEANWHILE });
     app.log.warn({ account: me.id }, 'account.recovery_code_created');
     return { recoveryCode };
   });
@@ -633,7 +640,13 @@ export function registerAccountRoutes(
         return reply.code(401).send({ error: 'Current password is wrong.' });
       }
       const { hash, salt } = await hashPassword(password);
-      store.setLocalAccountPassword(target.id, hash, salt);
+      // Your own change is stored only while the password you proved is still
+      // the account's, in one compare-and-swap: a reset made during the checks
+      // (by the owner, or the command line) was overwritten, so the holder of
+      // the old password kept the account the reset was meant to take back (#199).
+      if (!store.setLocalAccountPassword(target.id, hash, salt, self ? target.pwHash : undefined)) {
+        return reply.code(409).send({ error: PASSWORD_CHANGED_MEANWHILE });
+      }
       revokeCliTokensOf(target.id);
       // Every session of that account dies with the old hash. Re-issue one for
       // the caller when it's their own, so changing it doesn't log them out.
