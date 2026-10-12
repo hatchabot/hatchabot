@@ -366,12 +366,24 @@ const SCENARIOS = String.raw`(() => {
     },
     // Archiving from its page with its console open: both close, so the next click
     // can't land on Restore where Chat was (2026-10-07: restored 12 min after archiving).
+    // Archive and Delete are everyday actions: at the foot of the Overview, not under Advanced (Chris, 2026-10-12).
+    archiveDeleteOnOverview: async () => {
+      try {
+        openV2Agent('a1', 'overview');
+        await until(() => byText('#v2AgentDlg .v2danger', 'Archive or delete'));
+        ok('Overview has Archive and Delete', !!byText('#v2AgentDlg .v2danger button', 'Archive') && !!byText('#v2AgentDlg .v2danger button', 'Delete'));
+        openV2Agent('a1', 'advanced');
+        await until(() => document.getElementById('v2AgentDlg').open && !byText('#v2AgentDlg .v2tab.on, #v2Tabs button.on', 'Overview'));
+        await sleep(100);
+        ok('Advanced no longer has them', !byText('#v2AgentDlg .v2danger', 'Archive') && !byText('#v2AgentDlg button', 'Delete…'));
+      } finally { v2Close(); }
+    },
     archiveClosesItsConsole: async () => {
       const list = await (await fetch('/v1/agents')).json();
       const hw = list.find((a) => a.id === 'a1');
       try {
         consoleTabs.push({ id: 'a1', slug: hw.slug, frame: null, url: null });
-        openV2Agent('a1', 'advanced');
+        openV2Agent('a1', 'overview');
         await until(() => document.getElementById('v2AgentDlg').open);
         window.__answer = window.__answer || {};
         window.__answer['POST /v1/agents/a1/archive'] = [{ status: 200, body: { ...hw, state: 'ARCHIVED' } }];
@@ -428,7 +440,7 @@ const SCENARIOS = String.raw`(() => {
         ok('still archiving after a poll', tile(hw.name).classList.contains('v2st-working'));
         openV2Agent('a1', 'overview');
         await until(() => byText('#v2AgentDlg .v2row', 'Working on'));
-        openV2Agent('a1', 'advanced');
+        openV2Agent('a1', 'overview');
         await until(() => byText('#v2AgentDlg .v2danger', 'Archiving'));
         ok('no second Archive button meanwhile', !byText('#v2AgentDlg button', 'Archive'));
         v2Close();
@@ -3818,9 +3830,9 @@ const SCENARIOS = String.raw`(() => {
         ok('Escape closes, back on the avatar', pop.hidden && document.activeElement.id === 'v2AvatarBtn');
         // The pointer-only strips say where the keyboard does the same.
         ok('new-group strip hint', document.getElementById('v2NewGroup').textContent.includes('By keyboard: open the agent, then Overview → Group'));
-        ok('bin hint', document.getElementById('v2Trash').textContent.includes('By keyboard: open the agent, then Advanced → Delete'));
+        ok('bin hint', document.getElementById('v2Trash').textContent.includes('By keyboard: open the agent, then Delete… at the foot of its Overview'));
         const arch = [...document.querySelectorAll('#v2groups .v2group')].find((s) => s.querySelector('h3').textContent === 'Archived');
-        ok('Archived hint', !!arch && arch.textContent.includes('By keyboard: open the agent, then Advanced → Archive'));
+        ok('Archived hint', !!arch && arch.textContent.includes('By keyboard: open the agent, then Archive at the foot of its Overview'));
       } finally { if (!document.getElementById('v2AcctPop').hidden) v2CloseAccount(); v2SetView('group'); }
     },
   });

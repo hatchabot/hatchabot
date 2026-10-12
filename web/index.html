@@ -944,7 +944,7 @@
     <div id="v2groups"><div class="hb-loading" aria-live="polite"><span class="hb-spin" aria-hidden="true"></span> Loading your agents… <span class="sub">(a few seconds on a big fleet: every agent is checked)</span></div></div>
     <div class="v2dropstrips">
       <div class="v2newgroup" id="v2NewGroup">＋ Drag an icon here to start a new group — you name it right there<span class="v2keyhint">By keyboard: open the agent, then Overview → Group → ＋ New group…</span></div>
-      <div class="v2newgroup v2trash" id="v2Trash">🗑 Drop here to delete — it asks first<span class="v2keyhint">By keyboard: open the agent, then Advanced → Delete…</span></div>
+      <div class="v2newgroup v2trash" id="v2Trash">🗑 Drop here to delete — it asks first<span class="v2keyhint">By keyboard: open the agent, then Delete… at the foot of its Overview</span></div>
     </div>
     <section class="v2group" id="v2Activity" hidden aria-labelledby="v2ActTitle">
       <div class="v2ghead"><h3 id="v2ActTitle">Activity</h3><span class="n" id="v2ActCount"></span>
@@ -12318,7 +12318,7 @@ function renderV2() {
           const cost = v2CostChip(a) ? (!v2Costs.period || v2Costs.period === '1w' ? `, about ${v2Money(v2CostOf(a).weekly)} a week at API prices` : `, about ${v2Money(v2CostOf(a).cost)} in ${v2CostWindow()} at API prices`) : '';
           return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) || a.ops ? ' data-v2fixed="1"' : ''}
             aria-label="${esc(a.name)}${a.ops ? ` (${esc(V2_OPS_TIP)})` : ''} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}${esc(cost)}${prev ? `. ${esc(prev)}` : ''}">${v2IconHTML(a, st, { cost: true })}<span class="v2name">${esc(a.name)}</span></button>`;
-        }).join('') || (s.key === 'archived' ? `<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept. By keyboard: open the agent, then Advanced → Archive.</span>` : '')}
+        }).join('') || (s.key === 'archived' ? `<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept. By keyboard: open the agent, then Archive at the foot of its Overview.</span>` : '')}
       </div>
     </section>`);
   const tail = sections.findIndex(s => s.key === 'shared' || s.key === 'archived');
@@ -13255,7 +13255,13 @@ function v2Pane(a, tab) {
         ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}
         <div id="v2HealthSlot" hidden style="flex-basis:100%"></div>`) : built ? row('Checks', `${B('Logs', `openLogs('${id}','${n}')`)}${B('Setup log', `openSetupLog('${id}','${n}')`)}`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Rebuild', `${B('↻ Rebuild', `rebuild('${id}')`, 'class="primary" title="A fresh container on the current image. Its memory, files and members are kept."')}
-        <span class="sub">Takes about a minute. Do this after changing its image, its data folders, or the agents it can ask — and whenever Hatchabot says an update is waiting.</span>`) : ''}`;
+        <span class="sub">Takes about a minute. Do this after changing its image, its data folders, or the agents it can ask — and whenever Hatchabot says an update is waiting.</span>`) : ''}
+      <div class="v2danger"><h4>Archive or delete</h4><div class="v2v">
+        ${a.archiving ? '<span class="sub">Archiving…</span>' : ''}
+        ${['RUNNING', 'STOPPED', 'FAILED'].includes(a.state) && !a.archiving ? B('📥 Archive', `v2Close();archiveAgent('${id}','${n}','${a.state}')`, 'title="Keep it and its memory; hand its Telegram bot back"') : ''}
+        ${a.state !== 'DELETING' ? B('Delete…', `v2Close();del('${id}','${n}')`, 'class="danger"') : ''}
+        <span class="sub" style="flex-basis:100%">Archive keeps it and its memory, and frees its bot; Restore brings it back. Delete removes it for good.</span>
+      </div></div>`;
     case 'personality': return `
       ${slot('paneDef')}
       ${run ? `<h4 class="v2sec">Memory</h4>${row('Conversation', `${B('📝 Chat → Memory', `checkpointAgent('${id}','${n}')`)}${B('📥 Recover context', `recoverContext('${id}','${n}')`)}
@@ -13319,11 +13325,7 @@ function v2Pane(a, tab) {
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
       ${(run || a.state === 'STOPPED') && built ? `<h4 class="v2sec" id="v2BetweenServers">Between servers</h4>${row('Another Hatchabot', `${B('Move to another Hatchabot', `rehostAgent('${id}','${n}')`)}
         <span class="sub">Only for a second Hatchabot server with its own dashboard (⚙ Settings → Advanced). To run it on another computer under this one, add that computer as a runner and use <b>Move…</b> on its Machine row.</span>`)}` : ''}
-      <div class="v2danger"><h4>Careful</h4><div class="v2v">
-        ${a.archiving ? '<span class="sub">Archiving…</span>' : ''}
-        ${['RUNNING', 'STOPPED', 'FAILED'].includes(a.state) && !a.archiving ? B('📥 Archive', `v2Close();archiveAgent('${id}','${n}','${a.state}')`, 'title="Keep it and its memory; hand its Telegram bot back"') : ''}
-        ${a.state !== 'DELETING' ? B('Delete…', `v2Close();del('${id}','${n}')`, 'class="danger"') : ''}
-      </div></div>`;
+`;
   }
   return '';
 }
