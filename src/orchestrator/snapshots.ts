@@ -106,7 +106,8 @@ export async function readCoreFile(
 
 /**
  * The core files there are. An empty one is kept as '' so restoring the
- * snapshot empties it again (#67); a missing one is left out.
+ * snapshot empties it again (#67); a missing one is left out, and restoring
+ * the snapshot takes it away again (#214).
  */
 export async function readCoreFiles(
   provider: RuntimeProvider,
@@ -155,6 +156,26 @@ export async function writeCoreFile(
   const res = await writeFileInAgent(provider, runtimeRef, workspacePath(slug, name), b64, via);
   if (res.code !== 0) {
     throw new SnapshotError(`Couldn't write ${name}: ${res.stderr.slice(-200)}`);
+  }
+}
+
+/**
+ * Take a core file away: a snapshot taken before it existed restores that.
+ * Leaving it was a restore that said "done" yet kept the newer MEMORY.md (#214).
+ */
+export async function removeCoreFile(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+  slug: string,
+  name: string,
+  via: VolumeAccess = {},
+): Promise<void> {
+  const script = `rm -f ${JSON.stringify(workspacePath(slug, name))}`;
+  const res = via.onVolume
+    ? await provider.execShellOnVolume(runtimeRef, script, { image: via.image })
+    : await provider.execShell(runtimeRef, script);
+  if (res.code !== 0) {
+    throw new SnapshotError(`Couldn't remove ${name}: ${res.stderr.slice(-200)}`);
   }
 }
 
@@ -268,13 +289,14 @@ export async function restoreSnapshot(
   // A restore is itself destructive — capture the current state first so an
   // unwanted rollback is one more rollback away, not a loss.
   let safetySnapshotId: string | undefined;
+  let present: string[] = [];
   try {
-    safetySnapshotId = (
-      await captureSnapshot(deps, agentId, {
-        reason: 'pre-restore',
-        label: `before restoring ${snapshot.label}`,
-      })
-    ).id;
+    const safety = await captureSnapshot(deps, agentId, {
+      reason: 'pre-restore',
+      label: `before restoring ${snapshot.label}`,
+    });
+    safetySnapshotId = safety.id;
+    present = safety.files;
   } catch (err) {
     rethrowIfCrash(err);
     log('snapshot.safety_failed', { agentId, error: String(err) });
@@ -292,10 +314,16 @@ export async function restoreSnapshot(
   op.step('safety-taken', { safetySnapshotId });
 
   const restored: string[] = [];
-  for (const [name, content] of Object.entries(snapshot.files)) {
-    if (!(CORE_FILES as readonly string[]).includes(name)) continue; // stored data is ours, but be strict
+  // The snapshot's files are written; a core file it lacks was not there
+  // when it was taken, so one there now (the safety copy just read it) goes.
+  const steps: Array<[string, string | undefined]> = [
+    ...coreFilesOf(snapshot.files).map((n): [string, string] => [n, snapshot.files[n]!]),
+    ...present.filter((n) => isCoreFile(n) && !(n in snapshot.files)).map((n): [string, undefined] => [n, undefined]),
+  ];
+  for (const [name, content] of steps) {
     try {
-      await writeCoreFile(provider, agent.runtimeRef, agent.slug, name, content);
+      if (content === undefined) await removeCoreFile(provider, agent.runtimeRef, agent.slug, name);
+      else await writeCoreFile(provider, agent.runtimeRef, agent.slug, name, content);
     } catch (err) {
       rethrowIfCrash(err);
       // Each file is written whole (tmp + mv), but the set is not: files
@@ -345,17 +373,19 @@ function restoreParamLayer(store: Store, agentId: string, snapshot: StoredSnapsh
   }
 }
 
+const isCoreFile = (n: string): boolean => (CORE_FILES as readonly string[]).includes(n);
+
 /** The files a snapshot holds that a restore writes (only the core files, ever). */
 function coreFilesOf(files: Record<string, string>): string[] {
-  return Object.keys(files).filter((n) => (CORE_FILES as readonly string[]).includes(n));
+  return Object.keys(files).filter(isCoreFile);
 }
 
-/** Write a snapshot's core files; with `blankOthers`, the core files it lacks are emptied (how they were: absent or empty). */
+/** Make the core files a snapshot's: its files written, the ones it lacks (absent when it was taken) removed (#214). */
 async function writeSnapshotFiles(
-  deps: SnapshotDeps, runtimeRef: string, slug: string, files: Record<string, string>, blankOthers: string[] = [], via: VolumeAccess = {},
+  deps: SnapshotDeps, runtimeRef: string, slug: string, files: Record<string, string>, via: VolumeAccess = {},
 ): Promise<void> {
   for (const name of coreFilesOf(files)) await writeCoreFile(deps.provider, runtimeRef, slug, name, files[name]!, via);
-  for (const name of blankOthers) if (!(name in files)) await writeCoreFile(deps.provider, runtimeRef, slug, name, '', via);
+  for (const name of CORE_FILES) if (!(name in files)) await removeCoreFile(deps.provider, runtimeRef, slug, name, via);
 }
 
 const SNAPSHOT_CHOICES = {
@@ -392,13 +422,13 @@ export async function resumeSnapshotRestore(deps: SnapshotDeps, opId: string): P
   const via: VolumeAccess = agent.state === 'STOPPED' ? { onVolume: true, image: agent.image ?? undefined } : {};
   try { now = await readCoreFiles(deps.provider, agent.runtimeRef, agent.slug, via); } catch { now = undefined; }
   if (now && snapshot) {
-    const names = coreFilesOf(snapshot.files);
-    if (names.every((n) => now![n] === snapshot.files[n])) {
+    // Every core file, so one the snapshot lacks must be gone too (#214).
+    if (CORE_FILES.every((n) => now![n] === snapshot.files[n])) {
       restoreParamLayer(deps.store, agent.id, snapshot);
       op.done(`Restored its files from "${label}".`);
       return;
     }
-    if (safety && names.every((n) => (now![n] ?? '') === (safety.files[n] ?? ''))) {
+    if (safety && CORE_FILES.every((n) => (now![n] ?? '') === (safety.files[n] ?? ''))) {
       op.rolledBack(`The restore of "${label}" was interrupted by a restart before any file was written — nothing was changed.`);
       return;
     }
@@ -424,15 +454,14 @@ export async function recoverSnapshotRestore(deps: SnapshotDeps, opId: string, a
   if (action === 'revert') {
     const safety = p.safetySnapshotId ? deps.store.getSnapshot(agent.id, p.safetySnapshotId) : undefined;
     if (!safety) throw new SnapshotError('The snapshot taken before the restore is gone, so there is nothing to revert to. Finish instead.');
-    const snapshot = p.snapshotId ? deps.store.getSnapshot(agent.id, p.snapshotId) : undefined;
-    await writeSnapshotFiles(deps, agent.runtimeRef, agent.slug, safety.files, snapshot ? coreFilesOf(snapshot.files) : [], via);
+    await writeSnapshotFiles(deps, agent.runtimeRef, agent.slug, safety.files, via);
     restoreParamLayer(deps.store, agent.id, safety);
     op.rolledBack(`Reverted its files to how they were before restoring "${label}".`);
     return;
   }
   const snapshot = p.snapshotId ? deps.store.getSnapshot(agent.id, p.snapshotId) : undefined;
   if (!snapshot) throw new SnapshotError(`The snapshot "${label}" no longer exists, so the restore cannot be finished. Revert instead.`);
-  await writeSnapshotFiles(deps, agent.runtimeRef, agent.slug, snapshot.files, [], via);
+  await writeSnapshotFiles(deps, agent.runtimeRef, agent.slug, snapshot.files, via);
   restoreParamLayer(deps.store, agent.id, snapshot);
   op.step('written');
   op.done(`Restored its files from "${label}".`);
