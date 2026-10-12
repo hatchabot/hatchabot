@@ -2423,6 +2423,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.2` (#33)
 - **Code:** `src/api/peerAddress.ts` — `allowedPeerAddress`
 
+### Adding another server, a move or the bot census fails with "resolves to a local address" or "answered with a redirect"
+- **Check:** the server's name resolves to a loopback or link-local address (`getent hosts <name>` on this machine), or its address answers `curl -sI http://<address>/v1/agents` with a 3xx.
+- **Cause:** a peer's name was judged only as text, so a name that resolved to this machine's loopback (or a metadata address) was called; later calls followed redirects to any address. Every call to another server now checks the address it actually connects to and refuses redirects.
+- **Fix:** register the other server at the address it really answers on (its tailnet or LAN name or IP, with `https://` if it serves HTTPS), not a name that points at this machine or one that redirects. Remove and add the peer again if its address changed.
+- **Fixed in:** `v2.162.0` (#200, #201)
+- **Code:** `src/api/peerAddress.ts` — `pinnedPeerFetch`, `allowedPeerIp`; `src/orchestrator/migrate.ts` — `peerFetch`
+
 ### A mixed zram and disk-swap host grants compressed-swap allowances
 - **Check:** the host has active zram and a plain swap file or partition while zswap is disabled.
 - **Cause:** detecting any zram device qualified the whole host despite its uncompressed fallback.

@@ -6,6 +6,7 @@ import type { ProvisionDeps } from './provision.js';
 import { whileBusy } from './busy.js';
 import { beginOperation, currentBootId, handleFor, rethrowIfCrash, stepReached, type OpHandle } from './operations.js';
 import { randomUUID } from 'node:crypto';
+import { pinnedPeerFetch, type PeerFetch, type PeerRequestInit } from '../api/peerAddress.js';
 
 /**
  * Move an agent to another Hatchabot installation in one action.
@@ -38,6 +39,8 @@ export interface Peer {
 
 export interface MigrateDeps extends ProvisionDeps {
   secrets: SecretStore;
+  /** How the other server is called: pinnedPeerFetch unless a test stubs it. */
+  peerFetch?: PeerFetch;
 }
 
 export class MigrateError extends Error {
@@ -194,13 +197,15 @@ export function preflight(
 }
 
 async function peerFetch(
-  deps: Pick<MigrateDeps, 'secrets'>,
+  deps: Pick<MigrateDeps, 'secrets' | 'peerFetch'>,
   peer: Peer,
   path: string,
-  init: RequestInit,
+  init: PeerRequestInit,
 ): Promise<Response> {
   const token = await deps.secrets.get(peer.secretRef);
-  return fetch(`${peer.url.replace(/\/$/, '')}${path}`, {
+  // Pinned and redirect-refusing: the registration check judged the URL's
+  // text, not what its name resolves to now or where a redirect points.
+  return (deps.peerFetch ?? pinnedPeerFetch)(`${peer.url.replace(/\/$/, '')}${path}`, {
     ...init,
     headers: { authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
   });
@@ -267,7 +272,7 @@ export function moveState(store: Store, moveId: string, ownerId: string): MoveSt
 
 /** Source side: ask the destination about our move. undefined: no answer; 'unsupported': an older Hatchabot. */
 async function askAboutMove(
-  deps: Pick<MigrateDeps, 'secrets'>,
+  deps: Pick<MigrateDeps, 'secrets' | 'peerFetch'>,
   peer: Peer,
   moveId: string,
 ): Promise<MoveState | 'unsupported' | undefined> {
@@ -298,7 +303,7 @@ async function askAboutMove(
  * slug not in its list: the request never reached its import.
  */
 export async function destinationHasAgent(
-  deps: Pick<MigrateDeps, 'secrets' | 'sleep'>,
+  deps: Pick<MigrateDeps, 'secrets' | 'sleep' | 'peerFetch'>,
   peer: Peer,
   slug: string,
   attempts = 12,

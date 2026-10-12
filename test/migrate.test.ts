@@ -8,6 +8,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
+import { viaGlobalFetch } from './support/world.js';
 
 class MemSecrets implements SecretStore {
   map = new Map<string, string>();
@@ -57,7 +58,7 @@ async function world() {
   await provider.start(runtimeRef);
   store.setAgentState('a1', 'RUNNING');
   provider.stateStore.set(runtimeRef, Buffer.from('memory'));
-  return { store, secrets, provider, deps: { store, secrets, provider, channel: channelStub, sleep: async () => {} } };
+  return { store, secrets, provider, deps: { store, secrets, provider, channel: channelStub, sleep: async () => {}, peerFetch: viaGlobalFetch } };
 }
 
 /** Stub the peer's HTTP surface. */
