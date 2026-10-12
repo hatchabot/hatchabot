@@ -1220,6 +1220,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/providers/localDockerProvider.ts` — `streamFromVolume`
 
+### A download from Files never starts or never finishes, and the browser just waits
+- **Check:** the download shows no progress for minutes; the agent's machine is a runner that went to sleep or lost its connection, or `docker ps` shows a `<prefix>-fs-…` container that stays up.
+- **Cause:** a download had no deadline: a Docker daemon or runner that stopped sending, without ending the copy, held the download (and its container) for as long as the browser waited.
+- **Fix:** upgrade: a download that receives nothing from Docker for two minutes is broken off, the browser reports it as failed, and its container is removed. A slow download that keeps moving, or a slow browser, is not cut off. Try again once the machine answers.
+- **Fixed in:** `v2.162.0` (#217)
+- **Code:** `src/providers/localDockerProvider.ts` — `streamFromVolume`, `STREAM_STALL_MS`
+
 ### An upload whose name starts or ends with a space replaced a different file
 - **Check:** the file you uploaded was named with a leading or trailing space (` notes.md`), and the agent's `notes.md` now holds its content.
 - **Cause:** the upload trimmed the spaces from the name, so it landed on the file without them.

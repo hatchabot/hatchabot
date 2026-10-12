@@ -82,3 +82,36 @@ describe('an import that does not finish is heard only once its one-shot is gone
     expect(r).toMatchObject({ ok: false, removed: true });
   });
 });
+
+describe('a download from a volume that stalls fails instead of hanging (#217)', () => {
+  /** Reads the whole stream; `pauseMs` first, as a slow reader would. */
+  const drain = async (s: import('node:stream').Readable, pauseMs = 0) => {
+    if (pauseMs) { s.pause(); await new Promise((r) => setTimeout(r, pauseMs)); }
+    let bytes = 0;
+    try { for await (const c of s) bytes += (c as Buffer).length; return { bytes }; } catch (err) { return { bytes, err: err as Error }; }
+  };
+
+  it('docker sends nothing and never exits: the download fails and its one-shot is removed', async () => {
+    const p = provider('exec sleep 10');
+    const t0 = Date.now();
+    const r = await drain(p.streamFromVolume(REF, ['cat', '/home/node/notes.md']));
+    expect(String(r.err)).toMatch(/stalled/);
+    expect(Date.now() - t0).toBeLessThan(3000);
+    for (let i = 0; i < 40 && !existsSync(join(dir, 'removed')); i++) await new Promise((res) => setTimeout(res, 50));
+    expect(readFileSync(join(dir, 'argv.log'), 'utf8')).toContain(`rm -f ${/--name (\S+)/.exec(readFileSync(join(dir, 'argv.log'), 'utf8'))![1]}`);
+  });
+
+  it('a slow transfer that keeps moving is not cut off', async () => {
+    // A chunk every 150 ms for over a second: longer than the deadline in all, never silent that long.
+    const r = await drain(provider('for i in 1 2 3 4 5 6 7 8; do printf "chunk-%s " $i; sleep 0.15; done').streamFromVolume(REF, ['cat', 'x']));
+    expect(r.err).toBeUndefined();
+    expect(r.bytes).toBe(8 * 'chunk-1 '.length);
+  });
+
+  it('a reader that is slow is waiting on itself: not a stall', async () => {
+    // Far more than the buffers hold, sent at once; the reader starts late.
+    const r = await drain(provider('head -c 4000000 /dev/zero').streamFromVolume(REF, ['cat', 'x']), 900);
+    expect(r.err).toBeUndefined();
+    expect(r.bytes).toBe(4_000_000);
+  });
+});
