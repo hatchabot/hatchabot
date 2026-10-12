@@ -164,6 +164,26 @@ describe('a class memory cap', () => {
       expect(r.json().memoryPending).toMatch(/kept its old memory limits \(Its machine did not answer\.\)/);
     } finally { done(); }
   });
+  it('the same edit again after a container refused the cap tries it again, and says if it is still refused (#220)', async () => {
+    const { store, f, provider, refs, done } = await world();
+    try {
+      const cls = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: as(OWNER), payload: { name: 'Quants', memoryCap: '6g' } })).json().class;
+      store.setAgentClass('own', cls.id);
+      const update = provider.updateMemory.bind(provider);
+      provider.updateMemory = async () => { throw new ProviderError('docker update: daemon gone', 'Its machine did not answer.'); };
+      const first = await f.inject({ method: 'PUT', url: `/v1/agent-classes/${cls.id}`, headers: as(OWNER), payload: { memoryCap: '8g' } });
+      expect(first.json().skipped).toEqual(['own: Its machine did not answer.']);
+      const still = await f.inject({ method: 'PUT', url: `/v1/agent-classes/${cls.id}`, headers: as(OWNER), payload: { memoryCap: '8g' } });
+      expect(still.json().skipped).toEqual(['own: Its machine did not answer.']);
+      provider.updateMemory = update;
+      const retry = await f.inject({ method: 'PUT', url: `/v1/agent-classes/${cls.id}`, headers: as(OWNER), payload: { memoryCap: '8g' } });
+      expect(retry.json().skipped).toEqual([]);
+      expect(provider.memoryUpdates).toEqual([{ runtimeRef: refs.own, cap: '8g' }]);
+      // An edit that names no limit leaves the containers alone.
+      await f.inject({ method: 'PUT', url: `/v1/agent-classes/${cls.id}`, headers: as(OWNER), payload: { name: 'Quant desk' } });
+      expect(provider.memoryUpdates).toHaveLength(1);
+    } finally { done(); }
+  });
   it('deleting a class gives its members the limits that now apply, and names any that kept the old (#148)', async () => {
     const { store, f, provider, refs, done } = await world();
     try {
