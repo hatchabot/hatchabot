@@ -47,16 +47,27 @@ export function hibernateAfterMs(raw = process.env.HATCHABOT_HIBERNATE_AFTER): n
   return Math.max(0, Math.round(n * mult));
 }
 
-/** Why this agent may not sleep right now, or undefined when it may. */
-export async function hibernateBlocker(deps: HibernateDeps, a: Agent, now: number, afterMs: number): Promise<string | undefined> {
+/**
+ * The part of the rule its record and settings decide, with no waiting:
+ * judged again just before the stop, under the lock (`locked`: the busy flag
+ * is then its own).
+ */
+function settledBlocker(deps: HibernateDeps, a: Agent, locked = false): string | undefined {
   if (a.state !== 'RUNNING' || !a.runtimeRef) return 'not running';
   if (a.hostId !== deps.store.localHostId()) return 'on another host';
   if (a.migratedTo) return 'moved to another machine';
   if (a.ops) return 'the management agent';
-  if (deps.isBusy(a.id)) return 'busy';
+  if (!locked && deps.isBusy(a.id)) return 'busy';
   if (a.hibernate === 'never') return 'set to stay awake';
   const kinds = deps.store.listChannelsForAgent(a.id).map((c) => c.kind);
   if (kinds.some((k) => k !== 'telegram')) return 'on Discord or Slack (nothing queues their messages)';
+  return undefined;
+}
+
+/** Why this agent may not sleep right now, or undefined when it may. */
+export async function hibernateBlocker(deps: HibernateDeps, a: Agent, now: number, afterMs: number): Promise<string | undefined> {
+  const settled = settledBlocker(deps, a);
+  if (settled) return settled;
   // The idle clock: the newest of its conversations and its last wake — a
   // woken agent gets the whole idle period again, restart or no restart.
   // A read that failed is not "no activity": falling back to the record's own
@@ -72,7 +83,17 @@ export async function hibernateBlocker(deps: HibernateDeps, a: Agent, now: numbe
   return undefined;
 }
 
-export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string): Promise<Agent> {
+/** The sweep's choice no longer holds once the lock is taken: it stays up, and there is nothing to report. */
+class NoLongerSleepy extends Error {}
+
+/** Agents whose bedtime mark this process is still reading: the wake poll leaves their placeholder alone. */
+const markPending = new Set<string>();
+
+/**
+ * Put an agent to sleep. `opts.idle`: the idle sweep's, so the settings it
+ * judged before its activity and task reads are judged again under the lock.
+ */
+export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string, opts: { idle?: boolean } = {}): Promise<Agent> {
   const provider = deps.providerFor(a.hostId);
   // The record first, the container second: a crash between the two used to
   // leave a stopped container the wake poll never looked at (30th audit). And
@@ -86,11 +107,20 @@ export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string)
   // Bedtime, by the clock Telegram dates messages with (seconds): what was
   // sent from now on is mail even if it is already waiting when the mark is
   // read, after the stop (#98).
+  // One time for bedtime and the record: a restart before the real mark
+  // recovers it by this record's time (telegramHasMail, #218).
   let bedtime = 0;
+  let sleptAt = '';
   await whileBusy(a.id, async () => {
-    bedtime = Math.floor(Date.now() / 1000);
+    // The sweep read the settings before its awaits: "Never sleep" chosen
+    // meanwhile used to lose to it and the agent was stopped anyway (#219).
+    const blocker = opts.idle ? settledBlocker(deps, deps.store.getAgent(a.id) ?? now, true) : undefined;
+    if (blocker) throw new NoLongerSleepy(blocker);
+    const t = Date.now();
+    bedtime = Math.floor(t / 1000);
+    sleptAt = new Date(t).toISOString();
     deps.store.setAgentState(a.id, 'STOPPED');
-    deps.store.setHibernated(a.id, new Date().toISOString(), Number.MAX_SAFE_INTEGER);
+    deps.store.setHibernated(a.id, sleptAt, Number.MAX_SAFE_INTEGER);
     try {
       await provider.stop(now.runtimeRef!);
     } catch (err) {
@@ -106,17 +136,18 @@ export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string)
   // Until the real mark is known, nothing counts as mail: a wake poll in
   // this gap saw the unconfirmed update as new, woke the agent, and the
   // write below then marked a RUNNING agent asleep (night review).
-  deps.store.setHibernated(a.id, new Date().toISOString(), Number.MAX_SAFE_INTEGER);
+  deps.store.setHibernated(a.id, sleptAt, Number.MAX_SAFE_INTEGER);
   // A message that came in between the stop and this read used to become the
   // mark, "already handled", and could not wake the agent. Only what was sent
   // before bedtime counts as the gateway's unconfirmed batch; an update with
   // no date of its own (a button press) is taken to be part of it.
-  const waiting = await telegramWaitingUpdates(deps, a);
-  const before = (waiting ?? []).filter((u) => u.date === undefined || u.date < bedtime);
-  const mark = before.length ? Math.max(0, ...before.map((u) => u.id)) : 0;
+  markPending.add(a.id);
+  let waiting: Array<{ id: number; date?: number }> | undefined;
+  try { waiting = await telegramWaitingUpdates(deps, a); } finally { markPending.delete(a.id); }
+  const mark = markBefore(waiting, bedtime);
   const still = deps.store.getAgent(a.id);
   if (still?.state !== 'STOPPED' || !still.hibernatedAt) return still ?? a;
-  deps.store.setHibernated(a.id, new Date().toISOString(), mark);
+  deps.store.setHibernated(a.id, sleptAt, mark);
   deps.log(a.id)('agent.hibernated', { why });
   return deps.store.getAgent(a.id)!;
 }
@@ -133,9 +164,10 @@ export async function hibernateSweep(deps: HibernateDeps, now = Date.now(), afte
       const blocker = await hibernateBlocker(deps, a, now, afterMs);
       if (blocker) continue;
       try {
-        await hibernateAgent(deps, a, `quiet for ${Math.round(afterMs / 60_000)} min`);
+        await hibernateAgent(deps, a, `quiet for ${Math.round(afterMs / 60_000)} min`, { idle: true });
         out.push(a.id);
       } catch (err) {
+        if (err instanceof NoLongerSleepy) continue;
         deps.log(a.id)('hibernate.failed', { error: err instanceof Error ? err.message : String(err) });
       }
     }
@@ -230,11 +262,8 @@ export function resetHibernateState(): void { refusedTokens.clear(); waking.clea
  * here.) Ask for a page, not one: with limit=1 the answer was always the
  * oldest waiting update — the bedtime mark itself — and ten newer messages
  * behind it were invisible until Telegram expired it a day later (30th
- * audit). Every waiting id is what this returns.
+ * audit). Every waiting update is what telegramWaitingUpdates returns.
  */
-async function telegramWaitingIds(deps: HibernateDeps, a: Agent): Promise<number[] | undefined> {
-  return (await telegramWaitingUpdates(deps, a))?.map((u) => u.id);
-}
 /** getUpdates' page size: a full page may have more behind it. */
 const PAGE = 100;
 /** When an update was sent (or edited), in Telegram's seconds; undefined for one with no date of its own. */
@@ -273,6 +302,11 @@ async function telegramWaitingUpdates(deps: HibernateDeps, a: Agent): Promise<Ar
     return undefined;
   }
 }
+/** The bedtime mark: the newest update sent before bedtime (or with no date), 0 when none. */
+function markBefore(waiting: Array<{ id: number; date?: number }> | undefined, bedtime: number): number {
+  const before = (waiting ?? []).filter((u) => u.date === undefined || u.date < bedtime);
+  return before.length ? Math.max(0, ...before.map((u) => u.id)) : 0;
+}
 /**
  * How far below the bedtime mark an update may sit and still be one that was
  * already waiting then: the gateway's last batch, unconfirmed, is at most a
@@ -286,15 +320,23 @@ const MARK_BATCH = 100;
  * can sit BELOW the mark — and a sleeper waited for it forever (2026-09-30).
  */
 export async function telegramHasMail(deps: HibernateDeps, a: Agent): Promise<boolean> {
-  const ids = await telegramWaitingIds(deps, a);
-  const waiting = ids?.length ? Math.max(0, ...ids) : undefined;
+  // While hibernateAgent reads the mark nothing is mail (it writes the mark).
+  if (a.hibernateMark === Number.MAX_SAFE_INTEGER && markPending.has(a.id)) return false;
+  const updates = await telegramWaitingUpdates(deps, a);
+  const ids = updates?.map((u) => u.id);
   // The placeholder mark outlived its sleep (a restart between it and the
-  // real mark): what waits now becomes the mark, or the agent never woke on
-  // a message again (regression review, 2026-09-28).
+  // real mark): the mark is found as bedtime finds it, by the sleep's
+  // recorded time, or the agent never woke on a message again (regression
+  // review, 2026-09-28). Everything waiting used to become the mark, so the
+  // first message sent after bedtime was taken as handled and woke nothing
+  // (#218): one sent after the recorded time is mail now.
   if (a.hibernateMark === Number.MAX_SAFE_INTEGER) {
     const now = deps.store.getAgent(a.id);
-    if (now?.hibernatedAt && now.hibernateMark === Number.MAX_SAFE_INTEGER) deps.store.setHibernated(a.id, now.hibernatedAt, waiting ?? 0);
-    return false;
+    if (!now?.hibernatedAt || now.hibernateMark !== Number.MAX_SAFE_INTEGER) return false;
+    // An unreadable time: every dated update is mail (wake rather than miss one).
+    const bedtime = Math.floor((Date.parse(now.hibernatedAt) || 0) / 1000);
+    deps.store.setHibernated(a.id, now.hibernatedAt, markBefore(updates, bedtime));
+    return (updates ?? []).some((u) => u.date !== undefined && u.date >= bedtime);
   }
   if (!ids?.length) return false;
   // A full page may hide newer mail behind it: the page always starts at the

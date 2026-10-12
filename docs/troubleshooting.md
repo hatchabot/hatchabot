@@ -1192,6 +1192,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/api/routes.ts` — `'/v1/agents/:id/hibernate'`
 
+### A sleeping agent did not wake for the first message after the service restarted
+- **Check:** the service restarted within seconds of `agent.hibernated` on the timeline; the first Telegram message sent after that waits unanswered until another message comes or the agent is started.
+- **Cause:** a restart between the stop and the reading of what was already waiting left a placeholder mark. The next wake check took everything waiting then, including messages sent after bedtime, as already handled.
+- **Fix:** upgrade: the mark is recovered by the time the agent went to sleep, so a message sent after it wakes the agent. On older releases send another message or start the agent.
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/orchestrator/hibernate.ts` — `telegramHasMail`, `markBefore`
+
+### An agent set to "Never sleep" was put to sleep anyway
+- **Check:** `agent.hibernated` on the timeline, by the idle sweep (`quiet for … min`), seconds after its sleep setting was changed to never.
+- **Cause:** the idle sweep read the setting before it read the agent's activity and tasks, and stopped it without looking again.
+- **Fix:** upgrade: the setting is judged again just before the stop. Start the agent; it stays up.
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/orchestrator/hibernate.ts` — `hibernateAgent`, `settledBlocker`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")

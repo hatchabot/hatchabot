@@ -307,6 +307,57 @@ describe('the 2026-10-10 workflow audit', () => {
   });
 });
 
+describe('the 2026-10-11 workflow audit', () => {
+  afterEach(() => resetHibernateState());
+
+  it('a restart in the placeholder window: a message sent after bedtime wakes it, the batch from before does not (#218)', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { botToken: 'fake-token-R' });
+    const id2 = await seedRunningAgent(w, { id: 'r2', slug: 'second', accountId: 'secondbot', botToken: 'fake-token-S' });
+    const sleptAt = Date.now() - 60_000;
+    const sec = Math.floor(sleptAt / 1000);
+    // Stopped and marked asleep, then the process died before the real mark was written.
+    for (const x of [id, id2]) {
+      w.store.setAgentState(x, 'STOPPED');
+      w.store.setHibernated(x, new Date(sleptAt).toISOString(), Number.MAX_SAFE_INTEGER);
+    }
+    const byToken: Record<string, unknown[]> = {
+      // The gateway's last, unconfirmed message and the first one sent after bedtime.
+      'fake-token-R': [
+        { update_id: 700, message: { message_id: 1, date: sec - 30, text: 'thanks' } },
+        { update_id: 701, message: { message_id: 2, date: sec + 20, text: 'one more thing' } },
+      ],
+      // Only the unconfirmed batch (a message and a button press): nothing to wake for.
+      'fake-token-S': [{ update_id: 800, message: { message_id: 3, date: sec - 10 } }, { update_id: 801, callback_query: { id: 'q1', data: 'ok' } }],
+    };
+    const deps = depsFor(w, { fetchImpl: (async (u: string | URL | Request) =>
+      new Response(JSON.stringify({ ok: true, result: byToken[/bot([^/]+)\//.exec(String(u))![1]!] ?? [] }))) as typeof fetch });
+    expect(await wakeSweep(deps)).toEqual([id]);
+    expect(w.store.getAgent(id)!.state).toBe('RUNNING');
+    expect(w.store.getAgent(id2)!.hibernateMark).toBe(801);
+    expect(await wakeSweep(deps)).toEqual([]);
+    // A newer message for the second one is mail by the mark recovered.
+    byToken['fake-token-S']!.push({ update_id: 802, message: { message_id: 4, date: sec + 90 } });
+    expect(await wakeSweep(deps)).toEqual([id2]);
+  });
+
+  it('"Never sleep" chosen while the idle sweep reads activity keeps the agent up (#219)', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w);
+    const deps = depsFor(w, { lastActiveFor: async () => {
+      w.store.setHibernatePolicy(id, 'never');
+      return new Date(Date.now() - 10 * HOUR).toISOString();
+    } });
+    expect(await hibernateSweep(deps, Date.now(), 6 * HOUR)).toEqual([]);
+    expect(w.store.getAgent(id)!.state).toBe('RUNNING');
+    expect(w.store.getAgent(id)!.hibernatedAt).toBeFalsy();
+    expect(deps.events).not.toContainEqual([id, 'hibernate.failed']);
+    // Hibernate by hand is the owner's own ask: it still works.
+    await hibernateAgent(deps, w.store.getAgent(id)!, 'by hand');
+    expect(w.store.getAgent(id)!.state).toBe('STOPPED');
+  });
+});
+
 describe('the 30th audit: by hand', () => {
   it('the management agent cannot be put to sleep, by hand either', async () => {
     const w = await makeWorld();
