@@ -897,6 +897,10 @@ export class Store {
       `ALTER TABLE cli_tokens ADD COLUMN scope TEXT`,
       `ALTER TABLE agents ADD COLUMN applied_profile_id TEXT`,
       `ALTER TABLE agents ADD COLUMN applied_model TEXT`,
+      // When the applied source last changed, and from which: usage before
+      // that instant is the old source's (sourceUsage.ts).
+      `ALTER TABLE agents ADD COLUMN applied_profile_prev TEXT`,
+      `ALTER TABLE agents ADD COLUMN applied_profile_at TEXT`,
       `ALTER TABLE agents ADD COLUMN migrated_to TEXT`,
       `ALTER TABLE agents ADD COLUMN shared_paths TEXT`,
       `ALTER TABLE agents ADD COLUMN gateway_port INTEGER`,
@@ -4842,10 +4846,16 @@ export class Store {
     ).map(rowToAgent);
   }
 
-  setAgentApplied(id: string, aiProfileId: string, model: string): void {
+  setAgentApplied(id: string, aiProfileId: string, model: string, at = new Date().toISOString()): void {
+    // A change of source also records when, and from which: the usage sampler
+    // files calls before that instant under the old source, so the transcript
+    // rewrite of the last hour doesn't count it under both.
     this.db
-      .prepare(`UPDATE agents SET applied_profile_id = ?, applied_model = ? WHERE id = ?`)
-      .run(aiProfileId, model, id);
+      .prepare(`UPDATE agents SET
+         applied_profile_prev = CASE WHEN applied_profile_id IS NOT NULL AND applied_profile_id != @p THEN applied_profile_id ELSE applied_profile_prev END,
+         applied_profile_at = CASE WHEN applied_profile_id IS NOT NULL AND applied_profile_id != @p THEN @at ELSE applied_profile_at END,
+         applied_profile_id = @p, applied_model = @m WHERE id = @id`)
+      .run({ p: aiProfileId, m: model, at, id });
   }
 
   /** Record the current peer grant as installed. ONLY a provision/rebuild may
@@ -5834,6 +5844,8 @@ function rowToAgent(r: any): Agent {
     sharedPaths: r.shared_paths ? safeJson(r.shared_paths, undefined) : undefined,
     appliedProfileId: r.applied_profile_id ?? undefined,
     appliedModel: r.applied_model ?? undefined,
+    appliedProfilePrevId: r.applied_profile_prev ?? undefined,
+    appliedProfileAt: r.applied_profile_at ?? undefined,
     gatewayPort: r.gateway_port ?? undefined,
     gatewayToken: r.gateway_token ?? undefined,
     group: r.group_name ?? undefined,

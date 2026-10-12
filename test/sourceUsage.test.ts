@@ -69,6 +69,37 @@ describe('the log cursor, and samples that overlap (#107, #108, #109)', () => {
     expect(store.modelCallHoursFor('max', '2026-09-15T15').map((h) => [h.agentId, h.failed])).toEqual([['a', 1]]);
     expect(store.modelCallHoursFor('key2', '2026-09-15T15')).toEqual([]);
   });
+
+  it('after a rebuild that switches source, calls before the switch stay the old source\'s and are not counted under both', async () => {
+    const { store, provider } = await world();
+    store.insertAIProfile({ id: 'key2', ownerId: OWNER, name: 'API key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/key2', createdAt: 'now' } as any);
+    store.setAgentApplied('a', 'max', 'claude-opus-4-8');
+    const deps = { store, providerFor: () => provider };
+    provider.modelCallLines = '';
+    // Calls in the 15:30 and 15:50 slots, on the plan.
+    provider.usage.set('*', { ...totalOf(1000), callSlots: { '2026-09-15T15:35:00.000Z': 3, '2026-09-15T15:55:00.000Z': 2 } });
+    await sampleAgentUsage(deps, store.getAgent('a')!, Date.parse('2026-09-15T16:00:00Z'));
+    // The rebuild switches it to the key at 16:02; it calls once more after (the 16:05 slot), and is refused once.
+    store.setAgentAIProfile('a', 'key2');
+    store.setAgentApplied('a', 'key2', 'claude-opus-4-8', '2026-09-15T16:02:00.000Z');
+    expect(store.getAgent('a')).toMatchObject({ appliedProfileId: 'key2', appliedProfilePrevId: 'max', appliedProfileAt: '2026-09-15T16:02:00.000Z' });
+    provider.usage.set('*', { ...totalOf(1500), callSlots: { '2026-09-15T15:35:00.000Z': 3, '2026-09-15T15:55:00.000Z': 2, '2026-09-15T16:10:00.000Z': 1 } });
+    provider.modelCallLines = [line('2026-09-15T16:01:00.000Z', 429), line('2026-09-15T16:06:00.000Z', 429)].join('\n');
+    await sampleAgentUsage(deps, store.getAgent('a')!, Date.parse('2026-09-15T16:12:00Z'));
+    await sampleAgentUsage(deps, store.getAgent('a')!, Date.parse('2026-09-15T16:20:00Z')); // a repeat changes nothing
+    const slots = (p: string) => store.modelCallSlotsFor(p, '2026-09-15T15').filter((r) => r.agentId === 'a' && (r.ok || r.limited)).map((r) => [r.slot, r.ok, r.limited]).sort();
+    expect(slots('max')).toEqual([['2026-09-15T15:30', 3, 0], ['2026-09-15T15:50', 2, 0], ['2026-09-15T16:00', 0, 1]]);
+    expect(slots('key2')).toEqual([['2026-09-15T16:05', 1, 1]]);
+    expect(store.limitHitsFor('max', '2026-09-15T15').map((h) => h.at)).toEqual(['2026-09-15T16:01:00.000Z']);
+    expect(store.limitHitsFor('key2', '2026-09-15T15').map((h) => h.at)).toEqual(['2026-09-15T16:06:00.000Z']);
+    // Hours too: the 16 hour is split between them, not counted twice.
+    const hours = (p: string) => store.modelCallHoursFor(p, '2026-09-15T15').filter((r) => r.agentId === 'a').map((r) => [r.hour, r.ok]).sort();
+    expect(hours('max')).toEqual([['2026-09-15T15', 5], ['2026-09-15T16', 0]]);
+    expect(hours('key2')).toEqual([['2026-09-15T16', 1]]);
+    // A rebuild that keeps the source keeps the switch's record.
+    store.setAgentApplied('a', 'key2', 'claude-opus-4-8', '2026-09-15T17:00:00.000Z');
+    expect(store.getAgent('a')!.appliedProfileAt).toBe('2026-09-15T16:02:00.000Z');
+  });
 });
 
 class MemSecrets implements SecretStore {

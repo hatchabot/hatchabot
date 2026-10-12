@@ -102,6 +102,10 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
   // The source the container runs: a switch saved but not yet rebuilt still
   // calls the old one, and its calls are that one's (#107).
   const source = a.appliedProfileId ?? a.aiProfileId;
+  // …and calls from before the rebuild that switched it are the old source's:
+  // the transcript rewrite of the last hour counted them under both.
+  const switchedAt = a.appliedProfilePrevId && a.appliedProfilePrevId !== source ? a.appliedProfileAt : undefined;
+  const sourceAt = (iso: string): string => switchedAt && iso < switchedAt ? a.appliedProfilePrevId! : source;
   const nowIso = new Date(now).toISOString();
   let calls = 0, limited = 0;
   const runtimeRef = a.runtimeRef;
@@ -113,19 +117,22 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
     const text = await provider.modelCallLog(runtimeRef, since);
     const sinceKey = logKey(since);
     const fresh = parseModelCalls(text).filter((c) => c.key > sinceKey);
-    const buckets = new Map<string, { ok: number; limited: number; failed: number }>();
-    const slots = new Map<string, { ok: number; limited: number; failed: number }>();
+    type Counts = Map<string, { ok: number; limited: number; failed: number }>;
+    const bySource = new Map<string, { buckets: Counts; slots: Counts }>();
     let lastOk: string | undefined, lastLimited: string | undefined, maxKey = sinceKey;
     for (const c of fresh) {
-      const b = buckets.get(hourOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
-      const sb = slots.get(slotOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
+      const src = sourceAt(c.at);
+      const per = bySource.get(src) ?? { buckets: new Map(), slots: new Map() };
+      bySource.set(src, per);
+      const b = per.buckets.get(hourOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
+      const sb = per.slots.get(slotOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
       // Successes are counted from the transcripts below: OpenClaw logs only
       // those slower than a second, so the log missed 10–28% (review, 2026-09-29).
       if (c.status >= 200 && c.status < 300) { lastOk = c.at; }
-      else if (c.status === 429) { b.limited++; sb.limited++; lastLimited = c.at; store.addLimitHit(a.id, source, c.at, c.model); limited++; }
+      else if (c.status === 429) { b.limited++; sb.limited++; lastLimited = c.at; store.addLimitHit(a.id, src, c.at, c.model); limited++; }
       else { b.failed++; sb.failed++; }
-      buckets.set(hourOf(c.at), b);
-      slots.set(slotOf(c.at), sb);
+      per.buckets.set(hourOf(c.at), b);
+      per.slots.set(slotOf(c.at), sb);
       if (c.key > maxKey) maxKey = c.key;
     }
     // The loop lines the same read kept (a chat-app message retried past its
@@ -133,13 +140,15 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
     // re-read window adds nothing twice (keyed by kind, event and time).
     const loops = parseLoopLines(text);
     if (loops.length) store.addLoopMarks(a.id, loops);
-    store.addModelCallHours(a.id, source, buckets);
-    store.addModelCallSlots(a.id, source, slots);
+    for (const [src, per] of bySource) {
+      store.addModelCallHours(a.id, src, per.buckets);
+      store.addModelCallSlots(a.id, src, per.slots);
+    }
     calls += fresh.length;
     // No new calls: still move the cursor on (minus a little), so an idle agent
     // isn't rescanned from a week ago every pass.
     const next = fresh.length ? maxKey : Date.parse(since) >= now - 5 * 60_000 ? sinceKey : new Date(now - 5 * 60_000).toISOString().replace('Z', '000000Z');
-    store.setUsageCursor(a.id, next, lastOk, lastLimited, source);
+    store.setUsageCursor(a.id, next, lastOk, lastLimited, lastOk ? sourceAt(lastOk) : source);
   } catch (err) {
     deps.log?.('usage.sample_log_failed', { agentId: a.id, error: String((err as Error).message ?? err).slice(0, 200) });
   }
@@ -151,15 +160,15 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
     if (store.latestTokenTotal(a.id) === undefined && u.recent?.length) {
       let running = u.totalTokens - u.recent.reduce((s, [, t]) => s + t, 0);
       let prevAt = new Date(Date.parse(u.recent[0]![0]) - 300_000).toISOString();
-      store.addTokenSample(a.id, source, prevAt, running);
+      store.addTokenSample(a.id, sourceAt(prevAt), prevAt, running);
       for (const [at, t] of u.recent) {
         // Each slot's own start too, so a chart that spreads a rise between
         // two readings keeps it in its five minutes, not the idle hours
         // before it (review, 2026-09-29).
         const start = new Date(Date.parse(at) - 300_000).toISOString();
-        if (start > prevAt && start < nowIso) store.addTokenSample(a.id, source, start, running);
+        if (start > prevAt && start < nowIso) store.addTokenSample(a.id, sourceAt(start), start, running);
         running += t;
-        if (at < nowIso) { store.addTokenSample(a.id, source, at, running); prevAt = at; }
+        if (at < nowIso) { store.addTokenSample(a.id, sourceAt(at), at, running); prevAt = at; }
       }
     }
     store.addTokenSample(a.id, source, nowIso, u.totalTokens);
@@ -182,8 +191,18 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
       }
       const through = store.callsThrough(a.id);
       const from = through ? slotOf(new Date(Date.parse(`${through}:00Z`) - 3_600_000).toISOString()) : '';
-      store.setModelCallOk(a.id, source, ok, from, !through);
-      if (u.lastActive) store.noteUsageOk(a.id, u.lastActive, source);
+      // A slot is filed whole under the source that ran when it began. While
+      // the switch is inside the rewritten range, the old source's slots are
+      // rewritten too (set, not added), and the new one gets only its own.
+      if (switchedAt && switchedAt >= from.slice(0, 13)) { // the rewrite starts at from's hour
+        const prev = new Map<string, number>(), cur = new Map<string, number>();
+        for (const [sl, n] of ok) (sourceAt(`${sl}:00.000Z`) === source ? cur : prev).set(sl, n);
+        // The last write sets how far the counts go: the new source's, unless it has none yet.
+        const parts: Array<[string, Map<string, number>]> = [[a.appliedProfilePrevId!, prev], [source, cur]];
+        if (!cur.size) parts.reverse();
+        parts.forEach(([p, m], i) => store.setModelCallOk(a.id, p, m, from, !through && i === 0));
+      } else store.setModelCallOk(a.id, source, ok, from, !through);
+      if (u.lastActive) store.noteUsageOk(a.id, u.lastActive, sourceAt(u.lastActive));
     }
     const priced = u.byModel.filter((m) => m.tokens > 0);
     if (u.totalTokens > 0 && priced.length) {

@@ -1874,6 +1874,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/sourceUsage.ts` — `sampleAgentUsage`, `logKey`
 
+### After a rebuild that switched an agent's AI source, its last hour of calls shows under both sources
+- **Check:** Usage for the old and the new source both show the same calls in the hour before the rebuild (the agent's requests are about doubled across the two).
+- **Cause:** before v2.162.0 each sample rewrites the last hour of successful calls from the transcripts, and filed all of it under the source running now, while the old source still had those calls.
+- **Fix:** upgrade. A rebuild that changes the source records when it did; calls before that time stay with the old source and only later ones go to the new source. Counts from before the upgrade are not corrected.
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/orchestrator/sourceUsage.ts` — `sampleAgentUsage`; `src/store/store.ts` — `setAgentApplied`
+
 ### The Cost view's figures stay on the old window after pressing another (1 hr, 1 day …)
 - **Check:** the pill is on the new window but the chips still show the old one's suffix (for example `/wk`), until the next poll five minutes later.
 - **Cause:** before v2.160.0 a pill pressed while the previous figures were still loading was dropped, and the discarded answer still counted as fresh.
