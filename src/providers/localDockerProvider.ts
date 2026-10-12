@@ -342,7 +342,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     // keys) goes in a 0600 file the docker client reads, never on its command
     // line: /proc/<pid>/cmdline is readable by every user on the machine, and
     // on a shared host those are other tenants (night review, 2026-09-28).
-    await this.#withEnvFile(spec.env, (flag) => this.#must([...args, ...flag, image, 'openclaw', 'gateway'], 'The agent runtime could not be created.'));
+    await this.#withEnvFile(spec.env, (flag, childEnv) => this.#must([...args, ...flag, image, 'openclaw', 'gateway'], 'The agent runtime could not be created.', childEnv));
 
     return { runtimeRef };
   }
@@ -1273,7 +1273,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     await this.#docker(['rm', '-f', name]);
     const routes = JSON.stringify(doormanRoutes({ opsPort: opts.opsPort, agentContainer, embedPort: opts.embedPort }));
     const alias = await this.hostAliasTarget();
-    const runDoorman = () => this.#withEnvFile(opts.doormanKey ? { DOORMAN_KEY: opts.doormanKey } : {}, (keyFlag) => this.#docker([
+    const runDoorman = () => this.#withEnvFile(opts.doormanKey ? { DOORMAN_KEY: opts.doormanKey } : {}, (keyFlag, childEnv) => this.#docker([
       'run', '-d', '--name', name,
       '--network', network, '--network-alias', DOORMAN_ALIAS,
       // Maps to this machine on every platform — the one thing the doorman may reach.
@@ -1288,7 +1288,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       ...keyFlag,
       '--entrypoint', 'node',
       this.image, '-e', doormanScript(),
-    ]));
+    ], undefined, childEnv));
     // A doorman of a previous install (the uninstall never knew it) may still
     // hold this console port: a MacBook reinstall failed on it (2026-09-25).
     // Only a doorman of THIS prefix that serves another agent is an orphan.
@@ -1861,28 +1861,33 @@ export class LocalDockerProvider implements RuntimeProvider {
   /**
    * Run `fn` with `--env-file <0600 file>` holding `env`; the file is gone
    * afterwards. A value an env file cannot carry (a line break: a PEM, a
-   * pretty-printed JSON credential) still goes as `-e`, as every value did
-   * before — refusing it failed the rebuild after the old container was
-   * already removed (regression review, 2026-09-28).
+   * pretty-printed JSON credential) goes as a bare `-e NAME`, which the docker
+   * client fills from its own environment: `fn` gets those values to run the
+   * client with. They were `-e NAME=value` arguments, readable by every user
+   * of the machine in /proc/<pid>/cmdline (#203); a process's environment is
+   * readable only by its own user. Refusing such a value failed the rebuild
+   * after the old container was already removed (regression review, 2026-09-28).
    */
-  async #withEnvFile<T>(env: Record<string, string>, fn: (flag: string[]) => Promise<T>): Promise<T> {
+  async #withEnvFile<T>(env: Record<string, string>, fn: (flag: string[], childEnv?: Record<string, string>) => Promise<T>): Promise<T> {
     const entries = Object.entries(env);
     if (!entries.length) return fn([]);
     const inFile = entries.filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && !/[\r\n\0]/.test(v));
-    const asArgs = entries.filter((e) => !inFile.includes(e)).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-    if (!inFile.length) return fn(asArgs);
+    const passed = entries.filter((e) => !inFile.includes(e));
+    const asArgs = passed.flatMap(([k]) => ['-e', k]);
+    const childEnv = passed.length ? Object.fromEntries(passed) : undefined;
+    if (!inFile.length) return fn(asArgs, childEnv);
     const dir = await mkdtemp(join(tmpdir(), 'hatchabot-env-'));
     const file = join(dir, 'env');
     try {
       await writeFile(file, inFile.map(([k, v]) => `${k}=${v}`).join('\n') + '\n', { mode: 0o600 });
-      return await fn(['--env-file', file, ...asArgs]);
+      return await fn(['--env-file', file, ...asArgs], childEnv);
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
     }
   }
 
-  async #must(args: string[], userMessage: string): Promise<ExecResult> {
-    const res = await this.#docker(args);
+  async #must(args: string[], userMessage: string, childEnv?: Record<string, string>): Promise<ExecResult> {
+    const res = await this.#docker(args, undefined, childEnv);
     if (res.code !== 0) {
       throw new ProviderError(
         `docker ${args[0]} failed: ${res.stderr.slice(-2000)}`,
@@ -1921,10 +1926,12 @@ export class LocalDockerProvider implements RuntimeProvider {
     });
   }
 
-  async #docker(args: string[], timeoutMs?: number): Promise<ExecResult> {
+  /** `childEnv`: values a bare `-e NAME` takes from the client's environment (#withEnvFile). */
+  async #docker(args: string[], timeoutMs?: number, childEnv?: Record<string, string>): Promise<ExecResult> {
     if (!(await this.reachable())) return { code: 1, stdout: '', stderr: `cannot connect: ${UNREACHABLE_WORDS}`, timedOut: true, unreachable: true };
     try {
       const { stdout, stderr } = await execFileP(this.docker, this.#argv(args), {
+        ...(childEnv ? { env: { ...process.env, ...childEnv } } : {}),
         maxBuffer: 8 * 1024 * 1024,
         // A hung daemon must fail this call, not freeze the control plane.
         timeout: timeoutMs ?? Number(process.env.HATCHABOT_DOCKER_TIMEOUT_MS ?? 60_000),

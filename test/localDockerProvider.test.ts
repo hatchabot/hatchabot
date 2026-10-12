@@ -281,6 +281,32 @@ exit 0
     }
   });
 
+  it('a value with line breaks reaches the container without appearing on the docker command line (#203)', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-envml-'));
+    const out = (n: string) => join(d, n);
+    const st = join(d, 'docker');
+    // The stub keeps what `create` was given: its arguments (NUL-separated, so a
+    // value with line breaks stays whole), the variable from its own
+    // environment, and the env file's contents.
+    writeFileSync(st, `#!/usr/bin/env bash
+if [ "$1" = create ]; then
+  printf '%s\\0' "$@" > ${JSON.stringify(out('args'))}
+  printf '%s' "\${SERVICE_KEY_JSON-unset}" > ${JSON.stringify(out('childenv'))}
+  prev=; for a in "$@"; do [ "$prev" = --env-file ] && cat "$a" > ${JSON.stringify(out('envfile'))}; prev=$a; done
+fi
+exit 0
+`, { mode: 0o755 });
+    const multiline = '{\n  "fixture": "line one",\n  "also": "fixture line two"\n}';
+    await new LocalDockerProvider({ docker: st, image: 'test-image:latest' })
+      .provision(spec({ env: { BRAVE_API_KEY: 'brave-fixture', SERVICE_KEY_JSON: multiline } }) as any);
+    const args = readFileSync(out('args'), 'utf8');
+    expect(args).not.toContain('fixture line two');
+    expect(args).not.toContain('brave-fixture');
+    expect(args).toContain('\0-e\0SERVICE_KEY_JSON\0'); // a bare -e: docker reads the value from its environment
+    expect(readFileSync(out('childenv'), 'utf8')).toBe(multiline);
+    expect(readFileSync(out('envfile'), 'utf8')).toBe('BRAVE_API_KEY=brave-fixture\n');
+  });
+
   it('runs with an init process, so orphaned grandchildren get reaped', async () => {
     await provider.provision(spec() as any);
     const create = argv().split('\n').find((l) => l.startsWith('create '));

@@ -2372,6 +2372,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.132.3`
 - **Code:** `src/orchestrator/consoleAccess.ts` — `gatewayCallAs`, `settled`
 
+### A multi-line credential (a PEM key, pretty-printed JSON) shows in `ps` while an agent is built
+- **Check:** during a build, `ps -ef | grep 'docker create'` shows `-e NAME=` followed by the value of an agent environment setting that spans several lines.
+- **Cause:** an env file cannot hold a line break, so such values went on the docker command line, which every user of the machine can read.
+- **Fix:** upgrade; such a value now goes as a bare `-e NAME` and the docker client reads it from its own environment. If the machine has other users, rotate a credential that was exposed this way.
+- **Fixed in:** `v2.162.0` (#203)
+- **Code:** `src/providers/localDockerProvider.ts` — `#withEnvFile`
+
 ## Audit fixes in v2.158.2
 
 ### An archived agent's old bot still answers, or two agents answer the same bot
