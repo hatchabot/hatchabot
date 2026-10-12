@@ -2,6 +2,51 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.162.0] — 2026-10-11
+
+Fixes for the 31 issues an automated review filed on GitHub (#198–#228), and for gaps left open in v2.160.0. Each fix has a test that failed before it, and a docs/troubleshooting.md entry.
+
+### Fixed
+
+#### Backlog from v2.160.0
+- After a rebuild that switches an agent's AI source, its last hour of calls is no longer counted under both sources.
+- An app waiting for a new agent, set up before v2.160.0, has its passwords and keys moved out of the database into the secret store when the service starts.
+- A console link (`#console=`) opened right after closing a console now opens it, instead of doing nothing.
+- A Google account list gog answers with `null` counts as unreadable, not empty (gog prints an empty list as `[]`), so a failed removal is never taken as done.
+- The deck's control-panel slide shows the current home screen.
+
+#### Snapshots, sleep, classes and upgrades
+- Restoring a snapshot now also removes a MEMORY.md (or other core file) that was created after the snapshot was taken.
+- A sleeping agent wakes for the first message after a service restart, and an agent set to "Never sleep" is no longer put to sleep by a sweep already under way.
+- Setting a class's memory cap again after it was refused now really retries it.
+- Upgrades keep their lock however long they take, and the macOS service installs from folders whose path contains `&` or quotes.
+- Tidying `.env` no longer changes a value that is set by both an `export` line and a plain line.
+- Removing a member also clears them from app-wide and group allow lists, and the home screen no longer briefly shows removed sources, machines or answered pairing requests.
+
+#### Privacy checks and problem reports
+- Report a problem masks the keys and settings of every agent whose failures a report includes, not only the agent it's about.
+- Credentials written as `password=$…` or `password = …` are now masked in reports and failure messages.
+- A long report no longer keeps the first part of a credential where text was cut to fit.
+- Reports hide private IPv6 addresses (such as a runner's `fd…` address) the way they already hid private IPv4 ones.
+- The GitHub privacy check now reads every commit in a change, a branch's first commit, and the text inside binary files. A git command that fails makes the check "incomplete" instead of passing.
+- The daily privacy watch reads every release note, so an edit to an old release's notes is caught.
+
+#### Sign-in and accounts
+- Two second-factor removals sent at the same moment can no longer leave an owner with no second factor while public access is on.
+- A password change or new recovery code checked with the old password no longer overwrites a reset made at the same moment.
+- Google sign-in: creating an account with an email and password now sends the verification email, with a "Send the link again" button. Several people signing in right after a restart no longer get "could not be verified".
+- If Sign out cannot reach Hatchabot, the page now says you are still signed in instead of quietly staying signed in.
+- `restart.sh` and upgrades now check a service that serves HTTPS itself or listens on one address correctly, instead of rolling the upgrade back.
+- Refused cross-site requests no longer write invitation codes into the service log.
+
+#### Other machines, git sources, imports and backups
+- Calls to another Hatchabot server now check the address they actually connect to, and never follow a redirect. A name that points back at this machine is refused, and a move's archive can't be sent elsewhere.
+- A git source's SSH host key is trusted on first contact only; a changed key is refused, with steps to check it.
+- Multi-line credentials (PEM keys, JSON) no longer show on the docker command line while an agent is built.
+- Restores and imports: a damaged file is refused before anything is deleted, and a timed-out import reports its failure only after its container is gone, so the rollback has the volume to itself.
+- Backups: two runs can no longer both take over a killed run's lock, and a runner backup that times out has its container removed.
+- A Files download that receives nothing for two minutes fails instead of hanging.
+
 ## [2.161.0] — 2026-10-11
 
 ### Changed
