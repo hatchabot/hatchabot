@@ -21,8 +21,9 @@
  *
  * What it reads, for a pull request (base...head) or a push to main
  * (before..after): every added line, the text inside every changed binary
- * file (textInside), every changed file's path, each commit's
- * message, author and committer, and the pull request's title, body and branch
+ * file (textInside) and every changed file's path, in the end result and in
+ * each commit on its own (a value added and taken out again stays public in
+ * the history); each commit's message, author and committer, and the pull request's title, body and branch
  * name. The identities in scripts/privacy-identity.txt — the owner's, already
  * public on every commit — are not findings as author, committer or in a
  * Co-authored-by/Signed-off-by trailer; anywhere else they still are. A line
@@ -39,8 +40,8 @@
  * secrets as written.
  *
  * Exit 0: clean; 1: found something; 2: usage; 3: incomplete — no secret (a
- * pull request from a fork gets none), a garbled one, a range or a GitHub
- * answer it could not read. Never a pass.
+ * pull request from a fork gets none), a garbled one, a range, a git command or
+ * a GitHub answer that failed. Never a pass.
  */
 import { createHmac } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -248,50 +249,95 @@ export function rangeOf(event, name, cwd) {
   return { why: `${name || '(no event)'} is not a pull request or a push` };
 }
 
-/** Everything a pull request or push adds: hits and counts. */
+/** Files a `--numstat -z` listing names, and which of them are binary ("-\t-\t"). */
+const numstatFiles = (out) => {
+  const all = String(out).split('\0').map((e) => e.replace(/^\n+/, '')).filter(Boolean);
+  return { names: all.map((e) => e.split('\t').slice(2).join('\t')), binary: all.filter((e) => e.startsWith('-\t-\t')).map((e) => e.slice(4)) };
+};
+/** Most commits read one by one; a range past it is incomplete, not partly clean. */
+const MAX_COMMITS = 1000;
+
+/**
+ * Everything a pull request or push adds: hits, counts, and `gaps` — what
+ * could not be read, which makes the result incomplete, never clean. A git
+ * command that failed read as an empty diff, so the scan passed on nothing
+ * (#206). Both the end result (base...head) and each commit's own changes are
+ * read: a value added in one commit and removed in the next is gone from the
+ * end result, but still public in the history (#207).
+ */
 export function scanRange(cwd, r, fp) {
   const EMPTY = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
-  const from = r.base ?? EMPTY;
+  // A root commit against the empty tree itself: `EMPTY...head` asks for a merge base a tree cannot have (#206).
+  const between = r.base ? [`${r.base}...${r.head}`] : [EMPTY, r.head];
   const range = r.base ? [`${r.base}..${r.head}`] : ['-1', r.head];
-  const hits = [];
+  const hits = [], gaps = [];
+  const ok = (what, x) => {
+    if (!x.error && x.status === 0) return true;
+    gaps.push(`${what}: git could not read it (${String(x.stderr || x.error?.message || '').trim().split('\n')[0] || `exit ${x.status}`})`);
+    return false;
+  };
+  const run = (what, ...a) => { const x = git(cwd, ...a); return ok(what, x) ? x.stdout : ''; };
+  const blob = (what, spec) => { const x = spawnSync('git', ['-C', cwd, 'cat-file', 'blob', spec], { maxBuffer: 1 << 30 }); return ok(what, x) ? x.stdout : null; };
   // The identities already public on the trusted side; the file as the change leaves it.
   const published = r.base ? publishedIdentities(cwd, [r.base]) : new Set();
   const idFile = git(cwd, 'show', `${r.head}:${IDENTITY_FILE}`);
   const allowed = allowedIdentities(idFile.status === 0 ? idFile.stdout : '', published);
 
   // Paths first: a file whose name is private is not named again beside its lines.
-  const paths = git(cwd, 'diff', '--name-only', '--no-renames', '--diff-filter=d', `${from}...${r.head}`).stdout.split('\n').filter(Boolean);
-  const privatePath = new Map();
-  for (const p of paths) {
+  const privatePath = new Map(), named = new Set();
+  const checkName = (p) => {
+    if (named.has(p)) return;
+    named.add(p);
     const h = scanText(p, 'a changed file\'s name', fp, { lines: false });
     if (h.length) { privatePath.set(p, `(a file whose name is private, '${h[0].shown}')`); hits.push(...h); }
-  }
+  };
   const shown = (p) => privatePath.get(p) ?? p;
-
-  const diff = git(cwd, 'diff', '--unified=0', '--no-color', '--no-ext-diff', '--no-renames', `${from}...${r.head}`).stdout;
-  let file = '?', line = 0, added = 0, binary = 0;
-  for (const l of diff.split('\n')) {
-    if (l.startsWith('+++ ')) { file = l.slice(4).replace(/^b\//, ''); continue; }
-    if (l.startsWith('--- ')) continue;
-    if (/^Binary files .* differ$/.test(l)) continue; // read whole, below
-    const h = /^@@ -\S+ \+(\d+)/.exec(l);
-    if (h) { line = Number(h[1]); continue; }
-    if (l.startsWith('+')) {
-      added++;
-      const text = file === IDENTITY_FILE ? withoutAllowedLines(l.slice(1), allowed) : l.slice(1);
-      for (const x of scanLine(text, fp)) hits.push({ ...x, where: shown(file), line });
-      line++;
+  // Each value once per file: a hit in the end result is not named again for the commit that added it.
+  const seen = new Set();
+  const once = (h, file) => { const k = `${h.cat}|${h.shown}|${file}`; if (!seen.has(k)) { seen.add(k); hits.push(h); } };
+  /** The added lines of a --unified=0 patch, scanned; their count. */
+  const scanPatch = (diff, where) => {
+    let file = '?', line = 0, n = 0;
+    for (const l of diff.split('\n')) {
+      if (l.startsWith('+++ ')) { file = l.slice(4).replace(/^b\//, ''); continue; }
+      if (l.startsWith('--- ')) continue;
+      if (/^Binary files .* differ$/.test(l)) continue; // read whole, with textInside
+      const h = /^@@ -\S+ \+(\d+)/.exec(l);
+      if (h) { line = Number(h[1]); continue; }
+      if (l.startsWith('+')) {
+        n++;
+        const text = file === IDENTITY_FILE ? withoutAllowedLines(l.slice(1), allowed) : l.slice(1);
+        for (const x of scanLine(text, fp)) once({ ...x, where: where(file), line }, file);
+        line++;
+      }
     }
-  }
-  // Files git treats as binary: the text inside them, as the pre-push check reads it (they were skipped here).
-  const numstat = git(cwd, 'diff', '--numstat', '-z', '--no-renames', '--diff-filter=d', `${from}...${r.head}`).stdout.split('\0');
-  for (const f of numstat.filter((e) => e.startsWith('-\t-\t')).map((e) => e.slice(4))) {
-    binary++;
-    const data = spawnSync('git', ['-C', cwd, 'cat-file', 'blob', `${r.head}:${f}`], { maxBuffer: 1 << 30 }).stdout;
-    hits.push(...scanText(textInside(data), `${shown(f)} (text inside a binary file)`, fp, { lines: false }));
+    return n;
+  };
+  // Files git treats as binary: the text inside them, as the pre-push check reads it.
+  const scanBinary = (f, rev, where) => {
+    const data = blob(`${f} at ${rev.slice(0, 7)}`, `${rev}:${f}`);
+    if (data) for (const h of scanText(textInside(data), where, fp, { lines: false })) once(h, f);
+  };
+
+  // The end result.
+  const paths = run('the changed file names', 'diff', '--name-only', '--no-renames', '--diff-filter=d', ...between).split('\n').filter(Boolean);
+  for (const p of paths) checkName(p);
+  const added = scanPatch(run('the added lines', 'diff', '--unified=0', '--no-color', '--no-ext-diff', '--no-renames', ...between), shown);
+  const bins = numstatFiles(run('the binary files', 'diff', '--numstat', '-z', '--no-renames', '--diff-filter=d', ...between)).binary;
+  for (const f of bins) scanBinary(f, r.head, `${shown(f)} (text inside a binary file)`);
+
+  // Each commit's own changes. A merge adds nothing of its own here: its sides are commits in the range.
+  const own = run('the commits', 'rev-list', '--no-merges', ...range, '--').split('\n').filter(Boolean);
+  if (own.length > MAX_COMMITS) gaps.push(`${own.length} commits: only the newest ${MAX_COMMITS} were read one by one`);
+  for (const c of own.slice(0, MAX_COMMITS)) {
+    const short = c.slice(0, 7);
+    const files = numstatFiles(run(`commit ${short}'s files`, 'show', '--format=', '--numstat', '-z', '--no-renames', '--diff-filter=d', c));
+    for (const p of files.names) checkName(p);
+    scanPatch(run(`commit ${short}'s changes`, 'show', '--format=', '--unified=0', '--no-color', '--no-ext-diff', '--no-renames', c), (f) => `${shown(f)} (commit ${short})`);
+    for (const f of files.binary) scanBinary(f, c, `${shown(f)} (commit ${short}, text inside a binary file)`);
   }
 
-  const log = git(cwd, 'log', '--format=%H%x00%an%x00%ae%x00%cn%x00%ce%x00%B%x1e', ...range, '--').stdout;
+  const log = run('the commit messages', 'log', '--format=%H%x00%an%x00%ae%x00%cn%x00%ce%x00%B%x1e', ...range, '--');
   let commits = 0;
   for (const rec of log.split('\x1e')) {
     const [sha, an, ae, cn, ce, msg] = rec.replace(/^\n/, '').split('\0');
@@ -309,7 +355,7 @@ export function scanRange(cwd, r, fp) {
     hits.push(...scanText(r.body, 'PR body', fp));
     hits.push(...scanText(r.ref, 'PR branch name', fp, { lines: false }));
   }
-  return { hits, commits, added, files: paths.length, binary };
+  return { hits, gaps, commits, added, files: paths.length, binary: bins.length, read: Math.min(own.length, MAX_COMMITS) };
 }
 
 function report(hits, say = console.log) { for (const h of hits) say(`  ${label(h)}`); }
@@ -326,14 +372,22 @@ function ciMain(args) {
   try { event = JSON.parse(readFileSync(eventPath, 'utf8')); } catch { console.log(`✗ privacy: incomplete — the event (${eventPath ?? 'no GITHUB_EVENT_PATH'}) could not be read`); return INCOMPLETE; }
   const r = rangeOf(event, name, cwd);
   if (r.why) { console.log(`✗ privacy: incomplete — ${r.why}`); return INCOMPLETE; }
-  const { hits, commits, added, files, binary } = scanRange(cwd, r, fp);
+  const { hits, gaps, commits, added, files, binary, read } = scanRange(cwd, r, fp);
   const notCovered = `not covered: ${NOT_COVERED}`;
   if (hits.length) {
     console.log(`✗ privacy: ${hits.length} private value(s) in this ${r.kind}:`);
-    report(hits); advice(console.log); console.log(notCovered);
+    report(hits); advice(console.log);
+    for (const g of gaps) console.log(`✗ incomplete: ${g}`);
+    console.log(notCovered);
     return FOUND;
   }
-  console.log(`✓ privacy: ${r.kind} clean — ${commits} commit(s), ${added} added line(s), ${files} file name(s)${binary ? `, the text inside ${binary} binary file(s)` : ''}${r.kind === 'pull request' ? ', the title, body and branch name' : ''}; ${fp.exact.size + fp.lower.size} fingerprints`);
+  if (gaps.length) {
+    for (const g of gaps) console.log(`✗ incomplete: ${g}`);
+    console.log(`✗ privacy: incomplete — not all of this ${r.kind} could be read; this is not a pass`);
+    console.log(notCovered);
+    return INCOMPLETE;
+  }
+  console.log(`✓ privacy: ${r.kind} clean — ${commits} commit(s), each one's changes (${read}) and the end result: ${added} added line(s), ${files} file name(s)${binary ? `, the text inside ${binary} binary file(s)` : ''}${r.kind === 'pull request' ? ', the title, body and branch name' : ''}; ${fp.exact.size + fp.lower.size} fingerprints`);
   if (r.note) console.log(`note: ${r.note}`);
   console.log(notCovered);
   return CLEAN;

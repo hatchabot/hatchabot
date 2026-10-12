@@ -48,11 +48,11 @@ const commitAs = (who: string, files: Record<string, string>, msg: string) => {
 };
 const OWNER = 'Ada Owner <owner@example.org>';
 /** privacy-ci.mjs for a pull request base...head (or a push), with the given secret. */
-const ci = (blob: string | undefined, event: object, name = 'pull_request', extra: string[] = []) => {
+const ci = (blob: string | undefined, event: object, name = 'pull_request', extra: string[] = [], env: Record<string, string> = {}) => {
   const ev = join(dir, 'event.json');
   writeFileSync(ev, JSON.stringify(event));
   return spawnSync('node', [CI, '--dir', repo, '--event', ev, '--event-name', name, ...extra], {
-    cwd: dir, encoding: 'utf8', env: scriptEnv(dir, PATH(), blob === undefined ? {} : { PRIVACY_FINGERPRINTS: blob }),
+    cwd: dir, encoding: 'utf8', env: scriptEnv(dir, PATH(), { ...(blob === undefined ? {} : { PRIVACY_FINGERPRINTS: blob }), ...env }),
   });
 };
 const pr = (base: string, head: string, title = 'A change', body = '') => ({ pull_request: { base: { sha: base }, head: { sha: head, ref: 'a-branch' }, title, body } });
@@ -196,6 +196,48 @@ describe('the owner\'s identity (scripts/privacy-identity.txt)', () => {
     expect(r.stdout).toMatch(/commit message [0-9a-f]{7}:1/);
     expect(r.stdout).toContain('author/committer');
     masked(r);
+  });
+});
+
+describe('the history a change publishes, and git failing (#206, #207)', () => {
+  it('a value added in one commit and removed in the next is found, in the commit that added it', () => {
+    const one = commitAs('Test <test@example.org>', { 'notes.md': 'Today the Mapleford Helper agent did well.\n', 'a.md': 'x\n' }, 'add');
+    const two = commitAs('Test <test@example.org>', { 'notes.md': 'Today an agent did well.\n' }, 'take it out');
+    const r = ci(exportBlob(), pr(base, two));
+    expect(r.status, shown(r)).toBe(1);
+    expect(r.stdout).toContain(`[A agent name] 'Ma…(16)' notes.md (commit ${one.slice(0, 7)}):1`);
+    expect(r.stdout.match(/Ma…\(16\)/g)).toHaveLength(1);
+    masked(r);
+    // Still there at the end: named once, where it is now.
+    const kept = commitAs('Test <test@example.org>', { 'b.md': 'The Mapleford Helper again.\n' }, 'b');
+    const k = ci(exportBlob(), pr(two, kept));
+    expect(k.stdout).toContain("[A agent name] 'Ma…(16)' b.md:1");
+    expect(k.stdout).not.toContain('b.md (commit');
+  });
+
+  it('a root commit is read whole against the empty tree', () => {
+    g('checkout', '-q', '--orphan', 'other');
+    g('rm', '-rq', '--cached', '.');
+    const root = commitAs('Test <test@example.org>', { 'first.md': 'Hello\nthe Mapleford Helper\n' }, 'first');
+    const r = ci(exportBlob(), { before: ZERO, after: root }, 'push');
+    expect(r.status, shown(r)).toBe(1);
+    expect(r.stdout).toContain("[A agent name] 'Ma…(16)' first.md:2");
+    masked(r);
+  });
+
+  it('git failing is incomplete (exit 3), not a clean scan of nothing', () => {
+    const head = commitAs('Test <test@example.org>', { 'a.md': 'nothing private\n' }, 'a');
+    // A git that refuses one kind of command; every other one goes to the real git.
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nfor a in "$@"; do [ "$a" = "$HB_GIT_FAIL" ] && { echo "fatal: made-up failure" >&2; exit 128; }; done\nexec /usr/bin/git "$@"\n`, { mode: 0o755 });
+    const blob = exportBlob();
+    for (const what of ['diff', 'show', 'rev-list', 'log']) {
+      const r = ci(blob, pr(base, head), 'pull_request', [], { HB_GIT_FAIL: what });
+      expect(r.status, `${what}: ${shown(r)}`).toBe(3);
+      expect(r.stdout).toContain('✗ incomplete:');
+      expect(r.stdout).toContain('made-up failure');
+      expect(r.stdout).not.toContain('✓ privacy');
+    }
+    expect(ci(blob, pr(base, head)).status).toBe(0);
   });
 });
 
