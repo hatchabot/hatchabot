@@ -39,18 +39,27 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # test clone, this purged PRODUCTION's containers, volumes, data and .env.
 # Now a clone that is not the service's own refuses, naming both, unless
 # --installed says to act on the service's install from here.
+# The install dir a launchd plist runs from: the job's argument since v2.162.0
+# (launchd-plist.sh, XML-escaped), before that baked in as `cd "<dir>"`.
+plist_dir() {
+  local d
+  d="$(sed -n 's/.*<string>hatchabot<\/string><string>\(.*\)<\/string>.*/\1/p' "$1" | sed -n 1p \
+    | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&quot;/"/g' -e "s/&apos;/'/g" -e 's/&amp;/\&/g')"
+  [ -n "$d" ] || d="$(sed -n 's/.*cd &quot;\([^&]*\)&quot;.*/\1/p;s/.*cd "\([^"]*\)".*/\1/p' "$1" | sed -n 1p)"
+  printf '%s' "$d"
+}
 UNIT="$HOME/.config/systemd/user/hatchabot.service"
 INSTALLED_DIR=""
 if [ -f "$UNIT" ]; then
   INSTALLED_DIR="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | sed -n 1p)"
   INSTALLED_DIR="${INSTALLED_DIR/#\%h/$HOME}"
 elif [ "$(uname -s)" = "Darwin" ]; then
-  # launchd has no WorkingDirectory here: setup-host.sh bakes `cd "<repo>"`
-  # into the job's command, so read it back out of whichever plist exists.
+  # launchd has no WorkingDirectory here: the job is given the install dir
+  # (plist_dir), so read it back out of whichever plist exists.
   for p in com.hatchabot.control-plane com.agentclaw.control-plane; do
     PL="$HOME/Library/LaunchAgents/$p.plist"
     [ -f "$PL" ] || continue
-    INSTALLED_DIR="$(sed -n 's/.*cd &quot;\([^&]*\)&quot;.*/\1/p;s/.*cd "\([^"]*\)".*/\1/p' "$PL" | sed -n 1p)"
+    INSTALLED_DIR="$(plist_dir "$PL")"
     [ -n "$INSTALLED_DIR" ] && break
   done
 fi

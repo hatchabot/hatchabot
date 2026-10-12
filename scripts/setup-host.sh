@@ -112,24 +112,9 @@ if [ "$(uname -s)" = "Darwin" ]; then
   DOCKER_DIR="$(dirname "$(command -v docker)")"
   PLIST="$HOME/Library/LaunchAgents/com.hatchabot.control-plane.plist"
   mkdir -p "$HOME/Library/LaunchAgents" data
-  cat > "$PLIST" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.hatchabot.control-plane</string>
-  <key>ProgramArguments</key><array>
-    <string>/bin/bash</string><string>-c</string>
-    <string>cd "$REPO" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; exec ./node_modules/.bin/tsx src/index.ts</string>
-  </array>
-  <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>$NODE_DIR:$DOCKER_DIR:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$REPO/data/server.log</string>
-  <key>StandardErrorPath</key><string>$REPO/data/server.log</string>
-</dict></plist>
-PLIST
+  # Written by launchd-plist.sh: the paths XML-escaped, the install dir an argument (#227).
+  JOB_PATH="$NODE_DIR:$DOCKER_DIR:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+  ./scripts/launchd-plist.sh service "$REPO" "$JOB_PATH" > "$PLIST"
   launchctl unload -w "$PLIST" 2>/dev/null || true
   launchctl load -w "$PLIST"
   echo "Manage with: launchctl {load|unload} -w $PLIST"
@@ -138,25 +123,7 @@ PLIST
   # Nightly backups — the launchd counterpart of the systemd timer Linux hosts
   # get; without it a macOS host has no automatic backups at all.
   BACKUP_PLIST="$HOME/Library/LaunchAgents/com.hatchabot.backup.plist"
-  cat > "$BACKUP_PLIST" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.hatchabot.backup</string>
-  <key>ProgramArguments</key><array>
-    <string>/bin/bash</string><string>-c</string>
-    <string>cd "$REPO" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; exec ./scripts/backup-volumes.sh</string>
-  </array>
-  <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>$NODE_DIR:$DOCKER_DIR:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
-  </dict>
-  <key>StartCalendarInterval</key><dict>
-    <key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer>
-  </dict>
-  <key>StandardOutPath</key><string>$REPO/data/backup.log</string>
-  <key>StandardErrorPath</key><string>$REPO/data/backup.log</string>
-</dict></plist>
-PLIST
+  ./scripts/launchd-plist.sh backup "$REPO" "$JOB_PATH" > "$BACKUP_PLIST"
   launchctl unload -w "$BACKUP_PLIST" 2>/dev/null || true
   launchctl load -w "$BACKUP_PLIST"
   echo "Nightly backups at 03:30: launchctl {load|unload} -w $BACKUP_PLIST"

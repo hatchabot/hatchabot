@@ -162,20 +162,29 @@ fi
 # point the service at THIS directory — replacing a working install with one
 # that runs from a different place. That is how a production box ends up
 # serving a development tree. Checked BEFORE anything below moves.
+# The install dir a launchd plist runs from: the job's argument since v2.162.0
+# (launchd-plist.sh, XML-escaped), before that baked in as `cd "<dir>"`.
+plist_dir() {
+  local d
+  d="$(sed -n 's/.*<string>hatchabot<\/string><string>\(.*\)<\/string>.*/\1/p' "$1" | sed -n 1p \
+    | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&quot;/"/g' -e "s/&apos;/'/g" -e 's/&amp;/\&/g')"
+  [ -n "$d" ] || d="$(sed -n 's/.*cd &quot;\([^&]*\)&quot;.*/\1/p;s/.*cd "\([^"]*\)".*/\1/p' "$1" | sed -n 1p)"
+  printf '%s' "$d"
+}
 UNIT="$HOME/.config/systemd/user/hatchabot.service"
 INSTALLED=""
 if [ -f "$UNIT" ]; then
   INSTALLED="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | sed -n 1p)"
   INSTALLED="${INSTALLED/#\%h/$HOME}"
 elif [ "$OS" = Darwin ]; then
-  # launchd has no WorkingDirectory: setup-host.sh bakes `cd "<dir>"` into the
-  # job's command (read back the same way uninstall.sh does). Linux-only, this
+  # launchd has no WorkingDirectory: the job names its install dir (plist_dir,
+  # read back the same way uninstall.sh does). Linux-only, this
   # guard let a Mac's one-line install repoint a working install at a fresh
   # clone with an empty database (night review, 2026-09-28).
   for p in com.hatchabot.control-plane com.agentclaw.control-plane; do
     PL="$HOME/Library/LaunchAgents/$p.plist"
     [ -f "$PL" ] || continue
-    INSTALLED="$(sed -n 's/.*cd &quot;\([^&]*\)&quot;.*/\1/p;s/.*cd "\([^"]*\)".*/\1/p' "$PL" | sed -n 1p)"
+    INSTALLED="$(plist_dir "$PL")"
     [ -n "$INSTALLED" ] && break
   done
 fi

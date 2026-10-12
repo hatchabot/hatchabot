@@ -52,9 +52,10 @@ the doctor command prints what is wrong with an install.
 - `.github/workflows/bundles.yml` — `workflow_call`: builds the bundles (artifacts only); `.github/workflows/runtime-image-build.yml` — `workflow_call`, `HATCHABOT_RELEASE`: builds the runtime image (artifacts only); `.github/workflows/runtime-image.yml` — `openclaw_version`: a candidate image; `.github/workflows/promote-images.yml` — `image-aliases`, `allow_backwards`: moves `:latest`/`:beta`/`:stable` by a release manifest's digest (`scripts/promote.sh` — `promote_images`).
 - `scripts/sqlite-driver.sh` — `better-sqlite3`, `--compile`: makes sure the database driver loads on this machine.
 - `scripts/setup-host.sh` — `say`, `launchd`: clone-based setup of a fresh host (dependencies, .env, the service; launchd on macOS).
+- `scripts/launchd-plist.sh` — `xml`, `service`, `backup`: the macOS launchd jobs setup-host.sh installs (paths XML-escaped, the install dir an argument); `install.sh`, `scripts/uninstall.sh` — `plist_dir`: read the install dir back out of one.
 - `scripts/install-service.sh` — `sed_escape`, `systemctl`: installs the systemd user service on Linux.
 - `scripts/ensure-deps.sh` — `npm ci`: installs dependencies only when the lockfile moved.
-- `scripts/upgrade.sh` — `rollback`, `restore_deps`, `vernewer`: the upgrade command (a channel or a tag), with rollback on failure; a bundle install's next bundle is checked by release-manifest.sh asset.
+- `scripts/upgrade.sh` — `rollback`, `restore_deps`, `vernewer`, `lock_left_over`, `take_lock`: the upgrade command (a channel or a tag), with rollback on failure; a bundle install's next bundle is checked by release-manifest.sh asset. The upgrade lock names its holder; `scripts/deploy-release.sh` takes the same lock.
 - `scripts/follow-channel.sh` — `--install`, `--uninstall`, `MAX_TRIES`: optional timer that keeps an install on its channel (retries a failing install less often, then sets it aside).
 - `scripts/uninstall.sh` — `--purge`, `--installed`, `volumes`, `other_installs`: removes the install it lives in (or, with `--installed`, the one the service runs), keeping data unless asked.
 - `scripts/upgrade-check.sh` — `CREATE TABLE IF NOT EXISTS`: checks that databases from older releases still open.
