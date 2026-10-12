@@ -358,15 +358,23 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
   app.delete<{ Params: { id: string }; Body: { current?: string } }>('/v1/second-factor/:id', async (req, reply) => {
     const ownerId = me(req, reply);
     if (!ownerId) return reply;
+    // The last factor of someone with owner rights is what public access stands on.
+    const lastOne = (): boolean => {
+      const host = api.rpId();
+      const usableAfter = real(ownerId).filter((f) => f.id !== req.params.id && (f.kind === 'totp' || !host || f.rpId === host)).length;
+      return api.config().on && api.hasOwnerRights(ownerId) && usableAfter === 0;
+    };
+    const onlyFactor = 'This is your only second factor, and public access is on. Add another first, or turn public access off (Settings → Reach it from anywhere).';
     const row = real(ownerId).find((f) => f.id === req.params.id);
     if (!row) return reply.code(404).send({ error: 'Not found' });
-    // The last factor of someone with owner rights is what public access stands on.
-    const host = api.rpId();
-    const usableAfter = real(ownerId).filter((f) => f.id !== row.id && (f.kind === 'totp' || !host || f.rpId === host)).length;
-    if (api.config().on && api.hasOwnerRights(ownerId) && usableAfter === 0) {
-      return reply.code(409).send({ error: 'This is your only second factor, and public access is on. Add another first, or turn public access off (Settings → Reach it from anywhere).' });
-    }
+    if (lastOne()) return reply.code(409).send({ error: onlyFactor });
     if (!(await proveManage(req, reply, ownerId, (req.body as { current?: string } | null)?.current))) return reply;
+    // Judged again after the password check, with nothing awaited between the
+    // check and the delete: two removals sent at once each saw the OTHER
+    // factor before either was gone, and both went through, leaving public
+    // access on with no second factor at all.
+    if (!real(ownerId).some((f) => f.id === row.id)) return reply.code(404).send({ error: 'Not found' });
+    if (lastOne()) return reply.code(409).send({ error: onlyFactor });
     store.deleteSecondFactor(ownerId, row.id);
     if (real(ownerId).length === 0) store.deleteSecondFactors(ownerId, 'backup');
     // What was proved with the old set of factors is void on every pass, not
