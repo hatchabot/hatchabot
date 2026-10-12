@@ -40,6 +40,21 @@ describe('redacting a failure', () => {
     }
   });
 
+  it('a value starting with $, and a spaced unquoted assignment, are masked; references and code are not (#209)', () => {
+    const cases: Array<[string, string]> = [
+      ['password=$fake-value', 'password=***'],
+      ['password = fake-value', 'password = ***'],
+      ['GARDEN_TOKEN = pl4nt then more', 'GARDEN_TOKEN = *** then more'],
+      ['"apiKey": $seed1', '"apiKey": ***'],
+      ['token: $lowercase9', 'token: ***'],
+    ];
+    for (const [text, want] of cases) expect(redactSecrets(text), text).toBe(want);
+    for (const text of ['TOKEN=${GARDEN_TOKEN}', 'password = ${{ secrets.GARDEN_PASSWORD }}', 'token = config.apiKey;', 'const token = await getToken();',
+      'apiKey = os.environ["GARDEN_KEY"]', 'secret = null', 'if (token == expected) go()', 'token => token.trim()', 'password = $GARDEN_PASSWORD']) {
+      expect(redactSecrets(text), text).toBe(text);
+    }
+  });
+
   it('masks known values exactly, and only real-looking ones', () => {
     expect(maskKnownValues('login failed for pl4nt-bed-7 at 10:00', ['pl4nt-bed-7', 'abc', ''])).toBe('login failed for *** at 10:00');
     expect(credentialValuesFromEnv({ GARDEN_API_KEY: 'k-1', HOME: '/home/pat', PWD: '/home/pat/x', SMTP_PASSWORD: 'p' })).toEqual(['k-1', 'p']);

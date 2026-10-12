@@ -26,24 +26,39 @@ const CRED_KEY = String.raw`[A-Za-z0-9_.-]*?(?:token|secret|passw(?:or)?d|passph
 // Starts only where a name starts, so a long run of name characters is tried once (linear).
 const KEY_START = String.raw`(?<![A-Za-z0-9_.-])`;
 const QUOTED_VALUE = String.raw`"(?:[^"\\\n]|\\.)*"|'[^'\n]*'`;
-const BARE_VALUE = String.raw`(?:(?:Bearer|Basic|Token)\s+)?[^\s,;&"'}\])]+`;
+// A whole `${{ … }}` or `${NAME}` first, so a reference is judged as one value, not cut at its space or brace.
+const BARE_VALUE = String.raw`\$\{\{[^}\n]*\}\}|\$\{[A-Za-z_][A-Za-z0-9_]*\}|(?:(?:Bearer|Basic|Token)\s+)?[^\s,;&"'}\])]+`;
 // "apiKey": "…", 'token': '…' — a JSON or object field.
 const QUOTED_FIELD = new RegExp(String.raw`(["'])(${CRED_KEY})\1(\s*[:=]\s*)(?:${QUOTED_VALUE}|${BARE_VALUE})`, 'gi');
-// TOKEN=…, password: …, ?token=… — a setting, a log line, a query. A spaced `token = getToken()` is code: only a quoted literal there.
-const BARE_FIELD = new RegExp(String.raw`${KEY_START}(${CRED_KEY})(?:(=|:\s*)(?:${QUOTED_VALUE}|${BARE_VALUE})|(\s+=\s*)(?:${QUOTED_VALUE}))`, 'gi');
+// TOKEN=…, password: …, ?token=…, password = … — a setting, a log line, a query. Not `==` or `=>`.
+const BARE_FIELD = new RegExp(String.raw`${KEY_START}(${CRED_KEY})(?:(=(?![=>])|:\s*)(?:${QUOTED_VALUE}|${BARE_VALUE})|(\s+=(?![=>])\s*)(?:${QUOTED_VALUE}|${BARE_VALUE}))`, 'gi');
 const masked = (value: string) => (value.startsWith('"') ? '"***"' : value.startsWith("'") ? "'***'" : '***');
+/**
+ * A reference, not a value: $NAME (capitals, as settings are named),
+ * ${name}, ${{ secrets.X }}. Anything else starting with $ is a value: every
+ * `$…` was kept, so `password=$fake-value` went through (#209).
+ */
+const isReference = (value: string) => /^(?:\$[A-Z_][A-Z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$\{\{[^}\n]*\}\})$/.test(value);
+/**
+ * After a spaced `=`, code: a call (`getToken(req`), an index, a member
+ * (`config.apiKey`) or a keyword. Any other bare word there is a value: only a
+ * quoted literal was masked, so `password = fake-value` went through (#209).
+ */
+const isCode = (value: string) =>
+  /[([]/.test(value) || /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(value)
+  || /^(?:null|undefined|None|nil|true|false|await|new|this|self)$/.test(value);
 
 export function redactCredentialFields(text: string): string {
   return String(text ?? '')
     .replace(QUOTED_FIELD, (m, q: string, key: string, sep: string) => {
       const value = m.slice(q.length * 2 + key.length + sep.length);
-      return value.startsWith('$') ? m : `${q}${key}${q}${sep}${masked(value)}`;
+      return isReference(value) ? m : `${q}${key}${q}${sep}${masked(value)}`;
     })
     .replace(BARE_FIELD, (m, key: string, sep1?: string, sep2?: string) => {
       const sep = sep1 ?? sep2 ?? '';
       const value = m.slice(key.length + sep.length);
-      // A reference ($TOKEN, ${{ secrets.X }}) or an already-masked value is not a credential.
-      return value.startsWith('$') || value === '***' ? m : `${key}${sep}${masked(value)}`;
+      // A reference ($TOKEN, ${{ secrets.X }}), code after a spaced `=`, or an already-masked value is not a credential.
+      return isReference(value) || (sep2 && isCode(value)) || value === '***' ? m : `${key}${sep}${masked(value)}`;
     });
 }
 
