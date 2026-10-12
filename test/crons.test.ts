@@ -576,6 +576,77 @@ describe('an agent in no chat app: results go to its console conversation (2026-
   });
 });
 
+// 2026-10-12: asked in its web chat at night for a summary every morning, an
+// agent made the task itself (isolated, no recipient); the full pass runs only
+// after a start and then daily, so the 8am run came first and reached no one.
+describe('a task an agent makes in its chat is re-pointed within minutes, cheaply', () => {
+  /** One row per task as the store read prints it: the job as stored, its id and last change. */
+  const storeRead = (jobs: Array<Record<string, unknown>>) => ({ code: 0, stderr: '', stdout: JSON.stringify({ jobs }) });
+  const madeInChat = { id: 'j1', name: 'Market summary', enabled: true, sessionTarget: 'isolated', delivery: { mode: 'announce' }, payload: { kind: 'agentTurn', message: 'Summarise the markets.' }, updatedAtMs: 1000 };
+
+  it('pendingRetarget reads OpenClaw\'s task store with one shell and starts no CLI', async () => {
+    const { pendingRetarget, cronStoreReadShell } = await import('../src/orchestrator/crons.js');
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('sh', storeRead([
+      // A stored delivery with no mode is announce to the gateway.
+      { ...madeInChat, delivery: {} },
+      { id: 'j2', enabled: true, sessionTarget: 'current', sessionKey: 'agent:kitchen:main', delivery: { mode: 'announce' }, updatedAtMs: 1 },
+      { id: 'j3', enabled: true, sessionTarget: 'isolated', delivery: { mode: 'none' }, updatedAtMs: 1 },
+      { id: 'j4', enabled: true, declarationKey: 'openclaw.dreaming', delivery: { mode: 'announce' }, updatedAtMs: 1 },
+    ]));
+    expect(await pendingRetarget(p, ref, 'kitchen', { session: 'agent:kitchen:main' })).toEqual({ ids: ['j1'], sig: 'j1@1000' });
+    expect(p.execLog.filter((a) => a[0] !== 'sh')).toEqual([]);
+    expect(p.execLog.find((a) => a[0] === 'sh')![1]).toBe(cronStoreReadShell('kitchen'));
+    expect(cronStoreReadShell('kitchen')).toContain('/home/node/.openclaw/state/openclaw.sqlite');
+    expect(cronStoreReadShell('kitchen')).toMatch(/from cron_jobs .* kitchen 2>\/dev\/null/);
+    // A held task is due once there is someone to post to.
+    p.execResponses.set('sh', storeRead([{ id: 'h', enabled: true, delivery: { mode: 'none' }, updatedAtMs: 5 }]));
+    expect((await pendingRetarget(p, ref, 'kitchen', undefined, ['h']))!.ids).toEqual([]);
+    expect((await pendingRetarget(p, ref, 'kitchen', { channel: 'telegram', to: TG_ID }, ['h']))!.ids).toEqual(['h']);
+    // No store (an older OpenClaw), a failed read, or a bad slug: unknown, not "nothing due".
+    p.execResponses.set('sh', { code: 0, stderr: '', stdout: '' });
+    expect(await pendingRetarget(p, ref, 'kitchen', undefined)).toBeUndefined();
+    p.execResponses.set('sh', { code: 0, stderr: '', stdout: 'not json' });
+    expect(await pendingRetarget(p, ref, 'kitchen', undefined)).toBeUndefined();
+    expect(await pendingRetarget(p, ref, "x'; rm -rf /", undefined)).toBeUndefined();
+  });
+
+  it('the quick pass re-points a web-chat-only agent\'s new task, and starts the CLI only when one is due', async () => {
+    const { CRON_QUICK_CHECK_MS } = await import('../src/orchestrator/crons.js');
+    expect(CRON_QUICK_CHECK_MS).toBeLessThanOrEqual(10 * 60_000);
+    const { provider, f, store } = await world();
+    provider.infoOverride.set(store.getAgent('a1')!.runtimeRef!, { openclawVersion: '2026.9.8' });
+    const quick = (f as unknown as { quickCronRetarget: () => Promise<void> }).quickCronRetarget;
+    const cli = () => provider.execLog.filter((a) => a[0] === 'cron');
+    // Nothing due: one read, no CLI.
+    provider.execResponses.set('sh', storeRead([{ ...madeInChat, sessionTarget: 'current', sessionKey: 'agent:kitchen:main' }]));
+    await quick();
+    expect(cli()).toEqual([]);
+    // The agent made the task in its chat: pointed at its web chat on this pass.
+    provider.execResponses.set('sh', storeRead([madeInChat]));
+    provider.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [madeInChat] }) });
+    await quick();
+    expect(cli().filter((a) => a[1] === 'edit')).toEqual([
+      ['cron', 'edit', 'j1', '--session', 'current', '--session-key', 'agent:kitchen:main', '--announce', '--best-effort-deliver'],
+    ]);
+    expect(store.listEvents(['a1']).some((e) => e.event === 'cron.retargeted')).toBe(true);
+    // The same task, unchanged since (the edit did not take): not tried again every few minutes.
+    provider.execLog.length = 0;
+    await quick();
+    expect(cli()).toEqual([]);
+    // Once it changes, it is looked at again.
+    provider.execResponses.set('sh', storeRead([{ ...madeInChat, updatedAtMs: 2000 }]));
+    await quick();
+    expect(cli().map((a) => a.slice(0, 2).join(' '))).toEqual(['cron list', 'cron edit']);
+    // An agent that is not running is not read at all.
+    store.setAgentState('a1', 'STOPPED');
+    provider.execLog.length = 0;
+    await quick();
+    expect(provider.execLog).toEqual([]);
+  });
+});
+
 describe("OpenClaw's own tasks (2026-09-25)", () => {
   it('a declared job is marked system, shown by its display name; removing or changing it is a clear refusal, not "may no longer exist"', async () => {
     const p = new MockProvider();

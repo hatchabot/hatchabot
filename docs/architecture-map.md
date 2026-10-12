@@ -121,7 +121,7 @@ the step that failed.
 - `src/orchestrator/provision.ts` — `createAgentRecord`, `provisionAgent`, `runProvisionSteps`, `rebuildAgent`, `buildRuntimeSpec`, `waitForHealthy`: the provisioning pipeline.
 - `src/providers/localDockerProvider.ts` — `provision`, `SEED_STEP_MARK`, `seedFailure`, `seedStepLabel`: the seed script and how its failure is reported.
 - `src/openclaw/configWriter.ts` — `buildConfigCommands`, `batchConfigCommands`, `seedInvocation`, `skipIf`: the OpenClaw config steps; skipIf and markers skip steps already done.
-- `src/openclaw/workspace.ts` — `buildWorkspaceSeed`, `memoryPolicySection`, `dataSourcesSection`: the SOUL.md, AGENTS.md and MEMORY.md written on first provision, and the managed sections refreshed on rebuild.
+- `src/openclaw/workspace.ts` — `buildWorkspaceSeed`, `memoryPolicySection`, `dataSourcesSection`, `scheduledResultsSection`: the SOUL.md, AGENTS.md and MEMORY.md written on first provision, and the managed sections refreshed on rebuild (`syncDataSourceDocs` in `src/orchestrator/provision.ts`; "Scheduled results" only for an agent in no chat app).
 - `src/orchestrator/busy.ts` — `whileBusy`, `AgentBusyError`: one operation per agent at a time.
 - `src/orchestrator/buildFailure.ts` — `buildFailureReason`: turns a build error into a plain reason.
 - `src/orchestrator/rebuildPolicy.ts` — `rebuildNeed`, `pickAutoRebuilds`, `inQuietHours`: when an agent needs a rebuild and automatic rebuilds.
@@ -514,6 +514,7 @@ API through one fetch helper.
 - `src/api/routes.ts` — `'/'`, `'/v1/config'`, `'/v1/agents'`, `'/v1/agents/:id'`, `'/v1/recent'`, `'/v1/agents/:id/crons'`, `indexPage`: the page itself and the main reads behind it.
 - `src/orchestrator/recent.ts` — `RecentTracker`, `orderRecent`, `previewLine`: the Activity view and tile previews.
 - `src/orchestrator/crons.ts` — `listCrons`, `addCron`, `editCron`, `setCronEnabled`, `runCronNow`: scheduled tasks inside the agent.
+- `src/orchestrator/crons.ts` — `cronTargetFor`, `retargetImplicitCrons`, `pendingRetarget`, `cronStoreReadShell`: where a task's result goes (the owner's chat, or the web-chat conversation of an agent in no chat app), and re-pointing tasks with no recipient; `src/api/routes.ts` runs `retargetCronSweep` after a start and daily, and `quickCronRetarget` every 5 minutes (one read of the task store per agent, the CLI only for a task that needs changing).
 - `web/sw.js` — `fetch`: the service worker for the installable app.
 - `scripts/check-web.mjs` — `checkHandlers`: static checks on the page (run by the tests).
 - `scripts/ui-clickthrough.mjs` — `--headless`: the click-through UI test (headless Chrome against the real page).
