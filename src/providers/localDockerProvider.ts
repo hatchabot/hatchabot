@@ -1164,7 +1164,11 @@ export class LocalDockerProvider implements RuntimeProvider {
           // Counted by decompressing once more (CPU), never by trusting the
           // gzip trailer (mod 2^32).
           `if [ "$(gzip -dc /tmp/s.tgz | head -c ${IMPORT_MAX_BYTES + 1} | wc -c)" -gt ${IMPORT_MAX_BYTES} ]; then echo "archive expands past the size limit" >&2; exit 3; fi && ` +
-          'if tar tzf /tmp/s.tgz | grep -qE "^\\./\\.openclaw/"; then DEST=/vol; else DEST=/vol/.openclaw; fi && ' +
+          // The whole tar is read before anything is deleted: gzip -t checks
+          // only the compression, and a failed listing used to pick the old
+          // layout and empty the volume before extraction found the junk (#213).
+          'if ! tar tzf /tmp/s.tgz > /tmp/s.list; then echo "not a tar archive" >&2; exit 4; fi && ' +
+          'if grep -qE "^\\./\\.openclaw/" /tmp/s.list; then DEST=/vol; else DEST=/vol/.openclaw; fi && ' +
           'find /vol -mindepth 1 -delete && mkdir -p "$DEST" && ' +
           'tar xz --no-same-owner -C "$DEST" -f /tmp/s.tgz && ' +
           // An old-layout archive is already in the home layout once here:
@@ -1181,7 +1185,9 @@ export class LocalDockerProvider implements RuntimeProvider {
               `volume import failed (${code}): ${stderr.slice(-500)}`,
               code === 3
                 ? `This archive would expand to more than ${Math.round(IMPORT_MAX_BYTES / 2 ** 30)} GB, which this machine does not allow (HATCHABOT_IMPORT_MAX_GB).`
-                : "Couldn't restore the agent's state.",
+                : code === 4
+                  ? "That file is not a valid agent archive (it is not a tar archive). The agent's state was left as it was."
+                  : "Couldn't restore the agent's state.",
             ),
           );
       }, reject);
