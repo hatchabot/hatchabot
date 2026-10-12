@@ -108,7 +108,9 @@ export function gitSyncReason(stderr: string, mode: 'deploy-key' | 'public' = 'd
     return "The repo wasn't found — check the URL, or add this agent's deploy key if it's private.";
   }
   if (/host key verification failed|no matching host key/i.test(s)) {
-    return "Couldn't verify the git host's SSH key.";
+    // The key it trusted is kept (hostKeyTrustLine): a host that really
+    // changed its key needs the owner to confirm it and clear the old one.
+    return "Couldn't verify the git host's SSH key: it is not the key this agent trusted. If the host really changed its key, see \"git host key\" in docs/troubleshooting.md.";
   }
   if (/could not resolve hostname|network is unreachable|connection timed out/i.test(s)) {
     return "Couldn't reach the git host from this agent — network or DNS.";
@@ -159,6 +161,19 @@ export function buildPublicGitSyncScript(
 }
 
 /**
+ * Trust the git host's key on first use only. Every sync used to merge a fresh,
+ * unauthenticated ssh-keyscan into known_hosts, so a key served by whoever
+ * answered for the host that day was trusted next to the real one, and
+ * StrictHostKeyChecking could never notice the swap (#202). Once the host has
+ * an entry it is kept as it is: a changed key makes ssh refuse ("Host key
+ * verification failed") until the owner checks it and clears the old one.
+ */
+export function hostKeyTrustLine(host: string, kh: string): string {
+  return `touch ${kh} && if ! ssh-keygen -F ${shq(host)} -f ${kh} >/dev/null 2>&1; then ` +
+    `ssh-keyscan -t ed25519,rsa ${shq(host)} 2>/dev/null > ${kh}.tmp || true; cat ${kh}.tmp >> ${kh}; rm -f ${kh}.tmp; fi`;
+}
+
+/**
  * The idempotent script that clones (or refreshes) one git source inside the
  * container. Safe to re-run every provision/rebuild: it rewrites the key and
  * ssh config, clones only when absent, and never touches the working tree
@@ -180,7 +195,7 @@ export function buildGitSyncScript(
     'set -e',
     `mkdir -p ${sshDir} && chmod 700 ${sshDir}`,
     `echo ${q(privKeyB64)} | base64 -d > ${key} && chmod 600 ${key}`,
-    `ssh-keyscan -t ed25519,rsa ${q(src.host)} 2>/dev/null | sort -u - ${kh} 2>/dev/null > ${kh}.tmp || ssh-keyscan -t ed25519,rsa ${q(src.host)} > ${kh}.tmp 2>/dev/null; mv ${kh}.tmp ${kh}`,
+    hostKeyTrustLine(src.host, kh),
     retainedCloneCheck(clone, src.sshUrl),
     `if [ ! -d ${q(clone)}/.git ]; then GIT_SSH_COMMAND=${q(sshCmd)} git clone ${q(src.sshUrl)} ${q(clone)}; fi`,
     // A clone kept from the public (https) source has that address and a

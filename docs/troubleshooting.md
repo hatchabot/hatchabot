@@ -877,6 +877,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0` (#88, #89)
 - **Code:** `src/orchestrator/gitSource.ts` — `retainedCloneCheck`, `buildGitSyncScript`, `buildPublicGitSyncScript`
 
+### A git data source stops syncing with "Couldn't verify the git host's SSH key" (git host key)
+- **Check:** the source's error says it is not the key this agent trusted; in the agent, `ssh-keygen -F <host> -f ~/.openclaw/.ssh/known_hosts` prints the key it trusts, and `ssh-keyscan <host>` prints a different one.
+- **Cause:** the agent trusts a git host's SSH key from its first sync and keeps it. Before this release every sync added whatever key answered for the host, so a swapped key was trusted silently; now a different key is refused.
+- **Fix:** compare the new key's fingerprint (`ssh-keyscan <host> | ssh-keygen -lf -`) with the one the git host publishes. Only if they match, run `ssh-keygen -R <host> -f ~/.openclaw/.ssh/known_hosts` in the agent and rebuild it; the next sync trusts the new key. If they do not match, do not clear it: something else is answering for that host.
+- **Fixed in:** `v2.162.0` (#202)
+- **Code:** `src/orchestrator/gitSource.ts` — `hostKeyTrustLine`, `gitSyncReason`
+
 ### A failed app install or update shows no test output
 - **Check:** the error says the tests failed, but no output appears under it.
 - **Cause:** `api()` dropped the server's `test.output`.
