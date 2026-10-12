@@ -2225,10 +2225,10 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ### A problem report draft still shows a credential, or the start of one
 - **Check:** the value is in the draft's Recent failures, Agent log or your own words, and it is one of an agent's settings, its bot token or AI key.
-- **Cause:** a report not about one agent knew only this server's own credential settings, though its Recent failures come from every agent you can see.
-- **Fix:** upgrade: every agent whose failures a report carries has its credentials masked. Before that, delete the value from the draft before filing.
+- **Cause:** a report not about one agent knew only this server's own credential settings, though its Recent failures come from every agent you can see. And a setting written `password=$…` (a value starting with `$`) or `password = …` (spaces, no quotes) was not recognised as a credential, in reports and in failure messages alike.
+- **Fix:** upgrade: every agent whose failures a report carries has its credentials masked, and both forms are masked (`$NAME`, `${name}` and `${{ … }}` stay: they are references). Before that, delete the value from the draft before filing.
 - **Fixed in:** `v2.162.0`
-- **Code:** `src/api/routes.ts` — `reportRedaction`, `reportAgents`
+- **Code:** `src/api/routes.ts` — `reportRedaction`, `reportAgents`; `src/domain/redact.ts` — `redactCredentialFields`, `isReference`, `isCode`
 
 ### On a Claude subscription, the Hatchabot agent says it will do something, then nothing happens (no card)
 - **Check:** the reply ends with a long JSON object (`{"tool": …}`), shown as text, and no confirmation card appears; the AI source behind the Hatchabot agent is a setup-token or machine login (Settings → AI).
