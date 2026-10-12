@@ -141,6 +141,34 @@ describe('fingerprints: made on the owner\'s machine, read by CI', () => {
     masked(r);
   });
 
+  it('the text inside a binary file is read, as UTF-8 and UTF-16, and split into words like a line', () => {
+    // Metadata-like runs between NUL bytes, as a photo or a PDF holds them; git calls these files binary.
+    const bin = (...parts: Buffer[]) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0x0d]), ...parts.flatMap((p) => [p, Buffer.alloc(4)])]);
+    mkdirSync(join(repo, 'img'), { recursive: true });
+    writeFileSync(join(repo, 'img', 'a.png'), bin(Buffer.from('Author: Mapleford Helper', 'utf8')));
+    writeFileSync(join(repo, 'img', 'b.bin'), bin(Buffer.from('owner someone@example.org', 'utf16le')));
+    writeFileSync(join(repo, 'img', 'c.bin'), bin(Buffer.from('Made with Hatchabot', 'utf8')));
+    g('add', 'img');
+    g('-c', 'user.name=Test', '-c', 'user.email=test@example.org', 'commit', '-qm', 'pictures');
+    const head = g('rev-parse', 'HEAD');
+    const r = ci(exportBlob(), pr(base, head));
+    expect(r.status, shown(r)).toBe(1);
+    expect(r.stdout).toContain("[A agent name] 'Ma…(16)' img/a.png (text inside a binary file)");
+    expect(r.stdout).toContain("[E email] 'so…(19)' img/b.bin (text inside a binary file)");
+    expect(r.stdout).not.toContain('c.bin');
+    masked(r);
+    // A clean one is counted as read.
+    g('rm', '-q', 'img/a.png', 'img/b.bin');
+    g('-c', 'user.name=Test', '-c', 'user.email=test@example.org', 'commit', '-qm', 'drop');
+    const dropped = g('rev-parse', 'HEAD');
+    writeFileSync(join(repo, 'img', 'c.bin'), bin(Buffer.from('Made with Hatchabot again', 'utf8')));
+    g('add', 'img');
+    g('-c', 'user.name=Test', '-c', 'user.email=test@example.org', 'commit', '-qm', 'picture');
+    const read = ci(exportBlob(), pr(dropped, g('rev-parse', 'HEAD')));
+    expect(read.status, shown(read)).toBe(0);
+    expect(read.stdout).toContain('the text inside 1 binary file(s)');
+  });
+
   it('a name broken across two lines is not matched (the text is read a line at a time)', () => {
     const head = commitAs('Test <test@example.org>', { 'wrap.md': 'the Mapleford\nHelper agent\n' }, 'wrap');
     expect(ci(exportBlob(), pr(base, head)).status).toBe(0);

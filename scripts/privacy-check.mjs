@@ -52,7 +52,7 @@ import { homedir, hostname, networkInterfaces, tmpdir, userInfo } from 'node:os'
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { IDENTITY_FILE, SECRET_NAME, allowedIdentities, buildFingerprints, publishedIdentities, withoutAllowedLines, withoutOwnTrailers } from './privacy-ci.mjs';
+import { IDENTITY_FILE, SECRET_NAME, allowedIdentities, buildFingerprints, publishedIdentities, textInside, withoutAllowedLines, withoutOwnTrailers } from './privacy-ci.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -252,20 +252,8 @@ function catBatch(cwd, ids) {
   return out;
 }
 const isText = (b) => !b.subarray(0, 4096).includes(0);
-/**
- * The text inside a file git treats as binary, one run per line: runs of six
- * or more letters, digits, spaces and punctuation, read as UTF-8 and as
- * UTF-16 in both byte orders — what `strings` finds: a name in PDF or Office
- * metadata, EXIF and PNG text chunks, a SQLite file, a build. Binary files
- * were skipped until 2026-10-10. Compressed parts (zip, PDF streams, image
- * data) stay unread: NOT_COVERED says so.
- */
-export function textInside(b) {
-  const runs = /[\x20-\x7e\u00a0-\u024f\t]{6,}/g;
-  const out = [];
-  for (const t of [b.toString('utf8'), b.toString('utf16le'), b.subarray(1).toString('utf16le')]) out.push(...(t.match(runs) ?? []));
-  return out.join('\n');
-}
+// textInside (the text inside a binary file) lives in privacy-ci.mjs, which CI runs alone: one reader for both checks.
+export { textInside };
 
 /**
  * The history published before the scrub (2026-10-09): it still names real

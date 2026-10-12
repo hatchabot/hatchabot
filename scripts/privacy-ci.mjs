@@ -20,7 +20,8 @@
  * --dir <checkout> (default: the current directory).
  *
  * What it reads, for a pull request (base...head) or a push to main
- * (before..after): every added line, every changed file's path, each commit's
+ * (before..after): every added line, the text inside every changed binary
+ * file (textInside), every changed file's path, each commit's
  * message, author and committer, and the pull request's title, body and branch
  * name. The identities in scripts/privacy-identity.txt — the owner's, already
  * public on every commit — are not findings as author, committer or in a
@@ -53,7 +54,7 @@ export const CATS = { A: 'agent name', S: 'agent slug', E: 'email', I: 'person i
 export const LETTER = Object.fromEntries(Object.entries(CATS).map(([k, v]) => [v, k]));
 export const IDENTITY_FILE = 'scripts/privacy-identity.txt';
 export const SECRET_NAME = 'PRIVACY_FINGERPRINTS';
-export const NOT_COVERED = 'binary files and images (no OCR); a private value the owner\'s install does not record; a value split across lines or paraphrased';
+export const NOT_COVERED = 'pictures and compressed data inside binary files (no OCR, no unpacking; the text inside them is read); a private value the owner\'s install does not record; a value split across lines or paraphrased';
 const DIGEST_BYTES = 16;
 /** Parts of a word longer than this are not tried in every combination (a long URL). */
 const MAX_SPAN = 16;
@@ -63,6 +64,23 @@ const MAX_SPAN = 16;
 const WORD = /[\p{L}\p{M}\p{N}]+(?:[.@_-]+[\p{L}\p{M}\p{N}]+)*/gu;
 export const words = (text) => String(text).match(WORD) ?? [];
 export const digest = (key, s) => createHmac('sha256', key).update(s, 'utf8').digest().subarray(0, DIGEST_BYTES).toString('base64url');
+
+/**
+ * The text inside a file git treats as binary, one run per line: runs of six
+ * or more letters, digits, spaces and punctuation, read as UTF-8 and as
+ * UTF-16 in both byte orders — what `strings` finds: a name in PDF or Office
+ * metadata, EXIF and PNG text chunks, a SQLite file, a build. Each run is then
+ * a line like any other, split into the same words. Compressed parts (zip,
+ * PDF streams, image data) stay unread: NOT_COVERED says so. privacy-check.mjs
+ * reads binary files with this too; it lives here because CI runs this file
+ * alone, copied from the base commit, so it can import nothing of its own.
+ */
+export function textInside(b) {
+  const runs = /[\x20-\x7e\u00a0-\u024f\t]{6,}/g;
+  const out = [];
+  for (const t of [b.toString('utf8'), b.toString('utf16le'), b.subarray(1).toString('utf16le')]) out.push(...(t.match(runs) ?? []));
+  return out.join('\n');
+}
 
 /**
  * The fingerprints of the private values, [{ value, cat, caseless }]: each
@@ -255,7 +273,7 @@ export function scanRange(cwd, r, fp) {
   for (const l of diff.split('\n')) {
     if (l.startsWith('+++ ')) { file = l.slice(4).replace(/^b\//, ''); continue; }
     if (l.startsWith('--- ')) continue;
-    if (/^Binary files .* differ$/.test(l)) { binary++; continue; }
+    if (/^Binary files .* differ$/.test(l)) continue; // read whole, below
     const h = /^@@ -\S+ \+(\d+)/.exec(l);
     if (h) { line = Number(h[1]); continue; }
     if (l.startsWith('+')) {
@@ -264,6 +282,13 @@ export function scanRange(cwd, r, fp) {
       for (const x of scanLine(text, fp)) hits.push({ ...x, where: shown(file), line });
       line++;
     }
+  }
+  // Files git treats as binary: the text inside them, as the pre-push check reads it (they were skipped here).
+  const numstat = git(cwd, 'diff', '--numstat', '-z', '--no-renames', '--diff-filter=d', `${from}...${r.head}`).stdout.split('\0');
+  for (const f of numstat.filter((e) => e.startsWith('-\t-\t')).map((e) => e.slice(4))) {
+    binary++;
+    const data = spawnSync('git', ['-C', cwd, 'cat-file', 'blob', `${r.head}:${f}`], { maxBuffer: 1 << 30 }).stdout;
+    hits.push(...scanText(textInside(data), `${shown(f)} (text inside a binary file)`, fp, { lines: false }));
   }
 
   const log = git(cwd, 'log', '--format=%H%x00%an%x00%ae%x00%cn%x00%ce%x00%B%x1e', ...range, '--').stdout;
@@ -302,13 +327,13 @@ function ciMain(args) {
   const r = rangeOf(event, name, cwd);
   if (r.why) { console.log(`✗ privacy: incomplete — ${r.why}`); return INCOMPLETE; }
   const { hits, commits, added, files, binary } = scanRange(cwd, r, fp);
-  const notCovered = `not covered: ${NOT_COVERED}${binary ? `; ${binary} binary file change(s)` : ''}`;
+  const notCovered = `not covered: ${NOT_COVERED}`;
   if (hits.length) {
     console.log(`✗ privacy: ${hits.length} private value(s) in this ${r.kind}:`);
     report(hits); advice(console.log); console.log(notCovered);
     return FOUND;
   }
-  console.log(`✓ privacy: ${r.kind} clean — ${commits} commit(s), ${added} added line(s), ${files} file name(s)${r.kind === 'pull request' ? ', the title, body and branch name' : ''}; ${fp.exact.size + fp.lower.size} fingerprints`);
+  console.log(`✓ privacy: ${r.kind} clean — ${commits} commit(s), ${added} added line(s), ${files} file name(s)${binary ? `, the text inside ${binary} binary file(s)` : ''}${r.kind === 'pull request' ? ', the title, body and branch name' : ''}; ${fp.exact.size + fp.lower.size} fingerprints`);
   if (r.note) console.log(`note: ${r.note}`);
   console.log(notCovered);
   return CLEAN;
