@@ -365,8 +365,10 @@ secret can test guesses against it, so it is kept as a secret.
   cannot loosen the check it is judged by.
 - **`Privacy watch`** (`.github/workflows/privacy-watch.yml`, daily and by
   hand) reads the last two days of issues, pull request titles and bodies,
-  issue comments, review comments and release notes with a read-only token,
-  and fails on a match; GitHub then emails the owner.
+  issue comments and review comments, and every release note (GitHub gives
+  a release no date it was last edited, so notes edited on an old release
+  are read too), with a read-only token, and fails on a match; GitHub then
+  emails the owner.
 - **No secret is a failure**, never a pass (exit 3): a pull request from a
   fork gets no secrets, so its `privacy` check fails until the maintainer
   re-makes it on a branch here. A garbled secret, a range that is not in
@@ -375,8 +377,8 @@ secret can test guesses against it, so it is kept as a secret.
 What it cannot catch: a private value the install has no record of (a
 person mentioned only in conversation, say); a paraphrase or a misspelling;
 a name broken across two lines (text is read a line at a time); pictures
-and compressed data inside binary files (no OCR, no unpacking); review summaries, discussions and the wiki; anything the
-watch's two days have passed. The rule in `AGENTS.md` — examples come from
+and compressed data inside binary files (no OCR, no unpacking); review summaries, discussions and the wiki; an issue,
+pull request or comment the watch's two days have passed. The rule in `AGENTS.md` — examples come from
 the invented household — stays the first line of defence.
 
 A hit: replace the value with a made-up one — examples come from the invented

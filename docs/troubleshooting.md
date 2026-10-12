@@ -134,6 +134,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.162.0`
 - **Code:** `scripts/privacy-ci.mjs` — `scanRange`, `numstatFiles`
 
+### `Privacy watch` fails on an old release's notes
+- **Check:** the hit says `release v… body`, for a release published long before the watch's two days.
+- **Cause:** release notes were judged by the date the release was published, so an edit to an old release's notes was never read; GitHub keeps no date a release was last edited, so now every release note is read each day.
+- **Fix:** edit that release's notes on GitHub to use a made-up value, then run the watch again by hand.
+- **Fixed in:** `v2.162.0`
+- **Code:** `scripts/privacy-ci.mjs` — `watchMain`
+
 ### The installer or an upgrade says the bundle does not match the release's manifest
 - **Check:** `scripts/release-manifest.sh asset vX.Y.Z <downloaded bundle> hatchabot-vX.Y.Z-<platform>.tar.gz` says it does not match; compare `wc -c` and `sha256sum` of the download with the manifest's entry. The installer says "the bundle does not match the release's manifest — not using it"; an upgrade says "the release's manifest does not vouch for it" and exits 3.
 - **Cause:** the downloaded bundle is not the one the release vouched for: a truncated or altered download, or a proxy rewriting it.
