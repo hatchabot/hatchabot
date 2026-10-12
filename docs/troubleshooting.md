@@ -1299,6 +1299,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/snapshots.ts` — `readCoreFile`, `writeSnapshotFiles`
 
+### Restoring a snapshot keeps a MEMORY.md (or other core file) made after it was taken
+- **Check:** the snapshot's file list (`GET /v1/agents/<id>/snapshots/<snapshot id>`) has no entry for the file, yet after the restore the agent still has it.
+- **Cause:** a snapshot leaves out a core file that was not there when it was taken, and a restore wrote only the files the snapshot holds, so a file made later stayed although the restore said it was done.
+- **Fix:** upgrade, then restore the snapshot again: a core file the snapshot lacks is now removed. The copy taken just before the restore ("before restoring …") still holds it, so restoring that one brings it back. A snapshot from before v2.160.0 also lacks a file that was empty then; that file is removed too.
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/orchestrator/snapshots.ts` — `restoreSnapshot`, `removeCoreFile`, `writeSnapshotFiles`
+
 ### After restoring a snapshot, changing a setup value brings back the text that was undone
 - **Check:** the agent is a configured template copy (it has Setup values); after a restore, Apply values rewrites SOUL.md or AGENTS.md with the version from before the restore.
 - **Cause:** setup values re-render the files from a stored layer with `{{placeholders}}`. A restore put the files back but left the newer layer and values, so the next Apply rendered the undone version.

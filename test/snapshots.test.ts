@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { existsSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -11,8 +12,10 @@ import {
   readCoreFiles,
   workspacePath,
   restoreSnapshot,
+  recoverSnapshotRestore,
   SnapshotError,
 } from '../src/orchestrator/snapshots.js';
+import { setStepHookForTests, SimulatedCrash } from '../src/orchestrator/operations.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 
@@ -232,6 +235,44 @@ describe('reading the core files', () => {
     writeFileSync(join(w.dir, 'AGENTS.md'), 'filled in later\n');
     await restoreSnapshot(w.deps, 'a1', snap.id);
     expect(readFileSync(join(w.dir, 'AGENTS.md'), 'utf8')).toBe('');
+  });
+});
+
+describe('a core file that was not there when the snapshot was taken (#214)', () => {
+  const dirs: string[] = [];
+  afterEach(() => { setStepHookForTests(undefined); for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  it('is taken away by the restore; an empty one is emptied, a filled one refilled; the safety copy keeps the newer file', async () => {
+    const w = folderWorld(); dirs.push(w.dir);
+    writeFileSync(join(w.dir, 'SOUL.md'), 'A calm cook.\n');
+    writeFileSync(join(w.dir, 'AGENTS.md'), '');
+    const snap = await captureSnapshot(w.deps, 'a1', { label: 'before memory' });
+    expect(snap.files.sort()).toEqual(['AGENTS.md', 'SOUL.md']);
+    writeFileSync(join(w.dir, 'SOUL.md'), 'A loud cook.\n');
+    writeFileSync(join(w.dir, 'AGENTS.md'), 'rules added later\n');
+    writeFileSync(join(w.dir, 'MEMORY.md'), '- The owner likes bread\n');
+    const r = await restoreSnapshot(w.deps, 'a1', snap.id);
+    expect(existsSync(join(w.dir, 'MEMORY.md'))).toBe(false);
+    expect(readFileSync(join(w.dir, 'SOUL.md'), 'utf8')).toBe('A calm cook.\n');
+    expect(readFileSync(join(w.dir, 'AGENTS.md'), 'utf8')).toBe('');
+    expect(r.restored.sort()).toEqual(['AGENTS.md', 'MEMORY.md', 'SOUL.md']);
+    // Undoable: the copy taken first still holds the newer memory.
+    expect(w.store.getSnapshot('a1', r.safetySnapshotId!)!.files['MEMORY.md']).toBe('- The owner likes bread\n');
+  });
+
+  it('a restore finished after a restart takes it away too; a revert puts it back', async () => {
+    for (const action of ['finish', 'revert'] as const) {
+      const w = folderWorld(); dirs.push(w.dir);
+      writeFileSync(join(w.dir, 'SOUL.md'), 'soul\n');
+      const snap = await captureSnapshot(w.deps, 'a1', { label: 'before memory' });
+      writeFileSync(join(w.dir, 'MEMORY.md'), 'memory\n');
+      setStepHookForTests((_op, k) => { if (k === 'file-written') throw new SimulatedCrash(); });
+      await expect(restoreSnapshot(w.deps, 'a1', snap.id)).rejects.toBeInstanceOf(SimulatedCrash);
+      setStepHookForTests(undefined);
+      const op = w.store.listOperations(['a1'])[0]!;
+      await recoverSnapshotRestore(w.deps, op.id, action);
+      expect(existsSync(join(w.dir, 'MEMORY.md'))).toBe(action === 'revert');
+    }
   });
 });
 
