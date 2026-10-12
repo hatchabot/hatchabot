@@ -2,7 +2,8 @@ name: Privacy watch
 
 # What GitHub publishes beside the code — issues, pull request titles and
 # bodies, comments, review comments, release notes — never passes a push
-# check. Once a day this looks at what changed in the last two days with the
+# check. Once a day this looks at what changed in the last two days, and at
+# every release note (a release has no last-edited date), with the
 # same keyed fingerprints as CI's `privacy` job (scripts/privacy-ci.mjs,
 # docs/releasing.md "The privacy check"). A hit fails the run, and GitHub
 # emails the owner; the log shows a masked hint and where, never the value.
@@ -28,7 +29,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
-      - name: the last two days of issues, comments, pull requests and release notes
+      - name: the last two days of issues, comments and pull requests, and every release note
         env:
           PRIVACY_FINGERPRINTS: ${{ secrets.PRIVACY_FINGERPRINTS }}
           GH_TOKEN: ${{ github.token }}

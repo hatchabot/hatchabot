@@ -264,7 +264,7 @@ describe('the daily watch (privacy-watch.yml)', () => {
   });
   const now = new Date().toISOString();
 
-  it('a private value in an issue or a release note fails, masked; clean passes; GitHub refusing is incomplete', () => {
+  it('a private value in an issue fails, masked; clean passes', () => {
     const blob = exportBlob();
     const out = join(dir, 'gh-out');
     writeFileSync(out, `${JSON.stringify({ w: 'issue #7', d: now, t: 'It stalls', b: 'Since Monday the\nMapleford Helper stalls.' })}\n`);
@@ -272,10 +272,26 @@ describe('the daily watch (privacy-watch.yml)', () => {
     expect(hit.status, shown(hit)).toBe(1);
     expect(hit.stdout).toContain("[A agent name] 'Ma…(16)' issue #7 body:2");
     masked(hit);
-    writeFileSync(out, `${JSON.stringify({ w: 'release v2.0.0', d: '2001-01-01T00:00:00Z', t: 'old', b: 'Mapleford Helper' })}\n${JSON.stringify({ w: 'issue #8', d: now, t: 'Fine', b: 'nothing private' })}\n`);
+    writeFileSync(out, `${JSON.stringify({ w: 'issue #8', d: now, t: 'Fine', b: 'nothing private' })}\n`);
     const clean = watch(blob, { HB_GH_OUT: out });
     expect(clean.status, shown(clean)).toBe(0);
     expect(clean.stdout).toContain('✓ privacy watch');
+    expect(clean.stdout).toContain('and all 1 release note(s)');
+  });
+
+  it('a release published long ago whose notes were edited today is read (#212)', () => {
+    const out = join(dir, 'gh-out');
+    // GitHub gives a release no "last edited" date: only when it was made and published.
+    writeFileSync(out, `${JSON.stringify({ w: 'release v2.0.0', d: '2001-01-01T00:00:00Z', t: 'v2.0.0', b: 'Fixed:\nthe Mapleford Helper stall' })}\n`);
+    const r = watch(exportBlob(), { HB_GH_OUT: out });
+    expect(r.status, shown(r)).toBe(1);
+    expect(r.stdout).toContain("[A agent name] 'Ma…(16)' release v2.0.0 body:2");
+    masked(r);
+    expect(readFileSync(join(dir, 'gh-argv'), 'utf8')).not.toMatch(/releases[^\n]*since=/);
+  });
+
+  it('GitHub refusing is incomplete', () => {
+    const blob = exportBlob();
     const refused = watch(blob, { HB_GH: 'fail' });
     expect(refused.status).toBe(3);
     expect(refused.stdout).toContain('GitHub did not answer');

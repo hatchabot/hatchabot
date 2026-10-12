@@ -395,9 +395,12 @@ function ciMain(args) {
 
 // ---- the daily watch: what is published beside the code -----------------------------
 /**
- * Issues and pull requests (their titles and bodies), issue comments, review
- * comments and release notes changed in the last `days` days, through `gh
- * api` with the workflow's read-only token. GitHub not answering is incomplete.
+ * Issues and pull requests (their titles and bodies), issue comments and
+ * review comments changed in the last `days` days, and every release note,
+ * through `gh api` with the workflow's read-only token. GitHub not answering
+ * is incomplete. Release notes are read whole each time: GitHub gives a
+ * release no date it was last edited, so notes edited today on a release
+ * published long ago were skipped by its publishing date (#212).
  */
 function watchMain(args) {
   const opt = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined; };
@@ -413,24 +416,25 @@ function watchMain(args) {
       '.[] | {w: ((if .pull_request then "pull request #" else "issue #" end) + (.number|tostring)), d: .updated_at, t: .title, b: .body} | tojson'],
     ['issue comments', `repos/${repo}/issues/comments?since=${since}&per_page=100`, '.[] | {w: ("comment " + .html_url), d: .updated_at, b: .body} | tojson'],
     ['review comments', `repos/${repo}/pulls/comments?since=${since}&per_page=100`, '.[] | {w: ("review comment " + .html_url), d: .updated_at, b: .body} | tojson'],
-    ['release notes', `repos/${repo}/releases?per_page=100`, '.[] | {w: ("release " + .tag_name), d: (.published_at // .created_at), t: .name, b: .body} | tojson'],
+    ['release notes', `repos/${repo}/releases?per_page=100`, '.[] | {w: ("release " + .tag_name), t: .name, b: .body} | tojson', 'every'],
   ];
   const hits = [], gaps = [], read = [];
-  let items = 0;
-  for (const [what, path, jq] of sources) {
+  let items = 0, releases = 0;
+  for (const [what, path, jq, every] of sources) {
     const r = spawnSync('gh', ['api', '--paginate', path, '--jq', jq], { encoding: 'utf8', maxBuffer: 1 << 28 });
     if (r.error || r.status !== 0) { gaps.push(`${what}: GitHub did not answer (${(r.stderr || String(r.error?.message ?? '')).trim().split('\n')[0] || `gh exit ${r.status}`})`); continue; }
     read.push(what);
     for (const line of r.stdout.split('\n').filter(Boolean)) {
       let it;
       try { it = JSON.parse(line); } catch { gaps.push(`${what}: an answer that is not JSON`); break; }
-      if (it.d && it.d < since) continue;
-      items++;
+      if (every) releases++;
+      else if (it.d && it.d < since) continue;
+      else items++;
       hits.push(...scanText(it.t ?? '', `${it.w} title`, fp, { lines: false }));
       hits.push(...scanText(it.b ?? '', `${it.w} body`, fp));
     }
   }
-  const notCovered = `not covered: ${NOT_COVERED}; review summaries, discussions, wiki; anything older than ${days} day(s)`;
+  const notCovered = `not covered: ${NOT_COVERED}; review summaries, discussions, wiki; issues, pull requests and comments not changed in ${days} day(s)`;
   if (hits.length) {
     console.log(`✗ privacy watch: ${hits.length} private value(s) published on ${repo} since ${since}:`);
     report(hits); advice(console.log);
@@ -440,7 +444,7 @@ function watchMain(args) {
   }
   for (const g of gaps) console.log(`✗ incomplete: ${g}`);
   if (gaps.length) { console.log('✗ privacy watch: incomplete — not everything could be read; this is not a pass'); console.log(notCovered); return INCOMPLETE; }
-  console.log(`✓ privacy watch: ${items} item(s) changed since ${since} — ${read.join(', ')} — name nothing private (${fp.exact.size + fp.lower.size} fingerprints)`);
+  console.log(`✓ privacy watch: ${items} item(s) changed since ${since} and all ${releases} release note(s) — ${read.join(', ')} — name nothing private (${fp.exact.size + fp.lower.size} fingerprints)`);
   console.log(notCovered);
   return CLEAN;
 }
