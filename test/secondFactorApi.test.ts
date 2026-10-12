@@ -218,6 +218,24 @@ describe('second factors: at the public address', () => {
     const mcall = await priv(h, 'member', m.password);
     expect((await mcall('POST', '/v1/second-factor/reset/owner', {})).statusCode).toBe(403);
   });
+
+  it('two removals sent at once cannot take away the last factor between them (#198)', async () => {
+    h = await publicApp();
+    const o = await h.addAccount('owner', { owner: true });
+    // A second authenticator row, so each removal on its own sees another factor left.
+    const other = h.store.listSecondFactors(o.id, { kind: 'totp' })[0]!;
+    h.store.insertSecondFactor({ id: 'sf-second', ownerId: o.id, kind: 'totp', label: 'Authenticator app', data: other.data, confirmed: true });
+    await h.app.publicAccess!.evaluate();
+    expect(h.app.publicAccess!.config().on).toBe(true);
+    const call = await priv(h, 'owner', o.password);
+    const ids = h.store.listSecondFactors(o.id, { kind: 'totp' }).map((f) => f.id);
+    expect(ids).toHaveLength(2);
+    // Both pass the first look before either password check finishes.
+    const codes = (await Promise.all(ids.map((id) => call('DELETE', `/v1/second-factor/${id}`, { current: o.password })))).map((r) => r.statusCode).sort();
+    expect(codes).toEqual([200, 409]);
+    expect(h.store.listSecondFactors(o.id, { kind: 'totp' })).toHaveLength(1);
+    expect(h.app.publicAccess!.secondFactorNeed(o.id)).toBe('yes');
+  });
 });
 
 describe('new backup codes', () => {
