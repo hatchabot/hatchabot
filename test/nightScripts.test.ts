@@ -31,6 +31,10 @@ describe('deploy and upgrade', () => {
     expect(lockOf(d)?.[1]).toBe('PWD');
     expect(lockOf(u)?.[1]).toBe('DIR'); // DIR="$PWD" after its cd
     expect(u).toMatch(/DIR="\$PWD"/);
+    // And judge a leftover the same way: by its holder, cleared under the same second lock (#226).
+    const fns = (s: string) => ['proc_start() {', 'lock_left_over() {', 'take_lock() {'].map((f) => s.slice(s.indexOf(f), s.indexOf('\n}\n', s.indexOf(f))));
+    expect(fns(d)).toEqual(fns(u));
+    for (const s of [d, u]) expect(s).toContain('mkdir "$LOCK_PATH.clearing"');
   });
   it('upgrade.sh installs through ensure-deps (it writes the stamp restart.sh checks)', () => {
     expect(src('scripts/upgrade.sh')).toMatch(/INSTALL="\$\{HATCHABOT_INSTALL_CMD:-\.\/scripts\/ensure-deps\.sh --quiet\}"/);

@@ -41,13 +41,37 @@ fi
 # and macOS has no flock). A flock here and a mkdir there did not exclude each
 # other, so `hbt upgrade` and the follow-latest timer could race one checkout's
 # node_modules.prev (night review, 2026-09-28). Keyed on $PWD, as upgrade.sh
-# is. A lock older than an hour is a crash's leftover. In this user's state
-# folder, not /tmp, where anyone on a shared host could make it first and stop
-# every deploy (review, 2026-10-09).
+# is, and taken the same way: its holder written in it, and only a holder
+# that is gone (or, with none written, an hour) makes it a leftover, cleared
+# under a second lock (#226). In this user's state folder, not /tmp, where
+# anyone on a shared host could make it first and stop every deploy (review,
+# 2026-10-09).
 LOCKS="${XDG_STATE_HOME:-$HOME/.local/state}/hatchabot"; mkdir -p "$LOCKS"
-LOCK="$LOCKS/upgrade-$(printf %s "$PWD" | cksum | cut -d' ' -f1).lock.d"
-if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then rmdir "$LOCK" 2>/dev/null || true; fi
-mkdir "$LOCK" 2>/dev/null || { echo "Another deploy or upgrade of $PROD is running (lock $LOCK)."; exit 4; }
+LOCK_PATH="$LOCKS/upgrade-$(printf %s "$PWD" | cksum | cut -d' ' -f1).lock.d"
+LOCK=""
+proc_start() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; }
+ME="$$"; MY_START="$(proc_start $$)"; [ -z "$MY_START" ] || ME="$$ $MY_START"
+lock_left_over() {
+  local owner pid
+  owner="$(cat "$LOCK_PATH/owner" 2>/dev/null)" || owner=""
+  if [ -z "$owner" ]; then [ -n "$(find "$LOCK_PATH" -maxdepth 0 -mmin +60 2>/dev/null)" ]; return; fi
+  pid="${owner%% *}"
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; else [ "$owner" != "$pid $(proc_start "$pid")" ]; fi
+}
+take_lock() {
+  mkdir "$LOCK_PATH" 2>/dev/null || return 1
+  LOCK="$LOCK_PATH"
+  printf '%s\n' "$ME" > "$LOCK_PATH/owner.$$" && mv -f "$LOCK_PATH/owner.$$" "$LOCK_PATH/owner"
+}
+if ! take_lock; then
+  [ -z "$(find "$LOCK_PATH.clearing" -maxdepth 0 -mmin +10 2>/dev/null)" ] || rmdir "$LOCK_PATH.clearing" 2>/dev/null || true
+  if [ -d "$LOCK_PATH" ] && lock_left_over && mkdir "$LOCK_PATH.clearing" 2>/dev/null; then
+    if lock_left_over; then rm -rf "$LOCK_PATH"; fi
+    rmdir "$LOCK_PATH.clearing" 2>/dev/null || true
+  fi
+  take_lock || { echo "Another deploy or upgrade of $PROD is running (lock $LOCK_PATH)."; exit 4; }
+fi
 CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
 # Whatever ends the script ends here. Something it did not plan for (set -e
 # after node_modules was moved aside) left a half-changed checkout and exit 1,
@@ -59,7 +83,7 @@ finish() {
   local rc=$?
   set +e
   if [ "$rc" != 0 ] && [ "$CHANGING" = 1 ]; then CHANGING=0; rc=3; echo "The deploy stopped part-way — putting $CUR back."; rollback; fi
-  rmdir "$LOCK" 2>/dev/null
+  [ -z "$LOCK" ] || [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$ME" ] || rm -rf "$LOCK"
   case "$rc" in 0|2|3|4) ;; 1) [ "$ROLLED_BACK" = 1 ] || rc=3 ;; *) rc=3 ;; esac
   exit "$rc"
 }
