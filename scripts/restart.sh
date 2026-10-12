@@ -22,31 +22,47 @@ else
 fi
 
 # Wait for it to answer, so "restarted" means "actually serving".
-# .env values may be quoted or carry an inline comment — take the bare value.
-PORT="$(sed -n 's/^PORT=//p' .env 2>/dev/null \
+# .env (the unit's EnvironmentFile) is what the service runs with; its values
+# may be quoted or carry an inline comment — take the bare value, last wins.
+envval() { { sed -n "s/^$1=//p" .env 2>/dev/null || true; } \
   | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' \
-  | tail -n1 || true)"
+  | tail -n1; }
+PORT="$(envval PORT)"
 PORT="${PORT:-8080}"
-# The health probe is loopback on purpose — TLS terminates in front (e.g.
-# tailscale serve), so localhost:PORT is the listener, not the front door.
-# Report the PUBLIC https URL when configured; the loopback one is a detail.
+# The probe asks the listener itself, as the service is configured: https
+# when it serves TLS natively (HATCHABOT_TLS_CERT), at its HATCHABOT_BIND
+# address when that is one host. Probing plain http://localhost failed a
+# healthy native-TLS or LAN-bound listener, and an upgrade rolled back for it.
+# -k: this asks whether it is serving, not whether the certificate names
+# 127.0.0.1 (it names the machine's real address; doctor checks that one).
+SCHEME=http; [ -n "$(envval HATCHABOT_TLS_CERT)" ] && SCHEME=https
+BIND="$(envval HATCHABOT_BIND)"
+case "$BIND" in
+  ""|0.0.0.0|::|"[::]"|localhost|127.0.0.1) PROBE_HOST=localhost ;;
+  \[*) PROBE_HOST="$BIND" ;;
+  *:*) PROBE_HOST="[$BIND]" ;;   # an IPv6 address goes in brackets in a URL
+  *) PROBE_HOST="$BIND" ;;
+esac
+LISTENER="${SCHEME}://${PROBE_HOST}:${PORT}"
+# TLS usually terminates in front (e.g. tailscale serve), so the listener is
+# not the front door: report the PUBLIC https URL when configured.
 PUBLIC_URL="$( { sed -n 's/^HATCHABOT_PUBLIC_URL=//p' "$HOME/.config/hatchabot/env" 2>/dev/null; sed -n 's/^HATCHABOT_PUBLIC_URL=//p' .env 2>/dev/null; } \
   | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' | tail -n1 || true)"
 # 60s, not 30: the DGX control plane takes ~40s to serve, and the old cap
 # printed a scary failure for a boot that was going fine.
 for _ in $(seq 1 60); do
-  if curl -sf -o /dev/null "http://localhost:${PORT}/healthz"; then
+  if curl -sfk -o /dev/null "${LISTENER}/healthz"; then
     if [ -n "$PUBLIC_URL" ]; then
-      echo "Hatchabot is up — ${PUBLIC_URL}  (listener: http://localhost:${PORT})"
+      echo "Hatchabot is up — ${PUBLIC_URL}  (listener: ${LISTENER})"
     else
-      echo "Hatchabot is up on http://localhost:${PORT}"
+      echo "Hatchabot is up on ${LISTENER}"
       echo "Tip: set HATCHABOT_PUBLIC_URL in ~/.config/hatchabot/env to your https address — invites and Google OAuth redirect URIs use it."
     fi
     exit 0
   fi
   sleep 1
 done
-echo "Service was restarted but isn't answering on port ${PORT}."
+echo "Service was restarted but isn't answering at ${LISTENER}."
 # Print the reason rather than pointing at it: a crash-on-boot (a bad .env
 # line, a duplicate route, a missing dependency) is ALWAYS in these lines, and
 # "here are the logs" sends people to restart again instead of reading them.
