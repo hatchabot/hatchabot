@@ -176,6 +176,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0` (#79)
 - **Code:** `src/config/envFile.ts` — `multilineSetting`, `syncEnvText`
 
+### On a Mac, a setting in `.env` went back to an older value after a start (the log may say `env.sync_refused` "would change …")
+- **Check:** `.env` sets the same name twice, once as `export NAME=…` and once as plain `NAME=…`, the plain one lower down.
+- **Cause:** at each start Hatchabot puts `.env` in order and moves lines it does not understand, such as `export …`, under "Other settings" at the end. The macOS launcher reads the file as a shell does, where the last line wins, so the old `export` line took over again.
+- **Fix:** upgrade: such a file is now left as it is, with `env.sync_refused` naming the setting. Remove the `export` line you no longer want (or the word `export`). If an older release already reordered it, the newest `.env.bak-*` copy has the order as you wrote it.
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/config/envFile.ts` — `sourcedValues`, `syncEnvText`
+
 ## Sign-in and accounts
 
 ### Password mode: requests to the app's address were served without the password
