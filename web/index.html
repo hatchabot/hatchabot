@@ -11670,6 +11670,12 @@ let pollTimer, pairTick = 0, pollPaused = false;
 // among it (review, 2026-10-09). Only the newest answer is used; an older call
 // waits for the newer one, so whoever awaited it still sees fresh agents.
 let refreshSeq = 0, refreshLatest = Promise.resolve();
+// The sources and machines, and the pairing knocks, are read on some passes
+// only, and the agent-list check above did not cover them: an older pass's
+// answer landing after a newer one's put back what it no longer had (#228).
+// Each has its own generation; the newest read of it is the one kept, and an
+// older pass's read is still kept when no newer pass read it at all.
+let metaSeq = 0, pairSeq = 0;
 function refresh(withMeta) {
   const seq = ++refreshSeq;
   return (refreshLatest = refreshNow(withMeta, seq));
@@ -11678,7 +11684,9 @@ async function refreshNow(withMeta, seq) {
   void refreshInboxBadge(); // keep the inbox count live without opening it
   try {
     if (withMeta || !profiles.length || !hosts.length) {
-      [profiles, hosts] = await Promise.all([api('/v1/ai-profiles'), api('/v1/hosts')]);
+      const metaMine = ++metaSeq;
+      const meta = await Promise.all([api('/v1/ai-profiles'), api('/v1/hosts')]);
+      if (metaMine === metaSeq) [profiles, hosts] = meta;
       // Who am I (email + linked Telegram) — drives the "That's me" pairing
       // button and the Telegram line under Settings → You.
       void loadMyAccount();
@@ -11718,9 +11726,12 @@ async function refreshNow(withMeta, seq) {
     if (pairTick++ % 3 === 0) {
       // Only agents in a chat app can be knocked on: one with none answers 404.
       const running = agents.filter(a => a.state === 'RUNNING' && v2ChannelKinds(a).length);
+      const pairMine = ++pairSeq;
       const results = await Promise.allSettled(running.map(a => api(`/v1/agents/${a.id}/pairing`)));
-      pairings = {};
-      results.forEach((r, i) => { if (r.status === 'fulfilled') pairings[running[i].id] = r.value; });
+      if (pairMine === pairSeq) {
+        pairings = {};
+        results.forEach((r, i) => { if (r.status === 'fulfilled') pairings[running[i].id] = r.value; });
+      }
       // Members are read when an agent's sheet opens (renderEditMembers).
     }
     renderSetup(); renderV2(); // renderV2 itself waits out a drag
