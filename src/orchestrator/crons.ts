@@ -316,7 +316,8 @@ export async function retargetCron(provider: RuntimeProvider, runtimeRef: string
  * Every task of an agent that announces with no explicit recipient, pointed at
  * the owner's chat, or at the console conversation of an agent in no chat app
  * (or made quiet). Agents also make such tasks themselves, so this runs after
- * each start and daily, not once. Returns how many changed.
+ * each start and daily, not once, and whenever the quick check
+ * (pendingRetarget) finds one due. Returns how many changed.
  *
  * A task already bound to a conversation of its own (`current` with a session
  * key: what an agent makes when asked in its console) is left alone on an
@@ -350,7 +351,6 @@ export async function retargetImplicitCrons(
     }
     return { changed, failed, held: [...stillHeld] };
   }
-  const bound = (j: Cron) => j.sessionTarget === 'current' && !!j.sessionKey;
   const change = isConversation(to) ? todo.filter((j) => !bound(j)) : todo;
   if (isConversation(to) && (change.length || waiting.some((j) => !bound(j)))) await ensureConversation(provider, runtimeRef, slug, to.session);
   for (const j of change) {
@@ -362,6 +362,80 @@ export async function retargetImplicitCrons(
     if (await retargetCron(provider, runtimeRef, j.id, its)) changed++; else { failed++; stillHeld.add(j.id); }
   }
   return { changed, failed, held: [...stillHeld] };
+}
+
+/** Bound to a conversation of its own: `current` with a session key (what an agent makes when asked in a chat). */
+const bound = (j: Cron) => j.sessionTarget === 'current' && !!j.sessionKey;
+
+/**
+ * How often the quick check (pendingRetarget) looks at every running agent.
+ * A task an agent makes in its chat can be due the next morning; the full
+ * pass ran only after a start and then daily, so it fired before it was
+ * re-pointed and reached no one (2026-10-12).
+ */
+export const CRON_QUICK_CHECK_MS = 5 * 60_000;
+
+/**
+ * The shell that prints an agent's tasks straight from OpenClaw's own store
+ * as `{"jobs":[…]}`, in the shape `cron list --json` gives: 2026.9 keeps them
+ * in the state database (`~/.openclaw/state/openclaw.sqlite`, table
+ * `cron_jobs`, one `job_json` per task, read-only here). One Node start, about
+ * 65 ms with the exec, where a `cron list` starts the whole CLI (4–8 s on
+ * 2026.9). Prints nothing when there is no such store (2026.7 keeps a file)
+ * or the read failed.
+ */
+export function cronStoreReadShell(slug: string): string {
+  const db = '/home/node/.openclaw/state/openclaw.sqlite';
+  const node = [
+    'const {DatabaseSync}=require("node:sqlite");',
+    `const db=new DatabaseSync(${JSON.stringify(db)},{readOnly:true});`,
+    'const jobs=[];',
+    'for(const r of db.prepare("select job_id,declaration_key,job_json,updated_at from cron_jobs where agent_id is null or agent_id = ?").all(process.argv[1])){',
+    'let j={};try{j=JSON.parse(r.job_json)}catch(e){}',
+    'jobs.push({...j,id:r.job_id,declarationKey:j.declarationKey||r.declaration_key||undefined,updatedAtMs:r.updated_at})}',
+    'process.stdout.write(JSON.stringify({jobs}));',
+  ].join('');
+  // Single quotes inside the node script would end the shell quoting; there are none.
+  return `[ -f ${db} ] && node -e '${node}' ${slug} 2>/dev/null || true`;
+}
+
+/**
+ * The tasks a retarget pass would change, judged from the list alone (no
+ * version check, no CLI): announcing to no one in particular (a task bound to
+ * a conversation of its own stays, for an agent posting to its console
+ * conversation), or held quiet earlier while there is now someone to post to.
+ */
+export function tasksToRetarget(jobs: Cron[], target: CronTarget | undefined, held: readonly string[] = []): Cron[] {
+  const wasHeld = new Set(held);
+  return jobs.filter((j) => !j.system && (
+    (j.implicitDelivery && !(isConversation(target) && bound(j)))
+    || (!!target && wasHeld.has(j.id) && j.announce === false)));
+}
+
+/**
+ * The quick check: one read of the agent's task store, and the tasks a
+ * retargetImplicitCrons pass would change, with a signature of them (id and
+ * last change) so a caller can tell "the same ones the last pass could not
+ * change" from new ones. Undefined when the store could not be read: then
+ * only the full pass (after a start, and daily) looks.
+ */
+export async function pendingRetarget(
+  provider: RuntimeProvider, runtimeRef: string, slug: string, target: CronTarget | undefined, held: readonly string[] = [],
+): Promise<{ ids: string[]; sig: string } | undefined> {
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(slug)) return undefined;
+  const res = await provider.execShell(runtimeRef, cronStoreReadShell(slug)).catch(() => undefined);
+  if (!res || res.code !== 0 || !res.stdout.trim()) return undefined;
+  let rows: unknown;
+  try { rows = JSON.parse(res.stdout).jobs; } catch { return undefined; }
+  if (!Array.isArray(rows)) return undefined;
+  const jobs = rows
+    .filter((j): j is Record<string, any> => !!j && typeof j === 'object' && typeof j.id === 'string' && j.id !== '')
+    // The gateway reads a stored delivery with no mode as "announce" (row-codec, 2026.9).
+    .map((j) => (j.delivery && typeof j.delivery === 'object' && j.delivery.mode === undefined ? { ...j, delivery: { ...j.delivery, mode: 'announce' } } : j));
+  const stamp = new Map(jobs.map((j) => [String(j.id), Number(j.updatedAtMs) || 0]));
+  const due = tasksToRetarget(jobs.map(normalizeCron), target, held);
+  const ids = due.map((j) => j.id).sort();
+  return { ids, sig: ids.map((id) => `${id}@${stamp.get(id)}`).join(',') };
 }
 
 /**

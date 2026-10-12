@@ -176,6 +176,46 @@ know — don't ask them to re-introduce themselves.
 ${safe}`;
 }
 
+export const SCHEDULED_RESULTS_HEADING = '## Scheduled results';
+
+/**
+ * For an agent in no chat app: where a scheduled task's result goes. Asked in
+ * its web chat for "a market summary every morning", one agent made the task
+ * isolated (OpenClaw's own refusal of sessionTarget "main" for a non-default
+ * agent says to), which has no conversation to post to, then told its owner
+ * it needed Telegram (2026-10-12). Its console conversation is where results
+ * go (crons.ts cronTargetFor): `current` bound to it, announced with no
+ * channel. `conversation` false = an OpenClaw too old for that (before
+ * 2026.9): such tasks are kept quiet and read in Hatchabot.
+ */
+export function scheduledResultsSection(slug: string, conversation: boolean): string {
+  if (!conversation) {
+    return `${SCHEDULED_RESULTS_HEADING}
+- You are in no chat app (no Telegram, Discord or Slack), and this OpenClaw
+  cannot post a scheduled result into the web chat. Your scheduled tasks run
+  quietly: make them with delivery mode "none". Each run's result is kept in
+  the task's run history, which your owner reads in Hatchabot (your Schedule
+  tab).
+- Never tell the person they need Telegram to get a scheduled result.`;
+  }
+  return `${SCHEDULED_RESULTS_HEADING}
+- You are in no chat app (no Telegram, Discord or Slack): your owner talks to
+  you in Hatchabot's web chat, and a scheduled task's result is delivered
+  there, into the conversation your console opens on (\`agent:${slug}:main\`).
+  It shows up without them sending anything.
+- To make one, use your cron tool as usual: an \`agentTurn\` payload with
+  sessionTarget "current" (the default when you are asked in a chat), and
+  delivery left to announce with no channel and no \`to\`. Its result is then
+  committed to the conversation you were asked in.
+- Do not use sessionTarget "main": it is refused for you ("only valid for the
+  default agent"). That refusal suggests "isolated"; an isolated task has no
+  conversation to post to — but if one ends up that way, or with no
+  recipient, Hatchabot points it at your web chat within minutes.
+- Never tell the person they need Telegram (or any chat app) to get a
+  scheduled result. If they also want it on their phone, they can add a chat
+  app to you from your settings in Hatchabot.`;
+}
+
 export const PEERS_HEADING = '## Peers';
 
 /**

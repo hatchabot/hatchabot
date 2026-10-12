@@ -2191,6 +2191,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/crons.ts` — `retargetImplicitCrons`; `src/store/store.ts` — `quietedCrons`
 
+### A web-chat-only agent says it needs Telegram for a scheduled task, or the task fails with "no configured channels detected"
+- **Check:** the agent is in no chat app (no Telegram, Discord or Slack) and runs OpenClaw 2026.9; you asked it in its web chat for something on a schedule ("a market summary every morning"). In the agent's console, `openclaw cron list --json` shows the task it made with `sessionTarget` `isolated` and a `delivery` that names no `channel` or `to`; its runs (`openclaw cron runs --id <id>`) end with "Channel is required (no configured channels detected)". The agent may also say it "isn't the Gateway's default agent", after OpenClaw refused `sessionTarget "main"` for it.
+- **Cause:** results of an agent in no chat app go into its web-chat conversation (the one its console opens on), and Hatchabot points tasks with no recipient there. But it did so only a few minutes after a start and then once a day, so a task made in chat in the evening ran the next morning before it was re-pointed; and nothing told the agent that its web chat receives scheduled results, so it fell back on an isolated task and blamed the missing Telegram.
+- **Fix:** upgrade, then rebuild the agent (or wait for its next rebuild). Its AGENTS.md gets a "Scheduled results" section saying where results go and how to make such a task (sessionTarget "current", announce with no channel), and Hatchabot checks every running agent's tasks every 5 minutes, re-pointing a new one at the web chat within minutes. A task made before the upgrade is re-pointed on the first check. To fix one by hand: `openclaw cron edit <id> --session current --session-key agent:<slug>:main --announce --best-effort-deliver` in the agent's console.
+- **Fixed in:** `v2.163.0`
+- **Code:** `src/orchestrator/crons.ts` — `pendingRetarget`, `cronStoreReadShell`, `CRON_QUICK_CHECK_MS`; `src/api/routes.ts` — `quickCronRetarget`; `src/openclaw/workspace.ts` — `scheduledResultsSection`; `src/orchestrator/provision.ts` — `syncDataSourceDocs`
+
 ### A task's schedule reads "every 0m", or a slightly wrong number of minutes
 - **Check:** the task runs on an interval that is not whole minutes (`openclaw cron list --json` in the agent: `schedule.everyMs` such as 15000 or 90000).
 - **Cause:** the Schedule tab rounded intervals to whole minutes; the task itself ran on its real interval.

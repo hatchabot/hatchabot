@@ -76,7 +76,7 @@ import { contextStats, exportTranscript, recoverContext } from '../orchestrator/
 import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
 import { commandOwnersFor, reapplyCurrentSettings } from '../orchestrator/provision.js';
-import { CronSystemOwnedError, addCron, editCron, cronTargetFor, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
+import { CronSystemOwnedError, CRON_QUICK_CHECK_MS, addCron, editCron, cronTargetFor, pendingRetarget, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
 import { dropAppPending, pendingSecretRefs, resolvePendingValues, stashOldPendingSecrets, stashPendingSecrets } from '../orchestrator/appPending.js';
 import { request as httpRequest } from 'node:http';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
@@ -3104,6 +3104,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     return store.getAgent(woken.id) ?? woken;
   };
+  /** One agent's tasks with no recipient pointed where its results go (crons.ts retargetImplicitCrons). */
+  const retargetAgentCrons = async (a: Agent & { runtimeRef: string }, why: 'sweep' | 'quick') => {
+    const held = store.quietedCrons(a.id);
+    const r = await retargetImplicitCrons(providerFor(a.hostId), a.runtimeRef, a.slug, cronTargetFor(store, a), held);
+    if (held.length || r.held.length) store.setQuietedCrons(a.id, r.held, new Date().toISOString());
+    if (r.changed || r.failed) trace(a.id)('cron.retargeted', { changed: r.changed, failed: r.failed, ...(r.held.length ? { waiting: r.held.length } : {}), ...(why === 'quick' ? { quick: true } : {}) });
+  };
   /**
    * Scheduled tasks that announce to no one in particular get the owner's chat
    * as their recipient, or the console conversation of an agent in no chat app
@@ -3117,10 +3124,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     for (const a of store.listAllActiveAgents()) {
       if (a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) continue;
       try {
-        const held = store.quietedCrons(a.id);
-        const r = await retargetImplicitCrons(providerFor(a.hostId), a.runtimeRef, a.slug, cronTargetFor(store, a), held);
-        if (held.length || r.held.length) store.setQuietedCrons(a.id, r.held, new Date().toISOString());
-        if (r.changed || r.failed) trace(a.id)('cron.retargeted', { changed: r.changed, failed: r.failed, ...(r.held.length ? { waiting: r.held.length } : {}) });
+        await retargetAgentCrons(a as Agent & { runtimeRef: string }, 'sweep');
       } catch { /* its gateway is not answering: next time */ }
       // The owner is OpenClaw's command owner, live (hot-reloaded): an agent
       // built before this left the key empty, and the next person approved
@@ -3162,6 +3166,35 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           }
         }
       } catch { /* next time */ }
+    }
+  };
+  /**
+   * The quick check between full passes, every CRON_QUICK_CHECK_MS: a task an
+   * agent made in its chat (an 8am summary asked for in the web chat at
+   * night) fired before the next daily pass re-pointed it, and its result
+   * reached no one (2026-10-12). Per running agent it reads the task store
+   * once (pendingRetarget, ~65 ms) and starts the CLI only when a task needs
+   * changing. Tasks a pass could not change are not tried again until they
+   * change: the signature of what was due is kept per agent.
+   */
+  const quickTried = new Map<string, string>();
+  let quickRunning = false;
+  const quickCronRetarget = async () => {
+    if (quickRunning) return;
+    quickRunning = true;
+    try {
+      for (const a of store.listAllActiveAgents()) {
+        if (a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) { quickTried.delete(a.id); continue; }
+        try {
+          const due = await pendingRetarget(providerFor(a.hostId), a.runtimeRef, a.slug, cronTargetFor(store, a), store.quietedCrons(a.id));
+          if (!due?.ids.length) { quickTried.delete(a.id); continue; }
+          if (quickTried.get(a.id) === due.sig) continue;
+          quickTried.set(a.id, due.sig);
+          await retargetAgentCrons(a as Agent & { runtimeRef: string }, 'quick');
+        } catch { /* its gateway is not answering: next time */ }
+      }
+    } finally {
+      quickRunning = false;
     }
   };
   /**
@@ -3257,11 +3290,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   (app as unknown as { limitsCheck?: typeof limitsCheck; lastLimitsCheck?: () => LimitsCheckSummary | undefined }).limitsCheck = limitsCheck;
   (app as unknown as { lastLimitsCheck?: () => LimitsCheckSummary | undefined }).lastLimitsCheck = () => lastLimitsCheck;
   (app as unknown as { retargetCronSweep?: typeof retargetCronSweep }).retargetCronSweep = retargetCronSweep;
+  (app as unknown as { quickCronRetarget?: typeof quickCronRetarget }).quickCronRetarget = quickCronRetarget;
   (app as unknown as { hibernateDeps?: HibernateDeps; ensureAwake?: typeof ensureAwake }).hibernateDeps = hibernateDeps;
   (app as unknown as { ensureAwake?: typeof ensureAwake }).ensureAwake = ensureAwake;
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
     setTimeout(() => { void retargetCronSweep(); }, 3 * 60_000).unref();
     setInterval(() => { void retargetCronSweep(); }, 24 * 3_600_000).unref();
+    setInterval(() => { void quickCronRetarget(); }, CRON_QUICK_CHECK_MS).unref();
     setTimeout(() => { void limitsCheck().catch((err) => app.log.warn({ err: String(err) }, 'limits check failed')); }, Number(process.env.HATCHABOT_SWAP_BOOT_MS) || 45_000).unref();
     setInterval(() => { void limitsCheck().catch((err) => app.log.warn({ err: String(err) }, 'limits check failed')); }, Number(process.env.HATCHABOT_SWAP_PROBE_MS) || 10 * 60_000).unref();
     setInterval(() => { void hibernateSweep(hibernateDeps).catch((err) => app.log.warn({ err: String(err) }, 'hibernate sweep failed')); },

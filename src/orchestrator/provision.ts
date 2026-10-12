@@ -21,7 +21,7 @@ import { agentTimeZone } from './timezone.js';
 import { whileBusy } from './busy.js';
 import { notifyAgentChat } from '../channels/notify.js';
 import { autoSnapshot, workspacePath, writeFileInAgent } from './snapshots.js';
-import { addCron, cronTargetFor, listCrons } from './crons.js';
+import { addCron, conversationDeliverySupported, cronTargetFor, listCrons } from './crons.js';
 import { syncModelReviewCron } from './modelReview.js';
 import { channelTimeoutEnv } from './channelTimeout.js';
 import { syncContextCap } from './compaction.js';
@@ -29,7 +29,7 @@ import { clearStaleRuntimePins } from './runtimePins.js';
 import { syncConnections } from './googleConnections.js';
 import { verifyAgentAccess } from './accessOverview.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
-import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, removeInstallSections, operatorSection, peerToolsSection, removeSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, removeInstallSections, operatorSection, peerToolsSection, removeSection, replaceSection, scheduledResultsSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, SCHEDULED_RESULTS_HEADING } from '../openclaw/workspace.js';
 import { effectiveMemoryCap, memoryBudgetSection } from './memoryCap.js';
 import { agentMemoryLimits } from './swap.js';
 
@@ -1491,6 +1491,15 @@ export async function syncDataSourceDocs(
     next = replaceSection(next, '## Memory budget', memoryBudgetSection(memoryCapFor(store, agent)));
     // The operator identity: injected so every agent already knows who it serves.
     next = replaceSection(next, OPERATOR_HEADING, operatorSection(store.getOperatorProfile(agent.ownerId)));
+    // Where scheduled results go, for an agent in no chat app only: one asked
+    // in its web chat told its owner it needed Telegram (2026-10-12). Adding or
+    // removing a chat app rebuilds the agent, which brings this back here.
+    if (store.listChannelsForAgent(agentId).length === 0) {
+      const version = await provider.info(runtimeRef).then((i) => i.openclawVersion, () => undefined);
+      next = replaceSection(next, SCHEDULED_RESULTS_HEADING, scheduledResultsSection(agent.slug, conversationDeliverySupported(version)));
+    } else {
+      next = removeSection(next, SCHEDULED_RESULTS_HEADING);
+    }
     // The management agent's own notes are Hatchabot's: keep the sections that
     // go stale between releases current on every build, instead of only when
     // the agent was first created (it refused work it could do, 2026-09-19).

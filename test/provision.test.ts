@@ -705,6 +705,39 @@ describe('AGENTS.md "## Data sources" stays in step with reality', () => {
     await rebuildAgent(w.deps, agent.id);
     expect(written(w.provider as MockProvider)).toBeUndefined(); // read, then stop
   });
+
+  // 2026-10-12: a web-chat-only agent made a morning task isolated, then told
+  // its owner it needed Telegram; nothing in its notes said otherwise.
+  it('"## Scheduled results" tells an agent in no chat app its results go to its web chat, and follows its chat apps', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const p = w.provider as MockProvider;
+    const ref = w.store.getAgent(agent.id)!.runtimeRef!;
+    // In a chat app: no such section, and one left from before comes off.
+    p.execResponses.set('sh', { code: 0, stdout: '# K\n\n## Scheduled results\n- old\n\n## Mine\nKeep me.\n', stderr: '' });
+    p.execLog.length = 0;
+    await rebuildAgent(w.deps, agent.id);
+    expect(written(p)).not.toContain('## Scheduled results');
+    expect(written(p)).toContain('Keep me.');
+    // Its last chat app gone: the rebuild writes where its results go.
+    w.store.deleteChannelForAgent(agent.id, 'all');
+    w.store.setAgentWebOnly(agent.id, true);
+    p.infoOverride.set(ref, { openclawVersion: '2026.9.8' });
+    p.execResponses.set('sh', { code: 0, stdout: '# K\n', stderr: '' });
+    p.execLog.length = 0;
+    await rebuildAgent(w.deps, agent.id);
+    const doc = written(p)!;
+    expect(doc).toContain('## Scheduled results');
+    expect(doc).toContain(`agent:${agent.slug}:main`);
+    expect(doc).toContain('sessionTarget "current"');
+    expect(doc).toContain('Never tell the person they need Telegram');
+    // An OpenClaw too old to post into a conversation: quiet tasks, read in Hatchabot.
+    p.infoOverride.set(ref, { openclawVersion: '2026.7.1' });
+    p.execLog.length = 0;
+    await rebuildAgent(w.deps, agent.id);
+    expect(written(p)).toContain('delivery mode "none"');
+    expect(written(p)).not.toContain('sessionTarget "current"');
+  });
 });
 
 describe('a git source that will not clone is visible, not just logged', () => {
