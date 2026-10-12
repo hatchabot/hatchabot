@@ -2223,6 +2223,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `web/index.html` — `reportDiscard`
 
+### A problem report draft still shows a credential, or the start of one
+- **Check:** the value is in the draft's Recent failures, Agent log or your own words, and it is one of an agent's settings, its bot token or AI key.
+- **Cause:** a report not about one agent knew only this server's own credential settings, though its Recent failures come from every agent you can see.
+- **Fix:** upgrade: every agent whose failures a report carries has its credentials masked. Before that, delete the value from the draft before filing.
+- **Fixed in:** `v2.162.0`
+- **Code:** `src/api/routes.ts` — `reportRedaction`, `reportAgents`
+
 ### On a Claude subscription, the Hatchabot agent says it will do something, then nothing happens (no card)
 - **Check:** the reply ends with a long JSON object (`{"tool": …}`), shown as text, and no confirmation card appears; the AI source behind the Hatchabot agent is a setup-token or machine login (Settings → AI).
 - **Cause:** on a subscription the model is reached through the Claude CLI, which answers in text; a tool call after a sentence was looked for among only the last 20 opening braces, so a call with many nested objects (a schedule, a list of rows) was never found and was shown as prose.

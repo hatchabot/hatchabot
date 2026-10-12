@@ -360,4 +360,24 @@ describe('the report routes mask private names and known credentials, on every w
     expect(decodeURIComponent(edited.issueUrl)).not.toMatch(/Meal Planner|rose9/);
     expect((await f.inject({ method: 'GET', url: `/v1/problem-reports/${d.id}`, headers: h })).json().body).toBe('Also <name>. password: ***');
   });
+
+  it('a general report masks the key of every agent whose failure it carries, not only a selected one (#204)', async () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: 'owner-1', kind: 'local', provider: 'mock', name: 'pantry-box', settings: {}, createdAt: 'now' } as never);
+    store.insertAgent({ id: 'a1', ownerId: 'owner-1', name: 'Garden Notes', slug: 'garden-notes', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
+    store.insertAgentEnv({ id: 'e1', agentId: 'a1', name: 'GARDEN_KEY', secretRef: 'ref-garden', createdAt: 'now' });
+    // Free text, no credential-shaped field name: only the known value can catch it.
+    store.recordEvent('a1', 'runtime.failed', { message: 'login refused for seedling-42 at the gate' });
+    const f = Fastify();
+    await registerRoutes(f, {
+      store, secrets: { put: async () => {}, get: async (ref: string) => (ref === 'ref-garden' ? 'seedling-42' : 'x'), delete: async () => {} }, providers: new Map([['mock', new MockProvider()]]),
+      channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0 } }, reportDoctor: async () => [],
+    } as never);
+    const r = await f.inject({ method: 'POST', url: '/v1/problem-reports', headers: { 'x-hatchabot-owner': 'owner-1' }, payload: { title: 'Things fail', whatHappened: 'Several agents fail.' } });
+    expect(r.statusCode, r.body).toBe(200);
+    const d = r.json() as { body: string; issueUrl: string };
+    expect(d.body).toContain('runtime.failed');
+    expect(d.body).toContain('login refused for *** at the gate');
+    expect(`${d.body}\n${decodeURIComponent(d.issueUrl)}`).not.toContain('seedling');
+  });
 });
