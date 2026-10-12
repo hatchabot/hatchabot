@@ -226,7 +226,7 @@ import {
 } from './consoleProxy.js';
 import { ConsoleAccess } from '../orchestrator/consoleAccess.js';
 import { credentialValuesFromEnv, redactSecrets } from '../domain/redact.js';
-import { buildReport, issueUrl, knownProblems, localContext, matchKnownProblems, readSource, redactForPublic, searchSource, type PublicRedactContext, type ReportFacts, type ReportInput } from '../orchestrator/problemReport.js';
+import { boundInput, buildReport, issueUrl, knownProblems, localContext, matchKnownProblems, readSource, redactForPublic, searchSource, type PublicRedactContext, type ReportFacts, type ReportInput } from '../orchestrator/problemReport.js';
 import { consoleIdentity, type ConsoleRole } from '../openclaw/consoleIdentity.js';
 import type { IdentityVerifier } from './identity.js';
 import {
@@ -8636,7 +8636,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     for (const e of store.listEvents(agents.map((a) => a.id), 400)) {
       if (!FAILURE_EVENT.test(e.event) || Date.parse(e.at) < since) continue;
       const detail = e.detail ? Object.fromEntries(Object.entries(e.detail).filter(([k]) => !PERSON_KEYS.has(k))) : undefined;
-      const text = detail && Object.keys(detail).length ? redactSecrets(JSON.stringify(detail)).slice(0, 300) : undefined;
+      // Bounded, not clipped to show: a report masks it whole, then clips it (#210).
+      const text = detail && Object.keys(detail).length ? boundInput(redactSecrets(JSON.stringify(detail)), 1000) : undefined;
       const key = `${e.agentId} ${e.event} ${text ?? ''}`;
       const had = seen.get(key);
       if (had) { had.n++; continue; }
@@ -8723,7 +8724,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
   app.post<{ Body: Partial<ReportInput> & { agent?: string } }>('/v1/problem-reports', async (req, reply) => {
     const b = (req.body ?? {}) as Partial<ReportInput> & { agent?: string };
-    const str = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.slice(0, max) : undefined);
+    const str = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? boundInput(v, max) : undefined);
     const title = str(b.title, 200), whatHappened = str(b.whatHappened, 8000);
     if (!title || !whatHappened) return reply.code(400).send({ error: 'A title and what happened, in a sentence or two.' });
     const confidence = b.confidence === 'low' || b.confidence === 'medium' || b.confidence === 'high' ? b.confidence : undefined;
@@ -8744,7 +8745,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!had) return reply.code(404).send({ error: 'Not found' });
     // A person's edit is masked like the rest before it is kept (2026-10-09); what comes back is what goes out, for them to read.
     const ctx = await reportRedaction(req, had.agentId);
-    const patch = { ...(typeof b.title === 'string' && b.title.trim() ? { title: redactForPublic(b.title.slice(0, 200), ctx) } : {}), ...(typeof b.body === 'string' ? { body: redactForPublic(b.body.slice(0, 60_000), ctx) } : {}) };
+    const patch = { ...(typeof b.title === 'string' && b.title.trim() ? { title: redactForPublic(boundInput(b.title, 200), ctx) } : {}), ...(typeof b.body === 'string' ? { body: redactForPublic(boundInput(b.body, 60_000), ctx) } : {}) };
     if (!store.updateProblemReport(ownerIdOf(req), req.params.id, patch)) return reply.code(404).send({ error: 'Not found' });
     return reportView(store.getProblemReport(ownerIdOf(req), req.params.id)!, ctx);
   });

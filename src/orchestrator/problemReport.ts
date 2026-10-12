@@ -107,6 +107,15 @@ const cut = (s: string, n: number) => {
   return s.slice(0, c >= 0xd800 && c <= 0xdbff ? n - 1 : n);
 };
 const clip = (s: string, n: number) => (s.length > n ? `${cut(s, n - 1)}…` : s);
+/**
+ * Input held to `max` before it is masked: past the bound, the cut word goes
+ * too. A credential cut in two no longer matches the value it is masked by,
+ * so its first half would stay (#210). Masking comes first everywhere else;
+ * this is for where text must be bounded before it can be masked.
+ */
+export function boundInput(s: string, max: number): string {
+  return s.length > max ? cut(s, max).replace(/\S*$/, '') : s;
+}
 /** A lone surrogate (pasted text can carry one) made U+FFFD: encodeURIComponent throws on one. */
 const wellFormed = (s: string) => s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
 const fence = (s: string, lang = '') => `\`\`\`${lang}\n${s.replace(/```/g, "'''")}\n\`\`\``;
@@ -115,21 +124,22 @@ const fence = (s: string, lang = '') => `\`\`\`${lang}\n${s.replace(/```/g, "'''
 export function buildReport(input: ReportInput, facts: ReportFacts, ctx: PublicRedactContext = localContext()): { title: string; body: string } {
   // The agent it is about is private wherever it turns up — its log, the prose, the patch — not only in the facts.
   const own = { ...ctx, names: [...(ctx.names ?? []), ...(facts.agent?.name ? [facts.agent.name] : [])] };
+  // Masked whole, then clipped: a value cut at the clip no longer matches what masks it (#210).
   const r = (s: string) => redactForPublic(s, own);
   const parts: string[] = [];
   parts.push(`<!-- ${REPORT_FORMAT} version=${facts.version} install=${facts.install.replace(/\s+/g, '-')} -->`);
-  parts.push('### What happened', r(clip(input.whatHappened.trim(), 4000)));
-  if (input.steps?.trim()) parts.push('### Steps to reproduce', r(clip(input.steps.trim(), 2000)));
+  parts.push('### What happened', clip(r(input.whatHappened.trim()), 4000));
+  if (input.steps?.trim()) parts.push('### Steps to reproduce', clip(r(input.steps.trim()), 2000));
   if (input.diagnosis?.trim()) {
-    parts.push(`### Diagnosis${input.by === 'agent' ? ' (by the Hatchabot agent on this machine' + (input.confidence ? ` — confidence: ${input.confidence}` : '') + ')' : ''}`, r(clip(input.diagnosis.trim(), 5000)));
+    parts.push(`### Diagnosis${input.by === 'agent' ? ' (by the Hatchabot agent on this machine' + (input.confidence ? ` — confidence: ${input.confidence}` : '') + ')' : ''}`, clip(r(input.diagnosis.trim()), 5000));
   }
   if (input.suggestedPatch?.trim()) {
-    parts.push(`### Suggested fix (against ${facts.version})`, fence(r(clip(input.suggestedPatch.trim(), 12000)), 'diff'));
+    parts.push(`### Suggested fix (against ${facts.version})`, fence(clip(r(input.suggestedPatch.trim()), 12000), 'diff'));
   }
   const env = [`- Hatchabot ${facts.version} (${facts.install}) · ${facts.platform} · Node ${facts.node}${facts.openclaw ? ` · OpenClaw ${facts.openclaw}` : ''}`];
   if (facts.agent) {
     const a = facts.agent;
-    env.push(`- Agent: ${a.state}${a.reason ? ` — ${clip(a.reason, 300)}` : ''}${a.model ? ` · ${a.model}` : ''}${a.image ? ` · image ${a.image}` : ''}${a.onRunner ? ' · on a runner' : ''}`);
+    env.push(`- Agent: ${a.state}${a.reason ? ` — ${clip(r(a.reason), 300)}` : ''}${a.model ? ` · ${a.model}` : ''}${a.image ? ` · image ${a.image}` : ''}${a.onRunner ? ' · on a runner' : ''}`);
   }
   parts.push('### Environment', r(env.join('\n')));
   if (facts.doctor?.length) {
@@ -137,11 +147,11 @@ export function buildReport(input: ReportInput, facts: ReportFacts, ctx: PublicR
     parts.push('### hatchabot doctor', fence(r(facts.doctor.map((d) => `${mark(d.level)} ${d.text}${d.fix && d.level !== 'ok' ? `\n    → ${d.fix}` : ''}`).join('\n'))));
   }
   if (facts.failures?.length) {
-    parts.push('### Recent failures (last 3 days)', fence(r(facts.failures.slice(0, 15).map((f) => `${f.at.slice(0, 16).replace('T', ' ')}  ${f.event}${f.detail ? `  ${clip(f.detail, 200)}` : ''}`).join('\n'))));
+    parts.push('### Recent failures (last 3 days)', fence(r(facts.failures.slice(0, 15).map((f) => `${f.at.slice(0, 16).replace('T', ' ')}  ${f.event}${f.detail ? `  ${clip(r(f.detail), 200)}` : ''}`).join('\n'))));
   }
-  if (facts.agent?.logs?.trim()) parts.push('### Agent log (last lines)', fence(r(clip(facts.agent.logs.trim(), 6000))));
+  if (facts.agent?.logs?.trim()) parts.push('### Agent log (last lines)', fence(clip(r(facts.agent.logs.trim()), 6000)));
   parts.push(`<sub>Prepared with Hatchabot's Report a problem${input.by === 'agent' ? ' by the Hatchabot agent' : ''}, and reviewed by the person who sent it.</sub>`);
-  return { title: r(clip(input.title.trim(), 120)), body: parts.join('\n\n') };
+  return { title: clip(r(input.title.trim()), 120), body: parts.join('\n\n') };
 }
 
 /**

@@ -7,7 +7,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { buildReport, issueUrl, knownProblems, matchKnownProblems, newerRelease, readSource, redactForPublic, searchSource, searchesRunning, sourcePath, type ReportFacts } from '../src/orchestrator/problemReport.js';
+import { boundInput, buildReport, issueUrl, knownProblems, matchKnownProblems, newerRelease, readSource, redactForPublic, searchSource, searchesRunning, sourcePath, type ReportFacts } from '../src/orchestrator/problemReport.js';
 
 /**
  * "Report a problem" (docs/field-reports.md): a public GitHub issue made from
@@ -245,6 +245,21 @@ describe('a report masks what the app knows is private', () => {
     expect(r.body).toContain('[gateway] <name> ready');
     expect(r.body).toContain('password: ***');
     expect(r.body).toContain('### hatchabot doctor');
+  });
+
+  it('a known credential across a clip boundary is masked whole, not cut to a prefix that stays (#210)', () => {
+    const c = { ...ctx, secrets: ['seedling-42-compost'] };
+    const at = (n: number) => `${'w '.repeat(Math.floor((n - 6) / 2))}`;
+    const r = buildReport({
+      title: `${at(120)}seedling-42-compost`,
+      whatHappened: `${at(4000)}seedling-42-compost and more`,
+      diagnosis: `${at(5000)}seedling-42-compost`,
+      by: 'person',
+    }, { ...facts, failures: [{ at: '2026-10-06T10:00:00Z', event: 'runtime.failed', detail: `${at(200)}seedling-42-compost` }], agent: { name: 'Recipe Box', state: 'FAILED', reason: `${at(300)}seedling-42-compost` } }, c);
+    for (const s of ['seedl', 'seedling']) expect(`${r.title}\n${r.body}`, s).not.toContain(s);
+    // Input bounded before it can be masked loses the cut word, not keeps half of it.
+    expect(boundInput('a b seedling-42-compost', 10)).toBe('a b ');
+    expect(boundInput('short', 10)).toBe('short');
   });
 
   it('a second pass changes nothing (the draft is masked again as it leaves)', () => {
