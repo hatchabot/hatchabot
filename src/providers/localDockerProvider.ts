@@ -1173,16 +1173,7 @@ export class LocalDockerProvider implements RuntimeProvider {
           'if [ "$DEST" = /vol/.openclaw ]; then touch /vol/.openclaw/.agentclaw-home-v2; fi && ' +
           'chown -R 1000:1000 /vol && chmod -R a-s /vol',
       ]));
-      let stderr = '';
-      // A stalled daemon must fail the call, not pin the agent busy for ever (30th audit).
-      // The one-shot is gone before the caller hears: its rollback extracts
-      // into the same volume (regression review, 2026-09-28).
-      const timer = setTimeout(() => { child.kill('SIGKILL'); void this.#docker(['rm', '-f', ioName], 120_000).catch(() => {}).finally(() => reject(new ProviderError('docker import timed out', 'Docker did not respond in time.'))); }, IO_TIMEOUT_MS);
-      timer.unref();
-      child.on('close', () => clearTimeout(timer));
-      child.stderr.on('data', (c) => (stderr += c));
-      child.on('error', reject);
-      child.on('close', (code) => {
+      this.#oneShotExit(child, ioName).then(({ code, stderr }) => {
         if (code === 0) resolve();
         else
           reject(
@@ -1193,13 +1184,44 @@ export class LocalDockerProvider implements RuntimeProvider {
                 : "Couldn't restore the agent's state.",
             ),
           );
-      });
+      }, reject);
       // Same EPIPE race as #runStdin: if the child exits before draining stdin
       // (a corrupt archive fails `gzip -t` early, docker refuses to start), the
       // write emits an unhandled stream error and takes the PROCESS down. The
       // real failure is already reported by the close handler above.
       child.stdin.on('error', () => {});
       child.stdin.end(data);
+    });
+  }
+
+  /**
+   * The one way a volume-writing one-shot ends (#205). Its close and the
+   * timeout each used to settle the call: the kill made the client close at
+   * once, so the caller heard "failed" and began its rollback while the named
+   * container was still extracting into the same volume. A stalled daemon must
+   * still fail the call, not pin the agent busy for ever (30th audit), but now
+   * whichever comes first owns the outcome, and a failure of any kind (timeout,
+   * error exit, a client killed by a signal) is reported only once the one-shot
+   * has been removed.
+   */
+  #oneShotExit(child: ChildProcess, name: string): Promise<{ code: number; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      let stderr = '';
+      let over = false;
+      const finish = (settle: () => void, reap: boolean) => {
+        if (over) return;
+        over = true;
+        clearTimeout(timer);
+        if (reap) void this.#reapOneShot(name).finally(settle); else settle();
+      };
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        finish(() => reject(new ProviderError('docker import timed out', 'Docker did not respond in time.')), true);
+      }, IO_TIMEOUT_MS);
+      timer.unref();
+      child.stderr?.on('data', (c) => (stderr += c));
+      child.on('error', (err) => finish(() => reject(err), true));
+      child.on('close', (code) => finish(() => resolve({ code: code ?? 1, stderr }), code !== 0));
     });
   }
 
@@ -1217,16 +1239,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         `mkdir -p ${dir} && tar xz --no-same-owner -C ${dir} && ` +
           `chown -R 1000:1000 /vol/.openclaw && chmod -R a-s /vol/.openclaw`,
       ]));
-      let stderr = '';
-      // A stalled daemon must fail the call, not pin the agent busy for ever (30th audit).
-      // The one-shot is gone before the caller hears: its rollback extracts
-      // into the same volume (regression review, 2026-09-28).
-      const timer = setTimeout(() => { child.kill('SIGKILL'); void this.#docker(['rm', '-f', ioName], 120_000).catch(() => {}).finally(() => reject(new ProviderError('docker import timed out', 'Docker did not respond in time.'))); }, IO_TIMEOUT_MS);
-      timer.unref();
-      child.on('close', () => clearTimeout(timer));
-      child.stderr.on('data', (c) => (stderr += c));
-      child.on('error', reject);
-      child.on('close', (code) =>
+      this.#oneShotExit(child, ioName).then(({ code, stderr }) =>
         code === 0
           ? resolve()
           : reject(
@@ -1234,8 +1247,7 @@ export class LocalDockerProvider implements RuntimeProvider {
                 `workspace import failed (${code}): ${stderr.slice(-500)}`,
                 "Couldn't copy the agent's files into its new home.",
               ),
-            ),
-      );
+            ), reject);
       // Same EPIPE race as #runStdin: if the child exits before draining stdin
       // (a corrupt archive fails `gzip -t` early, docker refuses to start), the
       // write emits an unhandled stream error and takes the PROCESS down. The
@@ -1903,26 +1915,33 @@ export class LocalDockerProvider implements RuntimeProvider {
     if (!(await this.reachable())) throw this.#unreachableError();
     return new Promise<ExecResult>((resolve, reject) => {
       const child = spawn(this.docker, this.#argv(args));
+      // Once the call is given up (timeout, unreadable input), the killed
+      // client's close is not the answer: the caller hears only after the
+      // one-shot is removed, or its next step (a rollback) races it (#205).
+      let abandoned = false;
+      const abandon = (err: unknown) => {
+        if (abandoned) return;
+        abandoned = true;
+        clearTimeout(timer);
+        child.kill('SIGKILL');
+        if (oneShot) void this.#reapOneShot(oneShot).finally(() => reject(err)); else reject(err);
+      };
       // A stalled daemon/runner must fail the call, not pin the agent busy forever.
       // A named one-shot goes with it: the killed client alone leaves it running.
-      const timer = setTimeout(() => {
-        child.kill('SIGKILL');
-        const fail = () => reject(new ProviderError('docker stdin op timed out', 'Docker did not respond in time.'));
-        if (oneShot) void this.#reapOneShot(oneShot).finally(fail); else fail();
-      }, IO_TIMEOUT_MS);
+      const timer = setTimeout(() => abandon(new ProviderError('docker stdin op timed out', 'Docker did not respond in time.')), IO_TIMEOUT_MS);
       timer.unref();
       child.on('close', () => clearTimeout(timer));
       let stdout = '';
       let stderr = '';
       child.stdout.on('data', (c) => (stdout += c));
       child.stderr.on('data', (c) => (stderr += c));
-      child.on('error', reject);
-      child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+      child.on('error', (err) => { if (!abandoned) reject(err); });
+      child.on('close', (code) => { if (!abandoned) resolve({ code: code ?? 1, stdout, stderr }); });
       // If the child exits without draining stdin, the write races to EPIPE —
       // swallow it (the close handler above is the real result).
       child.stdin.on('error', () => {});
       if (Buffer.isBuffer(data)) child.stdin.end(data);
-      else createReadStream(data.file).on('error', (err) => { child.kill('SIGKILL'); reject(err); }).pipe(child.stdin);
+      else createReadStream(data.file).on('error', abandon).pipe(child.stdin);
     });
   }
 
