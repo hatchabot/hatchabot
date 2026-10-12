@@ -98,6 +98,8 @@ const GATEWAY_PORT = 18789;
 const ROOTLESS_HOST_ADDRESS = '10.0.2.2';
 /** Bound for volume import/export and seeding (large tarballs, slow runners). */
 const IO_TIMEOUT_MS = Number(process.env.HATCHABOT_DOCKER_IO_TIMEOUT_MS ?? 15 * 60_000);
+/** A download from a volume that sends nothing for this long has stalled (#217). */
+const STREAM_STALL_MS = Math.min(IO_TIMEOUT_MS, 2 * 60_000);
 /** The label on every volume one-shot; its value is the install's prefix. */
 export const ONESHOT_LABEL = 'hatchabot.oneshot';
 
@@ -754,11 +756,27 @@ export class LocalDockerProvider implements RuntimeProvider {
     child.stdout.pipe(out, { end: false });
     child.on('error', (e) => out.destroy(e));
     child.on('close', (code, signal) => {
+      clearInterval(stall); // docker has had its say: the reader takes what is left at its own pace
       if (out.destroyed) return;
       if (code === 0) out.end();
       else out.destroy(new Error(`exit ${code ?? signal}: ${err.trim().slice(-300)}`));
     });
+    // A daemon or runner that stalls (sends nothing, never exits) held the
+    // download and its docker client open for as long as the browser waited
+    // (#217). No byte for STREAM_STALL_MS fails it, and the close below
+    // removes the one-shot. Only docker's silence counts: a reader that is
+    // slow (our buffer full) is waiting on itself, and a large transfer that
+    // keeps moving is never cut off.
+    let lastByte = Date.now();
+    child.stdout.on('data', () => { lastByte = Date.now(); });
+    out.on('drain', () => { lastByte = Date.now(); });
+    const stall = setInterval(() => {
+      if (out.writableNeedDrain) { lastByte = Date.now(); return; }
+      if (Date.now() - lastByte >= STREAM_STALL_MS) out.destroy(new Error(`stalled: nothing from docker for ${Math.round(STREAM_STALL_MS / 1000)} s`));
+    }, Math.max(50, Math.min(STREAM_STALL_MS / 4, 5_000)));
+    stall.unref();
     out.on('close', () => {
+      clearInterval(stall);
       child.stdout.unpipe(out);
       if (child.exitCode !== null || child.signalCode !== null) return;
       child.kill('SIGKILL');
