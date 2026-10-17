@@ -7,16 +7,17 @@ import { scriptEnv } from './helpers/scriptEnv.js';
 
 /**
  * scripts/release.sh and scripts/release-check.sh in a sandbox (release by
- * workflow, issue #37, 2026-10-10): a throwaway repo with a local bare
- * "origin", a temp HOME, hooks off, PATH of shims. gh is a fake that answers
- * CI from HB_CI, records `workflow run`, and makes the release run succeed or
- * fail (HB_RUN); scripts/privacy-check.mjs is a fake that records what it was
- * given and exits HB_PRIVACY_TEXT / HB_PRIVACY_SYNC. Nothing reaches GitHub.
+ * workflow, issue #37, 2026-10-10; through the publish kit, 2026-10-16): a
+ * throwaway repo with a local bare "origin" (the dev repo) and "public" (the
+ * public repo), a temp HOME, hooks off, PATH of shims. gh is a fake that
+ * answers CI from HB_CI; scripts/privacy-check.mjs is a fake that records
+ * what it was given and exits HB_PRIVACY_TEXT / HB_PRIVACY_SYNC. Nothing
+ * reaches GitHub.
  */
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-const SCRIPTS = ['release.sh', 'release-check.sh', 'dispatch-run.sh'];
+const SCRIPTS = ['release.sh', 'release-check.sh'];
 const CHANGELOG = (v: string, body = '### Fixed\n- An agent no longer stalls.\n') => `# Changelog\n\n## [${v}] — 2026-10-10\n\n${body}\n## [9.8.6] — 2026-10-09\n\n- Older.\n`;
 
 function world() {
@@ -24,30 +25,26 @@ function world() {
   const home = join(root, 'home'); mkdirSync(home);
   const bin = join(root, 'bin'); mkdirSync(bin);
   const log = join(root, 'gh.log');
-  const dispatched = join(root, 'dispatched');
   writeFileSync(join(bin, 'gh'), `#!/usr/bin/env bash
 echo "gh $*" >> ${JSON.stringify(log)}
 ci="\${HB_CI:-success}"
 case "$1 $2" in
   "run list")
-    case "$*" in
-      *"--workflow release.yml"*) [ -f ${JSON.stringify(dispatched)} ] && echo 501; echo 500 ;;
-      *) case "$ci" in late:*) n=$(cat ${JSON.stringify(log)}.ci 2>/dev/null || echo 0); echo $((n+1)) > ${JSON.stringify(log)}.ci; if [ "$n" -ge 2 ]; then echo "4242 completed \${ci#late:}"; fi ;; none) ;; pr-only) case "$*" in *"--event push"*) ;; *) echo "4243 completed success" ;; esac ;; running:*) echo "4242 in_progress " ;; *) echo "4242 completed $ci" ;; esac ;;
-    esac ;;
-  "run watch") if [ "$3" = 4242 ]; then [ "\${ci#running:}" = success ]; else [ "\${HB_RUN:-success}" = success ]; fi ;;
-  "workflow run") touch ${JSON.stringify(dispatched)} ;;
-  "release view") echo "https://github.com/example-owner/example/releases/tag/$3" ;;
+    case "$ci" in late:*) n=$(cat ${JSON.stringify(log)}.ci 2>/dev/null || echo 0); echo $((n+1)) > ${JSON.stringify(log)}.ci; if [ "$n" -ge 2 ]; then echo "4242 completed \${ci#late:}"; fi ;; none) ;; pr-only) case "$*" in *"--event push"*) ;; *) echo "4243 completed success" ;; esac ;; running:*) echo "4242 in_progress " ;; *) echo "4242 completed $ci" ;; esac ;;
+  "run watch") [ "\${ci#running:}" = success ] ;;
   *) exit 1 ;;
 esac
 `, { mode: 0o755 });
-  const env = scriptEnv(home, `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, { HATCHABOT_SLUG: 'example-owner/example', HATCHABOT_DISPATCH_POLL: '0', HATCHABOT_CI_APPEAR_SECS: '2' });
+  const env = scriptEnv(home, `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, { HATCHABOT_DEV_SLUG: 'example-owner/example-dev', HATCHABOT_DISPATCH_POLL: '0', HATCHABOT_CI_APPEAR_SECS: '2' });
   const git = (cwd: string, ...args: string[]) => {
     const r = spawnSync('git', args, { cwd, env, encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
     return r.stdout.trim();
   };
   const origin = join(root, 'origin.git');
+  const pub = join(root, 'public.git');
   git(root, 'init', '-q', '--bare', '-b', 'main', origin);
+  git(root, 'init', '-q', '--bare', '-b', 'main', pub);
   const work = join(root, 'work'); mkdirSync(join(work, 'scripts'), { recursive: true });
   git(work, 'init', '-q', '-b', 'main');
   for (const s of SCRIPTS) writeFileSync(join(work, 'scripts', s), readFileSync(join('scripts', s)), { mode: 0o755 });
@@ -69,40 +66,43 @@ process.exit(Number(process.env.HB_PRIVACY_SYNC ?? 0));
   git(work, 'tag', 'v9.8.6');
   git(work, 'remote', 'add', 'origin', origin);
   git(work, 'push', '-q', 'origin', 'main', 'v9.8.6');
+  git(work, 'push', '-q', pub, 'main', 'v9.8.6');
+  git(work, 'remote', 'add', '--no-tags', 'public', pub);
   const run = (script: string, args: string[], extra: Record<string, string> = {}) =>
     spawnSync('bash', [join(work, 'scripts', script), ...args], { cwd: work, env: { ...env, ...extra }, encoding: 'utf8' });
   const release = (args: string[], extra: Record<string, string> = {}) => run('release.sh', args, extra);
   const read = (f: string) => (existsSync(join(root, f)) ? readFileSync(join(root, f), 'utf8') : '');
   const landed = (v: string, changelog?: string) => { const sha = commitVersion(v, changelog); git(work, 'push', '-q', 'origin', 'main'); return sha; };
-  return { root, work, origin, git, release, run, landed, commitVersion, ghLog: () => read('gh.log'), privacyLog: () => read('privacy.log'), notes: () => read('notes.log') };
+  /** The tag on origin, peeled, and its message ('' when origin has none). */
+  const originTag = (tag: string) => { const r = spawnSync('git', ['--git-dir', origin, 'for-each-ref', '--format=%(objecttype) %(*objectname) %(contents:subject)', `refs/tags/${tag}`], { env, encoding: 'utf8' }); return r.stdout.trim(); };
+  return { root, work, origin, pub, git, release, run, landed, commitVersion, originTag, ghLog: () => read('gh.log'), privacyLog: () => read('privacy.log'), notes: () => read('notes.log') };
 }
 
 const out = (r: { stdout: string; stderr: string }) => r.stdout + r.stderr;
 
-describe('scripts/release.sh starts the release workflow once everything it needs has landed', () => {
-  it('checks, runs the privacy steps, starts release.yml for the checked commit, follows it and prints the release', () => {
+describe('scripts/release.sh tags the version commit in the dev repo once everything it needs has landed', () => {
+  it('checks, runs the privacy steps, then pushes an annotated tag on the checked commit to origin', () => {
     const w = world();
     const sha = w.landed('9.8.7');
     const r = w.release(['9.8.7']);
     expect(r.status, out(r)).toBe(0);
-    expect(w.ghLog()).toContain(`gh workflow run release.yml --repo example-owner/example --ref main -f version=9.8.7 -f commit=${sha} -f draft_only=false`);
-    expect(w.ghLog()).toContain('gh run watch 501 --repo example-owner/example --exit-status');
-    expect(w.ghLog()).toContain('--workflow ci.yml --commit ' + sha + ' --event push --branch main');
-    // The notes are the CHANGELOG section, checked before the fingerprints are synced and the workflow starts.
+    expect(w.ghLog()).toContain('--repo example-owner/example-dev --workflow ci.yml --commit ' + sha + ' --event push --branch main');
+    // The notes are the CHANGELOG section, checked before the fingerprints are synced and the tag is made.
     expect(w.notes()).toBe('### Fixed\n- An agent no longer stalls.\n');
     expect(w.privacyLog()).toMatch(/^--text \S+notes\.md\n--sync-ci\n$/);
-    expect(r.stdout).toContain('→ v9.8.7 from ' + sha.slice(0, 9) + ': https://github.com/example-owner/example/actions/runs/501');
-    expect(r.stdout).toContain('✓ released v9.8.7: https://github.com/example-owner/example/releases/tag/v9.8.7');
+    expect(w.originTag('v9.8.7')).toBe(`tag ${sha} hatchabot v9.8.7`);
+    expect(r.stdout).toContain(`✓ tagged v9.8.7 on ${sha.slice(0, 9)} in example-owner/example-dev.`);
+    expect(r.stdout).toContain('gh workflow run publish.yml -R cksci/publisher');
+    expect(w.ghLog()).not.toContain('workflow run');
   });
 
-  it('--draft-only asks the workflow for a draft and says how to remove it', () => {
+  it('--draft-only is gone: the release is built only on the public repo', () => {
     const w = world();
     w.landed('9.8.7');
     const r = w.release(['v9.8.7', '--draft-only']);
-    expect(r.status, out(r)).toBe(0);
-    expect(w.ghLog()).toMatch(/workflow run release\.yml .* -f draft_only=true/);
-    expect(r.stdout).toContain('✓ draft v9.8.7 made, nothing published');
-    expect(r.stdout).toContain('gh release delete v9.8.7');
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('--draft-only is gone');
+    expect(w.originTag('v9.8.7')).toBe('');
   });
 
   it('waits for CI still running on the commit, then goes on', () => {
@@ -121,21 +121,33 @@ describe('scripts/release.sh starts the release workflow once everything it need
     expect(r.stderr).toContain('No CI run listed yet');
   });
 
-  it('a failed workflow run: exit 1, with the run and how to re-run it', () => {
+  it('a refused tag push: exit 1, and the local tag is deleted again', () => {
     const w = world();
     w.landed('9.8.7');
-    const r = w.release(['9.8.7'], { HB_RUN: 'failure' });
+    w.git(w.work, 'remote', 'set-url', '--push', 'origin', join(w.root, 'nowhere.git'));
+    const r = w.release(['9.8.7']);
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain('The release workflow failed: https://github.com/example-owner/example/actions/runs/501');
-    expect(r.stderr).toContain('gh run rerun 501 --failed');
+    expect(r.stderr).toContain('The push of v9.8.7 was refused');
+    expect(spawnSync('git', ['-C', w.work, 'tag', '-l', 'v9.8.7'], { encoding: 'utf8' }).stdout).toBe('');
   });
 
-  /** A refusal: exit non-zero, the reason, and no workflow started. */
+  /** A refusal: exit non-zero, the reason, and no tag on origin. */
   const refused = (r: ReturnType<ReturnType<typeof world>['release']>, w: ReturnType<typeof world>, why: RegExp) => {
     expect(r.status, out(r)).not.toBe(0);
     expect(r.stderr).toMatch(why);
-    expect(w.ghLog()).not.toContain('workflow run');
+    expect(w.originTag('v9.8.7')).toBe('');
   };
+
+  it('refuses a tag name the public repo already has, and a clone with no public remote', () => {
+    const w = world();
+    const sha = w.landed('9.8.7');
+    w.git(w.work, 'push', '-q', w.pub, `${sha}:refs/tags/v9.8.7`);
+    refused(w.release(['9.8.7']), w, /The tag v9\.8\.7 already exists on the public repo/);
+    const n = world();
+    n.landed('9.8.7');
+    n.git(n.work, 'remote', 'remove', 'public');
+    refused(n.release(['9.8.7']), n, /No remote 'public' for the public repo/);
+  });
 
   it('refuses while local main is not origin/main (the version commit has not landed)', () => {
     const w = world();
@@ -162,11 +174,11 @@ describe('scripts/release.sh starts the release workflow once everything it need
     const w = world();
     w.landed('9.8.7');
     w.git(w.work, 'tag', 'v9.8.7'); w.git(w.work, 'push', '-q', 'origin', 'v9.8.7');
-    refused(w.release(['9.8.7']), w, /The tag v9\.8\.7 already exists/);
+    expect(w.release(['9.8.7']).stderr).toMatch(/The tag v9\.8\.7 already exists — a version is released once/);
   });
 
   it('refuses failed CI, no CI run for the push to main, and a pull-request run alone', () => {
-    for (const [ci, why] of [['failure', /CI failed on \w+ \(failure\): https:\/\/github\.com\/example-owner\/example\/actions\/runs\/4242/], ['none', /No CI run for the push to main/], ['pr-only', /No CI run for the push to main/]] as const) {
+    for (const [ci, why] of [['failure', /CI failed on \w+ \(failure\): https:\/\/github\.com\/example-owner\/example-dev\/actions\/runs\/4242/], ['none', /No CI run for the push to main/], ['pr-only', /No CI run for the push to main/]] as const) {
       const w = world();
       w.landed('9.8.7');
       refused(w.release(['9.8.7'], { HB_CI: ci }), w, why);
@@ -193,7 +205,28 @@ describe('scripts/release.sh starts the release workflow once everything it need
   });
 });
 
-describe('scripts/release-check.sh (the workflow\'s first job runs it too)', () => {
+describe('scripts/release-check.sh (the public repo\'s release workflow runs it too, --tagged)', () => {
+  it('--tagged: the tag on origin names a commit on main; that commit is checked, and CI is not asked', () => {
+    const w = world();
+    const sha = w.landed('9.8.7');
+    w.git(w.work, 'tag', '-a', 'v9.8.7', '-m', 'hatchabot v9.8.7', sha); w.git(w.work, 'push', '-q', 'origin', 'v9.8.7');
+    w.landed('9.8.8');
+    const r = w.run('release-check.sh', ['9.8.7', '--tagged', '--repo', 'example-owner/example']);
+    expect(r.status, out(r)).toBe(0);
+    expect(r.stdout).toBe(`version=9.8.7\ntag=v9.8.7\ncommit=${sha}\nnewest=true\nprerelease=false\n`);
+    expect(w.ghLog()).toBe('');
+    const none = w.run('release-check.sh', ['9.8.9', '--tagged']);
+    expect(none.status).toBe(1);
+    expect(none.stderr).toContain('The tag v9.8.9 is not on origin');
+    w.git(w.work, 'checkout', '-q', '-b', 'side', sha);
+    const side = w.commitVersion('9.9.0');
+    w.git(w.work, 'tag', 'v9.9.0', side); w.git(w.work, 'push', '-q', 'origin', 'v9.9.0');
+    const off = w.run('release-check.sh', ['9.9.0', '--tagged']);
+    expect(off.status).toBe(1);
+    expect(off.stderr).toContain('which is not on main');
+    expect(w.run('release-check.sh', ['9.8.7', '--tagged', '--commit', sha]).status).toBe(2);
+  });
+
   it('prints the outputs; newest only when above every release tag; a pre-release is never newest', () => {
     const w = world();
     const sha = w.landed('9.8.7');

@@ -1,12 +1,16 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { scanWorkspacePaths } from '../src/orchestrator/dataPaths.js';
+import { SYSTEM_PREFIXES, scanWorkspacePaths as scanWith } from '../src/orchestrator/dataPaths.js';
 
 // Root under the repo, not /tmp — the scan (correctly) excludes /tmp and other
 // system trees, so a fixture there would be filtered out.
 const root = mkdtempSync(join(process.cwd(), 'acl-dp-test-'));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
+// A checkout that is itself under a system tree (a self-hosted runner's
+// /var/lib/...) keeps every other system prefix.
+const prefixes = SYSTEM_PREFIXES.filter((s) => !root.startsWith(`${s}/`));
+const scanWorkspacePaths = (ws: string) => scanWith(ws, prefixes);
 
 // A real external data folder (with a file), and the agent's workspace.
 const data = join(root, 'condo-documents');

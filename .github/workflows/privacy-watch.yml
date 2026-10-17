@@ -20,6 +20,9 @@ permissions:
 
 jobs:
   watch:
+    # What is published beside the code is the public repo's; the private dev
+    # repo holds no fingerprint set.
+    if: github.repository == 'hatchabot/hatchabot'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

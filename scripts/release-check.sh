@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
-# May this commit be released as this version? The release workflow's first
-# job runs it (.github/workflows/release.yml), and scripts/release.sh runs it
-# before starting the workflow, so a refusal comes before anything is built
-# (release by workflow, issue #37, 2026-10-10):
+# May this commit be released as this version? scripts/release.sh runs it
+# in the private dev repo before tagging, and the public repo's release
+# workflow runs it (--tagged) on the tag the publisher pushed
+# (.github/workflows/release.yml; docs/releasing.md):
 #
-#   scripts/release-check.sh <X.Y.Z> [--commit <sha>] [--repo owner/name] [--notes <file>] [--wait-ci]
+#   scripts/release-check.sh <X.Y.Z> [--commit <sha>] [--repo owner/name] [--notes <file>] [--wait-ci] [--public <remote>]
+#   scripts/release-check.sh <X.Y.Z> --tagged [--repo owner/name] [--notes <file>]
 #
-# It refuses unless:
+# Before tagging, it refuses unless:
 #   - the commit is origin/main's head, or (with --commit) a commit on main;
 #   - package.json at that commit says X.Y.Z, and CHANGELOG.md there has a
 #     `## [X.Y.Z]` section with something in it (--notes writes the section);
 #   - the CI run for the push to main of that commit (ci.yml, event push,
 #     branch main) concluded success — a pull request's run does not count;
 #     one still running is waited for with --wait-ci, refused without;
-#   - the tag vX.Y.Z does not exist on origin.
+#   - the tag vX.Y.Z does not exist on origin, nor (with --public) on that
+#     remote: the public repo, where a tag name is used once for good.
+# With --tagged (the public repo's release workflow), the tag vX.Y.Z must
+# exist on origin and name a commit on main, and that commit is the one
+# checked; CI is not asked (the dev repo's CI passed before it was tagged,
+# and the publisher's gate checked the tree).
 # On success it prints, for $GITHUB_OUTPUT: version=, tag=, commit=,
 # newest= (true when X.Y.Z is above every release tag and not a
 # pre-release: the `latest` image alias follows it) and prerelease=.
@@ -22,10 +28,12 @@ set -euo pipefail
 die() { echo "✗ $1" >&2; exit "${2:-1}"; }
 say() { echo "$*" >&2; }
 
-VERSION=""; COMMIT=""; REPO=""; NOTES=""; WAIT=0
+VERSION=""; COMMIT=""; REPO=""; NOTES=""; WAIT=0; TAGGED=0; PUBLIC=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --commit) COMMIT="${2:-}"; shift 2 ;;
+    --tagged) TAGGED=1; shift ;;
+    --public) PUBLIC="${2:-}"; shift 2 ;;
     --repo) REPO="${2:-}"; shift 2 ;;
     --notes) NOTES="${2:-}"; shift 2 ;;
     --wait-ci) WAIT=1; shift ;;
@@ -33,7 +41,8 @@ while [ $# -gt 0 ]; do
     *) [ -z "$VERSION" ] || die "one version only" 2; VERSION="${1#v}"; shift ;;
   esac
 done
-[ -n "$VERSION" ] || die "usage: release-check.sh <X.Y.Z> [--commit <sha>] [--repo owner/name] [--notes <file>] [--wait-ci]" 2
+[ -n "$VERSION" ] || die "usage: release-check.sh <X.Y.Z> [--commit <sha>] [--repo owner/name] [--notes <file>] [--wait-ci] [--public <remote>] | <X.Y.Z> --tagged" 2
+[ "$TAGGED" = 0 ] || [ -z "$COMMIT$PUBLIC" ] || die "--tagged checks the tag's own commit: no --commit or --public with it" 2
 echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || die "\"$VERSION\" is not a version (X.Y.Z, or X.Y.Z-rc.N)." 2
 TAG="v$VERSION"
 if [ -z "$REPO" ]; then
@@ -43,7 +52,11 @@ fi
 
 git fetch -q --no-tags origin +refs/heads/main:refs/remotes/origin/main || die "Could not fetch main from origin."
 MAIN="$(git rev-parse refs/remotes/origin/main)"
-if [ -z "$COMMIT" ]; then
+if [ "$TAGGED" = 1 ]; then
+  git fetch -q --no-tags origin "+refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || die "The tag $TAG is not on origin."
+  SHA="$(git rev-parse -q --verify "refs/tags/$TAG^{commit}")" || die "The tag $TAG names no commit."
+  git merge-base --is-ancestor "$SHA" "$MAIN" || die "The tag $TAG names ${SHA:0:9}, which is not on main."
+elif [ -z "$COMMIT" ]; then
   SHA="$MAIN"
 else
   echo "$COMMIT" | grep -qE '^[0-9a-f]{7,40}$' || die "--commit must be a commit sha."
@@ -68,34 +81,42 @@ grep -qF "## [$VERSION]" "$AT/CHANGELOG.md" || die "CHANGELOG.md at ${SHA:0:9} h
 [ -n "$(printf '%s' "$SECTION" | tr -d '[:space:]')" ] || die "The CHANGELOG section for $VERSION is empty."
 if [ -n "$NOTES" ]; then printf '%s\n' "$SECTION" | sed -e '/./,$!d' > "$NOTES"; fi
 
-[ -z "$(git ls-remote --tags origin "refs/tags/$TAG")" ] || die "The tag $TAG already exists — a version is released once. Make a new patch version."
+if [ "$TAGGED" = 1 ]; then
+  say "✓ $TAG: ${SHA:0:9} is on main, package.json and CHANGELOG say $VERSION"
+else
+  [ -z "$(git ls-remote --tags origin "refs/tags/$TAG")" ] || die "The tag $TAG already exists — a version is released once. Make a new patch version."
+  if [ -n "$PUBLIC" ]; then
+    P="$(git ls-remote --tags "$PUBLIC" "refs/tags/$TAG")" || die "Could not read the public repo's tags ($PUBLIC)."
+    [ -z "$P" ] || die "The tag $TAG already exists on the public repo — a version is released once. Make a new patch version."
+  fi
 
-# The run for the push to main, as promote.sh reads it: a pull request's run
-# on the same commit tested it merged onto whatever its base was then.
-command -v gh >/dev/null 2>&1 || die "Can't check CI: the gh command is not installed."
-ci() { gh run list --repo "$REPO" --workflow ci.yml --commit "$SHA" --event push --branch main --limit 1 --json databaseId,status,conclusion -q '.[] | "\(.databaseId) \(.status) \(.conclusion)"'; }
-RUN="$(ci)" || die "Could not ask GitHub about CI for ${SHA:0:9}."
-# Right after a pull request merges, GitHub takes a few seconds to list the
-# push's run (the first v2.159.1 release stopped here, 2026-10-10): with
-# --wait-ci, give it up to HATCHABOT_CI_APPEAR_SECS (180) to appear.
-if [ -z "$RUN" ] && [ "$WAIT" = 1 ]; then
-  say "No CI run listed yet for ${SHA:0:9} — waiting for it to appear…"
-  APPEAR_END=$(( $(date +%s) + ${HATCHABOT_CI_APPEAR_SECS:-180} ))
-  while [ -z "$RUN" ] && [ "$(date +%s)" -lt "$APPEAR_END" ]; do
-    sleep "${HATCHABOT_DISPATCH_POLL:-10}"
-    RUN="$(ci)" || die "Could not ask GitHub about CI for ${SHA:0:9}."
-  done
+  # The run for the push to main, as promote.sh reads it: a pull request's run
+  # on the same commit tested it merged onto whatever its base was then.
+  command -v gh >/dev/null 2>&1 || die "Can't check CI: the gh command is not installed."
+  ci() { gh run list --repo "$REPO" --workflow ci.yml --commit "$SHA" --event push --branch main --limit 1 --json databaseId,status,conclusion -q '.[] | "\(.databaseId) \(.status) \(.conclusion)"'; }
+  RUN="$(ci)" || die "Could not ask GitHub about CI for ${SHA:0:9}."
+  # Right after a pull request merges, GitHub takes a few seconds to list the
+  # push's run (the first v2.159.1 release stopped here, 2026-10-10): with
+  # --wait-ci, give it up to HATCHABOT_CI_APPEAR_SECS (180) to appear.
+  if [ -z "$RUN" ] && [ "$WAIT" = 1 ]; then
+    say "No CI run listed yet for ${SHA:0:9} — waiting for it to appear…"
+    APPEAR_END=$(( $(date +%s) + ${HATCHABOT_CI_APPEAR_SECS:-180} ))
+    while [ -z "$RUN" ] && [ "$(date +%s)" -lt "$APPEAR_END" ]; do
+      sleep "${HATCHABOT_DISPATCH_POLL:-10}"
+      RUN="$(ci)" || die "Could not ask GitHub about CI for ${SHA:0:9}."
+    done
+  fi
+  [ -n "$RUN" ] || die "No CI run for the push to main of ${SHA:0:9} — has it landed on main?"
+  ID="${RUN%% *}"; ST="${RUN#* }"
+  if [ "${ST%% *}" != completed ]; then
+    [ "$WAIT" = 1 ] || die "CI for ${SHA:0:9} is still running: https://github.com/$REPO/actions/runs/$ID — release once it has passed."
+    say "CI for ${SHA:0:9} is still running — waiting for it…"
+    gh run watch "$ID" --repo "$REPO" --exit-status >/dev/null 2>&1 || die "CI failed on ${SHA:0:9}: https://github.com/$REPO/actions/runs/$ID"
+  elif [ "$ST" != "completed success" ]; then
+    die "CI failed on ${SHA:0:9} (${ST#completed }): https://github.com/$REPO/actions/runs/$ID"
+  fi
+  say "✓ $TAG: ${SHA:0:9} is on main, package.json and CHANGELOG say $VERSION, CI passed, the tag is free"
 fi
-[ -n "$RUN" ] || die "No CI run for the push to main of ${SHA:0:9} — has it landed on main?"
-ID="${RUN%% *}"; ST="${RUN#* }"
-if [ "${ST%% *}" != completed ]; then
-  [ "$WAIT" = 1 ] || die "CI for ${SHA:0:9} is still running: https://github.com/$REPO/actions/runs/$ID — release once it has passed."
-  say "CI for ${SHA:0:9} is still running — waiting for it…"
-  gh run watch "$ID" --repo "$REPO" --exit-status >/dev/null 2>&1 || die "CI failed on ${SHA:0:9}: https://github.com/$REPO/actions/runs/$ID"
-elif [ "$ST" != "completed success" ]; then
-  die "CI failed on ${SHA:0:9} (${ST#completed }): https://github.com/$REPO/actions/runs/$ID"
-fi
-say "✓ $TAG: ${SHA:0:9} is on main, package.json and CHANGELOG say $VERSION, CI passed, the tag is free"
 
 # Newest: above every release tag on origin ("~" sorts a pre-release below its release).
 PRE=false; case "$VERSION" in *-*) PRE=true ;; esac

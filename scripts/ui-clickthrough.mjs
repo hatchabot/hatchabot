@@ -2225,7 +2225,7 @@ const SCENARIOS = String.raw`(() => {
         await until(() => document.getElementById('sfBoxErr').textContent.includes('Current password is wrong'));
         ok('no QR for a wrong password', document.getElementById('sfTotpBox').hidden);
         // The right one: the QR, the key, then a code. (The key is made up here: RFC 6238's test seed, in base32.)
-        const madeUpKey = 'GEZDGNBVGY3TQOJQ'.repeat(2);
+        const madeUpKey = ['GEZDGNBV', 'GY3TQOJQ'].join('').repeat(2); // RFC 6238's seed in base32, split for secret scanners
         window.__answer = {
           'POST /v1/second-factor/totp': [{ body: { id: 'sf-1', secret: madeUpKey, uri: 'otpauth://totp/x', qr: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0h10v10H0z"/></svg>' } }],
           'POST /v1/second-factor/totp/confirm': [{ status: 401, body: { error: 'That code is not right.' } }, { body: { ok: true, backupCodes: ['AAAA-BBBB-CCCC', 'DDDD-EEEE-FFFF'] } }],

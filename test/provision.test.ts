@@ -14,6 +14,7 @@ import { Store } from '../src/store/store.js';
 import { ChannelSetupRequired } from '../src/channels/channel.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
+import { DISCORD_ID } from './support/fixtures.js';
 
 class MemSecrets implements SecretStore {
   map = new Map<string, string>();
@@ -865,7 +866,7 @@ describe('Discord rests behind the same door as Telegram', () => {
     await rebuildAgent(w.deps, agent.id);
     let dc = (w.provider as MockProvider).lastSpec!.workspace.configPatch.discord!;
     expect(dc.dmPolicy).toBe('pairing'); // nobody on the list yet: reachable
-    w.store.bindMemberIdentity(agent.id, agent.ownerId, 'discord', '123456789012345678');
+    w.store.bindMemberIdentity(agent.id, agent.ownerId, 'discord', DISCORD_ID);
     await rebuildAgent(w.deps, agent.id);
     dc = (w.provider as MockProvider).lastSpec!.workspace.configPatch.discord!;
     expect(dc.dmPolicy).toBe('allowlist');

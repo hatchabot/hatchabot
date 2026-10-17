@@ -9,9 +9,16 @@
 # Tagging a release makes it `latest` and nothing more; `stable` only moves
 # when you run this. That is what lets you release several times a day
 # without a stranger's first install landing on whatever you tagged an hour
-# ago. It commits channels.json on main and pushes — no new tag, no rebuild —
-# then has GitHub move the runtime image's :stable/:beta to that release's
-# image (promote-images.yml), and waits for it.
+# ago. It lands channels.json on the dev repo's main (origin, through
+# scripts/land.sh) and asks the publisher for the fast lane with a tag
+# channels-YYYYMMDDTHHMMSSZ (UTC) on that commit: the publisher copies that
+# one file to the public repo on its next run (gated, no wait), and the
+# public repo's promote-images.yml then moves the runtime image's
+# :stable/:beta to that release's image. No release tag, no rebuild.
+#
+# Only a published release can be promoted: the public repo (the remote
+# `public`, read only) has its tag. The fast lane refuses a channels.json
+# naming any other.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 die() { echo "✗ $*" >&2; exit 1; }
@@ -21,6 +28,11 @@ TAG="${1:-}"; CH="${2:-stable}"
 case "$CH" in stable|beta) ;; *) die "Channel must be stable or beta (latest is always the newest tag)." ;; esac
 git fetch --tags --force --quiet origin
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "No tag $TAG — tag and push the release first."
+PUBLIC="${HATCHABOT_PUBLIC_REMOTE:-public}"
+git remote get-url "$PUBLIC" >/dev/null 2>&1 \
+  || die "No remote '$PUBLIC' for the public repo — add it, read only: git remote add --no-tags public https://github.com/hatchabot/hatchabot.git && git remote set-url --push public DISABLED"
+PUB_TAG="$(git ls-remote --tags "$PUBLIC" "refs/tags/$TAG")" || die "Could not list the public repo's tags."
+[ -n "$PUB_TAG" ] || die "$TAG is not published yet (the public repo has no such tag): the publisher publishes it after its wait — promote it then."
 [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || die "Promote from main."
 [ -z "$(git status --porcelain channels.json)" ] || die "channels.json has uncommitted changes."
 # What GitHub's main holds, and nothing else. The promote commit is pushed as
@@ -34,7 +46,37 @@ AHEAD="$(git rev-list --count origin/main..HEAD)"; BEHIND="$(git rev-list --coun
 git merge-base --is-ancestor "$TAG^{commit}" origin/main || die "$TAG is not on main — promote only releases tagged on main."
 
 CURRENT="$(git show origin/main:channels.json | sed -nE "s/.*\"$CH\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | sed -n 1p)"
-if [ "$CURRENT" = "$TAG" ]; then echo "$CH already points at $TAG."; exit 0; fi
+
+# The fast lane: a channels-<UTC time> tag on origin's main, whose
+# channels.json names $TAG, asks the publisher to copy that one file to the
+# public repo. Nothing to do when the public main already has that file, or
+# a fast-lane tag already names that commit.
+fast_lane() {
+  git fetch -q origin main || die "Could not fetch main from origin."
+  local c pub name
+  c="$(git rev-parse origin/main)"
+  git show "$c:channels.json" | grep -q "\"$CH\": \"$TAG\"" \
+    || die "origin/main's channels.json does not say $CH → $TAG."
+  git fetch -q --no-tags "$PUBLIC" main || die "Could not fetch main from the public repo."
+  pub="$(git show FETCH_HEAD:channels.json 2>/dev/null || true)"
+  if [ "$pub" = "$(git show "$c:channels.json")" ]; then
+    echo "✓ $CH points at $TAG on the public repo."; return 0
+  fi
+  if git ls-remote origin 'refs/tags/channels-*' | grep -q "^$c[[:space:]].*\^{}\$"; then
+    echo "✓ $CH → $TAG is waiting for the publisher (a fast-lane tag names $(git rev-parse --short "$c"))."; return 0
+  fi
+  name="channels-$(date -u +%Y%m%dT%H%M%SZ)"
+  git tag -a "$name" "$c" -m "hatchabot channels: $CH → $TAG"
+  # One tag, by name — never `git push --tags`; the pre-push hooks check it.
+  if ! git push -q origin "refs/tags/$name"; then
+    git tag -d "$name" >/dev/null
+    die "The push of the fast-lane tag $name was refused (above) — run scripts/promote.sh $TAG $CH again."
+  fi
+  echo "✓ $CH → $TAG asked of the publisher ($name): it copies channels.json to the public repo on its next run,"
+  echo "  then the public repo's promote-images.yml moves the image :$CH. New installs and followers on $CH move then."
+  echo "  Scheduled publisher runs come hours apart; to go sooner: gh workflow run publish.yml -R cksci/publisher"
+}
+if [ "$CURRENT" = "$TAG" ]; then echo "$CH already points at $TAG on main."; fast_lane; exit 0; fi
 # Going backwards is allowed (a bad release gets rolled back this way) but it
 # should never happen by accident.
 # "~" sorts below everything in sort -V, so a prerelease ranks below its final release.
@@ -52,12 +94,21 @@ ci_gate() {
   if [ "${HATCHABOT_PROMOTE_IGNORE_CI:-}" = 1 ]; then echo "⚠ CI not checked (HATCHABOT_PROMOTE_IGNORE_CI=1)."; return 0; fi
   local how="HATCHABOT_PROMOTE_IGNORE_CI=1 promotes without the check"
   command -v gh >/dev/null 2>&1 || die "Can't check CI: the gh command is not installed ($how)."
-  local slug="${HATCHABOT_SLUG:-hatchabot/hatchabot}" sha runs id st
+  local slug sha runs id st
+  slug="$(git remote get-url origin | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')"
+  echo "$slug" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || slug="${HATCHABOT_DEV_SLUG:-cksci/hatchabot-dev}"
   sha="$(git rev-list -n 1 "$TAG")"
-  # The run for the push to main: a pull request's run on the same commit
-  # tests it merged into whatever its base was then, not as main (review, 2026-10-09).
-  runs="$(gh run list --repo "$slug" --workflow ci.yml --commit "$sha" --event push --branch main --limit 1 --json databaseId,status,conclusion -q '.[] | "\(.databaseId) \(.status) \(.conclusion)"')" \
-    || die "Could not ask GitHub about CI for $TAG ($how)."
+  # The dev repo's run for the push to main (origin): a pull request's run on
+  # the same commit tests it merged into whatever its base was then, not as
+  # main (review, 2026-10-09).
+  ci_runs() { gh run list --repo "$1" --workflow ci.yml --commit "$sha" --event push --branch main --limit 1 --json databaseId,status,conclusion -q '.[] | "\(.databaseId) \(.status) \(.conclusion)"'; }
+  runs="$(ci_runs "$slug")" || die "Could not ask GitHub about CI for $TAG ($how)."
+  # A release from before the dev repo (v2.163.0 and older) was tested on
+  # the public repo's main.
+  if [ -z "$runs" ]; then
+    slug="${HATCHABOT_SLUG:-hatchabot/hatchabot}"
+    runs="$(ci_runs "$slug")" || die "Could not ask GitHub about CI for $TAG ($how)."
+  fi
   [ -n "$runs" ] || die "No CI run for $TAG (${sha:0:9}) — was it pushed to main? ($how)"
   id="${runs%% *}"; st="${runs#* }"
   if [ "${st%% *}" != completed ]; then
@@ -121,29 +172,5 @@ if ! "$(dirname "$0")/land.sh" --footer "Promotion by scripts/promote.sh: change
   undo
   die "The promote did not land — nothing changed here. See the message above; run it again once it is fixed."
 fi
-echo "✓ $CH → $TAG  (was ${CURRENT:-unset}). New installs on $CH get it now."
-
-# The runtime image's :stable/:beta tag follows the channel (issue #47,
-# 2026-10-10). .github/workflows/promote-images.yml moves it — one move at a
-# time, to the digest in the release's release-manifest.json, never to an
-# older release unless this is a rollback (allow_backwards). A release made
-# before the release workflow has no manifest: its image tags stay as they are.
-promote_images() {
-  local slug="${HATCHABOT_SLUG:-hatchabot/hatchabot}" back=false assets run
-  [ -z "$CURRENT" ] || [ "$NEWER" != "$CURRENT" ] || back=true
-  local again="gh workflow run promote-images.yml --repo $slug --ref main -f version=${TAG#v} -f alias=$CH -f allow_backwards=$back"
-  command -v gh >/dev/null 2>&1 || { echo "✗ The image :$CH was not moved: no gh command. Move it with: $again" >&2; return 1; }
-  assets="$(gh release view "$TAG" --repo "$slug" --json assets -q '.assets[].name')" \
-    || { echo "✗ Could not read $TAG's release from GitHub: the image :$CH was not moved. Move it with: $again" >&2; return 1; }
-  if ! printf '%s\n' "$assets" | grep -qx release-manifest.json; then
-    echo "  The image :$CH is unchanged: $TAG was released before release-manifest.json, and image tags move only by a release's manifest."
-    return 0
-  fi
-  run="$(bash scripts/dispatch-run.sh "$slug" promote-images.yml -f version="${TAG#v}" -f alias="$CH" -f allow_backwards="$back")" \
-    || { echo "✗ The image :$CH was not moved. Move it with: $again" >&2; return 1; }
-  echo "→ image :$CH → $TAG: https://github.com/$slug/actions/runs/$run"
-  gh run watch "$run" --repo "$slug" --exit-status >/dev/null 2>&1 \
-    || { echo "✗ Moving the image :$CH failed: https://github.com/$slug/actions/runs/$run — channels.json has moved; once the cause is fixed: gh run rerun $run --failed --repo $slug" >&2; return 1; }
-  echo "✓ image :$CH → $TAG"
-}
-promote_images || exit 1
+echo "✓ $CH → $TAG on the dev repo's main (was ${CURRENT:-unset})."
+fast_lane

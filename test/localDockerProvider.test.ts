@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { LocalDockerProvider, remoteTarget, SEED_STEP_MARK, secretValuesOf, seedFailure, seedStepLabel, tcpReachable } from '../src/providers/localDockerProvider.js';
 import { createServer, type AddressInfo } from 'node:net';
+import { GATEWAY_TOKEN } from './support/fixtures.js';
 
 /**
  * The only real provider, and previously untested — mutation testing showed
@@ -206,9 +207,9 @@ describe('a failed seed names the step it died in (To Do Agent, 2026-09-25)', ()
     expect(seedFailure(r)).toMatch(/^seed failed at "openclaw plugins enable duckduckgo": /);
   });
   it('nothing secret survives into the failure text: every token-like value of the spec is replaced (2026-09-25)', () => {
-    const spec = { workspace: { files: {}, configPatch: { agentId: 'k', authMode: 'oauth-claude-cli', setupToken: 'sk-ant-oat01-SECRETSETUP', gatewayToken: 'gw-SECRET-1234', telegram: { accountId: 'b', botToken: '123456:ABC-SECRET-TOKEN', allowFrom: ['1'] }, discord: { token: 'MTIz.SECRET.discord-token', applicationId: '1' }, model: 'm' } }, env: { BRAVE_API_KEY: 'brave-secret-key', HATCHABOT_MEMORY_CAP: '3g' } } as never;
+    const spec = { workspace: { files: {}, configPatch: { agentId: 'k', authMode: 'oauth-claude-cli', setupToken: 'sk-ant-oat01-SECRETSETUP', gatewayToken: GATEWAY_TOKEN, telegram: { accountId: 'b', botToken: '123456:ABC-SECRET-TOKEN', allowFrom: ['1'] }, discord: { token: 'MTIz.SECRET.discord-token', applicationId: '1' }, model: 'm' } }, env: { BRAVE_API_KEY: 'brave-secret-key', HATCHABOT_MEMORY_CAP: '3g' } } as never;
     const values = secretValuesOf(spec);
-    expect(values).toEqual(expect.arrayContaining(['sk-ant-oat01-SECRETSETUP', 'gw-SECRET-1234', '123456:ABC-SECRET-TOKEN', 'MTIz.SECRET.discord-token', 'brave-secret-key']));
+    expect(values).toEqual(expect.arrayContaining(['sk-ant-oat01-SECRETSETUP', GATEWAY_TOKEN, '123456:ABC-SECRET-TOKEN', 'MTIz.SECRET.discord-token', 'brave-secret-key']));
     expect(values).not.toContain('3g'); expect(values).not.toContain('m'); expect(values).not.toContain('b');
     const out = seedFailure({ stderr: 'config set refused value "123456:ABC-SECRET-TOKEN" at channels.telegram.accounts.b.botToken\n', stdout: 'token MTIz.SECRET.discord-token rejected' }, values);
     expect(out).not.toContain('SECRET');

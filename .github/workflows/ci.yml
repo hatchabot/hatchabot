@@ -11,9 +11,14 @@ on:
 permissions:
   contents: read
 
+# Where it runs: on hatchabot/hatchabot, GitHub's hosted runners. In the
+# private dev repo, its own runners (label hatchabot-dev, on the
+# maintainer's machine as a user with no docker and no access to the live
+# install), except `ui` (docker), which runs hosted and only for pull
+# requests; `privacy` runs on the public repo only (docs/releasing.md).
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'hatchabot/hatchabot' && 'ubuntu-latest' || 'hatchabot-dev' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,6 +46,9 @@ jobs:
   # its Docker image, which GitHub's Ubuntu runners can run. promote.sh reads
   # this workflow's result, so a failure here also stops a promote.
   ui:
+    # Docker (headless Chrome): a hosted runner in the dev repo too, whose
+    # own runners have no docker; there only for pull requests (D21).
+    if: github.repository == 'hatchabot/hatchabot' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -65,10 +73,12 @@ jobs:
   # tag's own code and opens it with this one.
   # gitleaks on the commits a push or pull request adds: generic secrets in
   # anyone's change, pull requests included, which never pass the maintainer's
-  # own hooks (docs/releasing.md, "The privacy check"). .gitleaks.toml lets
-  # through test fixtures whose values say they are made up.
+  # own hooks (docs/releasing.md, "The privacy check"); then the whole tree
+  # with gitleaks' default rules and no config, as the publisher's gate scans
+  # a release (it ignores .gitleaks.toml, which allows nothing either), so a
+  # hit shows here before a tag rather than blocking the release.
   secrets:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'hatchabot/hatchabot' && 'ubuntu-latest' || 'hatchabot-dev' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -81,9 +91,14 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          V=8.28.0
-          curl -fsSL -o gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v$V/gitleaks_${V}_linux_x64.tar.gz"
-          echo "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb  gl.tgz" | sha256sum -c -
+          V=8.30.1
+          case "$(uname -m)" in
+            x86_64) A=x64; SUM=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;;
+            aarch64) A=arm64; SUM=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 ;;
+            *) echo "::error::no gitleaks pin for $(uname -m)"; exit 1 ;;
+          esac
+          curl -fsSL -o gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v$V/gitleaks_${V}_linux_${A}.tar.gz"
+          echo "$SUM  gl.tgz" | sha256sum -c -
           tar -xzf gl.tgz gitleaks
           FROM="${BASE:-$BEFORE}"
           if [ -n "$FROM" ] && ! echo "$FROM" | grep -qE '^0+$' && git cat-file -e "$FROM^{commit}" 2>/dev/null; then RANGE="$FROM..$HEAD_SHA"; else RANGE="-1 $HEAD_SHA"; FROM=""; fi
@@ -101,6 +116,12 @@ jobs:
           # The config still reports ordinary values whatever they are called,
           # and keeps its fixtures quiet only where they live (#42, 2026-10-09).
           bash "$REGRESSION" ./gitleaks "$CONFIG"
+          # The tree as the publisher's gate sees it: plain files in a folder
+          # with no gitleaks config or ignore list, default rules.
+          mkdir -p "$RUNNER_TEMP/scan/tree"
+          git archive "$HEAD_SHA" | tar -x -C "$RUNNER_TEMP/scan/tree"
+          GL="$PWD/gitleaks"
+          (cd "$RUNNER_TEMP/scan" && "$GL" dir . --redact --no-banner --exit-code 1)
 
   # The household privacy check, on GitHub (2026-10-10): what a pull request
   # or push to main adds — lines, file names, commit messages and authors, the
@@ -112,6 +133,9 @@ jobs:
   # failure, not a pass. The scanner comes from the base commit when it has
   # one, so a change cannot loosen the check it is judged by.
   privacy:
+    # The public repo only: the private dev repo holds no fingerprint set;
+    # what is published is gated by the publisher with it (docs/releasing.md).
+    if: github.repository == 'hatchabot/hatchabot'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -132,7 +156,7 @@ jobs:
           node "$SCANNER" --dir "$GITHUB_WORKSPACE"
 
   upgrade:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'hatchabot/hatchabot' && 'ubuntu-latest' || 'hatchabot-dev' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

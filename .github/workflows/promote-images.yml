@@ -4,10 +4,16 @@
 # candidate) only its OpenClaw version.
 #
 #   - release.yml calls it for :latest after publishing the newest release;
-#   - scripts/promote.sh starts it for :stable/:beta once the channel's commit
-#     has landed (allow_backwards for a rollback), and waits for it.
+#   - a push to main that changes channels.json (the publisher's fast lane,
+#     asked for by scripts/promote.sh) moves :stable/:beta to the release the
+#     channel now names; a channel moved to an older release is a rollback
+#     (promote.sh asked first), so that move may go backwards;
+#   - by hand (Actions → Promote images → Run workflow), one move.
 #
-# One move at a time (job concurrency `image-aliases`). The image is the one
+# The `plan` job works out the moves; `move` makes them, one alias at a time
+# (job concurrency `image-aliases-<alias>`). A release made before the
+# release workflow has no manifest: its channel moves, its image tags do not.
+# It runs only on hatchabot/hatchabot. The image is the one
 # the release's own release-manifest.json names, by its index digest — the
 # manifest is checked against its attestation from release.yml first — and
 # the release's :vX.Y.Z must name that same digest. An alias never moves to an
@@ -16,6 +22,9 @@
 # the published manifest.
 name: Promote images
 on:
+  push:
+    branches: [main]
+    paths: [channels.json]
   workflow_dispatch:
     inputs:
       version:
@@ -43,13 +52,64 @@ on:
         default: false
 permissions: {}
 jobs:
+  plan:
+    if: github.repository == 'hatchabot/hatchabot'
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      moves: ${{ steps.plan.outputs.moves }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          VERSION: ${{ inputs.version }}
+          ALIAS: ${{ inputs.alias }}
+          BACK: ${{ inputs.allow_backwards }}
+        run: |
+          set -euo pipefail
+          # Started by hand or called (release.yml's :latest): the one move asked for.
+          if [ -n "$ALIAS" ]; then
+            jq -cn --arg v "$VERSION" --arg a "$ALIAS" --arg b "$BACK" '[{version: $v, alias: $a, allow_backwards: ($b == "true")}]' \
+              | sed 's/^/moves=/' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A push that changed channels.json: each channel that moved.
+          R="$GITHUB_REPOSITORY"
+          chan() { gh api "repos/$R/contents/channels.json?ref=$1" -H 'Accept: application/vnd.github.raw' | jq -r --arg c "$2" '.[$c] // ""'; }
+          MOVES='[]'
+          for ch in stable beta; do
+            OLD=""; echo "$BEFORE" | grep -qE '^0+$' || OLD="$(chan "$BEFORE" "$ch")"
+            NEW="$(chan "$AFTER" "$ch")"
+            [ -n "$NEW" ] && [ "$NEW" != "$OLD" ] || continue
+            if ! gh release view "$NEW" --repo "$R" --json assets -q '.assets[].name' | grep -qx release-manifest.json; then
+              echo "$ch → $NEW: released before release-manifest.json; the image :$ch is left as it is"; continue
+            fi
+            BACKWARDS=false
+            # "~" sorts a pre-release below its release.
+            if [ -n "$OLD" ] && [ "$(printf '%s\n%s\n' "${OLD#v}" "${NEW#v}" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/')" = "${OLD#v}" ]; then BACKWARDS=true; fi
+            echo "$ch: ${OLD:-unset} → $NEW$([ "$BACKWARDS" = true ] && echo ' (a rollback)')"
+            MOVES="$(jq -c --arg v "${NEW#v}" --arg a "$ch" --argjson b "$BACKWARDS" '. + [{version: $v, alias: $a, allow_backwards: $b}]' <<<"$MOVES")"
+          done
+          echo "moves=$MOVES" >> "$GITHUB_OUTPUT"
+
   move:
+    needs: plan
+    if: needs.plan.outputs.moves != '[]'
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.moves) }}
     permissions:
       contents: read
       packages: write
       attestations: read
     concurrency:
-      group: image-aliases
+      group: image-aliases-${{ matrix.alias }}
       cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -62,9 +122,9 @@ jobs:
       - name: move the alias by the release manifest's digest
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-          ALIAS: ${{ inputs.alias }}
-          BACK: ${{ inputs.allow_backwards }}
+          VERSION: ${{ matrix.version }}
+          ALIAS: ${{ matrix.alias }}
+          BACK: ${{ matrix.allow_backwards }}
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
@@ -81,8 +141,11 @@ jobs:
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p release-manifest.json -D "$D" \
             || fail "$TAG has no release-manifest.json (released before release by workflow): its image is not moved by digest"
           M="$D/release-manifest.json"
-          gh attestation verify "$M" --repo "$GITHUB_REPOSITORY" \
-            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-ref refs/heads/main \
+          # Made on the publisher's tag push (refs/tags/vX.Y.Z), or before the
+          # publish kit, by a run started on main.
+          attested() { gh attestation verify "$M" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-ref "$1"; }
+          attested "refs/tags/$TAG" || attested refs/heads/main \
             || fail "release-manifest.json of $TAG does not carry release.yml's attestation"
           jq -e --arg v "$VERSION" --arg t "$TAG" --arg i "$IMAGE" \
             '.schema == 1 and .version == $v and .tag == $t and .image.repository == $i and .image.tag == $t and (.image.index | test("^sha256:[0-9a-f]{64}$"))' \

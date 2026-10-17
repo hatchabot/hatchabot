@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { botPollState } from '../src/orchestrator/adopt.js';
+import { DISCORD_ID } from './support/fixtures.js';
 
 // Night review, 2026-09-27: regressions for the fixes made that night.
 
@@ -32,7 +33,7 @@ describe('switching to family accounts keeps the owner\'s links (night review)',
     const { Store } = await import('../src/store/store.js');
     const store = new Store(new Database(':memory:'));
     const db = (store as any).db;
-    db.prepare(`INSERT INTO member_identities (agent_id, user_id, kind, channel_user_id, bound_at) VALUES ('a1','dev-owner','discord','123456789012345678','now')`).run();
+    db.prepare(`INSERT INTO member_identities (agent_id, user_id, kind, channel_user_id, bound_at) VALUES ('a1','dev-owner','discord','${DISCORD_ID}','now')`).run();
     db.prepare(`INSERT INTO discord_bots (application_id, secret_ref, owner_id, added_at) VALUES ('app1','ref1','dev-owner','now')`).run();
     db.prepare(`INSERT INTO mgmt_proposals (id, owner_id, record, status, created_at_ms, expires_at_ms) VALUES ('p1','dev-owner','{}','pending',1,2)`).run();
     db.prepare(`INSERT INTO accounts (owner_id, email, last_seen, telegram_user_id) VALUES ('dev-owner', NULL, 'now', '555')`).run();
@@ -123,7 +124,7 @@ describe('removing a member clears their room access too (night review)', () => 
     store.insertAgent({ id: 'a1', ownerId: 'o', name: 'A', slug: 'a', state: 'STOPPED', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now', runtimeRef: 'r1' } as never);
     store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u2', role: 'user', status: 'active' } as never);
     store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'discord', accountId: 'app1', secretRef: 's', deepLink: 'x', createdAt: 'now' } as never);
-    store.bindMemberIdentity('a1', 'u2', 'discord', '123456789012345678');
+    store.bindMemberIdentity('a1', 'u2', 'discord', DISCORD_ID);
     let script = '';
     const provider = { execShellOnVolume: async (_r: string, s: string) => { script = s; return { code: 0, stdout: '', stderr: '' }; } };
     await revokeMember({ store, provider, log: () => {} } as never, 'a1', 'u2');

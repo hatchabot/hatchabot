@@ -13,6 +13,7 @@ import { registerRoutes } from '../src/api/routes.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
+import { WS_SAMPLE_KEY } from './support/fixtures.js';
 
 /**
  * A hosted Hatchabot lives at <name>.my.hatchabot.com. Until that suffix is on
@@ -253,7 +254,7 @@ function upgrade(port: number, extra: string): Promise<string> {
   return new Promise((resolve) => {
     const sock = connect(port, '127.0.0.1', () => {
       sock.write(`GET /v1/agents/a1/ui/ HTTP/1.1\r\nHost: ${HOST}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n` +
-        `Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n${extra}\r\n`);
+        `Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${WS_SAMPLE_KEY}\r\n${extra}\r\n`);
     });
     let buf = '';
     sock.on('data', (d) => { buf += d.toString(); if (buf.includes('101') && !buf.includes('echo:')) sock.write('ping'); if (buf.includes('echo:')) { sock.destroy(); resolve('OPEN'); } });

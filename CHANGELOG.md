@@ -2,6 +2,19 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.164.1] — 2026-10-17
+
+### Changed
+- v2.164.0 was tagged but never published: the publisher's secret scan stopped it on sample values in the tests that look like credentials. They are now built when the tests run, and CI scans the whole tree the way the publisher does. This release carries the same changes.
+- **Releases reach this repository through a gated publisher.** Work happens in a private development repository; each release tag there is checked for private values, held for an hour, checked again, and published here as one `Release vX.Y.Z` commit and its tag. The release workflow now starts on that tag, and the runtime image's `:stable` and `:beta` move when `channels.json` changes on `main`. Installs, upgrades, bundles, images and attestations work as before.
+- For maintainers: `hbt release X.Y.Z` tags the release for the publisher (`--draft-only` is gone), `hbt deploy` deploys the newest published release, and `scripts/promote.sh` promotes only a published release (docs/releasing.md).
+
+## [2.164.0] — 2026-10-17
+
+### Changed
+- **Releases reach this repository through a gated publisher.** Work happens in a private development repository; each release tag there is checked for private values, held for an hour, checked again, and published here as one `Release vX.Y.Z` commit and its tag. The release workflow now starts on that tag, and the runtime image's `:stable` and `:beta` move when `channels.json` changes on `main`. Installs, upgrades, bundles, images and attestations work as before.
+- For maintainers: `hbt release X.Y.Z` tags the release for the publisher (`--draft-only` is gone), `hbt deploy` deploys the newest published release, and `scripts/promote.sh` promotes only a published release (docs/releasing.md).
+
 ## [2.163.0] — 2026-10-12
 
 ### Fixed

@@ -8,6 +8,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { pairingListShell, parsePairingList } from '../src/orchestrator/claim.js';
 import { denyPairing, grantChannelAccess, revokeMember, scrubChannelAllowlist } from '../src/orchestrator/members.js';
+import { DISCORD_ID } from './support/fixtures.js';
 
 /**
  * OpenClaw 2026.9 keeps pairing requests and approvals in its state database;
@@ -111,7 +112,7 @@ describe('pairing requests on a 2026.9 volume (database, no files)', () => {
     store.insertChannel({ id: 'ct', agentId: 'a1', kind: 'telegram', accountId: 'FamBot', secretRef: 'x', deepLink: 'x', createdAt: 'now' });
     store.insertChannel({ id: 'cd', agentId: 'a1', kind: 'discord', accountId: '1', secretRef: 'z', deepLink: 'z', createdAt: 'now' });
     store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'u2', role: 'user', displayName: 'Gran', channelUserId: '555', status: 'active' });
-    store.bindMemberIdentity('a1', 'u2', 'discord', '123456789012345678');
+    store.bindMemberIdentity('a1', 'u2', 'discord', DISCORD_ID);
     await revokeMember({ store, provider }, 'a1', 'u2');
     const script = provider.execLog.find((a) => a[0] === 'sh-volume')![1]!;
     const v = volume();

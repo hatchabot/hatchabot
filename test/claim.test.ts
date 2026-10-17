@@ -4,6 +4,7 @@ import { parsePairingList, claimFirstContact } from '../src/orchestrator/claim.j
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { canTransition } from '../src/domain/stateMachine.js';
+import { DISCORD_ID } from './support/fixtures.js';
 
 describe('parsePairingList', () => {
   it('parses the 2026.6.11 pairing file shape', () => {
@@ -318,7 +319,7 @@ describe('the owner claim never takes a known person (2026-09-25)', () => {
   it('Discord: an identity bound on any agent is never the owner\'s first message; a malformed id is never bound', async () => {
     const { store, claim } = await world('discord', [{ id: 'not-an-id', code: 'AAAA' }, { id: '123456789012345678', code: 'BBBB' }, { id: '987654321098765432', code: 'CCCC' }]);
     store.insertMembership({ id: 'm-y', agentId: 'b1', userId: 'u3', role: 'user', status: 'active' });
-    store.bindMemberIdentity('b1', 'u3', 'discord', '123456789012345678');
+    store.bindMemberIdentity('b1', 'u3', 'discord', DISCORD_ID);
     expect(await claim()).toBe('987654321098765432');
     expect(store.memberIdentities('a1', 'u1').discord).toBe('987654321098765432');
   });

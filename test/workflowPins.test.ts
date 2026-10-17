@@ -44,7 +44,11 @@ describe('workflow pins and permissions', () => {
   it('release by workflow: one release at a time, aliases only by promote-images, no replacing uploads', () => {
     const read = (f: string) => readFileSync(join('.github', 'workflows', f), 'utf8');
     const release = read('release.yml');
-    expect(release).toMatch(/^on:\n {2}workflow_dispatch:/m);
+    // Started by the publisher's tag push, on the public repo only (publish kit, 2026-10-16).
+    expect(release).toMatch(/^on:\n {2}push:\n {4}tags: \['v\*\.\*\.\*'\]\n/m);
+    expect(release).not.toMatch(/workflow_dispatch|draft_only/);
+    expect(release).toMatch(/ {2}check:\n {4}if: github\.repository == 'hatchabot\/hatchabot'\n/);
+    expect(release).toContain('bash scripts/release-check.sh "${TAG#v}" --tagged');
     expect(release).toMatch(/^concurrency:\n {2}group: release\n {2}cancel-in-progress: false/m);
     expect(release).toContain('bash scripts/release-check.sh');
     expect(release).toContain('node scripts/privacy-ci.mjs --text');
@@ -56,8 +60,8 @@ describe('workflow pins and permissions', () => {
     // Drafted, checked, then tagged and published — in that order; never --clobber.
     const at = (s: string) => { const i = release.indexOf(s); expect(i, s).toBeGreaterThan(-1); return i; };
     expect(at('-F draft=true')).toBeLessThan(at("the draft's assets are not the manifest's"));
-    expect(at("the draft's assets are not the manifest's")).toBeLessThan(at('refs/tags/$TAG'));
-    expect(at('refs/tags/$TAG')).toBeLessThan(at('-F draft=false'));
+    expect(at("the draft's assets are not the manifest's")).toBeLessThan(at('git/ref/tags/$TAG'));
+    expect(at('git/ref/tags/$TAG')).toBeLessThan(at('-F draft=false'));
     expect(at('a release\'s image is never replaced')).toBeGreaterThan(0);
     for (const f of ['release.yml', 'bundles.yml', 'runtime-image.yml', 'runtime-image-build.yml', 'promote-images.yml']) expect(read(f)).not.toContain('--clobber');
     // bundles.yml and the image build only build; neither runs on a tag or a release any more.
@@ -67,7 +71,10 @@ describe('workflow pins and permissions', () => {
     expect(read('runtime-image.yml')).not.toMatch(/IMAGE:latest|IMAGE:\$GITHUB_REF_NAME|promote_latest/);
     expect(read('runtime-image-build.yml')).not.toMatch(/packages: write|docker\/login-action/);
     const promote = read('promote-images.yml');
-    expect(promote).toMatch(/concurrency:\n\s+group: image-aliases\n\s+cancel-in-progress: false/);
+    expect(promote).toMatch(/concurrency:\n\s+group: image-aliases-\$\{\{ matrix\.alias \}\}\n\s+cancel-in-progress: false/);
+    // The fast lane's push of channels.json moves :stable/:beta, on the public repo only.
+    expect(promote).toMatch(/^on:\n {2}push:\n {4}branches: \[main\]\n {4}paths: \[channels\.json\]\n/m);
+    expect(promote).toMatch(/ {2}plan:\n {4}if: github\.repository == 'hatchabot\/hatchabot'\n/);
     expect(promote).toContain('allow_backwards');
     expect(promote).toContain('org.hatchabot.release');
   });

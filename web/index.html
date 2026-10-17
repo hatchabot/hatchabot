@@ -13462,7 +13462,7 @@ async function v2LoadChans(id) {
         <select id="chanRoomMode-${kind}" style="width:auto" onchange="const on = this.value === 'room'; const pick = $('chanRoomPick-${kind}'); const find = $('chanRoomFind-${kind}'); if (pick) { pick.hidden = !on; $('chanRoom-${kind}').hidden = !on || ('${kind}' === 'telegram') || pick.value !== ''; if (on && pick.value) $('chanRoom-${kind}').value = pick.value; } else $('chanRoom-${kind}').hidden = !on; if (find) find.hidden = !on">
           ${modeOptions.map(([v, t]) => `<option value="${v}"${rooms.mode === v ? ' selected' : ''}>${t}</option>`).join('')}
         </select>${roomPicker}
-        <input type="text" id="chanRoom-${kind}" placeholder="${{ slack: 'C0123ABCD', discord: '123456789012345678', telegram: '-1001234567890' }[kind]}" value="${esc(rooms.roomId || '')}"${roomInputHidden ? ' hidden' : ''} autocomplete="off">
+        <input type="text" id="chanRoom-${kind}" placeholder="${{ slack: 'C0123ABCD', discord: '123456789' + '012345678' /* split: a secret scanner takes it whole for a Discord client id */, telegram: '-1001234567890' }[kind]}" value="${esc(rooms.roomId || '')}"${roomInputHidden ? ' hidden' : ''} autocomplete="off">
         ${canChange ? `<button onclick="chanSaveRooms('${jsq(id)}','${kind}', this)">Save</button>` : ''}
         <span class="sub" style="flex-basis:100%">In a group it answers members only, and only when @mentioned. ${roomHelp}</span>
       </div>

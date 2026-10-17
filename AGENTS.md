@@ -37,9 +37,14 @@ key that expired), not a bug. Say which it is.
 
 ## Changing the code
 
-- **Changes reach `main` only through a pull request** whose required checks
-  pass, privacy included: `scripts/land.sh` opens it and waits for the merge.
-  A direct push to `main` is refused.
+- **Where things are:** `origin` is the private dev repo; the public repo
+  (the remote `public`, read only) changes only through the publisher, an
+  hour or more after a release tag (docs/releasing.md, "How a release
+  reaches the public repo"). Real data — the live install in
+  `~/hatchabot-prod` and `~/hatchabot-data`, `.env` files — is looked at in
+  a session started there, never from a coding session.
+- **Changes reach `main` only through a pull request** whose checks pass:
+  `scripts/land.sh` opens it, waits for the checks and merges it.
 - **The gates, chained so one failure stops the rest:**
 
   ```sh
@@ -53,7 +58,9 @@ key that expired), not a bug. Say which it is.
   `node scripts/live.mjs due` and then `node scripts/live.mjs run <name>` for
   each test it lists; commit `docs/live-test-runs.md`. `scripts/promote.sh`
   refuses while any is due. What each proves and needs: `docs/live-tests.md`.
-- **Releasing:** `docs/releasing.md`.
+- **Releasing:** `docs/releasing.md`. `scripts/release.sh X.Y.Z` tags the
+  version commit in the dev repo; once the release is published,
+  `scripts/promote.sh` moves a channel.
   - The CHANGELOG headings are `## [x.y.z] — YYYY-MM-DD`.
   - Moving a channel forward (`scripts/promote.sh`) checks CI first.
 - **Lists a test enforces:**
@@ -72,8 +79,9 @@ key that expired), not a bug. Say which it is.
   including the names of anyone's agents. Examples and fixtures come from
   the invented household in `docs/deck/shot-data.mjs`. The privacy check
   (`scripts/privacy-check.mjs`, docs/releasing.md) enforces it on push, on
-  release notes and before promoting; never `git push --tags`. CI requires
-  it too: its `privacy` job fails a pull request or push that names one.
+  release notes and before promoting; never `git push --tags`. The
+  publisher's gate checks every release against the same values before it
+  is public, and CI's `privacy` job checks the public repo after.
 - **Keep the knowledge pack true.** A fix for a problem users can hit gets a
   `docs/troubleshooting.md` entry, and moved code updates
   `docs/architecture-map.md`. `test/knowledgePack.test.ts` fails when either

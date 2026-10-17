@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { connect } from 'node:net';
 import { Jar, PUBLIC_HOST, publicApp, type PublicApp } from './helpers/publicApp.js';
 import { deviceLabel, publicCsp } from '../src/api/publicAccess.js';
+import { WS_SAMPLE_KEY } from './support/fixtures.js';
 
 let h: PublicApp | undefined;
 afterEach(async () => { await h?.close(); h = undefined; });
@@ -169,7 +170,7 @@ describe('only invited people (Google sign-in)', () => {
 describe('the console\'s WebSocket at the public address', () => {
   const upgrade = (port: number, path: string, cookie: string) => new Promise<string>((resolve) => {
     const s = connect(port, '127.0.0.1', () => {
-      s.write(`GET ${path} HTTP/1.1\r\nHost: ${PUBLIC_HOST}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n${cookie ? `Cookie: ${cookie}\r\n` : ''}\r\n`);
+      s.write(`GET ${path} HTTP/1.1\r\nHost: ${PUBLIC_HOST}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${WS_SAMPLE_KEY}\r\n${cookie ? `Cookie: ${cookie}\r\n` : ''}\r\n`);
     });
     let got = '';
     s.on('data', (d) => { got += String(d); });

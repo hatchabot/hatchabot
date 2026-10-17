@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
+import { DISCORD_ID } from './support/fixtures.js';
 
 async function setup(sharedMemory = true) {
   const db = new Database(':memory:');
@@ -421,7 +422,7 @@ describe('revoking across channels', () => {
     s.store.setAgentRuntimeRef('a1', s.opts.runtimeRef);
     s.store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'u2', role: 'user', displayName: 'Gran', channelUserId: '555', status: 'active' });
     s.store.bindMemberIdentity('a1', 'u2', 'slack', 'U0GRAN');
-    s.store.bindMemberIdentity('a1', 'u2', 'discord', '123456789012345678');
+    s.store.bindMemberIdentity('a1', 'u2', 'discord', DISCORD_ID);
     return s;
   }
 
@@ -527,6 +528,6 @@ describe('admitting on Slack and Discord', () => {
     provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [{ id: '123456789012345678', code: 'DSC1' }] }), stderr: '' });
     const r = await admitMember({ store, provider }, { ...opts, accountId: 'hatchabot', code: 'DSC1', kind: 'discord', asSelf: true });
     expect(r).toMatchObject({ userId: 'u1', alreadyMember: true });
-    expect(store.memberIdentities('a1', 'u1')).toEqual({ discord: '123456789012345678' });
+    expect(store.memberIdentities('a1', 'u1')).toEqual({ discord: DISCORD_ID });
   });
 });

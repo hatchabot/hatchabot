@@ -154,6 +154,7 @@ async function world() {
     providers: new Map([['mock', new MockProvider()]]),
     channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any,
     buildImage: async (opts: any) => { builds.push(opts.name); return { ok: true }; },
+    removeImage: async () => ({ ok: true }), // no docker rmi here: CI runners may have no docker
   });
   return { store, f, builds };
 }

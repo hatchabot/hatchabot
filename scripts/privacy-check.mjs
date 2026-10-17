@@ -18,6 +18,7 @@
  *   node scripts/privacy-check.mjs --public [--check-hook]   # everything GitHub serves (the `privacy` live test)
  *   node scripts/privacy-check.mjs --sync-ci [--repo owner/name]   # GitHub's keyed fingerprints (scripts/privacy-ci.mjs)
  *   node scripts/privacy-check.mjs --export-digests [--out <file>] # the same fingerprints, to a file
+ *   node scripts/privacy-check.mjs --export-values | …   # the values themselves, for the publish kit's provider (scripts/private-values)
  *
  * Options: --db <hatchabot.sqlite>, --env <file> (repeatable), --no-machine
  * (skip this machine's host, tailnet and IP values; for tests), --repo
@@ -459,7 +460,7 @@ function publicScan() {
     return INCOMPLETE;
   }
   const { ms, gaps } = loaded;
-  const url = git(ROOT, 'remote', 'get-url', 'origin').stdout.trim();
+  const url = publicUrl();
   const repo = opt('--repo') || /github\.com[:/](.+?)(?:\.git)?$/.exec(url)?.[1];
   const work = mkdtempSync(join(tmpdir(), 'hb-privacy-'));
   const mirror = join(work, 'public.git');
@@ -595,6 +596,45 @@ function refuseExport(r, say) {
   return INCOMPLETE;
 }
 
+/**
+ * The public repository's URL: the remote `public` (read only, in a clone
+ * whose origin is the private dev repo), else origin.
+ */
+function publicUrl() {
+  const pub = git(ROOT, 'remote', 'get-url', 'public');
+  return (pub.status === 0 ? pub.stdout : git(ROOT, 'remote', 'get-url', 'origin').stdout).trim();
+}
+
+/**
+ * gh's environment for `gh secret set`: the token in
+ * ~/.config/hatchabot/secrets.token (HATCHABOT_SECRETS_TOKEN_FILE) when there
+ * is one — a fine-grained token that can only write the public repos'
+ * Actions and Dependabot secrets, since the everyday one cannot write them —
+ * else gh's own login.
+ */
+function secretsTokenEnv() {
+  const f = process.env.HATCHABOT_SECRETS_TOKEN_FILE || join(homedir(), '.config', 'hatchabot', 'secrets.token');
+  if (!existsSync(f)) return process.env;
+  return { ...process.env, GH_TOKEN: readFileSync(f, 'utf8').trim() };
+}
+
+/**
+ * --export-values: the private values themselves, one JSON line each,
+ * {"cat", "match": "exact"|"lower", "value"}, for the publish kit's provider
+ * (scripts/private-values, never published), which `kit values sync` runs and
+ * fingerprints as it reads. Only into a pipe, never a terminal or a file; an
+ * install it cannot fully read gives nothing (exit 3), as --sync-ci.
+ */
+function exportValues() {
+  if (process.stdout.isTTY) { console.error('usage: privacy-check.mjs --export-values | <reader> (the output is the private values themselves)'); return USAGE; }
+  const loaded = load();
+  if (!loaded) { console.error('✗ privacy values: not given — no Hatchabot install here to read private values from'); return INCOMPLETE; }
+  if (loaded.gaps.length) { console.error('✗ privacy values: not given — this install could not be fully read'); coverage(console.error, loaded); return INCOMPLETE; }
+  process.stdout.write(loaded.ms.map((m) => JSON.stringify({ cat: m.cat, match: m.re.flags.includes('i') ? 'lower' : 'exact', value: m.value }) + '\n').join(''));
+  console.error(`✓ privacy values: ${loaded.ms.length} given`);
+  return CLEAN;
+}
+
 /** --export-digests [--out file]: the blob, to a 0600 file or a pipe (never a terminal). */
 function exportDigests() {
   const out = opt('--out');
@@ -614,15 +654,16 @@ function exportDigests() {
 function syncCi() {
   const r = exportBlob();
   if (!r.blob) return refuseExport(r, console.log);
-  const url = git(ROOT, 'remote', 'get-url', 'origin').stdout.trim();
+  const url = publicUrl();
   const repo = opt('--repo') || /github\.com[:/](.+?)(?:\.git)?$/.exec(url)?.[1];
-  if (!repo) { console.log(`✗ privacy fingerprints: not sent — ${url || 'origin'} is not a GitHub address (pass --repo <owner/name>)`); return USAGE; }
+  if (!repo) { console.log(`✗ privacy fingerprints: not sent — ${url || 'the public remote'} is not a GitHub address (pass --repo <owner/name>)`); return USAGE; }
   if (Buffer.byteLength(r.json) > SECRET_MAX) { console.log(`✗ privacy fingerprints: not sent — ${Math.ceil(Buffer.byteLength(r.json) / 1024)} KB is over GitHub's 48 KB for a secret`); return FOUND; }
   // Twice: for Actions, and for Dependabot — its pull requests get only
   // Dependabot secrets, so without this their required privacy check could
   // never pass (2026-10-10).
+  const env = secretsTokenEnv();
   for (const app of ['actions', 'dependabot']) {
-    const set = spawnSync('gh', ['secret', 'set', SECRET_NAME, '--repo', repo, '--app', app], { input: r.json, encoding: 'utf8' });
+    const set = spawnSync('gh', ['secret', 'set', SECRET_NAME, '--repo', repo, '--app', app], { input: r.json, encoding: 'utf8', env });
     if (set.error || set.status !== 0) {
       console.log(`✗ privacy fingerprints: not sent to ${app} — gh secret set failed (${(set.stderr || String(set.error?.message ?? '')).trim().split('\n')[0] || `exit ${set.status}`})`);
       return FOUND;
@@ -652,8 +693,8 @@ function checkHook() {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const code = has('--install-hook') ? installHook() : has('--pre-push') ? prePush() : has('--text') ? text() : has('--public') ? publicScan()
-    : has('--sync-ci') ? syncCi() : has('--export-digests') ? exportDigests()
+    : has('--sync-ci') ? syncCi() : has('--export-digests') ? exportDigests() : has('--export-values') ? exportValues()
     : has('--check-hook') ? checkHook()
-    : (console.error('usage: privacy-check.mjs --install-hook | --check-hook | --pre-push <remote> <url> | --text <file>... | --public [--check-hook] | --sync-ci [--repo owner/name] | --export-digests [--out file]'), USAGE);
+    : (console.error('usage: privacy-check.mjs --install-hook | --check-hook | --pre-push <remote> <url> | --text <file>... | --public [--check-hook] | --sync-ci [--repo owner/name] | --export-digests [--out file] | --export-values'), USAGE);
   process.exitCode = code;
 }

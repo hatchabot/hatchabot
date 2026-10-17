@@ -190,13 +190,6 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.159.0` (#47)
 - **Code:** `src/orchestrator/runnerSetup.ts` — `installRuntimeImage`
 
-### Promote says "Moving the image :stable failed" (or :beta)
-- **Check:** open the run address in the message; promote-images.yml says why: no manifest, no attestation, `:vX.Y.Z` names another digest, or "newer than … needs allow_backwards".
-- **Cause:** the channel moved but the image alias did not (a registry error, a release from before manifests, or a backwards move that was not a rollback).
-- **Fix:** fix the cause, then `gh run rerun <id> --failed`, or `gh workflow run promote-images.yml --ref main -f version=X.Y.Z -f alias=stable [-f allow_backwards=true]`.
-- **Fixed in:** `v2.159.0` (#47)
-- **Code:** `scripts/promote.sh` — `promote_images`
-
 ### A setting saved in the app is gone again, although the save said it worked
 - **Check:** two settings were saved close together (Settings → Hosts → Defaults, rebuild policy, backup drills, public access); `grep HATCHABOT_<NAME> .env` lacks one of them. A leftover `.env.tmp` beside `.env` is a sign of the same race.
 - **Cause:** each save read the whole `.env`, changed its line and renamed a shared `.env.tmp` over the file; two saves at once each wrote their own snapshot, so the later one put back the other's old value (or renamed the other's half-written copy).
@@ -217,6 +210,34 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: such a file is now left as it is, with `env.sync_refused` naming the setting. Remove the `export` line you no longer want (or the word `export`). If an older release already reordered it, the newest `.env.bak-*` copy has the order as you wrote it.
 - **Fixed in:** `v2.162.0`
 - **Code:** `src/config/envFile.ts` — `sourcedValues`, `syncEnvText`
+
+### Releasing: a tag made with `scripts/release.sh` has not reached the public repo
+- **Check:** `./scripts/channels.sh` marks it `not-published`; the publisher's issues (`cksci/publisher`) have a digest issue `hatchabot vX.Y.Z publishes at <time>`, or an issue saying it was blocked or could not be gated.
+- **Cause:** a release reaches the public repo only through the publisher: it gates the tag on its next run, waits an hour, and publishes on the first run after that. GitHub starts its scheduled runs hours apart. A gate hit stops the release for good; a `reject` label or the `HOLD` variable keeps it back.
+- **Fix:** none needed for a release still waiting; to go sooner, start a run: `gh workflow run publish.yml -R cksci/publisher` (or Actions → publish → Run workflow in the browser). Blocked: fix what the issue names (rule, path, line; never the value) and release the next patch version. Held: clear `HOLD`.
+- **Fixed in:** —
+- **Code:** `scripts/release.sh` — `refs/tags/$TAG`; `docs/releasing.md` — `How a release reaches the public repo`
+
+### `scripts/promote.sh`: "vX.Y.Z is not published yet (the public repo has no such tag)"
+- **Check:** `git ls-remote --tags public refs/tags/vX.Y.Z` prints nothing.
+- **Cause:** only a published release can be moved to a channel, and the publisher has not pushed it yet (above). The publisher's fast lane would refuse a `channels.json` naming it.
+- **Fix:** wait until it is published (`./scripts/channels.sh` no longer marks it `not-published`), then promote it.
+- **Fixed in:** `v2.164.0`
+- **Code:** `scripts/promote.sh` — `PUB_TAG`
+
+### `scripts/release.sh` or `scripts/promote.sh`: "No remote 'public' for the public repo"
+- **Check:** `git remote -v` lists no `public`.
+- **Cause:** a clone made before the dev repo, or a fresh clone of the dev repo: the scripts read the public repo (tags, `channels.json`) through a read-only remote.
+- **Fix:** `git remote add --no-tags public https://github.com/hatchabot/hatchabot.git && git remote set-url --push public DISABLED`.
+- **Fixed in:** `v2.164.0`
+- **Code:** `scripts/release.sh` — `HATCHABOT_PUBLIC_REMOTE`; `scripts/promote.sh` — `HATCHABOT_PUBLIC_REMOTE`
+
+### After `scripts/promote.sh`, the channel moved but the runtime image's `:stable` (or `:beta`) did not (before v2.164.0: "Moving the image :stable failed")
+- **Check:** the public repo's Actions → Promote images: a run for the `Update channels` push failed, or none ran yet because the publisher has not copied `channels.json` (the public `channels.json` still names the old release).
+- **Cause:** the image alias moves on the public repo, when the publisher's fast lane pushes `channels.json`; a release made before `release-manifest.json` has no image to move by digest. A move fails on a registry error, a missing attestation, or a `:vX.Y.Z` that names another digest (the run says which).
+- **Fix:** wait for the fast lane (start a publisher run to go sooner). A failed move: Actions → Promote images → Run workflow, with the version and the alias (and "allow backwards" for a rollback).
+- **Fixed in:** `v2.164.0`
+- **Code:** `.github/workflows/promote-images.yml` — `plan`, `allow_backwards`
 
 ## Sign-in and accounts
 

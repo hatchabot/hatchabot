@@ -7,19 +7,58 @@
   bumps MAJOR. The CHANGELOG is the contract; "Upgrading" notes go at the top
   of the entry that needs them.
 - **A tag is a release.** `vX.Y.Z` tags on `main` are the only things a user
-  should install, and only the release workflow makes them (below, "Cutting a
-  release"). `package.json` must carry the same version (the web app shows
-  it at the bottom; the server stamps it at boot).
+  should install. They are made in the private dev repo and reach the public
+  repo only through the publisher (below, "How a release reaches the public
+  repo"). `package.json` must carry the same version (the web app shows it
+  at the bottom; the server stamps it at boot).
 - **CHANGELOG.md is written with the change**, not at release time — every
   user-visible commit adds a line under the version it ships in.
 
 ## Branches
 
+- Work happens in the private dev repo `cksci/hatchabot-dev` (every clone's
+  `origin`). The public repo `hatchabot/hatchabot` is the remote `public`,
+  read only (push `DISABLED`): it changes only through the publisher.
 - `main` is the stable trunk: every commit on it is tested (CI runs typecheck,
   unit tests and the e2e suite) and deployable.
 - Every change lands by pull request (`scripts/land.sh`), so CI has run
-  before it reaches `main`; `main`'s ruleset requires it (the checks test, ui,
-  secrets, upgrade, privacy; linear history).
+  before it reaches `main`: it waits for every check (test, ui, secrets,
+  upgrade) and merges with a rebase. The dev repo has no branch rules, so
+  `land.sh` is the gate; nothing else pushes to `main`.
+
+## How a release reaches the public repo
+
+The publish kit (`cksci/publish-kit`) runs it, from the private
+`cksci/publisher` repo:
+
+1. `scripts/release.sh X.Y.Z` tags the version commit in the dev repo (an
+   annotated `vX.Y.Z`, pushed by name).
+2. The publisher picks the tag up on its next run (scheduled runs come
+   hours apart; `gh workflow run publish.yml -R cksci/publisher`, or Actions
+   → publish → Run workflow in the browser, starts one). Its gate scans
+   everything that would become public — every file, the text inside binary
+   files, the release notes — against keyed fingerprints of this
+   household's private values (from `scripts/private-values`, below),
+   generic personal-data patterns and gitleaks.
+3. A clean gate opens a digest issue in `cksci/publisher`
+   (`hatchabot vX.Y.Z publishes at <time>`: the notes, the changed public
+   text). Skim it. To stop this release, add the label `reject`; to stop
+   everything, set the publisher's `HOLD` variable.
+4. After 1 hour, the gate runs again with a fresh set, then the publisher
+   pushes one commit (`Release vX.Y.Z`: the tag's files, the maintainer's
+   name with the GitHub noreply address) and the annotated tag to the
+   public repo. Only its deploy key may (the `kit-main` and `kit-tags`
+   rulesets).
+5. The tag push starts the public repo's `release.yml` (below), which
+   builds, attests and publishes the GitHub release. Then it is `latest`.
+
+A gate hit opens an issue in `cksci/publisher` (rule, path, line and
+fingerprint id; never the value). A blocked tag is final: fix it and
+release the next patch version. A moved dev tag cancels its release.
+
+Never published (`publish.toml` `exclude`): `publish.toml`,
+`.github/dependabot.yml` (Dependabot runs in the dev repo) and the provider
+`scripts/private-values`.
 
 ## Channels — releasing fast without moving new users
 
@@ -35,31 +74,34 @@ New installs take **`stable`**, which names a release in `channels.json` on
 ```
 
 Promote from a `main` that matches `origin/main` exactly (it refuses
-otherwise, so nothing unpushed rides along) and a tag on `main`. The commit
-it pushes changes `channels.json` and nothing else: other staged or unstaged
-work is left as it was, and it refuses before pushing if the commit would
-hold anything more. Promoting
+otherwise, so nothing unpushed rides along) and a published release: the
+public repo must have its tag. The commit it lands changes `channels.json`
+and nothing else: other staged or unstaged work is left as it was, and it
+refuses before pushing if the commit would hold anything more. Promoting
 forward asks GitHub first: it refuses a release whose CI run for the push to
-`main` failed
-(naming the run), waits for one still running, and stops when there is no run
-or no `gh` — `HATCHABOT_PROMOTE_IGNORE_CI=1` goes on without the check. Moving
-a channel back (a rollback) is not held to it.
+`main` failed (the dev repo's; for a release from before the dev repo, the
+public repo's), naming the run, waits for one still running, and stops when
+there is no run or no `gh` — `HATCHABOT_PROMOTE_IGNORE_CI=1` goes on without
+the check. Moving a channel back (a rollback) is not held to it.
 
-Once the channel's commit has landed, it starts
-`.github/workflows/promote-images.yml` to move the runtime image's `:stable`
-or `:beta` to that release's image — by the digest in its
-`release-manifest.json`, one move at a time, never to an older release
-unless this is a rollback — and waits for it. A release made before the
-release workflow has no manifest: its image tags are left as they are. If
-the move fails, the channel has still moved; the message says how to re-run
-it.
+Once the channel's commit has landed on the dev repo's `main`, it asks the
+publisher for the fast lane: a tag `channels-<UTC time>` on that commit. On
+its next run the publisher gates it, checks every release `channels.json`
+names is published, and copies that one file to the public repo
+(`Update channels`; no wait, no digest). That push starts the public repo's
+`.github/workflows/promote-images.yml`, which moves the runtime image's
+`:stable` or `:beta` to that release's image — by the digest in its
+`release-manifest.json`, one alias at a time; a channel moved back is a
+rollback, so its image moves back too. A release made before the release
+workflow has no manifest: its image tags are left as they are. A failed
+move can be made by hand: Actions → Promote images → Run workflow.
 
 On the development machine the CLI has the release verbs too — set
 `HATCHABOT_DEV_DIR=<your checkout>` in `~/.config/hatchabot/env` once:
 
 ```sh
-hbt release 2.32.0   # GitHub makes the release (scripts/release.sh; --draft-only for a dry run)
-hbt deploy           # this machine: the newest tag, now   (hbt deploy v2.31.3 for a specific one)
+hbt release 2.32.0   # tag it in the dev repo; the publisher publishes it (scripts/release.sh)
+hbt deploy           # this machine: the newest published tag, now   (hbt deploy v2.31.3 for a specific one)
 hbt promote          # stable ← what this machine runs     (hbt promote v2.32.0 beta)
 hbt channels         # where everything points
 ```
@@ -82,7 +124,7 @@ held to it.
 The machine you develop on can run every release first, automatically:
 
 ```sh
-./scripts/follow-latest.sh --install   # deploy the newest tag within 10 minutes of tagging
+./scripts/follow-latest.sh --install   # deploy the newest release within 10 minutes of its publishing
 ./scripts/follow-latest.sh --uninstall # back to deploying by hand
 ```
 
@@ -170,36 +212,38 @@ management agent stays pinned and moves last.
    git commit -am "Release vX.Y.Z"
    scripts/land.sh                        # a pull request; merges when its checks pass
    ```
-   `main` takes changes only through a pull request whose required checks
-   pass (test, ui, secrets, upgrade, privacy); `scripts/land.sh` opens it,
-   asks for a rebase merge, waits, and brings local `main` to what landed.
-   There is no bypass: in an emergency the repository owner turns the `main`
-   rule off in GitHub's settings, pushes, and turns it back on.
-4. Release it — GitHub makes the release; nothing is tagged, built or
-   uploaded from this machine:
+   `scripts/land.sh` opens the pull request in the dev repo, waits for its
+   checks (test, ui, secrets, upgrade), merges it with a rebase, and brings
+   local `main` to what landed.
+4. Tag it — the publisher publishes it, and GitHub builds the release;
+   nothing is built or uploaded from this machine:
    ```sh
    scripts/release.sh X.Y.Z               # or: hbt release X.Y.Z
    ```
    It refuses unless local `main` is `origin/main` and the version commit is
    on it (`package.json` says X.Y.Z, CHANGELOG has `## [X.Y.Z]`), CI passed
    on that commit's push to `main` (it waits for a run still going), and the
-   tag `vX.Y.Z` does not exist yet. It checks the release notes (the
-   CHANGELOG section) with `privacy-check.mjs --text`, brings GitHub's
-   privacy fingerprints up to date (`--sync-ci`), starts
-   `.github/workflows/release.yml`, follows it, and prints the release's
-   address. `--commit <sha>` releases an earlier commit on `main` instead of
-   its head.
-5. Deploy it (below), then promote it when it has held up (above).
+   tag `vX.Y.Z` exists neither in the dev repo nor on the public repo (a
+   name the public repo ever had is used for good). It checks the release
+   notes (the CHANGELOG section) with `privacy-check.mjs --text`, brings the
+   public repo's privacy fingerprints up to date (`--sync-ci`), then makes
+   the annotated tag and pushes it, by name, to the dev repo.
+   `--commit <sha>` tags an earlier commit on `main` instead of its head.
+   Then the publisher (above, "How a release reaches the public repo"):
+   skim the digest issue; the release is public an hour or more later.
+5. Deploy it once it is published (below), then promote it when it has held
+   up (above).
 
 ### What the release workflow does
 
-`.github/workflows/release.yml` (started by hand on `main` only; one release
+`.github/workflows/release.yml` (started on the public repo by the
+publisher's push of the tag `vX.Y.Z`; never in the dev repo; one release
 at a time):
 
-1. **check** (read-only): `scripts/release-check.sh` — the commit is on
-   `main`, `package.json` and CHANGELOG say the version, the CI run for its
-   push to `main` succeeded, the tag is free — and the notes against the
-   privacy fingerprints (`privacy-ci.mjs --text`; no fingerprints fails).
+1. **check** (read-only): `scripts/release-check.sh --tagged` — the tag
+   names a commit on `main`, and `package.json` and CHANGELOG there say the
+   version — and the notes against the privacy fingerprints
+   (`privacy-ci.mjs --text`; no fingerprints fails).
 2. **bundles** and **image** (read-only, nothing pushed): the three bundles
    with their `.sha256` (`bundles.yml`), and the multi-arch runtime image as
    OCI archives with its index made in advance (`runtime-image-build.yml`,
@@ -217,62 +261,68 @@ at a time):
    image pushed by its index digest and tagged `:vX.Y.Z` (refused if that tag
    names another digest), a **draft** release with the notes, every bundle,
    `.sha256` and the manifest, the draft's asset list checked against the
-   manifest (names, sizes, digests), then the tag `vX.Y.Z` made on the
-   checked commit and the release published.
+   manifest (names, sizes, digests), then — the tag checked to name that
+   commit — the release published.
 6. **latest**: when it is the newest release, `:latest` moves to its image
    (`promote-images.yml`). `:beta` and `:stable` move only when
    `scripts/promote.sh` moves the channel; nothing else moves them, and never
    to an older release unless it is a rollback.
 
-A failure before **publish** changes nothing on GitHub. Inside it, the
-worst left behind is a draft (the next attempt deletes it) or an image
-pushed by digest with no tag. Fix the cause and re-run the failed jobs
-(`gh run rerun <run> --failed`): they use the same artifacts. A whole new
-run is refused once the tag exists.
+A failure before **publish** changes nothing on GitHub but the tag the
+publisher pushed. Inside it, the worst left behind is a draft (the next
+attempt deletes it) or an image pushed by digest with no tag. Fix the cause
+and re-run the failed jobs (Actions → the run → Re-run failed jobs): they
+use the same artifacts. A cause in the code itself is fixed by the next
+patch version: the tag is published, and release tags never move.
 
-### The dry run
-
-`scripts/release.sh X.Y.Z --draft-only` runs everything up to a checked
-draft release: the image is pushed by digest but not tagged, and no git tag
-is made. Look at the draft (its notes, six bundle files and
-`release-manifest.json`), then delete it
-(`gh release delete vX.Y.Z --yes`); the real release of the same version
-can follow.
+There is no dry run of the release workflow: it runs only on the public
+repo, once the tag is published. `bundles.yml` can be started by hand in
+the dev repo to build the bundles (artifacts only, nothing published).
 
 ### Emergencies
 
-- **A broken `main` that blocks every pull request:** turn the `main` rule off
-  in the repository settings, push the fix, turn the rule back on, and say so
-  in the commit.
-- **GitHub Actions is down:** wait. A release is made only by the workflow;
-  `scripts/release.sh` has no local path.
+- **Stop a release:** add the label `reject` to its digest issue in
+  `cksci/publisher`, or set the publisher's `HOLD` variable (`all`, or
+  `hatchabot`) to stop everything until it is cleared.
+- **A broken `main` that blocks every pull request:** fix it in a pull
+  request whose checks pass; the dev repo has no rule to turn off.
+- **GitHub Actions is down:** wait. A release is made only by the publisher
+  and the workflow; `scripts/release.sh` has no local path.
 - **A bad release:** release a new patch version. `scripts/promote.sh` with
   an older tag rolls a channel (and its image alias) back. A bad release is
   not edited.
-- **Something private leaked into a release:**
+- **Something private leaked into a release:** set the publisher's `HOLD`
+  first, so nothing more goes out.
   - *In the release notes:* edit them. An immutable release's title and notes
     stay editable; only its files and tag are locked.
   - *In code that shipped:* delete the release (an immutable release can be
     deleted, and its bundles go with it), turn the "release tags: never moved
-    or deleted" rule off, delete the tag, rewrite the history with the `main`
-    rule off as for any history scrub, turn both rules back on, and release
-    the next patch version. That version number is gone for good: GitHub never
-    lets an immutable release's tag name be used again. Cached copies of the
-    old commits are removed by GitHub Support, as before.
+    or deleted" rule off, delete the tag, rewrite the public history with the
+    kit's rulesets off as for any history scrub (rulesets backed up first),
+    turn them back on, `kit accept-public hatchabot <sha>` the new `main`,
+    and release the next patch version. That version number is gone for
+    good: GitHub never lets an immutable release's tag name be used again.
+    Cached copies of the old commits are removed by GitHub Support, as
+    before. Then add the value to what `scripts/private-values` reads, so
+    the gate finds it next time.
 
-### The repository's settings
+### The repositories' settings
 
-- `main`: pull requests only, the five required checks, linear history, no
-  force-push or deletion, no bypass.
-- `v*` tags: never moved or deleted; `v0.*` never created.
-- Immutable releases: on (since 2026-10-10).
-- The `release` environment (the publish job's): deployable from `main` only.
-- **Not on: a rule that only the workflow may create `v*` tags.** GitHub does
-  not let a free organization's repository rule exempt GitHub Actions, and
-  the alternatives (a deploy key or an organization-owned app for the
-  workflow) were declined (2026-10-10). So a token with write access can
-  still push a new `v*` tag; it cannot move or delete one, or change a
-  published release's files.
+The public repo `hatchabot/hatchabot`:
+- `kit-main` and `kit-tags` (the publish kit's rulesets): only the
+  publisher's deploy key may update `main` or create `v*` tags;
+- `main`: no force-push or deletion; `v*` tags: never moved or deleted;
+  `v0.*` never created;
+- immutable releases on (since 2026-10-10); secret scanning and push
+  protection on; one deploy key, the publisher's;
+- the `release` environment (the publish job's): deployable from release
+  tags (`v*.*.*`) only;
+- one Actions secret, `PRIVACY_FINGERPRINTS` (CI's `privacy` job and the
+  privacy watch).
+
+`kit doctor hatchabot` (in the publish kit) checks all of these. The dev
+repo `cksci/hatchabot-dev` is private, with no branch rules (`land.sh`
+lands every change), and its own CI runners.
 
 ## The privacy check
 
@@ -292,10 +342,15 @@ A pattern scanner cannot do this: a real agent's name is just words.
   all it warns and lets the push through; an install it can only partly read
   (an env file but no database, say) blocks the push.
 - **Every release note**, with `--text` (step 4 above).
-- **Every pull request and push to `main`, on GitHub**: CI's `privacy` job
-  (below) — whoever or whatever wrote the change, on any machine or on
-  GitHub's own pages. With `main` behind pull requests it is a required
-  check.
+- **Every release, before it is public**: the publisher's gate, twice
+  (above, "How a release reaches the public repo"), with keyed fingerprints
+  of the same values from `scripts/private-values`: `node
+  scripts/privacy-check.mjs --export-values` (only into a pipe) and the
+  machine's `~/.config/pii-scan/private.json`, less what is public by
+  decision. `kit values sync hatchabot` uploads them to the publisher.
+- **Every push to the public repo's `main`, on GitHub**: CI's `privacy` job
+  (below), after the fact: the dev repo holds no fingerprint set, so the job
+  runs on the public repo only.
 - **Every day, on GitHub**: the `Privacy watch` workflow reads what is
   published beside the code (below).
 - **Every promote**: the `privacy` live test (`--public --check-hook`) reads
@@ -339,8 +394,12 @@ secret can test guesses against it, so it is kept as a secret.
 
 - **`node scripts/privacy-check.mjs --sync-ci`** makes the set from this
   install and sets the secret with `gh secret set` (the value on stdin,
-  never in a command line; it prints counts only). It refuses, exit 3, an
-  install it cannot fully read — the same rule as the hook.
+  never in a command line; it prints counts only) on the public repo (the
+  remote `public`). It uses the token in `~/.config/hatchabot/secrets.token`
+  when there is one (a fine-grained token that can only write the public
+  repos' Actions and Dependabot secrets; the everyday token cannot), else
+  gh's own login. It refuses, exit 3, an install it cannot fully read — the
+  same rule as the hook.
   `--export-digests --out <file>` writes the same set to a 0600 file.
 - **Daily**: `scripts/privacy-sync.sh --install` (Linux, a systemd user
   timer) runs it once a day, so a new agent's name is covered within a day;
@@ -406,12 +465,15 @@ fork or anyone's clone.
 
 GitHub's side: secret scanning and push protection are on; rulesets refuse
 force-pushes and deletion of `main`, `v0.*` tags, and moving or deleting a
-release tag; CI runs gitleaks on every push and pull request. Its exceptions
-(`.gitleaks.toml`) are exact fixture values, each for one rule and only in the
-files that hold it — never a word list, which let a setting's name hide a
-real-looking value (#42). A new fixture that trips it gets its exact value
-added there; `scripts/gitleaks-regression.sh` (run by the same CI job) checks
-that ordinary values are still reported whatever they are called.
+release tag; CI runs gitleaks on every push and pull request, then over the
+whole tree as the publisher's gate does: default rules, no config. The gate
+ignores `.gitleaks.toml`, so it allows nothing either: an exception there
+would pass CI and block the release, as sample values in the tests blocked
+v2.164.0. A test or page that needs a credential-shaped sample builds it at
+run time (`test/support/fixtures.ts`). `scripts/gitleaks-regression.sh` (run
+by the same CI job) checks that ordinary values are reported whatever they
+are called (an old word-list allowlist hid them, #42), and the old samples
+wherever they are.
 
 ## Updating pinned actions and images
 
@@ -426,9 +488,10 @@ promote-images.yml) can write, and they run no project code.
 keeps its git credentials, a job that installs or builds can write, or an
 image pin is missing.
 
-- **The reviewed path:** Dependabot (`.github/dependabot.yml`) opens a
-  weekly pull request for actions and for the `FROM` lines in `docker/`. Read
-  the upstream release notes, let CI pass, merge.
+- **The reviewed path:** Dependabot (`.github/dependabot.yml`, in the dev
+  repo only: the file is never published) opens a weekly pull request for
+  actions and for the `FROM` lines in `docker/`. Read the upstream release
+  notes, let CI pass, merge.
 - **What Dependabot does not see:** `ARG NODE_IMAGE=` in
   `docker/Dockerfile.runtime` and `CHROME_IMAGE` in
   `scripts/ui-clickthrough.mjs` (with the matching `docker pull` in
@@ -455,7 +518,7 @@ edit — or a half-finished `git pull` — in a live checkout changes what users
 
 ```
 ~/hatchabot        # development: branches, uncommitted work, tests
-~/hatchabot-prod   # production: always at a tag; nothing edited by hand
+~/hatchabot-prod   # production: always at a tag; nothing edited by hand; pulls from the public repo (push DISABLED)
 ~/hatchabot-data   # state: SQLite (which also holds the encrypted secrets), backups
 ```
 

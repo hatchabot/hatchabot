@@ -11,8 +11,11 @@
 #
 # A Mac has no timer here: run `node scripts/privacy-check.mjs --sync-ci`
 # after adding an agent or a person, and before each release. It needs this
-# machine's install and `gh` signed in with rights to the repository's
-# secrets; the value goes to gh on stdin and only counts are printed.
+# machine's install and a token that can write the repository's secrets:
+# ~/.config/hatchabot/secrets.token when there is one (a fine-grained token
+# for the public repos' Actions and Dependabot secrets only), else gh's own
+# login. The repository is the public one (the remote `public`, else
+# origin). The value goes to gh on stdin and only counts are printed.
 # --also (repeatable) adds a repository whose own privacy job uses the same
 # fingerprints, such as the project's website (2026-10-11).
 set -euo pipefail

@@ -7,6 +7,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
+import { WS_SAMPLE_KEY } from './support/fixtures.js';
 
 /**
  * The Control UI is reverse-proxied so the agent's gateway port can stay bound
@@ -98,7 +99,7 @@ function upgrade(port: number, path: string): Promise<{ status: string; echoed?:
     const sock = connect(port, '127.0.0.1', () => {
       sock.write(
         `GET ${path} HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n` +
-          `Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`,
+          `Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${WS_SAMPLE_KEY}\r\n\r\n`,
       );
     });
     let buf = '';

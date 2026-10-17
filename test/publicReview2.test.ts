@@ -10,6 +10,7 @@ import { base32Decode, totp } from '../src/api/totp.js';
 import { parseFunnelStatus, targetsPort } from '../src/ops/tailnet.js';
 import { evaluateSafeguards, failingSafeguards } from '../src/api/safeguards.js';
 import { verifyAssertion, verifyRegistration, WebAuthnError } from '../src/api/webauthn.js';
+import { WS_SAMPLE_KEY } from './support/fixtures.js';
 
 /**
  * What a second, independent review of the public listener found
@@ -176,7 +177,7 @@ async function openConsole(port: number, agent: string, cookie: string): Promise
   const state = { got: '', closed: false };
   s.on('data', (d) => { state.got += d.toString(); }); s.on('error', () => {}); s.on('close', () => { state.closed = true; });
   await new Promise((r) => s.once('connect', r));
-  s.write(`GET /v1/agents/${agent}/ui/ HTTP/1.1\r\nHost: ${PUBLIC_HOST}\r\nX-Forwarded-For: 203.0.113.7\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nCookie: ${cookie}\r\n\r\n`);
+  s.write(`GET /v1/agents/${agent}/ui/ HTTP/1.1\r\nHost: ${PUBLIC_HOST}\r\nX-Forwarded-For: 203.0.113.7\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${WS_SAMPLE_KEY}\r\nCookie: ${cookie}\r\n\r\n`);
   for (let i = 0; i < 40 && !state.got.includes('101') && !state.closed; i++) await sleep(50);
   return { s, state };
 }

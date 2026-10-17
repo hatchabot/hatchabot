@@ -1,11 +1,16 @@
 # The one way a release is made (release by workflow,
 # docs/release-by-workflow-design.md; issues #37, #38, #47, 2026-10-10).
-# Started by `scripts/release.sh X.Y.Z` (`hbt release X.Y.Z`), on main:
+# Started by the tag vX.Y.Z reaching this repository. Nobody pushes here but
+# the publisher (docs/releasing.md, "How a release reaches the public
+# repo"): `scripts/release.sh X.Y.Z` tags the version commit in the private
+# dev repo, and the publisher gates the tag's tree and notes, waits, gates
+# them again, and pushes one release commit and the annotated tag. It runs
+# only on hatchabot/hatchabot, never in the dev repo the same file lives in.
 #
-#   check     read-only: the commit is on main (main's head unless given),
-#             package.json and CHANGELOG say X.Y.Z, CI passed on its push to
-#             main, the tag is free (scripts/release-check.sh); the notes are
-#             the CHANGELOG section, checked against the privacy fingerprints.
+#   check     read-only: the tag names a commit on main, package.json and
+#             CHANGELOG there say X.Y.Z (scripts/release-check.sh --tagged);
+#             the notes are the CHANGELOG section, checked against the
+#             privacy fingerprints.
 #   bundles   read-only: the three bundles and their .sha256 (bundles.yml).
 #   image     read-only: the multi-arch runtime image as OCI archives and its
 #             index digest (runtime-image-build.yml) — pushed nowhere yet.
@@ -17,9 +22,8 @@
 #             jq, skopeo on the artifacts): the image pushed by digest and
 #             tagged :vX.Y.Z (refused if that tag names another digest); a
 #             DRAFT release with the notes, every asset and the manifest; its
-#             asset list checked against the manifest; then the tag on the
-#             checked commit and the release published. draft_only stops at
-#             the checked draft: no image tag, no git tag (the dry run).
+#             asset list checked against the manifest; then, the tag
+#             checked to name that commit, the release published.
 #   latest    :latest moves to this release's image (promote-images.yml) when
 #             it is the newest release.
 #
@@ -28,19 +32,8 @@
 # "Re-run failed jobs" runs `publish` again on the same artifacts.
 name: Release
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: The version to release (X.Y.Z, as package.json and CHANGELOG.md say)
-        required: true
-      commit:
-        description: The commit on main to release (blank = main's head)
-        required: false
-        default: ''
-      draft_only:
-        description: Stop at a complete draft release (the dry run) — no tag, no image tag, nothing published
-        type: boolean
-        default: false
+  push:
+    tags: ['v*.*.*']
 permissions: {}
 # One release at a time; a second waits rather than racing for the same tag.
 concurrency:
@@ -48,6 +41,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   check:
+    if: github.repository == 'hatchabot/hatchabot'
     permissions:
       contents: read
       actions: read
@@ -63,24 +57,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0     # main's history, for "is the commit on main"
+          fetch-depth: 0     # main's history, for "is the tag's commit on main"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
       - id: check
         env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-          COMMIT: ${{ inputs.commit }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # This workflow as main has it: a branch's copy could say anything.
-          [ "$GITHUB_REF" = refs/heads/main ] || { echo "::error::Start the release on main (this run is on $GITHUB_REF)."; exit 1; }
-          bash scripts/release-check.sh "$VERSION" ${COMMIT:+--commit "$COMMIT"} --repo "$GITHUB_REPOSITORY" --notes "$RUNNER_TEMP/notes.md" | tee -a "$GITHUB_OUTPUT"
+          # Release tags only (the publisher pushes no other kind).
+          [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a release tag: $GITHUB_REF"; exit 1; }
+          bash scripts/release-check.sh "${TAG#v}" --tagged --repo "$GITHUB_REPOSITORY" --notes "$RUNNER_TEMP/notes.md" | tee -a "$GITHUB_OUTPUT"
       # The notes are published apart from the code; release.sh checked them
-      # with the private values on the owner's machine, and this checks them
-      # here too, wherever the release was started from. No fingerprints is a
-      # failure, not a pass.
+      # with the private values on the owner's machine and the publisher's
+      # gate scanned them twice; this checks them here too. No fingerprints is
+      # a failure, not a pass.
       - name: release notes against the privacy fingerprints
         env:
           PRIVACY_FINGERPRINTS: ${{ secrets.PRIVACY_FINGERPRINTS }}
@@ -193,14 +185,14 @@ jobs:
           set -euo pipefail
           for f in *; do
             gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-ref refs/heads/main >/dev/null
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-ref "$GITHUB_REF" >/dev/null
             echo "✓ $f"
           done
 
   publish:
     needs: [check, image, manifest, attest]
-    # Its own environment: in the repository settings only main may deploy to
-    # it (docs/release-by-workflow-design.md, "Rollout").
+    # Its own environment: in the repository settings only release tags
+    # (v*.*.*) may deploy to it (docs/releasing.md, "The repository's settings").
     environment: release
     permissions:
       contents: write
@@ -213,7 +205,6 @@ jobs:
       COMMIT: ${{ needs.check.outputs.commit }}
       PRERELEASE: ${{ needs.check.outputs.prerelease }}
       NEWEST: ${{ needs.check.outputs.newest }}
-      DRAFT_ONLY: ${{ inputs.draft_only }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -294,7 +285,6 @@ jobs:
             [ "$(jq -r '.["org.hatchabot.release"] // ""' <<<"$LABELS")" = "$VERSION" ] \
               || { echo "::error::$arch is not labelled org.hatchabot.release=$VERSION"; exit 1; }
           done
-          if [ "$DRAFT_ONLY" = true ]; then echo "draft only: $IMAGE@$INDEX pushed, not tagged"; exit 0; fi
           skopeo copy --all --preserve-digests --retry-times 3 --src-authfile "$AUTH" --dest-authfile "$AUTH" "docker://$IMAGE@$INDEX" "docker://$IMAGE:$TAG"
           [ "$(digest_of "$IMAGE:$TAG")" = "$INDEX" ] || { echo "::error::$IMAGE:$TAG does not name $INDEX"; exit 1; }
           echo "✓ $IMAGE:$TAG = $INDEX"
@@ -304,7 +294,7 @@ jobs:
           set -euo pipefail
           R="$GITHUB_REPOSITORY"; A="$RUNNER_TEMP/assets"
           # A published release is never touched; a draft of this tag is what
-          # a dry run or a failed attempt left, and goes.
+          # a failed attempt left, and goes.
           [ "$(gh api "repos/$R/releases?per_page=100" --paginate --jq ".[] | select(.tag_name == \"$TAG\" and .draft == false) | .id")" = "" ] \
             || { echo "::error::$TAG is already released"; exit 1; }
           for old in $(gh api "repos/$R/releases?per_page=100" --paginate --jq ".[] | select(.tag_name == \"$TAG\" and .draft) | .id"); do
@@ -324,25 +314,22 @@ jobs:
             [ -z "$d" ] || printf '%s\n' "$want" | grep -qxF "$n $s $d" || { echo "::error::$n: GitHub's digest $d is not the manifest's"; exit 1; }
           done
           echo "✓ draft $TAG holds exactly the manifest's $(printf '%s\n' "$have" | wc -l) files: $(gh api "repos/$R/releases/$RID" --jq .html_url)"
-      - name: tag the checked commit and publish
-        if: ${{ !inputs.draft_only }}
+      - name: the tag names the checked commit; publish
         env:
           RID: ${{ steps.draft.outputs.id }}
         run: |
           set -euo pipefail
           R="$GITHUB_REPOSITORY"
-          if AT="$(gh api "repos/$R/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null)"; then
-            # Only a re-run of this job finds it: the check refused an existing tag.
-            [ "$AT" = "$COMMIT" ] || { echo "::error::the tag $TAG names $AT, not $COMMIT"; exit 1; }
-          else
-            gh api -X POST "repos/$R/git/refs" -f ref="refs/tags/$TAG" -f sha="$COMMIT" >/dev/null
-          fi
+          # The publisher's tag is annotated: peel it to its commit.
+          read -r TYPE AT < <(gh api "repos/$R/git/ref/tags/$TAG" --jq '"\(.object.type) \(.object.sha)"')
+          [ "$TYPE" != tag ] || AT="$(gh api "repos/$R/git/tags/$AT" --jq .object.sha)"
+          [ "$AT" = "$COMMIT" ] || { echo "::error::the tag $TAG names $AT, not $COMMIT"; exit 1; }
           LATEST=false; [ "$NEWEST" = true ] && LATEST=true
           gh api -X PATCH "repos/$R/releases/$RID" -F draft=false -f make_latest="$LATEST" --jq '"✓ published \(.html_url) (immutable: \(.immutable // "not reported"))"'
 
   latest:
     needs: [check, publish]
-    if: ${{ !inputs.draft_only && needs.check.outputs.newest == 'true' }}
+    if: ${{ needs.check.outputs.newest == 'true' }}
     permissions:
       contents: read
       packages: write

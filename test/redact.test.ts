@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { briefCause, credentialValuesFromEnv, maskKnownValues, redactSecrets } from '../src/domain/redact.js';
 import { opsListenError } from '../src/ops/opsServer.js';
+import { SLACK_APP_TOKEN } from './support/fixtures.js';
 
 /** A failure message must say enough to act on and never carry a credential. */
 
@@ -10,7 +11,7 @@ describe('redacting a failure', () => {
       ['connect ECONNREFUSED http://ops:9fZk3pQ7sample@172.19.0.1:8091', 'ops:9fZk3pQ7sample'],
       ['telegram 401 for 1234567890:AA' + 'x'.repeat(33), '1234567890:AA'],
       ['slack refused xoxb-0000-1111-abcdefghijklmnop', 'xoxb-0000'],
-      ['slack refused xapp-1-A0APP-1111-abcdefghijklmnop', 'xapp-1-A0APP'],
+      [`slack refused ${SLACK_APP_TOKEN}`, 'xapp-1-A0APP'],
       ['anthropic 401 sk-ant-0123456789abcdefghij', 'sk-ant-0123'],
       ['bad key ' + 'A'.repeat(48), 'A'.repeat(48)],
     ];

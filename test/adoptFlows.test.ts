@@ -8,7 +8,7 @@
  * `systemctl restart openclaw-gateway` for real; its logic is covered in
  * openclawImport.test.ts with an injected restart.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,6 +23,14 @@ const wsFresh = join(tmp, 'workspace-fresh');
 // External data folder must live OUTSIDE /tmp (the scan excludes /tmp).
 const repoTmp = mkdtempSync(join(process.cwd(), 'acl-adopt-data-'));
 const dataDir = join(repoTmp, 'condo-docs');
+// A checkout that is itself under a system tree (a self-hosted runner's
+// /var/lib/...): the route's scan keeps every other system prefix.
+vi.mock('../src/orchestrator/dataPaths.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/orchestrator/dataPaths.js')>();
+  const here = process.cwd();
+  const prefixes = real.SYSTEM_PREFIXES.filter((s) => !here.startsWith(`${s}/`));
+  return { ...real, scanWorkspacePaths: (ws: string) => real.scanWorkspacePaths(ws, prefixes) };
+});
 
 const prevCfg = process.env.OPENCLAW_CONFIG;
 const prevDb = process.env.OPENCLAW_STATE_DB;

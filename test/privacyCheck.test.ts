@@ -387,3 +387,28 @@ describe('--text (release notes)', () => {
     expect(bad.stdout).toContain("'Ma…(16)'");
   });
 });
+
+describe('--export-values (the publish kit\'s provider, scripts/private-values)', () => {
+  const lines = (out: string) => out.split('\n').filter(Boolean).map((l) => JSON.parse(l) as { cat: string; match: string; value: string });
+
+  it('gives each value as a JSON line: names as written, the rest in any case; ignored words left out', () => {
+    const r = run(['--export-values']);
+    expect(r.status, r.stderr).toBe(0);
+    const got = lines(r.stdout);
+    expect(got).toContainEqual({ cat: 'agent name', match: 'exact', value: 'Mapleford Helper' });
+    expect(got).toContainEqual({ cat: 'agent slug', match: 'lower', value: 'mapleford-helper' });
+    expect(got).toContainEqual({ cat: 'email', match: 'lower', value: 'someone@example.org' });
+    expect(got.find((v) => v.value === 'made-up-secret-value-0001')?.cat).toBe('secret');
+    expect(got.map((v) => v.value)).not.toContain('Test');
+    expect(r.stderr).toMatch(/✓ privacy values: \d+ given/);
+  });
+
+  it('an install it cannot fully read gives nothing (exit 3)', () => {
+    const r = spawnSync('node', [SCRIPT, '--export-values', '--db', db, '--env', env, '--env', join(dir, 'missing.env'), '--no-machine'], {
+      cwd: repo, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: dir },
+    });
+    expect(r.status).toBe(3);
+    expect(r.stdout).toBe('');
+    expect(r.stderr).toContain('could not be fully read');
+  });
+});

@@ -15,7 +15,7 @@ jobs:
   label:
     permissions:
       issues: write
-    if: contains(github.event.issue.body, '<!-- hatchabot-report v1')
+    if: github.repository == 'hatchabot/hatchabot' && contains(github.event.issue.body, '<!-- hatchabot-report v1')
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

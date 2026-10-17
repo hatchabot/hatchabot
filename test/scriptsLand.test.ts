@@ -7,32 +7,41 @@ import { scriptEnv } from './helpers/scriptEnv.js';
 
 /**
  * scripts/land.sh in a sandbox: a throwaway repo with a local bare "origin",
- * a temp HOME, hooks off, and a fake gh whose "merge" moves origin's main to
- * the pull request's branch (as a rebase merge would when main has not moved).
+ * a temp HOME, hooks off, and a fake gh whose merge moves origin's main to
+ * the pull request's branch (as a rebase merge would when main has not
+ * moved). With `required`, main's rules require checks and GitHub's
+ * auto-merge merges; without (the dev repo), land.sh merges once every check
+ * passed.
  */
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-function world(prState: 'merge' | 'fail' | 'close' | 'noauto' = 'merge') {
+function world(prState: 'merge' | 'fail' | 'close' | 'noauto' | 'green' = 'merge', required = true) {
   const root = mkdtempSync(join(tmpdir(), 'hb-land-')); dirs.push(root);
   const bin = join(root, 'bin'); mkdirSync(bin);
   const origin = join(root, 'origin.git');
   const log = join(root, 'gh.log');
+  const merged = join(root, 'merged');
   writeFileSync(join(bin, 'gh'), `#!/bin/sh
 echo "$*" >> "${log}"
+land() { b=$(git --git-dir="${origin}" for-each-ref --format='%(refname:short)' 'refs/heads/land/*' | head -1)
+         [ -n "$b" ] && git --git-dir="${origin}" update-ref refs/heads/main "refs/heads/$b"; touch "${merged}"; }
 case "$1 $2" in
+  "api "*/rules/branches/main) ${required ? `echo 1` : `echo 0`} ;;
+  "run list") echo "" ;;
   "pr create") echo "https://github.com/example-owner/example/pull/7" ;;
-  "pr merge") ;;
+  "pr merge") case "$*" in *--auto*) ${required ? ':' : 'exit 1'} ;; *--disable-auto*) ;; *) land ;; esac ;;
+  "pr close") ;;
   "pr view")
+    if [ -f "${merged}" ]; then echo 'MERGED noauto'; exit 0; fi
     case "${prState}" in
-      merge) b=$(git --git-dir="${origin}" for-each-ref --format='%(refname:short)' 'refs/heads/land/*' | head -1)
-             [ -n "$b" ] && git --git-dir="${origin}" update-ref refs/heads/main "refs/heads/$b"; echo MERGED ;;
-      close) echo CLOSED ;;
-      noauto) echo 'OPEN noauto' ;;
+      merge) land; echo 'MERGED auto' ;;
+      close) echo 'CLOSED noauto' ;;
+      noauto|green) echo 'OPEN noauto' ;;
       *) echo 'OPEN auto' ;;
     esac ;;
   # Like gh: exit 8 while checks are still pending.
-  "pr checks") if [ "${prState}" = noauto ]; then printf 'test\tpass\t1m\turl\nprivacy\tpass\t8s\turl\n'; exit 0; fi
+  "pr checks") case "${prState}" in noauto|green) printf 'test\tpass\t1m\turl\nprivacy\tskipping\t0\turl\n'; exit 0 ;; esac
     if [ "${prState}" = fail ]; then printf 'test\tpass\t1m\turl\nprivacy\tfail\t8s\turl\n'; exit 1; else printf 'test\tpending\t0\turl\n'; exit 8; fi ;;
 esac
 `, { mode: 0o755 });
@@ -52,7 +61,7 @@ esac
   git(work, 'remote', 'add', 'origin', origin);
   git(work, 'push', '-q', 'origin', 'main');
   const land = (...args: string[]) => spawnSync('bash', [join(work, 'scripts', 'land.sh'), ...args], {
-    cwd: work, encoding: 'utf8', env: { ...env, GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null', GIT_CONFIG_KEY_1: 'user.name', GIT_CONFIG_VALUE_1: 'Test', GIT_CONFIG_KEY_2: 'user.email', GIT_CONFIG_VALUE_2: 'test@example.org' },
+    cwd: work, encoding: 'utf8', env: { ...env, HATCHABOT_LAND_POLL_SECS: '0', GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null', GIT_CONFIG_KEY_1: 'user.name', GIT_CONFIG_VALUE_1: 'Test', GIT_CONFIG_KEY_2: 'user.email', GIT_CONFIG_VALUE_2: 'test@example.org' },
   });
   const ghLog = () => { try { return readFileSync(log, 'utf8'); } catch { return ''; } };
   return { work, origin, git, land, ghLog };
@@ -80,12 +89,25 @@ describe('scripts/land.sh lands commits on main through a pull request', () => {
     expect(w.ghLog()).toBe('');
   });
 
-  it('a failed check is named, exit 1, and the pull request is left open', () => {
+  it('a failed check is named, exit 1, and the pull request is closed so nothing merges later', () => {
     const w = world('fail');
     writeFileSync(join(w.work, 'b.txt'), 'two\n'); w.git(w.work, 'add', 'b.txt'); w.git(w.work, 'commit', '-q', '-m', 'Add b');
     const r = w.land();
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('Check(s) failed: privacy');
+    expect(w.ghLog()).toMatch(/pr merge \S+ --repo \S+ --disable-auto/);
+    expect(w.ghLog()).toMatch(/pr close \S+ --repo \S+ --delete-branch/);
+  });
+
+  it('no required checks (the dev repo): waits for every check to pass, skipped ones too, then merges itself', () => {
+    const w = world('green', false);
+    writeFileSync(join(w.work, 'b.txt'), 'two\n'); w.git(w.work, 'add', 'b.txt'); w.git(w.work, 'commit', '-q', '-m', 'Add b');
+    const r = w.land();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('merging it (rebase) here once every check has passed');
+    expect(w.ghLog()).not.toContain('--auto');
+    expect(w.ghLog()).toMatch(/pr merge \S+ --repo \S+ --rebase --delete-branch/);
+    expect(w.git(w.work, 'rev-parse', 'HEAD')).toBe(w.git(w.origin, 'rev-parse', 'main'));
   });
 
   it('checks passed but GitHub turned auto-merge off (a rebase it refuses): says so at once, exit 1', () => {

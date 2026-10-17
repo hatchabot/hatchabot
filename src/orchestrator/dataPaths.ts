@@ -10,7 +10,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 // Directories that are never useful to share: the OS, and volatile/system trees.
-const SYSTEM_PREFIXES = [
+export const SYSTEM_PREFIXES: readonly string[] = [
   '/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/proc', '/sys', '/dev',
   '/run', '/tmp', '/var', '/opt', '/snap', '/boot', '/root/.cache',
 ];
@@ -40,8 +40,10 @@ function collectFiles(dir: string, depth: number, acc: string[]): void {
  * actually exist on the host and sit OUTSIDE the workspace itself — i.e. real
  * external data the agent reads. Files collapse to their parent directory;
  * nested hits collapse to the shallowest shared ancestor already in the list.
+ * `systemPrefixes` is for tests whose checkout itself sits under one (a
+ * self-hosted CI runner's work dir in /var/lib).
  */
-export function scanWorkspacePaths(workspaceDir: string): string[] {
+export function scanWorkspacePaths(workspaceDir: string, systemPrefixes: readonly string[] = SYSTEM_PREFIXES): string[] {
   const ws = resolve(workspaceDir);
   const files: string[] = [];
   collectFiles(ws, 0, files);
@@ -79,7 +81,7 @@ export function scanWorkspacePaths(workspaceDir: string): string[] {
     // dirs (.ssh, .aws, .gnupg, .kube, .docker, .config) the share-blocklist
     // doesn't all cover. Real data folders are not dot-directories.
     if (p.split('/').some((seg) => seg.startsWith('.'))) continue;
-    if (SYSTEM_PREFIXES.some((s) => p === s || p.startsWith(`${s}/`))) continue;
+    if (systemPrefixes.some((s) => p === s || p.startsWith(`${s}/`))) continue;
     // Skip trivially-shallow roots ("/", "/home", "/home/user", "/mnt").
     if (p.split('/').filter(Boolean).length < 2) continue;
     dirs.add(p);

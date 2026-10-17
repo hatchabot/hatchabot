@@ -40,6 +40,11 @@ runtime. You do need it to run the product (`./scripts/setup-host.sh`).
 - Run `npm test` and `npm run typecheck`; CI runs both.
 - Describe the *why* in the commit message. The git log is used as a design
   record here.
+- Open pull requests here as usual; CI runs on them. This repository's
+  `main` changes only through releases, so a pull request is not merged
+  here: once it is ready, the maintainer brings it into the development
+  repository (you stay the commit's author), and it ships with the next
+  release; the pull request is then closed with a note saying which.
 
 ## Security
 

@@ -2,8 +2,10 @@
 # Does .gitleaks.toml still catch what it should? Its allowlist used to be a
 # word list matched against the whole assignment, so a setting whose NAME
 # said "example" or "fake" hid a real-looking value beside it (audit issue
-# #42, 2026-10-09). This scans a throwaway folder of invented files and
-# checks each one is reported, or not, as it should be:
+# #42, 2026-10-09); later it allowed exact sample values, which the
+# publisher's gate (default rules, no allowlist) then blocked (2026-10-17).
+# This scans a throwaway folder of invented files and checks each one is
+# reported:
 #
 #   scripts/gitleaks-regression.sh <gitleaks binary> [config]
 #
@@ -35,18 +37,17 @@ mkdir -p "$WORK/src" "$WORK/test"
 printf 'const exampleApiKey = "%s";\n' "$(rnd)" > "$WORK/src/example-settings.ts"
 printf 'FAKE_SERVICE_TOKEN="%s"\n' "$(rnd)" > "$WORK/src/fake-env.sh"
 printf "const madeUpSecret = '%s';\n" "$(rnd)" > "$WORK/test/madeup.test.ts"
-# A known fixture outside the files it is allowed in.
-printf 'headers["Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=="];\n' > "$WORK/src/ws-sample.ts"
-# Must NOT be reported: the known fixtures where they live.
-printf 'const req = `Sec-WebSocket-Version: 13\\r\\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\\r\\n`;\n' > "$WORK/test/ws.test.ts"
-printf "store.bindMemberIdentity('a1', 'u2', 'discord', '123456789012345678');\n" > "$WORK/test/members.test.ts"
-WANT_FOUND="src/example-settings.ts src/fake-env.sh test/madeup.test.ts src/ws-sample.ts"
-WANT_QUIET="test/ws.test.ts test/members.test.ts"
+# The sample values the tests once wrote out, where they were allowed: the
+# gate allows none, so CI must report them too. Built here, never written out.
+WSKEY="$(printf 'the sample nonce' | base64)"
+DISCORD_ID="123456789""012345678"
+printf 'const req = `Sec-WebSocket-Version: 13\\r\\nSec-WebSocket-Key: %s\\r\\n`;\n' "$WSKEY" > "$WORK/test/ws.test.ts"
+printf "store.bindMemberIdentity('a1', 'u2', 'discord', '%s');\n" "$DISCORD_ID" > "$WORK/test/members.test.ts"
+WANT_FOUND="src/example-settings.ts src/fake-env.sh test/madeup.test.ts test/ws.test.ts test/members.test.ts"
 
 ( cd "$WORK" && "$BIN" dir . --config "$CONFIG" --redact --no-banner --exit-code 0 -l error -f csv -r "$WORK/report.csv" )
 found="$(cut -d, -f3 "$WORK/report.csv" | tail -n +2 | sed 's#^\./##' | sort -u)"
 bad=0
 for f in $WANT_FOUND; do grep -qx "$f" <<<"$found" || { echo "✗ not reported: $f"; bad=1; }; done
-for f in $WANT_QUIET; do ! grep -qx "$f" <<<"$found" || { echo "✗ reported, but it is a known fixture: $f"; bad=1; }; done
-[ "$bad" = 0 ] && echo "✓ gitleaks config: ordinary values reported whatever they are called; known fixtures quiet only where they live"
+[ "$bad" = 0 ] && echo "✓ gitleaks config: ordinary values reported whatever they are called, and sample values wherever they are"
 exit "$bad"

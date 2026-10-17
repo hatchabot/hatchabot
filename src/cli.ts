@@ -373,9 +373,10 @@ Options must be ones listed here: a mistyped one is an error, not a guess.`;
 const MAINTAINER_USAGE = `
 
 Release (this is the development machine):
-  release X.Y.Z [--draft-only] Make a release: GitHub's release workflow builds, attests and
-                               publishes it (land the version commit first; docs/releasing.md)
-  deploy [vX.Y.Z]              Put a release on this machine now (default: the newest tag)
+  release X.Y.Z                Tag a release in the dev repo: the publisher publishes it, then
+                               GitHub's release workflow builds it (land the version commit first;
+                               docs/releasing.md)
+  deploy [vX.Y.Z]              Put a release on this machine now (default: the newest published tag)
   promote [vX.Y.Z] [channel]   New installs get it (default: what this machine runs → stable)
   channels [all]               Where stable, beta and latest point, and every release`;
 
@@ -1060,12 +1061,18 @@ async function main() {
     const git = (dir: string, ...a: string[]) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     let argv: string[];
     if (cmd === 'release') {
-      // GitHub's release workflow makes it (scripts/release.sh; release by workflow, 2026-10-10).
-      const version = rest[0] ?? fail('say which version: hatchabot release X.Y.Z [--draft-only]');
+      // Tagged in the dev repo; the publisher publishes it and GitHub's release workflow builds it
+      // (scripts/release.sh, docs/releasing.md). --draft-only is passed on for release.sh to say it is gone.
+      const version = rest[0] ?? fail('say which version: hatchabot release X.Y.Z');
       argv = [join(devDir, 'scripts', 'release.sh'), version, ...(flags.has('draft-only') ? ['--draft-only'] : [])];
     } else if (cmd === 'deploy') {
-      git(devDir, 'fetch', '--tags', '--force', '--quiet', 'origin');
-      const tag = rest[0] ?? git(devDir, 'tag', '-l', 'v[0-9]*', '--sort=-v:refname').split('\n').find((t) => t && !/-(rc|beta|alpha)/.test(t));
+      // The newest release the public repo has (a dev tag may still be waiting for the publisher).
+      const remotes = git(devDir, 'remote').split('\n');
+      const from = remotes.includes('public') ? 'public' : 'origin';
+      const published = git(devDir, 'ls-remote', '--tags', from, 'refs/tags/v[0-9]*').split('\n')
+        .map((l) => /refs\/tags\/(v[^^]+)$/.exec(l)?.[1]).filter((t): t is string => Boolean(t) && !/-(rc|beta|alpha)/.test(t!))
+        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+      const tag = rest[0] ?? published[0];
       argv = [join(devDir, 'scripts', 'deploy-release.sh'), tag ?? fail('no release tags')];
     } else if (cmd === 'promote') {
       // Default: what this machine runs — you promote what you have been running.
