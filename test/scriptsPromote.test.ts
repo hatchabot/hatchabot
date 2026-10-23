@@ -1,9 +1,14 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
+
+// Every test here runs real shell scripts (git, bash, a fake gh) in a sandbox. On the
+// self-hosted runner CI shares the machine with other work, and vitest's 5 s was not
+// enough under load (land, promote, release, first-run-link; 2026-10-23).
+vi.setConfig({ testTimeout: 30_000 });
 
 /**
  * scripts/promote.sh in a sandbox: a throwaway repo with a local bare
@@ -394,7 +399,7 @@ describe('scripts/promote.sh promotes only a release GitHub has published (audit
 });
 
 // Each runs several promotes, each fetching both remotes: slow on a shared CI runner.
-describe('scripts/promote.sh and a release tagged before it (audit, 2026-10-20)', { timeout: 30_000 }, () => {
+describe('scripts/promote.sh and a release tagged before it (audit, 2026-10-20)', () => {
   /** A release tagged on origin, not published yet, whose channels.json says stable → `says`. */
   const pending = (w: ReturnType<typeof world>, tag: string, says: string) => {
     writeFileSync(join(w.work, 'channels.json'), `{\n  "stable": "${says}",\n  "beta": "v1.0.0"\n}\n`);
@@ -499,7 +504,7 @@ describe('scripts/promote.sh and a release tagged before it (audit, 2026-10-20)'
     expect(again.status, again.stdout + again.stderr).toBe(0);
     expect(again.stdout).toContain('has lost it since');
     expect(w.fastLane().split('\n')).toHaveLength(3);
-  }, 30_000); // several promotes, each fetching both remotes
+  });
 
   // Final audit, 2026-10-22: which tags the publisher is done with is read from its commits.
   const tick = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1100);   // tag names go by the second
@@ -527,7 +532,7 @@ describe('scripts/promote.sh and a release tagged before it (audit, 2026-10-20)'
     expect(r.status, r.stdout + r.stderr).toBe(1);   // T1 is still to come: a rollback now would be undone by it
     expect(r.stderr).toContain('is still waiting for the publisher');
     expect(w.fastLane().split('\n')).toHaveLength(2);
-  }, 30_000); // several promotes, each fetching both remotes
+  });
 
   it('a blocked tag before a published one is done, even when a release brings its file back', () => {
     const w = world();
@@ -540,7 +545,7 @@ describe('scripts/promote.sh and a release tagged before it (audit, 2026-10-20)'
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(r.stdout).toContain('has lost it since');                               // T2 was published: asked again
     expect(w.fastLane().split('\n')).toHaveLength(3);
-  }, 30_000);
+  });
 
   it('a published tag named by hand does not make later tags count as done', () => {
     const w = world();
@@ -555,7 +560,7 @@ describe('scripts/promote.sh and a release tagged before it (audit, 2026-10-20)'
     const r = w.promote({}, 'v1.2.0');
     expect(r.status, r.stdout + r.stderr).toBe(1);                               // T2 still waits
     expect(r.stderr).toContain('is still waiting for the publisher');
-  }, 30_000);
+  });
 
   it('a hand-made fast-lane tag with no channels.json (lightweight too) is one the publisher stops at', () => {
     const w = world();
@@ -568,7 +573,7 @@ describe('scripts/promote.sh and a release tagged before it (audit, 2026-10-20)'
     const r = w.promote({}, 'v1.1.0');
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('channels-20200101T000000Z');
-  }, 30_000);
+  });
 
   it('a fast-lane tag older than one the public repo has is done, published or blocked', () => {
     const w = world();
@@ -582,7 +587,7 @@ describe('scripts/promote.sh and a release tagged before it (audit, 2026-10-20)'
     const r = w.promote({}, 'v1.3.0');
     expect(r.status, r.stdout + r.stderr).toBe(0);           // T1, blocked for good, no longer holds it back
     expect(w.fastLane().split('\n')).toHaveLength(3);
-  }, 30_000); // several promotes, each fetching both remotes
+  });
 
   it("a rollback states itself in the fast-lane tag, as the publisher's gate requires", () => {
     const w = world();
@@ -619,7 +624,7 @@ describe('scripts/promote.sh and a release tagged before it (audit, 2026-10-20)'
     expect(b.stderr).toContain('is still waiting for the publisher');
     expect(w.fastLane().split('\n')).toHaveLength(3);   // no tag stating two rollbacks against the wrong file
     expect(w.channels()).toContain('"beta": "v1.1.0"');   // and channels.json as it was
-  }, 30_000); // several promotes, each fetching both remotes
+  });
 
   it("a failed read of the public repo leaves channels.json as it was", () => {
     const w = world();

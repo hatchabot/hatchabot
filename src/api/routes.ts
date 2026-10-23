@@ -14,6 +14,7 @@ import { computeUsagePeriod, localDay, snapshotDailyUsage, USAGE_PERIODS, type U
 import { parkDiscordBot, poolRef, publicDiscordBot, type DiscordBotRow } from '../orchestrator/discordPool.js';
 import { defaultDbPath } from '../envCompat.js';
 import { spawn } from 'node:child_process';
+import { Transform, pipeline } from 'node:stream';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { hostname as osHostname, totalmem } from 'node:os';
@@ -148,6 +149,7 @@ import {
   parseTemplate,
   pushedParameters,
   readCloneMemory,
+  renderedTooBig,
   resolveParamValues,
   TemplateParamSchema,
   TEMPLATE_FORMAT,
@@ -233,6 +235,7 @@ import {
   forwardedClientAddress, GUEST_VIEW_SCRIPT, GUEST_VIEW_SCRIPT_PATH, guestControlUiConfig, guestHttpPath, spliceGuest,
   stripClientIdentity, withConsoleIdentity, withGuestView,
 } from './consoleProxy.js';
+import { CONSOLE_WORKER_STUB } from './consoleWorkerStub.js';
 import { ConsoleAccess } from '../orchestrator/consoleAccess.js';
 import { credentialValuesFromEnv, redactSecrets } from '../domain/redact.js';
 import { boundInput, buildReport, issueUrl, knownProblems, localContext, matchKnownProblems, readSource, redactForPublic, searchSource, type PublicRedactContext, type ReportFacts, type ReportInput } from '../orchestrator/problemReport.js';
@@ -242,7 +245,9 @@ import {
   autoSnapshot,
   captureSnapshot,
   CORE_FILES,
+  CoreFileTooBigError,
   MAX_FILE_BYTES,
+  readCoreFile,
   restoreSnapshot,
   SnapshotError,
   writeFileInAgent,
@@ -6369,19 +6374,29 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (agent.state !== 'RUNNING') {
         return reply.code(409).send({ error: 'Start the agent to edit its files.' });
       }
-      // Same cap the snapshot path enforces — an unbounded cat of a corrupt
-      // multi-MB file would balloon responses (audit 2026-09-04 #3).
-      const res = await providerFor(agent.hostId).execShell(
-        agent.runtimeRef,
-        `head -c ${MAX_FILE_BYTES + 1} ${JSON.stringify(workspacePath(agent.slug, req.params.name))} 2>/dev/null || true`,
-      );
-      // Bytes, not JS chars — a multibyte-heavy file just over the cap passed
-      // the char-count check yet arrived truncated mid-character by head -c,
-      // and saving it back wrote the truncation (10th audit).
-      if (Buffer.byteLength(res.stdout, 'utf8') > MAX_FILE_BYTES) {
-        return reply.code(413).send({ error: `${req.params.name} is over ${MAX_FILE_BYTES / 1024}KB — edit it in chat instead.` });
+      // The snapshot read: the same cap (an unbounded cat of a corrupt
+      // multi-MB file would balloon responses, audit 2026-09-04 #3), counted
+      // in bytes (a multibyte-heavy file just over the cap arrived truncated
+      // mid-character and was saved back truncated, 10th audit), and it tells
+      // a failed read from an empty file. `head … || true` answered a runner
+      // asleep or a daemon down with 200 and '', the editor showed an empty
+      // file ready to save, and a Save wrote nothing over the real one
+      // (review 2026-10-23). A failed read is a 502 now, and nothing loads.
+      let content: string | undefined;
+      try {
+        content = await readCoreFile(providerFor(agent.hostId), agent.runtimeRef, agent.slug, req.params.name);
+      } catch (err) {
+        if (err instanceof CoreFileTooBigError) {
+          return reply.code(413).send({ error: `${req.params.name} is over ${MAX_FILE_BYTES / 1024}KB — edit it in chat instead.` });
+        }
+        if (err instanceof SnapshotError) return reply.code(502).send({ error: `${err.userMessage} Nothing was loaded.` });
+        return reply.code(502).send({ error: `Couldn't read ${req.params.name} — is the agent's machine awake? Nothing was loaded.` });
       }
-      return { name: req.params.name, content: res.stdout };
+      // A file that is not there is editable as empty: saving creates it.
+      // Said apart from one that is there and empty.
+      return content === undefined
+        ? { name: req.params.name, content: '', missing: true }
+        : { name: req.params.name, content };
     },
   );
 
@@ -6438,8 +6453,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       .header('cache-control', 'no-store')
       .header('x-content-type-options', 'nosniff')
       .header('content-security-policy', 'sandbox');
-    if (kind === 'file') reply.header('content-length', String(size));
-    return reply.send(stream);
+    if (kind !== 'file') return reply.send(stream);
+    reply.header('content-length', String(size));
+    // Exactly the bytes announced: `head -c` caps a file that grew, and a file
+    // that shrank meanwhile (a log rotated, a file rewritten) ends the body
+    // short. Ended cleanly, a short body on a kept-alive connection was taken
+    // as complete, or as the start of the next response (review R23, 2026-10-23);
+    // an error here makes Fastify destroy the response instead.
+    let sent = 0;
+    const exact = new Transform({
+      transform(chunk: Buffer, _enc, cb) { sent += chunk.length; cb(null, chunk); },
+      flush(cb) { cb(sent < size ? new Error(`${name} shrank while it was being read (${sent} of ${size} bytes)`) : null); },
+    });
+    pipeline(stream, exact, () => { /* the error reaches the response through `exact` */ });
+    return reply.send(exact);
   };
   app.get<{ Params: { id: string }; Querystring: { path?: string; inline?: string } }>('/v1/agents/:id/fs/file', NO_COMPRESS, (req, reply) => fsStream(req, reply, req.params.id, req.query.path, 'file', req.query.inline === '1'));
 
@@ -6611,6 +6638,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           if (typeof paramFiles.agents === 'string') {
             writes.push({ name: 'AGENTS.md', content: applyParamValues(paramFiles.agents, resolved) });
           }
+          // Rendered past the core-file limit: refused before the snapshot and the writes (review R16).
+          for (const w of writes) if (Buffer.byteLength(w.content, 'utf8') > MAX_FILE_BYTES) throw renderedTooBig(w.name);
           await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-params');
           for (const w of writes) {
             const b64 = Buffer.from(w.content, 'utf8').toString('base64');
@@ -6623,6 +6652,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (res.code !== 0) return reply.code(500).send({ error: 'Write failed' });
       } catch (err) {
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         if (err instanceof NoPlaceholders) {
           return reply.code(400).send({
             error:
@@ -6979,6 +7009,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const me = ownerIdOf(req);
     const caller = consoleCaller(me, req.params.id);
     if (!caller) return reply.code(404).send({ error: 'No debug gateway for this agent.' });
+    // The console's service worker is not OpenClaw's: every agent's console
+    // registered one under its own path on this one site and cached its own
+    // copy of the console (55 MB a build, three builds kept), and fifty agents
+    // filled the browser's storage for the site — every console then warned
+    // "Could not store the previous draft in browser storage" on each keystroke.
+    // The stand-in (consoleWorkerStub.ts) clears those caches and unregisters
+    // itself. Answered here, whatever the agent's machine is doing.
+    if ((req.method === 'GET' || req.method === 'HEAD') && req.params['*'] === 'sw.js') {
+      return reply.header('cache-control', 'no-store').type('text/javascript; charset=utf-8').send(CONSOLE_WORKER_STUB);
+    }
     // A machine already known not to answer: say so in words, without waiting on it.
     if ((slowHostUntil.get(caller.agent.hostId) ?? 0) > Date.now()) return machineAway(reply, caller.agent);
     const target = await consoleTarget(caller.agent).catch(() => undefined);
@@ -12064,21 +12104,39 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * too, and the agent rebuilt from its members: removing the link alone
    * left the handed-on account able to DM every agent (night review).
    */
-  app.delete('/v1/account/discord', async (req) => {
+  app.delete('/v1/account/discord', async (req, reply) => {
     // Only THIS id comes out of each agent's allowlists, on its volume, in any
     // state: wiping the whole approval store locked out everyone admitted since
     // the last rebuild, and a stopped agent kept the id until then (regression review).
-    const ownId = store.identityOfUserAnywhere(ownerIdOf(req), 'discord');
-    const agentIds = store.agentsWithIdentity(ownerIdOf(req), 'discord');
-    const n = store.unbindIdentityEverywhere(ownerIdOf(req), 'discord');
-    if (ownId && /^\d{5,32}$/.test(ownId)) {
-      for (const id of agentIds) {
-        const agent = store.getAgent(id);
-        if (!agent?.runtimeRef || agent.state === 'DELETED' || !store.getChannelForAgent(id, 'discord')) continue;
+    // Per agent, with the id THAT agent knows (a person's id can differ between
+    // agents), and the binding goes only once its scrub is done: one id was
+    // scrubbed from every agent and every binding dropped first, so a failed
+    // scrub (the runner asleep) left the id admitted by an agent that no longer
+    // knew it, and a second unlink had nothing to find (review 2026-10-23).
+    const me = ownerIdOf(req);
+    const failed: string[] = [];
+    let n = 0;
+    for (const id of store.agentsWithIdentity(me, 'discord')) {
+      const ownId = store.memberIdentities(id, me).discord;
+      const agent = store.getAgent(id);
+      if (ownId && /^\d{5,32}$/.test(ownId) && agent?.runtimeRef && agent.state !== 'DELETED' && store.getChannelForAgent(id, 'discord')) {
         const script = allowlistScrubScript([{ channel: 'discord', acct: CHANNEL_ACCOUNT, id: ownId, cred: `/home/node/.openclaw/credentials/discord-${CHANNEL_ACCOUNT.toLowerCase()}-allowFrom.json` }]);
         const res = await providerFor(agent.hostId).execShellOnVolume(agent.runtimeRef, script).catch(() => undefined);
-        if (res?.code !== 0) trace(id)('channel.unlink_scrub_failed', { kind: 'discord' });
+        if (res?.code !== 0) {
+          trace(id)('channel.unlink_scrub_failed', { kind: 'discord' });
+          failed.push(agent.name);
+          continue;
+        }
       }
+      n += store.unbindMemberIdentity(id, me, 'discord');
+    }
+    if (failed.length) {
+      return reply.code(502).send({
+        unlinked: false, agents: n, failed,
+        error: `Your Discord could not be removed from ${failed.join(', ')} — is the machine it runs on awake? ` +
+          `${failed.length === 1 ? 'That agent' : 'Those agents'} still ${failed.length === 1 ? 'knows' : 'know'} it` +
+          `${n ? `; ${n === 1 ? 'one other has' : `${n} others have`} forgotten it` : ''}. Unlink again when ${failed.length === 1 ? 'it is' : 'they are'} reachable.`,
+      });
     }
     return { unlinked: true, agents: n };
   });
@@ -12411,41 +12469,62 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!master?.runtimeRef || master.state !== 'RUNNING') {
       return reply.code(409).send({ error: 'Start the master to push its definition.' });
     }
+    // The master mid-operation (a restore, a move) has files that are not its
+    // definition yet.
+    if (busyNow(master, reply)) return reply;
     const children = store.listChildren(master.id).filter((c) => c.ownerId === ownerIdOf(req));
     if (!children.length) return reply.code(400).send({ error: 'This agent has no derived children.' });
-    const readCapped = async (agentLike: Agent, nameF: string) => {
-      const res = await providerFor(agentLike.hostId).execShell(
-        agentLike.runtimeRef!,
-        `head -c ${MAX_FILE_BYTES + 1} ${JSON.stringify(workspacePath(agentLike.slug, nameF))} 2>/dev/null || true`,
-      );
-      if (Buffer.byteLength(res.stdout, 'utf8') > MAX_FILE_BYTES) {
-        throw new TransferError(`${nameF} is over ${MAX_FILE_BYTES / 1024}KB — trim it before pushing.`);
+    /**
+     * One file as it is: its text, '' when it is there and empty, undefined
+     * when it is not there. A read that failed throws (SnapshotError): `head …
+     * || true` read a sleeping runner as '' and the layer dropped the file,
+     * so a SOUL.md the owner had cleared on purpose stayed as it was on every
+     * child while the push reported success (review 2026-10-23).
+     */
+    const readCapped = async (agentLike: Agent, nameF: string): Promise<string | undefined> => {
+      try {
+        return await readCoreFile(providerFor(agentLike.hostId), agentLike.runtimeRef!, agentLike.slug, nameF);
+      } catch (err) {
+        if (err instanceof CoreFileTooBigError) throw new TransferError(`${nameF} is over ${MAX_FILE_BYTES / 1024}KB — trim it before pushing.`);
+        throw err;
       }
-      return res.stdout;
     };
     // The master's RAW template layer, when it has one — a master that filled
     // its own setup values (the /params master-seeding flow) has RENDERED
     // live files; pushing those overwrote every child's per-child values with
     // the master's and froze placeholder-free text as each child's layer
     // (10th audit). Live files are only the source when no layer exists.
+    // A file read as empty is pushed as empty; only a file that is not there
+    // is left out.
     let layer: { soul?: string; agents?: string; persona?: string };
     try {
       layer = master.paramFiles ?? {
-        soul: (await readCapped(master, 'SOUL.md')) || undefined,
-        agents: (await readCapped(master, 'AGENTS.md')) || undefined,
-        persona: master.persona || undefined,
+        soul: await readCapped(master, 'SOUL.md'),
+        agents: await readCapped(master, 'AGENTS.md'),
+        persona: typeof master.persona === 'string' ? master.persona : undefined,
       };
     } catch (err) {
       if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
-      throw err;
+      if (err instanceof SnapshotError) return reply.code(502).send({ error: `Couldn't read the master's files: ${err.userMessage}` });
+      return reply.code(502).send({ error: "Couldn't read the master's files — is its machine awake?" });
     }
-    if (!layer.soul && !layer.agents) {
-      return reply.code(502).send({ error: "Couldn't read the master's files." });
+    if (layer.soul === undefined && layer.agents === undefined) {
+      return reply.code(400).send({ error: 'The master has neither a SOUL.md nor an AGENTS.md to push.' });
     }
     const results: Array<{ id: string; name: string; ok: boolean; error?: string }> = [];
     for (const child of children) {
       if (child.state !== 'RUNNING' || !child.runtimeRef) {
         results.push({ id: child.id, name: child.name, ok: false, error: `not running (${child.state})` });
+        continue;
+      }
+      // A child whose long operation is not over (a restore interrupted by a
+      // restart, say) has files that are being put right: the transient busy
+      // flag below is empty after a restart, and the push wrote under the
+      // recovery (review 2026-10-23). Refused in the operation's words, as
+      // every other file-writing route does.
+      const onDisk = operationRefusal(store, child.id);
+      if (onDisk) {
+        results.push({ id: child.id, name: child.name, ok: false, error: onDisk });
         continue;
       }
       try {
@@ -12474,16 +12553,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // the next rebuild (10th audit). Splice each child's own section
           // back into the pushed content.
           const childAgentsMd = typeof layer.agents === 'string'
-            ? await readCapped(child, 'AGENTS.md').catch(() => '')
-            : '';
-          const childDataSection = extractSection(childAgentsMd, DATA_SOURCES_HEADING);
+            ? await readCapped(child, 'AGENTS.md').catch(() => undefined)
+            : undefined;
+          const childDataSection = extractSection(childAgentsMd ?? '', DATA_SOURCES_HEADING);
           // Both files or neither: a SOUL.md written and an AGENTS.md that
           // failed left the child half on the new definition, with the
           // bookkeeping below skipped (review, 2026-10-22). What was written
           // goes back as it was before the push.
-          // A file that read as nothing is not written back as nothing: the
-          // pre-params snapshot is the way back for it.
-          const written: Array<[string, string]> = [];
+          // A file whose read failed, or that was not there, is not written
+          // back as nothing: the pre-params snapshot is the way back for it.
+          // One that was there and empty goes back empty.
+          const written: Array<[string, string | undefined]> = [];
           const write = (nameF: string, text: string) =>
             writeFileInAgent(providerFor(child.hostId), child.runtimeRef!, workspacePath(child.slug, nameF), Buffer.from(text, 'utf8').toString('base64'));
           try {
@@ -12493,13 +12573,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
               if (nameF === 'AGENTS.md' && childDataSection) {
                 rendered = replaceSection(rendered, DATA_SOURCES_HEADING, childDataSection);
               }
-              const before = nameF === 'AGENTS.md' ? childAgentsMd : await readCapped(child, nameF).catch(() => '');
+              if (Buffer.byteLength(rendered, 'utf8') > MAX_FILE_BYTES) throw renderedTooBig(nameF); // review R16
+              const before = nameF === 'AGENTS.md' ? childAgentsMd : await readCapped(child, nameF).catch(() => undefined);
               const r = await write(nameF, rendered);
               if (r.code !== 0) throw new Error('write failed');
               written.push([nameF, before]);
             }
           } catch (err) {
-            const back = await Promise.all(written.map(([nameF, before]) => (before ? write(nameF, before).then((r) => r.code === 0, () => false) : false)));
+            const back = await Promise.all(written.map(([nameF, before]) => (before !== undefined ? write(nameF, before).then((r) => r.code === 0, () => false) : false)));
             if (back.every(Boolean)) throw err;
             throw new Error(`write failed, and ${written.filter((_, i) => !back[i]).map(([n]) => n).join(', ')} could not be put back: restore the pre-params snapshot`);
           }

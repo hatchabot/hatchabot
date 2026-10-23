@@ -289,4 +289,14 @@ describe('the tracker', () => {
     expect(exec).toHaveBeenCalledTimes(2);
     expect(exec.mock.calls[1]![1]).toContain(Buffer.from(JSON.stringify(['agent:k:main'])).toString('base64'));
   });
+  it('a conversation gone from the listing takes its saved preview with it; an unreadable listing changes nothing (review R02)', async () => {
+    const { t, exec } = make(JSON.stringify({ v: 1, s: { 'agent:k:main': { role: 'user', text: 'Deleted message' } } }));
+    await t.note({ id: 'a1', slug: 'k' }, { 'agent:k:main': { updatedAt: NOW - MIN } });
+    expect(t.record('a1')?.sessions['agent:k:main']?.text).toBe('Deleted message');
+    await t.note({ id: 'a1', slug: 'k' }, undefined); // the listing could not be read: not known empty
+    expect(t.record('a1')?.sessions['agent:k:main']?.text).toBe('Deleted message');
+    await t.note({ id: 'a1', slug: 'k' }, {}); // read fine, and empty: the conversation was deleted
+    expect(t.record('a1')?.sessions).toEqual({});
+    expect(exec).toHaveBeenCalledTimes(1);
+  });
 });

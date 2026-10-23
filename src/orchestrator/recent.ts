@@ -488,9 +488,14 @@ export class RecentTracker {
     const prev = this.record(agent.id);
     const keys = keysToRead(s, prev, now);
     if (!keys.length) {
-      // Nothing new to read; only the activity time may have moved.
+      // Nothing new to read; the activity time may have moved, or a conversation
+      // may be gone (deleted, reset): its saved preview goes with it, as
+      // mergeRecent drops it. Written only on the time moving, a deleted
+      // conversation's last message stayed on show (review R02, 2026-10-23).
+      // `sessions` undefined (an unreadable listing) returned above: not known empty.
       const at = newestActivity(s);
-      if (!prev || at > prev.lastActiveAt) this.deps.set(agent.id, mergeRecent(prev, s, {}, [], now));
+      const gone = !!prev && Object.keys(prev.sessions).some((k) => !(k in s));
+      if (!prev || at > prev.lastActiveAt || gone) this.deps.set(agent.id, mergeRecent(prev, s, {}, [], now));
       return;
     }
     this.#inFlight.add(agent.id);

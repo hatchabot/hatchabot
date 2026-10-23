@@ -313,3 +313,42 @@ describe('approving the console for a new browser', () => {
     }
   });
 });
+
+describe("the console's service worker is Hatchabot's stand-in", () => {
+  // OpenClaw's worker cached each agent's copy of the console (55 MB a build,
+  // three builds kept) under this one site address; fifty agents filled the
+  // browser's storage and every console warned "Could not store the previous
+  // draft in browser storage" on each keystroke (2026-10-23). The proxy answers
+  // sw.js itself with a worker that clears those caches and unregisters.
+  const owner = { 'x-hatchabot-owner': OWNER };
+  const withOwnerHeader = async <T,>(fn: () => Promise<T>): Promise<T> => {
+    const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
+    process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
+    try { return await fn(); } finally { if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev; }
+  };
+  it('answers sw.js (any build) with the stand-in, without asking the gateway', async () => {
+    const { port } = await world({ ownerId: OWNER, via: 'identity' });
+    lastGatewayHeaders = {};
+    const res = await withOwnerHeader(() => fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/sw.js?v=2026.9.8-release-fc23bc864e45`, { headers: owner }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/javascript');
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    const js = await res.text();
+    expect(js).toContain("caches.keys()");
+    expect(js).toContain("k.startsWith('openclaw-control-')");
+    expect(js).toContain('self.registration.unregister()');
+    // Keeps nothing and answers nothing: no fetch handler, no reply to the console's version probe.
+    expect(js).not.toMatch(/addEventListener\('(fetch|message)'/);
+    expect(lastGatewayHeaders).toEqual({});
+  });
+  it('the real worker still comes from the gateway for everything else under the prefix', async () => {
+    const { port } = await world({ ownerId: OWNER, via: 'identity' });
+    const res = await withOwnerHeader(() => fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/assets/sw-refresh.runtime-x.js`, { headers: owner }));
+    expect(await res.text()).toBe('const href="/assets/x";');
+  });
+  it('is only for the agent\'s own people', async () => {
+    const { port } = await world({ ownerId: 'someone-else', via: 'identity' });
+    const res = await withOwnerHeader(() => fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/sw.js`, { headers: { 'x-hatchabot-owner': 'someone-else' } }));
+    expect(res.status).toBe(404);
+  });
+});

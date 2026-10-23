@@ -518,7 +518,9 @@
   .v2costbar .su-period { font-size:12px; padding:2px 9px }
   .v2viewbar button.on { background:color-mix(in srgb, var(--accent) 17%, var(--panel)); border-color:color-mix(in srgb, var(--accent) 45%, var(--line)); color:var(--text) }
   .v2binsort { display:flex; gap:4px; align-items:center; flex:none; margin-left:auto }
-  @media (max-width: 620px) { .v2viewbar { flex-wrap:wrap } .v2binsort { margin-left:0 } }
+  /* On a phone the sort buttons wrap too: five of them (Cost, Age, Name, Activity,
+     My order) ran past the edge of a 390 px screen and the last were unreachable (Chris, 2026-10-23). */
+  @media (max-width: 620px) { .v2viewbar { flex-wrap:wrap } .v2binsort { margin-left:0; flex-wrap:wrap; min-width:0 } }
   .v2ghead h3 { margin:0; font-size:12px; letter-spacing:.09em; text-transform:uppercase; color:var(--dim); font-weight:650 }
   /* A Cost band reads like its chips: "$10–50/wk", not "/WK". */
   .v2ghead h3.v2h-money { text-transform:none; letter-spacing:.03em }
@@ -10508,11 +10510,15 @@ function collectParamValues(parameters, title) {
     paramFormDlg.showModal();
   });
 }
-// Esc / backdrop-close counts as Cancel — the pending promise must settle.
-paramFormDlg.addEventListener('close', () => {
-  if (paramFormResolve) { const r = paramFormResolve; paramFormResolve = null; r(null); }
-});
-function cancelParamForm() { paramFormDlg.close(); }
+// Esc / Cancel counts as Cancel — the pending promise must settle. Chrome
+// delivers a dialog's close event with the next animation frame, which can be
+// well after close(): Esc (the cancel event) and the Cancel button settle it
+// at once, and a close event that finds the dialog open again belongs to an
+// earlier form (a second import right behind the first), not to this one.
+function settleParamForm(values) { const r = paramFormResolve; paramFormResolve = null; if (r) r(values); }
+paramFormDlg.addEventListener('cancel', () => settleParamForm(null));
+paramFormDlg.addEventListener('close', () => { if (!paramFormDlg.open) settleParamForm(null); });
+function cancelParamForm() { settleParamForm(null); paramFormDlg.close(); }
 function submitParamForm() {
   const values = {};
   for (let i = 0; i < paramFormFields.length; i++) {
@@ -10537,6 +10543,60 @@ function submitParamForm() {
   if (done) done(values);
 }
 
+/** The most of a .hatchabot file the import peek decompresses in the tab. A
+ *  template is small (each file in it under 256 KB, at most 24 setup fields
+ *  and 12 tasks); a full copy inlines the agent's whole volume, up to 256 MB. */
+const IMPORT_PEEK_BYTES = 4 * 1024 * 1024;
+/** How a template's manifest begins: the exporter writes `format` first. */
+const TEMPLATE_HEAD = /^\s*\{\s*"format"\s*:\s*"(hatchabot|agentclaw)-template"/;
+/** A template's setup answers travel in the request's address (`?values=`);
+ *  Node refuses a request line past 16 KB with a bare 431, so the page
+ *  refuses first, in words, well under that. */
+const IMPORT_VALUES_MAX_CHARS = 12 * 1024;
+
+// Reads a .hatchabot file's gzip only as far as it takes to tell a template
+// from a full copy; a parsed template, or null for anything else. A full copy
+// is a gzipped manifest with the agent's volume inlined (up to 256 MB):
+// decompressing it whole, as the peek did until v2.166.0, froze a desktop
+// and killed a phone's tab on the ordinary "restore my agent" path. Not gzip,
+// not JSON, a copy, or past the cap: null, and the file is uploaded as it is
+// for the server's own bounded peek to sort out.
+async function peekImportTemplate(file, cap = IMPORT_PEEK_BYTES) {
+  const reader = file.stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+  try {
+    const dec = new TextDecoder();
+    let text = '', bytes = 0, judged = false;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      text += dec.decode(value, { stream: true });
+      // Judged on the first bytes: a template declares itself at the start.
+      if (!judged && text.length >= 64) { judged = true; if (!TEMPLATE_HEAD.test(text)) return null; }
+      if (bytes > cap) return null;
+    }
+    text += dec.decode();
+    if (!TEMPLATE_HEAD.test(text)) return null;
+    return JSON.parse(text);
+  } catch { return null; }
+  finally { reader.cancel().catch(() => {}); }
+}
+
+// Interim (v2.166.0): the answers ride the request's address, which Node caps
+// at 16 KB with the headers — about five full-length answers. This says what
+// is over and which answer is longest, in place of the bare "Import failed"
+// the 431 gave. The transport itself is unchanged.
+function importValuesTooLong(values, parameters, max = IMPORT_VALUES_MAX_CHARS) {
+  const encoded = encodeURIComponent(JSON.stringify(values));
+  if (encoded.length <= max) return '';
+  const over = encoded.length - max;
+  const longest = Object.entries(values).sort((a, b) => b[1].length - a[1].length)[0];
+  const label = parameters.find((p) => p.key === longest[0])?.label || longest[0];
+  return `The setup answers are too long to send together: ${over.toLocaleString()} characters over what the import can take ` +
+    `(the longest is “${label}”, ${longest[1].length.toLocaleString()} characters). ` +
+    `Shorten some answers — the rest can be finished in the agent's Overview after the import.`;
+}
+
 // Import = open any .hatchabot file. The server sniffs it: a full backup is
 // restored as the SAME agent (its bot and members ride along); a shared
 // template stands up a FRESH agent that you give your own bot.
@@ -10548,13 +10608,12 @@ async function importAgentFile(file) {
     // fine — upload as-is and the server's own validation speaks.
     let query = '';
     let tpl = null;
-    try {
-      const text = await new Response(file.stream().pipeThrough(new DecompressionStream('gzip'))).text();
-      tpl = JSON.parse(text);
-    } catch { /* not a peekable template — the server sorts it out */ }
+    try { tpl = await peekImportTemplate(file); } catch { /* not a peekable template — the server sorts it out */ }
     if (['hatchabot-template', 'agentclaw-template'].includes(tpl?.format) && tpl.parameters?.length) {
       const values = await collectParamValues(tpl.parameters, tpl.name || file.name);
       if (values === null) return; // cancelled — don't upload
+      const tooLong = importValuesTooLong(values, tpl.parameters);
+      if (tooLong) { toast(tooLong, 30000); return; }
       query = `?values=${encodeURIComponent(JSON.stringify(values))}`;
     }
     const send = async (q) => {
@@ -13236,10 +13295,20 @@ function v2FilesOrder(entries) {
   const rank = (e) => (e.type === 'dir' ? 0 : 1);
   return [...entries].sort((a, b) => rank(a) - rank(b) || dir * cmp(a, b));
 }
-/** A file shown here, in the tab, with a way back: a new browser tab had no obvious way back on a phone (Chris, 2026-10-23). */
+/**
+ * A file shown here, in the tab, with a way back: a new browser tab had no
+ * obvious way back on a phone (Chris, 2026-10-23) — and the app installed on
+ * a phone's home screen has no browser bar at all, so sound, video and PDF
+ * (the player and the reader the browser has) open here too. Together these
+ * are what the server shows inline (inlineType()); the rest downloads.
+ */
 const V2_TEXT_FILE = /\.(txt|md|markdown|log|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|py|m?js|ts|sh|c|cc|cpp|h|sql|xml|s?v|diff|patch|env|html?|svg)$/i;
 const V2_IMAGE_FILE = /\.(png|jpe?g|gif|webp|bmp|ico)$/i;
+const V2_AUDIO_FILE = /\.(mp3|wav|ogg|m4a)$/i;
+const V2_VIDEO_FILE = /\.(mp4|webm)$/i;
+const V2_PDF_FILE = /\.pdf$/i;
 const V2_VIEW_MAX = 2 * 1024 * 1024;
+const v2ShownHere = (n) => !/\.[a-z0-9]+$/i.test(n) || V2_TEXT_FILE.test(n) || V2_IMAGE_FILE.test(n) || V2_AUDIO_FILE.test(n) || V2_VIDEO_FILE.test(n) || V2_PDF_FILE.test(n);
 async function v2OpenFile(id, folder, name, size) {
   const box = $('v2Files'); if (!box || box.dataset.agent !== id) return;
   const p = (folder ? folder + '/' : '') + name;
@@ -13256,6 +13325,19 @@ async function v2OpenFile(id, folder, name, size) {
   const isText = !/\.[a-z0-9]+$/i.test(name) || V2_TEXT_FILE.test(name);
   if (V2_IMAGE_FILE.test(name)) {
     box.innerHTML = `${bar}<div id="v2FileBody" style="padding:8px 0"><img src="${url}&inline=1" alt="${esc(name)}" style="max-width:100%;height:auto;border-radius:8px"></div>`;
+    return;
+  }
+  // The browser's own player or reader, in the tab (the file is served sandboxed: no scripts, no cookies).
+  if (V2_AUDIO_FILE.test(name)) {
+    box.innerHTML = `${bar}<div id="v2FileBody" style="padding:8px 0"><audio controls src="${url}&inline=1" style="width:100%;max-width:520px"></audio></div>`;
+    return;
+  }
+  if (V2_VIDEO_FILE.test(name)) {
+    box.innerHTML = `${bar}<div id="v2FileBody" style="padding:8px 0"><video controls playsinline src="${url}&inline=1" style="max-width:100%;max-height:70vh;border-radius:8px;background:#000"></video></div>`;
+    return;
+  }
+  if (V2_PDF_FILE.test(name)) {
+    box.innerHTML = `${bar}<div id="v2FileBody" style="padding:8px 0"><iframe src="${url}&inline=1" title="${esc(name)}" style="width:100%;height:70vh;border:1px solid var(--line);border-radius:8px;background:#fff"></iframe></div>`;
     return;
   }
   if (!isText || (size || 0) > V2_VIEW_MAX) {
@@ -13291,16 +13373,12 @@ async function v2LoadFiles(id, path) {
   const crumb = [`<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','')">home</a>`]
     .concat(segs.map((s, i) => `<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','${jsq(segs.slice(0, i + 1).join('/'))}')">${esc(s)}</a>`)).join(' / ');
   const dl = (kind, p) => `/v1/agents/${id}/fs/${kind}?path=${encodeURIComponent(p)}`;
-  // What the browser can show by itself opens in a new tab (served sandboxed);
-  // the rest downloads. Mirrors inlineType() on the server.
-  const viewable = (n) => !/\.[a-z0-9]+$/i.test(n) || /\.(txt|md|markdown|log|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|py|m?js|ts|sh|c|cc|cpp|h|sql|xml|s?v|diff|patch|env|html?|svg|png|jpe?g|gif|webp|bmp|ico|pdf|mp3|wav|ogg|m4a|mp4|webm)$/i.test(n);
-  const inPage = (n) => !/\.[a-z0-9]+$/i.test(n) || V2_TEXT_FILE.test(n) || V2_IMAGE_FILE.test(n);
   const rows = v2FilesOrder(r.entries).map(e => {
     const p = (r.path ? r.path + '/' : '') + e.name;
-    // Text and images open here in the tab (with ← Back); sound, video and PDF still open in a new tab.
+    // What the browser can show opens here in the tab, with ← Back (v2OpenFile; its bar
+    // offers a new tab and ⬇); the rest only downloads. Mirrors inlineType() on the server.
     const open = e.type === 'dir' ? `<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','${jsq(p)}')">📁 ${esc(e.name)}/</a>`
-      : e.type === 'file' && inPage(e.name) ? `📄 <a href="${dl('file', p)}&inline=1" onclick="event.preventDefault();v2OpenFile('${jsq(id)}','${jsq(r.path || '')}','${jsq(e.name)}',${Number(e.size) || 0})" title="Open here">${esc(e.name)}</a>`
-      : e.type === 'file' && viewable(e.name) ? `📄 <a href="${dl('file', p)}&inline=1" target="_blank" rel="noopener" onclick="return sfOpen(event, this, '${jsq(`/v1/agents/${id}/fs?path=${encodeURIComponent(r.path || '')}`)}')" title="Open in a new tab">${esc(e.name)}</a>`
+      : e.type === 'file' && v2ShownHere(e.name) ? `📄 <a href="${dl('file', p)}&inline=1" onclick="event.preventDefault();v2OpenFile('${jsq(id)}','${jsq(r.path || '')}','${jsq(e.name)}',${Number(e.size) || 0})" title="Open here">${esc(e.name)}</a>`
       : `${e.type === 'link' ? '🔗' : '📄'} ${esc(e.name)}`;
     const get = e.type === 'dir' ? `<a class="btn" href="${dl('archive', p)}" onclick="return sfLink(event, this, 'folder.tar.gz')" title="This folder as a .tar.gz">⬇ .tar.gz</a>`
       : e.type === 'file' ? `<a class="btn" href="${dl('file', p)}" download onclick="return sfLink(event, this, '${jsq(e.name)}')" title="Download">⬇</a>` : '';

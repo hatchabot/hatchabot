@@ -215,6 +215,10 @@ export function localDay(now: number): { day: string; startIso: string } {
 export function snapshotDailyUsage(store: Store, now = Date.now()): void {
   const byOwner = new Map<string, Agent[]>();
   for (const a of store.listAllActiveAgents()) { const l = byOwner.get(a.ownerId) ?? []; l.push(a); byOwner.set(a.ownerId, l); }
+  // An owner whose agents are all gone still has days to finish: their last
+  // agent deleted after its final reading, yesterday's point kept the earlier
+  // one (review R19, 2026-10-23).
+  for (const ownerId of store.deletedAgentOwners()) if (!byOwner.has(ownerId)) byOwner.set(ownerId, []);
   const today = localDay(now);
   const yesterday = localDay(Date.parse(today.startIso) - 1);
   for (const [ownerId, list] of byOwner) {
@@ -233,13 +237,15 @@ export function snapshotDailyUsage(store: Store, now = Date.now()): void {
       any = true; total += t;
       byBilling[billing] = (byBilling[billing] ?? 0) + t;
     }
-    if (!any) continue;
-    store.upsertUsageSnapshot(ownerId, { day: today.day, totalTokens: total, byBilling });
+    // No reading from an active agent: today's counter total stands; the days'
+    // own use below is still finished (a deleted agent's last readings).
+    if (any) store.upsertUsageSnapshot(ownerId, { day: today.day, totalTokens: total, byBilling });
     // A deleted agent's use still counts on the days it spent: left out, deleting one
     // lowered yesterday's and today's cost already recorded (report B38, 2026-10-22).
     const gone = store.listDeletedAgents(ownerId);
     for (const a of gone) billingOfAgent(a);
     const all = [...list, ...gone];
+    if (!all.length) continue;
     const ids = new Set(all.map((a) => a.id));
     for (const { day, startIso, endIso } of [{ ...yesterday, endIso: today.startIso }, { ...today, endIso: undefined }]) {
       // The day's own use, from per-sample deltas: differencing lifetime

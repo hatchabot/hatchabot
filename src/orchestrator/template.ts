@@ -471,6 +471,15 @@ export function applyParamValues(text: string, values: Record<string, string>): 
 }
 
 /**
+ * A rendered core file over the limit snapshots.ts holds every core file to:
+ * the raw template was within it, its placeholders filled it is not. Refused
+ * before anything is made or written (review R16, 2026-10-23).
+ */
+export function renderedTooBig(name: string): TransferError {
+  return new TransferError(`With these setup values, ${name} would be over ${MAX_FILE_BYTES / 1024} KB — too big for an agent's core file. Give shorter answers, or trim the template.`);
+}
+
+/**
  * Validate the importer's values against the template's declared fields.
  * Returns the effective values (importer's, else defaults) or throws a
  * TransferError naming every problem at once — the caller renders one form,
@@ -682,6 +691,21 @@ export function importTemplate(
   const name = (opts.name ?? manifest.agent.name).trim();
   // The same rule as creating one: a name of 1–64 characters.
   if (!name || name.length > 64) throw new TransferError('Give the agent a name of 1 to 64 characters.');
+
+  // The trained files as they will be seeded (and MEMORY.md if the template
+  // carried it). Setup-field values are substituted into the TRAINED files
+  // only — memory is verbatim history, never a substitution surface. Built
+  // BEFORE the record: a small file with many placeholders and a long answer
+  // rendered past the core-file limit, and the agent it made could not be
+  // edited or snapshotted (review R16, 2026-10-23).
+  const seed: Record<string, string> = {};
+  for (const n of SEEDABLE_FILES) {
+    if (typeof manifest.files[n] !== 'string') continue;
+    seed[n] = TRAINED_FILES.includes(n)
+      ? applyParamValues(manifest.files[n], values)
+      : manifest.files[n];
+    if (Buffer.byteLength(seed[n], 'utf8') > MAX_FILE_BYTES) throw renderedTooBig(n);
+  }
   let agent: Agent;
   try {
     // Fresh identity: importer owns it, provisions their own bot, invites their
@@ -700,16 +724,6 @@ export function importTemplate(
     store.setAgentIcon(agent.id, manifest.agent.icon, validIconColor(manifest.agent.iconColor) ? manifest.agent.iconColor : null);
   }
 
-  // Seed the trained files (and MEMORY.md if the template carried it).
-  // Setup-field values are substituted into the TRAINED files only — memory is
-  // verbatim history, never a substitution surface.
-  const seed: Record<string, string> = {};
-  for (const n of SEEDABLE_FILES) {
-    if (typeof manifest.files[n] !== 'string') continue;
-    seed[n] = TRAINED_FILES.includes(n)
-      ? applyParamValues(manifest.files[n], values)
-      : manifest.files[n];
-  }
   store.setAgentSeed(agent.id, seed);
 
   // A configured copy stays RE-configurable: keep the field declarations (so

@@ -192,8 +192,11 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       .get(username) as { username: string; secret_ref: string; leased_to: string | null } | undefined;
     if (!row) throw new Error(`@${username} is not in the pool.`);
     if (row.leased_to) throw new Error(`@${username} is leased to an agent — delete that agent first.`);
+    // The row goes first, and only while still unleased: a lease taken while the
+    // secret store answered would have lost its bot (review R14, 2026-10-23).
+    const gone = this.db.prepare(`DELETE FROM telegram_pool WHERE username = ? AND leased_to IS NULL`).run(row.username);
+    if (gone.changes === 0) throw new Error(`@${username} was leased to an agent just now — delete that agent first.`);
     await this.secrets.delete(row.secret_ref).catch(() => {});
-    this.db.prepare(`DELETE FROM telegram_pool WHERE username = ?`).run(row.username);
   }
 
   /** Every pool bot with its lease state and token ref — for the bot audit. */
@@ -283,10 +286,10 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
    * cosmetic and must not cost anyone their agent.
    */
   /** Record the name this bot SHOULD have, and the earliest we may try. */
-  #park(username: string, name: string, delayMs: number, onlyIfFree = false): void {
+  #park(username: string, name: string, delayMs: number, onlyIfFree = false, onlyIf?: string): void {
     this.db
-      .prepare(`UPDATE telegram_pool SET desired_name = ?, rename_after = ? WHERE username = ? COLLATE NOCASE${onlyIfFree ? ' AND leased_to IS NULL' : ''}`)
-      .run(name, new Date(Date.now() + delayMs).toISOString(), username);
+      .prepare(`UPDATE telegram_pool SET desired_name = ?, rename_after = ? WHERE username = ? COLLATE NOCASE${onlyIfFree ? ' AND leased_to IS NULL' : ''} AND (? IS NULL OR desired_name IS ?)`)
+      .run(name, new Date(Date.now() + delayMs).toISOString(), username, onlyIf ?? null, onlyIf ?? null);
   }
 
   async #applyDisplayName(secretRef: string, username: string, name: string, fromSweep = false): Promise<void> {
@@ -331,9 +334,11 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       return;
     }
     // Keep the name parked, and respect the deadline Telegram gave us. Without
-    // this the sweep retried a three-hour limit every two minutes.
+    // this the sweep retried a three-hour limit every two minutes. From the
+    // sweep, only while it is still the name queued: a lease meanwhile queued
+    // its own, and the failed old one replaced it (review R15, 2026-10-23).
     const waitMs = (res.retryAfter ?? 300) * 1000;
-    this.#park(username, name, waitMs);
+    this.#park(username, name, waitMs, false, fromSweep ? name : undefined);
   }
 
   /**

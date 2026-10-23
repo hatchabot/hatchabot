@@ -208,7 +208,8 @@ describe('a pause budget on an agent the owner had already stopped (usage #1)', 
     expect(r1.paused).toEqual(['a1']);
     expect(store.getBudgetPause('a1', '2026-10')).toMatchObject({ kind: 'pause' });
     expect(told).toHaveLength(1);
-    expect(told[0]).toMatch(/it is paused/);
+    expect(told[0]).toMatch(/it was already stopped, so it stays stopped/); // not "paused until the 1st": the budget stopped nothing (review R11)
+    expect(store.getBudgetPause('a1', '2026-10')!.alreadyStopped).toBe(true);
     // The owner starts it in the app: the route marks the take-over (the row exists now).
     store.resumeBudgetPause('a1', '2026-10', iso(NOW + 60_000), 'owner');
     store.setAgentState('a1', 'RUNNING');

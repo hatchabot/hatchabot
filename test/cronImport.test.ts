@@ -292,4 +292,44 @@ describe('readOpenclawCrons + workspace resolution', () => {
     expect(again).toEqual({ total: 1, carried: 1, failed: 0 });
     expect(provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'add').length).toBe(before);
   });
+
+  it('a task there already with the same name but another time, prompt or zone is another task, and is added (review R20)', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+    store.insertAgent({ id: 'a1', ownerId: 'o', name: 'Tech', slug: 'tech', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: 'x', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'tech', workspace: { files: {}, configPatch: { agentId: 'tech', authMode: 'api-key' } }, env: {} });
+    store.setAgentRuntimeRef('a1', runtimeRef);
+    await provider.start(runtimeRef);
+    store.setAgentState('a1', 'RUNNING');
+    // The source: a one-shot reminder for December, and the daily brief.
+    const src = join(root, 'two.sqlite');
+    const d2 = new Database(src);
+    d2.exec(`CREATE TABLE cron_jobs (agent_id TEXT, name TEXT, description TEXT, schedule_kind TEXT, schedule_expr TEXT,
+      schedule_tz TEXT, every_ms INTEGER, at TEXT, payload_kind TEXT, payload_message TEXT, sort_order INTEGER, created_at_ms INTEGER)`);
+    d2.prepare(`INSERT INTO cron_jobs (agent_id,name,schedule_kind,at,payload_kind,payload_message,sort_order,created_at_ms) VALUES (?,?,?,?,?,?,?,?)`)
+      .run('garden-advisor', 'Reminder', 'at', '2026-12-01T12:00:00Z', 'agentTurn', 'new reminder', 0, 1);
+    d2.prepare(`INSERT INTO cron_jobs (agent_id,name,schedule_kind,schedule_expr,schedule_tz,payload_kind,payload_message,sort_order,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?)`)
+      .run('garden-advisor', 'Daily brief', 'cron', '0 8 * * *', 'America/Toronto', 'agentTurn', 'Write the brief', 1, 2);
+    d2.close();
+    // The agent already has a "Reminder" for November and a "Daily brief" with another prompt: two other tasks.
+    const jobs = (reminderAt: string, briefMessage: string) => JSON.stringify({ jobs: [
+      { id: 'j1', name: 'Reminder', enabled: false, schedule: { kind: 'at', at: reminderAt }, payload: { kind: 'agentTurn', message: 'unrelated reminder' } },
+      { id: 'j2', name: 'Daily brief', enabled: false, schedule: { kind: 'cron', expr: '0 8 * * *', tz: 'America/Toronto' }, payload: { kind: 'agentTurn', message: briefMessage } },
+    ] });
+    provider.execResponses.set('cron list', { code: 0, stdout: jobs('2026-11-01T12:00:00Z', 'Something else'), stderr: '' });
+    const adds = () => provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'add');
+    expect(await migrateCrons({ store, provider }, 'a1', join(root, 'ws-tech'), { configPath: cfg, dbPath: src, readyGapMs: 0 })).toEqual({ total: 2, carried: 2, failed: 0 });
+    expect(adds().map((a) => a[a.indexOf('--name') + 1])).toEqual(['Reminder', 'Daily brief']);
+    expect(adds()[0]).toEqual(expect.arrayContaining(['--at', '2026-12-01T12:00:00Z']));
+    // Brought over, both are there as they were made: adopted again, neither is added twice (B37 still holds).
+    provider.execResponses.set('cron list', { code: 0, stdout: JSON.stringify({ jobs: [
+      { id: 'j3', name: 'Reminder', enabled: false, schedule: { kind: 'at', at: '2026-12-01T12:00:00Z' }, payload: { kind: 'agentTurn', message: 'new reminder' } },
+      { id: 'j4', name: 'Daily brief', enabled: false, schedule: { kind: 'cron', expr: '0 8 * * *', tz: 'America/Toronto' }, payload: { kind: 'agentTurn', message: 'Write the brief' } },
+    ] }), stderr: '' });
+    const before = adds().length;
+    expect(await migrateCrons({ store, provider }, 'a1', join(root, 'ws-tech'), { configPath: cfg, dbPath: src, readyGapMs: 0 })).toEqual({ total: 2, carried: 2, failed: 0 });
+    expect(adds().length).toBe(before);
+  });
 });

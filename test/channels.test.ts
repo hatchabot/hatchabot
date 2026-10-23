@@ -501,6 +501,56 @@ describe('an on-demand rename answers honestly', () => {
   });
 });
 
+describe('the pool: what the 2026-10-23 review found', () => {
+  it('a sweep rename that fails parks its name only while that name is still the one queued (R15)', async () => {
+    const db = new Database(':memory:');
+    let release!: (r: Response) => void;
+    let started!: () => void;
+    const pending = new Promise<void>((r) => { started = r; });
+    const fetchImpl = (async (url: any) => {
+      if (String(url).endsWith('/getMe')) return new Response('{"ok":true,"result":{"first_name":"Different"}}', { headers: { 'content-type': 'application/json' } });
+      started();
+      return new Promise<Response>((r) => { release = r; });
+    }) as unknown as typeof fetch;
+    const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl, renameBackoffMs: [] });
+    await pool.addToPool('bot', 'tok');
+    db.prepare(`UPDATE telegram_pool SET desired_name = ?`).run('Old name');
+    const sweep = pool.retryPendingNames();
+    await pending;
+    // A lease meanwhile queues its own name…
+    db.prepare(`UPDATE telegram_pool SET desired_name = ?, leased_to = ?`).run('New name', 'a1');
+    // …and the sweep's old rename comes back refused for a while.
+    release(new Response('{"ok":false,"description":"Too Many Requests","parameters":{"retry_after":300}}', { status: 429, headers: { 'content-type': 'application/json' } }));
+    await sweep;
+    expect(pool.pendingName('bot')!.name).toBe('New name');
+    db.close();
+  });
+
+  it('removing a pool bot takes its row first: a lease asked for while its token is being deleted finds no bot (R14)', async () => {
+    const db = new Database(':memory:');
+    const secrets = new MemSecrets();
+    let release!: () => void;
+    const slow: SecretStore = {
+      put: (ref, v) => secrets.put(ref, v),
+      get: (ref) => secrets.get(ref),
+      delete: async (ref) => { await new Promise<void>((r) => { release = r; }); await secrets.delete(ref); },
+    };
+    const pool = new TelegramPoolProvisioner(db, slow, { fetchImpl: stubFetch });
+    await pool.addToPool('bot', 'tok');
+    const removing = pool.removeFromPool('bot');
+    await expect(pool.provision(REQ)).rejects.toBeInstanceOf(PoolExhaustedError);
+    release();
+    await removing;
+    expect(pool.owns('bot')).toBe(false);
+    expect(secrets.map.size).toBe(0);
+    // A leased bot is still refused in words.
+    await pool.addToPool('other', 'tok2');
+    await pool.provision(REQ);
+    await expect(pool.removeFromPool('other')).rejects.toThrow(/leased to an agent/);
+    db.close();
+  });
+});
+
 describe('Change bot and moves: the pool (night review, 2026-09-27)', () => {
   it('a swap never gets its own leased bot back, and a swapped or moved release sends no "removed" notice', async () => {
     const sent: string[] = [];

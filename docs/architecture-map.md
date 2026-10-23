@@ -255,6 +255,7 @@ own sessions. A simpler chat route runs one turn inside the container.
 
 - `src/api/routes.ts` — `'/v1/agents/:id/ui'`, `'/v1/agents/:id/ui/*'`, `'/v1/agents/:id/console/access'`, `'/v1/agents/:id/console/approve'`, `gatewayAddr`, `consoleHeaders`, `revalidateConsoleSockets`: the console proxy and its WebSocket upgrade handler.
 - `src/api/consoleProxy.ts` — `withConsoleIdentity`, `guestRequestVerdict`, `spliceGuest`, `scrubForGuest`, `GUEST_METHODS`: what a guest may do through the proxy.
+- `src/api/consoleWorkerStub.ts` — `CONSOLE_WORKER_STUB`: the stand-in service worker the proxy answers each console's `sw.js` with (keeps nothing, clears OpenClaw's caches, unregisters); OpenClaw's own cached one copy of the console per agent and filled the browser's storage.
 - `src/api/controlUiRebase.ts` — `rebaseControlUi`: rewrites the console page to live under the proxy path.
 - `src/api/consoleSockets.ts` — `ConsoleSockets`: open console WebSockets, closed when rights change.
 - `src/openclaw/consoleIdentity.ts` — `consoleGatewayRoles`, `consoleGatewayAuth`, `GUEST_SCOPES`: the trusted-proxy roles written into the gateway.
@@ -505,7 +506,7 @@ classic card look was removed in v2.155.0). Clicking an icon opens the
 agent sheet, whose tabs are rendered by v2Pane. All data comes from the /v1
 API through one fetch helper.
 
-- `web/index.html` — `v2LoadFiles`, `v2FilesSortBy`, `v2FilesOrder`, `v2OpenFile`: the Files tab's list, its sorting (folders first; remembered as `hb-files-sort`) and the in-tab viewer with ← Back (text and images; the rest opens in a new tab).
+- `web/index.html` — `v2LoadFiles`, `v2FilesSortBy`, `v2FilesOrder`, `v2OpenFile`: the Files tab's list, its sorting (folders first; remembered as `hb-files-sort`) and the in-tab viewer with ← Back (text, images, sound, video and PDF — `v2ShownHere`; the rest only downloads).
 - `web/index.html` — `openGateway`, `consoleCoverSay`, `autoApproveConsole`: opening an agent's console: the panel opens at once with the spinner, which stays until the console's frame has loaded.
 - `web/index.html` — `initV2`, `renderV2`, `refresh`, `api`: start-up, the home grid, the periodic reload and the fetch helper.
 - `web/index.html` — `openV2Agent`, `v2Open`, `v2Pane`, `v2RenderSheet`: the agent sheet; v2Pane's tabs are overview, personality, ai, messaging, knowledge, sharing, usage, schedule, files and advanced.
@@ -515,6 +516,7 @@ API through one fetch helper.
 - `web/index.html` — `v2TabKeys`, `v2AcctItems`: arrow keys for the View by and sheet tabs and the account menu.
 - `web/index.html` — `setupSteps`, `renderSetup`, `openSetupGuide`: the first-run guide.
 - `web/index.html` — `openCrons`, `renderCrons`, `openInspect`, `openGallery`, `openInbox`: scheduled tasks, archived-agent inspector, templates, shared agents.
+- `web/index.html` — `importAgentFile`, `peekImportTemplate`, `importValuesTooLong`, `collectParamValues`, `submitParamForm`: Import of a `.hatchabot` file (a full copy or a template); the bounded peek that tells them apart in the tab (the first bytes, at most `IMPORT_PEEK_BYTES`), the template's setup form, and the refusal when its answers would not fit the request's address (`IMPORT_VALUES_MAX_CHARS`).
 - `web/index.html` — `takeClassicChoice`, `v2DismissClassicMap`: the one-time map for a browser that had the classic look (`hb-ui`), and a `?ui=` dropped from the address.
 - `web/index.html` — `agentNotices`, `prepareEdit`, `prepareCrons`: the notices and the editDlg / cronDlg sections the agent sheet borrows.
 - `src/api/routes.ts` — `'/'`, `'/v1/config'`, `'/v1/agents'`, `'/v1/agents/:id'`, `'/v1/recent'`, `'/v1/agents/:id/crons'`, `indexPage`: the page itself and the main reads behind it.

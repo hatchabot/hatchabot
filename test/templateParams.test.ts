@@ -5,6 +5,7 @@ import { gzipSync } from 'node:zlib';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
+import { beginOperation } from '../src/orchestrator/operations.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**
@@ -357,6 +358,38 @@ describe('PUT /v1/agents/:id/params (edit values later)', () => {
     expect(store.getAgent(id)!.paramFiles?.soul).toContain('{{style}}');
   });
 
+  it('a value that renders a file past the core-file limit is refused (400) by import and by edit, nothing written (review R16)', async () => {
+    const { store, f, provider } = await world();
+    const wide = gzipSync(Buffer.from(JSON.stringify({
+      format: 'hatchabot-template', version: 1, exportedAt: 'now',
+      agent: { name: 'Wide', persona: 'p', sharedMemory: false },
+      files: { 'SOUL.md': '{{motto}} '.repeat(200), 'AGENTS.md': '# A' },
+      ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [],
+      parameters: [{ key: 'motto', label: 'Motto', required: true, type: 'text', target: 'soul' }],
+    })));
+    const long = 'x'.repeat(2000); // the longest answer a field takes; 200 of them is 400 KB
+    const bin = { ...H, 'content-type': 'application/octet-stream' };
+    const refused = await f.inject({ method: 'POST', url: `/v1/agents/import?values=${encodeURIComponent(JSON.stringify({ motto: long }))}`, headers: bin, payload: wide });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error).toMatch(/SOUL\.md would be over 256 KB/);
+    expect(store.listAgents(OWNER)).toHaveLength(1);
+    const res = await f.inject({ method: 'POST', url: `/v1/agents/import?values=${encodeURIComponent(JSON.stringify({ motto: 'short' }))}`, headers: bin, payload: wide });
+    expect(res.statusCode).toBe(201);
+    const id = res.json().id as string;
+    await new Promise((r) => setTimeout(r, 30));
+    const { runtimeRef } = await provider.provision({ agentId: id, slug: 'wide', workspace: { files: {}, configPatch: { agentId: 'wide', authMode: 'api-key' } }, env: {} } as any);
+    store.setAgentRuntimeRef(id, runtimeRef);
+    if (store.getAgent(id)!.state === 'FAILED') store.setAgentState(id, 'PROVISIONING');
+    store.setAgentState(id, 'RUNNING');
+    const writesBefore = provider.execLog.length;
+    const edit = await f.inject({ method: 'PUT', url: `/v1/agents/${id}/params`, headers: H, payload: { values: { motto: long } } });
+    expect(edit.statusCode).toBe(400);
+    expect(edit.json().error).toMatch(/SOUL\.md would be over 256 KB/);
+    expect(store.getAgent(id)!.paramValues).toEqual({ motto: 'short' });
+    expect(provider.execLog.length).toBe(writesBefore);
+    expect(store.listSnapshots(id).some((s) => s.reason === 'pre-params')).toBe(false);
+  });
+
   it('reset re-applies defaults, and refuses when a required field has none', async () => {
     const { store, f, id } = await importedWorld();
     // "style" is required with NO default in TEMPLATE — a blanket reset must say so.
@@ -547,6 +580,70 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     // SOUL.md went out with the new text, then back to what it was.
     expect(writes.map((x) => x.text)).toEqual(['IMPROVED growth playbook v2.\n', 'A growth advisor at work.\n']);
     expect(store.getAgent(child.id)!.paramFiles).toEqual(layerBefore);
+  });
+
+  it('a master file cleared on purpose is pushed as empty, not left as it was on the child (review 2026-10-23 R17)', async () => {
+    const { store, f, provider, child } = await withChild();
+    const shell = provider.execShell.bind(provider);
+    const writes: Array<{ path: string; text: string }> = [];
+    provider.execShell = async (ref: string, script: string, opts?: any) => {
+      const w = /^set -e; echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
+      if (w) { writes.push({ path: w[2]!, text: Buffer.from(w[1]!, 'base64').toString('utf8') }); return { code: 0, stdout: '', stderr: '' }; }
+      // The master's SOUL.md is there and empty; its AGENTS.md has text.
+      if (script.startsWith('head -c') && script.includes('/agents/mine/agent/SOUL.md')) return { code: 0, stdout: '', stderr: 'hatchabot:empty-file\n' };
+      if (script.startsWith('head -c') && script.includes('AGENTS.md')) return { code: 0, stdout: '# Rules {{style}}\n', stderr: '' };
+      return shell(ref, script, opts);
+    };
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(res.json()).toMatchObject({ pushed: 1 });
+    const childWrites = writes.filter((x) => x.path.includes(`/agents/${child.slug}/`));
+    expect(childWrites.find((x) => x.path.endsWith('SOUL.md'))?.text).toBe('');
+    expect(childWrites.find((x) => x.path.endsWith('AGENTS.md'))?.text).toBe('# Rules growth\n');
+    expect(store.getAgent(child.id)!.paramFiles).toMatchObject({ soul: '', agents: '# Rules {{style}}\n' });
+  });
+
+  it("a master whose files cannot be read is a 502, not a push of nothing", async () => {
+    const { store, f, provider, child } = await withChild();
+    const layerBefore = store.getAgent(child.id)!.paramFiles;
+    provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon' });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toMatch(/Couldn't read the master's files/);
+    expect(store.getAgent(child.id)!.paramFiles).toEqual(layerBefore);
+  });
+
+  it('a child whose durable operation is not over is refused in its words while the others are pushed (review 2026-10-23 R18)', async () => {
+    const { store, f, provider, child } = await withChild();
+    // A second child, brought up the same way.
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/derive', headers: H, payload: { name: 'Building Three', values: { style: 'value' } } });
+    const other = store.listAgents(OWNER).find((x) => x.name === 'Building Three')!;
+    await new Promise((r) => setTimeout(r, 30));
+    const { runtimeRef } = await provider.provision({
+      agentId: other.id, slug: other.slug,
+      workspace: { files: {}, configPatch: { agentId: other.slug, authMode: 'api-key' } }, env: {},
+    } as any);
+    store.setAgentRuntimeRef(other.id, runtimeRef);
+    if (store.getAgent(other.id)!.state === 'FAILED') store.setAgentState(other.id, 'PROVISIONING');
+    store.setAgentState(other.id, 'RUNNING');
+    // The first child's restore is on disk and not over; the transient busy flag is empty (as after a restart).
+    const op = beginOperation(store, 'restore-snapshot', child.id, {});
+    op.step('file-written');
+    const layerBefore = store.getAgent(child.id)!.paramFiles;
+    provider.execResponses.set('sh', { code: 0, stdout: 'IMPROVED {{style}} playbook v2.\n', stderr: '' });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().pushed).toBe(1);
+    const refused = res.json().results.find((r: any) => r.id === child.id);
+    expect(refused).toMatchObject({ ok: false });
+    expect(refused.error).toMatch(/under way|wait for it to finish/i);
+    expect(store.getAgent(child.id)!.paramFiles).toEqual(layerBefore); // untouched
+    expect(store.getAgent(other.id)!.paramFiles?.soul).toContain('IMPROVED {{style}}');
+    expect(store.activeOperationFor(child.id)?.id).toBe(op.id);
+    // The master itself mid-operation is refused up front.
+    beginOperation(store, 'restore-snapshot', 'a1', {}).step('file-written');
+    const busy = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(busy.statusCode).toBe(409);
+    expect(busy.json().error).toMatch(/under way|wait/i);
   });
 
   it('push refuses when there are no children; a non-running child is skipped by name', async () => {

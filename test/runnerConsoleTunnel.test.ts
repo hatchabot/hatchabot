@@ -1,7 +1,28 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { LocalDockerProvider, sshTarget, sshTunnelArgs } from '../src/providers/localDockerProvider.js';
 
 describe("a runner agent's console, through the runner's SSH (2026-09-23)", () => {
+  it('no ssh on the service PATH: the console is unavailable, and the service lives (review R21)', async () => {
+    // An empty PATH folder: `spawn('ssh')` fails with ENOENT, as it did when the
+    // service unit's PATH lacked ssh — and the unhandled 'error' took the
+    // service down. No real ssh, no network: the reach probe is a stub.
+    const empty = mkdtempSync(join(tmpdir(), 'hb-no-ssh-'));
+    const prevPath = process.env.PATH;
+    process.env.PATH = empty;
+    try {
+      const provider = new LocalDockerProvider({ host: 'ssh://runner.invalid', reachProbe: async () => true });
+      await expect(provider.gatewayEndpoint(18789)).resolves.toBeUndefined();
+      // Nothing stale kept from the failed attempt: asked again, it tries again and says the same.
+      await expect(provider.gatewayEndpoint(18789)).resolves.toBeUndefined();
+    } finally {
+      process.env.PATH = prevPath;
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
   it('this machine: the published port itself', async () => {
     expect(await new LocalDockerProvider().gatewayEndpoint(19111)).toEqual({ host: '127.0.0.1', port: 19111 });
   });

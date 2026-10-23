@@ -1,6 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+// Every test here runs real shell scripts (git, bash, a fake gh) in a sandbox. On the
+// self-hosted runner CI shares the machine with other work, and vitest's 5 s was not
+// enough under load (land, promote, release, first-run-link; 2026-10-23).
+vi.setConfig({ testTimeout: 30_000 });
 
 /**
  * macOS runs these with its bash 3.2, which in a Mac's locale reads the bytes

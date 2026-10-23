@@ -401,8 +401,15 @@ export async function migrateCrons(
       payloadMessage: applyReplacements(c.payloadMessage, pairs),
       description: applyReplacements(c.description, pairs),
     };
+    // The whole task, not its name and kind: two one-shots named "Reminder" on
+    // different days, or two daily tasks with different prompts, are two tasks,
+    // and the second was counted as carried and never added (review R20, 2026-10-23).
+    const sameTime = (j: Cron) => c.scheduleKind === 'cron' ? j.scheduleExpr === c.scheduleExpr && (j.scheduleTz ?? null) === (c.scheduleTz ?? null)
+      : c.scheduleKind === 'every' ? j.everyMs === c.everyMs
+      : c.scheduleKind === 'at' ? j.atMs !== undefined && j.atMs === (/^\d+$/.test(String(c.at ?? '').trim()) ? Number(c.at) : Date.parse(String(c.at)))
+      : true;
     const same = there.find((j) => !j.system && !!c.name && j.name === c.name && j.scheduleKind === c.scheduleKind
-      && (c.scheduleKind === 'cron' ? j.scheduleExpr === c.scheduleExpr : c.scheduleKind === 'every' ? j.everyMs === c.everyMs : true));
+      && sameTime(j) && (j.message ?? '') === (rewritten.payloadMessage ?? ''));
     if (same) {
       carried++;
       log('cron.migrate_already_present', { name: c.name, id: same.id });

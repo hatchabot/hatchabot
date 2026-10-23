@@ -15,7 +15,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { z } from 'zod';
-import type { RuntimeProvider } from '../providers/provider.js';
+import type { ExecResult, RuntimeProvider } from '../providers/provider.js';
 import { SimulatedCrash } from './operations.js';
 
 export const MANIFEST_FILE = 'hatchabot.json';
@@ -26,7 +26,9 @@ const MAX_TAR_BYTES = 100 * 1024 * 1024;
 // -- the manifest ---------------------------------------------------------------------
 const FROM = ['agent.openclawId', 'agent.telegramAccount', 'agent.name', 'owner.telegram', 'owner.email', 'host.timezone'] as const;
 const field = z.object({
-  key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/),
+  // "__proto__" is not a key an object can hold: assigning it set the config's
+  // prototype, and a required value was accepted and then not there (review R13, 2026-10-23).
+  key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/).refine((k) => k !== '__proto__', { message: 'a field cannot be keyed "__proto__"' }),
   label: z.string().max(200).optional(),
   type: z.enum(['text', 'email', 'number', 'bool', 'list']).optional(),
   required: z.boolean().optional(),
@@ -226,12 +228,25 @@ export function mergeConfig(m: AppManifest, facts: AgentFacts, existing: Record<
     if (given && !cleared) {
       const v = coerce(f.type, values[f.key]);
       if (v === INVALID) invalid.push(`${f.key} must be ${TYPE_WORD[f.type ?? 'text']} (got ${JSON.stringify(values[f.key]).slice(0, 60)})`);
+      // A required list given as [] is no value, as '' is for text: it was
+      // written, and the app ran with no recipients (review R03, 2026-10-23).
+      else if (f.required && blank(v)) { missing.push(f.label ? `${f.key} (${f.label})` : f.key); missingKeys.push(f.key); }
       else out[f.key] = v;
     } else if (cleared && !f.required) out[f.key] = f.type === 'list' ? [] : f.type === 'number' || f.type === 'bool' ? null : '';
     // Kept: an own value (a key named "constructor" read Object's and was
     // never written), unless the field is required now and it is blank
     // (an optional field made required kept its '' unasked). Review, 2026-10-22.
-    else if (Object.hasOwn(out, f.key) && out[f.key] !== undefined && !(f.required && blank(out[f.key]))) continue;
+    else if (Object.hasOwn(out, f.key) && out[f.key] !== undefined && !(f.required && blank(out[f.key]))) {
+      // Held to the field's type NOW: an update that made a text field a number
+      // kept "abc" under it unasked (review R04, 2026-10-23). A value the new
+      // type refuses is asked for again, not thrown: it was valid when given.
+      // A secret field's value is kept as it is. An optional one's is cleared.
+      const kept = f.type && !f.secret ? coerce(f.type, out[f.key]) : out[f.key];
+      if (kept !== INVALID) out[f.key] = kept;
+      else if (f.required) { delete out[f.key]; missing.push(f.label ? `${f.key} (${f.label})` : f.key); missingKeys.push(f.key); }
+      else out[f.key] = f.type === 'list' ? [] : f.type === 'number' || f.type === 'bool' ? null : '';
+      continue;
+    }
     else if (f.default !== undefined) {
       // The default is held to its field's type like a value given: "abc"
       // for a number was written as it was. '' and null stay "no value".
@@ -567,7 +582,10 @@ function addArgv(d: InstallDeps, m: AppManifest, t: AppManifest['tasks'][number]
  * again; only that second list may say the tasks are as they were.
  */
 export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppManifest): Promise<string[]> {
-  const run = (argv: string[]) => d.provider.exec(d.runtimeRef, argv, { timeoutMs: 60_000 });
+  // A call that rejects (the daemon gone mid-way) is a failed call: thrown, it
+  // left the replacement jobs already made beside the old ones (review R05, 2026-10-23).
+  const run = (argv: string[]): Promise<ExecResult> => d.provider.exec(d.runtimeRef, argv, { timeoutMs: 60_000 })
+    .catch((err: unknown): ExecResult => ({ code: 1, stdout: '', stderr: String((err as Error)?.message ?? err) }));
   const prev = previous?.app === m.app ? previous : undefined;
   const ours = appTaskNames(m, prev);
   const old = await appJobs(d, ours);

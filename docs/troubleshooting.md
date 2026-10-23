@@ -756,6 +756,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/store/store.ts` — `knownChannelUserId`, `setAccountTelegram`, `telegram_unlinks`
 
+### After unlinking your Discord, an agent still admits it, and unlinking again does nothing
+- **Check:** Settings → You said "Unlinked." (before v2.166.0), yet one agent still answers your Discord DMs without asking "That's me". The agent runs on a runner that was asleep, or Docker was down, at the time; the log has `channel.unlink_scrub_failed` for it. Unlink again and it says it has no Discord to unlink (`agents: 0`). Or: two agents knew you under two different Discord ids (you linked another account on one), and the second id still works on its agent.
+- **Cause:** the unlink dropped every agent's binding first and then scrubbed the agents' allowlists on their volumes, where the pairing approval lives and survives a rebuild. A scrub that failed was only logged; the binding it needed to retry was gone. And it took one id (the newest binding) and scrubbed that from every agent, so an agent that knew you under another id kept it.
+- **Fix:** upgrade, then unlink again. Each agent is now scrubbed of the id it knows, and its binding goes only once the scrub is done; when an agent cannot be reached the reply names it (`unlinked: false`, `failed`) and the rest are done, so unlinking again finishes it when the machine is awake. On an older version, or for an agent that lost its binding already: remove your Discord id from that agent by hand (Access → the member's channels), or rebuild it after removing the approval from `credentials/discord-*-allowFrom.json` on its volume.
+- **Fixed in:** `v2.166.0`
+- **Code:** `src/api/routes.ts` — `/v1/account/discord`, `allowlistScrubScript`; `src/store/store.ts` — `unbindMemberIdentity`, `memberIdentities`
+
 ### Someone removed just as they first messaged the bot can still chat with it
 - **Check:** they are not in the agent's members, yet the bot answers them; the trail shows their removal at the moment their invite's window let them in.
 - **Cause:** the window approved their message with OpenClaw before binding it to their seat. A removal that landed in between left the approval with no member row to remove them by.
@@ -769,6 +776,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: a sleeping agent's bot is listed as in use, marked `[asleep]`. Don't delete it in @BotFather: the agent would never wake on a message again.
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/bots.ts` — `auditBots`
+
+### Reopen for a member (or Add Telegram again) did nothing: the door shut again before they messaged
+- **Check:** **Reopen** was pressed (or Telegram attached again) while an earlier 30-minute window for the same person was still running; the agent's timeline shows `claim.window_closed` at the EARLIER window's end, and the agent's config has `dmPolicy` "allowlist" again while the app still showed the window open.
+- **Cause:** the two watchers share one stored window per person and chat app. The older one kept its own deadline and, when it ran out, deleted the window and set the door back to allowlist, though the newer watcher was still waiting.
+- **Fix:** upgrade. A watcher that finds its window renewed stops without touching it (`claim.window_superseded` in the timeline), and only the latest one closes the window when its own time is up. Until then: press Reopen again once the earlier window's time has passed.
+- **Fixed in:** `v2.166.0`
+- **Code:** `src/orchestrator/claim.ts` — `claimFirstContact`, `superseded`, `claim.window_superseded`
 
 ## Agents, builds and rebuilds
 
@@ -813,6 +827,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade; for an agent already made, paste the description into SOUL.md (or recreate it).
 - **Fixed in:** `v2.112.1`
 - **Code:** `src/orchestrator/provision.ts` — `replaceScaffold`
+
+### The Definition editor shows an empty SOUL.md (or AGENTS.md, MEMORY.md), and Save wiped the real one
+- **Check:** the agent is on a runner that was asleep, or Docker was not answering, when the editor opened; the file came up empty with Save enabled (before v2.166.0). After a Save the agent's file is empty; the `pre-edit` snapshot (Snapshots on the agent's page) has what it held. The same read serves **Push definition**: a master whose files could not be read pushed nothing for that file in silence, and a SOUL.md the owner had emptied on purpose was left as it was on every child while the push said it succeeded.
+- **Cause:** the read ran `head … || true` and used its output without looking at whether the command had worked, so a failed read and an empty file both came back as '' with status 200. The push built its layer from the same read and dropped a file that read as '', the only way it had to leave out a file it could not read.
+- **Fix:** upgrade. The editor's read is the snapshot read now: a failed read is an error in words (502) and nothing loads, so there is nothing to save; a file that is not there is told apart from one that is there and empty (`missing: true`). The push refuses when the master's files cannot be read, and an emptied file is pushed as empty. On an older version, restore the `pre-edit` snapshot to get the file back, and open the editor only while the agent's machine is awake.
+- **Fixed in:** `v2.166.0`
+- **Code:** `src/api/routes.ts` — `/v1/agents/:id/files/:name`, `readCapped`; `src/orchestrator/snapshots.ts` — `readCoreFile`, `EMPTY_FILE_MARK`
+
+### Push definition changed a child whose restore was interrupted ("is being put right")
+- **Check:** after a restart, a child's page says its restore or move was interrupted and is being put right (Alerts), yet a Push definition from its master reported it pushed; the child's files are then a mix of the restore's and the master's, and its setup values changed under the recovery. Only before v2.166.0.
+- **Cause:** the push checked that each child was RUNNING and not busy in memory; after a restart the in-memory busy flag is empty, while the operation on disk still protects the half-written files. Every other file-writing action also asks the operation on disk.
+- **Fix:** upgrade. A child under an unfinished operation is now refused in the operation's words and named in the push's result while the others are pushed; a master under one is refused up front. Let the operation finish (or choose on its page under Alerts), then push again. For a child already written into, restore its `pre-params` snapshot once the operation is over.
+- **Fixed in:** `v2.166.0`
+- **Code:** `src/api/routes.ts` — `/v1/agents/:id/push-definition`, `busyNow`; `src/orchestrator/operations.ts` — `operationRefusal`
 
 ### `hatchabot doctor`: "N running agents are still on the shared network"
 - **Check:** the doctor line.
@@ -1595,6 +1623,34 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.162.0`
 - **Code:** `web/index.html` — `consoleUnmark`, `consoleFromHash`
 
+### "Could not store the previous draft in browser storage. It remains available in this tab." on every pause in typing, in every agent's console
+- **Check:** the line is OpenClaw's console's, and comes back on each pause in typing, in every agent's console you open, not only after attaching a file. In the browser's console (F12) each pause adds an IndexedDB error, and `sw.js?v=…` throws `Uncaught (in promise) QuotaExceededError: Quota exceeded.` DevTools → Application → Storage shows the site's usage at its quota, most of it Cache Storage (`openclaw-control-…`). chrome://settings/content/all shows the Hatchabot address holding gigabytes.
+- **Cause:** every agent's console lives under its own path on one site address, so each one registered OpenClaw's service worker, which caches the console's files (55 MB a build) for offline use and keeps three builds — one copy per agent. A household of agents filled the browser's storage quota for the site, and the draft store (IndexedDB) shares that quota: its write fails after every change, 200 ms later, and the console says so. A private window, or site data blocked for the site, shows the same line for the same reason (no storage at all).
+- **Fix:** upgrade: the proxy answers each console's `sw.js` with a stand-in worker that keeps nothing, deletes the `openclaw-control-*` caches and unregisters itself; a browser cleans up on its next visit to any console. Before the upgrade, or to clear it at once: in Chrome, chrome://settings/content/all → the Hatchabot address → Delete data (or DevTools → Application → Storage → Clear site data); it signs you out and the home screen forgets its console tabs, nothing else. A computer whose disk is nearly full gets a smaller quota from Chrome; make room.
+- **Fixed in:** `v2.166.0`
+- **Code:** `src/api/consoleWorkerStub.ts` — `CONSOLE_WORKER_STUB`; `src/api/routes.ts` — the `'/v1/agents/:id/ui/*'` route answers the worker itself
+
+### The home screen's sort buttons run off the edge of a phone's screen
+- **Check:** on a phone (390 px wide), under the View by pills, the sort buttons (Age, Name, Activity, My order; Cost under View by → Cost) run past the right edge and the last cannot be tapped.
+- **Cause:** the sort buttons' box did not wrap below 620 px; the view pills beside it did.
+- **Fix:** upgrade; they wrap. The click-through gate (`npm run test:ui`) opens the page a second time at a phone's width and checks every sort button is inside the screen.
+- **Fixed in:** `v2.166.0`
+- **Code:** `web/index.html` — `.v2binsort`; `scripts/ui-clickthrough.mjs` — `phoneSortButtonsReachable`
+
+### A file opened from Files on a phone has no way back
+- **Check:** the app was opened from the phone's home screen (installed), a sound, video or PDF file was tapped in an agent's Files tab, and it filled the screen with no Back: the installed app has no browser bar.
+- **Cause:** text and images opened in the tab since v2.165.0, with ← Back; sound, video and PDF still opened in a new browser tab.
+- **Fix:** upgrade; they open in the tab, in the browser's own player or reader, with ← Back, Open in a tab and ⬇. Until then, close the file's tab from the phone's app switcher, or use the ⬇ next to the name instead.
+- **Fixed in:** `v2.166.0`
+- **Code:** `web/index.html` — `v2OpenFile`, `v2ShownHere`
+
+### Opening a runner agent's console took the whole service down (the log ends with `spawn ssh ENOENT`)
+- **Check:** the agent runs on a runner reached over `ssh://`; the moment its console was opened, the app stopped answering for everyone and the service restarted; `journalctl -u hatchabot` (or the service log) ends with `Error: spawn ssh ENOENT` from an unhandled `error` event. On the machine, `systemctl show hatchabot -p Environment` (or the launchd plist) gives the service a PATH without the folder `ssh` is in, or `ssh` is not installed.
+- **Cause:** the console of a runner agent is reached through an SSH port forward the service opens itself. The child process that `ssh` spawn made had a listener for its exit but none for its error, so a spawn that failed (no `ssh` on the service's PATH, or one that cannot run) raised an unhandled event and ended the process.
+- **Fix:** upgrade: a failed spawn is "the console is unavailable" for that agent and nothing more. Then give the service a PATH with `ssh` in it (or install openssh-client); the runner's docker connection needs it too.
+- **Fixed in:** `v2.166.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `gatewayEndpoint`, the tunnel's `child.once('error'`
+
 ## Runners
 
 ### A runner agent's tile: "Its machine isn't answering — it may be asleep or offline"
@@ -1921,6 +1977,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.162.0` (#213)
 - **Code:** `src/providers/localDockerProvider.ts` — `importState`
 
+### Import of a downloaded copy freezes the browser for a long while, or the tab dies on a phone, before anything is uploaded
+- **Check:** the file is a full copy (a Download, hundreds of MB; a template is a few hundred KB at most). After choosing it, the page stops answering for seconds to minutes with no network traffic in DevTools, or a phone's browser shows "This page is not responding" / reloads the tab. The server log has no `import` line yet.
+- **Cause:** before uploading, the page peeked inside every `.hatchabot` file to see whether it was a template that asks setup questions, by decompressing the whole file in the tab and parsing it as JSON. A full copy is a gzipped manifest with the agent's whole volume inlined (up to 256 MB), so the tab held up to about 340 MB of text plus the parsed copy before the upload began.
+- **Fix:** upgrade; the peek reads only the first bytes of the file (a template declares itself at the start) and stops within 4 MB, so a copy is uploaded as it is and the server's own bounded peek sorts it out. Before the upgrade: import the copy from a desktop browser and wait, or with the CLI (`hatchabot import <file>`), which does not peek.
+- **Fixed in:** `v2.166.0`
+- **Code:** `web/index.html` — `peekImportTemplate`, `IMPORT_PEEK_BYTES`, `importAgentFile`; `src/orchestrator/transfer.ts` — `peekFormat`; `scripts/ui-clickthrough.mjs` — `importPeekBounded`
+
 ### Two backup runs wrote the same day's set after a killed run
 - **Check:** the backup log shows two runs that each said "an earlier run that was killed left its lock … taking it over" for the same set, or the set's record does not match its files.
 - **Cause:** a run that found a dead run's lock took it over without checking again; two runs reading the same dead pid both went on, and each one's exit removed the lock while the other was still writing.
@@ -2112,6 +2175,19 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/compaction.ts` — `syncContextCap`, `writeEntry`
 
+### On the 1st, or after a budget was raised, agents you had stopped by hand started again
+- **Check:** the agents were stopped by you, not by a budget, when a "pause" budget (theirs or the machine's) reached 100%; each one's timeline shows `budget.paused` with `alreadyStopped: true`, then `budget.resumed` with `new-month` or `budget-raised`, and the agent is RUNNING.
+- **Cause:** v2.165.0 began recording a pause for an agent that was already stopped (so Start could be the owner's take-over it promised), but recorded it like any pause, and the pass that ends pauses started every open one. A machine budget's pool is every agent, so each hand-stopped agent started on the 1st and began spending.
+- **Fix:** upgrade, and stop the agents again. The record now remembers that the budget stopped nothing: it closes on the 1st or a raise with no start (`budget.pause_closed`), and the 100% message says "it was already stopped, so it stays stopped" (or how many "already stopped stay so").
+- **Fixed in:** `v2.166.0`
+- **Code:** `src/orchestrator/budgets.ts` — `runBudgets`, `alreadyStopped`, `budgetMessage`; `src/store/store.ts` — `addBudgetPause`, `already_stopped`
+### Usage → Spend over time: the day you deleted your last agent shows less than it spent
+- **Check:** every agent of yours was deleted (or the last one was) after it had been working that day; the day's bar in Spend over time is lower than the Usage tab showed before the delete, and it stays so the next day, while a day on which some agent of yours survived is right.
+- **Cause:** the daily point was made for the owners of active agents only. Once your last agent was gone, your days were never finished, so the readings its last hours had added were never counted, though deleted agents' use is meant to stay (v2.164.2).
+- **Fix:** upgrade: owners with a deleted agent are finished too, and the next daily pass takes the readings in. Nothing to do by hand.
+- **Fixed in:** `v2.166.0`
+- **Code:** `src/orchestrator/fleetUsage.ts` — `snapshotDailyUsage`; `src/store/store.ts` — `deletedAgentOwners`
+
 ## Scheduled tasks
 
 ### A scheduled task runs "ok" every day but its result reaches nobody
@@ -2198,6 +2274,19 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/template.ts` — `TemplateParamSchema`, `parseTemplate`, `resolveParamValues`
 
+### Importing a template with long setup answers says only "Import failed" (or, from v2.166.0, "The setup answers are too long to send together")
+- **Check:** the template asks several setup questions and the answers are long (about five full-length answers of 2,000 characters, fewer if they hold many spaces or punctuation). In DevTools → Network the `POST /v1/agents/import?values=…` request has a very long address and the answer is a `431` with no body; the server log shows nothing, because Node refused the request before the app saw it.
+- **Cause:** the setup answers travel in the request's address, and Node refuses a request whose address and headers together pass 16 KB. The page showed the empty answer as a bare "Import failed".
+- **Fix:** shorten some answers and import again; the rest can be finished in the agent's Overview after the import (Setup values). From v2.166.0 the page refuses before sending, saying how many characters are over and which answer is longest. The transport is unchanged (interim fix); a later release will send the answers in the request body.
+- **Fixed in:** `v2.166.0` (interim)
+- **Code:** `web/index.html` — `importValuesTooLong`, `IMPORT_VALUES_MAX_CHARS`, `importAgentFile`; `src/api/routes.ts` — `'/v1/agents/import'`; `scripts/ui-clickthrough.mjs` — `importAnswersTooLong`
+### An agent made from a template cannot be edited or snapshotted: "SOUL.md is over 256KB", though the template was small
+- **Check:** the template imported fine, but editing the agent's SOUL.md or AGENTS.md in the app says it is over 256KB, snapshots and Download copy refuse it, and the template file itself is a few KB. Its files use a setup field many times, and the answer given was long.
+- **Cause:** a template's files were held to the core-file limit as written, with their `{{placeholders}}`; the file as rendered with the answers was not. A 9 KB file with 1,000 placeholders and a 2,000-character answer became a 2 MB SOUL.md.
+- **Fix:** upgrade: the import, a Setup values edit and a push to derived children refuse a rendering over the limit before anything is made or written, naming the file. For the agent already made, give a shorter answer under Setup values, which renders the file again within the limit; or trim the master's file and share again.
+- **Fixed in:** `v2.166.0`
+- **Code:** `src/orchestrator/template.ts` — `renderedTooBig`, `importTemplate`; `src/api/routes.ts` — the `'/v1/agents/:id/params'` and `'/v1/agents/:id/push-definition'` routes
+
 ### A task added while the agent was being moved or exported is missing from the moved copy
 - **Check:** the task was added (the Schedule tab, `hatchabot tasks`, or the Hatchabot agent) while a move, export or rebuild of that agent was under way; the agent's timeline has `cron.created` during the operation.
 - **Cause:** adding a task did not wait for the agent's other operations, unlike enabling, editing or deleting one, so it could land in the runtime that was going away.
@@ -2246,6 +2335,19 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: a save goes to the agent it was made on and only empties the form while that agent and that edit are still open.
 - **Fixed in:** `v2.160.0`
 - **Code:** `web/index.html` — `addCronJob`
+
+### A task the agent made in its web chat stops working once the agent joins Telegram: its runs fail, or reach nobody
+- **Check:** the task was made by asking the agent in its console or web chat (`openclaw cron list --json` in the agent shows `sessionTarget: "current"` with a `sessionKey` such as `agent:<slug>:web:…`); the agent was then given Telegram and the task's delivery names the owner's chat; its runs fail, or nothing arrives, once that web conversation is gone (deleted, reset, or compacted away).
+- **Cause:** pointing the task at the chat changed only its delivery. `cron edit` changes where a task runs only when told to (`--session`, `--clear-session-key`), so the task stayed bound to the web conversation, and a run there fails before the message to Telegram is sent.
+- **Fix:** upgrade: a bound task is unbound as it is pointed at the chat (`--session isolated --clear-session-key`; OpenClaw 2026.9.6 and 2026.9.8 both have the flags). A task pointed at the chat before the fix is not looked at again, since its delivery already names the chat: in the agent run `openclaw cron edit <id> --session isolated --clear-session-key`, or delete it and ask the agent for it again.
+- **Fixed in:** `v2.166.0`
+- **Code:** `src/orchestrator/crons.ts` — `retargetCron`, `deliveryArgs`, `unbind`
+### Bring in from OpenClaw: a one-time task (or a daily one) is missing, though the import counted it as carried
+- **Check:** the source OpenClaw had a one-time task with the same name as one the agent already has, but for another day (two "Reminder"s), or a recurring task with the same name and schedule but another prompt or time zone. The import's result counted it as carried; the agent's Schedule tab has only the one it had before, and the log says `cron.migrate_already_present` for it.
+- **Cause:** a task was taken as "brought over before" by its name and schedule kind alone (and the expression or interval for a recurring one): the one-time task's date, the prompt and the time zone were not compared. The guard against adding a task twice on a second adopt (v2.164.2) took an unrelated task for the earlier copy.
+- **Fix:** upgrade, then run the import again: a task differing in its time, prompt or zone is added, and one brought over before is still not added twice. Or add the missing task by hand in the Schedule tab.
+- **Fixed in:** `v2.166.0`
+- **Code:** `src/orchestrator/cronImport.ts` — `migrateCrons`, `sameTime`
 
 ## Tailscale and public access
 
@@ -2550,13 +2652,6 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `scripts/privacy-check.mjs` (`secretsTokenEnv`, `syncCi`)
 
 ## Audit fixes in v2.165.0
-
-### "Could not store the previous draft in browser storage. It remains available in this tab." in an agent's console
-- **Check:** the line appears in the console (OpenClaw's own chat page inside Hatchabot) after attaching a file, or a large paste, to a message; the message still sends.
-- **Cause:** OpenClaw's console keeps an unsent draft, attachments included, in the browser's storage so a reload brings it back. A draft larger than the browser allows (big images, several files), or a browser that blocks site storage, cannot be kept there. It is OpenClaw's message, not Hatchabot's.
-- **Fix:** none needed to send: the draft stays in the tab until you send it. Keep attachments under a few megabytes, or put a big file in the agent's **Files** tab (⬆ Upload…) and tell the agent its path. A browser in a private window or with site data blocked shows it for every draft.
-- **Fixed in:** not a Hatchabot defect; noted since `v2.165.0`.
-- **Code:** OpenClaw's Control UI; Hatchabot's part is the proxy in `src/api/routes.ts` (the `/v1/agents/:id/ui/*` route).
 
 ### The home screen says "Loading your agents…" for ever in one browser
 - **Check:** the same sign-in works in another browser or window; the stuck one is a private window, or has cookies and site data blocked for the site, and the console (F12) shows a `SecurityError` on `localStorage`.

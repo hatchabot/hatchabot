@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
+import { gzipSync } from 'node:zlib';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { exportTemplate, importTemplate, parseTemplate, resolveParamValues, TemplateParamSchema } from '../src/orchestrator/template.js';
@@ -30,6 +31,24 @@ async function world() {
   provider.execResponses.set('sh', { code: 0, stdout: '# TRAINED CONTENT', stderr: '' });
   return { store, provider };
 }
+
+describe('importTemplate: what the 2026-10-23 review found', () => {
+  it('a template whose filled files would pass the core-file limit is refused before anything is made (R16)', async () => {
+    const { store, provider } = await world();
+    const data = gzipSync(JSON.stringify({
+      format: 'hatchabot-template', version: 1, exportedAt: 'now',
+      agent: { name: 'Expanded', persona: '', sharedMemory: false },
+      files: { 'SOUL.md': '{{value}}'.repeat(1000) }, ai: { vendor: 'anthropic' },
+      parameters: [{ key: 'value', label: 'Value', type: 'text', required: true, target: 'soul' }],
+    }));
+    // A 9 KB template; a 2,000-character answer renders it to 2 MB.
+    expect(() => importTemplate({ store, provider }, data, { ownerId: 'owner-a', values: { value: 'x'.repeat(2000) } }))
+      .toThrow(/SOUL\.md would be over 256 KB/);
+    expect(store.listAgents('owner-a').map((a) => a.name)).toEqual(['Advisor']);
+    const { agent } = importTemplate({ store, provider }, data, { ownerId: 'owner-a', values: { value: 'x' } });
+    expect(store.getAgentSeed(agent.id)['SOUL.md']).toBe('x'.repeat(1000));
+  });
+});
 
 describe('exportTemplate', () => {
   it('captures the trained files + needs, and leaks NO identity', async () => {

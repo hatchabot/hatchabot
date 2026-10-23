@@ -118,6 +118,34 @@ describe('GET/PUT /v1/agents/:id/files/:name', () => {
     const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/files/SOUL.md', headers: { 'x-hatchabot-owner': 'stranger' } });
     expect(res.statusCode).toBe(404);
   });
+
+  it('a read that failed is a 502 in words, not an empty file ready to save (review 2026-10-23 R07)', async () => {
+    const { f, provider } = await liveWorld();
+    // What the Docker provider answers for a runner asleep or a daemon down.
+    provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon' });
+    const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/files/SOUL.md', headers: H });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toMatch(/Couldn't read SOUL\.md/);
+    expect(res.json().content).toBeUndefined();
+    // A file that is there but cannot be read says so too.
+    provider.execResponses.set('sh', { code: 3, stdout: '', stderr: '' });
+    const unreadable = await f.inject({ method: 'GET', url: '/v1/agents/a1/files/SOUL.md', headers: H });
+    expect(unreadable.statusCode).toBe(502);
+    expect(unreadable.json().error).toMatch(/could not be read/);
+  });
+
+  it('a missing file is told apart from an empty one', async () => {
+    const { f, provider } = await liveWorld();
+    provider.execResponses.set('sh', { code: 0, stdout: '', stderr: '' });
+    const missing = await f.inject({ method: 'GET', url: '/v1/agents/a1/files/MEMORY.md', headers: H });
+    expect(missing.statusCode).toBe(200);
+    expect(missing.json()).toEqual({ name: 'MEMORY.md', content: '', missing: true });
+    // The read says on stderr when the file is there and empty.
+    provider.execResponses.set('sh', { code: 0, stdout: '', stderr: 'hatchabot:empty-file\n' });
+    const empty = await f.inject({ method: 'GET', url: '/v1/agents/a1/files/MEMORY.md', headers: H });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toEqual({ name: 'MEMORY.md', content: '' });
+  });
 });
 
 describe('snapshots over HTTP: create, restore, delete', () => {

@@ -299,16 +299,28 @@ export async function ensureConversation(provider: RuntimeProvider, runtimeRef: 
  * The delivery half of a `cron add`/`cron edit` argv. A conversation target
  * runs as `current` bound to that conversation and announces with no channel:
  * the gateway writes the result there and, with no chat route, nowhere else.
+ *
+ * `unbind` (edit only): the task was bound to a conversation of its own, and
+ * `cron edit` changes the session only when told to (`--session`,
+ * `--clear-session-key`; checked on 2026.9.6 and 2026.9.8). Left bound, a task
+ * pointed at a chat kept running in a web conversation, and once that
+ * conversation was gone the run failed before the chat was ever reached
+ * (review R10, 2026-10-23). It runs on its own now, as an app-made task does.
  */
-function deliveryArgs(target: CronTarget | undefined): string[] {
+function deliveryArgs(target: CronTarget | undefined, opts: { unbind?: boolean } = {}): string[] {
   if (!target) return ['--no-deliver'];
   if (isConversation(target)) return ['--session', 'current', '--session-key', target.session, '--announce', '--best-effort-deliver'];
-  return ['--announce', '--best-effort-deliver', '--channel', target.channel, '--to', target.to];
+  return ['--announce', '--best-effort-deliver', '--channel', target.channel, '--to', target.to, ...(opts.unbind ? ['--session', 'isolated', '--clear-session-key'] : [])];
 }
 
-/** Point one task at `target`, or make it quiet when there is none. */
-export async function retargetCron(provider: RuntimeProvider, runtimeRef: string, jobId: string, target: CronTarget | undefined): Promise<boolean> {
-  const res = await provider.exec(runtimeRef, ['cron', 'edit', jobId, ...deliveryArgs(target)]);
+/**
+ * Point one task at `target`, or make it quiet when there is none. `job`: the
+ * task as it is now; one bound to a conversation of its own is unbound when it
+ * is pointed at a chat (see deliveryArgs).
+ */
+export async function retargetCron(provider: RuntimeProvider, runtimeRef: string, jobId: string, target: CronTarget | undefined, job?: Pick<Cron, 'sessionTarget' | 'sessionKey'>): Promise<boolean> {
+  const unbind = !!target && !isConversation(target) && !!job && bound(job);
+  const res = await provider.exec(runtimeRef, ['cron', 'edit', jobId, ...deliveryArgs(target, { unbind })]);
   return res.code === 0;
 }
 
@@ -354,18 +366,18 @@ export async function retargetImplicitCrons(
   const change = isConversation(to) ? todo.filter((j) => !bound(j)) : todo;
   if (isConversation(to) && (change.length || waiting.some((j) => !bound(j)))) await ensureConversation(provider, runtimeRef, slug, to.session);
   for (const j of change) {
-    if (await retargetCron(provider, runtimeRef, j.id, to)) changed++; else failed++;
+    if (await retargetCron(provider, runtimeRef, j.id, to, j)) changed++; else failed++;
   }
   for (const j of waiting) {
     // A task bound to a conversation of its own goes back to announcing there.
     const its = isConversation(to) && bound(j) ? { session: j.sessionKey! } : to;
-    if (await retargetCron(provider, runtimeRef, j.id, its)) changed++; else { failed++; stillHeld.add(j.id); }
+    if (await retargetCron(provider, runtimeRef, j.id, its, j)) changed++; else { failed++; stillHeld.add(j.id); }
   }
   return { changed, failed, held: [...stillHeld] };
 }
 
 /** Bound to a conversation of its own: `current` with a session key (what an agent makes when asked in a chat). */
-const bound = (j: Cron) => j.sessionTarget === 'current' && !!j.sessionKey;
+const bound = (j: Pick<Cron, 'sessionTarget' | 'sessionKey'>) => j.sessionTarget === 'current' && !!j.sessionKey;
 
 /**
  * How often the quick check (pendingRetarget) looks at every running agent.

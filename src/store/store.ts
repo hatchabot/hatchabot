@@ -1109,6 +1109,10 @@ export class Store {
       // agent had none, NULL = taken before it was recorded): a restore puts
       // it back with the files, or the next value edit re-renders what was undone.
       `ALTER TABLE snapshots ADD COLUMN params TEXT`,
+      // A pause recorded on an agent the budget did NOT stop (stopped by hand when the
+      // limit came, v2.166.0): it closes on the 1st or a raise, and the budget never
+      // starts the agent — before, it started every hand-stopped agent on the 1st.
+      `ALTER TABLE budget_pauses ADD COLUMN already_stopped INTEGER NOT NULL DEFAULT 0`,
     ]) {
       try {
         this.db.exec(alter);
@@ -1704,6 +1708,10 @@ export class Store {
     return (this.db.prepare(`SELECT COUNT(*) AS n FROM agents WHERE state NOT IN ('ARCHIVED', 'DELETED')`).get() as { n: number }).n;
   }
 
+  /** The owners with a deleted agent, for a day's usage to finish once the last agent is gone. */
+  deletedAgentOwners(): string[] {
+    return (this.db.prepare(`SELECT DISTINCT owner_id FROM agents WHERE state = 'DELETED'`).all() as Array<{ owner_id: string }>).map((r) => r.owner_id);
+  }
   /** An owner's deleted agents (the rows stay as tombstones), for what they used before they went. */
   listDeletedAgents(ownerId: string): Agent[] {
     return (this.db.prepare(`SELECT * FROM agents WHERE owner_id = ? AND state = 'DELETED' ORDER BY created_at`).all(ownerId) as any[]).map(rowToAgent);
@@ -4151,6 +4159,7 @@ export class Store {
     if (opts.month) { where.push('month = ?'); args.push(opts.month); }
     return (this.db.prepare(`SELECT * FROM budget_pauses ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY paused_at`).all(...args) as any[])
       .map((r) => ({ agentId: r.agent_id, month: r.month, scope: r.scope, pausedAt: r.paused_at, kind: r.kind === 'cheaper' ? 'cheaper' as const : 'pause' as const,
+        ...(r.already_stopped ? { alreadyStopped: true } : {}),
         ...(r.kind === 'cheaper' ? { fromModel: r.from_model ?? null } : {}), ...(r.to_model ? { toModel: r.to_model } : {}),
         ...(r.replies ? { replies: safeParse(r.replies) as Record<string, { u: number; at: number }> } : {}),
         ...(r.resumed_at ? { resumedAt: r.resumed_at } : {}), ...(r.resumed_by ? { resumedBy: r.resumed_by } : {}) }));
@@ -4158,12 +4167,16 @@ export class Store {
   getBudgetPause(agentId: string, month: string): BudgetPauseRow | undefined {
     return this.listBudgetPauses({ month }).find((p) => p.agentId === agentId);
   }
-  /** Paused (again) this month: an earlier resume that was not the owner's own is replaced. */
-  addBudgetPause(agentId: string, month: string, scope: string, at: string, cheaper?: { fromModel: string | null; toModel: string }): void {
-    this.db.prepare(`INSERT INTO budget_pauses (agent_id, month, scope, paused_at, kind, from_model, to_model) VALUES (?, ?, ?, ?, ?, ?, ?)
+  /**
+   * Paused (again) this month: an earlier resume that was not the owner's own is replaced.
+   * `alreadyStopped`: the agent was stopped by hand when the limit came, so the budget
+   * stopped nothing and must start nothing (budgets.ts, review R11).
+   */
+  addBudgetPause(agentId: string, month: string, scope: string, at: string, cheaper?: { fromModel: string | null; toModel: string }, opts?: { alreadyStopped?: boolean }): void {
+    this.db.prepare(`INSERT INTO budget_pauses (agent_id, month, scope, paused_at, kind, from_model, to_model, already_stopped) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(agent_id, month) DO UPDATE SET scope = excluded.scope, paused_at = excluded.paused_at, kind = excluded.kind,
-        from_model = excluded.from_model, to_model = excluded.to_model, resumed_at = NULL, resumed_by = NULL`)
-      .run(agentId, month, scope, at, cheaper ? 'cheaper' : 'pause', cheaper?.fromModel ?? null, cheaper?.toModel ?? null);
+        from_model = excluded.from_model, to_model = excluded.to_model, already_stopped = excluded.already_stopped, resumed_at = NULL, resumed_by = NULL`)
+      .run(agentId, month, scope, at, cheaper ? 'cheaper' : 'pause', cheaper?.fromModel ?? null, cheaper?.toModel ?? null, opts?.alreadyStopped ? 1 : 0);
   }
   listSpendAlerts(): SpendAlertRow[] {
     return (this.db.prepare(`SELECT * FROM spend_alerts`).all() as any[]).map((r) => ({ scope: r.scope, ownerId: r.owner_id, stepUsd: r.step_usd, setAt: r.set_at, ...(r.set_by ? { setBy: r.set_by } : {}) }));
@@ -5708,6 +5721,11 @@ export class Store {
     return this.db.prepare(`DELETE FROM member_identities WHERE user_id = ? AND kind = ?`).run(userId, kind).changes;
   }
 
+  /** Forget a user's identity on one channel on ONE agent (the account-level unlink, once that agent's allowlists are scrubbed). */
+  unbindMemberIdentity(agentId: string, userId: string, kind: Exclude<ChannelKind, 'telegram'>): number {
+    return this.db.prepare(`DELETE FROM member_identities WHERE agent_id = ? AND user_id = ? AND kind = ?`).run(agentId, userId, kind).changes;
+  }
+
   /** The active member bound to this Slack or Discord identity, if any. */
   getMemberByIdentity(agentId: string, kind: ChannelKind, channelUserId: string): { userId: string; role: string } | undefined {
     const r = this.db
@@ -5908,6 +5926,8 @@ export interface BudgetPauseRow {
   scope: string;
   pausedAt: string;
   kind: 'pause' | 'cheaper';
+  /** pause: the agent was already stopped by hand when the limit came; the budget stopped nothing and starts nothing. */
+  alreadyStopped?: boolean;
   /** cheaper: the agent's own model pin before the switch (null = its source's default). */
   fromModel?: string | null;
   /** cheaper: the model it was moved to. */

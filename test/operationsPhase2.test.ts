@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { agentArchiveName, restoreAgentFromBackup, restoreSafetyDir } from '../src/orchestrator/backups.js';
-import { captureSnapshot, restoreSnapshot } from '../src/orchestrator/snapshots.js';
+import { captureSnapshot, restoreSnapshot, resumeSnapshotRestore } from '../src/orchestrator/snapshots.js';
 import { archiveAgent } from '../src/orchestrator/archive.js';
 import { clearBusy } from '../src/orchestrator/busy.js';
 import {
@@ -203,6 +203,26 @@ describe('restore a snapshot: killed at every step, then a restart', () => {
       }
     });
   }
+
+  it('a restore that made an empty file the copy taken before did not have is held, not "nothing was changed" (review R06)', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAgent({ id: 'a1', ownerId: 'o', name: 'Test Agent', slug: 'test-agent', state: 'PROVISIONING', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    store.setAgentRuntimeRef('a1', 'mock://a1');
+    store.setAgentState('a1', 'RUNNING');
+    const snaps: Array<[string, Record<string, string>]> = [['target', { 'SOUL.md': 'new', 'MEMORY.md': '' }], ['safety', { 'SOUL.md': 'old' }]];
+    for (const [id, files] of snaps) store.insertSnapshot({ id, agentId: 'a1', label: id, reason: 'manual', files, createdAt: 'now' });
+    const op = beginOperation(store, 'restore-snapshot', 'a1', { snapshotId: 'target', safetySnapshotId: 'safety' });
+    op.step('file-written');
+    // On disk now: SOUL.md still the old text; MEMORY.md there and empty (the restore made it, then the restart came).
+    (provider as any).execShell = async (_ref: string, script: string) => ({
+      code: 0, stdout: script.includes('SOUL.md') ? 'old' : '', stderr: script.includes('MEMORY.md') ? 'hatchabot:empty-file' : '',
+    });
+    await resumeSnapshotRestore({ store, provider }, op.id);
+    expect(store.getOperation(op.id)!.status).toBe('held');
+    expect(operationRefusal(store, 'a1')).toMatch(/part-way through its files/);
+  });
 
   for (const action of ['finish', 'revert'] as const) {
     it(`held, the owner chooses "${action}"`, async () => {

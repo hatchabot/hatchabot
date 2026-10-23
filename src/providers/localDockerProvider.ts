@@ -1485,17 +1485,24 @@ export class LocalDockerProvider implements RuntimeProvider {
     const stop = () => { try { child.kill(); } catch { /* gone */ } };
     process.once('exit', stop); // …and never outlives it, holding a loopback port forever
     this.#tunnels.set(port, { local, child });
-    child.once('exit', () => {
+    const forget = () => {
       process.removeListener('exit', stop);
       if (this.#tunnels.get(port)?.child === child) this.#tunnels.delete(port);
-    });
+    };
+    child.once('exit', forget);
+    // No ssh on the service's PATH (or one that cannot run): the child emits
+    // 'error' and never 'exit'. Unhandled, that took the whole service down
+    // when someone opened a runner agent's console (review R21, 2026-10-23).
+    // Here it is "console unavailable", said by the caller.
+    let failed = false;
+    child.once('error', () => { failed = true; forget(); });
     // Wait for the forward to accept (ExitOnForwardFailure ends ssh otherwise).
     for (let i = 0; i < 40; i++) {
-      if (child.exitCode !== null) break;
+      if (failed || child.exitCode !== null) break;
       if (await canConnect(local)) return { host: '127.0.0.1', port: local };
       await new Promise((r) => setTimeout(r, 150));
     }
-    child.kill();
+    if (!failed) child.kill();
     return undefined;
   }
 

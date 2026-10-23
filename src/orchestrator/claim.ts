@@ -169,6 +169,7 @@ export async function claimFirstContact(
   const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
   const pollIntervalMs = opts.pollIntervalMs ?? 3_000;
   const deadline = Date.now() + timeoutMs;
+  const until = new Date(deadline).toISOString();
   // An OPEN DOOR for as long as we are watching — and a narrow one when the
   // owner said WHO the invite is for: only a knock from that @handle or id is
   // ever claimed, so an open window is not "whoever messages first wins".
@@ -181,9 +182,18 @@ export async function claimFirstContact(
   // This window is one seat's: the owner's first contact and an invitee's
   // run side by side, and closing one must not close the other (30th audit).
   const seat = Store.pairingSeat(kindHere, opts.forUserId);
-  deps.store.openPairingWindow(opts.agentId, new Date(deadline).toISOString(), opts.forUserId, {
-    expect: opts.expect, kind: kindHere,
-  });
+  deps.store.openPairingWindow(opts.agentId, until, opts.forUserId, { expect: opts.expect, kind: kindHere });
+  /**
+   * This seat's stored window, expired or not. The owner's Reopen, or Telegram attached
+   * again, starts another watcher for the same seat, which renews the one row: the later
+   * watcher owns the deadline, and this one must not close its window or shut the door
+   * when its own time is up (review R22, 2026-10-23; as holdDoorForKnocks does).
+   */
+  const storedWindow = () => deps.store.pairingWindows(opts.agentId, new Date(0)).find((w) => w.seat === seat);
+  const superseded = (): boolean => {
+    const w = storedWindow();
+    return !!w && Date.parse(w.until) > deadline;
+  };
   const expect = normalizeHandle(opts.expect);
   const excluded = new Set(opts.excludeIds ?? []);
   // The agent rests in `allowlist`, where a stranger's DM is dropped in
@@ -224,6 +234,11 @@ export async function claimFirstContact(
       log('claim.window_abandoned', { agentId: opts.agentId, state: agent?.state });
       deps.store.closePairingWindow(opts.agentId, seat);
       await restoreDoor();
+      return null;
+    }
+    // A later watcher took this seat over (Reopen, a re-attach): the window and the door are its now.
+    if (superseded()) {
+      log('claim.window_superseded', { agentId: opts.agentId, kind: kindHere });
       return null;
     }
     // The membership we're binding for was already claimed (e.g. by an earlier
@@ -336,6 +351,11 @@ export async function claimFirstContact(
       }
     }
     await sleep(pollIntervalMs);
+  }
+  // Renewed during the last round's sleep: the later watcher closes it when ITS time is up.
+  if (superseded()) {
+    log('claim.window_superseded', { agentId: opts.agentId, kind: kindHere });
+    return null;
   }
   log('claim.window_closed', { agentId: opts.agentId });
   deps.store.closePairingWindow(opts.agentId, seat);

@@ -407,6 +407,50 @@ describe('unlinking my chat identities', () => {
     // Nothing else of mine is touched.
     expect((await w.f.inject({ method: 'DELETE', url: '/v1/account/discord', headers: as(OTHER) })).json().agents).toBe(0);
   });
+  it("Discord: a failed scrub keeps that agent's binding and says so, so unlinking again can retry (review 2026-10-23 R08)", async () => {
+    const w = await world();
+    const a = await seedRunningAgent(w, { id: 'a1', slug: 'one', accountId: 'onebot' });
+    const b = await seedRunningAgent(w, { id: 'a2', slug: 'two', name: 'Garden', accountId: 'twobot' });
+    for (const id of [a, b]) w.store.insertChannel({ id: `dc-${id}`, agentId: id, kind: 'discord', accountId: `app-${id}`, secretRef: `chan/${id}`, deepLink: 'https://discord.example/x', createdAt: 'now' });
+    expect(w.store.bindMemberIdentity(a, OWNER, 'discord', '111111111111111111')).toBe(true);
+    expect(w.store.bindMemberIdentity(b, OWNER, 'discord', '111111111111111111')).toBe(true);
+    const aRef = w.store.getAgent(a)!.runtimeRef!;
+    const onVolume = w.provider.execShellOnVolume.bind(w.provider);
+    let aFails = true;
+    w.provider.execShellOnVolume = async (ref: string, script: string, opts?: any) => {
+      if (ref === aRef && aFails) return { code: 1, stdout: '', stderr: 'runner offline' };
+      return onVolume(ref, script, opts);
+    };
+    const r = await w.f.inject({ method: 'DELETE', url: '/v1/account/discord', headers: as() });
+    expect(r.statusCode).toBe(502);
+    expect(r.json()).toMatchObject({ unlinked: false, agents: 1, failed: ['Kitchen'] });
+    expect(r.json().error).toMatch(/could not be removed from Kitchen/);
+    expect(w.store.memberIdentities(a, OWNER).discord).toBe('111111111111111111'); // kept, so a retry finds it
+    expect(w.store.memberIdentities(b, OWNER).discord).toBeUndefined();
+    // The runner is back: the retry scrubs that agent and finishes the unlink.
+    aFails = false;
+    const again = await w.f.inject({ method: 'DELETE', url: '/v1/account/discord', headers: as() });
+    expect(again.json()).toEqual({ unlinked: true, agents: 1 });
+    expect(w.store.memberIdentities(a, OWNER).discord).toBeUndefined();
+  });
+  it('Discord: each agent is scrubbed of the id IT knows, when they differ (review 2026-10-23 R09)', async () => {
+    const w = await world();
+    const a = await seedRunningAgent(w, { id: 'a1', slug: 'one', accountId: 'onebot' });
+    const b = await seedRunningAgent(w, { id: 'a2', slug: 'two', accountId: 'twobot' });
+    for (const id of [a, b]) w.store.insertChannel({ id: `dc-${id}`, agentId: id, kind: 'discord', accountId: `app-${id}`, secretRef: `chan/${id}`, deepLink: 'https://discord.example/x', createdAt: 'now' });
+    expect(w.store.bindMemberIdentity(a, OWNER, 'discord', '111111111111111111')).toBe(true);
+    expect(w.store.bindMemberIdentity(b, OWNER, 'discord', '222222222222222222')).toBe(true);
+    const scrubs: Array<[string, string]> = [];
+    w.provider.execShellOnVolume = async (ref: string, script: string) => { scrubs.push([ref, script]); return { code: 0, stdout: '', stderr: '' }; };
+    const r = await w.f.inject({ method: 'DELETE', url: '/v1/account/discord', headers: as() });
+    expect(r.json()).toEqual({ unlinked: true, agents: 2 });
+    const byRef = Object.fromEntries(scrubs);
+    expect(byRef[w.store.getAgent(a)!.runtimeRef!]).toContain('111111111111111111');
+    expect(byRef[w.store.getAgent(a)!.runtimeRef!]).not.toContain('222222222222222222');
+    expect(byRef[w.store.getAgent(b)!.runtimeRef!]).toContain('222222222222222222');
+    expect(byRef[w.store.getAgent(b)!.runtimeRef!]).not.toContain('111111111111111111');
+    expect(w.store.agentsWithIdentity(OWNER, 'discord')).toEqual([]);
+  });
 });
 
 describe('sending an agent to someone\'s inbox', () => {

@@ -289,6 +289,80 @@ describe('claimFirstContact', () => {
     );
     expect(claimed).toBeNull();
   });
+
+  // Review R22, 2026-10-23: the owner's Reopen (or Telegram attached again) starts a
+  // second watcher for the same seat before the first has run out. The two share one
+  // stored window; the older one used to delete it and shut the door at ITS deadline.
+  async function guestSeat() {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a4', slug: 'a4',
+      workspace: { files: {}, configPatch: { agentId: 'a4', authMode: 'api-key' } },
+      env: {},
+    });
+    store.insertAgent({
+      id: 'a4', ownerId: 'u1', name: 'D', slug: 'a4', state: 'RUNNING',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    // The owner is in already, so a window that closes shuts the door (allowlist).
+    store.insertMembership({ id: 'm1', agentId: 'a4', userId: 'u1', role: 'owner', channelUserId: '31337', status: 'active' });
+    store.insertMembership({ id: 'm2', agentId: 'a4', userId: 'guest', role: 'user', status: 'active' });
+    provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [] }), stderr: '' });
+    return { store, provider, runtimeRef };
+  }
+  const guestWindow = (store: Store) => store.pairingWindows('a4', new Date(0)).find((w) => w.seat === Store.pairingSeat('telegram', 'guest'));
+
+  it('reopened while an older watcher waits: the older one stops, leaving the renewed window and the open door alone', async () => {
+    const { store, provider, runtimeRef } = await guestSeat();
+    const events: string[] = [];
+    const renewedUntil = new Date(Date.now() + 60 * 60_000).toISOString();
+    let polls = 0;
+    const claimed = await claimFirstContact(
+      {
+        store, provider, log: (e) => { events.push(e); },
+        sleep: async () => { if (++polls === 1) store.openPairingWindow('a4', renewedUntil, 'guest', { kind: 'telegram' }); },
+      },
+      { agentId: 'a4', runtimeRef, accountId: 'bot', forUserId: 'guest', timeoutMs: 60_000, pollIntervalMs: 1 },
+    );
+    expect(claimed).toBeNull();
+    expect(polls).toBe(1); // noticed on the next round, not at its own deadline
+    expect(events).toContain('claim.window_superseded');
+    expect(events).not.toContain('claim.window_closed');
+    expect(guestWindow(store)?.until).toBe(renewedUntil);
+    expect(allowlisted(provider)).toBe(false);
+  });
+
+  it("renewed during the older watcher's last sleep: its timeout leaves the window; the later watcher's own timeout closes it", async () => {
+    const { store, provider, runtimeRef } = await guestSeat();
+    const events: string[] = [];
+    const renewedUntil = new Date(Date.now() + 60 * 60_000).toISOString();
+    const claimed = await claimFirstContact(
+      {
+        store, provider, log: (e) => { events.push(e); },
+        sleep: async () => {
+          store.openPairingWindow('a4', renewedUntil, 'guest', { kind: 'telegram' });
+          await new Promise((r) => setTimeout(r, 30)); // past this watcher's deadline
+        },
+      },
+      { agentId: 'a4', runtimeRef, accountId: 'bot', forUserId: 'guest', timeoutMs: 5, pollIntervalMs: 1 },
+    );
+    expect(claimed).toBeNull();
+    expect(events).toContain('claim.window_superseded');
+    expect(events).not.toContain('claim.window_closed');
+    expect(guestWindow(store)?.until).toBe(renewedUntil);
+    expect(allowlisted(provider)).toBe(false);
+    // The later watcher, run to its own end: the window closes and the door shuts.
+    const later = await claimFirstContact(
+      { store, provider, sleep: async () => {}, log: (e) => { events.push(e); } },
+      { agentId: 'a4', runtimeRef, accountId: 'bot', forUserId: 'guest', timeoutMs: 1, pollIntervalMs: 1 },
+    );
+    expect(later).toBeNull();
+    expect(events).toContain('claim.window_closed');
+    expect(guestWindow(store)).toBeUndefined();
+    expect(allowlisted(provider)).toBe(true);
+  });
 });
 
 describe('state machine', () => {

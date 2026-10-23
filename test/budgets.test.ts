@@ -222,6 +222,56 @@ describe('runBudgets', () => {
     expect(budgetView(store, store.getBudget('a4')!, 12, NOW, 'UTC', 'a4').resumedByHand).toBe(true);
   });
 
+  // Review R11, 2026-10-23: v2.165.0 recorded a pause for an agent already stopped by hand
+  // like any pause, and the pass that ends pauses started it on the 1st or a raise.
+  it('stopped by hand when the limit came: the record closes on a raise and on the 1st, and the agent stays stopped', async () => {
+    const { store, agent, deps, told } = world();
+    agent('a9', 'Seed Catalogue', { state: 'STOPPED' });
+    store.setBudget('a9', OWNER, 10, 'pause', iso(NOW));
+    store.setModelProfile('a9', profile(NOW, opus(NOW - DAY, 12)), iso(NOW));
+    expect((await runBudgets(deps, NOW)).paused).toEqual(['a9']);
+    expect(store.getBudgetPause('a9', '2026-10')).toMatchObject({ kind: 'pause', alreadyStopped: true });
+    expect(told).toHaveLength(1);
+    expect(told[0]!.text).toContain('it was already stopped, so it stays stopped.');
+    expect(told[0]!.text).not.toContain('it is paused until');
+    // Raised: the record closes; nothing is started.
+    store.setBudget('a9', OWNER, 40, 'pause', iso(NOW));
+    expect((await runBudgets(deps, NOW + MIN, { record: false })).resumed).toEqual([]);
+    expect(store.getAgent('a9')!.state).toBe('STOPPED');
+    expect(store.getBudgetPause('a9', '2026-10')!.resumedBy).toBe('budget-raised');
+    // Lowered again: recorded again, still not started; November closes it again, with no start.
+    store.setBudget('a9', OWNER, 10, 'pause', iso(NOW));
+    await runBudgets(deps, NOW + 2 * MIN, { record: false });
+    expect(store.getBudgetPause('a9', '2026-10')).toMatchObject({ alreadyStopped: true });
+    expect(store.getBudgetPause('a9', '2026-10')!.resumedAt).toBeUndefined();
+    expect(store.getAgent('a9')!.state).toBe('STOPPED');
+    const nov = Date.parse('2026-11-01T00:05:00Z');
+    expect((await runBudgets(deps, nov, { record: false })).resumed).toEqual([]);
+    expect(store.getAgent('a9')!.state).toBe('STOPPED');
+    expect(store.getBudgetPause('a9', '2026-10')!.resumedBy).toBe('new-month');
+  });
+
+  it("the machine's budget on the 1st starts the agents it paused, not one stopped by hand; the message says which", async () => {
+    const { store, agent, deps, told } = world();
+    agent('ops', 'Hatchabot', { ops: true });
+    agent('m5', 'Errands');
+    agent('m6', 'Attic Inventory', { state: 'STOPPED' });
+    store.setModelProfile('m5', profile(NOW, opus(NOW - DAY, 90)), iso(NOW));
+    store.setModelProfile('ops', profile(NOW, opus(NOW - DAY, 20)), iso(NOW));
+    store.setBudget(MACHINE, OWNER, 100, 'pause', iso(NOW));
+    expect((await runBudgets(deps, NOW)).paused.sort()).toEqual(['m5', 'm6']);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.text).toContain('1 agent is paused (not me) until November 1; 1 agent that was already stopped stays so.');
+    expect(store.getBudgetPause('m5', '2026-10')!.alreadyStopped).toBeUndefined();
+    expect(store.getBudgetPause('m6', '2026-10')!.alreadyStopped).toBe(true);
+    const nov = Date.parse('2026-11-01T00:05:00Z');
+    expect((await runBudgets(deps, nov, { record: false })).resumed).toEqual(['m5']);
+    expect(store.getAgent('m5')!.state).toBe('RUNNING');
+    expect(store.getAgent('m6')!.state).toBe('STOPPED');
+    expect(store.getBudgetPause('m6', '2026-10')!.resumedBy).toBe('new-month');
+    expect(store.listBudgetPauses({ open: true })).toEqual([]);
+  });
+
   it('a rebuild that starts a paused agent: still over, so paused again on the next pass', async () => {
     const { store, agent, deps } = world();
     agent('a7', 'Lab Notes');
@@ -717,6 +767,30 @@ describe('budgets that act together, and messages that did not get through', () 
     expect(again).toMatchObject({ resumed: ['p1'], downgraded: ['p1'] });
     expect(store.getAgent('p1')!.state).toBe('RUNNING');
     expect(store.getAgent('p1')!.model).toBe('claude-haiku-4-5');
+  });
+
+  it('a pause whose model restore did not take waits for the next pass; the cheaper row keeps its own model (review R12)', async () => {
+    const { store, agent, deps } = cheapWorld();
+    agent('ops', 'Hatchabot', { ops: true });
+    agent('p2', 'Recipe Box', { model: 'claude-opus-4-8' });
+    store.setBudget('p2', OWNER, 20, 'cheaper', iso(NOW));
+    store.setModelProfile('p2', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    expect((await runBudgets(deps, NOW)).downgraded).toEqual(['p2']);
+    store.setBudget(MACHINE, OWNER, 20, 'pause', iso(NOW));
+    let restores = 0;
+    deps.restoreModel = async () => { restores++; return false; };
+    const r = await runBudgets(deps, NOW + 10 * MIN, { record: false });
+    expect(restores).toBe(1);
+    expect(r.paused).toEqual([]);
+    expect(store.getAgent('p2')!.state).toBe('RUNNING');
+    // The row that remembers its own model is still there, untouched.
+    expect(store.getBudgetPause('p2', '2026-10')).toMatchObject({ kind: 'cheaper', fromModel: 'claude-opus-4-8', toModel: 'claude-haiku-4-5' });
+    // The restore takes on the next pass: paused on its own model, as #101 above.
+    deps.restoreModel = async (a, pin) => { store.setAgentModel(a.id, pin); return true; };
+    const again = await runBudgets(deps, NOW + 20 * MIN, { record: false });
+    expect(again.paused).toEqual(['p2']);
+    expect(store.getAgent('p2')!).toMatchObject({ state: 'STOPPED', model: 'claude-opus-4-8' });
+    expect(store.getBudgetPause('p2', '2026-10')).toMatchObject({ kind: 'pause', scope: MACHINE });
   });
 
   it('a downgrade that failed is not "already on the cheapest model": the 100% message waits until it works (#185)', async () => {

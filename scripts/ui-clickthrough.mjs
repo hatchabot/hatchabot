@@ -73,6 +73,9 @@ const SCENARIOS = String.raw`(() => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // 8 s: a condition that holds returns at once; a slow run of headless Chrome
   // (it happens) used to fail checks that were only late.
+  // The setup form opens once the file's first bytes are read — real work, during which virtual
+  // time can jump by minutes (2026-10-23): no deadline, the dialog's open attribute is observed.
+  const formOpened = () => new Promise((r) => { if (paramFormDlg.open) return r(); const o = new MutationObserver(() => { if (paramFormDlg.open) { o.disconnect(); r(); } }); o.observe(paramFormDlg, { attributes: true, attributeFilter: ['open'] }); });
   const until = async (f, ms = 8000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = f(); if (v) return v; await sleep(50); } throw new Error('timed out waiting for ' + String(f).replace(/\s+/g, ' ').slice(0, 160)); };
   const calls = (method, re) => window.__calls.filter((c) => c.method === method && re.test(c.path));
   const eq = (what, got, want) => { if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(what + ': got ' + JSON.stringify(got) + ', want ' + JSON.stringify(want)); };
@@ -1357,6 +1360,36 @@ const SCENARIOS = String.raw`(() => {
         try { v2Close(); } catch {}
         delete window.__override['/v1/agents/a1/fs']; delete window.__override['/v1/agents/a1/fs/file'];
         v2FilesSort = { key: 'name', dir: 1 }; try { localStorage.removeItem('hb-files-sort'); } catch {}
+      }
+    },
+    filesMediaOpenInPlace: async () => {
+      // Sound, video and PDF open in the tab too, with ← Back: the app on a phone's home screen has no browser
+      // bar, so a new tab had no way back (Chris, 2026-10-23). What the browser cannot show only downloads.
+      window.__override['/v1/agents/a1/fs'] = { path: 'media', entries: [
+        { name: 'talk.mp3', type: 'file', size: 10, mtime: '' }, { name: 'clip.mp4', type: 'file', size: 10, mtime: '' },
+        { name: 'plan.pdf', type: 'file', size: 10, mtime: '' }, { name: 'blob.bin', type: 'file', size: 10, mtime: '' },
+      ] };
+      const link = (n) => [...document.querySelectorAll('#v2FilesDrop tbody a')].find((a) => a.textContent.trim() === n);
+      const realOpen = window.open; let popped = 0; window.open = () => { popped++; return null; };
+      try {
+        openV2Agent('a1', 'files');
+        await v2LoadFiles('a1', 'media');
+        await until(() => link('talk.mp3'));
+        ok('a .bin is not a link (it only downloads)', !link('blob.bin') && !!byText('#v2FilesDrop td', 'blob.bin'));
+        for (const [n, sel] of [['talk.mp3', 'audio[controls]'], ['clip.mp4', 'video[controls]'], ['plan.pdf', 'iframe']]) {
+          link(n).click();
+          const el = await until(() => document.querySelector('#v2FileBody ' + sel));
+          ok(n + ' is shown by the browser\'s own ' + sel + ', inline: ' + el.getAttribute('src'), /fs\/file\?path=media%2F[\w.]+&inline=1$/.test(el.getAttribute('src')));
+          ok(n + ': no new browser tab', popped === 0);
+          const back = byText('#v2Files button', '← Back');
+          ok(n + ': a Back button, Open in a tab and ⬇', !!back && !!byText('#v2Files a', 'Open in a tab') && !!document.querySelector('#v2Files a[download]'));
+          back.click();
+          await until(() => link('talk.mp3'));
+        }
+      } finally {
+        window.open = realOpen;
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents/a1/fs']; v2FilesPath.delete('a1');
       }
     },
     consoleOpensAtOnce: async () => {
@@ -2710,6 +2743,95 @@ const SCENARIOS = String.raw`(() => {
         if (sfDlg.open) sfDlg.close();
       }
     },
+    importPeekBounded: async () => {
+      // R24 (v2.166.0): the import's template peek decompressed EVERY .hatchabot file in full, a
+      // full copy's inlined volume (up to 256 MB) included — a frozen desktop, a dead phone tab —
+      // before the upload began. It reads only enough to tell a template from a copy now.
+      const gzipFile = async (json, name) => new File([await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).blob()], name);
+      // Counts the bytes that come OUT of the page's DecompressionStream.
+      const Real = window.DecompressionStream;
+      let out = 0;
+      window.DecompressionStream = class { constructor(f) { const real = new Real(f); const count = new TransformStream({ transform(chunk, c) { out += chunk.byteLength; c.enqueue(chunk); } }); this.writable = real.writable; this.readable = real.readable.pipeThrough(count); } };
+      try {
+        // A full copy: a manifest with a large "volume" inlined — 12 MB of made-up text that, like a
+        // real one (base64 of a gzipped tar), gzip cannot shrink (a random 64 KB block, past its window).
+        let block = ''; while (block.length < 65536) block += Math.random().toString(36).slice(2);
+        const big = await gzipFile('{"format":"hatchabot-export","version":1,"agent":{"name":"Test Agent"},"state":"' + block.repeat(192) + '"}', 'test-agent.hatchabot');
+        ok('the made-up copy is several MB, compressed too: ' + big.size, big.size > 6 * 1048576);
+        window.__answer = { 'POST /v1/agents/import': [{ status: 200, body: { kind: 'copy', name: 'Test Agent' } }] };
+        const before = calls('POST', /\/v1\/agents\/import$/).length;
+        await importAgentFile(big);
+        const sent = calls('POST', /\/v1\/agents\/import$/).slice(before);
+        eq('the copy was uploaded, once', sent.length, 1);
+        ok('uploaded as the file itself, no setup values: ' + sent[0].url, sent[0].body instanceof File && !/values=/.test(sent[0].url));
+        ok('only the start of it was decompressed in the tab: ' + out + ' bytes', out > 0 && out < 4 * 1048576);
+        // A template with setup fields still opens the form, and its answers ride the request.
+        out = 0;
+        const tpl = await gzipFile(JSON.stringify({ format: 'hatchabot-template', version: 1, agent: { name: 'Homework Helper' }, files: {}, parameters: [{ key: 'subject', label: 'Subject', type: 'text', required: true }] }), 'homework-helper.template.hatchabot');
+        window.__answer = { 'POST /v1/agents/import': [{ status: 200, body: { kind: 'template', name: 'Homework Helper' } }] };
+        await until(() => !paramFormDlg.open && paramFormResolve === null); await sleep(0);
+        const imp = importAgentFile(tpl);
+        await formOpened();
+        document.getElementById('pfv-0').value = 'Algebra';
+        submitParamForm();
+        await imp;
+        const t = calls('POST', /\/v1\/agents\/import$/).slice(before + 1);
+        eq('the template was uploaded, once', t.length, 1);
+        eq('with the answer in the request', decodeURIComponent(t[0].url.split('values=')[1] || ''), JSON.stringify({ subject: 'Algebra' }));
+        ok('the small template was read whole: ' + out, out > 100);
+        ok('said what was imported: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('Imported “Homework Helper”'));
+        // A file that is not gzip at all is uploaded as it is, as before.
+        window.__answer = { 'POST /v1/agents/import': [{ status: 400, body: { error: 'That is not a .hatchabot file.' } }] };
+        await importAgentFile(new File(['not gzip'], 'x.hatchabot'));
+        eq('the plain file was uploaded', calls('POST', /\/v1\/agents\/import$/).length - before, 3);
+      } finally {
+        window.DecompressionStream = Real;
+        window.__answer = {};
+        if (paramFormDlg.open) paramFormDlg.close();
+      }
+    },
+    importAnswersTooLong: async () => {
+      // R25 (v2.166.0, interim): the setup answers ride the request's address; about five full-length
+      // (2,000-character) answers passed Node's 16 KB limit and came back as a bare "Import failed" (a 431
+      // with no body). The page refuses first and says what is over.
+      const gzipFile = async (json, name) => new File([await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).blob()], name);
+      const parameters = ['one', 'two', 'three', 'four', 'five'].map((k) => ({ key: k, label: 'Answer ' + k, type: 'text' }));
+      const tpl = await gzipFile(JSON.stringify({ format: 'hatchabot-template', version: 1, agent: { name: 'Long Answers' }, files: {}, parameters }), 'long-answers.template.hatchabot');
+      const before = calls('POST', /\/v1\/agents\/import$/).length;
+      try {
+        // The form settled from the scenario before (its close event is a queued task); a stale toast cleared.
+        await until(() => !paramFormDlg.open && paramFormResolve === null); await sleep(0);
+        document.getElementById('toast').textContent = '';
+        const imp = importAgentFile(tpl);
+        await formOpened();
+        // Written answers: a space or a comma takes three characters in the address.
+        const prose = (n) => 'A made-up answer, written out in full sentences, as a person would. '.repeat(40).slice(0, n);
+        for (let i = 0; i < 5; i++) document.getElementById('pfv-' + i).value = prose(i === 2 ? 2000 : 1990);
+        submitParamForm();
+        await imp;
+        const toastText = () => document.getElementById('toast').textContent;
+        await until(() => toastText().includes('too long to send together'), 3000).catch(() => {
+          throw new Error('not refused: toast ' + JSON.stringify(toastText()) + ', form open ' + paramFormDlg.open + ', imports made ' + (calls('POST', /\/v1\/agents\/import$/).length - before));
+        });
+        const said = toastText();
+        ok('refused in words: ' + said, /[\d,.]+ characters over/.test(said) && /“Answer three”, 2[,.]?000 characters/.test(said) && said.includes('Overview after the import'));
+        eq('no request was made', calls('POST', /\/v1\/agents\/import$/).length - before, 0);
+        // Answers that fit are sent.
+        window.__answer = { 'POST /v1/agents/import': [{ status: 200, body: { kind: 'template', name: 'Long Answers' } }] };
+        await until(() => !paramFormDlg.open && paramFormResolve === null); await sleep(0);
+        const imp2 = importAgentFile(tpl);
+        await formOpened();
+        for (let i = 0; i < 5; i++) document.getElementById('pfv-' + i).value = prose(2000);
+        document.getElementById('pfv-3').value = 'short';
+        document.getElementById('pfv-4').value = 'short';
+        submitParamForm();
+        await imp2;
+        eq('three full answers and two short ones went', calls('POST', /\/v1\/agents\/import$/).length - before, 1);
+      } finally {
+        window.__answer = {};
+        if (paramFormDlg.open) paramFormDlg.close();
+      }
+    },
     newDeviceNotice: async () => {
       const text = 'New sign-in to Hatchabot as sam: Chrome on Android, from about 203.0.113.x, 2026-10-01 12:00 UTC, through the public address. If they do not recognise it: Settings → Reach it from anywhere → sign sam out everywhere.';
       window.__override['/v1/security/notices'] = { notices: [{ id: 'sn-1', at: new Date().toISOString(), kind: 'new-device', aboutOwner: 'acct-9', text }], canSignOutOthers: true };
@@ -2939,7 +3061,9 @@ const SCENARIOS = String.raw`(() => {
       a14: c(7),                     // Hatchabot
     } };
   })();
-  const costFixture = async (body = COSTS) => { window.__override['/v1/costs'] = body; await v2LoadCosts(true); };
+  // v2LoadCosts asked while a read is out only queues a re-read (fire-and-forget, #93), so a fixture
+  // set right after another load could be checked before its own read came back (CI, 2026-10-23).
+  const costFixture = async (body = COSTS) => { window.__override['/v1/costs'] = body; await v2LoadCosts(true); await until(() => !v2CostsBusy && !v2CostsAgain); };
   const costCleanup = async () => {
     delete window.__override['/v1/costs']; delete window.__override['/v1/model-prices'];
     v2SetView('group'); await v2LoadCosts(true); // the stub answers {}: no costs
@@ -3086,7 +3210,7 @@ const SCENARIOS = String.raw`(() => {
         await costFixture();
         v2SetView('cost');
         await costFixture({ off: true, days: 7, agents: {} });
-        ok('no badges', !document.querySelector('#v2groups .v2cost'));
+        await until(() => !document.querySelector('#v2groups .v2cost'));
         ok('no Cost view', !byText('.v2views button', 'Cost'));
         ok('off the Cost view', v2View === 'group');
         ok('no cost line in the tooltip', !tipText('Meal Planner').includes('API prices'));
@@ -4675,8 +4799,9 @@ const SCENARIOS = String.raw`(() => {
       }
     },
     filesLinksSecondFactor: async () => {
-      // The file name (opens in a tab) and its ⬇ ask for the second factor at the public address, as the .tar.gz links do.
-      // A .pdf: text and images now open in the tab itself (filesSortAndOpenInPlace); what still goes to a new tab goes by sfOpen.
+      // The viewer's Open in a tab and its ⬇ ask for the second factor at the public address, as the .tar.gz links do.
+      // Every file the browser can show opens in the tab itself (filesSortAndOpenInPlace, filesMediaOpenInPlace);
+      // the viewer's Open in a tab is what still goes to a new tab, by sfOpen.
       window.__override['/v1/agents/a1/fs'] = { path: 'notes', entries: [{ name: 'packing-list.pdf', type: 'file', size: 12, mtime: '' }] };
       window.__override['/v1/second-factor'] = { factors: [{ id: 'sf-1', kind: 'totp' }], backupCodes: 3, need: 'yes', methods: ['totp', 'backup'], passkeyHere: false };
       const STEP = { status: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
@@ -4685,10 +4810,13 @@ const SCENARIOS = String.raw`(() => {
       try {
         openV2Agent('a1', 'files');
         await v2LoadFiles('a1', 'notes');
-        const name = await until(() => [...document.querySelectorAll('#v2Files a')].find((x) => x.textContent === 'packing-list.pdf'));
+        const row = await until(() => [...document.querySelectorAll('#v2Files a')].find((x) => x.textContent === 'packing-list.pdf'));
+        ok('the name opens the file here, not by a new tab', /v2OpenFile\(/.test(row.getAttribute('onclick') || '') && !row.target);
+        row.click();
+        const name = await until(() => byText('#v2Files a', 'Open in a tab'));
         const down = [...document.querySelectorAll('#v2Files a.btn')].find((x) => x.textContent === '⬇');
         ok('the ⬇ goes by sfLink: ' + down?.getAttribute('onclick'), /sfLink\(event, this, 'packing-list\.pdf'\)/.test(down?.getAttribute('onclick') || ''));
-        ok('the name goes by sfOpen', /^return sfOpen\(/.test(name.getAttribute('onclick') || ''));
+        ok('Open in a tab goes by sfOpen', /^return sfOpen\(/.test(name.getAttribute('onclick') || ''));
         let prevented = false; const ev = { preventDefault: () => { prevented = true; } };
         appConfig.publicAddress = false;
         ok('a plain link at the private address', sfOpen(ev, name, '/v1/agents/a1/fs?path=notes') === true && !prevented);
@@ -4893,12 +5021,55 @@ const SCENARIOS = String.raw`(() => {
       ok('degraded with no other cause still says something', bare.some((x) => x.includes('slow to respond')));
     },
   });
+  /** The phone run (the page opened 390 px wide): what has to fit a phone screen. The desktop suite is skipped there. */
+  const P = {
+    phoneSortButtonsReachable: async () => {
+      // Five sort buttons (Cost, Age, Name, Activity, My order) ran past the edge of a phone screen and the
+      // last were unreachable (Chris, 2026-10-23): they wrap now, every one inside the screen.
+      ok('a phone-wide window: ' + innerWidth, innerWidth <= 420);
+      const edges = () => [...document.querySelectorAll('.v2binsort button')].map((b) => [b.textContent.trim(), Math.round(b.getBoundingClientRect().right)]);
+      await until(() => document.querySelectorAll('.v2binsort button').length >= 4);
+      ok('every sort button inside the screen: ' + JSON.stringify(edges()), edges().every(([, r]) => r > 0 && r <= innerWidth));
+      const cost = byText('.v2views button', 'Cost');
+      if (cost) {
+        cost.click();
+        await until(() => document.getElementById('v2sort-cost'));
+        ok('with Cost too: ' + JSON.stringify(edges()), edges().length >= 5 && edges().every(([, r]) => r > 0 && r <= innerWidth));
+      }
+      ok('the page does not scroll sideways: ' + document.documentElement.scrollWidth + ' > ' + innerWidth, document.documentElement.scrollWidth <= innerWidth);
+    },
+    phoneFileHasAWayBack: async () => {
+      // A file opened from Files on a phone: ← Back is on the screen (the app from the home screen has no browser bar).
+      window.__override['/v1/agents/a1/fs'] = { path: '', entries: [{ name: 'notes.txt', type: 'file', size: 10, mtime: '' }] };
+      window.__override['/v1/agents/a1/fs/file'] = 'a note';
+      try {
+        openV2Agent('a1', 'files');
+        const a = await until(() => [...document.querySelectorAll('#v2FilesDrop tbody a')].find((x) => x.textContent.trim() === 'notes.txt'));
+        a.click();
+        await until(() => document.getElementById('v2FileBody')?.textContent.includes('a note'));
+        const back = byText('#v2Files button', '← Back');
+        const r = back.getBoundingClientRect();
+        ok('← Back is on the screen: ' + JSON.stringify(r), r.width > 0 && r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight);
+        back.click();
+        await until(() => document.querySelector('#v2FilesDrop tbody tr'));
+      } finally {
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents/a1/fs']; delete window.__override['/v1/agents/a1/fs/file']; v2FilesPath.delete('a1');
+      }
+    },
+  };
   (async () => {
-    for (const [name, run] of Object.entries(T)) {
+    // The results so far go on the page after every scenario, with the one running: a page
+    // that runs out of virtual time (Chrome's dump comes with no answer) still says where.
+    const report = () => document.documentElement.setAttribute('data-ui-results', JSON.stringify(results));
+    for (const [name, run] of Object.entries(innerWidth <= 500 ? P : T)) {
+      document.documentElement.setAttribute('data-ui-running', name);
       try { await run(); results.push({ name, ok: true }); }
       catch (err) { results.push({ name, ok: false, error: String(err && err.message || err).slice(0, 300) }); }
+      report();
     }
-    document.documentElement.setAttribute('data-ui-results', JSON.stringify(results));
+    document.documentElement.removeAttribute('data-ui-running');
+    document.documentElement.setAttribute('data-ui-done', String(Math.round(performance.now() / 1000)));
     document.title = 'UI-DONE';
   })();
 })();`;
@@ -4929,29 +5100,42 @@ try {
   // "the page never reported" (2026-10-09). The page holds only test data.
   chmodSync(work, 0o755);
   chmodSync(join(work, 'page.html'), 0o644);
-  let dom = '';
-  for (let tries = 1; !dom.includes('data-ui-results') && tries <= 3; tries++) {
-    try {
-    // Virtual time: 30 min of it. A scenario that times out spends up to 20 s;
-    // past the budget the page never reports and the failing scenario goes
-    // unnamed (seen twice in release runs, 2026-10-09).
-      dom = execFileSync(CONTAINER_CLI, [
-        'run', '--rm', '--shm-size=1g', '-v', `${work}:/w`, CHROME_IMAGE,
-        '--no-sandbox', '--headless', '--disable-gpu', '--disable-dev-shm-usage', '--hide-scrollbars',
-        '--window-size=1400,1000', '--virtual-time-budget=1800000', '--dump-dom', 'file:///w/page.html?ui=classic',
-      ], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] });
-    } catch (err) { dom = String(err.stdout ?? ''); }
+  // The page is opened twice: a desktop window runs the suite, a phone-wide
+  // one (390 px, an ordinary phone) runs the checks of what has to fit a phone
+  // screen (the P suite, picked by the window's width; Chris, 2026-10-23).
+  let failed = 0, total = 0;
+  for (const [label, size] of [['desktop', '1400,1000'], ['phone', '390,844']]) {
+    let dom = '';
+    // The attribute, not the words: the page's own script names it too.
+    for (let tries = 1; !/data-ui-done="/.test(dom) && tries <= 3; tries++) {
+      try {
+      // Virtual time, 2 h of it: Chrome fast-forwards it while the page waits
+      // on real work (a blob read, a decompression), by minutes a time while a
+      // timer is pending (measured 2026-10-23) — 30 min ran out on the dev
+      // runner, and the page reported nothing (also seen 2026-10-09). A page
+      // that still runs out names the scenario it was on (data-ui-running).
+        dom = execFileSync(CONTAINER_CLI, [
+          'run', '--rm', '--shm-size=1g', '-v', `${work}:/w`, CHROME_IMAGE,
+          '--no-sandbox', '--headless', '--disable-gpu', '--disable-dev-shm-usage', '--hide-scrollbars',
+          `--window-size=${size}`, '--virtual-time-budget=7200000', '--dump-dom', 'file:///w/page.html?ui=classic',
+        ], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] });
+      } catch (err) { dom = String(err.stdout ?? ''); }
+    }
+    if (keep) writeFileSync(join(work, `dom-${label}.html`), dom);
+    const m = /data-ui-results="([^"]*)"/.exec(dom);
+    if (!m) throw new Error(`the page never reported (no data-ui-results in the ${label} DOM dump${keep ? `; see ${work}/dom-${label}.html` : '; run with --keep'})`);
+    const results = JSON.parse(m[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'));
+    const done = /data-ui-done="(\d+)"/.exec(dom);
+    const running = /data-ui-running="([^"]*)"/.exec(dom);
+    if (!done) { failed++; total++; console.log(`✗ ${running?.[1] ?? '(unknown)'}${label === 'phone' ? ' (phone)' : ''} — the page ran out of virtual time on it (${results.length} scenarios reported before it)`); }
+    else if (done[1] > 3600) console.log(`(the ${label} run used ${done[1]} s of its 7200 s of virtual time)`);
+    for (const r of results) {
+      total++;
+      if (r.ok) console.log(`✓ ${r.name}${label === 'phone' ? ' (phone)' : ''}`);
+      else { failed++; console.log(`✗ ${r.name}${label === 'phone' ? ' (phone)' : ''} — ${r.error}`); }
+    }
   }
-  if (keep) writeFileSync(join(work, 'dom.html'), dom);
-  const m = /data-ui-results="([^"]*)"/.exec(dom);
-  if (!m) throw new Error(`the page never reported (no data-ui-results in the DOM dump${keep ? `; see ${work}/dom.html` : '; run with --keep'})`);
-  const results = JSON.parse(m[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'));
-  let failed = 0;
-  for (const r of results) {
-    if (r.ok) console.log(`✓ ${r.name}`);
-    else { failed++; console.log(`✗ ${r.name} — ${r.error}`); }
-  }
-  console.log(`${results.length - failed}/${results.length} passed${keep ? ` · kept ${work}` : ''}`);
+  console.log(`${total - failed}/${total} passed${keep ? ` · kept ${work}` : ''}`);
   process.exitCode = failed ? 1 : 0;
 } finally {
   if (!keep) rmSync(work, { recursive: true, force: true });

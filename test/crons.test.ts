@@ -591,12 +591,41 @@ describe('an agent in no chat app: results go to its console conversation (2026-
     // The same agent once it is in a chat app: every implicit one gets the owner's chat, bound or not.
     const r2 = await retargetImplicitCrons(p, ref, 'kitchen', { channel: 'telegram', to: TG_ID });
     expect(r2).toEqual({ changed: 3, failed: 0, held: [] });
+    // A task bound to a conversation of its own is unbound as it is pointed at the chat:
+    // `cron edit` leaves the session alone unless told, and a run in a web conversation
+    // that is gone fails before the chat is reached (review R10). An unbound one gets the chat alone.
+    const toChat = ['--announce', '--best-effort-deliver', '--channel', 'telegram', '--to', TG_ID];
+    expect(p.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit').slice(1)).toEqual([
+      ['cron', 'edit', 'j1', ...toChat],
+      ['cron', 'edit', 'j2', ...toChat, '--session', 'isolated', '--clear-session-key'],
+      ['cron', 'edit', 'j3', ...toChat, '--session', 'isolated', '--clear-session-key'],
+    ]);
     // Nothing to change: not even the version is asked.
     const p2 = new MockProvider();
     const ref2 = await seedRuntime(p2);
     p2.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [{ id: 'q', enabled: true, delivery: { mode: 'none' } }] }) });
     expect(await retargetImplicitCrons(p2, ref2, 'kitchen', { session: 'agent:kitchen:main' })).toEqual({ changed: 0, failed: 0, held: [] });
     expect(p2.execLog.map((a) => a.slice(0, 2).join(' '))).toEqual(['cron list']);
+  });
+
+  it('retargetCron unbinds a task bound to a conversation only when pointing it at a chat (review R10)', async () => {
+    const { retargetCron } = await import('../src/orchestrator/crons.js');
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    const boundJob = { sessionTarget: 'current', sessionKey: 'agent:kitchen:web:0123456789abcdef' };
+    await retargetCron(p, ref, 'j', { channel: 'telegram', to: TG_ID }, boundJob);
+    await retargetCron(p, ref, 'j', { channel: 'telegram', to: TG_ID }, { sessionTarget: 'isolated' });
+    await retargetCron(p, ref, 'j', { channel: 'telegram', to: TG_ID });
+    await retargetCron(p, ref, 'j', { session: 'agent:kitchen:main' }, boundJob);
+    await retargetCron(p, ref, 'j', undefined, boundJob);
+    const edits = p.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit').map((a) => a.slice(3).join(' '));
+    expect(edits).toEqual([
+      `--announce --best-effort-deliver --channel telegram --to ${TG_ID} --session isolated --clear-session-key`,
+      `--announce --best-effort-deliver --channel telegram --to ${TG_ID}`,
+      `--announce --best-effort-deliver --channel telegram --to ${TG_ID}`,
+      '--session current --session-key agent:kitchen:main --announce --best-effort-deliver',
+      '--no-deliver',
+    ]);
   });
 
   it('listCrons reads where a task runs and the conversation it is bound to', async () => {

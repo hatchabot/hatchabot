@@ -435,7 +435,9 @@ export async function resumeSnapshotRestore(deps: SnapshotDeps, opId: string): P
       op.done(`Restored its files from "${label}".`);
       return;
     }
-    if (safety && CORE_FILES.every((n) => (now![n] ?? '') === (safety.files[n] ?? ''))) {
+    // Strict, as above: a file the restore made (empty) where the copy taken
+    // before had none is a change, not "nothing" (review R06, 2026-10-23).
+    if (safety && CORE_FILES.every((n) => now![n] === safety.files[n])) {
       op.rolledBack(`The restore of "${label}" was interrupted by a restart before any file was written — nothing was changed.`);
       return;
     }

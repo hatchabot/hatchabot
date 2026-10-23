@@ -95,6 +95,14 @@ describe('downloads', () => {
     expect(r.body).toBe('hello');
     expect(provider.execLog.at(-1)![1]).toContain('exec head -c 5');
   });
+  it('a file that shrank between its size and its bytes does not end a short body as if complete (review R23)', async () => {
+    const { f, provider } = await world();
+    provider.execResponses.set('sh-volume', { code: 0, stdout: 'regular file\t100\n', stderr: '' });
+    provider.streamBytes = Buffer.from('short'); // 5 of the 100 bytes announced
+    // The response is destroyed, not ended: a client sees a broken download, never a complete one.
+    await expect(f.inject({ method: 'GET', url: '/v1/agents/a1/fs/file?path=out/log.txt', headers: as })).rejects.toThrow(/destroyed before completion/);
+    expect(provider.execLog.at(-1)![1]).toContain('exec head -c 100');
+  });
   it('a folder comes as .tar.gz; a file asked for as a folder (or the reverse) is refused; too big is refused before a byte', async () => {
     const { f, provider } = await world();
     provider.execResponses.set('sh-volume', { code: 0, stdout: '12345\n', stderr: '' });

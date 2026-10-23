@@ -269,6 +269,19 @@ describe('the daily trend point (review, 2026-09-29)', () => {
     expect(day().usedTokens).toBe(1_000_000);
   }));
 
+  it("an owner's last agent deleted after its final reading: yesterday's point still takes that reading (review R19)", () => withTz('UTC', () => {
+    const store = trendWorld();
+    store.addTokenSample('den', 'api', '2026-09-28T10:00:00.000Z', 1000);
+    store.addTokenSample('den', 'api', '2026-09-28T11:00:00.000Z', 1500);   // +500 by noon
+    snapshotDailyUsage(store, Date.parse('2026-09-28T12:00:00.000Z'));
+    const day = () => store.listUsageSnapshots(OWNER, 30).find((s) => s.day === '2026-09-28')!;
+    expect(day().usedTokens).toBe(500);
+    store.addTokenSample('den', 'api', '2026-09-28T23:55:00.000Z', 2500);   // +1000 more, late, then both agents deleted
+    for (const id of ['den', 'kitchen']) { store.setAgentState(id, 'DELETING'); store.setAgentState(id, 'DELETED'); }
+    snapshotDailyUsage(store, Date.parse('2026-09-29T12:00:00.000Z'));
+    expect(day().usedTokens).toBe(1500);
+  }));
+
   it("yesterday with no snapshot (down at midnight) gets one on the next pass (report B48, 2026-10-22)", () => withTz('UTC', () => {
     const store = trendWorld();
     store.addTokenSample('kitchen', 'sub', '2026-09-27T10:00:00.000Z', 1000);

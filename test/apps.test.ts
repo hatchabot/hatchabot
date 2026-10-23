@@ -81,6 +81,8 @@ class FakeAgent extends MockProvider {
   /** The config file the app's tests found in their {data_dir}. */
   testSaw: string[] = [];
   failAdd: (name: string) => boolean = () => false;
+  /** A `cron add` (by name) whose call rejects outright (the daemon gone), rather than answering an error. */
+  throwAdd: (name: string) => boolean = () => false;
   failRm: (id: string) => boolean = () => false;
   /** A `cron add` (by name) or `cron rm` (by id) that takes effect, then its reply is lost. */
   lostAdd: (name: string) => boolean = () => false;
@@ -110,6 +112,7 @@ class FakeAgent extends MockProvider {
     if (argv[0] === 'cron' && argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs: this.jobs.filter((j) => argv.includes('--all') || !j.disabled).map(({ id, name }) => ({ id, name })) }), stderr: '' };
     if (argv[0] === 'cron' && argv[1] === 'add') {
       const name = argv[argv.indexOf('--name') + 1]!;
+      if (this.throwAdd(name)) throw new Error('provider unavailable');
       if (this.failAdd(name)) return { code: 1, stdout: '', stderr: 'gateway refused the job' };
       const id = `j${this.#next++}`;
       this.jobs.push({ id, name, argv });
@@ -1273,6 +1276,45 @@ describe('apps: what the 2026-10-10 workflow audit found', () => {
     agent.breakScript = (s) => s;
     expect(agent.live()).toEqual(before);
     expect(JSON.parse(before.config!)).toMatchObject({ mailbox: 'first@example.org', mode: 'live' });
+  });
+});
+
+describe('apps: what the 2026-10-23 review found', () => {
+  const d = (agent: FakeAgent) => ({ provider: agent, runtimeRef: 'x', facts: FACTS });
+  const withFields = (fields: unknown[]) => parseManifest(JSON.stringify({ ...MANIFEST, config: { fields } }));
+
+  it('a required list given as [] is asked for, as "" is for text (R03)', () => {
+    const m = withFields([{ key: 'recipients', type: 'list', required: true, label: 'who gets it' }]);
+    const r = mergeConfig(m, FACTS, {}, { recipients: [] });
+    expect(r.missing).toEqual(['recipients (who gets it)']);
+    expect(r.missingKeys).toEqual(['recipients']);
+    expect(Object.hasOwn(r.config, 'recipients')).toBe(false);
+    expect(mergeConfig(m, FACTS, {}, { recipients: ['a@example.org'] })).toMatchObject({ config: { recipients: ['a@example.org'] }, missing: [] });
+  });
+
+  it("a kept value is held to its field's type now: one the new type refuses is asked for again, an optional one cleared, a secret kept (R04)", () => {
+    const m = withFields([{ key: 'count', type: 'number', required: true }, { key: 'limit', type: 'number' }, { key: 'token', type: 'text', secret: true }]);
+    const r = mergeConfig(m, FACTS, { count: 'not-a-number', limit: 'abc', token: 'ref:app-token/1' }, {});
+    expect(r.missing).toEqual(['count']);
+    expect(r.missingKeys).toEqual(['count']);
+    expect(r.config).toEqual({ limit: null, token: 'ref:app-token/1' });
+    // A kept value the type takes is written as that type ("12" under a number field is 12).
+    expect(mergeConfig(m, FACTS, { count: ' 12 ', limit: 3, token: 't' }, {})).toMatchObject({ config: { count: 12, limit: 3 }, missing: [] });
+  });
+
+  it('a field keyed "__proto__" is refused when the manifest is read (R13)', () => {
+    expect(() => withFields([{ key: '__proto__', type: 'text', required: true }])).toThrow(/config\.fields\.0\.key: a field cannot be keyed "__proto__"/);
+  });
+
+  it('a scheduling call that rejects outright (the daemon gone) is a failed call: the jobs already made come off again (R05)', async () => {
+    const agent = new FakeAgent();
+    agent.jobs = [{ id: 'keep', name: 'daily-brief' }];
+    agent.throwAdd = (name) => name === 'demoapp-two';
+    const rel = await resolveRelease(hostGit, repo({ ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['true'] }, { name: 'two', every: '1h', command: ['true'] }] }), 'HEAD');
+    await expect(installRelease(d(agent), rel, { mailbox: 'demo@example.org' }))
+      .rejects.toThrow(/Could not schedule demoapp-two: provider unavailable.*Its tasks are as they were/s);
+    expect(agent.live()).toEqual({ current: null, config: null, tasks: [], staging: false });
+    expect(agent.jobs).toEqual([{ id: 'keep', name: 'daily-brief' }]);
   });
 });
 

@@ -1,9 +1,14 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
+
+// Every test here runs real shell scripts (git, bash, a fake gh) in a sandbox. On the
+// self-hosted runner CI shares the machine with other work, and vitest's 5 s was not
+// enough under load (land, promote, release, first-run-link; 2026-10-23).
+vi.setConfig({ testTimeout: 30_000 });
 
 /**
  * scripts/first-run-link.sh in a sandbox: a throwaway checkout with its own
@@ -26,7 +31,7 @@ function run(env: string) {
 }
 
 describe('scripts/first-run-link.sh (audit, 2026-10-22)', () => {
-  it('reads a quoted PORT as the port, not with its quotes', { timeout: 30_000 }, () => { // several bash runs; CI's loaded runner passed 5 s (2026-10-23)
+  it('reads a quoted PORT as the port, not with its quotes', () => {
     for (const env of ['PORT="8123"\n', "PORT='8123'\n", 'PORT=8123 # my port\n', 'PORT=8123\n']) {
       const r = run(env);
       expect(r.status, env).toBe(0);
