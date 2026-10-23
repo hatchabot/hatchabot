@@ -36,6 +36,10 @@ const when = (ts) => { const d = new Date(ts); if (isNaN(d)) return '';
 // pre-migration .jsonl and the database rows made from it: count each once.
 const seen = new Set();
 const convs = [];
+// Records the store holds but that cannot be read (a damaged compressed
+// event, or a whole archived conversation): left out, and said so, not
+// dropped in silence (review 2026-10-22, A24).
+let damaged = 0;
 const add = (events, meta) => {
   const msgs = []; let started = '';
   for (const j of events) {
@@ -89,9 +93,12 @@ if (sqlite && fs.existsSync(dbf)) {
         live = w.length ? new Set(Object.values(cur)) : null;
       }
       const decode = (r) => {
-        if (r.event_json != null) return parse(r.event_json);
-        if (r.event_zstd) { try { return parse(zlib.zstdDecompressSync(Buffer.from(r.event_zstd)).toString('utf8')); } catch { return null; } }
-        return null;
+        let j = null;
+        if (r.event_json != null) j = parse(r.event_json);
+        else if (r.event_zstd) { try { j = parse(zlib.zstdDecompressSync(Buffer.from(r.event_zstd)).toString('utf8')); } catch {} }
+        else return null;
+        if (!j) damaged++;
+        return j;
       };
       const by = new Map();
       for (const r of rows) { if (!by.has(r.session_id)) by.set(r.session_id, []); by.get(r.session_id).push(decode(r)); }
@@ -101,7 +108,7 @@ if (sqlite && fs.existsSync(dbf)) {
       catch (e) { if (!noTable(e)) throw e; }
       for (const a of arch) {
         let text = '';
-        try { text = a.encoding === 'zstd' ? zlib.zstdDecompressSync(Buffer.from(a.archive_blob)).toString('utf8') : Buffer.from(a.archive_blob).toString('utf8'); } catch { continue; }
+        try { text = a.encoding === 'zstd' ? zlib.zstdDecompressSync(Buffer.from(a.archive_blob)).toString('utf8') : Buffer.from(a.archive_blob).toString('utf8'); } catch { damaged++; continue; }
         if (a.session_id) fromDb.add(a.session_id);
         // When it was archived, where the table says; else its last message.
         const evs = jsonl(text);
@@ -165,6 +172,7 @@ const who = (m) => m.role === 'assistant' ? name : 'User';
 const out = ['# ' + name + ' — chat history', '',
   'Exported ' + when(new Date()) + ' (' + tz + '). Oldest first; includes conversations from before resets. ' +
   'Automated (cron) runs and tool activity are left out.', ''];
+if (damaged) out.push('> ⚠ ' + damaged + ' saved record' + (damaged > 1 ? 's' : '') + ' could not be read (damaged in the agent\'s database) and ' + (damaged > 1 ? 'are' : 'is') + ' left out.', '');
 let messages = 0;
 pick.forEach((c, i) => {
   out.push('## Conversation ' + (i + 1) + ' — started ' + when(c.started) + (c.live ? ' · current' : c.reset ? ' · ended by a reset ' + when(c.reset) : ' · ended'), '');
@@ -182,9 +190,9 @@ if (mode === 'recover') {
   if (!messages) return done({ conversations: 0, messages: 0 });
   fs.mkdirSync(path.dirname(env.OUT), { recursive: true });
   fs.writeFileSync(env.OUT, text);
-  return done({ conversations: pick.length, messages, bytes: Buffer.byteLength(text) });
+  return done({ conversations: pick.length, messages, bytes: Buffer.byteLength(text), unreadable: damaged });
 }
-return done({ text, conversations: pick.length, messages });
+return done({ text, conversations: pick.length, messages, unreadable: damaged });
 }
 main();
 `;
@@ -210,6 +218,8 @@ export interface TranscriptResult {
   text: string;
   conversations: number;
   messages: number;
+  /** Records in the store that could not be read, left out (the text says so). */
+  unreadable: number;
 }
 
 export interface ContextStats {
@@ -253,7 +263,7 @@ export async function exportTranscript(provider: RuntimeProvider, agent: Agent):
     : await provider.execShellOnVolume(agent.runtimeRef!, s, { readOnly: true });
   if (res.code !== 0) throw new Error((res.stderr || res.stdout || 'transcript render failed').slice(-300));
   const j = JSON.parse(res.stdout || '{}');
-  return { text: j.text ?? '', conversations: j.conversations ?? 0, messages: j.messages ?? 0 };
+  return { text: j.text ?? '', conversations: j.conversations ?? 0, messages: j.messages ?? 0, unreadable: j.unreadable ?? 0 };
 }
 
 /**

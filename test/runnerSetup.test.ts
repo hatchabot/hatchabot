@@ -116,6 +116,23 @@ cat > /dev/null; echo 'no space left' >&2; exit 1
     expect(res.error).toContain('no space left');
   });
 
+  it('a receiver that fails early takes the sender with it (no docker save left blocked on its pipe, audit 2026-10-22)', async () => {
+    const pidFile = join(mkdtempSync(join(tmpdir(), 'acl-imgpid-')), 'save.pid');
+    const docker = stub(`
+if [ "$1" = save ]; then echo $$ > ${JSON.stringify(pidFile)}; echo start; exec sleep 30; fi
+echo 'load refused' >&2; exit 1
+`);
+    const res = await installRuntimeImage('ssh://r@x', { docker, stallMs: 10_000 });
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('load refused');
+    // Killed before it wrote its pid is gone too; otherwise its pid must be.
+    const { readFileSync } = await import('node:fs');
+    const pid = () => { try { return Number(readFileSync(pidFile, 'utf8')) || 0; } catch { return 0; } };
+    const alive = () => { const p = pid(); if (!p) return false; try { process.kill(p, 0); return true; } catch { return false; } };
+    for (let i = 0; i < 120 && alive(); i++) await new Promise((r) => setTimeout(r, 25));
+    expect(alive()).toBe(false);
+  });
+
   it('sends it compressed (docker load reads gzip) and reports how far it has come', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'acl-imgcopy-'));
     const got = join(dir, 'received.gz');

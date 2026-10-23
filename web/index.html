@@ -1982,21 +1982,23 @@
       <code id="bkDir" style="word-break:break-all"></code> at <code>0700</code> and is never downloadable from
       here.</div></details>
     </div>
-    <div class="actions" style="justify-content:flex-start;margin:12px 0 4px">
+    <div class="sub" id="bkOwnerOnly" style="margin:12px 0 4px" hidden>Backing up, restore drills and the nightly sets are run by this machine's owner.
+      Below: whether each of your agents could be brought back.</div>
+    <div class="actions" id="bkRunRow" style="justify-content:flex-start;margin:12px 0 4px">
       <button class="primary" id="bkRunBtn" onclick="runBackupNow()">Back up now</button>
     </div>
     <div id="bkRun" class="sub" style="margin:8px 0" hidden></div>
     <h4 style="margin:18px 0 4px">Can each agent be brought back?</h4>
     <div class="sub">For each agent, the newest backup a restore could use, and the last restore drill that checked it.
       A drill restores each agent's copy into a throwaway volume with no network, then removes it — nothing live is touched.</div>
-    <div class="actions" style="justify-content:flex-start;align-items:center;gap:10px;margin:8px 0 4px;flex-wrap:wrap">
+    <div class="actions" id="bkDrillRow" style="justify-content:flex-start;align-items:center;gap:10px;margin:8px 0 4px;flex-wrap:wrap">
       <label style="margin:0">Restore drills <select id="bkDrillEvery" onchange="setDrillEvery(this.value)">
         <option value="off">Off</option><option value="weekly">Weekly</option><option value="daily">Daily</option></select></label>
       <button id="bkDrillBtn" onclick="runDrillNow()">Run a drill now</button>
     </div>
     <div id="bkDrill" class="sub" style="margin:4px 0"></div>
     <div id="bkReady" style="margin-top:6px;overflow-x:auto">Loading…</div>
-    <h4 style="margin:18px 0 4px">Sets</h4>
+    <h4 id="bkSetsHead" style="margin:18px 0 4px">Sets</h4>
     <div id="bkList" style="margin-top:8px">Loading…</div>
   </section>
 
@@ -2856,6 +2858,22 @@ function sfLink(ev, el, fallbackName) {
   void saveFromServer(el.getAttribute('href'), fallbackName);
   return false;
 }
+/**
+ * A step-up link that opens in a new tab (a file shown inline). A tab cannot
+ * be asked for the second factor, so at the public address a cheap step-up
+ * read (`probe`, the folder it is in) goes first through api(), which asks
+ * when it has lapsed; the tab then opened gets the file, not raw JSON (audit, 2026-10-20).
+ */
+function sfOpen(ev, el, probe) {
+  if (!appConfig.publicAddress) return true;
+  ev.preventDefault();
+  void (async () => {
+    try { await api(probe); } catch (e) { toast(e.message, 8000); return; }
+    const w = window.open(el.getAttribute('href'), '_blank');
+    if (w) w.opener = null; else toast('The browser kept the new tab from opening — click the name again.', 8000);
+  })();
+  return false;
+}
 async function sfCancel() {
   const kind = sfPending?.kind;
   if (sfDlg.open) sfDlg.close();
@@ -3680,6 +3698,14 @@ loginDlg?.addEventListener('cancel', (e) => e.preventDefault());
 loginDlg?.addEventListener('keydown', (e) => { if (e.key === 'Escape') e.preventDefault(); });
 
 let toastTimer;
+/** Adopt's scheduled tasks that did not come across, said: unread ones read as none (review of 2026-10-22). */
+function adoptTasksMissed(c) {
+  if (!c) return '';
+  const parts = [];
+  if (c.failed) parts.push(`${c.failed} scheduled task${c.failed > 1 ? 's' : ''} could not be carried`);
+  if (c.error) parts.push(`its scheduled tasks were not all read: ${c.error}`);
+  return parts.length ? ` · ${parts.join('; ')}.` : '';
+}
 function toast(msg, ms, cls) {
   const t = $('toast');
   t.textContent = msg;
@@ -4852,7 +4878,18 @@ let bkPollTimer = null;
 
 async function loadBackups() {
   const el = $('bkList');
+  // Back up now, the drills and the sets are the machine owner's: the server
+  // answers anyone else 403, and leaves the last drill out of what they read.
+  // A member sees the per-agent table and a line saying who runs the rest (audit, 2026-10-20).
+  // Not read yet, or the read failed ({}): ask again. Still unknown, the owner's
+  // view, which the server guards with its 403: hiding it on a failed read took
+  // Back up now and the sets from the machine owner (regression audit, 2026-10-22).
+  if (typeof myAccount.hostOwner !== 'boolean') await loadMyAccount();
+  const owner = myAccount.hostOwner !== false;
+  for (const id of ['bkRunRow', 'bkDrillRow', 'bkDrill', 'bkSetsHead', 'bkList']) $(id).hidden = !owner;
+  $('bkOwnerOnly').hidden = owner;
   void loadReadiness(); // the per-agent table above the sets (recovery readiness)
+  if (!owner) { $('bkRun').hidden = true; return; }
   try {
     const r = await api('/v1/backups');
     $('bkDir').textContent = r.dir;
@@ -7048,7 +7085,7 @@ async function bringInSelected() {
       const { res, agentId } = await doAdopt({ path: a.workspace, name: a.name, reuse: !!a.bot, web: !a.bot, token: '', bot: a.bot, onStatus: m => rowSay(i, m) });
       const c = res.crons?.carried || 0;
       crons += c;
-      rowSay(i, `✓ brought in${c ? ` · ${c} task${c > 1 ? 's' : ''} carried (disabled)` : ''}`, 'var(--ok)'); ok++;
+      rowSay(i, `✓ brought in${c ? ` · ${c} task${c > 1 ? 's' : ''} carried (disabled)` : ''}${adoptTasksMissed(res.crons)}`, 'var(--ok)'); ok++;
       adopted.push({ agentId, name: a.name, workspace: a.workspace });
     } catch (e) { rowSay(i, `✗ ${e.message}`, 'var(--warn)'); }
   }
@@ -7253,7 +7290,7 @@ async function runAdopt() {
       onStatus: set,
     });
     adoptDlg.close();
-    const cronNote = res.crons?.carried ? ` Carried ${res.crons.carried} scheduled task${res.crons.carried > 1 ? 's' : ''} (disabled — review and enable in its Tasks).` : '';
+    const cronNote = (res.crons?.carried ? ` Carried ${res.crons.carried} scheduled task${res.crons.carried > 1 ? 's' : ''} (disabled — review and enable in its Tasks).` : '') + adoptTasksMissed(res.crons);
     toast(`Adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into “${name}”.${cronNote}${web ? ' No Telegram: talk to it in the web console (click its icon).' : ''} The original is untouched — retire it when you're happy.`, 45000);
     await refresh(true);
     await offerFolders([{ agentId, name, workspace }]);
@@ -7759,13 +7796,27 @@ async function deleteSnapshot(snapId, label) {
   } catch (e) { $('editErr').textContent = e.message; }
 }
 
+// Agents whose revert is still running: their editor reads but cannot save
+// (picking another file read it with Save on, and a Save then put back the
+// text the revert was replacing — regression audit, 2026-10-22).
+const editReverting = new Set();
+const EDIT_REVERTING = 'Reverting… the editor reloads when it is done.';
 async function revertSnapshot(snapId, label) {
   if (!confirm(`Revert to "${label}"? The agent's SOUL, AGENTS and MEMORY files go back to that point. Its current files are snapshotted first, so this is undoable. Applies to new conversations (send /new in Telegram).`)) return;
   try {
-    const res = await api(`/v1/agents/${editAgentId}/snapshots/${snapId}/restore`, { method: 'POST', body: {} });
+    const forId = editAgentId;
+    const res = await api(`/v1/agents/${forId}/snapshots/${snapId}/restore`, { method: 'POST', body: {} });
     // Since v2.156.0 a 202 with its operation: followed, its end said in a toast.
-    if (res?.operation?.id) v2FollowOp(res.operation);
-    else toast(`Reverted ${res.restored.join(', ')}`);
+    // The 202 comes before a file is written, so the editor is read again when
+    // it ends — read now, it showed the old text and a Save put it back (audit, 2026-10-20).
+    if (res?.operation?.id) {
+      editReverting.add(forId);
+      editLoaded = null; $('editSaveBtn').disabled = true;
+      $('editErr').textContent = EDIT_REVERTING;
+      v2FollowOp(res.operation, async () => { editReverting.delete(forId); if (editAgentId !== forId) return; await loadEditFile(); await loadSnapshots(); });
+      return;
+    }
+    toast(`Reverted ${res.restored.join(', ')}`);
     await loadEditFile();
     await loadSnapshots();
   } catch (e) { $('editErr').textContent = e.message; }
@@ -8651,7 +8702,9 @@ async function loadSpendChart(el) {
   const agent = el.dataset.agent, source = el.dataset.source;
   try {
     const sel = source ? `&source=${encodeURIComponent(source)}` : !agent && spendAgents.length ? `&agents=${encodeURIComponent(spendAgents.join(','))}` : '';
-    const d = await api(`/v1/usage/spend?range=${spendRange}${agent ? `&agent=${encodeURIComponent(agent)}` : sel}`);
+    // The page's zone: day bars start at its midnight, as their labels read (audit, 2026-10-20).
+    let tz = ''; try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch {}
+    const d = await api(`/v1/usage/spend?range=${spendRange}${agent ? `&agent=${encodeURIComponent(agent)}` : sel}${tz ? `&tz=${encodeURIComponent(tz)}` : ''}`);
     if (el.isConnected) el.innerHTML = spendChartHTML(d, { fleet: !agent && !source, byAgent: !!source }) + ((agent || source) && d.planShare > 0 ? '<div class="sub" style="margin-top:2px">* Claude plan use priced at API rates — not money you pay.</div>' : '');
   } catch (e) { if (el.isConnected) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
@@ -9137,15 +9190,19 @@ function renderHealth(h) {
     if (last) rows.push(healthRow('Last message', null, ago(new Date(last).toISOString())));
   }
   if (h.eventLoop) rows.push(healthRow('Event loop', !h.eventLoop.degraded, h.eventLoop.degraded ? (h.eventLoop.reasons.join(', ') || 'degraded') : 'nominal'));
+  for (const k of h.disconnected || []) rows.push(healthRow(`${k === 'slack' ? 'Slack' : 'Discord'} connected`, false, 'disconnected'));
   if (h.pluginErrors && h.pluginErrors.length) rows.push(healthRow('Plugin errors', false, h.pluginErrors.slice(0, 3).join(', ')));
   // Config lint (doctor --lint): silent degradations the gateway probe can't
   // see. Only present when the check was requested with ?doctor=1.
   if (h.doctor) {
     if (h.doctor.findings.length) {
-      rows.push(healthRow('Config warnings', false, `${h.doctor.findings.length} finding${h.doctor.findings.length > 1 ? 's' : ''}`));
+      // The worst come first; the count is all of them, not only those sent.
+      const total = h.doctor.findings.length + (h.doctor.omittedCount || 0);
+      rows.push(healthRow('Config warnings', false, `${total} finding${total > 1 ? 's' : ''}`));
       for (const f of h.doctor.findings.slice(0, 6)) {
         rows.push(`<div class="sub" style="margin:2px 0 2px 18px">${esc(f.severity)} · ${esc(f.checkId)}: ${esc(f.message)}</div>`);
       }
+      if (total > 6) rows.push(`<div class="sub" style="margin:2px 0 2px 18px">… and ${total - 6} more</div>`);
     } else {
       rows.push(healthRow('Config lint', true, `${h.doctor.checksRun} checks clean${h.doctor.mutedCount ? ` (+${h.doctor.mutedCount} known)` : ''}`));
     }
@@ -9368,6 +9425,7 @@ async function loadEditFile() {
     const f = await api(`/v1/agents/${forId}/files/${file}`);
     if (editAgentId !== forId || $('editFile').value !== file) return;
     $('editContent').value = f.content;
+    if (editReverting.has(forId)) { $('editErr').textContent = EDIT_REVERTING; return; }
     editLoaded = { agentId: forId, file };
     $('editSaveBtn').disabled = false;
   } catch (e) {
@@ -9383,14 +9441,21 @@ async function saveEditFile() {
     $('editErr').textContent = 'This file has not loaded, so there is nothing to save.';
     return;
   }
+  // The editor this save is for: closed, and another agent or file opened in
+  // it while it saved, its answer is said in a toast and leaves the new one
+  // (with whatever is typed there) as it is (review, 2026-10-22).
+  const loaded = editLoaded;
   $('editSaveBtn').disabled = true;
   try {
-    await api(`/v1/agents/${editAgentId}/files/${file}`, {
+    await api(`/v1/agents/${loaded.agentId}/files/${file}`, {
       method: 'PUT', body: { content: $('editContent').value },
     });
     toast(`${file} saved`);
-    editDlg.close();
-  } catch (e) { $('editErr').textContent = e.message; }
+    if (editLoaded === loaded) editDlg.close();
+  } catch (e) {
+    if (editLoaded === loaded) $('editErr').textContent = e.message;
+    else toast(`${file} was not saved: ${e.message}`, 8000);
+  }
   finally { $('editSaveBtn').disabled = !editLoaded; }
 }
 
@@ -9408,25 +9473,32 @@ async function openSetupLog(id, name) {
   setupLogDlg.showModal();
   await loadSetupLog();
 }
+// Each read numbered: a slow answer for the agent opened before paints
+// nothing over the one opened since (review, 2026-10-22).
+let setupLogGen = 0, logsGen = 0;
 async function loadSetupLog() {
   if (!setupLogAgentId) return;
+  const gen = ++setupLogGen;
   try {
     const r = await api(`/v1/agents/${setupLogAgentId}/events?limit=80`);
+    if (gen !== setupLogGen) return;
     const when = (iso) => { const d = new Date(iso); return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`; };
     $('setupLogBody').innerHTML = r.events.length
       ? r.events.map(e => `<div style="display:flex;gap:10px;padding:3px 0;border-bottom:1px solid var(--line)"><span class="sub" style="flex:none;font-variant-numeric:tabular-nums">${esc(when(e.at))}</span><span>${esc(e.label)}${e.note ? ` <span class="sub">— ${esc(String(e.note).slice(0, 200))}</span>` : ''}</span></div>`).join('')
       : '<div class="sub">Nothing recorded yet.</div>';
-  } catch (e) { $('setupLogBody').textContent = e.message; }
+  } catch (e) { if (gen === setupLogGen) $('setupLogBody').textContent = e.message; }
 }
 
 async function loadLogs() {
   if (!logsAgentId) return;
+  const gen = ++logsGen;
   $('logsText').textContent = 'Loading…';
   try {
     const l = await api(`/v1/agents/${logsAgentId}/logs?lines=120`);
+    if (gen !== logsGen) return;
     $('logsText').textContent = l.text || '(no recent output)';
     $('logsText').scrollTop = $('logsText').scrollHeight;
-  } catch (e) { $('logsText').textContent = e.message; }
+  } catch (e) { if (gen === logsGen) $('logsText').textContent = e.message; }
 }
 
 let cronAgentId = null;
@@ -10616,6 +10688,8 @@ async function cloneAgent(id, name) {
   try {
     const res = await api(`/v1/agents/${id}/clone`, { method: 'POST', body: { name: cn } });
     let left = (res.notCopied || []).length ? ` Its data sources (${res.notCopied.join(', ')}) did not come along: add them under Data.` : '';
+    // A variable whose value could not be read stayed behind (review, 2026-10-22).
+    if ((res.envNotCopied || []).length) left += ` Its variables ${res.envNotCopied.join(', ')} could not be read, so the copy does not have them: add them under Advanced → Extra credentials.`;
     // Its daily notes come too (2026-09-30); say when some could not.
     if (res.memoryCopyFailed) left += " Its daily notes (memory/) and USER.md couldn't be read, so only MEMORY.md came along.";
     else if ((res.memoryNotCopied || []).length) left += ` Some memory files were too big or not text and stayed behind: ${res.memoryNotCopied.slice(0, 5).join(', ')}${res.memoryNotCopied.length > 5 ? '…' : ''}.`;
@@ -11200,12 +11274,14 @@ function v2OpLine(op) {
 /** Under way on an agent of yours: what its tile and sheet say instead of "Working on it". */
 const v2OpGoing = (a) => !!(a?.operation && V2_OP_GOING.has(a.operation.status) && v2Mine(a));
 const v2Ops = new Map(); // op id → agent id
+const v2OpEnds = new Map(); // op id → what the page that started it does when it ends
 let v2OpTimer = null;
 const v2OpSchedule = () => { if (v2Ops.size && !v2OpTimer && !window.__noAutoPoll) v2OpTimer = setTimeout(v2OpTick, 2000); };
-/** Follow an operation this page has just started (the 202's `operation`). */
-function v2FollowOp(op) {
+/** Follow an operation this page has just started (the 202's `operation`); `onEnd` runs once when it has ended, however it ended. */
+function v2FollowOp(op, onEnd) {
   if (!op?.id) return;
   v2Ops.set(op.id, op.agentId || null);
+  if (onEnd) v2OpEnds.set(op.id, onEnd);
   const a = op.agentId && v2Find(op.agentId);
   if (a && V2_OP_GOING.has(op.status)) { a.operation = op; renderV2(); }
   v2OpSchedule();
@@ -11222,6 +11298,11 @@ function v2OpOutcome(op) {
   const lead = op.status === 'succeeded' ? '✅' : op.status === 'held' ? '⏸' : '⚠';
   return `${lead} ${who ? `${who}: ` : ''}${said}${op.status === 'held' ? ' — choose what to do on its page (Alerts).' : ''}`;
 }
+/** The end hook v2FollowOp was given, run once; its failure is the page's, not the operation's. */
+function v2OpEnded(id) {
+  const end = v2OpEnds.get(id); v2OpEnds.delete(id);
+  if (end) void Promise.resolve().then(end).catch(() => {});
+}
 /** One round: each followed operation read once; the ones that ended say so. */
 async function v2OpTick() {
   clearTimeout(v2OpTimer); v2OpTimer = null;
@@ -11229,12 +11310,17 @@ async function v2OpTick() {
   for (const [id, agentId] of [...v2Ops]) {
     let op;
     try { op = await api(`/v1/operations/${encodeURIComponent(id)}`); }
-    catch { v2Ops.delete(id); continue; } // gone, or no longer ours
+    // Gone, or no longer ours (404/403): it ended as far as this page can know.
+    // Any other failure (the network, a 5xx, a laptop waking) is asked again on
+    // the next round: taken as an end, a revert reloaded its editor before the
+    // restore had written anything (regression audit, 2026-10-22).
+    catch (e) { if (e?.status === 404 || e?.status === 403) { v2Ops.delete(id); v2OpEnded(id); } continue; }
     const a = v2Find(op.agentId || agentId);
     if (V2_OP_GOING.has(op.status)) { if (a) a.operation = op; continue; }
     v2Ops.delete(id); ended = true;
     if (a && a.operation?.id === id) a.operation = op.status === 'held' ? op : undefined;
     toast(v2OpOutcome(op), op.status === 'succeeded' ? 9000 : 20000);
+    v2OpEnded(id);
   }
   renderV2();
   if (ended) { void v2LoadActivity(true); await refresh(false); }
@@ -11387,11 +11473,16 @@ function v2HealthProblems(h) {
   if (!h.reachable) return ["it didn't answer — Rebuild it if this keeps happening"];
   const out = [];
   if (h.aiSource?.refusingSince) out.push(`its AI source has been ${h.aiSource.refusal === 'refused' ? 'refusing (rate-limited)' : 'failing'} since ${ago(h.aiSource.refusingSince)}`);
-  if (h.status === 'degraded') out.push(`it is slow to respond${h.eventLoop?.reasons?.length ? ` (${h.eventLoop.reasons.join(', ')})` : ''}`);
+  // "Slow" only when the event loop says so, or nothing else explains the
+  // degraded state: a chat app that is not connected degrades it too, and was
+  // listed as slow (regression audit, 2026-10-22).
+  const otherCause = (h.telegram && h.telegram.connected === false) || (h.disconnected || []).length > 0 || (h.pluginErrors || []).length > 0;
+  if (h.status === 'degraded' && (h.eventLoop?.degraded || !otherCause)) out.push(`it is slow to respond${h.eventLoop?.reasons?.length ? ` (${h.eventLoop.reasons.join(', ')})` : ''}`);
   if (h.telegram && h.telegram.connected === false) out.push(`Telegram is not connected${h.telegram.lastError ? ` (${h.telegram.lastError})` : ''}`);
+  for (const k of h.disconnected || []) out.push(`${k === 'slack' ? 'Slack' : 'Discord'} is not connected`);
   if (h.pluginErrors?.length) out.push(`plugin errors: ${h.pluginErrors.slice(0, 3).join(', ')}`);
-  const f = h.doctor?.findings ?? [];
-  if (f.length) out.push(`${f.length} setting${f.length > 1 ? 's' : ''} to fix: ${f.slice(0, 2).map(x => x.message).join('; ')}${f.length > 2 ? '; …' : ''}`);
+  const f = h.doctor?.findings ?? [], n = f.length + (h.doctor?.omittedCount || 0);
+  if (f.length) out.push(`${n} setting${n > 1 ? 's' : ''} to fix: ${f.slice(0, 2).map(x => x.message).join('; ')}${n > 2 ? '; …' : ''}`);
   return out;
 }
 async function v2CheckAll() {
@@ -12765,14 +12856,23 @@ async function v2LoadApp(id, fresh = false) {
   } else el.innerHTML = '';
 }
 function v2AppShow(text) { const o = $('v2AppOut'); if (o) { o.hidden = false; o.innerHTML = `<pre class="sub" style="white-space:pre-wrap;max-height:260px;overflow:auto;margin:6px 0 0">${esc(text)}</pre>`; } }
-async function v2AppUpdate(id, btn) {
+async function v2AppUpdate(id, btn, values) {
   btn.disabled = true; btn.textContent = 'Updating… (tests first)';
   toast('Updating its app: fetching the newest commit and running its tests…', 60000, 'progress');
   try {
-    const r = await api(`/v1/agents/${id}/app/update`, { method: 'POST', body: {} });
+    const r = await api(`/v1/agents/${id}/app/update`, { method: 'POST', body: values ? { values } : {} });
     // "Its tests passed" only when it has tests and they ran (a manifest without any answers test: null).
     toast(r.unchanged ? 'Already running the newest commit.' : `Updated to ${String(r.app.sha).slice(0, 12)}${r.test?.ok ? ' — its tests passed.' : ' (it has no tests to run).'}`);
   } catch (e) {
+    // A value it needs and has not got (a field made required, or one an older
+    // version left blank): asked for here, since Update sends none (final
+    // audit, 2026-10-22). Nothing changed.
+    if (Array.isArray(e.data?.needs) && e.data.needs.length) {
+      toast('Not updated: it needs a value first (below).', 8000);
+      v2AppAskValues(id, e.data.needs);
+      btn.disabled = false; btn.textContent = '⬆ Update';
+      return;
+    }
     // Only the server knows how it left the agent: "unchanged" when it says so,
     // held when putting it back failed (its choice is on this page), else unknown.
     toast(e.data?.held ? 'Not updated, and it could not be put back as it was: choose how to finish it on this page.'
@@ -12786,6 +12886,36 @@ async function v2AppUpdate(id, btn) {
     return;
   }
   void v2LoadApp(id, true);
+}
+/** The values an update needs, asked for under the app's row; Update with them sends them. */
+function v2AppAskValues(id, needs) {
+  const o = $('v2AppOut'); if (!o) return;
+  const box = (f) => {
+    const fid = esc('v2AppV_' + f.key); // a manifest's key is the app author's text
+    const label = `<label for="${fid}">${esc(f.key)}${f.label ? ` <span class="sub">— ${esc(f.label)}</span>` : ''}</label>`;
+    if (f.type === 'bool') return `<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="${fid}" style="width:auto"> ${esc(f.key)}${f.label ? ` <span class="sub">— ${esc(f.label)}</span>` : ''}</label>`;
+    if (f.secret) return label + `<input type="password" id="${fid}" autocomplete="new-password" spellcheck="false" value="">`;
+    return label + `<input type="${f.type === 'number' ? 'number' : f.type === 'email' ? 'email' : 'text'}" id="${fid}" value="">`;
+  };
+  v2AppNeeds = needs;
+  o.hidden = false;
+  o.innerHTML = `<div class="sub" style="margin:6px 0">Its new release needs ${needs.length === 1 ? 'a value' : 'values'} the app does not have yet. Fill ${needs.length === 1 ? 'it' : 'them'} in, then update:</div>
+    ${needs.map(box).join('')}
+    <div id="v2AppValErr" class="err"></div>
+    <div style="margin-top:8px"><button class="primary" id="v2AppUpdateWithBtn" onclick="v2AppUpdateWith('${jsq(id)}', this)">⬆ Update with these</button></div>`;
+}
+let v2AppNeeds = [];
+function v2AppUpdateWith(id, btn) {
+  const values = {};
+  for (const f of v2AppNeeds) {
+    const el = $('v2AppV_' + f.key); if (!el) continue;
+    if (f.type === 'bool') values[f.key] = el.checked ? 'true' : 'false';
+    else if (f.secret) { if (el.value) values[f.key] = el.value; }
+    else values[f.key] = el.value.trim();
+  }
+  const empty = v2AppNeeds.filter(f => f.type !== 'bool' && !values[f.key]).map(f => f.key);
+  if (empty.length) { $('v2AppValErr').textContent = `Fill in: ${empty.join(', ')}.`; return; }
+  return v2AppUpdate(id, btn, values);
 }
 async function v2AppRollback(id, btn) {
   if (!confirm('Go back to the release before the last install or update?')) return;
@@ -13000,10 +13130,10 @@ async function v2LoadFiles(id, path) {
   const rows = r.entries.map(e => {
     const p = (r.path ? r.path + '/' : '') + e.name;
     const open = e.type === 'dir' ? `<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','${jsq(p)}')">📁 ${esc(e.name)}/</a>`
-      : e.type === 'file' && viewable(e.name) ? `📄 <a href="${dl('file', p)}&inline=1" target="_blank" rel="noopener" title="Open in a new tab">${esc(e.name)}</a>`
+      : e.type === 'file' && viewable(e.name) ? `📄 <a href="${dl('file', p)}&inline=1" target="_blank" rel="noopener" onclick="return sfOpen(event, this, '${jsq(`/v1/agents/${id}/fs?path=${encodeURIComponent(r.path || '')}`)}')" title="Open in a new tab">${esc(e.name)}</a>`
       : `${e.type === 'link' ? '🔗' : '📄'} ${esc(e.name)}`;
     const get = e.type === 'dir' ? `<a class="btn" href="${dl('archive', p)}" onclick="return sfLink(event, this, 'folder.tar.gz')" title="This folder as a .tar.gz">⬇ .tar.gz</a>`
-      : e.type === 'file' ? `<a class="btn" href="${dl('file', p)}" download title="Download">⬇</a>` : '';
+      : e.type === 'file' ? `<a class="btn" href="${dl('file', p)}" download onclick="return sfLink(event, this, '${jsq(e.name)}')" title="Download">⬇</a>` : '';
     return `<tr><td>${open}</td><td class="num">${e.type === 'dir' ? '' : fmtBytes(e.size)}</td><td class="sub">${e.mtime ? ago(e.mtime) : ''}</td><td>${get}</td></tr>`;
   }).join('');
   // .openclaw itself, not every name starting so (.openclaw-notes is the agent's own): the server's rule (#117).
@@ -14017,7 +14147,13 @@ async function reportSaveEdits() {
   if (!reportCur) return null;
   const title = $('reportRTitle').value.trim() || reportCur.title, body = $('reportBody').value;
   if (title === reportCur.title && body === reportCur.body) return reportCur;
-  reportCur = await api(`/v1/problem-reports/${encodeURIComponent(reportCur.id)}`, { method: 'PATCH', body: { title, body } });
+  // Another draft opened (or a new report begun) while this saved: the saved
+  // one is still what the button pressed goes on with, but the page keeps the
+  // one shown now and its text (review, 2026-10-22).
+  const gen = reportGen;
+  const saved = await api(`/v1/problem-reports/${encodeURIComponent(reportCur.id)}`, { method: 'PATCH', body: { title, body } });
+  if (gen !== reportGen) return saved;
+  reportCur = saved;
   // The server masks the edits too (private names, keys): show what will go
   // out, not what was typed (2026-10-10).
   if ($('reportRTitle').value.trim() !== reportCur.title || $('reportBody').value !== reportCur.body) {

@@ -496,6 +496,59 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     expect(store.listSnapshots(child.id).some((s) => s.reason === 'pre-params')).toBe(true);
   });
 
+  /** masterWorld with a derived child brought up RUNNING. */
+  async function withChild() {
+    const w = await masterWorld();
+    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/derive', headers: H, payload: { name: 'Building Two', values: { style: 'growth' } } });
+    const child = w.store.listAgents(OWNER).find((x) => x.name === 'Building Two')!;
+    await new Promise((r) => setTimeout(r, 30));
+    const { runtimeRef } = await w.provider.provision({
+      agentId: child.id, slug: child.slug,
+      workspace: { files: {}, configPatch: { agentId: child.slug, authMode: 'api-key' } }, env: {},
+    } as any);
+    w.store.setAgentRuntimeRef(child.id, runtimeRef);
+    if (w.store.getAgent(child.id)!.state === 'FAILED') w.store.setAgentState(child.id, 'PROVISIONING');
+    w.store.setAgentState(child.id, 'RUNNING');
+    return { ...w, child: w.store.getAgent(child.id)! };
+  }
+
+  it('a master that removed all its fields takes them off its children too (review, 2026-10-22)', async () => {
+    const { store, f, provider, child } = await withChild();
+    expect(store.getAgent(child.id)!.parameters?.map((p) => p.key)).toEqual(['style']);
+    // Every declaration removed, and the placeholder with it.
+    await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: H, payload: { parameters: [] } });
+    expect(store.getAgent('a1')!.parameters).toBeUndefined();     // [] is stored as none
+    provider.execResponses.set('sh', { code: 0, stdout: 'A plain advisor; {{region}} is new.\n', stderr: '' });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(res.json().pushed).toBe(1);
+    // style is gone; the undeclared {{region}} the pushed text uses is asked for, as derive does.
+    expect(store.getAgent(child.id)!.parameters).toEqual([{ key: 'region', label: 'region', required: true, type: 'text', target: 'soul' }]);
+  });
+
+  it('a push whose second file fails puts the first back, and the child keeps its definition (review, 2026-10-22)', async () => {
+    const { store, f, provider, child } = await withChild();
+    const layerBefore = store.getAgent(child.id)!.paramFiles;
+    provider.execResponses.set('sh', { code: 0, stdout: 'IMPROVED {{style}} playbook v2.\n', stderr: '' });
+    const shell = provider.execShell.bind(provider);
+    const writes: Array<{ path: string; text: string }> = [];
+    let failAgentsMd = true;
+    provider.execShell = async (ref: string, script: string, opts?: any) => {
+      const w = /^set -e; echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
+      if (w && w[2]!.includes(`/agents/${child.slug}/`)) {
+        if (w[2]!.endsWith('AGENTS.md') && failAgentsMd) { failAgentsMd = false; return { code: 1, stdout: '', stderr: 'No space left on device' }; }
+        writes.push({ path: w[2]!, text: Buffer.from(w[1]!, 'base64').toString('utf8') });
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (script.startsWith('head -c') && script.includes(`/agents/${child.slug}/agent/SOUL.md`)) return { code: 0, stdout: 'A growth advisor at work.\n', stderr: '' };
+      return shell(ref, script, opts);
+    };
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(res.json()).toMatchObject({ pushed: 0, results: [{ name: 'Building Two', ok: false, error: 'write failed' }] });
+    // SOUL.md went out with the new text, then back to what it was.
+    expect(writes.map((x) => x.text)).toEqual(['IMPROVED growth playbook v2.\n', 'A growth advisor at work.\n']);
+    expect(store.getAgent(child.id)!.paramFiles).toEqual(layerBefore);
+  });
+
   it('push refuses when there are no children; a non-running child is skipped by name', async () => {
     const { store, f } = await masterWorld();
     const none = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });

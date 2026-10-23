@@ -52,7 +52,10 @@ export function isPublic(req: Rawish | IncomingMessage | undefined | null): bool
   const socket = r.raw?.socket ?? r.socket;
   if (socket && publicSockets.has(socket)) return true;
   const mark = r.headers?.[REPLAY_HEADER];
-  return typeof mark === 'string' && mark.length === REPLAY_SECRET.length && timingSafeEqual(Buffer.from(mark), Buffer.from(REPLAY_SECRET));
+  if (typeof mark !== 'string') return false;
+  // Bytes, not characters: timingSafeEqual throws on a length mismatch (audit, 2026-10-22).
+  const a = Buffer.from(mark), b = Buffer.from(REPLAY_SECRET);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 const last = (v: string | string[] | undefined): string | undefined => {

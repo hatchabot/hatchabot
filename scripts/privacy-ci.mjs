@@ -34,8 +34,9 @@
  * Words: letters and digits, with . @ - _ kept inside a word
  * ("mapleford-helper.md", "someone@example.org", "10.0.0.7"); a word's
  * dotted or dashed parts are tried too, so a slug inside a file name is found.
- * Text is read a line at a time: a name broken across two lines is not
- * matched. Names keep their case as privacy-check.mjs does ("Condo B" is not
+ * Text is read a line at a time and across each line break, so a name
+ * wrapped onto the next line is found (as the publisher's gate finds it;
+ * not across two breaks, a paragraph between). Names keep their case as privacy-check.mjs does ("Condo B" is not
  * "condo board"); slugs, emails, machine names and ids match in any case;
  * secrets as written.
  *
@@ -55,7 +56,7 @@ export const CATS = { A: 'agent name', S: 'agent slug', E: 'email', I: 'person i
 export const LETTER = Object.fromEntries(Object.entries(CATS).map(([k, v]) => [v, k]));
 export const IDENTITY_FILE = 'scripts/privacy-identity.txt';
 export const SECRET_NAME = 'PRIVACY_FINGERPRINTS';
-export const NOT_COVERED = 'pictures and compressed data inside binary files (no OCR, no unpacking; the text inside them is read); a private value the owner\'s install does not record; a value split across lines or paraphrased';
+export const NOT_COVERED = 'pictures and compressed data inside binary files (no OCR, no unpacking; the text inside them is read); a private value the owner\'s install does not record; a value split across more than one line break, or paraphrased';
 const DIGEST_BYTES = 16;
 /** Parts of a word longer than this are not tried in every combination (a long URL). */
 const MAX_SPAN = 16;
@@ -165,11 +166,24 @@ export function scanLine(line, fp) {
   return out;
 }
 
-/** Hits in a text, a line at a time: [{ cat, shown, where, line }]. */
+/**
+ * Hits only a line break hides: a value whose words run from the end of one
+ * line into the start of the next (wrapped text, a comment going on). Wrapped
+ * names reached the publisher's gate, which reads them so, past this check and
+ * the pre-push one (2026-10-22).
+ */
+export function scanAcross(above, below, fp) {
+  const alone = new Set([...scanLine(above, fp), ...scanLine(below, fp)].map((h) => `${h.cat}|${h.shown}`));
+  return scanLine(`${above} ${below}`, fp).filter((h) => !alone.has(`${h.cat}|${h.shown}`));
+}
+
+/** Hits in a text, a line at a time and across each line break: [{ cat, shown, where, line }]. */
 export function scanText(text, where, fp, { lines = true } = {}) {
   const out = [];
-  String(text ?? '').split('\n').forEach((l, i) => {
+  const ls = String(text ?? '').split('\n');
+  ls.forEach((l, i) => {
     for (const h of scanLine(l, fp)) out.push({ ...h, where, line: lines ? i + 1 : 0 });
+    if (i > 0) for (const h of scanAcross(ls[i - 1], l, fp)) out.push({ ...h, where, line: lines ? i : 0 });
   });
   return out;
 }
@@ -295,21 +309,27 @@ export function scanRange(cwd, r, fp) {
   // Each value once per file: a hit in the end result is not named again for the commit that added it.
   const seen = new Set();
   const once = (h, file) => { const k = `${h.cat}|${h.shown}|${file}`; if (!seen.has(k)) { seen.add(k); hits.push(h); } };
-  /** The added lines of a --unified=0 patch, scanned; their count. */
+  /** The added lines of a --unified=1 patch, scanned, and each line break beside one; their count. */
   const scanPatch = (diff, where) => {
-    let file = '?', line = 0, n = 0;
+    let file = '?', line = 0, n = 0, prev = null;
     for (const l of diff.split('\n')) {
-      if (l.startsWith('+++ ')) { file = l.slice(4).replace(/^b\//, ''); continue; }
+      if (l.startsWith('+++ ')) { file = l.slice(4).replace(/^b\//, ''); prev = null; continue; }
       if (l.startsWith('--- ')) continue;
-      if (/^Binary files .* differ$/.test(l)) continue; // read whole, with textInside
+      if (/^Binary files .* differ$/.test(l)) { prev = null; continue; } // read whole, with textInside
       const h = /^@@ -\S+ \+(\d+)/.exec(l);
-      if (h) { line = Number(h[1]); continue; }
-      if (l.startsWith('+')) {
-        n++;
-        const text = file === IDENTITY_FILE ? withoutAllowedLines(l.slice(1), allowed) : l.slice(1);
-        for (const x of scanLine(text, fp)) once({ ...x, where: where(file), line }, file);
+      if (h) { line = Number(h[1]); prev = null; continue; }
+      if (l.startsWith('+') || l.startsWith(' ')) {
+        const cur = { text: file === IDENTITY_FILE ? withoutAllowedLines(l.slice(1), allowed) : l.slice(1), line, added: l.startsWith('+') };
+        if (cur.added) {
+          n++;
+          for (const x of scanLine(cur.text, fp)) once({ ...x, where: where(file), line }, file);
+        }
+        // The line of context: a new line may finish a value an old one starts.
+        if (prev && (prev.added || cur.added)) for (const x of scanAcross(prev.text, cur.text, fp)) once({ ...x, where: where(file), line: prev.line }, file);
+        prev = cur;
         line++;
       }
+      // A removed line is not in the new file: the lines around it are neighbours there.
     }
     return n;
   };
@@ -322,7 +342,7 @@ export function scanRange(cwd, r, fp) {
   // The end result.
   const paths = run('the changed file names', 'diff', '--name-only', '--no-renames', '--diff-filter=d', ...between).split('\n').filter(Boolean);
   for (const p of paths) checkName(p);
-  const added = scanPatch(run('the added lines', 'diff', '--unified=0', '--no-color', '--no-ext-diff', '--no-renames', ...between), shown);
+  const added = scanPatch(run('the added lines', 'diff', '--unified=1', '--no-color', '--no-ext-diff', '--no-renames', ...between), shown);
   const bins = numstatFiles(run('the binary files', 'diff', '--numstat', '-z', '--no-renames', '--diff-filter=d', ...between)).binary;
   for (const f of bins) scanBinary(f, r.head, `${shown(f)} (text inside a binary file)`);
 
@@ -333,7 +353,7 @@ export function scanRange(cwd, r, fp) {
     const short = c.slice(0, 7);
     const files = numstatFiles(run(`commit ${short}'s files`, 'show', '--format=', '--numstat', '-z', '--no-renames', '--diff-filter=d', c));
     for (const p of files.names) checkName(p);
-    scanPatch(run(`commit ${short}'s changes`, 'show', '--format=', '--unified=0', '--no-color', '--no-ext-diff', '--no-renames', c), (f) => `${shown(f)} (commit ${short})`);
+    scanPatch(run(`commit ${short}'s changes`, 'show', '--format=', '--unified=1', '--no-color', '--no-ext-diff', '--no-renames', c), (f) => `${shown(f)} (commit ${short})`);
     for (const f of files.binary) scanBinary(f, c, `${shown(f)} (commit ${short}, text inside a binary file)`);
   }
 

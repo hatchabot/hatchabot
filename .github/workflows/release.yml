@@ -35,9 +35,13 @@ on:
   push:
     tags: ['v*.*.*']
 permissions: {}
-# One release at a time; a second waits rather than racing for the same tag.
+# One run per tag. A group shared by every tag held one run and one pending:
+# a third tag cancelled the pending one, which then never got its release
+# (audit, 2026-10-20). Runs of different tags share nothing but :latest,
+# which `publish` decides when it publishes and promote-images.yml never
+# moves backwards.
 concurrency:
-  group: release
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 jobs:
   check:
@@ -66,8 +70,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Release tags only (the publisher pushes no other kind).
-          [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a release tag: $GITHUB_REF"; exit 1; }
+          # Release tags only: the same versions release-check.sh takes, a
+          # pre-release too (it was refused here, accepted there; audit 2026-10-22).
+          [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::not a release tag: $GITHUB_REF"; exit 1; }
           bash scripts/release-check.sh "${TAG#v}" --tagged --repo "$GITHUB_REPOSITORY" --notes "$RUNNER_TEMP/notes.md" | tee -a "$GITHUB_OUTPUT"
       # The notes are published apart from the code; release.sh checked them
       # with the private values on the owner's machine and the publisher's
@@ -199,6 +204,8 @@ jobs:
       packages: write
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    outputs:
+      latest: ${{ steps.publish.outputs.latest }}
     env:
       VERSION: ${{ needs.check.outputs.version }}
       TAG: ${{ needs.check.outputs.tag }}
@@ -315,6 +322,7 @@ jobs:
           done
           echo "✓ draft $TAG holds exactly the manifest's $(printf '%s\n' "$have" | wc -l) files: $(gh api "repos/$R/releases/$RID" --jq .html_url)"
       - name: the tag names the checked commit; publish
+        id: publish
         env:
           RID: ${{ steps.draft.outputs.id }}
         run: |
@@ -324,12 +332,19 @@ jobs:
           read -r TYPE AT < <(gh api "repos/$R/git/ref/tags/$TAG" --jq '"\(.object.type) \(.object.sha)"')
           [ "$TYPE" != tag ] || AT="$(gh api "repos/$R/git/tags/$AT" --jq .object.sha)"
           [ "$AT" = "$COMMIT" ] || { echo "::error::the tag $TAG names $AT, not $COMMIT"; exit 1; }
-          LATEST=false; [ "$NEWEST" = true ] && LATEST=true
+          # Newest asked again now, not at `check`: runs of other tags go on
+          # alongside this one, and a newer tag may have come meanwhile.
+          LATEST=false
+          if [ "$NEWEST" = true ]; then
+            TOP="$(gh api "repos/$R/git/matching-refs/tags/v" --paginate --jq '.[].ref' | sed -nE 's#^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$#\1#p' | sort -V | tail -1)"
+            [ "$(printf '%s\n%s\n' "$TOP" "$VERSION" | sort -V | tail -1)" != "$VERSION" ] || LATEST=true
+          fi
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
           gh api -X PATCH "repos/$R/releases/$RID" -F draft=false -f make_latest="$LATEST" --jq '"✓ published \(.html_url) (immutable: \(.immutable // "not reported"))"'
 
   latest:
     needs: [check, publish]
-    if: ${{ needs.check.outputs.newest == 'true' }}
+    if: ${{ needs.publish.outputs.latest == 'true' }}
     permissions:
       contents: read
       packages: write

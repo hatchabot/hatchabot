@@ -2,6 +2,7 @@
 # Can a database created by an OLDER Hatchabot be opened by this one?
 #
 #   ./scripts/upgrade-check.sh [tag ...]     (default: a spread of past releases)
+#   ./scripts/upgrade-check.sh --list        (the default tags, one a line; checks nothing)
 #
 # `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so
 # a column added to one after it shipped reaches a fresh database and never an
@@ -19,16 +20,28 @@ REPO="$(pwd)"
 TMP="$(mktemp -d)"
 trap 'git worktree remove --force "$TMP/old" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
+LIST=0; [ "${1:-}" != --list ] || { LIST=1; shift; }
 TAGS=("$@")
 if [ ${#TAGS[@]} -eq 0 ]; then
   # The oldest release we promise to upgrade from, the last major, and the
-  # previous release — most breaks are one of those three hops.
-  mapfile -t ALL < <(git tag --sort=-creatordate | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$')
+  # newest release before this checkout — the one installs run now. Most
+  # breaks are one of those three hops. That is the newest tag unless it
+  # names this very commit (a checkout of a release): a pull request or a
+  # version commit is past the newest tag, and taking the one before it
+  # skipped the release users run (audit, 2026-10-20).
+  mapfile -t ALL < <(git tag --sort=-creatordate | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+  HERE="$(git tag --points-at HEAD)"
+  PREV=""
+  for t in ${ALL[@]+"${ALL[@]}"}; do
+    printf '%s\n' "$HERE" | grep -qxF "$t" || { PREV="$t"; break; }
+  done
   TAGS=()
-  for t in "v1.0.0" "v2.0.0" "${ALL[1]:-}"; do
-    [ -n "$t" ] && git rev-parse -q --verify "refs/tags/$t" >/dev/null && TAGS+=("$t")
+  for t in "v1.0.0" "v2.0.0" "$PREV"; do
+    [ -n "$t" ] && git rev-parse -q --verify "refs/tags/$t" >/dev/null || continue
+    printf '%s\n' ${TAGS[@]+"${TAGS[@]}"} | grep -qxF "$t" || TAGS+=("$t")
   done
 fi
+if [ "$LIST" = 1 ]; then printf '%s\n' ${TAGS[@]+"${TAGS[@]}"}; exit 0; fi
 [ ${#TAGS[@]} -gt 0 ] || { echo "No tags to check against — nothing to do."; exit 0; }
 
 fail=0

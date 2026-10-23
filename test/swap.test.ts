@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   agentMemoryLimits, defaultSwapAllowance, describeCompressedSwap, dockerMemorySwap, effectiveSwapAllowance,
-  formatSwapAllowance, limitsDrift, parseCgroupLimit, parseSwapAllowance, parseSwapProbe, procCgroupPath, wantedLimits,
+  formatSwapAllowance, limitsDrift, parseCgroupLimit, parseSwapAllowance, parseSwapProbe, procCgroupPath, SWAP_PROBE_SCRIPT, wantedLimits,
   type CompressedSwap, type LimitsCheckSummary,
 } from '../src/orchestrator/swap.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
@@ -25,8 +25,9 @@ const GiB = 1024 ** 3, MiB = 1024 ** 2;
 
 // ---- what the kernel says, as the probe script prints it -----------------------
 const SWAPS_HEADER = 'Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority';
-const probe = (o: { zswap?: 'Y' | 'N'; compressor?: string; swaps?: string[]; zram?: Record<string, { algo: string; mm: string }>; meminfo?: string }) => [
+const probe = (o: { zswap?: 'Y' | 'N'; compressor?: string; shrinker?: 'Y' | 'N' | ''; swaps?: string[]; zram?: Record<string, { algo: string; mm: string }>; meminfo?: string }) => [
   `zswap.enabled=${o.zswap ?? 'N'}`, `zswap.compressor=${o.compressor ?? 'lzo'}`, 'zswap.zpool=zsmalloc', 'zswap.max_pool_percent=20',
+  `zswap.shrinker_enabled=${o.shrinker ?? 'N'}`,
   '--swaps', SWAPS_HEADER, ...(o.swaps ?? []),
   '--meminfo', o.meminfo ?? 'Zswap:                 0 kB\nZswapped:              0 kB',
   '--zram', ...Object.entries(o.zram ?? {}).flatMap(([d, z]) => [`zram.${d}.algo=${z.algo}`, `zram.${d}.mm=${z.mm}`]),
@@ -117,6 +118,25 @@ describe('detecting compressed swap', () => {
   it('a zram device that is not a swap device (a ramdisk) does not count', () => {
     const s = parseSwapProbe(probe({ zswap: 'N', swaps: [SWAPFILE], zram: { zram1: { algo: '[lz4]', mm: '0 0 0 0 0 0 0 0 0' } } }));
     expect(s.kind).toBe('none');
+  });
+
+  it('zswap with its shrinker on is disk swap with a delay: no swap, and the fix says how (audit, 2026-10-22)', () => {
+    const s = parseSwapProbe(probe({ zswap: 'Y', compressor: 'zstd', shrinker: 'Y', swaps: [SWAPFILE] }));
+    expect(s).toMatchObject({ kind: 'none', compressed: false, zswap: { enabled: true, shrinker: true } });
+    expect(s.why).toMatch(/shrinker is on/);
+    expect(s.why).toMatch(/\/swap\.img/);
+    expect(s.why).toMatch(/enable-compressed-swap\.sh/);
+    // Off, it qualifies; a kernel with no shrinker (before 6.8: the file is not there) has none to turn off.
+    expect(parseSwapProbe(probe({ zswap: 'Y', shrinker: 'N', swaps: [SWAPFILE] }))).toMatchObject({ kind: 'zswap', compressed: true, zswap: { shrinker: false } });
+    const old = parseSwapProbe(probe({ zswap: 'Y', shrinker: '', swaps: [SWAPFILE] }));
+    expect(old).toMatchObject({ kind: 'zswap', compressed: true });
+    expect(old.zswap!.shrinker).toBeUndefined();
+    // zram alone never writes to disk: the shrinker is beside the point there.
+    expect(parseSwapProbe(probe({ zswap: 'Y', shrinker: 'Y', swaps: [ZRAM0], zram: { zram0: { algo: '[zstd]', mm: '1 1 1' } } }))).toMatchObject({ kind: 'zram', compressed: true });
+  });
+
+  it('the probe reads the shrinker beside zswap\'s other settings', () => {
+    expect(SWAP_PROBE_SCRIPT).toMatch(/max_pool_percent shrinker_enabled; do/);
   });
 
   it('no swap at all; and nothing readable is unknown — unknown means no swap', () => {

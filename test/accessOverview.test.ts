@@ -213,6 +213,63 @@ describe('Verify now records what is inside the running agent', () => {
     expect(accessProbeScript({ paths: [], env: [] })).not.toMatch(/process\.env\[n\]\b(?!\))/);
   });
 
+  it('counts the people a Slack channel or Discord server still admits by its users list (review, 2026-10-22)', () => {
+    const cfg = { channels: {
+      discord: { accounts: { hatchabot: {} }, guilds: { fixture: { users: ['700000000000000001'] } } },
+      slack: { accounts: { hatchabot: {} }, channels: { C0FIXTURE: { users: ['U0FIXTURE1'] } } },
+      telegram: { channels: { ignored: { users: ['1'] } } },
+    } };
+    const out = JSON.parse(runProbeInVm(accessProbeScript({ paths: [], env: [] }), { files: { [`${STATE}/openclaw.json`]: JSON.stringify(cfg) }, dirs: {}, sqlite: [] }));
+    expect(out.admitted.discord).toEqual(['700000000000000001']);
+    expect(out.admitted.slack).toEqual(['U0FIXTURE1']);
+    expect(out.admitted.telegram).toBeUndefined();
+    expect(out.unread).toEqual({ telegram: [], slack: [], discord: [] });
+  });
+
+  it('a chat app or account turned off admits nobody: its lists are not counted (review, 2026-10-22, B40)', () => {
+    const cfg = { channels: {
+      telegram: { enabled: false, allowFrom: [tgId(1)], accounts: { hatchabot: { allowFrom: [tgId(2)] } } },
+      discord: { accounts: { hatchabot: { enabled: false, allowFrom: ['700000000000000001'] }, other: { allowFrom: ['700000000000000002'] } } },
+      slack: { accounts: { hatchabot: { allowFrom: ['U0FIXTURE1'] } } },
+    } };
+    const out = JSON.parse(runProbeInVm(accessProbeScript({ paths: [], env: [] }), {
+      files: {
+        [`${STATE}/openclaw.json`]: JSON.stringify(cfg),
+        [`${STATE}/credentials/telegram-hatchabot-allowFrom.json`]: JSON.stringify({ allowFrom: [tgId(3)] }),
+        [`${STATE}/credentials/discord-hatchabot-allowFrom.json`]: JSON.stringify({ allowFrom: ['700000000000000003'] }),
+        [`${STATE}/credentials/discord-other-allowFrom.json`]: JSON.stringify({ allowFrom: ['700000000000000004'] }),
+        [`${STATE}/state/openclaw.sqlite`]: '',
+      },
+      dirs: { [`${STATE}/credentials`]: ['telegram-hatchabot-allowFrom.json', 'discord-hatchabot-allowFrom.json', 'discord-other-allowFrom.json'] },
+      sqlite: [{ channel_key: 'telegram', entry: tgId(4) }, { channel_key: 'slack', entry: 'U0FIXTURE2' }],
+    }));
+    expect(out.admitted.telegram).toBeUndefined();
+    expect(out.admitted.discord).toEqual(['700000000000000002', '700000000000000004']);
+    expect(out.admitted.slack).toEqual(['U0FIXTURE1', 'U0FIXTURE2']);
+    expect(out.channels.telegram.enabled).toBe(false);
+    expect(out.channels.discord.accounts.hatchabot.enabled).toBe(false);
+  });
+
+  it('a Discord or Slack bot running another token is found, each compared as it is stored (review, 2026-10-22, B31)', async () => {
+    const w = await world();
+    const slack = { botToken: 'fixture-slack-bot-value', appToken: 'fixture-slack-app-value' };
+    await w.deps.secrets.put('channel/a1/slack', JSON.stringify(slack));
+    await w.deps.secrets.put('channel/a1/discord', 'fixture-discord-value');
+    w.store.insertChannel({ id: 'ch2', agentId: 'a1', kind: 'slack', accountId: 'hatchabot', secretRef: 'channel/a1/slack', deepLink: 'https://slack.example/x', createdAt: 'now' } as never);
+    w.store.insertChannel({ id: 'ch3', agentId: 'a1', kind: 'discord', accountId: 'hatchabot', secretRef: 'channel/a1/discord', deepLink: 'https://discord.example/x', createdAt: 'now' } as never);
+    w.inside.channels.slack = { enabled: true, accounts: { hatchabot: { enabled: true, h: hash16(slack.botToken) } } };
+    w.inside.channels.discord = { enabled: true, accounts: { hatchabot: { enabled: true, h: hash16('fixture-discord-value') } } };
+    await verifyAgentAccess(w.deps, 'a1');
+    // The same bots: nothing differs (a Slack secret is JSON; its botToken is what the account holds).
+    expect(w.row('a1', 'slack', 'hatchabot')!.mismatch).toBeUndefined();
+    expect(w.row('a1', 'discord', 'hatchabot')!.mismatch).toBeUndefined();
+    w.inside.channels.slack.accounts.hatchabot!.h = hash16('another-slack-value');
+    w.inside.channels.discord.accounts.hatchabot!.h = hash16('another-discord-value');
+    await verifyAgentAccess(w.deps, 'a1');
+    expect(w.row('a1', 'slack', 'hatchabot')).toMatchObject({ intended: true, mismatch: 'differs' });
+    expect(w.row('a1', 'discord', 'hatchabot')).toMatchObject({ intended: true, mismatch: 'differs' });
+  });
+
   it('finds what it should not have: a connection not attached, another bot, a different token, a removed variable, a removed member', async () => {
     const w = await world();
     await verifyAgentAccess(w.deps, 'a1'); // a first check records SEARCH_KEY present

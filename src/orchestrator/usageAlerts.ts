@@ -15,6 +15,7 @@ import { loopCovering } from './tokenWatch.js';
  */
 
 const DAY = 86_400_000;
+const HOUR = 3_600_000;
 
 export interface UsageAlertRules {
   /** A day at least this many times the usual one (default 3). */
@@ -107,6 +108,9 @@ export interface UsageAlertDeps {
   log?(event: string, detail: Record<string, unknown>): void;
 }
 
+/** A warning that did not reach its owner → when it was last tried (in memory: a restart tries once more). */
+const retried = new Map<string, number>();
+
 /** One check over every active agent: warn about each new spike, once a day per agent. */
 export async function runUsageAlerts(deps: UsageAlertDeps, now = Date.now()): Promise<UsageSpike[]> {
   const { store } = deps;
@@ -117,7 +121,26 @@ export async function runUsageAlerts(deps: UsageAlertDeps, now = Date.now()): Pr
     // Once per agent per 24 hours: the same spike is not news every ten minutes.
     // Cleared warnings count too: clearing it on Usage re-armed the message
     // while the spike lasted (2026-10-09).
-    if (store.usageAlertsSince(new Date(now - DAY).toISOString(), { agentId: s.agent.id, dismissed: true }).length) continue;
+    const recent = store.usageAlertsSince(new Date(now - DAY).toISOString(), { agentId: s.agent.id, dismissed: true });
+    if (recent.length) {
+      // Recorded but never delivered (Telegram down): tried again hourly until it reaches
+      // them, rather than counted as told for a day (report A30, 2026-10-22). Not once it
+      // went out, a loop's message covers it, or the owner cleared it on Usage.
+      if (recent.some((r) => r.told || r.covered)) continue;
+      const open = store.usageAlertsSince(new Date(now - DAY).toISOString(), { agentId: s.agent.id })[0];
+      if (!open || loopCovering(store, s.agent.id, now)) continue;
+      const key = `${s.agent.id}|${open.at}`;
+      if (now - (retried.get(key) ?? Date.parse(open.at)) < HOUR) continue;
+      retried.set(key, now);
+      for (const [k, t] of retried) if (now - t > DAY) retried.delete(k);
+      if (await deps.tell(s.agent.ownerId, s.agent, usageSpikeText(s)).catch(() => false)) {
+        store.markUsageAlertTold(s.agent.id, open.at);
+        retried.delete(key);
+        deps.log?.('usage.spike', { agentId: s.agent.id, tokens: s.tokens, usual: s.usual, told: true, retried: true });
+        sent.push(s);
+      }
+      continue;
+    }
     // One cause, one message: a loop on this agent told today (or about to be)
     // is why it used so much, and its message already said so. Recorded all
     // the same — Usage and Recommended show the spike, as part of the loop.

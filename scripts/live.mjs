@@ -213,7 +213,13 @@ export function dueFor(tag, runs, tests = LIVE_TESTS, cwd = ROOT, arch = process
     if (!passes.length) { out.push({ test: t.name, why: 'it has never passed (on this release or an earlier one)', ...manual }); continue; }
     // The latest pass: the release nearest the one being promoted.
     const last = passes.reduce((a, b) => (atOrBefore(a.release, b.release) ? b : a));
-    if (last.release === tag) continue;
+    // Its latest run on this very release failed (a skip tests nothing):
+    // what failed there is not cleared by an earlier pass, on this release
+    // or another one (audit, 2026-10-20). Rows are in the order they ran.
+    const onTag = runs.filter((r) => r.test === t.name && r.release === tag && r.result !== 'skip');
+    const failed = onTag.length > 0 && onTag[onTag.length - 1].result === 'fail'
+      ? { test: t.name, why: `its latest run on ${tag} failed`, ...manual } : null;
+    if (last.release === tag) { if (failed) out.push(failed); continue; }
     // Not tied to files: what it checks (everything GitHub serves) changes
     // with every release.
     if (t.everyRelease) { out.push({ test: t.name, why: `it runs on every release (last passed on ${last.release})`, ...manual }); continue; }
@@ -227,6 +233,7 @@ export function dueFor(tag, runs, tests = LIVE_TESTS, cwd = ROOT, arch = process
       if (touches(git, last.release, tag, n.path, n.near)) changed.push(`${n.path} (where it uses it)`);
     }
     if (changed.length) out.push({ test: t.name, why: `${changed.length} file(s) in its area changed since it passed on ${last.release}: ${changed.slice(0, 4).join(', ')}${changed.length > 4 ? ', …' : ''}`, ...manual });
+    else if (failed) out.push(failed);
   }
   return out;
 }

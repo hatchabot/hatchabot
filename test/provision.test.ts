@@ -116,6 +116,28 @@ describe('runProvisionSteps', () => {
     expect(w.store.getPendingSchedules(first.agent.id)).toEqual([]);
   });
 
+  it('a template\'s announcing task with no one to post to yet is remembered for the repair pass (review A17)', async () => {
+    const w = await world({ parkFirst: true });
+    const first = await provisionAgent(w.deps, INPUT);
+    // The owner has not messaged the new bot yet: no chat to post to.
+    w.store.setPendingSchedules(first.agent.id, [{ name: 'Morning brief', message: 'Post the brief.', cron: '0 8 * * *' }]);
+    w.provider.execResponses.set('cron add', { code: 0, stdout: '{"id":"brief-1"}', stderr: '' });
+    await runProvisionSteps(w.deps, first.agent.id);
+    expect(w.provider.execLog.find((c) => c[0] === 'cron' && c[1] === 'add' && c.includes('Morning brief'))).toContain('--no-deliver');
+    expect(w.store.quietedCrons(first.agent.id)).toEqual(['brief-1']);
+  });
+
+  it("a task listing that fails keeps the template's tasks parked, not added blind (A50)", async () => {
+    const w = await world({ parkFirst: true });
+    const first = await provisionAgent(w.deps, INPUT);
+    const parked = [{ name: 'Morning brief', message: 'Post the brief.', cron: '0 8 * * *' }];
+    w.store.setPendingSchedules(first.agent.id, parked);
+    w.provider.execResponses.set('cron list', { code: 1, stdout: '', stderr: 'gateway restarting' });
+    await runProvisionSteps(w.deps, first.agent.id);
+    expect(w.provider.execLog.some((c) => c[0] === 'cron' && c[1] === 'add')).toBe(false);
+    expect(w.store.getPendingSchedules(first.agent.id)).toEqual(parked);
+  });
+
   it('retries from FAILED reusing the already-created channel row', async () => {
     const w = await world({ failOn: 'start' });
     const { agent } = await provisionAgent(w.deps, INPUT);

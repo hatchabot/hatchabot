@@ -334,8 +334,12 @@ export async function syncContextCap(deps: { store: Store; provider: RuntimeProv
   const path = `models.providers.${p}`;
   const current = await readEntry(provider, runtimeRef, path);
   if (current === 'failed') return 'failed';
-  const previousProvider = cap.appliedModel?.includes('/') ? cap.appliedModel.split('/')[0] : undefined;
-  const previous = cap.appliedModel ? cap.appliedModel.split('/').pop() : undefined;
+  // "<provider>/<model>", split at the first slash only: a model id may hold
+  // slashes of its own (openrouter/vendor/model), and its last part named no
+  // entry the cap was written under (B05, 2026-10-22).
+  const slash = cap.appliedModel?.indexOf('/') ?? -1;
+  const previousProvider = slash > 0 ? cap.appliedModel!.slice(0, slash) : undefined;
+  const previous = cap.appliedModel ? cap.appliedModel.slice(slash + 1) : undefined;
   // A cap written for another provider's model (a source switch) comes off
   // there first. Until it has, the old model stays on record as applied, so
   // the next sync tries again rather than forget it (#116).

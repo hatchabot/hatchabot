@@ -447,6 +447,19 @@ describe('the loop watcher', () => {
     expect((await f.inject({ method: 'GET', url: '/v1/token-incidents', headers: H })).json().recent).toHaveLength(1);
   });
 
+  it('an older loop still going is listed however many newer ones cleared (report B09, 2026-10-22)', async () => {
+    const { store, f } = await world();
+    const now = Date.now(), iso = (t: number) => new Date(t).toISOString();
+    store.openTokenIncident({ id: 'still', agentId: 'a1', ownerId: OWNER, kind: 'tool-loop', key: 'loop', openedAt: iso(now - 8 * DAY), updatedAt: iso(now), count: 10, text: 'ongoing' } as never);
+    for (let i = 0; i < 100; i++) {
+      store.openTokenIncident({ id: `done${i}`, agentId: 'a1', ownerId: OWNER, kind: 'tool-loop', key: `k${i}`, openedAt: iso(now - HOUR), updatedAt: iso(now - HOUR), count: 1, text: 'resolved' } as never);
+      store.clearTokenIncident(`done${i}`, iso(now));
+    }
+    const r = (await f.inject({ method: 'GET', url: '/v1/token-incidents', headers: H })).json();
+    expect(r.open.map((i: any) => i.id)).toEqual(['still']);
+    expect(r.recent).toHaveLength(100);
+  });
+
   it('tells at most TELL_PER_HOUR an hour per owner; the rest wait their turn, and are all under Alerts meanwhile', async () => {
     const { store } = await world();
     const now = Date.now();
@@ -717,6 +730,17 @@ describe('the context cap', () => {
     provider.execShell = async (_ref, script) => ({ code: 0, stdout: JSON.stringify(script.endsWith('models.providers.openai') ? old : now), stderr: '' });
     expect(await syncContextCap({ store, provider }, store.getAgent('a1')!, store.getAgent('a1')!.runtimeRef!)).toBe('unchanged');
     expect(provider.execLog.at(-1)).toEqual(['config', 'unset', 'models.providers.openai']);
+    expect(store.getContextCap('a1')!.appliedModel).toBe('anthropic/claude-sonnet-5');
+  });
+
+  it('a cap on a model id with slashes of its own comes off that row (B05)', async () => {
+    const { store, provider } = await world();
+    store.setContextCap('a1', 150_000, iso(Date.now()));
+    store.markContextCapApplied('a1', 'openrouter/team/model-x', iso(Date.now()));   // written before a source switch
+    const old = { models: [{ id: 'team/model-x', name: 'Model X', contextTokens: 150_000 }] };
+    provider.execShell = async (_ref, script) => ({ code: 0, stdout: script.endsWith('models.providers.openrouter') ? JSON.stringify(old) : '', stderr: '' });
+    await syncContextCap({ store, provider }, store.getAgent('a1')!, store.getAgent('a1')!.runtimeRef!);
+    expect(provider.execLog).toContainEqual(['config', 'unset', 'models.providers.openrouter']);
     expect(store.getContextCap('a1')!.appliedModel).toBe('anthropic/claude-sonnet-5');
   });
 

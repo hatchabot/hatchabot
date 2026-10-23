@@ -17,6 +17,13 @@ describe('agent time zone', () => {
     expect(validTimeZone('')).toBe(false);
   });
 
+  it('takes a zone with digits in its name, and still no offset or path (audit, 2026-10-22)', () => {
+    expect(validTimeZone('EST5EDT')).toBe(true);
+    expect(validTimeZone('Etc/GMT+5')).toBe(true);
+    expect(agentTimeZone({ HATCHABOT_TIMEZONE: 'CST6CDT' })).toBe('CST6CDT');
+    for (const bad of ['+05:00', '../etc/passwd', '/UTC', '5EST', 'America/Toronto; x']) expect(validTimeZone(bad), bad).toBe(false);
+  });
+
   it('is written into the agent\'s OpenClaw config', () => {
     const cmds = buildConfigCommands({ agentId: 'a1', authMode: 'api-key', userTimezone: 'America/Toronto' } as never);
     const set = cmds.flatMap((c) => c.argv.join(' ').includes('userTimezone') ? [c.argv] : []);

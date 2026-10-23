@@ -49,6 +49,7 @@ export const TEMPLATE_VERSION = 1;
 /** What a template file may hold: older apps refuse a file with more. */
 export const MAX_TEMPLATE_PARAMS = 24;
 export const MAX_TEMPLATE_SCHEDULES = 12;
+export const MAX_TEMPLATE_TASK_MESSAGE = 4000;
 
 /** Always carried: the agent's persona and instructions. */
 const TRAINED_FILES = ['SOUL.md', 'AGENTS.md'];
@@ -173,7 +174,7 @@ const TemplateSchema = z.object({
     .array(
       z.object({
         name: z.string().min(1).max(80),
-        message: z.string().min(1).max(4000),
+        message: z.string().min(1).max(MAX_TEMPLATE_TASK_MESSAGE),
         cron: z.string().min(9).max(64).optional(),
         everyMs: z.number().int().positive().optional(),
         tz: z.string().max(64).optional(),
@@ -266,6 +267,17 @@ export async function exportTemplate(
         'Switch off or remove the ones a copy does not need, then try again.',
     );
   }
+  // A task's message travels whole or not at all: one past 4,000 characters
+  // (an agent-made or adopted task; the app caps its own) was cut to fit
+  // without a word, and the copy ran a different task (review, 2026-10-22).
+  const long = tasks.filter((c) => c.message!.length > MAX_TEMPLATE_TASK_MESSAGE);
+  if (long.length) {
+    throw new TransferError(
+      `${long.length === 1 ? 'The scheduled task' : 'The scheduled tasks'} ${long.map((c) => `“${(c.name || 'task').slice(0, 80)}”`).join(', ')} ` +
+        `${long.length === 1 ? 'has a message' : 'have messages'} longer than the 4,000 characters a template carries. ` +
+        'Shorten it or switch it off, then try again.',
+    );
+  }
 
   const manifest: TemplateManifest = {
     format: TEMPLATE_FORMAT,
@@ -276,7 +288,7 @@ export async function exportTemplate(
     ai: { vendor: profile?.vendor ?? 'anthropic' },
     schedules: tasks.map((c) => ({
         name: (c.name || 'task').slice(0, 80),
-        message: c.message!.slice(0, 4000),
+        message: c.message!,
         cron: c.scheduleExpr,
         everyMs: c.everyMs,
         tz: c.scheduleTz,
@@ -308,7 +320,9 @@ export const CLONE_MEMORY_TOTAL_BYTES = 5 * 1024 * 1024;
 
 // Runs inside the source agent, in its workspace: USER.md and the text files
 // under memory/ (hidden entries skipped — .dreams is OpenClaw's own state),
-// as JSON. Anything too big, binary or oddly named is listed, not copied.
+// as JSON. Anything too big, binary or oddly named is listed, not copied, and
+// so is a folder deeper than 8 levels: it was left out unsaid (review
+// 2026-10-22, A48).
 const READ_MEMORY_JS = `
 const fs = require('fs');
 const PER = ${CLONE_MEMORY_FILE_BYTES}, TOTAL = ${CLONE_MEMORY_TOTAL_BYTES};
@@ -328,7 +342,7 @@ function walk(dir, depth) {
     if (n.startsWith('.')) continue;
     const rel = dir + '/' + n;
     let st; try { st = fs.lstatSync(rel); } catch { continue; }
-    if (st.isDirectory()) { if (depth < 3) walk(rel, depth + 1); } else take(rel);
+    if (st.isDirectory()) { if (depth < 8) walk(rel, depth + 1); else skipped.push(rel + '/'); } else take(rel);
   }
 }
 take('USER.md'); walk('memory', 1);
@@ -379,8 +393,10 @@ export function scanTemplate(m: TemplateManifest): PersonalScan {
   return scanPersonalData([
     ...Object.entries(m.files).map(([name, text]) => ({ where: name, text })),
     { where: 'Description', text: m.agent.persona },
-    ...(m.schedules ?? []).map((s) => ({ where: `Scheduled task “${s.name}”`, text: s.message })),
-    ...m.parameters.map((p) => ({ where: `Setup field “${p.label}”`, text: [p.help, p.default].filter(Boolean).join('\n') })),
+    // Names, labels and options travel too: an address in one went out
+    // unwarned (review, 2026-10-22).
+    ...(m.schedules ?? []).map((s) => ({ where: `Scheduled task “${s.name}”`, text: `${s.name}\n${s.message}` })),
+    ...m.parameters.map((p) => ({ where: `Setup field “${p.label}”`, text: [p.label, p.help, p.default, ...(p.options ?? [])].filter(Boolean).join('\n') })),
     ...m.dataNeeds.map((d) => ({ where: `Data source “${d.mountName}”`, text: d.repoUrl })),
   ]);
 }
@@ -424,6 +440,26 @@ function collectParameters(
 }
 
 /**
+ * A child's setup fields after a push of its master's definition: what the
+ * master declares, plus each undeclared {{key}} in the pushed text — as
+ * derive made them (collectParameters), keeping the child's own wording for
+ * a key it already had. The master's declarations alone could not say "none
+ * now": an empty list is stored as none, the same as never declared, so a
+ * master that removed all its fields left the child asking for them
+ * (review, 2026-10-22).
+ */
+export function pushedParameters(
+  masterParams: TemplateParam[] | undefined,
+  text: { soul?: string; agents?: string; persona?: string },
+  childParams: TemplateParam[] = [],
+): TemplateParam[] {
+  const declared = new Set((masterParams ?? []).map((p) => p.key));
+  const prior = new Map(childParams.map((p) => [p.key, p]));
+  return collectParameters({ parameters: masterParams } as Agent, { 'SOUL.md': text.soul ?? '', 'AGENTS.md': text.agents ?? '' }, text.persona ?? '')
+    .map((p) => (declared.has(p.key) ? p : prior.get(p.key) ?? p));
+}
+
+/**
  * Replace {{key}} placeholders with the importer's values (or the declared
  * default). Unknown placeholders are left verbatim — a doc showing the syntax
  * must not get mangled.
@@ -447,7 +483,10 @@ export function resolveParamValues(
   const out: Record<string, string> = {};
   const problems: string[] = [];
   for (const p of params) {
-    let v = values[p.key] ?? p.default;
+    // Own keys only: a field keyed "constructor" read Object's function and
+    // crashed on .trim() (review, 2026-10-22).
+    const given: unknown = Object.hasOwn(values, p.key) ? values[p.key] : undefined;
+    let v = given === undefined || given === null ? p.default : String(given);
     if (p.type === 'boolean' && v !== undefined) {
       // Only a known yes or no: anything else ("tru") was read as no and
       // turned the option off without a word (#83). Blank stays no.
@@ -481,7 +520,8 @@ export function resolveParamValues(
       }
       v = picks.join(', ');
     }
-    if (p.required && (v === undefined || v === '')) {
+    // Spaces alone are blank: three passed as an answer (review, 2026-10-22).
+    if (p.required && (v === undefined || v.trim() === '')) {
       problems.push(`"${p.label}" is required`);
       continue;
     }

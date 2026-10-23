@@ -169,9 +169,21 @@ describe('fingerprints: made on the owner\'s machine, read by CI', () => {
     expect(read.stdout).toContain('the text inside 1 binary file(s)');
   });
 
-  it('a name broken across two lines is not matched (the text is read a line at a time)', () => {
-    const head = commitAs('Test <test@example.org>', { 'wrap.md': 'the Mapleford\nHelper agent\n' }, 'wrap');
-    expect(ci(exportBlob(), pr(base, head)).status).toBe(0);
+  it('a name broken across a line break is found, as the publisher\'s gate finds it (2026-10-22)', () => {
+    const wrapped = commitAs('Test <test@example.org>', { 'wrap.md': 'the Mapleford\nHelper agent\n' }, 'wrap');
+    const r = ci(exportBlob(), pr(base, wrapped));
+    expect(r.status, shown(r)).toBe(1);
+    expect(r.stdout + r.stderr).toContain("'Ma…(16)' wrap.md");
+    expect(r.stdout + r.stderr).not.toContain('Mapleford');
+    // In a comment going on, and with only the second half new.
+    const comment = commitAs('Test <test@example.org>', { 'a.ts': '/**\n * seen on Mapleford\n * Helper, 2026-09-24\n */\n' }, 'comment');
+    expect(ci(exportBlob(), pr(base, comment)).status).toBe(1);
+    const old = commitAs('Test <test@example.org>', { 'half.md': 'ask the Mapleford\nbot\n' }, 'old');
+    const half = commitAs('Test <test@example.org>', { 'half.md': 'ask the Mapleford\nHelper\n' }, 'half');
+    expect(ci(exportBlob(), pr(old, half)).status).toBe(1);
+    // A paragraph between is two texts, not one name.
+    const apart = commitAs('Test <test@example.org>', { 'apart.md': 'Mapleford\n\nHelper\n' }, 'apart');
+    expect(ci(exportBlob(), pr(half, apart)).status, 'apart').toBe(0);
   });
 });
 
@@ -345,8 +357,16 @@ describe('--sync-ci', () => {
     expect(existsSync(join(dir, 'gh-argv'))).toBe(false);
   });
 
-  it('gh refusing is not a success', () => {
-    expect(check(['--sync-ci', '--repo', 'example/project'], { HB_GH: 'fail' }).status).toBe(1);
+  it('gh refusing is not a success, and the failure names the token it used', () => {
+    const r = check(['--sync-ci', '--repo', 'example/project'], { HB_GH: 'fail' });
+    expect(r.status).toBe(1);
+    // No token file: gh's own login, which after the token swap cannot write the secret (2026-10-20).
+    expect(r.stdout).toContain(`with gh's own login: there is no ${join(dir, '.config', 'hatchabot', 'secrets.token')}`);
+    const file = join(dir, 'secrets-token');
+    writeFileSync(file, 'not-a-real-token\n');
+    const withFile = check(['--sync-ci', '--repo', 'example/project'], { HB_GH: 'fail', HATCHABOT_SECRETS_TOKEN_FILE: file });
+    expect(withFile.status).toBe(1);
+    expect(withFile.stdout).toContain(`with the token in ${file})`);
   });
 
   it('the daily timer runs it (systemd --user, in a sandbox)', () => {

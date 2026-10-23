@@ -236,6 +236,15 @@ describe('each lock on its own (a marked socket, no listener)', () => {
       expect(principalOf(await publicReq({ 'x-hatchabot-owner': 'owner-1' })).via).toBe('password'); // the header is not read
     } finally { delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; }
   });
+  it('a secret header of the right length in characters but not in bytes is refused, not a 500 (audit, 2026-10-22)', async () => {
+    const { internalPrincipal } = await import('../src/api/principal.js');
+    const { isPublic } = await import('../src/api/trust.js');
+    const odd = 'é'.repeat(internalHeaders('owner-1')['x-hatchabot-internal']!.length);
+    expect(() => internalPrincipal(privateReq({ 'x-hatchabot-internal': odd, 'x-hatchabot-internal-owner': 'owner-1' }))).not.toThrow();
+    expect(internalPrincipal(privateReq({ 'x-hatchabot-internal': odd, 'x-hatchabot-internal-owner': 'owner-1' }))).toBeUndefined();
+    expect(() => isPublic(privateReq({ 'x-hatchabot-public-replay': 'é'.repeat(64) }))).not.toThrow();
+    expect(isPublic(privateReq({ 'x-hatchabot-public-replay': 'é'.repeat(64) }))).toBe(false);
+  });
   it('a public request is HTTPS whatever X-Forwarded-Proto says', async () => {
     const { requestIsHttps } = await import('../src/api/sessionCookie.js');
     expect(requestIsHttps(privateReq(), {})).toBe(false);

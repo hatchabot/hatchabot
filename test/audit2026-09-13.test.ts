@@ -24,6 +24,24 @@ describe('sharePathProblem (audit 2026-09-13)', () => {
     expect(sharePathProblem(join(home, '.config/rclone'), { home })).toBeDefined(); // inside .config
     expect(sharePathProblem('/srv/media', { home })).toBeUndefined();
   });
+  it('refuses a custom backup folder, inside it and above it (review, 2026-10-22)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'share-nas-'));
+    mkdirSync(join(root, 'family', 'hatchabot'), { recursive: true });
+    mkdirSync(join(root, 'photos'));
+    symlinkSync(join(root, 'family'), join(root, 'nas-link'));
+    const was = process.env.HATCHABOT_BACKUP_DIR;
+    try {
+      process.env.HATCHABOT_BACKUP_DIR = join(root, 'family', 'hatchabot');
+      expect(sharePathProblem(join(root, 'family'), { home })).toMatch(/every backup/);
+      expect(sharePathProblem(join(root, 'family', 'hatchabot', '2026-10-01'), { home })).toMatch(/every backup/);
+      expect(sharePathProblem(join(root, 'photos'), { home })).toBeUndefined();
+      // Named through a link: the real folder is protected too.
+      process.env.HATCHABOT_BACKUP_DIR = join(root, 'nas-link', 'hatchabot');
+      expect(sharePathProblem(join(root, 'family'), { home })).toMatch(/every backup/);
+    } finally {
+      if (was === undefined) delete process.env.HATCHABOT_BACKUP_DIR; else process.env.HATCHABOT_BACKUP_DIR = was;
+    }
+  });
   it('refuses a symlink and judges the real path', () => {
     const root = mkdtempSync(join(tmpdir(), 'share-'));
     mkdirSync(join(root, '.ssh'));

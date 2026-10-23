@@ -120,6 +120,31 @@ describe('the in-container reader', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('upgraded from 2026.7: the SQLite store, not the sessions.json left behind; a store with no session tables, the file (review, 2026-10-22)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-recent-both-'));
+    try {
+      const sd = join(root, 'kitchen', 'sessions');
+      mkdirSync(sd, { recursive: true });
+      mkdirSync(join(root, 'kitchen', 'agent'), { recursive: true });
+      // The file as the upgrade left it, pointing at its last 2026.7 conversation.
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ 'agent:kitchen:main': { sessionId: 's-old', updatedAt: NOW - 30 * DAY } }));
+      writeFileSync(join(sd, 's-old.jsonl'), ev('assistant', 'from before the upgrade'));
+      const file = join(root, 'kitchen', 'agent', 'openclaw-agent.sqlite');
+      let db = new Database(file);
+      db.exec('CREATE TABLE other_things (id TEXT)');
+      db.close();
+      expect(run(root, ['agent:kitchen:main'])['agent:kitchen:main']).toEqual({ role: 'assistant', text: 'from before the upgrade' });
+      db = new Database(file);
+      db.exec(`CREATE TABLE session_nodes (session_key TEXT PRIMARY KEY, current_session_id TEXT NOT NULL, entry_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE session_windows (session_id TEXT PRIMARY KEY, session_key TEXT NOT NULL, updated_at INTEGER);
+        CREATE TABLE transcript_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_json TEXT, created_at INTEGER NOT NULL, event_zstd BLOB, PRIMARY KEY (session_id, seq));`);
+      db.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?)').run('agent:kitchen:main', 'w1', '{}', NOW);
+      db.prepare('INSERT INTO transcript_events (session_id, seq, event_json, created_at) VALUES (?, ?, ?, 0)').run('w1', 1, ev('assistant', 'said today'));
+      db.close();
+      expect(run(root, ['agent:kitchen:main'])['agent:kitchen:main']).toEqual({ role: 'assistant', text: 'said today' });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('a read that fails names the conversation as failed, not as empty (#143)', () => {
     const root = mkdtempSync(join(tmpdir(), 'hb-recent-fail-'));
     const raw = (keys: string[]) => JSON.parse(execFileSync('sh', ['-c', recentReadShell('kitchen', keys)], { env: { ...process.env, AGENTS_DIR: root }, encoding: 'utf8' }));

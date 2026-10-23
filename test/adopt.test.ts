@@ -75,7 +75,7 @@ describe('inspectWorkspace', () => {
     for (let i = 0; i < 20_000; i++) writeFileSync(join(flat, `n${i}.md`), '');
     expect(() => inspectWorkspace(flat)).toThrow(/over 20000 files/);
     rmSync(flat, { recursive: true, force: true });
-  });
+  }, 30_000);   // 20,000 files written: CI's loaded runner took 5.8 s
 
   it('excludes credentials at any depth, not just the top level', () => {
     const p = inspectWorkspace(ws);
@@ -127,6 +127,29 @@ describe('packWorkspace', () => {
     const listing = execFileSync('tar', ['tz'], { input: await packWorkspace(p), encoding: 'utf8' })
       .split('\n').filter(Boolean).map((l) => l.replace(/^\.\//, '')).sort();
     expect(listing).toEqual(p.files.sort());
+  });
+});
+
+describe('packWorkspace and a folder that changes after the preview (review 2026-10-22, B14)', () => {
+  const setUp = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-swap-'));
+    const outside = mkdtempSync(join(tmpdir(), 'acl-outside-'));
+    writeFileSync(join(dir, 'SOUL.md'), '# soul');
+    mkdirSync(join(dir, 'memory'));
+    writeFileSync(join(dir, 'memory', 'note.md'), '# note');
+    writeFileSync(join(outside, 'note.md'), 'not the workspace');
+    writeFileSync(join(outside, 'SOUL.md'), 'not the workspace');
+    return { dir, outside, p: inspectWorkspace(dir) };
+  };
+  it('a file swapped for a link is refused, not packed as the link', async () => {
+    const { dir, outside, p } = setUp();
+    rmSync(join(dir, 'SOUL.md')); symlinkSync(join(outside, 'SOUL.md'), join(dir, 'SOUL.md'));
+    await expect(packWorkspace(p)).rejects.toThrow(/SOUL\.md .* changed while it was being copied/);
+  });
+  it('a folder swapped for a link is refused, so no file from outside travels under a listed name', async () => {
+    const { dir, outside, p } = setUp();
+    rmSync(join(dir, 'memory'), { recursive: true }); symlinkSync(outside, join(dir, 'memory'));
+    await expect(packWorkspace(p)).rejects.toThrow(/memory\/note\.md .* changed/);
   });
 });
 

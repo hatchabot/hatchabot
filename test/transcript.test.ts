@@ -188,6 +188,26 @@ describe('every current conversation is current, wherever it is kept', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it('a damaged record or archive is left out and said so, not dropped in silence (review 2026-10-22, A24)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'tx-dmg-'));
+    mkdirSync(join(root, 'kitchen', 'agent'), { recursive: true });
+    const ev = (id: string, role: string, text: string, ts: string) => line({ type: 'message', id, timestamp: ts, message: { role, content: [{ type: 'text', text }] } });
+    const db = new Database(join(root, 'kitchen', 'agent', 'openclaw-agent.sqlite'));
+    db.exec(`CREATE TABLE session_nodes (session_key TEXT PRIMARY KEY, current_session_id TEXT NOT NULL, entry_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE transcript_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_json TEXT, created_at INTEGER NOT NULL, event_zstd BLOB, PRIMARY KEY (session_id, seq));
+      CREATE TABLE session_transcript_archives (session_id TEXT, session_key TEXT, encoding TEXT, archive_blob BLOB, archived_at INTEGER);`);
+    db.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?)').run('agent:kitchen:main', 'live', '{}', 1);
+    db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?, NULL)').run('live', 1, ev('m1', 'user', 'what is for dinner', '2026-09-10T18:00:00Z'), 1);
+    db.prepare('INSERT INTO transcript_events VALUES (?, ?, NULL, ?, ?)').run('live', 2, 2, Buffer.from('not zstd at all'));
+    db.prepare('INSERT INTO session_transcript_archives VALUES (?, ?, ?, ?, ?)').run('gone', 'agent:kitchen:main', 'zstd', Buffer.from('not zstd either'), 1);
+    db.close();
+    const all = render(root);
+    expect(all.unreadable).toBe(2);
+    expect(all.text).toContain('2 saved records could not be read');
+    expect(all.text).toContain('what is for dinner');
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it('a sessions folder that cannot be read fails the read instead of looking empty', () => {
     const root = mkdtempSync(join(tmpdir(), 'tx-bad-'));
     mkdirSync(join(root, 'kitchen'), { recursive: true });

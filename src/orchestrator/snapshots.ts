@@ -240,7 +240,14 @@ export async function captureSnapshot(
     params,
   };
   store.insertSnapshot(snapshot);
-  const pruned = store.pruneAutoSnapshots(agentId, AUTO_KEEP);
+  // Not one the agent's operation still needs: a restore's safety copy, taken
+  // at the limit, pruned the very snapshot it was restoring, and a restart
+  // part-way then had nothing to finish with (A40, 2026-10-22).
+  const active = store.activeOperationFor(agentId);
+  const spare = Object.entries(active?.params ?? {})
+    .filter(([k, v]) => /snapshotId$/i.test(k) && typeof v === 'string')
+    .map(([, v]) => v as string);
+  const pruned = store.pruneAutoSnapshots(agentId, AUTO_KEEP, spare);
   log('snapshot.captured', { agentId, id: snapshot.id, reason, pruned });
   return {
     id: snapshot.id,

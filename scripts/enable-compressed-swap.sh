@@ -20,7 +20,8 @@
 #   --swap-size SIZE     zswap with no swap at all: the size of the /swapfile it makes (default 8G).
 #   --swappiness N       also set vm.swappiness (asked otherwise; see below). 0–200.
 #   --keep-shrinker      zswap: leave the kernel's shrinker on (it writes cold compressed pages
-#                        to the swap file early; off by default here — see below).
+#                        to the swap file early; off by default here). Hatchabot then gives
+#                        agents no swap: their cold memory would reach the disk.
 #   --yes                answer yes to everything (a provisioner); --swappiness still opt-in.
 #   --dry-run            print what it would do, change nothing.
 #
@@ -106,10 +107,24 @@ status() {
   else
     note "boot unit: not installed (nothing is re-applied at boot)"
   fi
-  local verdict=none
-  grep -q '^/dev/zram' /proc/swaps && verdict=zram
-  if [ "$verdict" = none ] && [ "$(cat $ZS/enabled 2>/dev/null)" = Y ] && [ "$(awk 'NR>1' /proc/swaps | grep -vc '^/dev/zram' || true)" -gt 0 ]; then verdict=zswap; fi
-  if [ "$verdict" = none ]; then
+  # In the order Hatchabot judges it (src/orchestrator/swap.ts, parseSwapProbe),
+  # so the two never disagree: zram alone; zram with disk swap needs zswap;
+  # zswap's shrinker writes agents' cold memory to disk early.
+  local verdict=none why='' zram disk zon=N shr=N
+  zram="$(awk 'NR>1 && $1 ~ /^\/dev\/zram[0-9]+$/' /proc/swaps | wc -l)"
+  disk="$(awk 'NR>1 && $1 !~ /^\/dev\/zram[0-9]+$/' /proc/swaps | wc -l)"
+  case "$(cat $ZS/enabled 2>/dev/null)" in [Yy]|1) zon=Y ;; esac
+  case "$(cat $ZS/shrinker_enabled 2>/dev/null)" in [Yy]|1) shr=Y ;; esac
+  if [ "$zram" -gt 0 ] && [ "$disk" -eq 0 ]; then verdict=zram
+  elif [ "$zram" -gt 0 ] && [ "$zon" != Y ]; then why=zram-disk
+  elif [ "$zon" = Y ] && [ "$disk" -gt 0 ] && [ "$shr" = Y ]; then why=shrinker
+  elif [ "$zon" = Y ] && [ "$disk" -gt 0 ]; then verdict=zswap
+  fi
+  if [ "$why" = shrinker ]; then
+    say "→ zswap is on, but its shrinker is too: Hatchabot gives agents no swap here (run this script again to turn the shrinker off)."
+  elif [ "$why" = zram-disk ]; then
+    say "→ zram and an uncompressed disk swap, without zswap: Hatchabot gives agents no swap here (turn the disk swap off, or zswap on)."
+  elif [ "$verdict" = none ]; then
     say "→ No compressed swap: Hatchabot gives agents no swap here."
   else
     say "→ Compressed swap is on ($verdict): Hatchabot gives agents their swap allowance here."
@@ -191,8 +206,12 @@ enable() {
   say "This will turn on compressed swap ($MODE) on $(hostname):"
   if [ "$MODE" = zswap ]; then
     note "• zswap on, compressor $comp, pool zsmalloc, at most $POOL% of memory ($(human $(( mem_bytes * POOL / 100 )))) for compressed pages"
-    note "• swapped pages are compressed in memory first; only when that pool is full do the oldest go on to the swap file"
-    [ "$SHRINKER" = N ] && note "• zswap's shrinker off: cold compressed pages stay in memory instead of being written to the swap file early"
+    note "• swapped pages are compressed in memory first; pages that do not compress, and the oldest once that pool is full, go on to the swap file (for nothing on disk, use --zram)"
+    if [ "$SHRINKER" = N ]; then
+      note "• zswap's shrinker off: cold compressed pages stay in memory instead of being written to the swap file early"
+    else
+      note "• zswap's shrinker stays on (--keep-shrinker): Hatchabot gives agents no swap while it is"
+    fi
     if [ "$make_swapfile" = 1 ]; then
       note "• there is no swap here, and zswap needs a swap device behind it: a $SWAP_SIZE /swapfile is made (and added to /etc/fstab)"
     else

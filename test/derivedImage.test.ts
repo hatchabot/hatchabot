@@ -83,6 +83,17 @@ describe('renderDockerfile', () => {
     expect(dockerfileProblem('RUN cat <<< "hi"')).toBeNull();
   });
 
+  it('a << inside quotes is text, as BuildKit reads it (review, 2026-10-22)', () => {
+    expect(dockerfileProblem('RUN echo "example <<EOF"')).toBeNull();
+    expect(dockerfileProblem("RUN echo 'a <<EOF' && echo \"b \\\" <<EOT\"")).toBeNull();
+    // Quoted delimiters and a << after the quotes are still heredocs.
+    expect(dockerfileProblem('RUN cat <<"EOF"\nhi')).toMatch(/heredoc <<EOF is never closed/);
+    expect(dockerfileProblem('RUN echo "a" <<EOF\nhi')).toMatch(/heredoc <<EOF is never closed/);
+    // A continued line may begin inside a quote: every << on it counts.
+    expect(dockerfileProblem('RUN echo "a \\\nb" <<EOF\nhi')).toMatch(/heredoc <<EOF is never closed/);
+    expect(dockerfileProblem('RUN echo a \\\n\n"x <<EOF"')).toMatch(/heredoc <<EOF is never closed/);
+  });
+
   it('a build of a saved record with such lines is refused before docker runs (B002)', async () => {
     const res = await buildDerivedImage({ name: 'media', base: 'hatchabot-runtime:latest', dockerfile: 'RUN echo installed \\', docker: '/nonexistent/docker', dataDir: mkdtempSync(join(tmpdir(), 'hb-derive-')) });
     expect(res).toEqual({ ok: false, error: expect.stringMatching(/continues it into nothing/) });

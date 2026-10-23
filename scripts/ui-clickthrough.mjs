@@ -11,8 +11,9 @@
  *   node scripts/ui-clickthrough.mjs           # all scenarios; exit 1 on a failure
  *   node scripts/ui-clickthrough.mjs --keep    # keep the work dir (the page + Chrome's DOM dump)
  *
- * Needs docker (headless Chrome runs in a throwaway container, as the
- * screenshots do). Results travel out of the page as a data attribute on
+ * Needs docker or podman (headless Chrome runs in a throwaway container, as
+ * the screenshots do); CONTAINER_CLI=podman picks podman, as the dev repo's
+ * own runners do (rootless, no docker there). Results travel out of the page as a data attribute on
  * <html>, read from Chrome's --dump-dom.
  */
 import { execFileSync } from 'node:child_process';
@@ -25,7 +26,9 @@ import { STUB } from '../docs/deck/shot-data.mjs';
 // Headless Chrome, pinned to a digest so CI runs the image it was reviewed with
 // (#46, 2026-10-09). ci.yml pulls the same one; test/workflowPins.test.ts checks
 // they agree. Bumping it: docs/releasing.md, "Updating pinned actions and images".
-const CHROME_IMAGE = 'zenika/alpine-chrome@sha256:eb3378c1ed0079f94db054a5fe1aaa790a254ec0d6bbc67eda052420d86a179d';
+// Fully qualified: podman refuses a short name it would have to guess the registry of.
+const CHROME_IMAGE = 'docker.io/zenika/alpine-chrome@sha256:eb3378c1ed0079f94db054a5fe1aaa790a254ec0d6bbc67eda052420d86a179d';
+const CONTAINER_CLI = process.env.CONTAINER_CLI || 'docker';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const keep = process.argv.includes('--keep');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
@@ -1194,6 +1197,9 @@ const SCENARIOS = String.raw`(() => {
       const mark = window.__calls.length;
       byText('.spendchart button', '1 mo').click();
       await until(() => window.__calls.slice(mark).some((c) => c.url.includes('/v1/usage/spend?range=month')));
+      // Day bars start at the page's midnight: it sends its zone (audit, 2026-10-20).
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      ok('the chart asks in the page\'s zone', window.__calls.slice(mark).some((c) => c.url.includes('&tz=' + encodeURIComponent(zone))));
       box.remove();
       // An agent's Usage tab carries the same chart, for it alone.
       const html = usageHTML({ totalTokens: 1e6, calls: 3, sessions: 1, byModel: [] }, 'a1');
@@ -2109,6 +2115,44 @@ const SCENARIOS = String.raw`(() => {
         await loadHealth();
         await until(() => body.textContent.includes('Responding'));
         ok('answering: last answered: ' + body.textContent.replace(/\s+/g, ' ').slice(0, 160), /AI source\s*last answered 2h ago/.test(body.textContent.replace(/\s+/g, ' ')));
+      } finally {
+        delete window.__override['/v1/agents/a1/health'];
+        try { v2Close(); } catch {}
+      }
+    },
+    // Health (review, 2026-10-22): a Discord or Slack bot that lost its connection is named.
+    healthDiscordDisconnected: async () => {
+      try {
+        window.__override['/v1/agents/a1/health'] = { reachable: true, status: 'degraded', ok: true, pluginErrors: [], disconnected: ['discord'] };
+        openV2Agent('a1', 'overview');
+        await until(() => document.getElementById('v2HealthSlot'));
+        byText('#v2AgentDlg button', 'Check health').click();
+        const body = document.getElementById('healthBody');
+        await until(() => body.textContent.includes('Discord connected'));
+        ok('the Discord row says disconnected: ' + body.textContent.replace(/\s+/g, ' ').slice(0, 160), /Discord connected\s*disconnected/.test(body.textContent.replace(/\s+/g, ' ')));
+        ok('and it is listed as a problem', v2HealthProblems({ reachable: true, status: 'degraded', disconnected: ['slack'] }).includes('Slack is not connected'));
+      } finally {
+        delete window.__override['/v1/agents/a1/health'];
+        try { v2Close(); } catch {}
+      }
+    },
+    // Audit 2026-10-22 (B22): past the first 20 the server sends a count, the worst first; the page counts them all.
+    healthLintCountsAll: async () => {
+      try {
+        const findings = [{ severity: 'error', checkId: 'gateway.bind', message: 'the gateway listens on every address' }]
+          .concat(Array.from({ length: 19 }, (_, i) => ({ severity: 'info', checkId: 'note.' + i, message: 'note ' + i })));
+        const h = { reachable: true, status: 'healthy', ok: false, doctor: { findings, checksRun: 40, mutedCount: 0, omittedCount: 5 } };
+        window.__override['/v1/agents/a1/health'] = h;
+        openV2Agent('a1', 'overview');
+        await until(() => document.getElementById('v2HealthSlot'));
+        byText('#v2AgentDlg button', 'Check health').click();
+        const body = document.getElementById('healthBody');
+        await until(() => body.textContent.includes('Config warnings'));
+        const t = body.textContent.replace(/\s+/g, ' ');
+        ok('the count is all 25, not the 20 sent: ' + t.slice(0, 200), /Config warnings\s*25 findings/.test(t));
+        ok('the error is listed first', t.indexOf('gateway.bind') >= 0 && t.indexOf('gateway.bind') < t.indexOf('note.0'));
+        ok('and the rest are counted, not dropped', t.includes('… and 19 more'));
+        ok('Alerts count them all too', v2HealthProblems(h).some((x) => x.startsWith('25 settings to fix')));
       } finally {
         delete window.__override['/v1/agents/a1/health'];
         try { v2Close(); } catch {}
@@ -3218,6 +3262,44 @@ const SCENARIOS = String.raw`(() => {
         v2Close(); v2AppCache = null; openV2Agent('a1', 'overview');
         await until(() => byText('#v2AppRow', 'Demo App'));
         ok('no buttons for someone else', !document.querySelector('#v2AppRow button'));
+        v2Close();
+      } finally {
+        delete window.__override['/v1/agents/a1/app'];
+        if (window.__answer) delete window.__answer['POST /v1/agents/a1/app/update'];
+        if (typeof v2AgentId !== 'undefined' && v2AgentId) v2Close();
+      }
+    },
+    // Final audit, 2026-10-22: an update that needs a value it has not got
+    // (a field an older version left blank) asks for it here, since Update sends none.
+    appUpdateAsksValues: async () => {
+      const SHA = 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0', NEW = 'f00dfeed1234f00dfeed1234f00dfeed1234f00d';
+      const APP = { app: 'demoapp', name: 'Demo App', source: '/home/tester/demoapp', ref: 'HEAD', sha: SHA, previousSha: null,
+        installedAt: new Date(Date.now() - 3600e3).toISOString(), testOk: true, tasks: ['demoapp-tick'] };
+      try {
+        window.__override['/v1/agents/a1/app'] = { app: APP, pending: null, canChange: true };
+        v2AppCache = null;
+        openV2Agent('a1', 'overview');
+        await until(() => byText('#v2AppRow', 'Demo App') && document.getElementById('v2AppUpdateBtn'));
+        window.__answer = window.__answer || {};
+        window.__answer['POST /v1/agents/a1/app/update'] = [
+          { status: 400, body: { error: 'Needs a value for: mailbox (its address) (give them as key=value).', needs: [{ key: 'mailbox', label: 'its address', type: 'email' }], unchanged: true } },
+          { status: 200, body: { app: { ...APP, sha: NEW, previousSha: SHA } } },
+        ];
+        const posts = () => window.__calls.filter((c) => c.method === 'POST' && c.path === '/v1/agents/a1/app/update');
+        const before = posts().length;
+        document.getElementById('v2AppUpdateBtn').click();
+        await until(() => document.getElementById('v2AppV_mailbox'));
+        const out = document.getElementById('v2AppOut').textContent;
+        ok('it asks for the value, in words for the page: ' + out.replace(/\\s+/g, ' ').slice(0, 100), !out.includes('key=value') && out.includes('mailbox'));
+        document.getElementById('v2AppUpdateWithBtn').click();
+        ok('left blank, it says so and sends nothing', document.getElementById('v2AppValErr').textContent.includes('mailbox')
+          && posts().length === before + 1);
+        document.getElementById('v2AppV_mailbox').value = 'you@example.com';
+        window.__override['/v1/agents/a1/app'] = { app: { ...APP, sha: NEW, previousSha: SHA }, pending: null, canChange: true };
+        document.getElementById('v2AppUpdateWithBtn').click();
+        await until(() => document.getElementById('toast').textContent.includes('Updated to f00dfeed1234'));
+        const sent = posts().at(-1);
+        ok('the update went with the value', sent?.body?.values?.mailbox === 'you@example.com');
         v2Close();
       } finally {
         delete window.__override['/v1/agents/a1/app'];
@@ -4388,6 +4470,256 @@ const SCENARIOS = String.raw`(() => {
       }
     },
   });
+  // Audit, 2026-10-20 (made-up data): a revert that runs in the background reloads the editor
+  // when it ends; a file's own links ask for the second factor; Backups for a member.
+  Object.assign(T, {
+    revertSnapshotInBackground: async () => {
+      window.__override['/v1/agents/a1/snapshots'] = [{ id: 's2', label: 'before the trip', createdAt: new Date().toISOString(), files: ['SOUL.md', 'AGENTS.md', 'MEMORY.md'], reason: 'manual' }];
+      window.__override['/v1/agents/a1/files/SOUL.md'] = { content: 'old soul' };
+      const op = { id: 'op_rv1', agentId: 'a1', kind: 'snapshot-restore', title: 'Reverting to a snapshot', status: 'running', requestedAt: new Date().toISOString() };
+      window.__answer = { 'POST /v1/agents/a1/snapshots/s2/restore': [{ status: 202, body: { operation: op } }] };
+      const reads = () => calls('GET', /\/v1\/agents\/a1\/files\/SOUL\.md$/).length;
+      try {
+        editAgentId = 'a1'; $('editFile').value = 'SOUL.md';
+        await loadEditFile(); await loadSnapshots();
+        ok('loaded first', $('editContent').value === 'old soul' && !$('editSaveBtn').disabled);
+        const before = reads();
+        const btn = await until(() => [...document.querySelectorAll('#snapList button')].find((b) => b.textContent === 'Revert' && /s2/.test(b.getAttribute('onclick'))));
+        btn.click();
+        await until(() => $('editErr').textContent.includes('reloads when it is done'));
+        eq('not read again while it runs', reads(), before);
+        ok('Save is off until it has been read again', $('editSaveBtn').disabled && editLoaded === null);
+        ok('followed', v2Ops.has('op_rv1'));
+        // It ends: the editor reads the reverted text, and Save is back.
+        window.__override['/v1/agents/a1/files/SOUL.md'] = { content: 'reverted soul' };
+        window.__answer['GET /v1/operations/op_rv1'] = [{ body: { ...op, status: 'succeeded', outcome: 'Reverted SOUL.md, AGENTS.md, MEMORY.md.', finishedAt: new Date().toISOString() } }];
+        await v2OpTick();
+        await until(() => $('editContent').value === 'reverted soul');
+        ok('Save is back on', !$('editSaveBtn').disabled && editLoaded?.file === 'SOUL.md');
+        ok('the hook ran once and is gone', !v2OpEnds.has('op_rv1'));
+      } finally {
+        window.__answer = {}; v2Ops.clear(); v2OpEnds.clear();
+        for (const k of ['/v1/agents/a1/snapshots', '/v1/agents/a1/files/SOUL.md']) delete window.__override[k];
+      }
+    },
+    filesLinksSecondFactor: async () => {
+      // The file name (opens in a tab) and its ⬇ ask for the second factor at the public address, as the .tar.gz links do.
+      window.__override['/v1/agents/a1/fs'] = { path: 'notes', entries: [{ name: 'packing-list.md', type: 'file', size: 12, mtime: '' }] };
+      window.__override['/v1/second-factor'] = { factors: [{ id: 'sf-1', kind: 'totp' }], backupCodes: 3, need: 'yes', methods: ['totp', 'backup'], passkeyHere: false };
+      const STEP = { status: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
+      const pub = appConfig.publicAddress, realOpen = window.open;
+      const opened = []; window.open = (url, target) => { opened.push([url, target]); return {}; };
+      try {
+        openV2Agent('a1', 'files');
+        await v2LoadFiles('a1', 'notes');
+        const name = await until(() => [...document.querySelectorAll('#v2Files a')].find((x) => x.textContent === 'packing-list.md'));
+        const down = [...document.querySelectorAll('#v2Files a.btn')].find((x) => x.textContent === '⬇');
+        ok('the ⬇ goes by sfLink: ' + down?.getAttribute('onclick'), /sfLink\(event, this, 'packing-list\.md'\)/.test(down?.getAttribute('onclick') || ''));
+        ok('the name goes by sfOpen', /^return sfOpen\(/.test(name.getAttribute('onclick') || ''));
+        let prevented = false; const ev = { preventDefault: () => { prevented = true; } };
+        appConfig.publicAddress = false;
+        ok('a plain link at the private address', sfOpen(ev, name, '/v1/agents/a1/fs?path=notes') === true && !prevented);
+        appConfig.publicAddress = true;
+        window.__answer = { 'GET /v1/agents/a1/fs': [STEP] };
+        ok('held at the public address', sfOpen(ev, name, '/v1/agents/a1/fs?path=notes') === false && prevented);
+        await until(() => sfDlg.open);
+        ok('no tab yet', opened.length === 0);
+        sfDone();
+        await until(() => opened.length === 1);
+        eq('then the file opens in a new tab', opened[0], [name.getAttribute('href'), '_blank']);
+        // Cancelled: no tab, and said.
+        window.__answer = { 'GET /v1/agents/a1/fs': [STEP] };
+        sfOpen(ev, name, '/v1/agents/a1/fs?path=notes');
+        await until(() => sfDlg.open);
+        byText('#sfDlg button', 'Cancel').click();
+        await until(() => $('toast').textContent.includes('The second factor was not given'));
+        eq('still one tab', opened.length, 1);
+        // The ⬇ at the public address is fetched, so it can ask.
+        window.__answer = { 'GET /v1/agents/a1/fs/file': [STEP] };
+        down.click();
+        await until(() => sfDlg.open);
+        byText('#sfDlg button', 'Cancel').click();
+        ok('the file was asked for', calls('GET', /\/v1\/agents\/a1\/fs\/file$/).length >= 1);
+      } finally {
+        appConfig.publicAddress = pub; window.open = realOpen; window.__answer = {};
+        delete window.__override['/v1/agents/a1/fs']; delete window.__override['/v1/second-factor'];
+        if (sfDlg.open) sfDlg.close();
+        if (v2AgentDlg.open) v2Close(); v2FilesPath.delete('a1');
+      }
+    },
+    backupsForMember: async () => {
+      // Someone who is not the machine's owner: no Back up now, drills or sets (each answers 403), the table and a line instead.
+      window.__override['/v1/backups/readiness'] = { newestSet: '2026-10-18', newestFresh: true, staleDays: 2, canRestore: false,
+        drill: { every: 'weekly', hours: { from: 5, to: 7 } },
+        agents: [{ agentId: 'a1', name: 'Homework Helper', hostId: 'h1', status: 'ready', line: 'Recoverable from 2026-10-18',
+          latestUsable: { date: '2026-10-18', ageDays: 1, sizeBytes: 2048, complete: true }, leftOut: { count: 0, of: 3, asleep: 0, failed: 0, missing: 0, other: 0 } }] };
+      const owner = myAccount.hostOwner; myAccount.hostOwner = false;
+      const before = calls('GET', /^\/v1\/backups$/).length;
+      try {
+        await openAiDlg('backups');
+        await until(() => document.getElementById('bkReadyTable'));
+        ok('the line saying who runs them', !$('bkOwnerOnly').hidden && $('bkOwnerOnly').textContent.includes("machine's owner"));
+        for (const id of ['bkRunRow', 'bkDrillRow', 'bkDrill', 'bkSetsHead', 'bkList']) ok(id + ' is hidden', $(id).hidden);
+        eq('the sets are not asked for', calls('GET', /^\/v1\/backups$/).length, before);
+        aiDlg.close();
+        // The owner sees them again.
+        myAccount.hostOwner = true;
+        await openAiDlg('backups');
+        ok('back for the owner', !$('bkRunRow').hidden && !$('bkDrillRow').hidden && !$('bkList').hidden && $('bkOwnerOnly').hidden);
+      } finally {
+        myAccount.hostOwner = owner; clearTimeout(bkDrillTimer); bkDrillTimer = null; aiDlg.close();
+        delete window.__override['/v1/backups/readiness']; v2Readiness = null; v2ReadinessAt = 0;
+      }
+    },
+    revertHoldsThroughBlipAndPicker: async () => {
+      // A poll that fails is not the end of the revert, and picking another file meanwhile keeps Save off (regression audit, 2026-10-22).
+      window.__override['/v1/agents/a1/snapshots'] = [{ id: 's3', label: 'before the move', createdAt: new Date().toISOString(), files: ['SOUL.md', 'AGENTS.md'], reason: 'manual' }];
+      window.__override['/v1/agents/a1/files/SOUL.md'] = { content: 'old soul' };
+      window.__override['/v1/agents/a1/files/AGENTS.md'] = { content: 'old agents' };
+      const op = { id: 'op_rv2', agentId: 'a1', kind: 'snapshot-restore', title: 'Reverting to a snapshot', status: 'running', requestedAt: new Date().toISOString() };
+      window.__answer = { 'POST /v1/agents/a1/snapshots/s3/restore': [{ status: 202, body: { operation: op } }] };
+      try {
+        editAgentId = 'a1'; $('editFile').value = 'SOUL.md';
+        await loadEditFile(); await loadSnapshots();
+        const btn = await until(() => [...document.querySelectorAll('#snapList button')].find((b) => b.textContent === 'Revert' && /s3/.test(b.getAttribute('onclick'))));
+        btn.click();
+        await until(() => v2Ops.has('op_rv2'));
+        // A 5xx (or the network) while it runs: still followed, the hook not run.
+        window.__answer['GET /v1/operations/op_rv2'] = [{ status: 502, body: { error: 'Bad Gateway' } }];
+        await v2OpTick();
+        ok('still followed after a failed poll', v2Ops.has('op_rv2') && v2OpEnds.has('op_rv2'));
+        // Another file picked meanwhile: it reads, but Save stays off and the line stays.
+        $('editFile').value = 'AGENTS.md';
+        await loadEditFile();
+        ok('the picked file reads', $('editContent').value === 'old agents');
+        ok('Save stays off while it reverts', $('editSaveBtn').disabled && editLoaded === null);
+        ok('and says so', $('editErr').textContent.includes('reloads when it is done'));
+        // It ends: read again, Save back.
+        window.__override['/v1/agents/a1/files/AGENTS.md'] = { content: 'reverted agents' };
+        window.__answer['GET /v1/operations/op_rv2'] = [{ body: { ...op, status: 'succeeded', outcome: 'Reverted SOUL.md, AGENTS.md.', finishedAt: new Date().toISOString() } }];
+        await v2OpTick();
+        await until(() => $('editContent').value === 'reverted agents');
+        ok('Save is back on after it ends', !$('editSaveBtn').disabled && editLoaded?.file === 'AGENTS.md');
+        // Gone (404) still ends it.
+        const op3 = { ...op, id: 'op_rv3' };
+        let ran = 0; v2FollowOp(op3, () => { ran++; });
+        window.__answer['GET /v1/operations/op_rv3'] = [{ status: 404, body: { error: 'Not found' } }];
+        await v2OpTick();
+        ok('a 404 ends it, once', !v2Ops.has('op_rv3') && ran === 1);
+      } finally {
+        window.__answer = {}; v2Ops.clear(); v2OpEnds.clear(); editReverting.clear();
+        for (const k of ['/v1/agents/a1/snapshots', '/v1/agents/a1/files/SOUL.md', '/v1/agents/a1/files/AGENTS.md']) delete window.__override[k];
+        $('editFile').value = 'SOUL.md';
+      }
+    },
+    backupsOwnerWhenAccountUnread: async () => {
+      // The account not read yet (or its read failed): asked again, and the owner keeps Back up now and the sets (regression audit, 2026-10-22).
+      window.__override['/v1/backups/readiness'] = { newestSet: '2026-10-18', newestFresh: true, staleDays: 2, canRestore: true, drill: { every: 'off' }, agents: [] };
+      const saved = myAccount;
+      try {
+        myAccount = {};
+        window.__answer = { 'GET /v1/account': [{ body: { ...saved, hostOwner: true } }] };
+        await openAiDlg('backups');
+        ok('asked for the account again', calls('GET', /^\/v1\/account$/).length >= 1);
+        ok('the owner sees Back up now and the sets', !$('bkRunRow').hidden && !$('bkList').hidden && $('bkOwnerOnly').hidden);
+        aiDlg.close();
+        // The read fails again: the owner's view, which the server guards.
+        myAccount = {};
+        window.__answer = { 'GET /v1/account': [{ status: 500, body: { error: 'boom' } }, { status: 500, body: { error: 'boom' } }] };
+        await openAiDlg('backups');
+        ok('still the owner view when it cannot be read', !$('bkRunRow').hidden && $('bkOwnerOnly').hidden);
+      } finally {
+        myAccount = saved; window.__answer = {}; clearTimeout(bkDrillTimer); bkDrillTimer = null; aiDlg.close();
+        delete window.__override['/v1/backups/readiness']; v2Readiness = null; v2ReadinessAt = 0;
+      }
+    },
+    slowAnswersStayWithTheirOwn: async () => {
+      // A slow answer for what was open before lands nowhere: the logs and the setup log of agent A over B's,
+      // A's file save closing the editor B is open in, A's report save over draft B (review, 2026-10-22, A37 A38 B43).
+      const real = window.fetch, held = [];
+      const hold = (re, method = 'GET') => { window.fetch = (input, init = {}) => {
+        const url = String(typeof input === 'string' ? input : input.url);
+        if ((init.method || 'GET').toUpperCase() === method && re.test(url.split('?')[0])) return new Promise((res) => held.push(() => res(real(input, init))));
+        return real(input, init);
+      }; };
+      const free = async () => { window.fetch = real; while (held.length) held.shift()(); await sleep(150); };
+      try {
+        window.__override['/v1/agents/a1/logs'] = { text: 'logs of A' };
+        window.__override['/v1/agents/a2/logs'] = { text: 'logs of B' };
+        hold(/\/v1\/agents\/a1\/logs$/);
+        logsAgentId = 'a1'; const a = loadLogs();
+        await until(() => held.length === 1);
+        window.fetch = real; logsAgentId = 'a2'; await loadLogs();
+        eq('B shows its logs', $('logsText').textContent, 'logs of B');
+        await free(); await a;
+        eq("A's late answer leaves B's", $('logsText').textContent, 'logs of B');
+        window.__override['/v1/agents/a1/events'] = { events: [{ at: new Date().toISOString(), label: 'event of A' }] };
+        window.__override['/v1/agents/a2/events'] = { events: [{ at: new Date().toISOString(), label: 'event of B' }] };
+        hold(/\/v1\/agents\/a1\/events$/);
+        setupLogAgentId = 'a1'; const s1 = loadSetupLog();
+        await until(() => held.length === 1);
+        window.fetch = real; setupLogAgentId = 'a2'; await loadSetupLog();
+        await free(); await s1;
+        ok("the setup log stays B's: " + $('setupLogBody').textContent, $('setupLogBody').textContent.includes('event of B') && !$('setupLogBody').textContent.includes('event of A'));
+        // The editor: A saves slowly, B opens in it and is typed in.
+        window.__override['/v1/agents/a1/files/SOUL.md'] = { content: 'soul of A' };
+        window.__override['/v1/agents/a2/files/SOUL.md'] = { content: 'soul of B' };
+        editAgentId = 'a1'; $('editFile').value = 'SOUL.md'; await loadEditFile();
+        if (!editDlg.open) editDlg.showModal();
+        hold(/\/v1\/agents\/a1\/files\/SOUL\.md$/, 'PUT');
+        const saving = saveEditFile();
+        await until(() => held.length === 1);
+        window.fetch = real; editAgentId = 'a2'; await loadEditFile();
+        $('editContent').value = 'B, being typed';
+        await free(); await saving;
+        ok("B's editor stays open", editDlg.open);
+        eq('with what is typed in it', $('editContent').value, 'B, being typed');
+        ok("A's save is said", $('toast').textContent.includes('SOUL.md saved'));
+        // A report: draft A saves slowly, draft B is opened meanwhile.
+        const draft = (id, title) => ({ id, title, body: 'body of ' + title, by: 'person', createdAt: new Date().toISOString(), issueUrl: 'https://example.com/' + id, fileName: id + '.md' });
+        reportPaint(draft('r-a', 'Draft A'));
+        $('reportBody').value = 'A, edited';
+        window.__answer = { 'PATCH /v1/problem-reports/r-a': [{ body: { ...draft('r-a', 'Draft A'), body: 'A, edited' } }] };
+        hold(/\/v1\/problem-reports\/r-a$/, 'PATCH');
+        const rs = reportSaveEdits();
+        await until(() => held.length === 1);
+        window.fetch = real;
+        window.__override['/v1/problem-reports/r-b'] = draft('r-b', 'Draft B');
+        await reportShow('r-b');
+        $('reportBody').value = 'B, edited';
+        await free();
+        eq('the save still answers with A', (await rs).id, 'r-a');
+        eq('B stays the draft shown', reportCur.id, 'r-b');
+        eq('with its text', [$('reportRTitle').value, $('reportBody').value], ['Draft B', 'B, edited']);
+      } finally {
+        window.fetch = real; window.__answer = {};
+        for (const k of ['/v1/agents/a1/logs', '/v1/agents/a2/logs', '/v1/agents/a1/events', '/v1/agents/a2/events', '/v1/agents/a1/files/SOUL.md', '/v1/agents/a2/files/SOUL.md', '/v1/problem-reports/r-b']) delete window.__override[k];
+        logsAgentId = null; setupLogAgentId = null; reportCur = null; reportGen++;
+        if (editDlg.open) editDlg.close(); if (reportDlg.open) reportDlg.close();
+      }
+    },
+    cloneNamesSkippedCredentials: async () => {
+      // A credential whose value could not be read stays behind, and the message names it (review, 2026-10-22, B32).
+      const p = window.prompt;
+      window.prompt = () => 'Homework Copy';
+      window.__answer = { 'POST /v1/agents/a1/clone': [{ status: 201, body: { id: 'a-copy', name: 'Homework Copy', notCopied: [], envNotCopied: ['MAIL_KEY'], memoryNotCopied: [] } }] };
+      try {
+        await cloneAgent('a1', 'Homework Helper');
+        const t = $('toast').textContent;
+        ok('names the credential left out: ' + t, t.includes('MAIL_KEY') && t.includes('Extra credentials'));
+      } finally { window.prompt = p; window.__answer = {}; }
+    },
+    healthOfflineChatNotSlow: async () => {
+      // A Discord or Slack bot offline degrades health; Alerts says that, not "slow to respond" (regression audit, 2026-10-22).
+      const off = v2HealthProblems({ reachable: true, status: 'degraded', ok: true, disconnected: ['discord'] });
+      ok('says Discord is not connected: ' + off.join(' | '), off.includes('Discord is not connected'));
+      ok('and not that it is slow', !off.some((x) => x.includes('slow to respond')));
+      const slow = v2HealthProblems({ reachable: true, status: 'degraded', eventLoop: { degraded: true, reasons: ['lag'] }, disconnected: ['slack'] });
+      ok('a slow event loop still says slow', slow.some((x) => x.includes('slow to respond (lag)')) && slow.includes('Slack is not connected'));
+      const bare = v2HealthProblems({ reachable: true, status: 'degraded' });
+      ok('degraded with no other cause still says something', bare.some((x) => x.includes('slow to respond')));
+    },
+  });
   (async () => {
     for (const [name, run] of Object.entries(T)) {
       try { await run(); results.push({ name, ok: true }); }
@@ -4430,7 +4762,7 @@ try {
     // Virtual time: 30 min of it. A scenario that times out spends up to 20 s;
     // past the budget the page never reports and the failing scenario goes
     // unnamed (seen twice in release runs, 2026-10-09).
-      dom = execFileSync('docker', [
+      dom = execFileSync(CONTAINER_CLI, [
         'run', '--rm', '--shm-size=1g', '-v', `${work}:/w`, CHROME_IMAGE,
         '--no-sandbox', '--headless', '--disable-gpu', '--disable-dev-shm-usage', '--hide-scrollbars',
         '--window-size=1400,1000', '--virtual-time-budget=1800000', '--dump-dom', 'file:///w/page.html?ui=classic',

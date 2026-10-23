@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CONSOLE_STARTUP_CALLS, GuestConsoleLog } from '../src/api/guestConsoleLog.js';
+import { CONSOLE_STARTUP_CALLS, GuestConsoleLog, MAX_KEYS, NAMES_PER_DAY, OTHER_METHODS } from '../src/api/guestConsoleLog.js';
 
 /**
  * A guest who reopened an agent's chat every few minutes filled its 200-line
@@ -41,5 +41,26 @@ describe('what a guest console visit leaves in the timeline', () => {
     expect(log.opened('a2', 'u1', T)).toBe(true);
     expect(log.opened('a1', 'u1', T + 30 * MIN)).toBe(false);
     expect(log.opened('a1', 'u1', T + 61 * MIN)).toBe(true);
+  });
+
+  it('made-up method names cannot flood the history: ten a day, the rest one "other" line (review, 2026-10-22)', () => {
+    const log = new GuestConsoleLog();
+    const recorded: string[] = [];
+    for (let i = 0; i < 500; i++) { const r = log.refusal('a1', 'u1', `made.up${i}`, T + i); if (r) recorded.push(r); }
+    expect(recorded.length).toBe(NAMES_PER_DAY + 1); // was 500, past the 200 the timeline keeps
+    expect(recorded.at(-1)).toBe(OTHER_METHODS);
+    // Not shaped like a method name: folded too.
+    expect(new GuestConsoleLog().refusal('a1', 'u1', '<script>', T)).toBe(OTHER_METHODS);
+    // Another guest has its own ten; a new day starts again.
+    expect(log.refusal('a1', 'u2', 'made.up1', T)).toBe('made.up1');
+    expect(log.refusal('a1', 'u1', 'made.up600', T + 25 * 60 * MIN)).toBe('made.up600');
+  });
+
+  it('remembers at most MAX_KEYS entries', () => {
+    const log = new GuestConsoleLog();
+    for (let i = 0; i < MAX_KEYS + 500; i++) log.opened('a1', `u${i}`, T);
+    // The oldest were forgotten, so u0 counts as a new visit; the newest is still remembered.
+    expect(log.opened('a1', 'u0', T + MIN)).toBe(true);
+    expect(log.opened('a1', `u${MAX_KEYS + 499}`, T + MIN)).toBe(false);
   });
 });

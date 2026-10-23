@@ -19,14 +19,15 @@ export const REPORT_FORMAT = 'hatchabot-report v1';
 
 /**
  * What makes a home machine identifiable, for a PUBLIC issue: on top of redactSecrets.
- * `names` (agents' names and slugs, members' names), `hosts` (machine names) and
- * `secrets` (known credential values) are what the app knows is private: the
+ * `names` (agents' names and slugs, members' names), `hosts` (machine names, the
+ * addresses it is reached at), `paths` (folders outside home, as the backup one)
+ * and `secrets` (known credential values) are what the app knows is private: the
  * patterns alone let an agent's name in a log line through (security audit,
  * 2026-10-09). Held for one call, never stored or logged.
  */
 export interface PublicRedactContext {
   home?: string; user?: string; host?: string;
-  names?: Iterable<string>; hosts?: Iterable<string>; secrets?: Iterable<string>;
+  names?: Iterable<string>; hosts?: Iterable<string>; paths?: Iterable<string>; secrets?: Iterable<string>;
 }
 
 export function localContext(): PublicRedactContext {
@@ -48,6 +49,9 @@ const isPrivateV6 = (addr: string) => {
   if (!isIPv6(ip)) return false;
   const v4 = /^::ffff:(\d+)\.(\d+)\.\d+\.\d+$/i.exec(ip);
   if (v4) return isPrivateV4(+v4[1]!, +v4[2]!);
+  // The same mapped address in hex (::ffff:a00:7 is ::ffff:10.0.0.7).
+  const hex = /^(?:::|(?:0{1,4}:){5})ffff:([0-9a-f]{1,4}):[0-9a-f]{1,4}$/i.exec(ip);
+  if (hex) { const hi = parseInt(hex[1]!, 16); return isPrivateV4(hi >> 8, hi & 0xff); }
   if (ip === '::1') return true;
   const first = ip.startsWith('::') ? 0 : parseInt(ip.split(':')[0]!, 16);
   return (first & 0xfe00) === 0xfc00 || (first & 0xff80) === 0xfe80;
@@ -77,6 +81,13 @@ function maskWords(text: string, words: Iterable<string> | undefined, as: string
  */
 export function redactForPublic(text: string, ctx: PublicRedactContext = localContext()): string {
   let out = redactSecrets(maskKnownValues(text, ctx.secrets));
+  // Longest first, and before home: a folder inside home keeps its "~/…" form.
+  for (const p of [...new Set([...(ctx.paths ?? [])].map((x) => String(x ?? '').replace(/\/+$/, '')))].sort((a, b) => b.length - a.length)) {
+    if (p.length < 3 || (ctx.home && (p === ctx.home || p.startsWith(`${ctx.home}/`)))) continue;
+    // Whole paths only: "/backups" is masked in "/backups/2026-10-22", never inside
+    // "docs/backups.md", "/v1/backups" or "/backups-old" (regression audit, 2026-10-22).
+    out = out.replace(new RegExp(`(?<![\\w.~/-])${esc(p)}(?=/|[^\\w.-]|\\.(?!\\w)|$)`, 'g'), '<path>');
+  }
   if (ctx.home && ctx.home.length > 1) out = out.replace(new RegExp(esc(ctx.home), 'g'), '~');
   out = out
     .replace(/\b[\w.+-]+@[\w-]+(\.[\w-]+)+\b/g, '<email>')                                          // addresses, incl. ssh user@host

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 
 const execFileP = promisify(execFile);
@@ -61,11 +62,21 @@ export async function probeImageCapabilities(
     '\n' +
     ABSENT_PROBES.map((b) => `command -v ${b} >/dev/null 2>&1 && echo "have=${b}"`).join('\n') +
     '\ntrue';
-  const { stdout } = await execFileP(
-    opts.docker ?? 'docker',
-    ['run', '--rm', '--entrypoint', 'bash', image, '-c', script],
-    { timeout: opts.timeoutMs ?? 60_000, killSignal: 'SIGKILL' },
-  );
+  // Named, so a probe that times out can be removed: killing the docker
+  // client leaves the container running on the daemon, and `--rm` only acts
+  // once it exits — a hung version command would never (review, 2026-10-22).
+  const name = `hatchabot-caps-${randomBytes(6).toString('hex')}`;
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileP(
+      opts.docker ?? 'docker',
+      ['run', '--rm', '--name', name, '--entrypoint', 'bash', image, '-c', script],
+      { timeout: opts.timeoutMs ?? 60_000, killSignal: 'SIGKILL' },
+    ));
+  } catch (err) {
+    await execFileP(opts.docker ?? 'docker', ['rm', '-f', name], { timeout: 15_000, killSignal: 'SIGKILL' }).catch(() => {});
+    throw err;
+  }
 
   const tools: Record<string, string> = {};
   const have = new Set<string>();

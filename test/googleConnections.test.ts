@@ -789,7 +789,17 @@ describe('syncConnections retries a removal until it is verified (issue #11)', (
     expect(await at('{}')).toBeNull();
     expect(await at('{"accounts":"x"}')).toBeNull();
     expect(await at('{"accounts":null}')).toBeNull();
-    expect(await at(JSON.stringify({ accounts: [{ email: 'mara@example.org' }, null, { email: 3 }] }))).toEqual(['mara@example.org']);
+    expect(await at(JSON.stringify({ accounts: [{ email: 'mara@example.org' }] }))).toEqual(['mara@example.org']);
+    // An entry it cannot read makes the whole list unknown (review, 2026-10-22, B11).
+    expect(await at(JSON.stringify({ accounts: [{ email: 'mara@example.org' }, null, { email: 3 }] }))).toBeNull();
+    expect(await at(JSON.stringify({ accounts: [{ account: EMAIL }] }))).toBeNull();
+  });
+
+  it('a failed remove is not verified by a list whose entries cannot be read (review, 2026-10-22)', async () => {
+    const w = await bare();
+    const rt = scripted((kind) => kind === 'remove' ? { code: 1, stdout: '', stderr: 'busy' } : kind === 'list' ? { code: 0, stdout: JSON.stringify({ accounts: [{ account: EMAIL }] }), stderr: '' } : ok);
+    await syncConnections({ store: w.store, secrets: w.secrets, provider: rt.provider }, 'a1', w.ref);
+    expect(w.store.connectionRemovals('a1')).toEqual([EMAIL]);
   });
 
   it('a failed remove for an account gog no longer lists counts as removed', async () => {

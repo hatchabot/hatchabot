@@ -4,6 +4,7 @@ import Fastify from 'fastify';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
+import { beginOperation } from '../src/orchestrator/operations.js';
 
 /**
  * Rebuilding the fleet is a queue: several at a time, and the ones waiting say
@@ -109,6 +110,28 @@ describe('rebuilding the fleet', () => {
       const why = w.store.listEvents([stopped, moved]).filter((e) => e.event === 'rebuild.skipped').map((e) => (e.detail as { why?: string }).why);
       expect(why.sort()).toEqual(['moved to another Hatchabot', 'stopped by its owner']);
       expect(w.store.getAgent(stopped)!.state).toBe('STOPPED');
+    } finally {
+      w.releaseAll();
+      delete process.env.HATCHABOT_REBUILD_CONCURRENCY;
+    }
+  });
+
+  it('a stopped agent whose move was held while its rebuild waited is not started at its turn (audit, 2026-10-20)', async () => {
+    const w = await fleet(2, { HATCHABOT_REBUILD_CONCURRENCY: '1' });
+    try {
+      const [, held] = w.ids as [string, string];
+      w.store['db'].prepare(`UPDATE agents SET state = 'STOPPED' WHERE id = ?`).run(held);
+      for (const id of w.ids) expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/rebuild`, headers: H, payload: {} })).statusCode).toBe(202);
+      await new Promise((r) => setTimeout(r, 50));
+      // While it waits, a move to another Hatchabot begins and ends held: the copy stays stopped.
+      beginOperation(w.store, 'migrate', held, { to: 'Desktop' })
+        .hold('The other Hatchabot did not answer.', { actions: [{ action: 'retry', label: 'Ask again' }], recommended: 'retry' });
+      const startSpy = vi.spyOn(w.provider, 'start');
+      for (let i = 0; i < 4; i++) { w.releaseAll(); await new Promise((r) => setTimeout(r, 80)); }
+      const why = w.store.listEvents([held]).filter((e) => e.event === 'rebuild.skipped').map((e) => (e.detail as { why?: string }).why);
+      expect(why).toEqual(['Move to another Hatchabot is not over']);
+      expect(startSpy.mock.calls.some(([ref]) => ref === `docker://${held}`)).toBe(false);
+      expect(w.store.getAgent(held)!.state).toBe('STOPPED');
     } finally {
       w.releaseAll();
       delete process.env.HATCHABOT_REBUILD_CONCURRENCY;

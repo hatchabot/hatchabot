@@ -103,11 +103,24 @@ describe('doctorLint', () => {
     });
     const d = (await doctorLint(p, ref))!;
     expect(d.mutedCount).toBe(4);
+    // Errors before warnings (audit, 2026-10-22).
     expect(d.findings.map((f) => f.message)).toEqual([
       'CRITICAL: gateway.auth.token is readable by every user (0644)',
-      'gateway.auth.token is sent over plain HTTP to a non-loopback address',
       'WARNING: openclaw.json contains plaintext secret-bearing config fields.',
+      'gateway.auth.token is sent over plain HTTP to a non-loopback address',
     ]);
+  });
+
+  it('lists the worst first and counts what it leaves out, so 20 notes cannot hide an error (audit, 2026-10-22)', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    const notes = Array.from({ length: 22 }, (_, i) => ({ checkId: `core/note/${i}`, severity: 'info', message: `note ${i}` }));
+    p.execResponses.set('doctor', { code: 0, stdout: JSON.stringify({ ok: false, checksRun: 30, findings: [...notes, { checkId: 'core/gateway', severity: 'error', message: 'gateway bind failed' }] }), stderr: '' });
+    const d = (await doctorLint(p, ref))!;
+    expect(d.findings).toHaveLength(20);
+    expect(d.findings[0]).toEqual({ checkId: 'core/gateway', severity: 'error', message: 'gateway bind failed' });
+    expect(d.findings[1]!.checkId).toBe('core/note/0');
+    expect(d.omittedCount).toBe(3);
   });
 
   it('reports ok:undefined (not a confident green) from empty/garbage JSON', async () => {
@@ -164,6 +177,22 @@ describe('agentHealth', () => {
       const h = await agentHealth(p, ref);
       expect(h.status, label).toBe('degraded');
     }
+  });
+
+  it('a Discord or Slack bot that says it is not connected is degraded, and named (review, 2026-10-22)', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    for (const k of ['discord', 'slack'] as const) {
+      p.execResponses.set('health', { code: 0, stdout: JSON.stringify({ ts: 1, ok: true, channels: { [k]: { connected: false, running: true, lastError: 'gateway closed' } } }), stderr: '' });
+      const h = await agentHealth(p, ref);
+      expect(h.status, k).toBe('degraded');
+      expect(h.disconnected).toEqual([k]);
+    }
+    // Connected, or no such field: as before.
+    p.execResponses.set('health', { code: 0, stdout: JSON.stringify({ ts: 1, ok: true, channels: { discord: { connected: true }, slack: { running: true } } }), stderr: '' });
+    const h = await agentHealth(p, ref);
+    expect(h.status).toBe('healthy');
+    expect(h.disconnected).toBeUndefined();
   });
 
   it('treats an agent with no Telegram channel as healthy (not degraded)', async () => {

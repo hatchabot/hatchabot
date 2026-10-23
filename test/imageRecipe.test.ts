@@ -33,6 +33,14 @@ describe('image recipes', () => {
     dest.tags.push({ tag: 'hatchabot-runtime:2026.9.6-plus-ffmpeg', imageId: 'x', openclawVersion: '2026.9.6' } as any);
     expect(await buildRecipeOn(dest, r as any)).toMatchObject({ ok: false, problem: expect.stringMatching(/slack/) });
   });
+  it("images that can't be read give no recipe, not one without the base's packages (A32)", async () => {
+    const p = new MockProvider();
+    p.tags.push({ tag: 'hatchabot-runtime:2026.9.6-plus-ffmpeg', imageId: 'b', openclawVersion: '2026.9.6', extraPackages: ['ffmpeg'] } as any);
+    p.listImageTags = async () => { throw new Error('daemon busy'); };
+    const derived = { name: 'media', tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:2026.9.6-plus-ffmpeg', dockerfile: 'RUN true', status: 'READY' } as any;
+    expect(await recipeFor(p, derived.tag, (t) => (t === derived.tag ? derived : undefined))).toMatchObject({ problem: expect.stringMatching(/could not be read/) });
+    expect(await recipeFor(p, 'hatchabot-runtime:2026.9.6-plus-ffmpeg', () => undefined)).toMatchObject({ problem: expect.stringMatching(/could not be read/) });
+  });
   it('a plain version tag built with extra packages gets them back after the pull (#161)', async () => {
     const dest = new MockProvider();
     dest.publishedBases.add('hatchabot-runtime:2026.9.6');

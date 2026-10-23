@@ -18,8 +18,9 @@ let dir: string;
 let LocalDockerProvider: typeof import('../src/providers/localDockerProvider.js').LocalDockerProvider;
 
 beforeAll(async () => {
-  // Read when the module loads: a short deadline for this file only.
-  vi.stubEnv('HATCHABOT_DOCKER_IO_TIMEOUT_MS', '300');
+  // Read when the module loads: a short deadline for this file only. A second,
+  // not less: on a loaded runner bash alone can take over 300 ms to print.
+  vi.stubEnv('HATCHABOT_DOCKER_IO_TIMEOUT_MS', '1000');
   vi.resetModules();
   ({ LocalDockerProvider } = await import('../src/providers/localDockerProvider.js'));
 });
@@ -102,8 +103,8 @@ describe('a download from a volume that stalls fails instead of hanging (#217)',
   });
 
   it('a slow transfer that keeps moving is not cut off', async () => {
-    // A chunk every 150 ms for over a second: longer than the deadline in all, never silent that long.
-    const r = await drain(provider('for i in 1 2 3 4 5 6 7 8; do printf "chunk-%s " $i; sleep 0.15; done').streamFromVolume(REF, ['cat', 'x']));
+    // A chunk every 300 ms for 2.4 seconds: longer than the deadline in all, never silent that long.
+    const r = await drain(provider('for i in 1 2 3 4 5 6 7 8; do printf "chunk-%s " $i; sleep 0.3; done').streamFromVolume(REF, ['cat', 'x']));
     expect(r.err).toBeUndefined();
     expect(r.bytes).toBe(8 * 'chunk-1 '.length);
   });

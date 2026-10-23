@@ -102,3 +102,44 @@ describe('stale runtime pins', () => {
     expect(w.store.listEvents([id]).some((e) => e.event === 'runtime.pins_cleared')).toBe(true);
   });
 });
+
+describe('more conversations than one list call returns (report B27, 2026-10-22)', () => {
+  // 1,201 conversations; the stale pin is on the last.
+  const rows = Array.from({ length: 1201 }, (_, i) => ({ key: `s${i}`, agentRuntime: rt(i === 1200 ? 'claude-cli' : 'openclaw') }));
+  const fake = (failOffset?: number) => {
+    const asked: Array<Record<string, unknown>> = [];
+    const provider: any = {
+      exec: async (_r: string, args: string[]) => {
+        if (args.includes('sessions.list')) {
+          const p = JSON.parse(args[args.indexOf('--params') + 1]!);
+          asked.push(p);
+          if (failOffset !== undefined && p.offset === failOffset) return { code: 1, stdout: '', stderr: 'unknown property offset' };
+          return listing(rows.slice(p.offset ?? 0, (p.offset ?? 0) + p.limit));
+        }
+        if (args.includes('sessions.patch')) return { code: 0, stdout: JSON.stringify({ ok: true }), stderr: '' };
+        return { code: 0, stdout: JSON.stringify({ 'anthropic/claude-opus-4-8': {} }), stderr: '' };
+      },
+    };
+    return { provider, asked };
+  };
+
+  it('reads every page, and clears the pin on the last one', async () => {
+    const { provider, asked } = fake();
+    expect(await clearStaleRuntimePins(provider, 'ref', 'sample')).toEqual(['s1200']);
+    expect(asked).toEqual([{ agentId: 'sample', limit: 500 }, { agentId: 'sample', limit: 500, offset: 500 }, { agentId: 'sample', limit: 500, offset: 1000 }]);
+  });
+
+  it('a gateway that ignores offset (the same page again) is asked twice, not forty times', async () => {
+    let calls = 0;
+    const provider: any = { exec: async () => { calls++; return listing(rows.slice(0, 500)); } };
+    expect(await listRuntimePins(provider, 'ref', 'sample')).toHaveLength(500);
+    expect(calls).toBe(2);
+  });
+
+  it('a later page that cannot be read is logged; the pages read still count', async () => {
+    const { provider } = fake(500);
+    const events: Array<[string, Record<string, unknown>]> = [];
+    expect(await listRuntimePins(provider, 'ref', 'sample', (e, d) => events.push([e, d]))).toHaveLength(500);
+    expect(events).toEqual([['runtime.pin_failed', { error: expect.stringContaining('after the first 500') }]]);
+  });
+});

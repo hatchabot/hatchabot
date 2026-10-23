@@ -85,6 +85,21 @@ describe('usage spikes', () => {
     expect(store.usageAlertsSince(new Date(NOW - D).toISOString(), { ownerId: 'someone-else' })).toEqual([]);
   });
 
+  it('a warning that did not reach the owner is tried again hourly until it does (report A30, 2026-10-22)', async () => {
+    const store = world([{ id: 'sched', name: 'Scheduler', perDay: [100e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6] }]);
+    let reach = false, tries = 0;
+    const tell = async () => { tries++; return reach; };
+    await runUsageAlerts({ store, tell, rules: RULES }, NOW);
+    await runUsageAlerts({ store, tell, rules: RULES }, NOW + 10 * 60_000);
+    expect(tries).toBe(1);                                  // not every pass
+    reach = true;
+    await runUsageAlerts({ store, tell, rules: RULES }, NOW + H + 60_000);
+    expect(tries).toBe(2);
+    await runUsageAlerts({ store, tell, rules: RULES }, NOW + 3 * H);
+    expect(tries).toBe(2);                                  // told now: once a day again
+    expect(store.usageAlertsSince(new Date(NOW - D).toISOString(), { ownerId: OWNER })).toMatchObject([{ agentId: 'sched', told: true }]);
+  });
+
   it('clearing the warning on Usage does not make it be told again the same day', async () => {
     const store = world([{ id: 'sched', name: 'Scheduler', perDay: [100e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6] }]);
     const told: string[] = [];

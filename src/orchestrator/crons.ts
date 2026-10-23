@@ -462,7 +462,7 @@ export async function addCron(
   runtimeRef: string,
   slug: string,
   opts: AddCronOptions,
-): Promise<{ ok: true; id?: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; id?: string; quieted?: true } | { ok: false; error: string }> {
   const argv = ['cron', 'add', '--json', '--agent', slug, '--name', opts.name, '--message', opts.message];
   if (opts.cron) argv.push('--cron', opts.cron);
   else if (opts.everyMs) argv.push('--every', msToEvery(opts.everyMs));
@@ -479,11 +479,16 @@ export async function addCron(
   if (res.code !== 0) {
     return { ok: false, error: (res.stderr || res.stdout || 'cron add failed').slice(0, 300) };
   }
+  // Meant to announce but no one to post to yet (the owner's id not known):
+  // made quiet, and `quieted` tells the caller to remember it, so the repair
+  // pass points it at the owner once there is one. Unremembered, it no longer
+  // looked implicit and stayed quiet for good (review of 2026-10-22, A17).
+  const quieted = opts.announce !== false && !to ? { quieted: true as const } : {};
   try {
     const parsed = JSON.parse(res.stdout);
-    return { ok: true, id: parsed?.id ? String(parsed.id) : parsed?.job?.id ? String(parsed.job.id) : undefined };
+    return { ok: true, id: parsed?.id ? String(parsed.id) : parsed?.job?.id ? String(parsed.job.id) : undefined, ...quieted };
   } catch {
-    return { ok: true };
+    return { ok: true, ...quieted };
   }
 }
 

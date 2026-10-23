@@ -227,6 +227,18 @@ describe('the ledger\'s verdict on a change', () => {
     expect(c.outcome).toBe('worse');
   });
 
+  it('changed again within the same hour: not enough data, not "0 turns" (B06)', () => {
+    const now = T0 + 9 * DAY;
+    const { store, row } = switched({ [T0]: { calls: 25, turns: 25 } }, now);
+    store.setAgentModel('a1', 'claude-opus-4-8');
+    recordChange(store, { agentId: 'a1', from: 'claude-haiku-4-5', to: 'claude-opus-4-8', at: iso(T0 + 5 * 60_000), by: 'owner', via: 'app', source: 'model' }, T0 + 5 * 60_000);
+    evaluateModelChanges(store, now);
+    const c = store.getModelChange(row.id)!;
+    expect(c.outcome).toBe('not-enough-data');
+    expect(c.reasons!.join(' ')).toMatch(/within the hour/);
+    expect(c.reasons!.join(' ')).not.toMatch(/^0 turns/);
+  });
+
   it('judge: unknown before uses the absolute bar; a floor of real counts', () => {
     const after = (o: Partial<ModelFigures>) => ({ model: 'm', days: 7, calls: 10, turns: 10, callsPerDay: 1, turnsPerDay: 1, toolCalls: 10, toolsPerTurn: 1, toolTurnShare: 1,
       badTurns: 0, malformed: 0, toolFailed: 0, rateLimited: 0, rates: { badTurn: 0, malformed: 0, toolFail: 0 }, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, basis: 'hours', ...o }) as ModelFigures;
@@ -264,6 +276,20 @@ describe('the quality guard\'s switch-back card', () => {
     expect(store.getModelChange(row.id)!.guardProposalId).toBe(filed[0]);
     // Nothing switched by itself.
     expect(store.getAgent('a1')!.model).toBe('claude-haiku-4-5');
+  });
+
+  it('a card that cannot be written gives its claim back, and the next pass files it (B07)', () => {
+    const now = T0 + 8 * DAY;
+    const { store, row } = switched(turnsAfter(10, { failed: 3, malformed: 3 }), now);
+    evaluateModelChanges(store, now);
+    const put = store.putMgmtProposal.bind(store);
+    store.putMgmtProposal = () => { throw new Error('database or disk is full'); };
+    const events: string[] = [];
+    expect(fileGuardProposals({ store, now, log: (e) => events.push(e) })).toEqual([]);
+    expect(events).toContain('model.guard_failed');
+    expect(store.getModelChange(row.id)!.guardProposalId).toBeFalsy();
+    store.putMgmtProposal = put;
+    expect(fileGuardProposals({ store, now })).toHaveLength(1);
   });
 
   it('an asleep agent: its verdict and card come from its last reading, and it stays asleep', () => {
@@ -322,6 +348,10 @@ describe('the quality guard\'s switch-back card', () => {
     // Reading the ledger works the verdict out; it reads no container.
     const execs = provider.execLog.length;
     const ledger = (await f.inject({ method: 'GET', url: '/v1/model-changes', headers: { 'x-hatchabot-owner': OWNER } })).json();
+    // A fractional page size is a whole one, not a 500 from SQLite's LIMIT (audit, 2026-10-22).
+    const odd = await f.inject({ method: 'GET', url: '/v1/model-changes?limit=1.5', headers: { 'x-hatchabot-owner': OWNER } });
+    expect(odd.statusCode, odd.body).toBe(200);
+    expect(odd.json().changes).toHaveLength(1);
     expect(ledger.changes[0]).toMatchObject({ agent: 'Agent a1', from: 'claude-opus-4-8', to: 'claude-haiku-4-5', by: 'owner', via: 'app', outcome: 'worse', before: 'unknown' });
     const [id] = fileGuardProposals({ store: w.store, now });
     expect(provider.execLog.length).toBe(execs);

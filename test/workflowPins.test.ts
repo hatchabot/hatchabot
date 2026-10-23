@@ -39,9 +39,18 @@ describe('workflow pins and permissions', () => {
     expect(bad).toMatch(/a docker image with no digest/);
   });
 
+  it('an image pulled or run with podman or $CONTAINER_CLI needs a digest too (the ui job uses podman)', () => {
+    const steps = (run: string) => checkWorkflow('example.yml', [
+      'name: example', 'on: pull_request', 'permissions:', '  contents: read', 'jobs:', '  ui:', '    runs-on: ubuntu-24.04', '    steps:', `      - run: ${run}`,
+    ].join('\n')).filter((b: string) => /no digest/.test(b));
+    for (const run of ['$CONTAINER_CLI pull docker.io/library/alpine:latest', '${CONTAINER_CLI} run node:22', 'podman pull example/image', 'podman run example/image'])
+      expect(steps(run), run).toHaveLength(1);
+    expect(steps(`$CONTAINER_CLI pull docker.io/example/image@sha256:${'a'.repeat(64)}`)).toEqual([]);
+  });
+
   // Release by workflow (issues #37, #38, #47, 2026-10-10): what the release
   // path must keep, read from the workflow files themselves.
-  it('release by workflow: one release at a time, aliases only by promote-images, no replacing uploads', () => {
+  it('release by workflow: one run per tag, aliases only by promote-images, no replacing uploads', () => {
     const read = (f: string) => readFileSync(join('.github', 'workflows', f), 'utf8');
     const release = read('release.yml');
     // Started by the publisher's tag push, on the public repo only (publish kit, 2026-10-16).
@@ -49,7 +58,10 @@ describe('workflow pins and permissions', () => {
     expect(release).not.toMatch(/workflow_dispatch|draft_only/);
     expect(release).toMatch(/ {2}check:\n {4}if: github\.repository == 'hatchabot\/hatchabot'\n/);
     expect(release).toContain('bash scripts/release-check.sh "${TAG#v}" --tagged');
-    expect(release).toMatch(/^concurrency:\n {2}group: release\n {2}cancel-in-progress: false/m);
+    // A group per tag: one shared by all tags cancelled a pending release when a third came (audit, 2026-10-20).
+    expect(release).toMatch(/^concurrency:\n {2}group: release-\$\{\{ github\.ref_name \}\}\n {2}cancel-in-progress: false/m);
+    // :latest is decided when publishing, not at check: another tag's run may have come meanwhile.
+    expect(release).toMatch(/ {2}latest:\n {4}needs: \[check, publish\]\n {4}if: \$\{\{ needs\.publish\.outputs\.latest == 'true' \}\}/);
     expect(release).toContain('bash scripts/release-check.sh');
     expect(release).toContain('node scripts/privacy-ci.mjs --text');
     expect(release).toContain('uses: ./.github/workflows/bundles.yml');
@@ -77,6 +89,10 @@ describe('workflow pins and permissions', () => {
     expect(promote).toMatch(/ {2}plan:\n {4}if: github\.repository == 'hatchabot\/hatchabot'\n/);
     expect(promote).toContain('allow_backwards');
     expect(promote).toContain('org.hatchabot.release');
+    // No release is a failure, and a channel goes back only by the fast lane (audit, 2026-10-20).
+    expect(promote).toContain('has no release on $R');
+    expect(promote).toContain('HEAD_MSG: ${{ github.event.head_commit.message }}');
+    expect(promote).toContain('!= "Update channels" ]');
   });
 
   it('accepts the same workflow split into a read-only build and a write-only publish', () => {

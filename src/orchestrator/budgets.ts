@@ -28,6 +28,23 @@ export const MAX_BUDGET = 100_000;
 export const WARN_AT = 0.8;
 /** An agent that made a model call this recently is mid-turn: its pause waits for the next pass. */
 export const QUIET_MS = 3 * 60_000;
+/**
+ * How long a pause waits for a quiet moment once 100% is reached. An agent in a
+ * loop or under steady load is never quiet for three minutes, and the limit
+ * exists for exactly that case: past this it is paused mid-turn (audit, 2026-10-20).
+ */
+export const PAUSE_WAIT_MS = 20 * 60_000;
+/**
+ * A cheaper-model switch the agent's runtime keeps refusing: tried every pass
+ * until its 100% message has gone (PAUSE_WAIT_MS after the limit), then at most
+ * this often. Its refusal goes on the agent's timeline once a day; the rest to
+ * the service log (regression audit, 2026-10-22).
+ */
+export const DOWNGRADE_RETRY_MS = 3_600_000;
+/** The budget mark kept when its 100% message said a switch did not take; told once a later one takes. */
+const LATE_SWITCH = 101;
+const refusals = new WeakMap<Store, Map<string, { at: number; day: string }>>();
+const refusalsOf = (store: Store) => { let m = refusals.get(store); if (!m) refusals.set(store, m = new Map()); return m; };
 /** Cost days are kept this long (last month and this one, with room). */
 const KEEP_DAYS = 100;
 
@@ -190,6 +207,8 @@ export interface BudgetDeps {
   restoreModel?(agent: Agent, pin: string | null): Promise<boolean>;
   isBusy(agentId: string): boolean;
   log?(event: string, detail: Record<string, unknown>): void;
+  /** The service log, for what would flood the agent's timeline. */
+  warn?(event: string, detail: Record<string, unknown>): void;
   tz?: string;
 }
 
@@ -223,12 +242,25 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
   // 1. What ends: a new month, a budget raised, removed or changed, the agent gone, or the owner taking over.
   for (const p of store.listBudgetPauses({ open: true })) {
     const a = byId.get(p.agentId) ?? store.getAgent(p.agentId);
-    if (!a || a.state === 'ARCHIVED' || a.state === 'DELETED') { store.resumeBudgetPause(p.agentId, p.month, nowIso, 'gone'); continue; }
+    if (!a || a.state === 'ARCHIVED' || a.state === 'DELETED') {
+      // Archived on a cheaper model a budget chose: its own goes back on the record now, or a
+      // restore from the archive would bring the cheaper one back for good.
+      if (a && a.state === 'ARCHIVED' && p.kind === 'cheaper' && deps.restoreModel && (!p.toModel || (a.model ?? null) === p.toModel)) {
+        if (!(await deps.restoreModel(a, p.fromModel ?? null).catch(() => false))) continue;
+        deps.log?.('budget.model_restored', { agentId: a.id, why: 'archived', model: p.fromModel ?? null });
+      }
+      store.resumeBudgetPause(p.agentId, p.month, nowIso, 'gone');
+      continue;
+    }
     if (p.kind === 'cheaper') {
       // Its model changed by hand since: the owner's choice stands, and the budget leaves it alone until the 1st.
       if (p.toModel && (a.model ?? null) !== p.toModel) { store.resumeBudgetPause(p.agentId, p.month, nowIso, 'owner'); continue; }
       const why = p.month !== month ? 'new-month' : !over(p.scope, 'cheaper') ? 'budget-raised' : undefined;
       if (!why || !deps.restoreModel) continue;
+      // Another cheaper budget that covers it still reached (its own, or the machine's): it
+      // stays on the cheaper model, as a pause stays (A09), or it ran on its own until the
+      // next pass moved it again (final audit, 2026-10-22).
+      if (over(a.id, 'cheaper') || (switchable(a) && over(MACHINE, 'cheaper'))) continue;
       if (await deps.restoreModel(a, p.fromModel ?? null).catch(() => false)) {
         store.resumeBudgetPause(p.agentId, p.month, nowIso, why);
         resumed.push(a.id);
@@ -243,6 +275,9 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     }
     const why = p.month !== month ? 'new-month' : !over(p.scope, 'pause') ? 'budget-raised' : undefined;
     if (!why) continue;
+    // Another pause budget that covers it still reached (its own, or the machine's): it stays
+    // paused, or it would run until the next pass paused it again (report A09, 2026-10-22).
+    if (over(a.id, 'pause') || (pausable(a) && over(MACHINE, 'pause'))) continue;
     if (deps.isBusy(a.id)) continue;
     if (await deps.resume(a).catch(() => false)) {
       store.resumeBudgetPause(p.agentId, p.month, nowIso, why);
@@ -263,6 +298,10 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     // Act first, so the message says what happened.
     const acted: Array<{ a: Agent; to?: string }> = [];
     let deferred = 0;
+    // The 100% mark is set when it is first reached, told or not: a pause waits from then.
+    const fresh100 = level === 100 && store.addBudgetMark(b.scope, month, 100, b.usd, nowIso);
+    const reachedAt = level === 100 ? Date.parse(store.budgetMark(b.scope, month, 100, b.usd)?.at ?? '') || now : now;
+    const waitedOut = now - reachedAt >= PAUSE_WAIT_MS;
     if (level === 100 && b.atLimit === 'pause') {
       for (const a of pool.filter(pausable)) {
         const prior = store.getBudgetPause(a.id, month);
@@ -273,8 +312,8 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
         const asleep = a.state === 'STOPPED' && !!a.hibernatedAt;
         if (a.state !== 'RUNNING' && !asleep) continue;
         const lastOk = Date.parse(store.usageCursor(a.id)?.lastOk ?? '') || 0;
-        // Busy, or mid-turn: the next pass.
-        if (deps.isBusy(a.id) || (!asleep && now - lastOk < QUIET_MS)) { deferred++; continue; }
+        // Busy, or mid-turn: the next pass. Mid-turn only for so long (PAUSE_WAIT_MS).
+        if (deps.isBusy(a.id) || (!asleep && !waitedOut && now - lastOk < QUIET_MS)) { deferred++; continue; }
         if (await deps.pause(a).catch(() => false)) {
           // Paused on a cheaper model a budget chose: its own model comes back now,
           // so it starts again on it; a budget still reached then moves it again.
@@ -287,19 +326,30 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
         } else deferred++;
       }
     }
+    const refused: Agent[] = [];
     if (level === 100 && b.atLimit === 'cheaper' && deps.downgrade) {
+      const tries = refusalsOf(store);
+      const told100 = !!store.budgetMark(b.scope, month, 100, b.usd)?.toldAt;
       for (const a of pool.filter(switchable)) {
         const prior = store.getBudgetPause(a.id, month);
         if (prior?.resumedBy === 'owner' || (prior && !prior.resumedAt)) continue;
         if (deps.isBusy(a.id)) { deferred++; continue; }
         // A switch that failed is not "nothing cheaper": it is tried again on the
-        // next pass, and the 100% message waits for it (#185).
+        // next pass, and the 100% message waits for it (#185) — for so long
+        // (PAUSE_WAIT_MS), then says it did not take; after that, hourly.
+        const last = tries.get(a.id);
+        if (last && told100 && now - last.at < DOWNGRADE_RETRY_MS) { deferred++; refused.push(a); continue; }
         let r: Awaited<ReturnType<NonNullable<BudgetDeps['downgrade']>>>;
         try { r = await deps.downgrade(a); } catch (err) {
           deferred++;
-          deps.log?.('budget.downgrade_failed', { agentId: a.id, error: String((err as Error)?.message ?? err).slice(0, 200) });
+          refused.push(a);
+          const day = nowIso.slice(0, 10);
+          const detail = { agentId: a.id, error: String((err as Error)?.message ?? err).slice(0, 200) };
+          if (last?.day !== day) deps.log?.('budget.downgrade_failed', detail); else deps.warn?.('budget.downgrade_failed', detail);
+          tries.set(a.id, { at: now, day: last?.day === day ? last.day : day });
           continue;
         }
+        tries.delete(a.id);
         if (!r) continue; // nothing cheaper on its source
         store.addBudgetPause(a.id, month, b.scope, nowIso, { fromModel: r.from, toModel: r.to });
         downgraded.push(a.id);
@@ -308,13 +358,15 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
       }
     }
     // The 100% message says what happened: while the action still waits on a turn, it waits too.
-    const hold100 = deferred > 0 && !acted.length;
+    // A switch refused past PAUSE_WAIT_MS does not hold it: it says the switch did not take.
+    const hold100 = deferred > 0 && !acted.length && !(refused.length && waitedOut);
     for (const lv of level === 100 ? [80, 100] : [80]) {
       if (lv === 100 && hold100) continue;
-      const fresh = store.addBudgetMark(b.scope, month, lv, b.usd, nowIso);
+      const fresh = lv === 100 ? fresh100 : store.addBudgetMark(b.scope, month, lv, b.usd, nowIso);
       if (store.budgetMark(b.scope, month, lv, b.usd)?.toldAt) continue;
       // 80% is not told once 100% is reached as well: the 100% message says it all.
-      if (lv === 80 && level === 100) { store.markBudgetTold(b.scope, month, lv, b.usd, nowIso); continue; }
+      // While the 100% message waits on a pause or a switch, the 80% one goes, so the owner hears now.
+      if (lv === 80 && level === 100 && !hold100) { store.markBudgetTold(b.scope, month, lv, b.usd, nowIso); continue; }
       // A mark is told once it reached the owner: with no manager yet, or a
       // message that failed, it stays due and the next pass tries again (#62).
       if (!agent) continue;
@@ -322,12 +374,28 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
       const did = acted.length || lv !== 100 ? acted : store.listBudgetPauses({ open: true, month })
         .filter((p) => p.scope === b.scope && p.kind === b.atLimit)
         .map((p) => ({ a: byId.get(p.agentId) ?? agent, ...(p.toModel ? { to: p.toModel } : {}) }));
-      const text = budgetMessage(b, spent, lv as 80 | 100, month, agent, did, now, tz);
+      const text = budgetMessage(b, spent, lv as 80 | 100, month, agent, did, now, tz, refused);
       const ok = await deps.tell(b.ownerId, agent, text).catch(() => false);
       if (ok || fresh) deps.log?.('budget.told', { agentId: agent.id, scope: b.scope === MACHINE ? MACHINE : 'agent', level: lv, told: ok });
       if (!ok) continue;
       store.markBudgetTold(b.scope, month, lv, b.usd, nowIso);
       told++;
+      // It said a switch did not take: remembered, so the one that takes later is told.
+      if (lv === 100 && refused.length) store.addBudgetMark(b.scope, month, LATE_SWITCH, b.usd, nowIso);
+    }
+    // A switch the 100% message said did not take has taken since: one message that it
+    // has, or the owner's last word was that it still runs on its own model (final audit,
+    // 2026-10-22). Kept with the budget's marks, so a restart neither repeats nor loses it.
+    const late = b.atLimit === 'cheaper' && agent ? store.budgetMark(b.scope, month, LATE_SWITCH, b.usd) : undefined;
+    if (late && !late.toldAt) {
+      const since = store.listBudgetPauses({ open: true, month })
+        .filter((p) => p.scope === b.scope && p.kind === 'cheaper' && p.toModel && p.pausedAt > late.at)
+        .map((p) => ({ a: byId.get(p.agentId) ?? agent!, to: p.toModel! }));
+      if (since.length) {
+        const ok = await deps.tell(b.ownerId, agent!, lateSwitchMessage(b, month, agent!, since)).catch(() => false);
+        deps.log?.('budget.told', { agentId: agent!.id, scope: b.scope === MACHINE ? MACHINE : 'agent', level: 100, late: true, told: ok });
+        if (ok) { store.markBudgetTold(b.scope, month, LATE_SWITCH, b.usd, nowIso); told++; }
+      }
     }
   }
   store.pruneBudgetMarks(prevMonth(prevMonth(month)));
@@ -402,7 +470,7 @@ export function parseStep(raw: string | undefined): number | undefined {
 export const newAgentStep = (env: NodeJS.ProcessEnv = process.env) => parseStep(env.HATCHABOT_NEW_AGENT_ALERT_EVERY);
 
 /** The chat message for a budget mark; `acted`: what the budget paused or moved this pass. */
-export function budgetMessage(b: BudgetRow, spent: number, level: 80 | 100, month: string, agent: Agent, acted: Array<{ a: Agent; to?: string }>, now: number, tz: string): string {
+export function budgetMessage(b: BudgetRow, spent: number, level: 80 | 100, month: string, agent: Agent, acted: Array<{ a: Agent; to?: string }>, now: number, tz: string, refused: Agent[] = []): string {
   const whole_ = b.scope === MACHINE;
   const whose = whole_ ? 'This Hatchabot' : `"${agent.name}"`;
   const of = `${whole(b.usd)} budget for ${monthName(month)}`;
@@ -410,8 +478,10 @@ export function budgetMessage(b: BudgetRow, spent: number, level: 80 | 100, mont
   const pace = elapsed >= 2 / 31 ? spent / elapsed : undefined;
   const next = `${monthName(nextMonth(month))} 1`;
   if (level === 80) {
-    const then = b.atLimit === 'pause' ? ` At 100% ${whole_ ? 'its agents pause' : 'it pauses'} until ${next}.`
-      : b.atLimit === 'cheaper' ? ` At 100% ${whole_ ? 'its agents move' : 'it moves'} to the cheapest model ${whole_ ? 'their sources offer' : 'its source offers'} until ${next}.` : '';
+    // Past 100% already, its pause waiting for a quiet moment, or its switch for the runtime (at most PAUSE_WAIT_MS).
+    const when = spent >= b.usd ? 'Shortly' : 'At 100%';
+    const then = b.atLimit === 'pause' ? ` ${when} ${whole_ ? 'its agents pause' : 'it pauses'} until ${next}.`
+      : b.atLimit === 'cheaper' ? ` ${when} ${whole_ ? 'its agents move' : 'it moves'} to the cheapest model ${whole_ ? 'their sources offer' : 'its source offers'} until ${next}.` : '';
     return `💵 Hatchabot: ${whose} has used ${Math.round((spent / b.usd) * 100)}% of its ${of} (${money(spent)})${pace ? `, on pace for ${money(pace)}` : ''}.${then}\nAsk me to raise the budget or to make ${whole_ ? 'the agents' : 'it'} cheaper.`;
   }
   const n = acted.length;
@@ -420,12 +490,25 @@ export function budgetMessage(b: BudgetRow, spent: number, level: 80 | 100, mont
     return `⏸ Hatchabot: ${whose} has used its ${of} (${money(spent)}): ${what} until ${next}.\nRaise the budget to start ${whole_ ? 'them' : 'it'} again now, or start ${whole_ ? 'one' : 'it'} in the app (it then runs on until the 1st).`;
   }
   if (b.atLimit === 'cheaper') {
+    const k = refused.length;
+    // A switch the runtime refused: said as such, never as "already on the cheapest".
+    const notYet = k ? (whole_ ? `${k} agent${k === 1 ? '' : 's'} could not be switched yet (${k === 1 ? 'its runtime refused' : 'their runtimes refused'} it; Hatchabot keeps trying)` : 'the switch to a cheaper model did not take (its runtime refused it), so it still runs on its own model; Hatchabot keeps trying') : '';
     const what = whole_
-      ? (n ? `${n} agent${n === 1 ? ' now runs' : 's now run'} on the cheapest model ${n === 1 ? 'its source offers' : 'their sources offer'} (not me)` : 'every agent was already on its cheapest model')
-      : acted[0]?.to ? `it now runs on ${bare(acted[0].to)}` : `it was already on the cheapest model its source offers, so it keeps working as it is`;
+      ? (n ? `${n} agent${n === 1 ? ' now runs' : 's now run'} on the cheapest model ${n === 1 ? 'its source offers' : 'their sources offer'} (not me)${k ? `; ${notYet}` : ''}` : k ? notYet : 'every agent was already on its cheapest model')
+      : acted[0]?.to ? `it now runs on ${bare(acted[0].to)}` : k ? notYet : `it was already on the cheapest model its source offers, so it keeps working as it is`;
     return `💵 Hatchabot: ${whose} has used its ${of} (${money(spent)}): ${what}${n ? ` until ${next}` : ''}.\n${n ? `Raise the budget to switch ${whole_ ? 'them' : 'it'} back now; change a model yourself and the budget leaves it alone until the 1st.` : 'Ask me to raise the budget, or have it pause at the limit.'}`;
   }
   return `💵 Hatchabot: ${whose} has used its ${of} (${money(spent)})${pace && pace > spent ? `, on pace for ${money(pace)}` : ''}. It keeps working: the budget is set to warn.\nAsk me to raise it, make ${whole_ ? 'the agents' : 'it'} cheaper, or have ${whole_ ? 'them' : 'it'} pause at the limit.`;
+}
+
+/** A switch the 100% message said did not take, taken since. */
+export function lateSwitchMessage(b: BudgetRow, month: string, agent: Agent, since: Array<{ a: Agent; to: string }>): string {
+  const next = `${monthName(nextMonth(month))} 1`;
+  const n = since.length;
+  const what = b.scope === MACHINE
+    ? `${n} agent${n === 1 ? ' that could not be switched now runs' : 's that could not be switched now run'} on the cheapest model ${n === 1 ? 'its source offers' : 'their sources offer'}`
+    : `"${agent.name}" now runs on ${bare(since[0]!.to)} after all: the switch its budget asked for has taken`;
+  return `💵 Hatchabot: ${what}, until ${next}.\nRaise the budget to switch ${b.scope === MACHINE ? 'them' : 'it'} back now.`;
 }
 
 // ---- a paused agent's one reply ----------------------------------------------

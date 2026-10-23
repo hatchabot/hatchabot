@@ -435,6 +435,27 @@ describe('migrate: killed at every step, then a restart', () => {
     await expect(recoverOperation(m.ctx, op.id, 'start-here')).rejects.toThrow(/not waiting on you/);
   });
 
+  it('the 10-minute question leaves alone a held move the owner settled while it was asking about another (audit, 2026-10-20)', async () => {
+    const m = await migrateWorld();
+    crashAt('answered');
+    await expect(migrateAgent(m.deps as any, 'a1', PEER)).rejects.toBeInstanceOf(SimulatedCrash);
+    reboot('a1');
+    m.peer.answers = 'down';
+    await resumeOperations(m.ctx);
+    // The loop's list is read before the owner chooses; it reaches this one after.
+    const listed = m.store.operationsWithStatus(['held']);
+    expect(listed).toHaveLength(1);
+    const op = listed[0]!;
+    expect((await recoverOperation(m.ctx, op.id, 'start-here')).status).toBe('rolled_back');
+    const real = m.store.operationsWithStatus.bind(m.store);
+    vi.spyOn(m.store, 'operationsWithStatus').mockImplementation((s) => (s.length === 1 && s[0] === 'held' ? listed : real(s)));
+    await retryHeldOperations(m.ctx);
+    expect(m.store.getOperation(op.id)!.status).toBe('rolled_back');
+    expect(m.store.getAgent('a1')!.state).toBe('RUNNING');
+    expect(operationRefusal(m.store, 'a1')).toBeUndefined();
+    expect(m.store.listEvents(['a1'], 200).filter((e) => e.event === 'op.held')).toHaveLength(1);
+  });
+
   it('an unconfirmed transfer in one go is held too (it used to leave Start allowed)', async () => {
     const m = await migrateWorld();
     vi.restoreAllMocks();

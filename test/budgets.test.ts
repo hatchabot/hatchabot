@@ -2,13 +2,14 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
+import { eventLabel } from '../src/orchestrator/eventLabels.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { HOUR_FIELDS, type HourField, type WindowModelStats } from '../src/orchestrator/usage.js';
 import type { StoredProfile } from '../src/orchestrator/modelScorecard.js';
 import type { Agent } from '../src/domain/types.js';
 import {
-  budgetLine, budgetView, dailyCosts, dayKey, levelOf, MACHINE, MAX_BUDGET, monthElapsed, monthKey, nextMonth, parseNewAgentBudget, pausedReplySweep, pausedReplyText, prevMonth, REPLY_EVERY_MS, runBudgets, suggestBudget, type BudgetDeps,
+  budgetLine, budgetView, dailyCosts, dayKey, levelOf, MACHINE, MAX_BUDGET, monthElapsed, monthKey, nextMonth, parseNewAgentBudget, PAUSE_WAIT_MS, pausedReplySweep, pausedReplyText, prevMonth, REPLY_EVERY_MS, runBudgets, suggestBudget, type BudgetDeps,
 } from '../src/orchestrator/budgets.js';
 import { MACHINE_DEFAULTS } from '../src/orchestrator/machineDefaults.js';
 import { primeSpendAlert, stepLine, stepView, STEP_TELL_EVERY_MS } from '../src/orchestrator/budgets.js';
@@ -122,17 +123,53 @@ describe('runBudgets', () => {
     store.setUsageCursor('a2', iso(NOW - MIN), iso(NOW - MIN));
     let r = await runBudgets(deps, NOW);
     expect(r.paused).toEqual([]);
-    expect(told).toEqual([]); // the message waits for the pause
+    // The 100% message waits for the pause; the owner hears now that it is coming.
+    expect(told).toHaveLength(1);
+    expect(told[0]!.text).toContain('"Trip Planner" has used 125% of its $20 budget for October ($25.00), on pace for');
+    expect(told[0]!.text).toContain('Shortly it pauses until November 1.');
     r = await runBudgets(deps, NOW + 10 * MIN);
     expect(r.paused).toEqual(['a2']);
     expect(store.getAgent('a2')!.state).toBe('STOPPED');
-    expect(told).toHaveLength(1);
-    expect(told[0]!.text).toMatch(/^⏸ Hatchabot: "Trip Planner" has used its \$20 budget for October \(\$25\.00\): it is paused until November 1\./);
+    expect(told).toHaveLength(2);
+    expect(told[1]!.text).toMatch(/^⏸ Hatchabot: "Trip Planner" has used its \$20 budget for October \(\$25\.00\): it is paused until November 1\./);
     await runBudgets(deps, NOW + 20 * MIN);
-    expect(told).toHaveLength(1);
+    expect(told).toHaveLength(2);
     expect(store.listBudgetPauses({ open: true }).map((p) => p.agentId)).toEqual(['a2']);
     const line = budgetLine(budgetView(store, store.getBudget('a2')!, 25, NOW, 'UTC', 'a2'), 'it');
     expect(line).toBe('Paused: it used its $20 budget for October ($25.00). It starts again on November 1 — or raise the budget, or start it now');
+  });
+
+  it('an agent that is never quiet (a loop) is still paused, PAUSE_WAIT_MS after the limit (audit, 2026-10-20)', async () => {
+    const { store, agent, told, deps } = world();
+    agent('a8', 'Errands');
+    store.setBudget('a8', OWNER, 20, 'pause', iso(NOW));
+    store.setModelProfile('a8', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    const pass = async (at: number) => { store.setUsageCursor('a8', iso(at - MIN), iso(at - MIN)); return runBudgets(deps, at); };
+    expect((await pass(NOW)).paused).toEqual([]);
+    expect((await pass(NOW + 10 * MIN)).paused).toEqual([]);
+    expect(told.map((t) => t.text)).toEqual([expect.stringContaining('Shortly it pauses until November 1.')]);
+    expect((await pass(NOW + PAUSE_WAIT_MS)).paused).toEqual(['a8']);
+    expect(store.getAgent('a8')!.state).toBe('STOPPED');
+    expect(told).toHaveLength(2);
+    expect(told[1]!.text).toContain('it is paused until November 1.');
+  });
+
+  it("its own budget raised, it stays paused while the machine's still is (report A09, 2026-10-22)", async () => {
+    const { store, agent, deps } = world();
+    agent('ops', 'Hatchabot', { ops: true });
+    agent('a3', 'Recipe Box');
+    store.setBudget('a3', OWNER, 20, 'pause', iso(NOW));
+    store.setModelProfile('a3', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    await runBudgets(deps, NOW);
+    expect(store.getAgent('a3')!.state).toBe('STOPPED');      // paused by its own budget
+    store.setBudget(MACHINE, OWNER, 10, 'pause', iso(NOW));   // the machine's reached too, since
+    store.setBudget('a3', OWNER, 40, 'pause', iso(NOW));
+    const r = await runBudgets(deps, NOW + MIN, { record: false });
+    expect(r.resumed).toEqual([]);
+    expect(store.getAgent('a3')!.state).toBe('STOPPED');
+    // The machine's raised too: nothing holds it now.
+    store.setBudget(MACHINE, OWNER, 40, 'pause', iso(NOW));
+    expect((await runBudgets(deps, NOW + 2 * MIN, { record: false })).resumed).toEqual(['a3']);
   });
 
   it('a raised budget starts it again; the 1st of the month does too', async () => {
@@ -172,7 +209,8 @@ describe('runBudgets', () => {
     expect(store.getAgent('a5')!.hibernatedAt).toBeFalsy(); // the wake poll no longer looks at it
     expect(store.getBudgetPause('a5', '2026-10')).toBeTruthy();
     expect(store.getAgent('a6')!.state).toBe('RUNNING');
-    expect(told.map((t) => t.via).sort()).toEqual(['Book Club', 'Tide Tables']);
+    expect(told.map((t) => t.via).sort()).toEqual(['Book Club', 'Moving Day', 'Tide Tables']);
+    expect(told.find((t) => t.via === 'Moving Day')!.text).toContain('Shortly it pauses'); // busy: told it is coming
     // The owner starts a4 by hand (the Start route marks it so).
     store.setAgentState('a4', 'RUNNING');
     store.resumeBudgetPause('a4', '2026-10', iso(NOW + MIN), 'owner');
@@ -180,6 +218,7 @@ describe('runBudgets', () => {
     await runBudgets(deps, NOW + 10 * MIN);
     expect(store.getAgent('a4')!.state).toBe('RUNNING');
     expect(store.getAgent('a6')!.state).toBe('STOPPED');
+    expect(told.filter((t) => t.via === 'Moving Day').at(-1)!.text).toContain('it is paused until November 1.');
     expect(budgetView(store, store.getBudget('a4')!, 12, NOW, 'UTC', 'a4').resumedByHand).toBe(true);
   });
 
@@ -243,7 +282,7 @@ async function app() {
   const store = new Store(new Database(':memory:'));
   const provider = new MockProvider();
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
-  store.insertAIProfile({ id: 'key', ownerId: OWNER, name: 'API key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/key', createdAt: 'now' } as never);
+  store.insertAIProfile({ id: 'key', ownerId: OWNER, name: 'API key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', models: ['claude-opus-4-8', 'claude-haiku-4-5'], secretRef: 'ai/key', createdAt: 'now' } as never);
   store.insertAIProfile({ id: 'k2', ownerId: OTHER, name: 'Theirs', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/k2', createdAt: 'now' } as never);
   const add = async (id: string, name: string, owner = OWNER, extra: Record<string, unknown> = {}) => {
     const { runtimeRef } = await provider.provision({ agentId: id, slug: id, workspace: { files: {}, configPatch: { agentId: id, authMode: 'api-key' } }, env: {} } as never);
@@ -255,7 +294,7 @@ async function app() {
   await add('x1', 'Theirs', OTHER);
   const f = Fastify();
   await registerRoutes(f, { store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} }, providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0 } } as never } as never);
-  return { f, store };
+  return { f, store, provider };
 }
 
 describe('the budget routes', () => {
@@ -302,6 +341,25 @@ describe('the budget routes', () => {
     r = await f.inject({ method: 'PUT', url: '/v1/agents/r1/budget', headers: as(OWNER), payload: { usd: null } });
     expect(r.json()).toMatchObject({ budget: null, message: '"Garden Notes" has no budget now.' });
     expect(store.getBudget('r1')).toBeUndefined();
+  });
+
+  it('a cheaper model the runtime refused is not a switch: the record goes back, and the next pass tries again (review, 2026-10-22)', async () => {
+    const { f, store, provider } = await app();
+    const now = Date.now();
+    store.setModelProfile('r1', { since: now - 30 * DAY, models: opus(now, 30), promptErrors: 0, crons: 0, firstCall: now - 60 * DAY, hourly: true } as StoredProfile, iso(now));
+    const { recordCostDays, machineTz } = await import('../src/orchestrator/budgets.js');
+    recordCostDays(store, machineTz(), now);
+    const month = monthKey(now, machineTz());
+    provider.execResponses.set('models set', { code: 1, stdout: '', stderr: 'gateway restarting' });
+    let r = await f.inject({ method: 'PUT', url: '/v1/agents/r1/budget', headers: as(OWNER), payload: { usd: 25, atLimit: 'cheaper' } });
+    expect(r.statusCode).toBe(200);
+    expect(store.getAgent('r1')!.model ?? null).toBeNull();
+    expect(store.getBudgetPause('r1', month)).toBeUndefined();
+    expect(r.json().budget.downgraded).toBeUndefined();
+    provider.execResponses.delete('models set');
+    r = await f.inject({ method: 'PUT', url: '/v1/agents/r1/budget', headers: as(OWNER), payload: { usd: 25, atLimit: 'cheaper' } });
+    expect(store.getAgent('r1')!.model).toBe('claude-haiku-4-5');
+    expect(store.getBudgetPause('r1', month)).toMatchObject({ kind: 'cheaper', fromModel: null, toModel: 'claude-haiku-4-5' });
   });
 
   it('the chat: get_budgets reads, set_budget is a card the owner confirms', () => {
@@ -378,6 +436,39 @@ describe('"cheaper model" at the limit', () => {
     await runBudgets(deps, Date.parse('2026-11-01T00:05:00Z'), { record: false });
     expect(store.getAgent('k2')!.model).toBe('claude-opus-4-8');
     expect(switches.at(-1)).toEqual(['k2', 'claude-opus-4-8']);
+  });
+
+  it('stopped and started, or archived, while on the cheaper model: its own model still comes back (audit, 2026-10-20)', async () => {
+    const { store, agent, deps } = cheapWorld();
+    agent('k6', 'Book Club', { model: 'claude-opus-4-8' });
+    agent('k7', 'Moving Day', { model: 'claude-opus-4-8' });
+    for (const id of ['k6', 'k7']) { store.setBudget(id, OWNER, 20, 'cheaper', iso(NOW)); store.setModelProfile(id, profile(NOW, opus(NOW - DAY, 25)), iso(NOW)); }
+    await runBudgets(deps, NOW);
+    expect(store.getAgent('k7')!.model).toBe('claude-haiku-4-5');
+    store.setAgentState('k7', 'ARCHIVED');
+    const logged: Array<{ event: string; detail: Record<string, unknown> }> = [];
+    deps.log = (event, detail) => { logged.push({ event, detail }); };
+    await runBudgets(deps, NOW + 10 * MIN, { record: false });
+    expect(store.getAgent('k7')!.model).toBe('claude-opus-4-8');
+    expect(store.getBudgetPause('k7', '2026-10')).toMatchObject({ resumedBy: 'gone' });
+    // Its timeline says why: archived, not "its budget was raised" (regression audit, 2026-10-22).
+    const restored = logged.find((l) => l.event === 'budget.model_restored' && l.detail.agentId === 'k7')!;
+    expect(eventLabel(restored.event, restored.detail)).toBe('back on its own model: it was archived');
+    // k6 stays on the cheaper model through the month, then gets its own back.
+    await runBudgets(deps, Date.parse('2026-11-01T00:05:00Z'), { record: false });
+    expect(store.getAgent('k6')!.model).toBe('claude-opus-4-8');
+  });
+
+  it('Start leaves a budget\'s cheaper model in place, to come back on the 1st (audit, 2026-10-20)', async () => {
+    const { f, store } = await app();
+    const month = monthKey(Date.now(), (await import('../src/orchestrator/budgets.js')).machineTz());
+    store.setAgentModel('r1', 'claude-haiku-4-5');
+    store.addBudgetPause('r1', month, 'r1', iso(Date.now()), { fromModel: 'claude-opus-4-8', toModel: 'claude-haiku-4-5' });
+    store.setAgentState('r1', 'STOPPED');
+    const r = await f.inject({ method: 'POST', url: '/v1/agents/r1/start', headers: as(OWNER) });
+    expect(r.statusCode).toBe(200);
+    expect(store.getBudgetPause('r1', month)).toMatchObject({ kind: 'cheaper', fromModel: 'claude-opus-4-8' });
+    expect(store.getBudgetPause('r1', month)!.resumedAt).toBeUndefined();
   });
 
   it('nothing cheaper on its source: it says so and changes nothing', async () => {
@@ -628,7 +719,7 @@ describe('budgets that act together, and messages that did not get through', () 
     expect(store.getAgent('p1')!.model).toBe('claude-haiku-4-5');
   });
 
-  it('a downgrade that failed is not "already on the cheapest model": nothing is told until it works (#185)', async () => {
+  it('a downgrade that failed is not "already on the cheapest model": the 100% message waits until it works (#185)', async () => {
     const { store, agent, deps, told } = world();
     let fail = true;
     deps.downgrade = async (a) => { if (fail) throw new Error('database is locked'); store.setAgentModel(a.id, 'claude-haiku-4-5'); return { from: null, to: 'claude-haiku-4-5' }; };
@@ -637,11 +728,116 @@ describe('budgets that act together, and messages that did not get through', () 
     store.setModelProfile('d1', profile(NOW, opus(NOW - DAY, 12)), iso(NOW));
     const r = await runBudgets(deps, NOW);
     expect(r.downgraded).toEqual([]);
-    expect(told).toEqual([]);
+    // While it waits, the owner hears the 80% message: it moves shortly.
+    expect(told.map((t) => t.text)).toEqual([expect.stringContaining('Shortly it moves to the cheapest model its source offers')]);
     fail = false;
     expect((await runBudgets(deps, NOW + 10 * MIN, { record: false })).downgraded).toEqual(['d1']);
-    expect(told).toHaveLength(1);
-    expect(told[0]!.text).toContain('it now runs on claude-haiku-4-5 until November 1');
+    expect(told).toHaveLength(2);
+    expect(told[1]!.text).toContain('it now runs on claude-haiku-4-5 until November 1');
+  });
+
+  it('a switch the runtime keeps refusing is said after PAUSE_WAIT_MS, then tried hourly, its refusal on the timeline once a day (regression audit, 2026-10-22)', async () => {
+    const { store, agent, deps, told } = world();
+    const events: Array<{ event: string; where: string }> = [];
+    deps.log = (event) => { events.push({ event, where: 'timeline' }); };
+    deps.warn = (event) => { events.push({ event, where: 'service' }); };
+    let calls = 0;
+    deps.downgrade = async () => { calls++; throw new Error('the runtime did not take claude-haiku-4-5'); };
+    agent('d2', 'Pantry Notes');
+    store.setBudget('d2', OWNER, 10, 'cheaper', iso(NOW));
+    store.setModelProfile('d2', profile(NOW, opus(NOW - DAY, 12)), iso(NOW));
+    await runBudgets(deps, NOW);
+    await runBudgets(deps, NOW + 10 * MIN, { record: false });
+    expect(told).toHaveLength(1); // the 80% "shortly" one; 100% still waits
+    await runBudgets(deps, NOW + 20 * MIN, { record: false });
+    expect(told).toHaveLength(2);
+    expect(told[1]!.text).toContain('the switch to a cheaper model did not take (its runtime refused it), so it still runs on its own model');
+    expect(told[1]!.text).not.toContain('already on the cheapest');
+    expect(calls).toBe(3);
+    // Told: tried again only hourly now, and never told twice.
+    await runBudgets(deps, NOW + 30 * MIN, { record: false });
+    await runBudgets(deps, NOW + 40 * MIN, { record: false });
+    expect(calls).toBe(3);
+    await runBudgets(deps, NOW + 81 * MIN, { record: false });
+    expect(calls).toBe(4);
+    expect(told).toHaveLength(2);
+    const refusals = events.filter((e) => e.event === 'budget.downgrade_failed');
+    expect(refusals.filter((e) => e.where === 'timeline')).toHaveLength(1);
+    expect(refusals.filter((e) => e.where === 'service')).toHaveLength(3);
+  });
+
+  it('a refused switch that takes later is told once, and a restart does not tell it again (final audit, 2026-10-22)', async () => {
+    const { store, agent, deps, told } = world();
+    let fail = true;
+    deps.downgrade = async (a) => { if (fail) throw new Error('the runtime did not take claude-haiku-4-5'); const from = a.model ?? null; store.setAgentModel(a.id, 'claude-haiku-4-5'); return { from, to: 'claude-haiku-4-5' }; };
+    agent('d3', 'Pantry Notes', { model: 'claude-opus-4-8' });
+    store.setBudget('d3', OWNER, 10, 'cheaper', iso(NOW));
+    store.setModelProfile('d3', profile(NOW, opus(NOW - DAY, 12)), iso(NOW));
+    await runBudgets(deps, NOW);
+    await runBudgets(deps, NOW + 20 * MIN, { record: false });
+    expect(told.at(-1)!.text).toContain('did not take');
+    fail = false;
+    await runBudgets(deps, NOW + 81 * MIN, { record: false });
+    expect(store.getAgent('d3')!.model).toBe('claude-haiku-4-5');
+    expect(told).toHaveLength(3);
+    expect(told[2]!.text).toContain('"Pantry Notes" now runs on claude-haiku-4-5 after all');
+    expect(told[2]!.text).toContain('until November 1');
+    // Told once: later passes, and a pass on a fresh start (the in-memory retries gone), say nothing more.
+    await runBudgets(deps, NOW + 90 * MIN, { record: false });
+    await runBudgets({ ...deps, store: new Store((store as unknown as { db: Database.Database }).db) }, NOW + 100 * MIN, { record: false });
+    expect(told).toHaveLength(3);
+  });
+
+  it("its own cheaper budget raised, it stays on the cheaper model while the machine's is still reached (final audit, 2026-10-22)", async () => {
+    const { store, agent, deps } = cheapWorld();
+    agent('ops', 'Hatchabot', { ops: true });
+    agent('c1', 'Recipe Box', { model: 'claude-opus-4-8' });
+    store.setBudget('c1', OWNER, 20, 'cheaper', iso(NOW));
+    store.setBudget(MACHINE, OWNER, 20, 'cheaper', iso(NOW));
+    store.setModelProfile('c1', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    await runBudgets(deps, NOW);
+    expect(store.getAgent('c1')!.model).toBe('claude-haiku-4-5');
+    const switches: Array<string | null> = [];
+    const restore = deps.restoreModel!;
+    deps.restoreModel = async (a, pin) => { switches.push(pin); return restore(a, pin); };
+    store.setBudget('c1', OWNER, 500, 'cheaper', iso(NOW));
+    const r = await runBudgets(deps, NOW + 10 * MIN, { record: false });
+    expect(r.resumed).toEqual([]);
+    expect(switches).toEqual([]);
+    expect(store.getAgent('c1')!.model).toBe('claude-haiku-4-5');
+    // The machine's raised too: its own model comes back.
+    store.setBudget(MACHINE, OWNER, 500, 'cheaper', iso(NOW));
+    expect((await runBudgets(deps, NOW + 20 * MIN, { record: false })).resumed).toEqual(['c1']);
+    expect(store.getAgent('c1')!.model).toBe('claude-opus-4-8');
+  });
+
+  it('a cheaper model an older version closed as Start or archive while left on is put back on the 1st (final audit, 2026-10-22)', async () => {
+    const { store, agent, deps } = cheapWorld();
+    agent('o1', 'Book Club', { model: 'claude-haiku-4-5' });
+    agent('o2', 'Moving Day', { model: 'claude-haiku-4-5', state: 'ARCHIVED' });
+    agent('o3', 'Tide Tables', { model: 'claude-sonnet-5' });   // changed by hand since: left alone
+    agent('o4', 'Seed Swap', { model: 'claude-haiku-4-5' });     // the owner chose the cheap one again by hand since
+    store.setBudget('o1', OWNER, 20, 'cheaper', iso(NOW));   // still reached this month
+    store.setModelProfile('o1', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    for (const [id, by] of [['o1', 'owner'], ['o2', 'gone'], ['o3', 'owner'], ['o4', 'owner']] as const) {
+      store.addBudgetPause(id, '2026-10', id, iso(NOW - DAY), { fromModel: 'claude-opus-4-8', toModel: 'claude-haiku-4-5' });
+      store.resumeBudgetPause(id, '2026-10', iso(NOW - HOUR), by);
+    }
+    store.addModelChange({ id: 'mc-o4', agentId: 'o4', ownerId: OWNER, from: 'claude-opus-4-8', to: 'claude-haiku-4-5', at: iso(NOW - 30 * MIN), by: 'owner', via: 'app', source: 'model', outcome: 'pending' });
+    // The upgrade: the one-time repair runs as the store opens.
+    const db = (store as unknown as { db: Database.Database }).db;
+    db.prepare(`DELETE FROM store_migrations WHERE name = '2026-10-22-budget-cheaper-reopen'`).run();
+    const up = new Store(db);
+    const d = { ...deps, store: up };
+    await runBudgets(d, NOW);
+    expect(up.getAgent('o2')!.model).toBe('claude-opus-4-8');   // archived: its own back on the record now
+    expect(up.getAgent('o1')!.model).toBe('claude-haiku-4-5');   // until the 1st, as the budget said
+    await runBudgets(d, Date.parse('2026-11-01T00:05:00Z'), { record: false });
+    expect(up.getAgent('o1')!.model).toBe('claude-opus-4-8');
+    expect(up.getAgent('o3')!.model).toBe('claude-sonnet-5');
+    expect(up.getBudgetPause('o3', '2026-10')).toMatchObject({ resumedBy: 'owner' });
+    expect(up.getAgent('o4')!.model).toBe('claude-haiku-4-5');   // its owner's choice, not the budget's
+    expect(up.getBudgetPause('o4', '2026-10')).toMatchObject({ resumedBy: 'owner' });
   });
 
   it('a mark is told once it reached the owner: a failed message is tried again, and a machine budget waits for its manager (#62)', async () => {

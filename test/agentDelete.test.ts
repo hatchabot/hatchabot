@@ -133,11 +133,14 @@ describe('the boot sweep of agent secrets nothing names (C089)', () => {
     store.insertAgentEnv({ id: 'e1', agentId: 'live', name: 'PANTRY_KEY', secretRef: 'agent-env/e1', createdAt: 'now' });
     store.insertDataSource({ id: 'ds1', agentId: 'live', kind: 'git', access: 'ro', mountName: 'defs', repoUrl: 'git@example.org:o/defs.git', secretRef: 'data-source/ds1', pubKey: 'k', createdAt: 'now' });
     store.insertDataSource({ id: 'ds2', agentId: 'live', kind: 'git', access: 'ro', mountName: 'pub', repoUrl: 'https://example.org/o/pub.git', createdAt: 'now' });
-    for (const ref of ['agent-env/e1', 'agent-env/e-orphan', 'data-source/ds1', 'data-source/ds-orphan', 'agent-call-token/live', 'agent-call-token/gone', 'agent-call-token/never', 'ai/p1', 'telegram/bot/x']) {
+    // A waiting app's secret value its row names, and two a failed delete left behind (review, 2026-10-22).
+    store.setAppPending('live', { source: '/srv/demo-app', ref: 'HEAD', values: { app_password: { $secretRef: 'app-pending/live/app_password' } } });
+    for (const ref of ['agent-env/e1', 'agent-env/e-orphan', 'data-source/ds1', 'data-source/ds-orphan', 'agent-call-token/live', 'agent-call-token/gone', 'agent-call-token/never', 'ai/p1', 'telegram/bot/x',
+      'app-pending/live/app_password', 'app-pending/live/old_key', 'app-pending/gone/app_password']) {
       await secrets.put(ref, 'FAKE-FIXTURE-VALUE');
     }
-    expect(store.sweepOrphanAgentSecrets().sort()).toEqual(['agent-call-token/gone', 'agent-call-token/never', 'agent-env/e-orphan', 'data-source/ds-orphan']);
+    expect(store.sweepOrphanAgentSecrets().sort()).toEqual(['agent-call-token/gone', 'agent-call-token/never', 'agent-env/e-orphan', 'app-pending/gone/app_password', 'app-pending/live/old_key', 'data-source/ds-orphan']);
     const left = (db.prepare('SELECT ref FROM secrets ORDER BY ref').all() as Array<{ ref: string }>).map((r) => r.ref);
-    expect(left).toEqual(['agent-call-token/live', 'agent-env/e1', 'ai/p1', 'data-source/ds1', 'telegram/bot/x']);
+    expect(left).toEqual(['agent-call-token/live', 'agent-env/e1', 'ai/p1', 'app-pending/live/app_password', 'data-source/ds1', 'telegram/bot/x']);
   });
 });

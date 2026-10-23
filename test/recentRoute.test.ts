@@ -113,6 +113,21 @@ describe('GET /v1/recent', () => {
     expect(JSON.stringify(items)).not.toContain('Pasta Place');
   });
 
+  it("a guest's unread mark is their own conversation's, not the owner's or another guest's (review, 2026-10-22)", async () => {
+    const seenAt = Date.now() - 5 * 60_000; // after the guest's own line (10 min ago), before the owner's (2 min ago)
+    const w = await world();
+    w.store.setAgentSeen(GUEST, 'r-lunch', seenAt);
+    w.store.setAgentSeen(MEMBER, 'r-lunch', seenAt);
+    w.store.setAgentSeen(OWNER, 'r-lunch', seenAt);
+    expect((await w.recent(GUEST)).items.find((i) => i.id === 'r-lunch')?.unread).toBe(false);
+    expect((await w.recent(MEMBER)).items.find((i) => i.id === 'r-lunch')?.unread).toBe(false); // no console to read it in
+    expect((await w.recent(OWNER)).items.find((i) => i.id === 'r-lunch')?.unread).toBe(true);
+    // The guest's own conversation moved since: theirs to read.
+    const v = await world({ guestNewest: true });
+    v.store.setAgentSeen(GUEST, 'r-lunch', Date.now() - 5 * 60_000);
+    expect((await v.recent(GUEST)).items.find((i) => i.id === 'r-lunch')?.unread).toBe(true);
+  });
+
   it('owner reads the guest\'s line under the guest\'s name when it is the newest', async () => {
     const w = await world({ guestNewest: true });
     await w.settle(OWNER);

@@ -218,6 +218,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `scripts/release.sh` — `refs/tags/$TAG`; `docs/releasing.md` — `How a release reaches the public repo`
 
+### Releasing: the publisher blocked a release for a fingerprint hit across two lines (`path:N-N+1`)
+- **Check:** the publisher's issue for the release names a fingerprint hit at two lines in a row, such as `docs/features.md:9-10`, and the release passed `scripts/release.sh`'s own privacy check.
+- **Cause:** a private name was wrapped onto the next line, in a paragraph or a comment. The publisher's gate reads each line break, but the privacy check here read a line at a time, so the name went through the pre-push hook and CI's `privacy` job.
+- **Fix:** reword each place it names, describing the agent or person by kind, and release the next patch version. Don't put the name in the CHANGELOG, the release notes or a commit message. To find others before tagging, run `git ls-files -z | xargs -0 node scripts/privacy-check.mjs --text`. It prints each hit masked; the owner's own address in `scripts/privacy-identity.txt` is expected there.
+- **Fixed in:** `v2.164.3`
+- **Code:** `scripts/privacy-check.mjs` — `scan`; `scripts/privacy-ci.mjs` — `scanAcross`, `scanText`, `scanRange`
+
 ### `scripts/promote.sh`: "vX.Y.Z is not published yet (the public repo has no such tag)"
 - **Check:** `git ls-remote --tags public refs/tags/vX.Y.Z` prints nothing.
 - **Cause:** only a published release can be moved to a channel, and the publisher has not pushed it yet (above). The publisher's fast lane would refuse a `channels.json` naming it.
@@ -231,6 +238,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** `git remote add --no-tags public https://github.com/hatchabot/hatchabot.git && git remote set-url --push public DISABLED`.
 - **Fixed in:** `v2.164.0`
 - **Code:** `scripts/release.sh` — `HATCHABOT_PUBLIC_REMOTE`; `scripts/promote.sh` — `HATCHABOT_PUBLIC_REMOTE`
+
+### `scripts/land.sh` waits until its timeout though the pull request's checks passed
+- **Check:** `gh pr checks <number> --repo cksci/hatchabot-dev` says "Resource not accessible by personal access token"; `gh auth status` shows a `github_pat_` token.
+- **Cause:** `gh pr checks` reads the check-runs API, which needs a permission ("Checks") that fine-grained personal tokens cannot have; the machine's everyday token is one (publish kit D8). Before this fix, `land.sh` saw no checks and kept waiting.
+- **Fix:** upgrade the checkout: `land.sh` reads the jobs of the commit's Actions runs on its branch, and the commit's statuses (the token's Actions and Commit statuses read access). To land a pull request already waiting: `gh pr merge <url> --rebase --delete-branch` once its CI run passed, then `git pull --rebase`.
+- **Fixed in:** the release after `v2.164.1` (2026-10-17)
+- **Code:** `scripts/land.sh` — `checks`
 
 ### After `scripts/promote.sh`, the channel moved but the runtime image's `:stable` (or `:beta`) did not (before v2.164.0: "Moving the image :stable failed")
 - **Check:** the public repo's Actions → Promote images: a run for the `Update channels` push failed, or none ran yet because the publisher has not copied `channels.json` (the public `channels.json` still names the old release).
@@ -2527,3 +2541,644 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade the checkout. Named references are now checked against their script, including each scenario.
 - **Fixed in:** `v2.158.2` (#35)
 - **Code:** `scripts/use-case-coverage.mjs`
+
+### The daily privacy sync fails with "HTTP 403: Resource not accessible by personal access token"
+- **Check:** `journalctl --user -u hatchabot-privacy-sync.service` shows `✗ privacy fingerprints: not sent to actions — gh secret set failed (… 403 …)`. The message ends with the token it used. `with gh's own login: there is no …/secrets.token` means the secrets-only token is missing, or was saved somewhere else.
+- **Cause:** gh's everyday token cannot write the public repos' secrets. `--sync-ci` uses `~/.config/hatchabot/secrets.token` (or `HATCHABOT_SECRETS_TOKEN_FILE`) and, when that file is not there, falls back to gh's login. A token saved under any other name or folder is not used.
+- **Fix:** save the fine-grained token (owner `hatchabot`, only `hatchabot/hatchabot` and `hatchabot/hatchabot.com`, Secrets and Dependabot secrets read and write) as `~/.config/hatchabot/secrets.token`, mode 600. Then run `systemctl --user start hatchabot-privacy-sync.service` and look for two `✓ PRIVACY_FINGERPRINTS set` lines. Until it is fixed, GitHub's privacy checks use the last fingerprints sent, so a value added since then is not covered there.
+- **Fixed in:** the release after `v2.164.1` (the failure names the token it used).
+- **Code:** `scripts/privacy-check.mjs` (`secretsTokenEnv`, `syncCi`)
+
+## Audit fixes in v2.164.2
+
+### A web-chat guest could open owner-only parts of an agent's console (session history, downloads, metrics)
+- **Check:** the service log has `console.guest_refused` lines for paths with `\`, `%5c` or a leading `//` after the upgrade; before it, the same requests answered 200. A guest's ordinary chat is unaffected.
+- **Cause:** the console proxy judged a guest's path split on `/`, but the agent's gateway reads it with `new URL()`, which takes `\` (or `%5c`) for `/`, drops tabs and newlines, resolves `..`, and reads a leading `//` as a host name. A path like `/assets/x\..\..\sessions/…/history` passed as a static file and reached an operator-only endpoint with the guest's read + write scopes.
+- **Fix:** upgrade. The proxy refuses any guest path the gateway would read differently from how it was judged, and forwards only the judged path.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/consoleProxy.ts` — `guestHttpPath`, `guestHttpAllowed`; `src/api/routes.ts` — the `/v1/agents/:id/ui/*` route
+
+### A stopped agent started by itself after a move was held, and two copies answer its bot
+- **Check:** the agent's timeline shows a Rebuild (from Rebuild all, or an AI-source switch with rebuild) that started after "Move to another Hatchabot" or "Move to another machine" was held; Alerts still shows that move waiting for a choice.
+- **Cause:** a rebuild that waited its turn in the queue checked for an unfinished operation only when it was queued, not when its turn came, so it started the copy the held move was keeping stopped.
+- **Fix:** stop the copy here, then settle the held move from Alerts. Since the fix, a queued rebuild skips itself ("Not rebuilt: … is not over") when its turn comes.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/routes.ts` — `staleRebuild`, `kickRebuild`
+
+### A move to another Hatchabot was held again after you chose "keep it here", and the running agent refuses Stop and Rebuild
+- **Check:** the operation shows rolled back, then held again a few minutes later; two or more moves were held at once while the other server was down.
+- **Cause:** the 10-minute retry worked through a list of held moves read before you chose, and put the settled one back on hold.
+- **Fix:** choose "It is not on … — keep it here" again. Since the fix, the retry skips an operation that has changed since it was read.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/operationsResume.ts` — `resumeOne`, `retryHeldOperations`
+
+### A scheduled task disappeared when an app was installed, updated or stopped
+- **Check:** the missing task's name started with the app's id and a dash (for example `news-digest` with app `news`), or it belonged to another app whose id starts the same way.
+- **Cause:** the app treated every job named `<app>-…` as its own and removed it.
+- **Fix:** re-create the task in the Tasks page. Since the fix, only the task names the app's manifest makes are treated as its own.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/apps.ts` — `appTaskNames`, `appJobs`, `syncTasks`, `removeTasks`
+
+### A "pause" budget is over 100% but the agent keeps running, and no "paused" message came
+- **Check:** the agent's Usage tab → Monthly budget shows more than 100% while its tile is still running; its log shows model calls every few minutes (a scheduled task, a retry loop, a busy chat).
+- **Cause:** a pause waited for three minutes without a model call, and an agent in a loop never has three. The wait had no end, so it was never paused, and the 100% message waited for the pause.
+- **Fix:** upgrade. A pause now waits at most 20 minutes after the limit is reached, and while it waits you get the 80% message saying it pauses shortly. Before upgrading: press Stop on the agent.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/budgets.ts` — `runBudgets`, `PAUSE_WAIT_MS`
+
+### An agent stays on the cheaper model after the 1st (its budget said "cheaper model")
+- **Check:** the agent's model is still the cheap one in the new month, its budget is not over, and the model ledger shows the budget's switch but no switch back. Usually the agent was stopped and started, or archived, while it was switched.
+- **Cause:** Start closed the budget's record whatever its kind, and archiving closed it as "gone". Only an open record gets its model put back on the 1st.
+- **Fix:** upgrade. Start now leaves a cheaper-model record open, and archiving puts the agent's own model back on its record. An agent already stuck this way is repaired once at the upgrade: while it still runs on the budget's cheaper model, its record is reopened, so its own model comes back on the 1st or as soon as the budget is raised (an archived agent's at once). An agent whose model you changed since is left as it is. Before upgrading: set the model back by hand in the agent's settings.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/routes.ts` — `/v1/agents/:id/start`; `src/orchestrator/budgets.ts` — `runBudgets`; `src/store/store.ts` — `runOnce`
+
+### Usage → Spend over time → 1 mo: each day's bar holds part of the next day (west of UTC)
+- **Check:** spend made in the evening shows under the next day's bar, and a day's bar does not match the budget's figure for that day.
+- **Cause:** day (and 3-hour) slices were cut at UTC midnight and labelled in the browser's time.
+- **Fix:** upgrade. The page sends its time zone, and slices start at its midnight.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/agentCosts.ts` — `spendSeries`, `zoneOffset`
+
+### Report a problem: the draft shows the install's own web address or backup folder
+- **Check:** the draft's "hatchabot doctor" section has "Public URL https://<your domain>" or "No backup set in /mnt/…".
+- **Cause:** the masking knew agent, member and machine names and tailnet addresses, but not `HATCHABOT_PUBLIC_URL`'s domain, the public access address, or a backup folder outside your home folder.
+- **Fix:** upgrade; these are now shown as `<host>` and `<path>`. Before upgrading: edit those lines out of the draft before you submit it.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/routes.ts` — `reportRedaction`; `src/orchestrator/problemReport.ts` — `redactForPublic`
+
+### After Revert on a snapshot, the editor still shows the old text, and Save puts it back
+- **Check:** an agent's Personality tab; Revert on a snapshot; the file shown is unchanged, and after Save the revert is gone (the snapshot list has a new "pre-edit" entry holding the reverted text).
+- **Cause:** since `v2.156.0` the revert runs in the background and answers before it has written anything; the page read the file straight away and never read it again, so Save wrote the old text back.
+- **Fix:** upgrade. Until then, close and reopen the agent after a revert before editing; to undo an accidental Save, revert to the newest "pre-edit" snapshot.
+- **Fixed in:** `v2.164.2`
+- **Code:** `web/index.html` — `revertSnapshot`, `v2FollowOp`, `v2OpEnded`
+
+### At the public address, a file's ⬇ or its name in Files gives `{"error":"second factor required"}`
+- **Check:** the page is opened at the public address, Files was open for more than 10 minutes (`HATCHABOT_PUBLIC_STEPUP_MINUTES`), and the download saves a small JSON file, or the new tab shows that JSON; the folder's ⬇ .tar.gz works.
+- **Cause:** the `v2.153.0` fix moved file transfers to `sfFetch`/`sfLink` but missed a single file's ⬇ and the open-in-a-tab link, which stayed plain links that cannot ask for the second factor.
+- **Fix:** upgrade. Until then, reopen the Files tab (it asks for the factor, which counts for 10 more minutes), or download from the private address.
+- **Fixed in:** `v2.164.2`
+- **Code:** `web/index.html` — `sfLink`, `sfOpen`, `v2LoadFiles`
+
+### Settings → Backups: Back up now, Restore drills and Run a drill now fail for a household member
+- **Check:** signed in as an account that is not the machine's owner; each button, or changing Restore drills, gives an error toast, the Sets list shows the error, and the drill line says "No restore drill has run yet" even when drills have run.
+- **Cause:** the pane showed the owner's controls to every account; the server rightly refuses them to anyone but the owner, and leaves the last drill out of what others read.
+- **Fix:** nothing to change: backups and drills are the owner's. Upgrade to see only the per-agent table and a line saying the owner runs them.
+- **Fixed in:** `v2.164.2`
+- **Code:** `web/index.html` — `loadBackups`
+
+### The `stable` channel (and the image `:stable`) went back to an older release after a promote
+- **Check:** `gh api 'repos/hatchabot/hatchabot/commits?path=channels.json' --jq '.[0:3][] | .commit.message'` shows a `Release vX.Y.Z` commit after the `Update channels` one, and `channels.json` on the public main names the older release; the Promote images run for that push says "(a rollback)".
+- **Cause:** a release tagged before the promote went out after it, with its own tree and so its own older `channels.json`; promote-images.yml took the change for a rollback and moved `:stable` back.
+- **Fix:** upgrade the checkout, then run `scripts/promote.sh <tag> stable` again: it sees the public repo lost the file and asks the publisher once more. Since the fix, promote.sh refuses while such a release is waiting to publish, release.sh refuses to tag a commit whose `channels.json` is behind, and promote-images.yml refuses a backwards move that is not a fast-lane commit. The publisher itself still carries the tag's `channels.json` in a release (a publish-kit bug, reported to the kit).
+- **Fixed in:** `v2.164.2`
+- **Code:** `scripts/promote.sh` — `pending_gate`, `fast_lane`; `scripts/release-check.sh`; `.github/workflows/promote-images.yml` — `plan`
+
+### `scripts/land.sh` says "Still waiting" though every check passed, and the waiting list names "unreadable"
+- **Check:** `gh api repos/cksci/hatchabot-dev/commits/<sha>/status` or `gh api 'repos/cksci/hatchabot-dev/actions/runs?head_sha=<sha>'` fails with the token `land.sh` uses (403, or no network).
+- **Cause:** since this fix, a failed read of the Actions runs or the commit statuses counts as a pending check. Before, `land.sh` took it as "nothing there", so a green result from the other source alone could merge the pull request. The dev repo has no branch rules, so `land.sh` is its only gate.
+- **Fix:** give the token read access to Actions and Commit statuses (or wait out the GitHub outage), then run `scripts/land.sh` again. A pull request left open merges with `gh pr merge <url> --rebase --delete-branch` once its CI run has passed.
+- **Fixed in:** `v2.164.2`
+- **Code:** `scripts/land.sh` — `checks`
+
+### A scheduled task never posts, though you have since linked your chat (it was made before)
+- **Check:** the task shows as quiet (no delivery) in the agent's Tasks. It was created (from a template, the Tasks page or the manager) before you had messaged the agent's bot, and no `cron.retargeted` event mentions it.
+- **Cause:** a task meant to announce, made while there was no one to post to, was made quiet but not remembered as waiting. So the repair pass that points such tasks at you once you are linked never picked it up. The v2.160.0 fix covered only tasks that a repair pass had quieted itself.
+- **Fix:** upgrade. Tasks made after the upgrade are remembered and point at you once you have messaged the bot. For a task that is already quiet, edit it in Tasks and turn announcing on.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/crons.ts` — `addCron`; `src/store/store.ts` — `addQuietedCron`
+
+### Adopting an agent from OpenClaw 2026.9 brought none of its scheduled tasks
+- **Check:** the adopt message says nothing about tasks (or "0 carried") although the OpenClaw agent had some, and the source install is OpenClaw 2026.9 or later.
+- **Cause:** adopt read only the older task store, with one column per field. 2026.9 keeps one `job_json` per task, so the read failed, and the failure was taken as "no tasks".
+- **Fix:** upgrade and adopt again; the copy's tasks come in disabled, for you to review. Since the fix, the adopt message says when it can't read a task store.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/cronImport.ts` — `readOpenclawCronStore`, `migrateCrons`
+
+### Adopted reminders (main-session tasks) were not carried, or came in as agent turns
+- **Check:** the source agent had reminders that run in its main conversation. After adopt they are missing from Tasks, or they run as a separate agent turn.
+- **Cause:** adopt wrote every non-command task as `--message` (an agent turn). OpenClaw refuses that for a main-session job, which needs `--system-event`.
+- **Fix:** upgrade and adopt again.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/cronImport.ts` — `cronAddArgs`
+
+### A budget said it moved an agent to a cheaper model, but it kept spending on its own
+- **Check:** the agent's budget is set to "cheaper model" and is over 100%. Its timeline has `model.live_set_failed` around the time the budget was reached, and Usage still shows the expensive model.
+- **Cause:** when the runtime refused the switch (`openclaw models set` failed, for example while the gateway restarted), Hatchabot still counted it as made, so it never tried again.
+- **Fix:** upgrade. A refused switch is now undone and tried again on the next usage pass. Meanwhile you get the 80% message saying it moves to a cheaper model shortly. If the switch still hasn't worked 20 minutes after the limit, the 100% message says it did not take and that the agent still runs on its own model; after that it is tried hourly, and once it takes you get one more message saying it now runs on the cheaper model. The refusal goes on the agent's timeline once a day. Before upgrading, set the cheaper model by hand in the agent's settings.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/budgets.ts` — `runBudgets`
+
+### Usage shows "no price known" for a model Hatchabot prices
+- **Check:** the model name has its vendor in front (`anthropic/claude-opus-4-8`) or a date after it (`claude-opus-4-8-20261001`), and the bare name is listed in Settings → AI sources → Model prices.
+- **Cause:** the cost estimate looked up the name exactly as written, so those spellings had no price.
+- **Fix:** upgrade. Every spelling of a known model now gets the same price.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/pricing.ts` — `priceOf`, `estimateCost`
+
+### Unread dots and the home screen's recent lines stopped changing after an OpenClaw upgrade
+- **Check:** the agent was made on OpenClaw 2026.7 and now runs 2026.8 or later. Its volume still has `agents/<slug>/sessions/sessions.json` next to `agent/openclaw-agent.sqlite`, and its chat shows newer messages than the recent line does.
+- **Cause:** the unread and recent readers read the old `sessions.json` before the SQLite store, so they kept showing what was there at the upgrade.
+- **Fix:** upgrade. Both now read the SQLite store first, as the chat does.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/unread.ts` — `sessionsReadShell`; `src/orchestrator/recent.ts`
+
+### Sharing a folder that holds a custom backup folder was allowed
+- **Check:** `HATCHABOT_BACKUP_DIR` is set (to a NAS, for example), and an agent's Data or Shared folders list that folder or one above it.
+- **Cause:** the share check refused only the default backup folder. A backup set holds the database and `secret-key.env`, which together unlock every credential in the install.
+- **Fix:** upgrade. Such a share is now refused, and an existing one fails at the agent's next rebuild with "A shared folder is no longer safe to mount". Remove it from the agent's Data, then rebuild.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/provision.ts` — `sharePathProblem`
+
+### A cloned agent runs on a different AI source (or machine) from the original
+- **Check:** the clone's Settings show the household's default AI source while the original uses another one, or the clone is on this machine while the original is on a runner.
+- **Cause:** Clone never passed the original's AI source and machine, so the copy took the defaults.
+- **Fix:** upgrade. A clone now keeps both whenever you are allowed to use them. For an existing clone, switch its AI source in its settings.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/routes.ts` — `/v1/agents/:id/clone`
+
+### An agent's timeline is full of "guest refused" lines with odd method names
+- **Check:** the agent's timeline has many `console.guest_refused` entries from one guest, each naming a different method, and older setup lines are gone.
+- **Cause:** each refused method name was recorded once a day, and the guest chooses the names, so made-up names could push the 200-line history out.
+- **Fix:** upgrade. Each guest now gets ten names a day per agent, and anything past that is one "(other methods)" line. If someone is doing this on purpose, take away that person's web chat.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/guestConsoleLog.ts` — `GuestConsoleLog`, `refusal`
+
+### Verify access shows a removed person as gone, but they still talk to the agent in a Slack channel or Discord server
+- **Check:** the person was removed and Access → Verify lists nobody for that chat app, yet the agent still answers them in a channel or server.
+- **Cause:** the check read the DM lists and the pairing store, but not the channel and server `users` lists that Hatchabot also writes.
+- **Fix:** upgrade, then run Verify again. Anyone left in a room's list now shows up, and removing them again clears it. A rebuild rewrites the room lists from the member list.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/accessOverview.ts` — `accessProbeScript`
+
+### Health says healthy while the agent's Discord or Slack bot is offline
+- **Check:** the bot shows as offline in Discord or Slack, but Check health says Responding.
+- **Cause:** health checked only Telegram's connection.
+- **Fix:** upgrade. A Discord or Slack bot that reports it is not connected now makes health degraded, with a "Discord connected — disconnected" row. Check the bot's token, then rebuild.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/health.ts` — `agentHealth`
+
+### Agents lost their swap allowance after an upgrade: "zswap's shrinker is on"
+- **Check:** the agent's sheet or `hatchabot doctor` says "zswap's shrinker is on: it writes agents' cold memory on to … early", and `cat /sys/module/zswap/parameters/shrinker_enabled` prints `Y`.
+- **Cause:** with the shrinker on, zswap writes cold compressed pages, such as an idle agent's memory with its keys, to the disk swap early. That makes it disk swap with a delay. Hatchabot used to count any zswap in front of a swap device as compressed swap.
+- **Fix:** run `sudo scripts/enable-compressed-swap.sh`, which turns the shrinker off now and at every boot. Agents get their allowance back within ten minutes. For nothing on disk at all, use `--zram`.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/swap.ts` — `parseSwapProbe`, `SWAP_PROBE_SCRIPT`; `scripts/enable-compressed-swap.sh`
+
+### Install image on a runner: two copies run at once, or a failed copy leaves `docker save` running
+- **Check:** after you click Install image twice (or from two tabs), the runner receives the image twice. Or `ps` on this machine shows a `docker save` long after an image copy failed.
+- **Cause:** the route checked for a copy under way only after two awaits, so two requests could each start one. And a `docker load` that failed early left `docker save` stuck writing to its pipe.
+- **Fix:** upgrade. Until then, click once. `pkill -f 'docker save'` (or restarting the service) clears a stuck copy.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/routes.ts` — `/v1/hosts/:id/install-image`; `src/orchestrator/runnerSetup.ts` — `installRuntimeImage`
+
+### The manager's web search shows titles and links but no descriptions
+- **Check:** no Brave key is set, so `web_search` uses DuckDuckGo, and every result's third line is empty.
+- **Cause:** the DuckDuckGo parser's lazy match ended right after each link, so the optional snippet never matched.
+- **Fix:** upgrade, or add a Brave Search key.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/ops/opsWeb.ts` — `makeOpsWeb`
+
+### Agents keep the machine's time zone although HATCHABOT_TIMEZONE names one like EST5EDT
+- **Check:** `.env` has `HATCHABOT_TIMEZONE=` set to a zone whose first part has digits (`EST5EDT`, `CST6CDT`, `PST8PDT`); agents' times follow the machine's zone instead.
+- **Cause:** a check run before the runtime's own list allowed letters only in the first part of the name, so these zones counted as unknown and the machine's zone was used.
+- **Fix:** upgrade and rebuild the agents. Meanwhile, use the region name (`America/New_York`).
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/timezone.ts` — `validTimeZone`
+
+### The installer's "Open Hatchabot" link reads http://…:"8123" and does not open
+- **Check:** `.env` has the port in quotes (`PORT="8123"` or `PORT='8123'`) or with a comment after it; the link (and `hbt` without `--url`) uses the port with its quotes.
+- **Cause:** `first-run-link.sh` and `setup-host.sh` took everything after `PORT=` as the port, quotes and comment included. The service itself reads the quoted value fine.
+- **Fix:** open `http://<this machine>:8123` by hand, or write the line as `PORT=8123`. Since the fix, both scripts drop the quotes and a trailing comment, as `deploy-release.sh` does.
+- **Fixed in:** `v2.164.2`
+- **Code:** `scripts/first-run-link.sh`, `scripts/setup-host.sh`
+
+### The service log says ".env … would be read in another order — left as it was" or "has a value on more than one line"
+- **Check:** `journalctl --user -u hatchabot | grep -i 'left as it was'`; the `.env` has a value with `$` outside single quotes (`PORT=$MY_PORT`), or an `export NAME="…` value that runs over several lines.
+- **Cause:** the start-up tidy reorders lines. With a `$` in force, a shell that sources the file (the macOS launcher) reads another value once the lines move; an exported value over several lines was read line by line, as if its lines were settings of their own. Before the fix the tidy went ahead and changed the value.
+- **Fix:** nothing breaks: the file is left as written and Hatchabot runs on it. To let the tidy run again, write each value out in full (KEY=VALUE on one line, no `$VAR`; the file's header says so). If a value already changed on an older version, put it back by hand.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/config/envFile.ts` — `syncEnvText`, `multilineSetting`
+
+### A file whose name ends in ".constructor" (or another of JavaScript's own names) fails to open in Files
+- **Check:** opening the file in the browser from Files gives an error; other files open.
+- **Cause:** the table of file types was looked up with inherited names too, so `.constructor` gave a function instead of a type.
+- **Fix:** upgrade, or download the file instead of opening it.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/agentFiles.ts` — `inlineType`
+
+### Health says "Config warnings: 20 findings" and lists only notes, though the check failed
+- **Check:** Check health on the agent: `ok` is false and the warnings listed are all minor; `openclaw doctor --lint` in the agent lists more than 20 findings, an error among the later ones.
+- **Cause:** only the first 20 findings were kept, in doctor's own order, so an error after 20 notes was dropped from the list and the count.
+- **Fix:** upgrade. Errors are listed first, then warnings; the count is all of them, and "… and N more" says what isn't listed.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/health.ts` — `doctorLint`; `web/index.html` — `v2HealthProblems`
+
+### A digit or # keycap emoji (1️⃣, #️⃣) is refused as an agent's icon
+- **Check:** setting the icon to a keycap does nothing, or the API answers that the icon is not one emoji.
+- **Cause:** the icon check refused anything with an ASCII character, and a keycap starts with one (`1` + U+FE0F + U+20E3).
+- **Fix:** upgrade.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/agentIcons.ts` — `validIcon`
+
+### A problem report draft shows a private address written in hex after ::ffff:
+- **Check:** the draft from Report a problem has `::ffff:` followed by two hex groups (not a dotted address).
+- **Cause:** a private IPv4 address mapped into IPv6 was masked only in its dotted form (`::ffff:` and four numbers), not in hex (`::ffff:` and two hex groups).
+- **Fix:** delete the address from the draft before sending (you review every line). Since the fix it is masked as `<private-ip>`.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/problemReport.ts` — `redactForPublic`
+
+### An upload with a very long file name fails, or leaves a `.part` file in the folder
+- **Check:** the file's name is longer than about 230 bytes (a non-Latin name reaches that sooner; each character can be 2–4 bytes), and the upload failed with a "File name too long" error. Or the folder in Files holds a `<name>.part-…` file after an upload that failed partway (a full disk, the agent stopped meanwhile).
+- **Cause:** the file was written beside its target as the target's name plus a `.part-…` suffix, which made a 255-byte name too long to write. A write that failed left that file behind.
+- **Fix:** upgrade, then upload again. Delete a leftover `.part-…` file in Files. Since the fix, the file is written under a short name of its own (`.hatchabot-upload-….part`, hidden), which is removed when the write fails.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/agentFiles.ts` — `putArgv`
+
+### An upload replaced a file that appeared while it was being sent, though "overwrite" was not asked for
+- **Check:** the agent (or another upload) wrote a file under the same name in the seconds the upload was streaming; the file now holds the upload, and no "already exists" message came.
+- **Cause:** the name was checked before the bytes streamed and the finished file was moved into place with `mv -f`, which replaced whatever had appeared meanwhile.
+- **Fix:** restore the file from a backup or a snapshot if it mattered. Since the fix, an upload without overwrite goes into place with `ln -T`, which refuses a name that appeared meanwhile and answers "already exists".
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/agentFiles.ts` — `putArgv`
+
+### After an adopt, the agent's notes and tasks still name the old folder (`/home/…/workspace`)
+- **Check:** the adopted agent's files or scheduled tasks mention the hand-built install's absolute workspace path, not `/home/node/.openclaw/agents/<slug>/agent`; the old install's `openclaw.json` gives that workspace as `~/…`.
+- **Cause:** the adopt rewrote only the path as `openclaw.json` wrote it (`~/workspace`), not its absolute form (`/home/you/workspace`), which is how the notes and tasks usually name it.
+- **Fix:** adopt again after upgrading, or edit the paths by hand (Files, Tasks). Since the fix, both forms are rewritten.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/cronImport.ts` — `selfPathReplacements`
+
+### An adopt rewrote a path to another folder whose name only starts the same (`/data/work+archive`)
+- **Check:** after an adopt, a path such as `/data/work+archive/…`, `/data/work@old` or `/data/work=2` in the agent's files or tasks now starts with `/home/node/.openclaw/agents/<slug>/agent`, but that folder was never the workspace.
+- **Cause:** the rewrite took `+`, `@`, `%` and `=` as the end of a path, so a sibling folder whose name went on with one of them was rewritten as if it were the workspace.
+- **Fix:** put the path back by hand (Files, Tasks). Since the fix, those characters count as part of a name.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/cronImport.ts` — `pathPattern`
+
+### After adopting a workspace whose path has an apostrophe, none of its paths were rewritten
+- **Check:** the old workspace's path has a `'` in it (`/data/owner's workspace`); the adopted agent's files still name it; the agent's log has `adopt.path_rewrite_skipped` with `reason: quote in path`.
+- **Cause:** the rewrite runs a shell command in the agent's container, and a path with a single quote was skipped rather than quoted, with no word to the owner.
+- **Fix:** adopt again after upgrading, or edit the paths by hand. Since the fix, the paths are quoted for the shell and rewritten.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/cronImport.ts` — `rewriteWorkspaceFiles`
+
+### The exported chat history is missing a conversation, with no word why
+- **Check:** an older conversation you remember is not in the file from Download chat history; the agent runs OpenClaw 2026.9 (its history is in `openclaw-agent.sqlite`).
+- **Cause:** a damaged record in the agent's database (a compressed message or a whole archived conversation that would not decompress) was dropped in silence.
+- **Fix:** upgrade and export again: the file now begins with "⚠ N saved records could not be read … and are left out", and the download carries an `x-hatchabot-unreadable` header. What is damaged cannot be read back; a snapshot from before the damage may still have it.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/transcript.ts` — `RENDER_SCRIPT`, `exportTranscript`
+
+### A workspace adopted into a stopped agent said its tasks were "deferred", and they never came
+- **Check:** the adopt's answer had `crons.deferred` (adopted with the API or CLI into a stopped agent, or while the agent was busy: `adopt.repoint_busy` in its log); the agent has none of the old install's scheduled tasks, and its files still name the old paths.
+- **Cause:** nothing kept the deferred work: the paths and tasks were re-pointed only during the adopt itself, and only when the agent was running and free.
+- **Fix:** upgrade, then start the agent: within 5 minutes the adopt finishes (`adopt.deferred_done` on its timeline), with the tasks carried disabled. If its gateway does not answer yet, it is looked at again within the hour (`adopt.deferred_waiting`), for up to a day of the agent running; tasks that still could not be brought over are told to you (`adopt.deferred_failed`): add them in its Tasks page. An adopt from before the upgrade was not remembered; adopt it again.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/routes.ts` — `repointAdopted`, `finishDeferredAdopts`; `src/store/store.ts` — `setAdoptPending`, `listAdoptPending`
+
+### A clone is missing notes from deep folders under memory/
+- **Check:** the source agent keeps notes four or more folders deep (`memory/projects/2026/q3/note.md`); the clone has none of them, and its list of files not copied doesn't name them either.
+- **Cause:** a clone read memory/ only three folders deep and left out what was below without saying so.
+- **Fix:** upgrade and clone again, or copy those notes by hand. Since the fix, a clone reads eight folders deep, and lists a folder deeper than that among the files not copied.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/template.ts` — `readCloneMemory`
+
+### An adopt fails: "… changed while it was being copied (a link or folder in its place)"
+- **Check:** the old install was running while you adopted, and something in the workspace was replaced by a link (or a folder by a link) between the look and the copy.
+- **Cause:** this is the guard working. The copy carries only the plain files the look found; one that became a link went in as the link, and a folder that became a link carried a file from outside the workspace under a listed name.
+- **Fix:** stop the old install (or wait for it to settle), look at the folder again, and adopt it again. Nothing was copied.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/adopt.ts` — `packWorkspace`
+
+### A derived image was refused with "The heredoc <<EOF is never closed" for a line that only prints `<<EOF` in quotes
+- **Check:** the refused lines have `<<` inside quotes on a line that starts an instruction, for example `RUN echo "use <<EOF to start"`.
+- **Cause:** the image check read every `<<` as the start of a heredoc, quoted or not. BuildKit reads a quoted one as text.
+- **Fix:** upgrade, or move the text out of the RUN line (into a file the image copies). Since the fix, a `<<` inside quotes on a line that starts an instruction is text. On a line that continues another one (a `\` before it), every `<<` still counts, because that line may begin inside a quote.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/derivedImage.ts` — `dockerfileProblem`, `quotedSpans`
+
+### Importing a template failed with an error about `trim`, or put odd text in the copy's SOUL.md
+- **Check:** the template has a setup field whose key is a built-in name such as `constructor` or `toString`, and the importer left it empty.
+- **Cause:** an empty answer was looked up on the answers object and found JavaScript's own function of that name, which a yes/no field then tried to `trim`, and a text field wrote into the files.
+- **Fix:** upgrade, or give that field an answer. Since the fix, only an answer actually given counts; otherwise the field's default does.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/template.ts` — `resolveParamValues`
+
+### A required setup field accepted an answer of only spaces
+- **Check:** a copy made from a template has a blank where the required answer should be in SOUL.md or AGENTS.md.
+- **Cause:** the required-field check refused an empty answer but not one of spaces.
+- **Fix:** fill the value in the copy's Setup values. Since the fix, an answer of only spaces counts as blank for a required field.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/template.ts` — `resolveParamValues`
+
+### A copy from a template ran a shortened scheduled task
+- **Check:** the original task's message is longer than 4,000 characters (the app caps the tasks it makes at that; ones the agent made, or adopted from another install, can be longer). In the copy, the same task's message stops part way.
+- **Cause:** the export cut each task's message to the 4,000 characters a template carries, without saying so.
+- **Fix:** shorten the task (or switch it off) and export again. Since the fix, the export is refused and names the tasks that are too long.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/template.ts` — `exportTemplate`, `MAX_TEMPLATE_TASK_MESSAGE`
+
+### The template's personal-data warning missed an address in a task name or a setup field's label or options
+- **Check:** the template file has an email address or phone number in `schedules[].name`, `parameters[].label` or `parameters[].options`, and the export said it found none.
+- **Cause:** the scan read the task messages, the files and the setup fields' help and defaults, but not those three.
+- **Fix:** read the template before you send it, and rename the task or field. Since the fix, the scan reads them too.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/template.ts` — `scanTemplate`
+
+### An app's settings file lost a required value, or kept a blank one the app now requires
+- **Check:** the app's manifest has a required field keyed like a built-in name (`constructor`), which install never asked for and the config file doesn't have. Or a field that was optional is now required, and its config value is still `""`.
+- **Cause:** a key named like a built-in was found on JavaScript's object, not in the file, so it counted as set. A value kept from before was never checked against the field's new rules.
+- **Fix:** upgrade, then Update the app; it asks for the value. Since the fix, only the file's own values count, and a required field with a blank value is asked for again (or takes its default).
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/apps.ts` — `mergeConfig`
+
+### An app's config file got a default of the wrong type, such as text for a number
+- **Check:** the app's `hatchabot.json` gives a field of type `number`, `bool`, `list` or `email` a `default` that is not of that type, and the config file has it as written.
+- **Cause:** values given were held to their field's type, but defaults were written as they were.
+- **Fix:** the app's author fixes the default. Since the fix, a default is converted like a value given (`"5"` is written as 5). One that can't be converted stops the install with "the app's default for … is not …"; give the value yourself to go on.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/apps.ts` — `mergeConfig`
+
+### Changing an app's settings on the same release left a failed test's changes in the running app
+- **Check:** you changed an app's settings without changing its release, its tests failed, and the page said nothing had changed. But files in the app's live release folder are different from before.
+- **Cause:** for a settings-only change, the tests ran in the live release folder, so whatever they wrote there stayed.
+- **Fix:** Update the app (or reinstall the release) to put its code back. Since the fix, those tests run in a copy of the live folder (built files and all) that is removed afterwards.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/apps.ts` — `installRelease`, `clearStaging`
+
+### Update app says `No commit "HEAD" in the repo` after the repo's main branch was renamed
+- **Check:** the app's git repo renamed its default branch (for example `main` to `trunk`) after the app was installed.
+- **Cause:** Hatchabot's copy of the repo fetched the branches but kept pointing at the old default branch, which the fetch removed.
+- **Fix:** upgrade, then Update again. Before it, install the app again from the new branch's name.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/apps.ts` — `repoFor`
+
+### A master's push left its children asking for setup fields the master no longer has
+- **Check:** the master's Setup fields were all removed, then its definition was pushed; each child's Setup values still lists the old fields.
+- **Cause:** the push copied the master's fields only when it had some, and no fields are stored the same as never declared, so "none now" never reached the children.
+- **Fix:** push again after upgrading. Since the fix, a push gives each child the master's fields plus any `{{placeholder}}` the pushed text still uses, as derive does. The child keeps its own wording for one it already had.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/template.ts` — `pushedParameters`; `src/api/routes.ts` — the `/v1/agents/:id/push-definition` route
+
+### A failed push left a child with the master's new SOUL.md and its old AGENTS.md
+- **Check:** the push result names the child with "write failed", and the child's SOUL.md is the new text while AGENTS.md is the old.
+- **Cause:** the push wrote the two files one after the other, and nothing undid the first when the second failed.
+- **Fix:** push again, or restore the child's `pre-params` snapshot. Since the fix, a failed push puts back what it wrote. If that fails too, the result says to restore the snapshot.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/routes.ts` — the `/v1/agents/:id/push-definition` route
+
+(B29/B30, the waiting app's secret values left in the store: encrypted, never read again, now swept at the next start. Not something a user sees, so no entry.)
+
+### An agent moved to another machine lost a tool its image had (a package it used is "not found" there)
+- **Check:** the agent is pinned to a derived image or a `-plus-…` image; after "Move to another machine" its tool calls fail with `command not found` for a package its image's labels list; the move's log says the image was rebuilt from its recipe.
+- **Cause:** the recipe is read from the source machine's image list. When that read failed for a moment, the recipe took it as "no extra packages" and rebuilt the image without them.
+- **Fix:** move the agent back, and then move it again once the source machine answers. Since the fix, an image list that can't be read gives no recipe ("could not be read just now … try again"), and the move offers the destination's default image instead of a thinner copy.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/imageRecipe.ts` — `recipeFor`, `ensureImageOn`
+
+### A restore was interrupted and now says "That snapshot no longer exists"
+- **Check:** the agent had 20 automatic snapshots (Files → Snapshots); a restore of the oldest one was interrupted (a restart part-way), and Alerts offers to finish it, but finishing fails because the snapshot is gone.
+- **Cause:** the restore first takes a safety snapshot of the current files. At the 20-snapshot limit, taking it pruned the oldest automatic one, which was the snapshot being restored.
+- **Fix:** choose "revert" in Alerts: the safety snapshot ("before restoring …") still holds the files as they were. Since the fix, pruning never removes a snapshot the agent's unfinished operation names.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/snapshots.ts` — `captureSnapshot`, `restoreSnapshot`; `src/store/store.ts` — `pruneAutoSnapshots`
+
+### A template's scheduled task appears twice on a new agent
+- **Check:** the agent was made from a template with scheduled tasks; its Tasks page lists one of them twice with the same name and schedule; its log has `schedule.applied` for that name on two builds.
+- **Cause:** before adding a template's tasks, a build reads the tasks already there and skips those. When that read failed, it was taken as "none there", and a task whose first add had landed (its answer lost) was added again.
+- **Fix:** delete the extra copy in the Tasks page. Since the fix, a failed read keeps the template's tasks waiting for the next rebuild (`schedule.list_failed` in the log) instead of adding them blind.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/provision.ts` — `runProvisionSteps`; `src/orchestrator/crons.ts` — `listCrons`
+
+### The weekly token review arrives at the wrong hour
+- **Check:** `HATCHABOT_TIMEZONE` is set to a zone different from the machine's; the Hatchabot agent's "Weekly token review" task shows `0 9 * * 1` with the machine's zone, not the one set.
+- **Cause:** the task was made in the machine's zone, while every other agent clock follows `HATCHABOT_TIMEZONE`.
+- **Fix:** edit the task's zone in the Tasks page, or delete it and rebuild the Hatchabot agent (the build makes it again). Since the fix, a new review task uses the agents' zone.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/modelReview.ts` — `syncModelReviewCron`; `src/orchestrator/timezone.ts` — `agentTimeZone`
+
+### A model change says "0 turns since the switch" although the agent was busy
+- **Check:** the model ledger shows two changes for the agent within the same hour; the first one's verdict is "not enough data" with "0 turns on … since the switch".
+- **Cause:** the ledger counts turns per hour, and a period shorter than one hour bucket has no whole hour of its own, so it summed nothing. The verdict was right (too little to judge); the reason was not.
+- **Fix:** nothing to do. Since the fix, the reason says the model was changed again within the hour, too soon to tell its turns apart.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/modelLedger.ts` — `evaluateModelChanges`, `afterFigures`
+
+### The quality guard said a model did worse, but no switch-back card came
+- **Check:** the model ledger shows a change judged "worse"; Alerts has no "Switch … back" card for it; the service log has a database error (often a full disk) from around then.
+- **Cause:** the guard marked the change as having its card before writing the card. When the write failed, the mark stayed, and no later pass filed it.
+- **Fix:** free some disk space. Since the fix, a card that can't be written gives its mark back (`model.guard_failed` in the log), and the next pass files it.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/modelLedger.ts` — `fileGuardProposals`; `src/store/store.ts` — `releaseModelChangeGuard`
+
+### The weekly review still runs after `HATCHABOT_MODEL_REVIEW=off` (under its old name)
+- **Check:** the Hatchabot agent's tasks list both "Weekly token review" and "Weekly model review", or one of them after the review was turned off; the agent was imported or restored.
+- **Cause:** with the review off, a build removed only the first task it found under either name.
+- **Fix:** delete the remaining one in the Tasks page. Since the fix, turning it off removes every task under either name.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/modelReview.ts` — `syncModelReviewCron`
+
+### An agent's tasks are there twice after "Adopt" was run again
+- **Check:** the adopted agent's Tasks page lists the old install's tasks twice, all disabled; Adopt was run again for the same agent, or retried after some tasks failed.
+- **Cause:** each adopt added every task from the old install again; the tasks already brought over were not looked for.
+- **Fix:** delete the extra copies. Since the fix, a task already there with the same name and schedule is counted as brought over and not added again (`cron.migrate_already_present`).
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/cronImport.ts` — `migrateCrons`
+
+### An adopted task with an interval like 1.5 seconds was not brought over
+- **Check:** the adopt summary counts a task as not brought over; the log has `cron.migrate_unmappable` with kind `every`; in the old install the task's `everyMs` is not a whole number of seconds.
+- **Cause:** it used to be rounded to the nearest second (1500 ms became 2 s, a third less often). Since the fix, an interval that can't be written exactly is reported instead of changed.
+- **Fix:** make the task again in the Tasks page with an interval of whole seconds.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/cronImport.ts` — `cronAddArgs`
+
+### An agent paused by its budget started again although the machine's budget was still used up
+- **Check:** the agent's timeline shows "started again: its budget was raised" while Settings → Budgets shows the machine's budget (set to pause) at or over 100%. It is paused again at the next budget pass, a few minutes later.
+- **Cause:** when its own budget was raised, the budget pass checked only the budget that had paused it, not the machine's, so it started an agent another budget still held.
+- **Fix:** upgrade. Since the fix, an agent stays paused while any pause budget that covers it (its own or the machine's) is still reached.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/budgets.ts` — `runBudgets`
+
+### After adopting an agent, a folder it uses was not offered for sharing because its name has a space
+- **Check:** the adopted agent's files name the folder in quotes or backticks (`"/home/you/My Documents"`), and the data-folder step after adopt does not list it.
+- **Cause:** the scan read a path only up to its first space, so `/home/you/My` was looked for and not found.
+- **Fix:** share the folder by hand from the agent's Data tab, or upgrade and scan again. Since the fix, a quoted path with spaces is found.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/dataPaths.ts` — `scanWorkspacePaths`
+
+### A token-use warning never arrived, and no other came that day
+- **Check:** Usage shows the spike warning, but the owner had no Telegram message for it; the manager's chat app was down or unreachable when it was first sent.
+- **Cause:** a warning that failed to send was recorded all the same, and that record counted as "already told" for 24 hours.
+- **Fix:** upgrade. Since the fix, a warning that did not reach its owner is tried again every hour until it does.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/usageAlerts.ts` — `runUsageAlerts`; `src/store/store.ts` — `markUsageAlertTold`
+
+### An agent restored from a Download copy, or moved to another Hatchabot, runs out of memory where it did not before
+- **Check:** the source agent had its own memory cap or swap allowance (its sheet → Advanced); the copy here shows the default.
+- **Cause:** a Download copy did not carry the agent's own cap or swap allowance, so the copy got the receiving machine's defaults.
+- **Fix:** set the cap again on its sheet (Advanced → Memory cap), or upgrade both ends and export again. Since the fix, the copy carries both, applied under the receiving machine's rules (a member's import is held to its per-agent maximum).
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/transfer.ts` — `importedLimits`, `exportAgent`, `importAgent`
+
+### On a busy machine, some agents' token use and rate limits are never counted
+- **Check:** the service log shows `usage.sample_incomplete` most passes, and the same agents show no recent use under Usage while they are clearly busy.
+- **Cause:** each usage pass sampled agents in the same order and stopped after five minutes, so slow agents at the front used up the time and the same agents at the back were never reached.
+- **Fix:** upgrade. Since the fix, each pass starts with the agents sampled longest ago.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/sourceUsage.ts` — `sampleSourceUsage`
+
+### Alerts does not show a loop that is still going
+- **Check:** `GET /v1/token-incidents` lists more than 100 incidents cleared in the last week, and an older incident is still open (Recommended still shows its fix).
+- **Cause:** the list read the newest 100 incidents and then split them into open and cleared, so 100 newer cleared ones pushed an older open one out.
+- **Fix:** upgrade. Since the fix, open incidents are read on their own.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/routes.ts` — the `/v1/token-incidents` route
+
+### "Not logged in · Please run /login" keeps coming back on an older conversation of an agent with many conversations
+- **Check:** the agent has more than 500 conversations (`openclaw gateway call sessions.list`), and the one that fails is not among the newest 500.
+- **Cause:** the stale runtime pin cleanup read only the first 500 conversations, so a pin to the old runtime on any later one was never cleared.
+- **Fix:** upgrade and restart the agent. Since the fix, the cleanup reads every page of conversations.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/runtimePins.ts` — `listRuntimePins`, `clearStaleRuntimePins`
+
+### A day's cost on the Usage trend went down after an agent was deleted
+- **Check:** the trend's cost for today or yesterday dropped right after an API-keyed agent was deleted.
+- **Cause:** each pass re-summed the day's cost over the agents still there and wrote it over the recorded one, so a deleted agent's spending dropped out.
+- **Fix:** upgrade. Since the fix, a deleted agent's use still counts on the days it spent.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/fleetUsage.ts` — `snapshotDailyUsage`; `src/store/store.ts` — `listDeletedAgents`
+
+### The cost estimate is too high for an agent moved between two API keys
+- **Check:** under Usage, the agent's tokens in the window were spent on two API sources with different models (say Opus, then Haiku), and the estimate prices all of them at the dearer model.
+- **Cause:** with no measured rate for the agent, all its API tokens were priced at one model, that of the source that carried the most.
+- **Fix:** upgrade. Since the fix, each source's tokens are priced at its own model.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/fleetUsage.ts` — `computeUsagePeriod`
+
+### The Usage trend has a gap for the day Hatchabot was down at midnight
+- **Check:** the trend has no point for a day Hatchabot was stopped or restarting across midnight, though the agents' readings for that day exist.
+- **Cause:** the pass after midnight finished yesterday's row only if one was already there, and made only today's.
+- **Fix:** upgrade. Since the fix, a missing row for yesterday is made from the readings as they stood at midnight.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/fleetUsage.ts` — `snapshotDailyUsage`; `src/store/store.ts` — `addUsageSnapshotIfMissing`, `latestTokenTotalBefore`
+
+### An agent's Logs or Setup log showed another agent's lines
+- **Check:** you opened one agent's Logs (or Setup log), then another's before the first had loaded, on a slow machine or a runner far away. The lines that showed belong to the first agent.
+- **Cause:** the panel painted whichever read answered last, so a slow answer for the agent opened first wrote over the one opened since.
+- **Fix:** open the logs again. Since the fix, only the newest read paints.
+- **Fixed in:** `v2.164.2`
+- **Code:** `web/index.html` — `loadLogs`, `loadSetupLog`
+
+### The file editor closed by itself, and what you were typing was lost
+- **Check:** you saved a file, then opened another agent's (or another) file in the editor before the save finished; the editor closed while you typed.
+- **Cause:** the first save's answer closed whatever the editor showed when it came back.
+- **Fix:** open the file again and redo the edit. Since the fix, a save closes the editor only if it is still showing the file it saved. If the editor has moved on, the save is reported in a toast.
+- **Fixed in:** `v2.164.2`
+- **Code:** `web/index.html` — `saveEditFile`, `loadEditFile`
+
+### A problem report draft showed another draft's text after a save
+- **Check:** in Report a problem, you pressed Copy, Save as a file or Open on GitHub on one draft, then opened another draft before it finished; the second draft's title or text changed to the first's.
+- **Cause:** the save's answer replaced the draft the page showed, whichever it was by then.
+- **Fix:** open the draft again from the list. Since the fix, the save carries on with its own draft and leaves the one shown as it is.
+- **Fixed in:** `v2.164.2`
+- **Code:** `web/index.html` — `reportSaveEdits`
+
+### A Google account was reported removed from an agent but was still there
+- **Check:** the agent's activity has `connection.removed_from_agent` for the account, but `gog auth list` inside the agent still names it, or lists entries with no `email` field.
+- **Cause:** the list of accounts gog printed was read leniently: an entry without an email was dropped, so a list that did name the account (in another shape) read as "not there", and a failed remove passed as done.
+- **Fix:** detach the account again, or run Verify on the agent. Since the fix, a list with any entry Hatchabot cannot read is no answer, and the removal stays pending until a clean list shows it gone.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/googleConnections.ts` — `gogAccounts`, `dematerializeConnection`
+
+### Strangers could still knock on an agent's Telegram bot after its owner linked
+- **Check:** the owner's first Telegram message was claimed, but the agent's Telegram door stayed on `pairing` (its config's `dmPolicy`) while a Discord or Slack invite window was open on the same agent.
+- **Cause:** when a claim window closed, any other open window on the agent kept the door open, even one for another chat app.
+- **Fix:** it closes by itself when the other window ends. Since the fix, only the same chat app's windows hold its door open.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/claim.ts` — `claimFirstContact`, `restoreDoor`
+
+### The owner's first message to a new bot was never claimed
+- **Check:** the agent's activity shows "its pairing requests could not be read; trying again" (`claim.read_failed`), or (before the fix) the claim window stayed listed with nothing watching it. The person messaged the bot and was never let in.
+- **Cause:** a read of the pairing requests that threw (a `docker exec` that failed) ended the watcher, and the window it was watching stayed stored.
+- **Fix:** let them in from Alerts, or send a new invite. Since the fix, a failed read (or approve) is tried again on the next round, and said once.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/claim.ts` — `claimFirstContact`, `listPairingRequests`
+
+### An agent went to sleep just after it answered
+- **Check:** sleep (`HATCHABOT_HIBERNATE_AFTER`) is on. The agent's timeline shows `agent.hibernated` within seconds of a reply it sent, and its next message had to wake it.
+- **Cause:** the idle sweep read the agent's activity, then its scheduled tasks; a conversation that finished in between was not seen, and under the lock only the settings were judged again.
+- **Fix:** none needed; a message wakes it. Since the fix, its activity is read again just before the stop, and anything newer keeps it up.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/hibernate.ts` — `hibernateAgent`, `hibernateSweep`, `idleBlocker`
+
+### A guest whose web chat was turned off got one more answer
+- **Check:** web chat was turned off for a guest (or they were removed) while the agent was asleep and their message was waking it; that message was still answered.
+- **Cause:** web chat was checked before the wake, which takes seconds, and not again before the message was sent.
+- **Fix:** none needed; later messages are refused. Since the fix, it is checked again after the wake, and the message is refused (403).
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/webChat.ts` — `/v1/agents/:id/chat`
+
+### Verify did not notice a Discord or Slack bot running another token
+- **Check:** the agent's Discord or Slack bot answers as a different bot than the one in Hatchabot, yet What it can reach shows the bot with no "a different bot token is running".
+- **Cause:** only Telegram's token was compared with the one Hatchabot holds.
+- **Fix:** run Verify again after upgrading; a mismatch shows as "a different bot token is running — rebuild it". Since the fix, every chat app's token is compared (Slack's bot token, which Hatchabot keeps with the app token).
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/accessOverview.ts` — `verifyNow`, `botTokenOf`
+
+### What it can reach said someone could still talk to an agent on a chat app that is off
+- **Check:** a person shows as still let in (an alert after removing them) but the chat app or the account they were on is turned off in the agent's OpenClaw settings (`enabled: false`).
+- **Cause:** the check counted the allow lists of turned-off chat apps and accounts as access.
+- **Fix:** run Verify again after upgrading. Since the fix, a turned-off chat app or account admits nobody in the check.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/accessOverview.ts` — `accessProbeScript`
+
+### A cloned agent's app could not log in: a credential was missing from the copy
+- **Check:** the clone's Advanced → Extra credentials lacks a variable the original has; its activity says "cloned without the credentials that could not be read" (`agent.clone_env_skipped`).
+- **Cause:** a credential whose stored value could not be read was skipped in silence; the clone was built without it.
+- **Fix:** add the variable to the clone under Advanced → Extra credentials. Since the fix, the clone's message names each one left out.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/routes.ts` — the `/v1/agents/:id/clone` route; `web/index.html` — `cloneAgent`
+
+### The bot census called a rebuilding agent's bot reclaimable
+- **Check:** `hatchabot bots` listed a bot as reclaimable while its agent was being built or rebuilt; with live checks, the census polled that bot.
+- **Cause:** only a running or sleeping agent's bot counted as in use; a build in progress may still have its gateway polling.
+- **Fix:** don't reclaim it; run the census again once the build is done. Since the fix, only an agent at rest (stopped by hand, archived, failed) leaves its bot reclaimable, and a bot in use is never polled.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/bots.ts` — `auditBots`
+
+### A guest's agent icon showed unread with nothing new for them
+- **Check:** you chat with someone else's agent on the web, and its icon (or Recent) shows unread, but your own conversation has nothing new.
+- **Cause:** the mark counted every conversation on the agent, including the owner's and other guests', which a guest cannot open.
+- **Fix:** none needed. Since the fix, a guest's mark is their own conversation's; a member without web chat gets none.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/api/routes.ts` — `unreadFor`; `src/orchestrator/unread.ts` — `consoleActivity`
+
+### Leftover hatchabot-caps containers after the Runtime tab timed out
+- **Check:** `docker ps` shows a `hatchabot-caps-…` container (or an unnamed one running `bash -c` from an agent image) that has been up for a long time.
+- **Cause:** a capability probe that timed out killed the docker client, but the container kept running; `--rm` acts only when it exits.
+- **Fix:** `docker rm -f` it. Since the fix, the probe names its container and removes it when it times out.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/runtimeCaps.ts` — `probeImageCapabilities`
+
+### Adopt brought over none of the scheduled tasks made with `openclaw cron add` (no --agent)
+- **Check:** the old install's tasks were made without `--agent`; in its state database, `sqlite3 ~/.openclaw/state.sqlite "select count(*) from cron_jobs where agent_id is null"` is above 0, and the adopted agent was the old install's default (the entry marked `default`, else the first).
+- **Cause:** OpenClaw stores such a task with no agent and runs it as the default agent, but adopt read only the tasks stored under the agent's own id.
+- **Fix:** upgrade, then adopt again: tasks with no agent come with the default agent (an adopt run again skips those already there).
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/cronImport.ts` — `readOpenclawCronStore`, `openclawDefaultAgentId`
+
+### Update says "Needs a value for: …" and the page gives nowhere to type it
+- **Check:** the app's newest release has a required setup field the installed copy has no value for (a field made required, or one an older version left blank); Update on the agent's page fails with "Needs a value for".
+- **Cause:** the page's Update sent no values, and the message asked for them as `key=value`, which only the CLI takes.
+- **Fix:** upgrade: Update asks for the missing values under the app's row ("Update with these"). Meanwhile, `hatchabot app update <agent> key=value`.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/apps.ts` — `mergeConfig`, `installRelease`; `web/index.html` — `v2AppUpdate`, `v2AppAskValues`
+
+### Raising an agent's "cheaper model" budget switched it back, then the next pass switched it down again
+- **Check:** the agent's own budget and the machine's are both set to "cheaper model". You raised the agent's own while the machine's was still over 100%, and its model ledger shows the budget's switch back to its own model and, minutes later, to the cheap one again.
+- **Cause:** its own model came back as soon as the budget that had moved it was no longer reached, even though another cheaper-model budget that covers it, the machine's, still was. A pause already waited for every pause budget that covers the agent.
+- **Fix:** upgrade. The agent stays on the cheaper model until every cheaper-model budget that covers it is under its limit, or until the 1st. To have it back on its own model now, raise the machine's budget too.
+- **Fixed in:** `v2.164.2`
+- **Code:** `src/orchestrator/budgets.ts` — `runBudgets`

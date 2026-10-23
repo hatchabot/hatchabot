@@ -63,7 +63,14 @@ export interface DoctorLint {
   findings: DoctorFinding[];
   /** Known-by-design warnings hidden from the list (see MUTED_CHECKS). */
   mutedCount: number;
+  /** Findings past the first 20 (the worst come first), not listed. */
+  omittedCount: number;
 }
+
+/** Errors first, then warnings, then the rest: 20 notes no longer push an error off the list. */
+const SEVERITY_RANK: Record<string, number> = { critical: 0, fatal: 0, error: 0, warning: 1, warn: 1 };
+const severityRank = (s: unknown) => (typeof s === 'string' && Object.hasOwn(SEVERITY_RANK, s.toLowerCase()) ? SEVERITY_RANK[s.toLowerCase()]! : 2);
+export const LINT_SHOWN = 20;
 
 export async function doctorLint(
   provider: RuntimeProvider,
@@ -80,19 +87,22 @@ export async function doctorLint(
       findings?: Array<{ checkId?: string; severity?: string; message?: string }>;
     };
     const all = Array.isArray(d.findings) ? d.findings : [];
-    const kept = all.filter((f) => !isMuted(f));
+    // Stable sort: within a severity, doctor's own order (audit, 2026-10-22).
+    const kept = all.filter((f) => !isMuted(f)).map((f, i) => ({ f, i }))
+      .sort((a, b) => severityRank(a.f.severity ?? 'warning') - severityRank(b.f.severity ?? 'warning') || a.i - b.i).map((x) => x.f);
     return {
       // A parseable-but-empty/garbage response (e.g. `{}` or a future format
       // change) must not paint a confident green — mirror agentHealth: only a
       // real boolean counts, and require the run to have actually run checks.
       ok: typeof d.ok === 'boolean' ? d.ok : undefined,
       checksRun: typeof d.checksRun === 'number' ? d.checksRun : 0,
-      findings: kept.slice(0, 20).map((f) => ({
+      findings: kept.slice(0, LINT_SHOWN).map((f) => ({
         checkId: String(f.checkId ?? ''),
         severity: String(f.severity ?? 'warning'),
         message: String(f.message ?? '').slice(0, 300),
       })),
       mutedCount: all.length - kept.length,
+      omittedCount: Math.max(0, kept.length - LINT_SHOWN),
     };
   } catch {
     return undefined; // lint is a bonus — never fail the health probe over it
@@ -114,6 +124,8 @@ export interface AgentHealth {
     lastOutboundAt?: number;
   };
   pluginErrors?: string[];
+  /** Discord or Slack reporting itself not connected (Telegram has its own block above). */
+  disconnected?: Array<'discord' | 'slack'>;
   checkedAt?: number;
 }
 
@@ -184,6 +196,9 @@ export async function agentHealth(
     ? { degraded: !!h.eventLoop.degraded, reasons: Array.isArray(h.eventLoop.reasons) ? h.eventLoop.reasons.map(String) : [] }
     : undefined;
   const pluginErrors = Array.isArray(h.plugins?.errors) ? h.plugins.errors.map(String) : [];
+  // Discord and Slack count too: a bot that lost its connection read healthy (review,
+  // 2026-10-22). Only a stated `connected: false`; a report without it says nothing.
+  const disconnected = (['discord', 'slack'] as const).filter((k) => h.channels?.[k] && typeof h.channels[k] === 'object' && h.channels[k].connected === false);
 
   // Healthy needs evidence: its own verdict, or the event loop or channels
   // it reports on. An empty answer ({}) said nothing, and read as healthy (#113).
@@ -193,6 +208,7 @@ export async function agentHealth(
     h.ok === false ||
     !!eventLoop?.degraded ||
     (telegram ? !telegram.connected : false) ||
+    disconnected.length > 0 ||
     pluginErrors.length > 0;
 
   return {
@@ -204,6 +220,7 @@ export async function agentHealth(
     eventLoop,
     telegram,
     pluginErrors,
+    ...(disconnected.length ? { disconnected } : {}),
     checkedAt: typeof h.ts === 'number' ? h.ts : undefined,
   };
 }

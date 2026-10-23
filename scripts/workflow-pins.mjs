@@ -97,7 +97,8 @@ export function checkWorkflow(name, text) {
     if (/\$\{\{\s*(secrets\.|github\.token)/.test(line) && !/^\s*(?:-\s+)?(?!run:)[\w-]+:\s*\$\{\{[^}]*\}\}\s*$/.test(line)) {
       bad.push(`${where}: a secret or the token outside an env:/with: value`);
     }
-    if (/\bdocker (pull|run)\b/.test(line) && !/@sha256:[0-9a-f]{64}/.test(line)) bad.push(`${where}: a docker image with no digest`);
+    // docker, podman, or the job's $CONTAINER_CLI (the dev repo's ui job runs podman).
+    if (/(?:\bdocker|\bpodman|\$\{?CONTAINER_CLI\}?) (pull|run)\b/.test(line) && !/@sha256:[0-9a-f]{64}/.test(line)) bad.push(`${where}: a docker image with no digest`);
   });
 
   const top = permissionsAt(lines, 0);
@@ -137,7 +138,7 @@ export function checkImages(root) {
   const pinned = /const CHROME_IMAGE = '([^']+)'/.exec(readFileSync(join(root, 'scripts', 'ui-clickthrough.mjs'), 'utf8'))?.[1];
   if (!pinned || !/@sha256:[0-9a-f]{64}$/.test(pinned)) bad.push('scripts/ui-clickthrough.mjs: CHROME_IMAGE is not pinned to a digest');
   const ci = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
-  if (pinned && !ci.includes(`docker pull ${pinned}`)) bad.push('ci.yml: the ui job does not pull the CHROME_IMAGE scripts/ui-clickthrough.mjs runs');
+  if (pinned && !ci.includes(` pull ${pinned}`)) bad.push('ci.yml: the ui job does not pull the CHROME_IMAGE scripts/ui-clickthrough.mjs runs');
   return bad;
 }
 

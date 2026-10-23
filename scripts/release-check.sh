@@ -15,7 +15,11 @@
 #     branch main) concluded success — a pull request's run does not count;
 #     one still running is waited for with --wait-ci, refused without;
 #   - the tag vX.Y.Z does not exist on origin, nor (with --public) on that
-#     remote: the public repo, where a tag name is used once for good.
+#     remote: the public repo, where a tag name is used once for good;
+#   - (with --public) channels.json at that commit names no channel an
+#     older release than the public repo's main or origin's main does: the
+#     publisher publishes the tag's whole tree, so it would move the channel
+#     (and the image :stable) back.
 # With --tagged (the public repo's release workflow), the tag vX.Y.Z must
 # exist on origin and name a commit on main, and that commit is the one
 # checked; CI is not asked (the dev repo's CI passed before it was tagged,
@@ -88,6 +92,31 @@ else
   if [ -n "$PUBLIC" ]; then
     P="$(git ls-remote --tags "$PUBLIC" "refs/tags/$TAG")" || die "Could not read the public repo's tags ($PUBLIC)."
     [ -z "$P" ] || die "The tag $TAG already exists on the public repo — a version is released once. Make a new patch version."
+    # The release commit is the tag's whole tree, channels.json and all: a
+    # commit from before a promote put the channel back an hour later
+    # (audit, 2026-10-20). Against origin's main too: a promote landed
+    # there may not have reached the public repo yet.
+    git fetch -q --no-tags "$PUBLIC" +refs/heads/main:refs/hatchabot-check/public-main 2>/dev/null \
+      || die "Could not fetch main from the public repo ($PUBLIC)."
+    if git show "$SHA:channels.json" > "$AT/channels.json" 2>/dev/null; then
+      chan() { sed -nE "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"v([^\"]+)\".*/\1/p" "$2" | sed -n 1p; }
+      for REF in refs/hatchabot-check/public-main "$MAIN"; do
+        git show "$REF:channels.json" > "$AT/there.json" 2>/dev/null || continue
+        WHERE="origin's main"; [ "$REF" = "$MAIN" ] || WHERE="the public repo's main"
+        for CH in stable beta; do
+          A="$(chan "$CH" "$AT/channels.json")"; B="$(chan "$CH" "$AT/there.json")"
+          [ -n "$A" ] && [ -n "$B" ] && [ "$A" != "$B" ] || continue
+          [ "$(printf '%s\n%s\n' "$A" "$B" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/')" != "$A" ] || continue
+          # The commit has the promote (a rollback, as origin's main has it):
+          # only the publisher's fast lane has not carried it yet.
+          if [ "$REF" != "$MAIN" ] && git show "$MAIN:channels.json" 2>/dev/null | cmp -s - "$AT/channels.json"; then
+            die "channels.json at ${SHA:0:9} says $CH → v$A, as origin's main does, but the public repo's main still says v$B: that promote is waiting for the publisher's fast lane, and this release would get there first. Release once the public repo says v$A (to go sooner: gh workflow run publish.yml -R cksci/publisher)."
+          fi
+          die "channels.json at ${SHA:0:9} says $CH → v$A, but $WHERE says v$B: publishing it would move $CH back. Release a commit that has the promote in it."
+        done
+      done
+    fi
+    git update-ref -d refs/hatchabot-check/public-main 2>/dev/null || true
   fi
 
   # The run for the push to main, as promote.sh reads it: a pull request's run

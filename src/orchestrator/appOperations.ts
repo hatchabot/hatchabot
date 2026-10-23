@@ -12,7 +12,7 @@
  */
 import type { AgentApp, Store } from '../store/store.js';
 import {
-  appJobs, appPaths, clearStaging, currentSha, pointBack, releaseManifest, removeTasks, sq, stagingDir, syncTasks,
+  appJobs, appPaths, appTaskNames, clearStaging, currentSha, pointBack, releaseManifest, removeTasks, sq, stagingDir, syncTasks,
   type AppManifest, type InstallDeps,
 } from './apps.js';
 import { handleFor, stepReached, type OpHandle, type Recovery } from './operations.js';
@@ -77,16 +77,20 @@ async function putTasksBack(d: InstallDeps, m: AppManifest): Promise<string | un
   let failed: string | undefined;
   try { await syncTasks(d, m); } catch (err) { failed = String((err as Error)?.message ?? err).slice(0, 200); }
   let listed: Set<string>;
-  try { listed = new Set((await appJobs(d, m.app)).map((j) => j.name)); }
+  try { listed = new Set((await appJobs(d, appTaskNames(m))).map((j) => j.name)); }
   catch (err) { return `the agent's task list could not be read (${String((err as Error)?.message ?? err).slice(0, 200)})`; }
   const missing = m.tasks.map((t) => `${m.app}-${t.name}`).filter((n) => !listed.has(n));
   if (!missing.length) return undefined;
   return `${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not on the agent${failed ? ` (${failed})` : ''}`;
 }
 
-/** Are the app's listed tasks exactly the manifest's, each once? */
-async function tasksAre(d: InstallDeps, m: AppManifest): Promise<boolean> {
-  const have = (await appJobs(d, m.app)).map((j) => j.name).sort();
+/**
+ * Are the app's listed tasks exactly the manifest's, each once? `others`: the
+ * app's other manifests (the release it was going to, the one before), whose
+ * tasks a sync cut off part way may have left on.
+ */
+async function tasksAre(d: InstallDeps, m: AppManifest, ...others: Array<AppManifest | undefined>): Promise<boolean> {
+  const have = (await appJobs(d, appTaskNames(m, ...others))).map((j) => j.name).sort();
   const want = m.tasks.map((t) => `${m.app}-${t.name}`).sort();
   return have.length === want.length && have.every((n, i) => n === want[i]);
 }
@@ -140,7 +144,7 @@ export async function resumeAppOperation(deps: AppOpDeps, opId: string): Promise
   const newManifest = row.kind === 'app-rollback' ? undefined : await releaseManifest(d, `${appPaths(p.app).releases}/${to}`);
   const cfg = row.kind === 'app-rollback' ? 'none' : await configState(d, p.app, to, newManifest);
   // The record's app has exactly its record's tasks (a sync cut off part way leaves two of one, or none).
-  const tasksOk = recShort ? await tasksAre(d, rec!.manifest as AppManifest) : true;
+  const tasksOk = recShort ? await tasksAre(d, rec!.manifest as AppManifest, newManifest, rec!.previousManifest as AppManifest | undefined) : true;
   // The record and the link name the new release, nothing is left staged (a
   // finished install clears its staging folder before the record is written)
   // and the tasks are the record's. An update of values on the commit already
@@ -238,10 +242,13 @@ async function goBack(deps: AppOpDeps, op: OpHandle, kind: string, p: AppOpParam
   if (back.code !== 0) throw new AppRecoverError(`The previous release could not be switched back on: ${(back.stderr || back.stdout).slice(-200)}`);
   // Its tasks: the record's app, as the record says; the new release's taken off when it is another app (or none).
   if (rec?.app === p.app) {
-    const leaving = kind === 'app-rollback' ? undefined : await releaseManifest(d, `${ap.releases}/${to}`);
+    // A rollback held part-way leaves the release it rolled back to: its tasks
+    // (renamed ones too) come off, or they run on beside the record's (regression audit, 2026-10-22).
+    const leaving = await releaseManifest(d, `${ap.releases}/${to}`)
+      ?? (kind === 'app-rollback' && short(rec.previousSha) === to ? rec.previousManifest as AppManifest | undefined : undefined);
     await syncTasks(d, rec.manifest as AppManifest, leaving);
   } else {
-    await removeTasks(d, p.app);
+    await removeTasks(d, p.app, await releaseManifest(d, `${ap.releases}/${to}`));
     if (rec) await syncTasks(d, rec.manifest as AppManifest);
   }
   await clearStaging(d, p.app, to);

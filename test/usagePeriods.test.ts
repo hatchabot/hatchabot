@@ -93,6 +93,16 @@ describe('computeUsagePeriod', () => {
     expect(den.cost!.high).toBe(den.cost!.low);
   });
 
+  it('a window on two API sources prices each one\'s tokens at its own model (report B39, 2026-10-22)', () => {
+    const store = world();
+    store.insertAIProfile({ id: 'cheap', ownerId: OWNER, name: 'Cheap key', vendor: 'anthropic', kind: 'api_key', model: 'claude-haiku-4-5', secretRef: 'ai/cheap', createdAt: 'now' });
+    store.addTokenSample('den', 'api', iso(8 * MIN), 1_125_400);      // +1M on Opus
+    store.addTokenSample('den', 'cheap', iso(6 * MIN), 2_125_400);    // +1M on Haiku
+    const den = computeUsagePeriod(store, OWNER, 'hour', NOW).agents.find((a) => a.name === 'Den')!;
+    // All input: $5 per million on Opus, $1 on Haiku; not $10 at Opus's price.
+    expect(den.cost!.low).toBeCloseTo((1_000_400 * 5 + 1_000_000 * 1) / 1e6, 6);
+  });
+
   // 2026-09-30: an unpriced model showed "est. $0.00+"; and billing followed
   // the agent's current source, not the one the tokens were spent on.
   it('an API model with no known price is marked unpriced, not priced at $0', () => {
@@ -240,5 +250,31 @@ describe('the daily trend point (review, 2026-09-29)', () => {
     store.addTokenSample('kitchen', 'sub', '2026-09-28T00:05:00.000Z', 1700);
     snapshotDailyUsage(store, Date.parse('2026-09-28T00:05:00.000Z'));
     expect(store.listUsageSnapshots(OWNER, 30).map((s) => [s.day, s.usedTokens])).toEqual([['2026-09-27', 600], ['2026-09-28', 100]]);
+  }));
+
+  it('deleting an agent leaves what it already spent that day (report B38, 2026-10-22)', () => withTz('UTC', () => {
+    const store = trendWorld();
+    const now = Date.parse('2026-09-28T12:00:00.000Z');
+    store.setAgentTokenRate('den', 2 / 1e6, false, '2026-09-28T00:00:00.000Z');
+    store.addTokenSample('den', 'api', '2026-09-28T01:00:00.000Z', 5_000_000);
+    store.addTokenSample('den', 'api', '2026-09-28T11:00:00.000Z', 6_000_000);   // +1M today: $2
+    store.addTokenSample('kitchen', 'sub', '2026-09-28T11:00:00.000Z', 100);
+    snapshotDailyUsage(store, now);
+    const day = () => store.listUsageSnapshots(OWNER, 30).find((s) => s.day === '2026-09-28')!;
+    expect(day().costLow).toBeCloseTo(2, 9);
+    store.setAgentState('den', 'DELETING'); store.setAgentState('den', 'DELETED');
+    store.scrubAgentResidue('den');   // as the delete route does
+    snapshotDailyUsage(store, now + 600_000);
+    expect(day().costLow).toBeCloseTo(2, 9);
+    expect(day().usedTokens).toBe(1_000_000);
+  }));
+
+  it("yesterday with no snapshot (down at midnight) gets one on the next pass (report B48, 2026-10-22)", () => withTz('UTC', () => {
+    const store = trendWorld();
+    store.addTokenSample('kitchen', 'sub', '2026-09-27T10:00:00.000Z', 1000);
+    store.addTokenSample('kitchen', 'sub', '2026-09-27T11:00:00.000Z', 1100);   // +100 on the 27th
+    store.addTokenSample('kitchen', 'sub', '2026-09-28T09:00:00.000Z', 1150);   // +50 on the 28th
+    snapshotDailyUsage(store, Date.parse('2026-09-28T09:05:00.000Z'));
+    expect(store.listUsageSnapshots(OWNER, 30).map((s) => [s.day, s.totalTokens, s.usedTokens])).toEqual([['2026-09-27', 1100, 100], ['2026-09-28', 1150, 50]]);
   }));
 });

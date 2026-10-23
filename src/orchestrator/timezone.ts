@@ -10,7 +10,9 @@
 
 /** True for a zone name this runtime knows (IANA, e.g. "America/Toronto"). */
 export function validTimeZone(tz: string): boolean {
-  if (!tz || !/^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+)*$|^UTC$/.test(tz)) return false;
+  // A name only (no offsets, no paths), then the runtime's own list decides:
+  // digits in the first part are fine (EST5EDT, CST6CDT; audit 2026-10-22).
+  if (!tz || !/^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)*$/.test(tz)) return false;
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: tz });
     return true;

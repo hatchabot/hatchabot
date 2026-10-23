@@ -91,7 +91,11 @@ export function registerWebChatRoutes(app: FastifyInstance, deps: WebChatDeps): 
     // Asleep is not down: a message wakes it, as a chat-app message would.
     // Before this turn is marked in flight — the wake refuses an agent that
     // looks busy, and a web turn counts as busy to the idle sweep.
-    const agent = found.hibernatedAt && found.state === 'STOPPED' ? await deps.ensureAwake(found, 'a web chat message') : found;
+    const asleep = found.hibernatedAt && found.state === 'STOPPED';
+    const agent = asleep ? await deps.ensureAwake(found, 'a web chat message') : found;
+    // The wake takes seconds: web chat taken away (or the person removed)
+    // meanwhile is judged now, before the turn is sent (review, 2026-10-22).
+    if (asleep && !allowed(found.id, me, reply)) return reply;
     if (deps.isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy (being rebuilt or moved) — try again shortly.' });
     if (agent.state !== 'RUNNING' || !agent.runtimeRef) {
       return reply.code(409).send({ error: 'It is not running right now. Ask its owner to start it.' });

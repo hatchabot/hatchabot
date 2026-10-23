@@ -16,7 +16,7 @@ import { scriptEnv } from './helpers/scriptEnv.js';
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-function world(prState: 'merge' | 'fail' | 'close' | 'noauto' | 'green' = 'merge', required = true) {
+function world(prState: 'merge' | 'fail' | 'close' | 'noauto' | 'green' | 'queued' | 'runsdown' | 'statusdown' | 'statusonly' = 'merge', required = true) {
   const root = mkdtempSync(join(tmpdir(), 'hb-land-')); dirs.push(root);
   const bin = join(root, 'bin'); mkdirSync(bin);
   const origin = join(root, 'origin.git');
@@ -28,7 +28,24 @@ land() { b=$(git --git-dir="${origin}" for-each-ref --format='%(refname:short)' 
          [ -n "$b" ] && git --git-dir="${origin}" update-ref refs/heads/main "refs/heads/$b"; touch "${merged}"; }
 case "$1 $2" in
   "api "*/rules/branches/main) ${required ? `echo 1` : `echo 0`} ;;
-  "run list") echo "" ;;
+  # The Actions API, already through --jq: runs as "id<TAB>status<TAB>name", jobs as "name<TAB>state".
+  "api "*/actions/runs/11/jobs*) case "${prState}" in
+      noauto|green|statusdown) printf 'test\tpass\nprivacy\tskipping\n' ;;
+      fail) printf 'test\tpass\nprivacy\tfail\n' ;;
+      *) printf 'test\tpending\n' ;;
+    esac ;;
+  # A green commit status, or (statusdown) a status read that fails.
+  "api "*/status) case "${prState}" in
+      statusdown) exit 1 ;;
+      runsdown|statusonly) printf 'external\tpass\n' ;;
+    esac ;;
+  # (after the jobs: in a case pattern ? matches the / of runs/11/jobs too)
+  "api "*/actions/runs\?*) case "${prState}" in
+      queued) echo "11	queued	CI" ;;
+      runsdown) exit 1 ;;
+      statusonly) ;;
+      *) echo "11	completed	CI" ;;
+    esac ;;
   "pr create") echo "https://github.com/example-owner/example/pull/7" ;;
   "pr merge") case "$*" in *--auto*) ${required ? ':' : 'exit 1'} ;; *--disable-auto*) ;; *) land ;; esac ;;
   "pr close") ;;
@@ -37,12 +54,9 @@ case "$1 $2" in
     case "${prState}" in
       merge) land; echo 'MERGED auto' ;;
       close) echo 'CLOSED noauto' ;;
-      noauto|green) echo 'OPEN noauto' ;;
+      noauto|green|queued|runsdown|statusdown|statusonly) echo 'OPEN noauto' ;;
       *) echo 'OPEN auto' ;;
     esac ;;
-  # Like gh: exit 8 while checks are still pending.
-  "pr checks") case "${prState}" in noauto|green) printf 'test\tpass\t1m\turl\nprivacy\tskipping\t0\turl\n'; exit 0 ;; esac
-    if [ "${prState}" = fail ]; then printf 'test\tpass\t1m\turl\nprivacy\tfail\t8s\turl\n'; exit 1; else printf 'test\tpending\t0\turl\n'; exit 8; fi ;;
 esac
 `, { mode: 0o755 });
   const env = scriptEnv(join(root, 'home'), `${bin}:/usr/bin:/bin`, {});
@@ -109,6 +123,34 @@ describe('scripts/land.sh lands commits on main through a pull request', () => {
     expect(w.ghLog()).toMatch(/pr merge \S+ --repo \S+ --rebase --delete-branch/);
     expect(w.git(w.work, 'rev-parse', 'HEAD')).toBe(w.git(w.origin, 'rev-parse', 'main'));
   });
+
+  it('a run not started yet keeps it waiting: never merged, exit 3 at the timeout', () => {
+    const w = world('queued', false);
+    writeFileSync(join(w.work, 'b.txt'), 'two\n'); w.git(w.work, 'add', 'b.txt'); w.git(w.work, 'commit', '-q', '-m', 'Add b');
+    const r = w.land('--timeout', '0');
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(r.stderr).toContain('Still waiting');
+    expect(w.ghLog()).not.toMatch(/pr merge \S+ --repo \S+ --rebase/);
+    expect(w.ghLog()).toMatch(/api repos\/\S+\/actions\/runs\?branch=land\/\S+&head_sha=[0-9a-f]{40}/);
+  });
+
+  // A read that fails is pending, never nothing: the other source's green
+  // alone passed the gate, and land.sh is the dev repo's only gate (A01).
+  for (const [state, why] of [
+    ['runsdown', 'the Actions runs cannot be read, though a commit status is green'],
+    ['statusdown', 'the commit statuses cannot be read, though every job passed'],
+    ['statusonly', 'no Actions run yet, only a green commit status'],
+  ] as const) {
+    it(`${why}: never merged, exit 3 at the timeout`, () => {
+      const w = world(state, false);
+      writeFileSync(join(w.work, 'b.txt'), 'two\n'); w.git(w.work, 'add', 'b.txt'); w.git(w.work, 'commit', '-q', '-m', 'Add b');
+      const r = w.land('--timeout', '0');
+      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.stderr).toContain('Still waiting');
+      expect(w.ghLog()).not.toMatch(/pr merge \S+ --repo \S+ --rebase/);
+      expect(w.git(w.origin, 'rev-parse', 'main')).not.toBe(w.git(w.work, 'rev-parse', 'HEAD'));
+    });
+  }
 
   it('checks passed but GitHub turned auto-merge off (a rebase it refuses): says so at once, exit 1', () => {
     const w = world('noauto');

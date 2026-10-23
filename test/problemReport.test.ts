@@ -49,6 +49,11 @@ describe('redactForPublic', () => {
     expect(redactForPublic(keep, {})).toBe(keep);
   });
 
+  it('masks a mapped private address written in hex as it does the dotted one (audit, 2026-10-22)', () => {
+    expect(redactForPublic('peer ::ffff:a00:7 and 0:0:0:0:0:ffff:c0a8:128 up', {})).toBe('peer <private-ip> and <private-ip> up');
+    expect(redactForPublic('public ::ffff:8c52:7003', {})).toBe('public ::ffff:8c52:7003');
+  });
+
   it('leaves public addresses and ordinary words alone', () => {
     expect(redactForPublic('pulled ghcr.io/hatchabot/runtime:2026.9.6 from 140.82.112.3; patience', ctx)).toBe('pulled ghcr.io/hatchabot/runtime:2026.9.6 from 140.82.112.3; patience');
   });
@@ -274,6 +279,18 @@ describe('a report masks what the app knows is private', () => {
     expect(boundInput('short', 10)).toBe('short');
   });
 
+  it('a folder outside home is masked whole; one inside home keeps its ~ form', () => {
+    expect(redactForPublic('sets in /mnt/pantry-nas/hatchabot/2026-10-20 and /home/pat/hatchabot-backups', { ...ctx, paths: ['/mnt/pantry-nas/hatchabot/', '/home/pat/hatchabot-backups'] }))
+      .toBe('sets in <path>/2026-10-20 and ~/hatchabot-backups');
+  });
+
+  it('a short backup folder is masked as a whole path only, never inside other paths or routes (regression audit, 2026-10-22)', () => {
+    expect(redactForPublic('See docs/backups.md, GET /v1/backups and /backups-old/x; sets in /backups/2026-10-22 and in /backups.', { ...ctx, paths: ['/backups'] }))
+      .toBe('See docs/backups.md, GET /v1/backups and /backups-old/x; sets in <path>/2026-10-22 and in <path>.');
+    expect(redactForPublic('--- a/src/orchestrator/backups.ts\n+++ b/src/orchestrator/backups.ts', { ...ctx, paths: ['/backups'] }))
+      .toBe('--- a/src/orchestrator/backups.ts\n+++ b/src/orchestrator/backups.ts');
+  });
+
   it('a second pass changes nothing (the draft is masked again as it leaves)', () => {
     const c = { ...ctx, names: ['Garden Notes'], hosts: ['pantry-box'], secrets: ['seedling-42'] };
     const once = redactForPublic('Garden Notes on pantry-box: TOKEN=pl4nt, seedling-42, /home/pat/x, sam@example.org', c);
@@ -386,6 +403,29 @@ describe('the report routes mask private names and known credentials, on every w
     expect(edited.body).toBe('Also <name>. password: ***');
     expect(decodeURIComponent(edited.issueUrl)).not.toMatch(/Meal Planner|rose9/);
     expect((await f.inject({ method: 'GET', url: `/v1/problem-reports/${d.id}`, headers: h })).json().body).toBe('Also <name>. password: ***');
+  });
+
+  it("doctor's lines carry neither the install's own address nor a backup folder outside home (audit, 2026-10-20)", async () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: 'owner-1', kind: 'local', provider: 'mock', name: 'pantry-box', settings: {}, createdAt: 'now' } as never);
+    const was = process.env.HATCHABOT_BACKUP_DIR;
+    process.env.HATCHABOT_BACKUP_DIR = '/mnt/pantry-nas/hatchabot';
+    try {
+      const f = Fastify();
+      await registerRoutes(f, {
+        store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} }, providers: new Map([['mock', new MockProvider()]]),
+        channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0 } }, publicUrl: 'https://hatchabot.garden-example.net',
+        reportDoctor: async () => [{ level: 'ok', text: 'Public URL https://hatchabot.garden-example.net' }, { level: 'warn', text: 'No backup set in /mnt/pantry-nas/hatchabot yet' }],
+      } as never);
+      const r = await f.inject({ method: 'POST', url: '/v1/problem-reports', headers: { 'x-hatchabot-owner': 'owner-1' }, payload: { title: 'Backups stopped', whatHappened: 'No backup since Monday.' } });
+      expect(r.statusCode, r.body).toBe(200);
+      const d = r.json() as { body: string; issueUrl: string };
+      expect(d.body).toContain('Public URL https://<host>');
+      expect(d.body).toContain('No backup set in <path> yet');
+      expect(`${d.body}\n${decodeURIComponent(d.issueUrl)}`).not.toMatch(/garden-example|pantry-nas/);
+    } finally {
+      if (was === undefined) delete process.env.HATCHABOT_BACKUP_DIR; else process.env.HATCHABOT_BACKUP_DIR = was;
+    }
   });
 
   it('a general report masks the key of every agent whose failure it carries, not only a selected one (#204)', async () => {

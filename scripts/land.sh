@@ -71,6 +71,8 @@ URL="$(printf '%s\n' "$URL" | grep -oE 'https://[^ ]+/pull/[0-9]+' | tail -1)"
 # pull request with nothing required is mergeable at once, before CI) and
 # the repository allows it; else this script waits for the checks itself.
 AUTO=0
+# Rules that cannot be read count as none: then this script waits for every
+# check itself, the stricter of the two paths.
 REQUIRED="$(gh api "repos/$SLUG/rules/branches/main" --jq '[.[] | select(.type == "required_status_checks")] | length' 2>/dev/null || echo 0)"
 if [ "${REQUIRED:-0}" != 0 ] && gh pr merge "$URL" --repo "$SLUG" --auto --rebase --delete-branch >/dev/null 2>&1; then
   AUTO=1
@@ -85,6 +87,36 @@ fail() {   # fail MESSAGE — nothing may merge later behind the caller's back
   gh pr close "$URL" --repo "$SLUG" --delete-branch >/dev/null 2>&1 || true
   die "$1 — the pull request is closed and its branch deleted; the commits stay on local main: fix, commit, and land again." 1
 }
+# Every check of the pushed commit, one "name<TAB>pass|fail|cancel|skipping|pending" line each:
+# the jobs of its Actions runs on this branch, and its commit statuses. Not `gh pr checks`: the
+# check-runs API it reads needs a permission fine-grained personal tokens cannot have, and the
+# everyday token is one (publish kit D8, 2026-10-17). A run not finished yet, or one whose jobs
+# cannot be read, counts as pending; one that ended with no job is a failure (a broken workflow).
+SHA="$(git rev-parse HEAD)"
+# A read that fails, and CI with no run yet, is a pending line, never nothing: with nothing from
+# one source, the other's green alone passed the gate, and this script is the dev repo's only
+# gate (review of an external audit, A01, 2026-10-22).
+checks() {
+  local id status name jobs runs statuses
+  runs="$(gh api "repos/$SLUG/actions/runs?branch=$BRANCH&head_sha=$SHA&per_page=100" \
+      --jq '.workflow_runs[] | [(.id | tostring), .status, .name] | @tsv' 2>/dev/null)" \
+    || { printf 'Actions runs (unreadable)\tpending\n'; runs=""; }
+  [ -n "$runs" ] || printf 'Actions runs (none yet)\tpending\n'
+  printf '%s\n' "$runs" |
+  while IFS="$(printf '\t')" read -r id status name; do
+    [ -n "$id" ] || continue
+    [ "$status" = completed ] || { printf '%s\tpending\n' "$name"; continue; }
+    jobs="$(gh api "repos/$SLUG/actions/runs/$id/jobs?per_page=100" --jq '.jobs[] | [.name,
+        (if .status != "completed" then "pending" elif .conclusion == "success" or .conclusion == "neutral" then "pass"
+         elif .conclusion == "skipped" then "skipping" elif .conclusion == "cancelled" then "cancel" else "fail" end)] | @tsv' 2>/dev/null)" \
+      || { printf '%s\tpending\n' "$name"; continue; }
+    [ -n "$jobs" ] && printf '%s\n' "$jobs" || printf '%s\tfail\n' "$name"
+  done
+  statuses="$(gh api "repos/$SLUG/commits/$SHA/status" --jq '.statuses[] | [.context,
+      (if .state == "success" then "pass" elif .state == "pending" then "pending" else "fail" end)] | @tsv' 2>/dev/null)" \
+    || { printf 'commit statuses (unreadable)\tpending\n'; return 0; }
+  [ -z "$statuses" ] || printf '%s\n' "$statuses"
+}
 END=$(( $(date +%s) + TIMEOUT * 60 ))
 while :; do
   VIEW="$(gh pr view "$URL" --repo "$SLUG" --json state,autoMergeRequest -q '.state + " " + (if .autoMergeRequest then "auto" else "noauto" end)' 2>/dev/null || echo UNKNOWN)"
@@ -93,18 +125,7 @@ while :; do
     MERGED) break ;;
     CLOSED) die "The pull request was closed without merging: $URL" 1 ;;
   esac
-  # gh pr checks prints "name<TAB>state<TAB>elapsed<TAB>link" (older gh has
-  # no --json here) and exits non-zero while checks are pending: not an
-  # error here. Its checks are the head commit's, so landing a commit again
-  # shows the last pull request's results until this one's run exists: an
-  # Actions check counts only when its run is on this branch.
-  RUNS="$(gh run list --repo "$SLUG" --branch "$BRANCH" --json databaseId --jq '[.[].databaseId | tostring] | join(" ")' 2>/dev/null || true)"
-  CHECKS="$({ gh pr checks "$URL" --repo "$SLUG" 2>/dev/null || true; } | awk -F'\t' -v runs="$RUNS" '
-    BEGIN { n = split(runs, r, " "); for (i = 1; i <= n; i++) mine[r[i]] = 1 }
-    NF >= 2 {
-      if (match($4, /\/actions\/runs\/[0-9]+\//) && !(substr($4, RSTART + 14, RLENGTH - 15) in mine)) next
-      print
-    }')"
+  CHECKS="$(checks)"
   FAILED="$(printf '%s\n' "$CHECKS" | awk -F'\t' '$2 == "fail" || $2 == "cancel" { printf "%s, ", $1 }')"
   [ -z "$FAILED" ] || fail "Check(s) failed: ${FAILED%, } ($URL)"
   # Counted whole (wc reads everything): `grep -q` would stop early and,

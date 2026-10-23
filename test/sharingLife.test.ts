@@ -16,7 +16,7 @@ import { readCloneMemory, scanTemplate, stripManagedSections, type TemplateManif
 import { aiSourceHealth } from '../src/orchestrator/health.js';
 import { workspacePath } from '../src/orchestrator/snapshots.js';
 import type { RuntimeProvider } from '../src/providers/provider.js';
-import { makeWorld, seedRunningAgent, as } from './support/world.js';
+import { makeWorld, seedRunningAgent, as, OWNER } from './support/world.js';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
@@ -141,6 +141,18 @@ describe('a clone carries the daily notes and USER.md', () => {
     expect(out.skipped.sort()).toEqual(['memory/huge.md', 'memory/photo.bin']);
   });
 
+  it('a note a few folders down is copied; a folder past the depth limit is listed, not left out unsaid (review 2026-10-22, A48)', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hb-clone-mem-'));
+    mkdirSync(join(dir, 'memory', 'a', 'b', 'c'), { recursive: true });
+    writeFileSync(join(dir, 'memory', 'a', 'b', 'c', 'note.md'), 'deep\n');
+    const deep = join(dir, 'memory', ...'abcdefgh'.split(''));
+    mkdirSync(join(deep, 'i'), { recursive: true });
+    writeFileSync(join(deep, 'i', 'too-deep.md'), 'x\n');
+    const out = await readCloneMemory(localShell(dir, 'kitchen'), 'ref', 'kitchen');
+    expect(out.files['memory/a/b/c/note.md']).toBe('deep\n');
+    expect(out.skipped).toEqual(['memory/a/b/c/d/e/f/g/h/']);
+  });
+
   it('never seeds a name that climbs out of memory/', async () => {
     const provider = {
       execShell: async () => ({ code: 0, stderr: '', stdout: JSON.stringify({
@@ -173,6 +185,31 @@ describe('a clone carries the daily notes and USER.md', () => {
     expect(seed['memory/2026-09-29.md']).toBe('notes\n');
     expect(seed['USER.md']).toBe('# Them\n');
     expect(Object.keys(seed)).toContain('MEMORY.md');
+  });
+
+  it('the clone keeps the original\'s AI source, not the default one (review, 2026-10-22)', async () => {
+    const w = await makeWorld();
+    await seedRunningAgent(w);
+    w.store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Second key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p2', createdAt: 'now' });
+    await w.secrets.put('ai/p2', 'test-key-two');
+    w.store.setAgentAIProfile('a1', 'p2');
+    const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/clone', headers: as(), payload: { name: 'Kitchen Copy' } });
+    expect(res.statusCode).toBe(201);
+    const clone = w.store.getAgent(res.json().id)!;
+    expect(clone.aiProfileId).toBe('p2');
+    expect(clone.hostId).toBe(w.store.getAgent('a1')!.hostId);
+  });
+
+  it('a credential whose value cannot be read is named in the answer, not dropped in silence (review, 2026-10-22)', async () => {
+    const w = await makeWorld();
+    await seedRunningAgent(w);
+    await w.secrets.put('agent-env/fx-ok', 'fixture-value');
+    w.store.insertAgentEnv({ id: 'fx-ok', agentId: 'a1', name: 'SEARCH_KEY', secretRef: 'agent-env/fx-ok', createdAt: 'now' });
+    w.store.insertAgentEnv({ id: 'fx-gone', agentId: 'a1', name: 'MAIL_KEY', secretRef: 'agent-env/fx-gone', createdAt: 'now' });
+    const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/clone', headers: as(), payload: { name: 'Kitchen Copy' } });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().envNotCopied).toEqual(['MAIL_KEY']);
+    expect(w.store.listAgentEnv(res.json().id).map((e) => e.name)).toEqual(['SEARCH_KEY']);
   });
 
   it('its first build replaces the scaffold with them, and they are dropped once on the volume', async () => {

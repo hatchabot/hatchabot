@@ -94,6 +94,19 @@ describe('when a live test is due', () => {
     expect(dueFor('v2', [run('v1'), run('v2', 'fail'), run('v2', 'skip')], T1, r)[0]?.why).toMatch(/changed since it passed on v1/);
     expect(dueFor('v1', [run('v3')], T1, r)[0]?.why).toMatch(/never passed/);
   });
+  it('its latest run on the release failed: due, though it passed before (audit, 2026-10-20)', () => {
+    const r = repo();
+    // Passed on this release, then failed on it.
+    expect(dueFor('v2', [run('v2'), run('v2', 'fail')], T1, r)).toEqual([{ test: 'alpha', why: 'its latest run on v2 failed' }]);
+    // Passed on an earlier release with nothing in its area changed since, then failed on this one.
+    expect(dueFor('v3', [run('v2'), run('v3', 'fail')], T1, r)).toEqual([{ test: 'alpha', why: 'its latest run on v3 failed' }]);
+    // A skip after the fail tests nothing: still due. A pass after it clears it.
+    expect(dueFor('v2', [run('v2'), run('v2', 'fail'), run('v2', 'skip')], T1, r)).toHaveLength(1);
+    expect(dueFor('v2', [run('v2'), run('v2', 'fail'), run('v2')], T1, r)).toEqual([]);
+    // Every-release tests too.
+    const every = [{ name: 'alpha', cmd: ['node', 'a.mjs'], area: [], everyRelease: true }];
+    expect(dueFor('v3', [run('v3'), run('v3', 'fail')], every, r)).toEqual([{ test: 'alpha', why: 'its latest run on v3 failed' }]);
+  });
   it('a version bump in package.json is not a change; a dependency is', () => {
     const dir = mkdtempSync(join(tmpdir(), 'hb-live-pkg-')); dirs.push(dir);
     const env = { ...process.env, HOME: dir, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',

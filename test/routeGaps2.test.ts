@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
+import * as runnerSetup from '../src/orchestrator/runnerSetup.js';
 import { ConnectorError, type ChannelConnector } from '../src/channels/connector.js';
 import { MemSecrets, OWNER, as, seedRunningAgent, type World } from './support/world.js';
 
@@ -152,6 +153,24 @@ describe('copying the runtime image to a runner', () => {
     const local = await w.f.inject({ method: 'POST', url: '/v1/hosts/h1/install-image', headers: as() });
     expect(local.statusCode).toBe(400);
     expect(local.json().error).toMatch(/already has the image/);
+  });
+
+  it('two requests at once start one copy, not two (a double click; audit, 2026-10-22)', async () => {
+    const w = await world();
+    w.store.insertHost({ id: 'h2', ownerId: OWNER, kind: 'remote', provider: 'mock', name: 'Runner', settings: { dockerHost: 'ssh://runner.example' }, createdAt: 'now' } as never);
+    let unblock!: () => void;
+    const held = new Promise<void>((r) => { unblock = r; });
+    const tags = vi.spyOn(w.provider, 'listImageTags').mockImplementation(async () => { await held; return []; });
+    const install = vi.spyOn(runnerSetup, 'installRuntimeImage').mockResolvedValue({ ok: true });
+    try {
+      const both = await Promise.all([1, 2].map(() => w.f.inject({ method: 'POST', url: '/v1/hosts/h2/install-image', headers: as(), payload: {} })));
+      expect(both.map((r) => r.statusCode)).toEqual([202, 202]);
+      unblock();
+      await vi.waitFor(() => expect(install).toHaveBeenCalled());
+      const after = (await w.f.inject({ method: 'GET', url: '/v1/hosts/h2/install-image', headers: as() })).json();
+      expect(after).toMatchObject({ done: true, ok: true });
+      expect(install).toHaveBeenCalledTimes(1);
+    } finally { tags.mockRestore(); install.mockRestore(); }
   });
 });
 

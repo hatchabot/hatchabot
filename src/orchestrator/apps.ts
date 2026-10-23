@@ -128,6 +128,12 @@ export async function repoFor(git: Git, src: AppSource, cacheDir: string): Promi
     ? await git(['-C', dir, 'fetch', '--prune', '--force', 'origin', '+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*'])
     : await git(['clone', '--mirror', '--', src.url, dir]);
   if (r.code !== 0) throw new AppError(`Could not fetch ${src.url}: ${r.stderr.trim().split('\n').pop() ?? 'git failed'}`);
+  // A fetch moves the branches, not the mirror's HEAD: once the repo's
+  // default branch was renamed (main → trunk) HEAD named a branch the prune
+  // removed, and Update said there was no commit (review, 2026-10-22).
+  const head = await git(['-C', dir, 'ls-remote', '--symref', 'origin', 'HEAD']);
+  const def = head.code === 0 ? /^ref: (refs\/heads\/\S+)\tHEAD$/m.exec(head.stdout.toString())?.[1] : undefined;
+  if (def) await git(['-C', dir, 'symbolic-ref', 'HEAD', def]);
   return dir;
 }
 
@@ -201,6 +207,8 @@ const UNFILLED: Partial<Record<(typeof FROM)[number], string>> = {
 export function mergeConfig(m: AppManifest, facts: AgentFacts, existing: Record<string, unknown>, values: Record<string, unknown>) {
   const out: Record<string, unknown> = { ...existing };
   const missing: string[] = [];
+  /** The keys of `missing`, for a form that asks for them. */
+  const missingKeys: string[] = [];
   const unfilled: string[] = [];
   const invalid: string[] = [];
   const fact: Record<(typeof FROM)[number], unknown> = {
@@ -220,15 +228,25 @@ export function mergeConfig(m: AppManifest, facts: AgentFacts, existing: Record<
       if (v === INVALID) invalid.push(`${f.key} must be ${TYPE_WORD[f.type ?? 'text']} (got ${JSON.stringify(values[f.key]).slice(0, 60)})`);
       else out[f.key] = v;
     } else if (cleared && !f.required) out[f.key] = f.type === 'list' ? [] : f.type === 'number' || f.type === 'bool' ? null : '';
-    else if (out[f.key] !== undefined) continue;
-    else if (f.default !== undefined) out[f.key] = f.default;
-    else if (f.required) missing.push(f.label ? `${f.key} (${f.label})` : f.key);
+    // Kept: an own value (a key named "constructor" read Object's and was
+    // never written), unless the field is required now and it is blank
+    // (an optional field made required kept its '' unasked). Review, 2026-10-22.
+    else if (Object.hasOwn(out, f.key) && out[f.key] !== undefined && !(f.required && blank(out[f.key]))) continue;
+    else if (f.default !== undefined) {
+      // The default is held to its field's type like a value given: "abc"
+      // for a number was written as it was. '' and null stay "no value".
+      const d = f.default === '' || f.default === null ? f.default : coerce(f.type, f.default);
+      if (d === INVALID) invalid.push(`the app's default for ${f.key} is not ${TYPE_WORD[f.type ?? 'text']} (${JSON.stringify(f.default).slice(0, 60)}; its ${MANIFEST_FILE} needs fixing)`);
+      else if (f.required && blank(d)) { missing.push(f.label ? `${f.key} (${f.label})` : f.key); missingKeys.push(f.key); }
+      else out[f.key] = d;
+    } else if (f.required) { missing.push(f.label ? `${f.key} (${f.label})` : f.key); missingKeys.push(f.key); }
   }
   if (invalid.length) throw new AppError(`Not a valid value: ${invalid.join('; ')}.`);
-  return { config: out, missing, unfilled };
+  return { config: out, missing, missingKeys, unfilled };
 }
 
 const INVALID = Symbol('invalid');
+const blank = (v: unknown) => v === null || (typeof v === 'string' && !v.trim()) || (Array.isArray(v) && !v.length);
 const TYPE_WORD: Record<string, string> = { number: 'a number', bool: 'true or false', list: 'a list (a, b, c)', email: 'an email address', text: 'text' };
 
 /** A value as its field's type, or INVALID ("abc" for a number became NaN, written as null). */
@@ -372,8 +390,16 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
       if (read.code !== 0) throw new AppError(`Could not read ${live} in the agent (${errText(read) || 'no output'}), so its settings were left as they are. Check it, then try again.`);
       let existing: Record<string, unknown> = {};
       try { existing = read.stdout.trim() ? JSON.parse(read.stdout) : {}; } catch { throw new AppError(`${live} in the agent is not valid JSON; fix or remove it.`); }
-      const { config, missing, unfilled } = mergeConfig(m, d.facts, existing, values);
-      if (missing.length) throw new AppError(`Needs a value for: ${missing.join(', ')} (give them as key=value).`);
+      const { config, missing, missingKeys, unfilled } = mergeConfig(m, d.facts, existing, values);
+      if (missing.length) {
+        // The fields too, so the page can ask for them: its Update sends no
+        // values, and a field made required (or a required one an older
+        // version left blank) had no way in from it (final audit, 2026-10-22).
+        const e = new AppError(`Needs a value for: ${missing.join(', ')} (give them as key=value).`);
+        (e as AppError & { needs?: unknown }).needs = fieldsToAsk(m).filter((f) => missingKeys.includes(f.key))
+          .map((f) => ({ key: f.key, ...(f.label ? { label: f.label } : {}), ...(f.type ? { type: f.type } : {}), ...(f.secret ? { secret: true } : {}) }));
+        throw e;
+      }
       if (unfilled.length) throw new AppError(`Hatchabot has nothing to fill ${unfilled.join(', ')} with; set that up, then try again.`);
       d.checkConfig?.(config, existing);
       const w = await d.provider.writeToVolume(d.runtimeRef,
@@ -386,9 +412,18 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
     let test: Installed['test'];
     if (m.test?.length) {
       log('app.test', { app: m.app, sha: short });
-      const tv = appVars(m, d.facts, { app_dir: dir, data_dir: stage });
+      // The same commit's tests run in a copy of the live folder (what they
+      // built before comes along): run in the live one, a test that wrote
+      // there and then failed left the change live, "unchanged" (review,
+      // 2026-10-22).
+      const testDir = sameRelease ? `${stage}-code` : dir;
+      if (sameRelease) {
+        const cp = await sh(d, `rm -rf ${sq(testDir)} && cp -a ${sq(dir)} ${sq(testDir)}`);
+        if (cp.code !== 0) throw new AppError(`Could not copy the release to test it: ${errText(cp)}`);
+      }
+      const tv = appVars(m, d.facts, { app_dir: testDir, data_dir: stage });
       const envStr = Object.entries(tv.envMap).map(([k, v]) => `${k}=${sq(v)}`).join(' ');
-      const r = await sh(d, `cd ${sq(dir)} && env ${envStr} ${m.test.map((a) => sq(expand(a, tv))).join(' ')} 2>&1`, 15 * 60_000);
+      const r = await sh(d, `cd ${sq(testDir)} && env ${envStr} ${m.test.map((a) => sq(expand(a, tv))).join(' ')} 2>&1`, 15 * 60_000);
       test = { ok: r.code === 0, output: (r.stdout + r.stderr).slice(-3000) };
       if (!test.ok) {
         log('app.test_failed', { app: m.app, sha: short });
@@ -454,7 +489,7 @@ export function stagingDir(app: string, short: string): string {
 /** Remove a release's staging folder (and the staging folder when empty); never throws. */
 export async function clearStaging(d: InstallDeps, app: string, short?: string): Promise<void> {
   const root = appPaths(app).root;
-  const what = short ? sq(stagingDir(app, short)) : `${sq(`${root}/staging`)}/*`;
+  const what = short ? `${sq(stagingDir(app, short))} ${sq(`${stagingDir(app, short)}-code`)}` : `${sq(`${root}/staging`)}/*`;
   await sh(d, `rm -rf ${what}; rmdir ${sq(`${root}/staging`)} 2>/dev/null; true`).catch(() => undefined);
 }
 
@@ -483,20 +518,27 @@ export async function switchTo(d: InstallDeps, m: AppManifest, sha: string, from
 
 type Job = { id: string; name: string };
 
+/** The job names an app's manifests make: "<app>-<task>", exactly. */
+export function appTaskNames(...ms: Array<AppManifest | undefined>): Set<string> {
+  return new Set(ms.flatMap((m) => (m ? m.tasks.map((t) => `${m.app}-${t.name}`) : [])));
+}
+
 /**
- * The agent's jobs named "<app>-…", disabled ones too (`--all`: a disabled app
- * task was invisible to Update and Stop app and stayed behind, #73); throws
- * when the list cannot be read (a sync must know what is there). Only the
- * app's own jobs must be whole: an unnamed job of the agent's own is none of
- * its business (it blocked every app change, #74).
+ * The agent's jobs with one of `names` (appTaskNames), disabled ones too
+ * (`--all`: a disabled app task was invisible to Update and Stop app and
+ * stayed behind, #73); throws when the list cannot be read (a sync must know
+ * what is there). Only the app's own jobs must be whole: an unnamed job of the
+ * agent's own is none of its business (it blocked every app change, #74). The
+ * names, not a "<app>-" prefix: the owner's own task "news-digest" was taken
+ * off with app "news" (audit, 2026-10-20).
  */
-export async function appJobs(d: InstallDeps, app: string): Promise<Job[]> {
+export async function appJobs(d: InstallDeps, names: ReadonlySet<string>): Promise<Job[]> {
   const list = await d.provider.exec(d.runtimeRef, ['cron', 'list', '--all', '--json'], { timeoutMs: 60_000 });
   if (list.code !== 0) throw new AppError(`Could not read the agent's scheduled tasks: ${errText(list)}`);
   let jobs: unknown;
   try { jobs = JSON.parse(list.stdout).jobs; } catch { throw new AppError("The agent's scheduled tasks did not read as JSON."); }
   if (!Array.isArray(jobs) || jobs.some((j) => !j || typeof j !== 'object')) throw new AppError("The agent's scheduled task list is incomplete or malformed. Try again.");
-  const mine = (jobs as Array<{ id?: unknown; name?: unknown }>).filter((x) => typeof x.name === 'string' && x.name.startsWith(`${app}-`));
+  const mine = (jobs as Array<{ id?: unknown; name?: unknown }>).filter((x) => typeof x.name === 'string' && names.has(x.name));
   if (mine.some((j) => typeof j.id !== 'string')) throw new AppError("The agent's scheduled task list is incomplete or malformed. Try again.");
   return mine as Job[];
 }
@@ -526,14 +568,15 @@ function addArgv(d: InstallDeps, m: AppManifest, t: AppManifest['tasks'][number]
  */
 export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppManifest): Promise<string[]> {
   const run = (argv: string[]) => d.provider.exec(d.runtimeRef, argv, { timeoutMs: 60_000 });
-  const old = await appJobs(d, m.app);
-  const oldIds = new Set(old.map((j) => j.id));
   const prev = previous?.app === m.app ? previous : undefined;
+  const ours = appTaskNames(m, prev);
+  const old = await appJobs(d, ours);
+  const oldIds = new Set(old.map((j) => j.id));
   /** Put the old set back; what is still wrong after a fresh list ([] = confirmed as it was). */
   const putBack = async (): Promise<string[]> => {
     const unread = (e: unknown) => [`the list could not be read (${(e as Error)?.message ?? e})`];
     let now: Job[];
-    try { now = await appJobs(d, m.app); } catch (e) { return unread(e); }
+    try { now = await appJobs(d, ours); } catch (e) { return unread(e); }
     const seen = new Set(now.map((j) => j.id));
     for (const j of now.filter((x) => !oldIds.has(x.id))) await run(['cron', 'rm', j.id]);
     for (const j of old.filter((x) => !seen.has(x.id))) {
@@ -541,7 +584,7 @@ export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppMa
       if (t) await run(addArgv(d, prev!, t));
     }
     let after: Job[];
-    try { after = await appJobs(d, m.app); } catch (e) { return unread(e); }
+    try { after = await appJobs(d, ours); } catch (e) { return unread(e); }
     // Listed before the put-back and not in the old set: a new job that would not come off.
     // Not listed before: added by the put-back, whatever its add answered.
     const stray = after.filter((j) => seen.has(j.id) && !oldIds.has(j.id)).map((j) => j.name);
@@ -576,14 +619,15 @@ export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppMa
   return made;
 }
 
-/** Take its tasks off; the code and data stay on the volume. */
-export async function removeTasks(d: InstallDeps, app: string): Promise<number> {
-  const jobs = await appJobs(d, app);
+/** Take its tasks off (those its manifests `ms` make); the code and data stay on the volume. */
+export async function removeTasks(d: InstallDeps, app: string, ...ms: Array<AppManifest | undefined>): Promise<number> {
+  const names = appTaskNames(...ms);
+  const jobs = await appJobs(d, names);
   for (const j of jobs) {
     // A lost response may mean it was removed. The fresh list decides.
     await d.provider.exec(d.runtimeRef, ['cron', 'rm', j.id], { timeoutMs: 60_000 }).catch(() => undefined);
   }
-  const left = await appJobs(d, app);
+  const left = await appJobs(d, names);
   if (left.length) throw new AppError(`Could not remove ${app}'s scheduled tasks: ${left.map((j) => j.name).join(', ')} remain. Try again; the app record has been kept.`);
   return jobs.length;
 }

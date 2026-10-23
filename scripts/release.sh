@@ -11,8 +11,10 @@
 #
 # It refuses unless local main is origin/main, the version commit has landed
 # (package.json and a CHANGELOG section for X.Y.Z on main), CI passed on it
-# (it waits for a run still going) and the tag is free, here and on the
-# public repo (the remote `public`, read only) — scripts/release-check.sh.
+# (it waits for a run still going), the tag is free, here and on the
+# public repo (the remote `public`, read only), and the commit's
+# channels.json moves no channel back from what either main says —
+# scripts/release-check.sh.
 # Then the release notes go through the privacy check (`privacy-check.mjs
 # --text`) and the public repo's privacy fingerprints are brought up to date
 # (`--sync-ci`), both here, where the private values are. Then it makes the
@@ -36,6 +38,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$VERSION" ] || die "usage: scripts/release.sh X.Y.Z [--commit <sha>]" 2
+# The publisher publishes vX.Y.Z tags only: a pre-release tagged here would
+# never reach the public repo, while this said it would (audit, 2026-10-22).
+case "$VERSION" in *-*) die "$VERSION is a pre-release: the publisher publishes X.Y.Z releases only, so its tag would never reach the public repo. Nothing tagged." 2 ;; esac
 command -v gh >/dev/null 2>&1 || die "No gh command: install it and gh auth login."
 # The dev repository, whose CI is checked: origin.
 SLUG="$(git remote get-url origin | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')"

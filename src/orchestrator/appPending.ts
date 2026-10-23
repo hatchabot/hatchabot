@@ -23,11 +23,29 @@ export async function stashPendingSecrets(
 ): Promise<Record<string, unknown>> {
   const secret = new Set(fieldsToAsk(m).filter((f) => f.secret).map((f) => f.key));
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(values)) {
-    if (!secret.has(k) || v === undefined || v === '') { out[k] = v; continue; }
-    const ref = pendingSecretRef(agentId, k);
-    await secrets.put(ref, JSON.stringify(v));
-    out[k] = { [REF]: ref };
+  // Each ref written, with what it held before: an install waiting already
+  // (being replaced) keeps its row when this fails, and names the same refs.
+  const written: Array<{ ref: string; was: string | undefined }> = [];
+  try {
+    for (const [k, v] of Object.entries(values)) {
+      if (!secret.has(k) || v === undefined || v === '') { out[k] = v; continue; }
+      const ref = pendingSecretRef(agentId, k);
+      let was: string | undefined;
+      try { was = await secrets.get(ref); } catch { /* none (or unreadable): deleted on failure, as before */ }
+      await secrets.put(ref, JSON.stringify(v));
+      written.push({ ref, was });
+      out[k] = { [REF]: ref };
+    }
+  } catch (e) {
+    // All or none: a second value that would not store left the first one
+    // with no row to name it (review, 2026-10-22). One the waiting install
+    // still names is put back as it was, not deleted (final audit,
+    // 2026-10-22). A delete that fails here is swept at the next start
+    // (sweepOrphanAgentSecrets).
+    for (const { ref, was } of written) {
+      await (was === undefined ? secrets.delete(ref) : secrets.put(ref, was)).catch(() => {});
+    }
+    throw e;
   }
   return out;
 }
@@ -61,7 +79,12 @@ export async function resolvePendingValues(
   return out;
 }
 
-/** Forget a waiting install: its secrets first, then its row. */
+/**
+ * Forget a waiting install: its secrets first, then its row. A secret that
+ * would not delete is not forgotten: no row names it once the row is gone,
+ * and sweepOrphanAgentSecrets removes it at the next start (review,
+ * 2026-10-22). The row cannot wait for it: kept, the install would run again.
+ */
 export async function dropAppPending(store: Store, secrets: SecretStore, agentId: string): Promise<void> {
   const p = store.getAppPending(agentId);
   if (!p) return;

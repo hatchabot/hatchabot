@@ -1,3 +1,8 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { consoleActivity, sessionsReadShell } from '../src/orchestrator/unread.js';
 
@@ -34,7 +39,30 @@ describe('a conversation known only by its origin (#58)', () => {
 });
 
 describe('reading the session records', () => {
-  it('prefers sessions.json and falls back to the agent SQLite (2026.8+), never a shell-breaking quote', () => {
+  it('reads the agent SQLite first, the sessions.json an upgrade left behind only when the store has no session table (review, 2026-10-22)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-unread-both-'));
+    try {
+      const base = join(root, 'agents', 'to-do-agent');
+      mkdirSync(join(base, 'sessions'), { recursive: true });
+      mkdirSync(join(base, 'agent'), { recursive: true });
+      const sh = () => execFileSync('sh', ['-c', sessionsReadShell('to-do-agent').replaceAll('/home/node/.openclaw', root)], { encoding: 'utf8' });
+      expect(sh()).toBe('{}');
+      writeFileSync(join(base, 'sessions', 'sessions.json'), JSON.stringify({ 'agent:to-do-agent:main': { updatedAt: 1 } }));
+      expect(JSON.parse(sh())).toEqual({ 'agent:to-do-agent:main': { updatedAt: 1 } });
+      const file = join(base, 'agent', 'openclaw-agent.sqlite');
+      let db = new Database(file);
+      db.exec('CREATE TABLE other_things (id TEXT)');
+      db.close();
+      expect(JSON.parse(sh())).toEqual({ 'agent:to-do-agent:main': { updatedAt: 1 } });
+      db = new Database(file);
+      db.exec('CREATE TABLE session_nodes (session_key TEXT PRIMARY KEY, entry_json TEXT NOT NULL)');
+      db.prepare('INSERT INTO session_nodes VALUES (?, ?)').run('agent:to-do-agent:main', JSON.stringify({ updatedAt: 2 }));
+      db.close();
+      expect(JSON.parse(sh())).toEqual({ 'agent:to-do-agent:main': { updatedAt: 2 } });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('reads sessions.json or the agent SQLite (2026.8+), never a shell-breaking quote', () => {
     const sh = sessionsReadShell('to-do-agent');
     expect(sh).toContain('/home/node/.openclaw/agents/to-do-agent/sessions/sessions.json');
     expect(sh).toContain('/home/node/.openclaw/agents/to-do-agent/agent/openclaw-agent.sqlite');

@@ -382,6 +382,12 @@ export class Store {
       -- Tasks the delivery repair made quiet because there was no one to post
       -- to yet (crons.ts retargetImplicitCrons): pointed at the owner's chat
       -- once there is one, instead of staying quiet for good.
+      -- An adopt whose re-point (its files' paths, its scheduled tasks) has
+      -- not run yet: into a stopped agent, or one busy at the time. Runs once
+      -- the agent is running (routes.ts finishDeferredAdopts).
+      CREATE TABLE IF NOT EXISTS adopt_pending (
+        agent_id TEXT PRIMARY KEY, path TEXT NOT NULL, at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS cron_quieted (
         agent_id TEXT NOT NULL, job_id TEXT NOT NULL, at TEXT NOT NULL,
         PRIMARY KEY (agent_id, job_id)
@@ -1125,6 +1131,21 @@ export class Store {
     this.runOnce('2026-09-29-memory-always-shared', () => {
       this.db.exec(`UPDATE agents SET shared_memory = 1 WHERE ops = 0 AND shared_memory = 0`);
     });
+    // v2.124.0–v2.164.1: Start closed a budget's cheaper-model row as the owner's
+    // and an archive as gone, the cheaper model left on, so nothing put the
+    // agent's own back. Reopened while it still runs on that model (its newest
+    // row, none open), the next budget pass restores it under today's rules: a
+    // new month, a raised budget, archived (final audit, 2026-10-22). Not when
+    // its model was changed since the row closed (model_changes records every
+    // change): an owner who chose the cheap model again by hand keeps it.
+    this.runOnce('2026-10-22-budget-cheaper-reopen', () => {
+      this.db.exec(`UPDATE budget_pauses SET resumed_at = NULL, resumed_by = NULL
+        WHERE kind = 'cheaper' AND resumed_by IN ('owner', 'gone') AND to_model IS NOT NULL
+          AND month = (SELECT MAX(p2.month) FROM budget_pauses p2 WHERE p2.agent_id = budget_pauses.agent_id)
+          AND NOT EXISTS (SELECT 1 FROM budget_pauses o WHERE o.agent_id = budget_pauses.agent_id AND o.resumed_at IS NULL)
+          AND EXISTS (SELECT 1 FROM agents a WHERE a.id = budget_pauses.agent_id AND a.state NOT IN ('DELETED', 'DELETING') AND a.model = budget_pauses.to_model)
+          AND NOT EXISTS (SELECT 1 FROM model_changes mc WHERE mc.agent_id = budget_pauses.agent_id AND mc.at > budget_pauses.resumed_at)`);
+    });
     this.runOnce('2026-09-29-dm-policy-unchanged', () => {
       this.db.exec(`DELETE FROM agent_events WHERE event = 'channel.dm_policy' AND CASE WHEN json_valid(detail) THEN json_extract(detail, '$.result') END = 'unchanged'`);
     });
@@ -1275,9 +1296,12 @@ export class Store {
     this.db
       .prepare(`UPDATE agents SET gateway_token = NULL, gateway_port = NULL WHERE id = ?`)
       .run(agentId);
-    for (const t of ['memberships', 'invites', 'data_sources', 'agent_env', 'agent_seed', 'model_call_hours', 'usage_cursor', 'limit_hits', 'token_samples', 'agent_app_pending'] as const) {
+    for (const t of ['memberships', 'invites', 'data_sources', 'agent_env', 'agent_seed', 'model_call_hours', 'usage_cursor', 'limit_hits', 'agent_app_pending'] as const) {
       this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId);
     }
+    // Not token_samples: the daily cost counts a deleted agent's readings on
+    // the days it spent (report B38, 2026-10-22); they hold only numbers and
+    // pruneSourceUsage drops them after a week like everyone's.
     // Night review, 2026-09-27: the five-minute usage slots (a source's chart
     // kept counting a deleted agent for days), claim windows (they carry an
     // invitee's @handle) and the lost-context note. Tables that may not exist
@@ -1355,10 +1379,13 @@ export class Store {
     try {
       const rows = this.db
         .prepare(
-          `SELECT ref FROM secrets
-           WHERE (ref LIKE 'agent-env/%' AND ref NOT IN (SELECT secret_ref FROM agent_env))
-              OR (ref LIKE 'data-source/%' AND ref NOT IN (SELECT secret_ref FROM data_sources WHERE secret_ref IS NOT NULL))
-              OR (ref LIKE 'agent-call-token/%' AND substr(ref, ${'agent-call-token/'.length + 1}) NOT IN (SELECT id FROM agents WHERE state != 'DELETED'))`,
+          `SELECT s.ref FROM secrets s
+           WHERE (s.ref LIKE 'agent-env/%' AND s.ref NOT IN (SELECT secret_ref FROM agent_env))
+              OR (s.ref LIKE 'data-source/%' AND s.ref NOT IN (SELECT secret_ref FROM data_sources WHERE secret_ref IS NOT NULL))
+              OR (s.ref LIKE 'agent-call-token/%' AND substr(s.ref, ${'agent-call-token/'.length + 1}) NOT IN (SELECT id FROM agents WHERE state != 'DELETED'))
+              -- A waiting app's secret values no waiting row names (a delete that
+              -- failed when it went in or was dropped; review, 2026-10-22).
+              OR (s.ref LIKE 'app-pending/%' AND NOT EXISTS (SELECT 1 FROM agent_app_pending p WHERE instr(p.vals, '"' || s.ref || '"') > 0))`,
         )
         .all() as Array<{ ref: string }>;
       const del = this.db.prepare(`DELETE FROM secrets WHERE ref = ?`);
@@ -1661,6 +1688,10 @@ export class Store {
     return (this.db.prepare(`SELECT COUNT(*) AS n FROM agents WHERE state NOT IN ('ARCHIVED', 'DELETED')`).get() as { n: number }).n;
   }
 
+  /** An owner's deleted agents (the rows stay as tombstones), for what they used before they went. */
+  listDeletedAgents(ownerId: string): Agent[] {
+    return (this.db.prepare(`SELECT * FROM agents WHERE owner_id = ? AND state = 'DELETED' ORDER BY created_at`).all(ownerId) as any[]).map(rowToAgent);
+  }
   listAgents(ownerId: string): Agent[] {
     const rows = this.db
       // Ungrouped first, then groups (order applied in JS), each by sort_order.
@@ -3286,15 +3317,17 @@ export class Store {
   }
 
   /** Keep the newest `keep` automatic snapshots; named ones are never pruned. */
-  pruneAutoSnapshots(agentId: string, keep: number): number {
+  /** `spare`: ids an operation still needs (a restore's target), never pruned. */
+  pruneAutoSnapshots(agentId: string, keep: number, spare: string[] = []): number {
+    const marks = spare.map(() => '?').join(',');
     return this.db
       .prepare(
         `DELETE FROM snapshots WHERE agent_id = ? AND reason != 'manual' AND id NOT IN (
            SELECT id FROM snapshots WHERE agent_id = ? AND reason != 'manual'
            ORDER BY created_at DESC LIMIT ?
-         )`,
+         )${spare.length ? ` AND id NOT IN (${marks})` : ''}`,
       )
-      .run(agentId, agentId, keep).changes;
+      .run(agentId, agentId, keep, ...spare).changes;
   }
 
   deleteSnapshotsFor(agentId: string): void {
@@ -3685,6 +3718,12 @@ export class Store {
         s.costLow ?? null, s.costHigh ?? null, new Date().toISOString());
   }
 
+  /** A day's snapshot, only if it has none yet (an existing one is never replaced). */
+  addUsageSnapshotIfMissing(ownerId: string, s: { day: string; totalTokens: number; byBilling: Record<string, number> }): void {
+    this.db.prepare(`INSERT OR IGNORE INTO usage_snapshots (owner_id, day, total_tokens, by_billing, cost_low, cost_high, captured_at) VALUES (?, ?, ?, ?, NULL, NULL, ?)`)
+      .run(ownerId, s.day, Math.round(s.totalTokens), JSON.stringify(s.byBilling), new Date().toISOString());
+  }
+
   // ---- AI-source usage ---------------------------------------------------------
   usageCursor(agentId: string): { lastTs: string; lastOk?: string; lastLimited?: string; lastOkProfile?: string } | undefined {
     const r = this.db.prepare(`SELECT last_ts, last_ok, last_limited, last_ok_profile FROM usage_cursor WHERE agent_id = ?`).get(agentId) as
@@ -3863,6 +3902,10 @@ export class Store {
   claimModelChangeGuard(id: string, proposalId: string): boolean {
     return this.db.prepare(`UPDATE model_changes SET guard_proposal_id = ? WHERE id = ? AND guard_proposal_id IS NULL`).run(proposalId, id).changes === 1;
   }
+  /** Give back a claim whose card could not be written, so the next pass files it. */
+  releaseModelChangeGuard(id: string, proposalId: string): void {
+    this.db.prepare(`UPDATE model_changes SET guard_proposal_id = NULL WHERE id = ? AND guard_proposal_id = ?`).run(id, proposalId);
+  }
   /** Confirmed set_model cards (the start-up backfill reads them; a week is all the table keeps). */
   confirmedModelProposals(): Array<{ id: string; ownerId: string; record: unknown; outcome?: string; resolvedAtMs?: number }> {
     const rows = this.db.prepare(`SELECT id, owner_id, record, outcome, resolved_at_ms FROM mgmt_proposals WHERE status = 'confirmed' ORDER BY resolved_at_ms`)
@@ -3886,15 +3929,41 @@ export class Store {
       ON CONFLICT(agent_id, name) DO UPDATE SET job_id = excluded.job_id, at = excluded.at, message_hash = excluded.message_hash`).run(agentId, name, jobId ?? null, at, messageHash ?? null);
   }
 
+  /** An adopt to re-point once its agent is running; the newest adopt replaces an older one. */
+  setAdoptPending(agentId: string, path: string, at: string): void {
+    this.db.prepare(`INSERT INTO adopt_pending (agent_id, path, at) VALUES (?, ?, ?)
+      ON CONFLICT(agent_id) DO UPDATE SET path = excluded.path, at = excluded.at`).run(agentId, path, at);
+  }
+  /** A newer adopt with nothing to re-point: an older one waiting must not run over it. */
+  dropAdoptPending(agentId: string): void {
+    this.db.prepare(`DELETE FROM adopt_pending WHERE agent_id = ?`).run(agentId);
+  }
+  /** Done: only for that path, so a newer adopt made meanwhile stays. */
+  clearAdoptPending(agentId: string, path: string): void {
+    this.db.prepare(`DELETE FROM adopt_pending WHERE agent_id = ? AND path = ?`).run(agentId, path);
+  }
+  listAdoptPending(): Array<{ agentId: string; path: string; at: string }> {
+    return (this.db.prepare(`SELECT agent_id, path, at FROM adopt_pending ORDER BY at`).all() as Array<{ agent_id: string; path: string; at: string }>)
+      .map((r) => ({ agentId: r.agent_id, path: r.path, at: r.at }));
+  }
+
   /** The agent's tasks made quiet for want of a recipient (crons.ts retargetImplicitCrons). */
   quietedCrons(agentId: string): string[] {
     return (this.db.prepare(`SELECT job_id FROM cron_quieted WHERE agent_id = ? ORDER BY job_id`).all(agentId) as Array<{ job_id: string }>).map((r) => r.job_id);
   }
-  /** Replace that set: what a repair pass says is still waiting. */
-  setQuietedCrons(agentId: string, jobIds: readonly string[], at: string): void {
+  /** One task made quiet when it was created, for want of a recipient (crons.ts addCron). */
+  addQuietedCron(agentId: string, jobId: string, at: string): void {
+    this.db.prepare(`INSERT OR IGNORE INTO cron_quieted (agent_id, job_id, at) VALUES (?, ?, ?)`).run(agentId, jobId, at);
+  }
+  /**
+   * Replace that set: what a repair pass says is still waiting. `from`: the set
+   * the pass started from; only those it settled come off, so a task made quiet
+   * while it ran stays remembered (regression audit, 2026-10-22).
+   */
+  setQuietedCrons(agentId: string, jobIds: readonly string[], at: string, from?: readonly string[]): void {
     this.db.transaction(() => {
       const keep = new Set(jobIds);
-      for (const id of this.quietedCrons(agentId)) if (!keep.has(id)) this.db.prepare(`DELETE FROM cron_quieted WHERE agent_id = ? AND job_id = ?`).run(agentId, id);
+      for (const id of from ?? this.quietedCrons(agentId)) if (!keep.has(id)) this.db.prepare(`DELETE FROM cron_quieted WHERE agent_id = ? AND job_id = ?`).run(agentId, id);
       for (const id of keep) this.db.prepare(`INSERT OR IGNORE INTO cron_quieted (agent_id, job_id, at) VALUES (?, ?, ?)`).run(agentId, id, at);
     })();
   }
@@ -4175,6 +4244,10 @@ export class Store {
     this.db.prepare(`INSERT OR REPLACE INTO usage_alerts (agent_id, owner_id, at, tokens, usual, told, covered) VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(a.agentId, a.ownerId, a.at, Math.round(a.tokens), Math.round(a.usual), a.told ? 1 : 0, a.covered ?? null);
   }
+  /** A warning that failed to send reached its owner on a later try. */
+  markUsageAlertTold(agentId: string, at: string): void {
+    this.db.prepare(`UPDATE usage_alerts SET told = 1 WHERE agent_id = ? AND at = ?`).run(agentId, at);
+  }
   /** Warnings at or after `sinceIso`, newest first; for one owner, or one agent. */
   usageAlertsSince(sinceIso: string, by: { ownerId?: string; agentId?: string; dismissed?: boolean }): Array<{ agentId: string; at: string; tokens: number; usual: number; told: boolean; covered?: string }> {
     const rows = this.db.prepare(
@@ -4203,6 +4276,11 @@ export class Store {
       : this.db.prepare(`UPDATE usage_alerts SET dismissed_at = ? WHERE owner_id = ? AND dismissed_at IS NULL`).run(at, ownerId).changes;
   }
   /** The newest token counter reading for an agent, if any. */
+  /** The newest reading before a time (a day's close, for a day snapshotted late). */
+  latestTokenTotalBefore(agentId: string, beforeIso: string): number | undefined {
+    const r = this.db.prepare(`SELECT total FROM token_samples WHERE agent_id = ? AND at < ? ORDER BY at DESC LIMIT 1`).get(agentId, beforeIso) as { total: number } | undefined;
+    return r?.total;
+  }
   latestTokenTotal(agentId: string): number | undefined {
     const r = this.db.prepare(`SELECT total FROM token_samples WHERE agent_id = ? ORDER BY at DESC LIMIT 1`).get(agentId) as { total: number } | undefined;
     return r?.total;

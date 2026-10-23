@@ -4,7 +4,7 @@
  * a stub docker, so the list stays truthful without needing docker in CI.
  */
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { probeImageCapabilities } from '../src/orchestrator/runtimeCaps.js';
@@ -47,6 +47,19 @@ describe('probeImageCapabilities', () => {
     writeFileSync(join(dirname(docker), 'body'), 'openclaw=SHOULD NOT BE PROBED');
     const caps2 = await probeImageCapabilities('test-image-b:1', { docker });
     expect(caps2).toBe(caps);
+  });
+
+  it('a probe that times out has its container removed, not left running on the daemon (review, 2026-10-22)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-capsdocker-'));
+    const bin = join(dir, 'docker');
+    // `run` hangs (a version command that never returns); every call is logged.
+    writeFileSync(bin, `#!/usr/bin/env bash\necho "$*" >> "$(dirname "$0")/log"\nif [ "$1" = image ]; then echo sha256:3333333333333333; elif [ "$1" = run ]; then exec sleep 30; fi\n`, { mode: 0o755 });
+    await expect(probeImageCapabilities('test-image-d:1', { docker: bin, timeoutMs: 300 })).rejects.toThrow();
+    const log = readFileSync(join(dir, 'log'), 'utf8').trim().split('\n');
+    const run = log.find((l) => l.startsWith('run '))!;
+    const name = /--name (hatchabot-caps-[0-9a-f]+)/.exec(run)?.[1];
+    expect(name).toBeTruthy();
+    expect(log).toContain(`rm -f ${name}`);
   });
 
   it('a tag rebuilt onto another image is probed again, not answered from the cache (#124)', async () => {

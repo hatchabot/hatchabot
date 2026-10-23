@@ -101,4 +101,22 @@ describe('auditBots', () => {
     expect(by.stopbot).toMatchObject({ cls: 'dead' });
     expect((await auditBots({ store, secrets, pool, hostName: 'DGX' }, 'o')).bots.find((b) => b.username === 'stopbot')!.cls).toBe('reclaimable');
   });
+
+  it('a bot whose agent is being built or rebuilt is in use, and its poller is not probed (review, 2026-10-22)', async () => {
+    const { store, secrets, pool } = await fixture();
+    for (const [id, state] of [['reb', 'REBUILDING'], ['prov', 'PROVISIONING']] as const) {
+      store.insertAgent({ id, ownerId: 'o', name: id.toUpperCase(), slug: id, state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: 'x', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+      store.setAgentRuntimeRef(id, `docker://${id}`);
+      if (state === 'REBUILDING') { store.setAgentState(id, 'RUNNING'); store.setAgentState(id, 'REBUILDING'); }
+      store.insertChannel({ id: `c-${id}`, agentId: id, kind: 'telegram', accountId: `${id}bot`, secretRef: `chan/${id}`, deepLink: `https://t.me/${id}bot`, createdAt: 'now' });
+      await secrets.put(`chan/${id}`, `${id}-token`);
+    }
+    const probed: string[] = [];
+    const fetchImpl = (async (u: string | URL) => { if (String(u).includes('/getUpdates')) probed.push(String(u)); return fetchStub(u); }) as typeof fetch;
+    const res = await auditBots({ store, secrets, pool, hostName: 'DGX', fetchImpl }, 'o', { live: true });
+    const by = Object.fromEntries(res.bots.map((b) => [b.username, b]));
+    expect(by.rebbot).toMatchObject({ cls: 'in-use', state: 'REBUILDING' });
+    expect(by.provbot).toMatchObject({ cls: 'in-use', state: 'PROVISIONING' });
+    expect(probed.filter((u) => u.includes('reb-token') || u.includes('prov-token'))).toEqual([]);
+  });
 });

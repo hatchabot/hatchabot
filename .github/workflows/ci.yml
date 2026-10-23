@@ -46,11 +46,13 @@ jobs:
   # its Docker image, which GitHub's Ubuntu runners can run. promote.sh reads
   # this workflow's result, so a failure here also stops a promote.
   ui:
-    # Docker (headless Chrome): a hosted runner in the dev repo too, whose
-    # own runners have no docker; there only for pull requests (D21).
-    if: github.repository == 'hatchabot/hatchabot' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    # Headless Chrome in a container: docker on GitHub's runners, rootless
+    # podman on the dev repo's own (the publish kit's runner/containers.sh
+    # sets it up; they have no docker), so it spends no Actions minutes.
+    runs-on: ${{ github.repository == 'hatchabot/hatchabot' && 'ubuntu-latest' || 'hatchabot-dev' }}
     timeout-minutes: 15
+    env:
+      CONTAINER_CLI: ${{ github.repository == 'hatchabot/hatchabot' && 'docker' || 'podman' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -61,7 +63,7 @@ jobs:
           cache: npm
       - run: npm ci
       # The same digest as CHROME_IMAGE in scripts/ui-clickthrough.mjs (the pin test checks).
-      - run: docker pull zenika/alpine-chrome@sha256:eb3378c1ed0079f94db054a5fe1aaa790a254ec0d6bbc67eda052420d86a179d # latest
+      - run: $CONTAINER_CLI pull docker.io/zenika/alpine-chrome@sha256:eb3378c1ed0079f94db054a5fe1aaa790a254ec0d6bbc67eda052420d86a179d # latest
       - run: npm run test:ui
 
   # Can a database written by an OLDER release be opened by this one?

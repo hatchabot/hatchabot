@@ -195,6 +195,18 @@ describe('cron routes', () => {
     expect(bad.json().error).toContain('bad expression');
   });
 
+  it('PATCH with an edit and enabled: false does both (A18)', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('cron list', { code: 0, stdout: CRON_JSON, stderr: '' });
+    const res = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: { name: 'Quiet scan', enabled: false } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, edited: true, enabled: false });
+    expect(provider.execLog).toContainEqual(['cron', 'edit', 'job-1', '--name', 'Quiet scan']);
+    expect(provider.execLog).toContainEqual(['cron', 'disable', 'job-1']);
+    const odd = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: { name: 'x', enabled: 'no' } });
+    expect(odd.statusCode).toBe(400);
+  });
+
   it('PATCH rejects a missing enabled flag', async () => {
     const { f } = await world();
     const res = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: {} });
@@ -420,6 +432,31 @@ describe('delivery (regression: tasks on a web-only agent failed every run)', ()
     store.setQuietedCrons('a1', ['j1'], 'now');
     p.execResponses.set('cron edit', { code: 1, stdout: '', stderr: 'gateway busy' });
     expect(await retargetImplicitCrons(p, ref, 'kitchen', { channel: 'telegram', to: TG_ID }, store.quietedCrons('a1'))).toEqual({ changed: 0, failed: 1, held: ['j1'] });
+    // A task made quiet while a pass ran (added on the Tasks page) is not forgotten
+    // when the pass writes back what it settled (regression audit, 2026-10-22).
+    const snapshot = store.quietedCrons('a1');
+    store.addQuietedCron('a1', 'j3', 'now');
+    store.setQuietedCrons('a1', [], 'now', snapshot);
+    expect(store.quietedCrons('a1')).toEqual(['j3']);
+  });
+
+  it('a task created before there is anyone to post to is remembered, and announces once the owner is linked (review A17)', async () => {
+    const { retargetImplicitCrons, addCron } = await import('../src/orchestrator/crons.js');
+    const { provider, f, store } = await world();
+    // A Telegram agent whose owner has not messaged it yet: no one to post to.
+    store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'kitchenbot', secretRef: 'channel/a1/bot-token', deepLink: 'https://t.me/kitchenbot', createdAt: 'now' });
+    provider.execResponses.set('cron add', { code: 0, stdout: '{"id":"job-7"}', stderr: '' });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'brief', message: 'm', everyMinutes: 60 } });
+    expect(res.statusCode).toBe(201);
+    expect(provider.execLog.find((a) => a[0] === 'cron' && a[1] === 'add')).toContain('--no-deliver');
+    expect(store.quietedCrons('a1')).toEqual(['job-7']);
+    // Quiet by choice is not remembered: it is the owner's to keep quiet.
+    expect(await addCron(provider, (await store.getAgent('a1'))!.runtimeRef!, 'kitchen', { name: 'q', message: 'm', everyMs: 60_000, announce: false })).toEqual({ ok: true, id: 'job-7' });
+    // The owner is linked: the next repair pass points it at them.
+    provider.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [{ id: 'job-7', name: 'brief', enabled: true, delivery: { mode: 'none' } }] }) });
+    const r = await retargetImplicitCrons(provider, (await store.getAgent('a1'))!.runtimeRef!, 'kitchen', { channel: 'telegram', to: TG_ID }, store.quietedCrons('a1'));
+    expect(r).toEqual({ changed: 1, failed: 0, held: [] });
+    expect(provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit').at(-1)).toEqual(['cron', 'edit', 'job-7', '--announce', '--best-effort-deliver', '--channel', 'telegram', '--to', TG_ID]);
   });
 
   it('an agent with no chat app on an OpenClaw without conversation delivery stays quiet', async () => {

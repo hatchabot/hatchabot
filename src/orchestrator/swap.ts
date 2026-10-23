@@ -114,6 +114,8 @@ export interface CompressedSwap {
   why?: string;
   swapDevices: SwapDevice[];
   zswap?: { enabled: boolean; compressor?: string; zpool?: string; maxPoolPercent?: number;
+    /** The shrinker (6.8+): writes cold compressed pages on to the swap device early. Absent on older kernels, which have none. */
+    shrinker?: boolean;
     /** /proc/meminfo Zswap (pool held in memory) and Zswapped (what it stores), when the kernel reports them. */
     poolBytes?: number; storedBytes?: number };
   zram?: Array<{ device: string; algorithm?: string; origBytes?: number; comprBytes?: number; memUsedBytes?: number }>;
@@ -128,7 +130,7 @@ export const COMPRESSED_SWAP_FIX = 'sudo scripts/enable-compressed-swap.sh (zswa
  * remote and Docker Desktop hosts run it in a one-shot.
  */
 export const SWAP_PROBE_SCRIPT =
-  'for f in enabled compressor zpool max_pool_percent; do printf "zswap.%s=%s\\n" "$f" "$(cat /sys/module/zswap/parameters/$f 2>/dev/null)"; done; ' +
+  'for f in enabled compressor zpool max_pool_percent shrinker_enabled; do printf "zswap.%s=%s\\n" "$f" "$(cat /sys/module/zswap/parameters/$f 2>/dev/null)"; done; ' +
   'echo "--swaps"; cat /proc/swaps 2>/dev/null; echo "--meminfo"; grep -E "^(Zswap|Zswapped):" /proc/meminfo 2>/dev/null; echo "--zram"; ' +
   'for d in /sys/block/zram*; do [ -e "$d/mm_stat" ] || continue; n=${d##*/}; printf "zram.%s.algo=%s\\n" "$n" "$(cat $d/comp_algorithm 2>/dev/null)"; printf "zram.%s.mm=%s\\n" "$n" "$(cat $d/mm_stat 2>/dev/null)"; done; echo "--end"';
 
@@ -158,6 +160,7 @@ export function parseSwapProbe(out: string | undefined): CompressedSwap {
     compressor: kv.get('zswap.compressor') || undefined,
     zpool: kv.get('zswap.zpool') || undefined,
     maxPoolPercent: /^\d+$/.test(kv.get('zswap.max_pool_percent') ?? '') ? Number(kv.get('zswap.max_pool_percent')) : undefined,
+    ...(/^(y|1|n|0)$/i.test(kv.get('zswap.shrinker_enabled') ?? '') ? { shrinker: /^(y|1)$/i.test(kv.get('zswap.shrinker_enabled')!) } : {}),
     poolBytes: meminfoKb('Zswap'),
     storedBytes: meminfoKb('Zswapped'),
   };
@@ -175,6 +178,10 @@ export function parseSwapProbe(out: string | undefined): CompressedSwap {
   const base = { swapDevices, ...(zswap ? { zswap } : {}), ...(zram.length ? { zram } : {}) };
   if (zramSwap.length && !behind.length) return { kind: 'zram', compressed: true, ...base };
   if (zramSwap.length && behind.length && !zswap?.enabled) return { kind: 'none', compressed: false, why: 'This machine has zram and uncompressed disk swap: agents get no swap. Disable the disk swap or enable zswap before granting an allowance.', ...base };
+  // The shrinker writes an idle agent's cold memory — exactly what an allowance
+  // pushes out — on to the disk swap early, so with it on zswap is disk swap
+  // with a delay (audit, 2026-10-22). Kernels before 6.8 have no shrinker.
+  if (zswap?.enabled && behind.length && zswap.shrinker) return { kind: 'none', compressed: false, why: `zswap's shrinker is on: it writes agents' cold memory on to ${behind.map((d) => d.name).join(', ')} early, so agents get no swap. Run ${COMPRESSED_SWAP_FIX}: it turns the shrinker off.`, ...base };
   if (zswap?.enabled && behind.length) return { kind: 'zswap', compressed: true, ...base };
   const why = zswap?.enabled
     ? 'zswap is on, but there is no swap device behind it: agents get no swap.'

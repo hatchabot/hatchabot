@@ -33,6 +33,7 @@ export function sessionsReadShell(slug: string): string {
   const node = [
     'const {DatabaseSync}=require("node:sqlite");',
     `const db=new DatabaseSync(${db},{readOnly:true});`,
+    'if(!db.prepare("select 1 from sqlite_master where type=? and name=?").get("table","session_nodes"))process.exit(4);',
     'const out={};',
     'for(const r of db.prepare("select session_key,entry_json from session_nodes").all()){try{out[r.session_key]=JSON.parse(r.entry_json)}catch(e){}}',
     'process.stdout.write(JSON.stringify(out));',
@@ -40,16 +41,28 @@ export function sessionsReadShell(slug: string): string {
   // Single quotes inside the node script would end the shell quoting; there are none.
   // Neither file (an agent that has never talked) prints {}: "no sessions",
   // told apart from a read that failed and printed nothing (#99).
-  return `if [ -f ${json} ]; then cat ${json}; elif [ -f ${db} ]; then node -e '${node}' 2>/dev/null || true; else printf "{}"; fi`;
+  // The SQLite store first, as webChat.ts reads it: an agent upgraded from
+  // 2026.7 can keep a sessions.json frozen at the upgrade, and read first it
+  // hid every exchange since (review, 2026-10-22). Exit 4 is a store with no
+  // session table (2026.7): then the file.
+  return `if [ -f ${db} ]; then out=$(node -e '${node}' 2>/dev/null); rc=$?; `
+    + `if [ $rc -eq 0 ]; then printf "%s" "$out"; elif [ $rc -eq 4 ] && [ -f ${json} ]; then cat ${json}; elif [ $rc -eq 4 ]; then printf "{}"; fi; `
+    + `elif [ -f ${json} ]; then cat ${json}; else printf "{}"; fi`;
 }
 
 const WEB = new Set(['', 'webchat', 'web', 'internal', 'cli']);
 
-/** Newest activity (ms since epoch) that was not delivered to a messaging app; 0 if none. */
-export function consoleActivity(sessions: Record<string, SessionEntry> | undefined, opts: { webOnly: boolean }): number {
+/**
+ * Newest activity (ms since epoch) that was not delivered to a messaging app; 0 if none.
+ * `keys`: only these conversations — a guest's own, the ones their console
+ * shows them. Every conversation counted, another person's private chat lit
+ * the guest's badge for something they could not open (review, 2026-10-22).
+ */
+export function consoleActivity(sessions: Record<string, SessionEntry> | undefined, opts: { webOnly: boolean; keys?: string[] }): number {
   let newest = 0;
   for (const [key, s] of Object.entries(sessions ?? {})) {
     if (!s || typeof s !== 'object') continue;
+    if (opts.keys && !opts.keys.includes(key)) continue;
     // Scheduled runs on an agent with a bot are delivered there. Only a
     // web-only agent's scheduled output has nowhere else to be read.
     if (key.includes(':cron:') && !opts.webOnly) continue;

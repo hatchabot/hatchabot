@@ -32,6 +32,8 @@ afterEach(() => { for (const c of toClose) { try { c.close(); } catch { /* gone 
 interface FakeGateway {
   port: number;
   http: IncomingHttpHeaders[];
+  /** The path of each HTTP request, as the gateway got it. */
+  urls: string[];
   upgrades: Array<{ url: string; headers: IncomingHttpHeaders }>;
   received: Array<{ identity?: string; method: string; params: any }>;
   /** Scopes the hello grants, by the name Hatchabot sent. */
@@ -52,9 +54,10 @@ const FAKE_UI_CONFIG = JSON.stringify({ basePath: '', communityInvite: true, ter
 
 /** An OpenClaw gateway stand-in: HTTP answers "ok"; a WebSocket gets a challenge, a hello, and an echo per request. */
 async function fakeGateway(): Promise<FakeGateway> {
-  const g: FakeGateway = { port: 0, http: [], upgrades: [], received: [], scopes: () => [], refusedConnects: [], dropAll: () => {}, dropped: [] };
+  const g: FakeGateway = { port: 0, http: [], urls: [], upgrades: [], received: [], scopes: () => [], refusedConnects: [], dropAll: () => {}, dropped: [] };
   const server: Server = createServer((req, res) => {
     g.http.push(req.headers);
+    g.urls.push(req.url ?? '');
     const path = (req.url ?? '').split('?')[0];
     if (path === '/chat') { res.setHeader('content-type', 'text/html; charset=utf-8'); res.setHeader('etag', '"doc"'); res.end(FAKE_DOCUMENT); return; }
     if (path === '/control-ui-config.json') { res.setHeader('content-type', 'application/json'); res.end(FAKE_UI_CONFIG); return; }
@@ -254,11 +257,23 @@ describe('what the gateway is told about the person (HTTP)', () => {
   it("a guest's request for an operator surface is refused here and never reaches the gateway", async () => {
     const { port, gw } = await world();
     const before = gw.http.length;
-    for (const [m, p] of [['POST', '/tools/invoke'], ['GET', '/v1/models'], ['GET', '/mcp'], ['GET', '/systems']] as const) {
+    for (const [m, p] of [
+      ['POST', '/tools/invoke'], ['GET', '/v1/models'], ['GET', '/mcp'], ['GET', '/systems'],
+      // Paths the gateway's new URL() reads as an operator surface, though they start in /assets.
+      ['GET', '/assets/x%5c..%5c..%5csessions/agent:recipe:main/history'], ['GET', '/assets/..%5C..%5Cmetrics'],
+      ['GET', '/assets/.%09./.%09./metrics'],
+    ] as const) {
       const res = await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui${p}`, { method: m, headers: { 'x-hatchabot-owner': GUEST } });
       expect(res.status).toBe(403);
     }
     expect(gw.http.length).toBe(before);
+  });
+
+  it("a guest's path reaches the gateway as it was judged: '//' would be read as a host", async () => {
+    const { port, gw } = await world();
+    const res = await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui//assets/sessions/agent:recipe:main/history?x=1`, { headers: { 'x-hatchabot-owner': GUEST } });
+    expect(res.status).toBe(200);
+    expect(gw.urls.at(-1)).toBe('/assets/sessions/agent:recipe:main/history?x=1');
   });
 
   it('a token gateway (not rebuilt): the owner is sent exactly as before — no name, nothing forwarded', async () => {

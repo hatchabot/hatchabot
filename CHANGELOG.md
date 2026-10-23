@@ -2,6 +2,131 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.164.3] — 2026-10-22
+
+### Fixed
+- **Docs and code comments:** four examples that named one of the maintainer's own agents now describe the agent by its kind. The meaning and dates are unchanged.
+
+### Changed
+For maintainers:
+- The privacy check finds a private name split across a line break, as in wrapped text or a comment that goes on to the next line. This covers the pre-push hook, `--text` for release notes, and CI's `privacy` job. Before, it read a line at a time, and only the publisher's gate found such a name, after the release was tagged.
+
+## [2.164.2] — 2026-10-22
+
+### Fixed
+- **Web chat:** a guest could reach owner-only parts of an agent's console, such as session history, downloads and metrics, through a path written with `\`, `%5c` or a leading `//`. The console proxy now refuses any guest path the agent's gateway would read differently from how it was checked, and forwards only the checked path.
+- **Moves and rebuilds:**
+  - A rebuild waiting in the queue no longer starts an agent that a held move is keeping stopped. That could leave two copies answering one bot.
+  - The 10-minute retry of held moves no longer puts a move you settled back on hold.
+- **Apps:** installing, updating or stopping an app no longer deletes your scheduled tasks whose names start with the app's id. An app owns only the task names its manifest makes.
+- **Budgets:**
+  - A "pause" budget now pauses an agent that never goes quiet, at most 20 minutes after the limit. While it waits, you get the 80% message saying it pauses shortly.
+  - A "cheaper model" switch is no longer permanent when the agent is started by hand or archived while switched. An agent left on the cheaper model that way by an older version gets its own model back on the 1st, or at once if it is archived.
+  - Raising an agent's own "cheaper model" budget no longer switches it back while the machine's "cheaper model" budget is still reached, only to switch it down again on the next pass.
+- **Usage:** the month chart's day bars start at your own midnight, not UTC's.
+- **Report a problem:** the draft now masks the install's public address and a backup folder outside your home folder (as a whole path only, so `docs/backups.md` stays as it is).
+- **Personality editor:** after Revert on a snapshot, the editor reloads once the restore has finished. Before, Save could put the old text back.
+- **Files:** at the public address, a single file's ⬇ and its open-in-a-tab link ask for the second factor again, instead of showing an error.
+- **Settings → Backups:** household members see only the per-agent table. The owner-only controls, which always failed for them, are gone.
+- **Scheduled tasks:** a task made before you had messaged the agent's bot (from a template, the Tasks page or the manager) now starts posting to you once you do, instead of staying silent for good.
+- **Adopt:**
+  - Adopting an agent from OpenClaw 2026.9 now carries its scheduled tasks; if they can't be read, the adopt message says so.
+  - Reminders that run in the agent's main conversation come in as reminders, not as agent turns.
+- **Budgets:** a "cheaper model" switch the agent's runtime refused is no longer counted as made. It is put back and tried again on the next pass. Meanwhile the 80% message says the agent moves shortly; 20 minutes after the limit, the 100% message says the switch did not take, and it is tried hourly after that. Once it takes, one more message says so.
+- **Usage:** models written with their vendor (`anthropic/…`) or a date get the same price as their bare name, instead of "no price known".
+- **Home screen:** unread dots and recent lines read the agent's current session store. A `sessions.json` left behind on agents upgraded from OpenClaw 2026.7 had frozen them at the upgrade.
+- **Shared folders:** a folder that holds a custom backup folder (`HATCHABOT_BACKUP_DIR`), or a folder above it, can no longer be shared with an agent. Backups hold the key to every credential.
+- **Clone:** a copy keeps the original's AI source and machine instead of moving to the defaults.
+- **Web chat:** a guest sending made-up console requests can no longer push an agent's history out.
+- **Access → Verify** shows people still admitted in a Slack channel or Discord server, and **Health** shows a Discord or Slack bot that isn't connected.
+- **Compressed swap:** zswap with its shrinker on no longer counts as compressed swap, because it writes agents' cold memory to the disk swap early. Re-run `scripts/enable-compressed-swap.sh` if your agents' swap is withheld. The docs now say what zswap can still write to the swap file.
+- **Runners:**
+  - A failed image copy no longer leaves `docker save` running on this machine.
+  - Clicking Install image twice starts one copy, not two.
+- **Manager web search** without a Brave key shows each result's description again.
+- **Time zone:** `HATCHABOT_TIMEZONE` takes a zone with digits in its name, such as `EST5EDT`. It used to fall back to the machine's zone.
+- **Install:** the first-run link, and the CLI's address, read a quoted `PORT` ("8123") without its quotes.
+- **Settings file:** the start-up tidy leaves `.env` as it is when moving its lines would change a `$` value for a shell that sources it, or when an `export` value runs over several lines. It used to change the value.
+- **Files:** a file whose name ends in `.constructor` (or another of JavaScript's own names) opens or downloads like any other.
+- **Health:** the settings check lists errors first and counts every finding, with "… and N more" for those not listed. It used to keep the first 20, so an error could be left off.
+- **Icons:** a keycap emoji (1️⃣, #️⃣, *️⃣) can be an agent's icon.
+- **Report a problem:** a private address mapped into IPv6 and written in hex after `::ffff:` is masked like its dotted form.
+- **API:** a fractional `limit` (`?limit=1.5`) is a whole page size, not a server error (model changes, events, operations, scorecard, token health, task runs, transcript).
+- **Sign-in:** a header of the right length in characters but not in bytes is refused rather than answered with a server error.
+- **App shell:** the offline shell's service worker deletes only its own older caches, not caches another page on the same address keeps (an agent's console).
+- **Files:** an upload with a name of up to 255 bytes now works (a long name had no room for the staging suffix); a failed upload no longer leaves a `.part` file behind; and an upload without overwrite no longer replaces a file that appeared while it was being sent.
+- **Adopt:** a workspace given as `~/…` has its absolute paths rewritten too; a sibling folder such as `/data/work+archive` is no longer rewritten as the workspace; and a path with an apostrophe is quoted rather than skipped.
+- **Adopt:** a workspace adopted into a stopped (or busy) agent now has its paths and scheduled tasks brought over once the agent is running; before, the answer said "deferred" and nothing came. If the agent's gateway does not answer yet it looks again hourly for a day of the agent running, without holding the agent up meanwhile, and tells you about tasks that still could not come.
+- **Adopt:** the copy re-checks each file before and after packing it, and refuses when one was replaced by a link (or its folder by one) since the look.
+- **Adopt:** the scan for folders an adopted agent depends on reads at most 400 files, even all in one folder, and at most 1 MB of each.
+- **Chat history:** a damaged record in the agent's database is no longer dropped in silence: the export says how many were left out.
+- **Clones:** notes up to eight folders deep under memory/ are copied, and a deeper folder is listed among the files not copied.
+- **Derived images:** a `<<` inside quotes, such as `RUN echo "use <<EOF"`, no longer counts as an open heredoc.
+- **Templates:**
+  - A setup field keyed like a built-in name (`constructor`) no longer breaks an import or writes odd text into the copy.
+  - A required setup field no longer accepts an answer of only spaces.
+  - An export with a scheduled task longer than 4,000 characters is refused, naming the task. Before, the task was cut short without a word.
+  - The personal-data warning now also reads task names and setup-field labels and options.
+- **Apps:**
+  - A required config field keyed like a built-in name is asked for.
+  - A field made required asks again for a value left blank while it was optional.
+  - Defaults are held to their field's type, like values given.
+  - A settings change on the same release runs its tests in a copy, so a failing test can't change the running app.
+  - Update works after the app repo's default branch is renamed.
+  - A waiting install's secret values are stored all or none; replacing a waiting install that fails part way leaves the waiting one's values as they were. One whose delete failed is removed at the next start.
+- **Master and children:**
+  - Pushing a master with no setup fields left takes the old ones off its children.
+  - A push that fails part way puts back what it wrote to the child.
+- **Scheduled tasks:** a change that both edits a task and turns it off (or on) now does both; the switch was ignored.
+- **Moving an agent:** when the source machine's images can't be read for a moment, its pinned image is no longer rebuilt elsewhere without the packages its labels list; the move says to try again.
+- **Snapshots:** the safety snapshot a restore takes at the 20-snapshot limit no longer prunes the snapshot being restored, so an interrupted restore can still be finished.
+- **Templates:** a template's scheduled tasks are no longer added a second time when the agent's task list can't be read during a build; they wait for the next build.
+- **Weekly token review:** the review task is made in the agents' time zone (`HATCHABOT_TIMEZONE`), not the machine's. Turning it off removes it under its old name as well as its new one.
+- **Context cap:** taking a cap off a model whose id has slashes of its own (`provider/vendor/model`) now removes it from the right entry.
+- **Model ledger:**
+  - Two model changes within one hour no longer report "0 turns since the switch". The first is "not enough data" because it was changed again within the hour.
+  - A switch-back card that can't be written (a full disk) is filed on the next pass instead of never.
+- **Adopt:** running Adopt again, or retrying it, no longer adds the old install's tasks a second time. An interval that isn't whole seconds is reported as not brought over rather than rounded to another interval.
+- **Budgets:** an agent paused by its own budget no longer starts again when that budget is raised while the machine's budget is still used up.
+- **Adopt:** the data-folder scan finds a folder named in quotes whose name has a space (`"/home/you/My Documents"`).
+- **Token-use warnings:** a warning that failed to send is tried again every hour until it reaches the owner, rather than counted as told for a day.
+- **Download copy and moves:** an agent's own memory cap and swap allowance now travel with it, applied under the receiving machine's rules.
+- **Usage:** on a busy machine, each usage pass starts with the agents sampled longest ago, so the same ones are no longer left out pass after pass.
+- **Alerts:** an older loop that is still going is listed however many newer ones have cleared.
+- **Stale runtime pins:** the cleanup reads all of an agent's conversations, not only the first 500.
+- **Usage trend:**
+  - Deleting an agent no longer lowers the cost already recorded for that day.
+  - A missing day after Hatchabot was down at midnight is filled in.
+  - An agent's tokens on two API sources are priced at each source's own model.
+- **Logs, files and reports:** a slow answer no longer lands in what you opened since. The logs and setup log show the agent open now, a file save no longer closes the editor you opened meanwhile, and a report save no longer changes the draft you switched to.
+- **Google accounts:** a removal is no longer counted as done when gog lists accounts in a shape Hatchabot cannot read.
+- **Chat app doors:** a Discord or Slack invite window no longer keeps the Telegram door open after the owner's first message is claimed. A pairing read that fails no longer ends the watch for a first message: it is tried again.
+- **Sleep:** an agent no longer goes to sleep just after a conversation that finished while the idle check ran.
+- **Web chat:** turning web chat off for a guest during a wake now stops the message that woke the agent.
+- **What it can reach:**
+  - Verify now finds a Discord or Slack bot running another token, as it did for Telegram.
+  - A chat app or account that is turned off no longer counts as letting someone in.
+- **Clone:** a credential whose value could not be read is now named in the clone's message, not left out in silence.
+- **Bots:** the census no longer calls a bot reclaimable, or polls it, while its agent is being built or rebuilt.
+- **Unread:** a web-chat guest's unread mark now follows only their own conversation.
+- **Runtime tab:** a capability probe that times out no longer leaves its container running.
+- **Adopt:** tasks made in the old install without `--agent` come with its default agent, as OpenClaw runs them.
+- **Apps:** an update that needs a value it has not got asks for it on the agent's page, under the app's row.
+
+### Changed
+For maintainers:
+- `scripts/promote.sh` promotes only a release whose GitHub release is published and has its manifest.
+- `scripts/promote.sh` refuses while a release that is tagged but not yet published would move the channel back.
+- `scripts/promote.sh` says so when the pull request is still open after `land.sh` stops waiting.
+- `scripts/promote.sh` writes the rollback statement the publisher's gate asks for.
+- `scripts/release.sh` refuses to tag a commit whose `channels.json` is behind.
+- `promote-images.yml` refuses a backwards move that is not a fast-lane commit, and fails when a channel names a release that is missing or still a draft.
+- Each tag's release workflow runs on its own, so a third tag can no longer cancel a waiting release.
+- The live-test gate counts a failure after a pass.
+- `scripts/land.sh` waits when it can't read the Actions runs or the commit statuses, or when no CI run has started yet, instead of merging on the other source alone.
+- The upgrade check covers the newest release.
+- `scripts/release.sh` refuses a pre-release version (the publisher publishes `vX.Y.Z` only, so its tag would never reach the public repo), and the public repo's release workflow takes the same versions `release-check.sh` does.
+
 ## [2.164.1] — 2026-10-17
 
 ### Changed

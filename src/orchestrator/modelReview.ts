@@ -4,6 +4,7 @@ import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 import { addCron, cronTargetFor, deleteCron, listCrons } from './crons.js';
 import { OPS_MODEL_REVIEW_MESSAGE } from '../ops/opsAgent.js';
+import { agentTimeZone } from './timezone.js';
 
 /**
  * The management agent's weekly token review (docs/features.md, "Right-size"
@@ -56,9 +57,13 @@ export async function syncModelReviewCron(
     // So the task list is read even then (a build with the review off only).
     const jobs = await listCrons(provider, runtimeRef, agent.slug).catch(() => undefined);
     if (!jobs) return mine ? 'failed' : 'off';
-    const job = jobs.find((j) => (mine?.jobId && j.id === mine.jobId) || isOurs(j.name));
-    if (!mine && !job) return 'off';
-    if (job && !(await deleteCron(provider, runtimeRef, job.id).catch(() => false))) return 'failed';
+    // Every one: a volume imported or restored can hold the task under both
+    // names, and removing one left the other running (B28, 2026-10-22).
+    const ours = jobs.filter((j) => (mine?.jobId && j.id === mine.jobId) || isOurs(j.name));
+    if (!mine && !ours.length) return 'off';
+    for (const job of ours) {
+      if (!(await deleteCron(provider, runtimeRef, job.id).catch(() => false))) return 'failed';
+    }
     store.deleteManagedCron(agent.id, MODEL_REVIEW_NAME);
     store.deleteManagedCron(agent.id, LEGACY_REVIEW_NAME);
     deps.log?.('schedule.model_review_removed', { agentId: agent.id });
@@ -95,10 +100,12 @@ export async function syncModelReviewCron(
     name: MODEL_REVIEW_NAME,
     message: OPS_MODEL_REVIEW_MESSAGE,
     cron: MODEL_REVIEW_CRON,
-    tz: Intl.DateTimeFormat().resolvedOptions().timeZone || undefined,
+    // The agents' zone (HATCHABOT_TIMEZONE), not the machine's (B03, 2026-10-22).
+    tz: agentTimeZone(),
     deliverTo: cronTargetFor(store, agent),
   }).catch(() => ({ ok: false as const, error: 'exec failed' }));
   if (!out.ok) { deps.log?.('schedule.model_review_failed', { agentId: agent.id, error: out.error }); return 'failed'; }
+  if (out.quieted && out.id) store.addQuietedCron(agent.id, out.id, now);
   remember(out.id, now, hash);
   deps.log?.('schedule.model_review_created', { agentId: agent.id });
   return 'created';

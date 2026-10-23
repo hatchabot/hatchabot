@@ -213,6 +213,9 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
   return { calls, limited };
 }
 
+/** When each agent's last sample began (in memory: after a restart, list order once). */
+const lastStarted = new Map<string, number>();
+
 /** One pass over every running agent: new model calls since last time + a token sample. */
 export async function sampleSourceUsage(deps: SampleDeps, now = Date.now()): Promise<{ agents: number; calls: number; limited: number }> {
   const { store } = deps;
@@ -224,9 +227,15 @@ export async function sampleSourceUsage(deps: SampleDeps, now = Date.now()): Pro
   // once the pass has run long enough (audit 2026-09-16).
   const deadline = Date.now() + PASS_BUDGET_MS;
   const running = store.listAllActiveAgents().filter((a) => a.state === 'RUNNING' && a.runtimeRef);
-  const queue = [...running];
+  // Longest unsampled first: in the same order every pass, slow agents at the
+  // front ran out the deadline and the same ones at the back were never
+  // sampled (report A42, 2026-10-22).
+  const ids = new Set(running.map((a) => a.id));
+  for (const id of lastStarted.keys()) if (!ids.has(id)) lastStarted.delete(id);
+  const queue = [...running].sort((x, y) => (lastStarted.get(x.id) ?? 0) - (lastStarted.get(y.id) ?? 0));
   const one = async (a: (typeof running)[number]): Promise<void> => {
     if (!a.runtimeRef) return;
+    lastStarted.set(a.id, Date.now());
     agents++;
     const r = await sampleAgentUsage(deps, a, now);
     calls += r.calls; limited += r.limited;

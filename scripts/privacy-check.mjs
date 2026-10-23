@@ -180,6 +180,11 @@ export function privateValues({ db, envFiles, machine = true, gaps = [], notes =
 
 // ---- matching ------------------------------------------------------------------
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// Between a value's words: spaces, or one line break and what starts the next
+// line (indent, a comment's * // #, a quote's >). Wrapped text split names
+// across lines and only the publisher's gate saw them (2026-10-22); its rule
+// is the same, a value split across one line break.
+const GAP = '(?:[^\\S\\n]+|[^\\S\\n]*\\r?\\n[^A-Za-z0-9\\n]*)';
 /** One matcher per value: names as written, the rest in any case; whole words. */
 function matchers(values) {
   return [...values].map(([value, meta]) => {
@@ -187,7 +192,10 @@ function matchers(values) {
     const caseless = !meta.secret && !named;
     const edge = meta.secret ? '' : '(?<![A-Za-z0-9])';
     const tail = meta.secret ? '' : '(?![A-Za-z0-9])';
-    return { value, ...meta, low: value.toLowerCase(), re: new RegExp(edge + esc(value) + tail, caseless ? 'i' : '') };
+    const body = meta.secret ? esc(value) : value.split(/\s+/).map(esc).join(GAP);
+    // `look` is the quick look before the pattern: the first word, as a gap may come after it.
+    const look = (meta.secret ? value : value.split(/\s+/)[0]).toLowerCase();
+    return { value, ...meta, low: value.toLowerCase(), look, re: new RegExp(edge + body + tail, caseless ? 'i' : '') };
   });
 }
 export const mask = (value) => `${value.slice(0, 2)}…(${value.length})`;
@@ -196,7 +204,7 @@ export function scan(text, where, ms) {
   const low = text.toLowerCase();
   const out = [];
   for (const m of ms) {
-    if (!low.includes(m.low)) continue;
+    if (!low.includes(m.look)) continue;
     const r = m.re.exec(text);
     if (!r) continue;
     const line = text.slice(0, r.index).split('\n').length;
@@ -379,22 +387,34 @@ function prePush() {
   let binary = 0;
   for (const c of commits) {
     const short = c.slice(0, 7);
-    const show = git(cwd, 'show', '--format=%B%x00', '--unified=0', '--no-color', '--no-ext-diff', c).stdout;
+    // One line of context: a name split across a line break may join a new line to an old one.
+    const show = git(cwd, 'show', '--format=%B%x00', '--unified=1', '--no-color', '--no-ext-diff', c).stdout;
     const [msg, diff = ''] = show.split('\0');
     hits.push(...scan(withoutOwnTrailers(msg, allowed), `commit ${short} message`, ms));
     hits.push(...scan(git(cwd, 'show', '-s', '--format=%an%n%ae%n%cn%n%ce', c).stdout, `commit ${short} author/committer`, people));
     for (const f of git(cwd, 'show', '--format=', '--name-only', '--no-renames', '--diff-filter=d', c).stdout.split('\n').filter(Boolean)) hits.push(...scan(f, `file name (commit ${short})`, ms));
-    let file = '?', line = 0;
+    let file = '?', line = 0, prev = null;
+    const text = (l) => file === IDENTITY_FILE ? withoutAllowedLines(l, allowed) : l;
+    // A value split across the break between two lines, one of them new: only what neither line has alone.
+    const across = (a, b) => {
+      const alone = new Set([...scan(a.text, '', ms), ...scan(b.text, '', ms)].map((x) => x.cat + x.shown));
+      for (const x of scan(`${a.text}\n${b.text}`, `${file} (commit ${short})`, ms)) {
+        if (!alone.has(x.cat + x.shown)) hits.push({ ...x, line: a.line });
+      }
+    };
     for (const l of diff.split('\n')) {
-      if (l.startsWith('+++ ')) { file = l.slice(4).replace(/^b\//, ''); continue; }
-      if (/^Binary files .* differ$/.test(l)) continue; // read whole, below
+      if (l.startsWith('+++ ')) { file = l.slice(4).replace(/^b\//, ''); prev = null; continue; }
+      if (/^Binary files .* differ$/.test(l)) { prev = null; continue; } // read whole, below
       const h = /^@@ -\S+ \+(\d+)/.exec(l);
-      if (h) { line = Number(h[1]); continue; }
-      if (l.startsWith('+')) {
-        const added = file === IDENTITY_FILE ? withoutAllowedLines(l.slice(1), allowed) : l.slice(1);
-        for (const x of scan(added, `${file} (commit ${short})`, ms)) hits.push({ ...x, line });
+      if (h) { line = Number(h[1]); prev = null; continue; }
+      if (l.startsWith('+') || l.startsWith(' ')) {
+        const cur = { text: text(l.slice(1)), line, added: l.startsWith('+') };
+        if (cur.added) for (const x of scan(cur.text, `${file} (commit ${short})`, ms)) hits.push({ ...x, line });
+        if (prev && (prev.added || cur.added)) across(prev, cur);
+        prev = cur;
         line++;
       }
+      // A removed line is not in the new file: the lines around it are neighbours there.
     }
     // Files git treats as binary: the text inside them (#9 of the 2026-10-10 review).
     const numstat = git(cwd, 'show', '--format=', '--numstat', '--no-renames', '--diff-filter=d', '-z', c).stdout.split('\0');
@@ -610,12 +630,13 @@ function publicUrl() {
  * ~/.config/hatchabot/secrets.token (HATCHABOT_SECRETS_TOKEN_FILE) when there
  * is one — a fine-grained token that can only write the public repos'
  * Actions and Dependabot secrets, since the everyday one cannot write them —
- * else gh's own login.
+ * else gh's own login. `via` says which, for a failure to name: a token
+ * saved anywhere else is silently not used (2026-10-20).
  */
 function secretsTokenEnv() {
   const f = process.env.HATCHABOT_SECRETS_TOKEN_FILE || join(homedir(), '.config', 'hatchabot', 'secrets.token');
-  if (!existsSync(f)) return process.env;
-  return { ...process.env, GH_TOKEN: readFileSync(f, 'utf8').trim() };
+  if (!existsSync(f)) return { env: process.env, via: `gh's own login: there is no ${f}` };
+  return { env: { ...process.env, GH_TOKEN: readFileSync(f, 'utf8').trim() }, via: `the token in ${f}` };
 }
 
 /**
@@ -661,11 +682,11 @@ function syncCi() {
   // Twice: for Actions, and for Dependabot — its pull requests get only
   // Dependabot secrets, so without this their required privacy check could
   // never pass (2026-10-10).
-  const env = secretsTokenEnv();
+  const { env, via } = secretsTokenEnv();
   for (const app of ['actions', 'dependabot']) {
     const set = spawnSync('gh', ['secret', 'set', SECRET_NAME, '--repo', repo, '--app', app], { input: r.json, encoding: 'utf8', env });
     if (set.error || set.status !== 0) {
-      console.log(`✗ privacy fingerprints: not sent to ${app} — gh secret set failed (${(set.stderr || String(set.error?.message ?? '')).trim().split('\n')[0] || `exit ${set.status}`})`);
+      console.log(`✗ privacy fingerprints: not sent to ${app} — gh secret set failed (${(set.stderr || String(set.error?.message ?? '')).trim().split('\n')[0] || `exit ${set.status}`}; with ${via})`);
       return FOUND;
     }
   }

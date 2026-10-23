@@ -1,6 +1,7 @@
 import { allowedPeerAddress, pinnedPeerFetch, type PeerFetch } from './peerAddress.js';
 import { GuestConsoleLog } from './guestConsoleLog.js';
 import { deviceLabel } from './publicAccess.js';
+import { hostOf, publicConfig } from './safeguards.js';
 import { stopAndConfirm } from '../orchestrator/quiesce.js';
 import { AppError, fieldsToAsk, hostGit, installRelease, manifestAt, mergeConfig, mirrorDir, outcome, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
 import { agentTimeZone } from '../orchestrator/timezone.js';
@@ -136,7 +137,7 @@ import { scanWorkspacePaths } from '../orchestrator/dataPaths.js';
 import {
   migrateCrons,
   openclawAgentEntryForWorkspace,
-  readOpenclawCrons,
+  readOpenclawCronStore,
   rewriteWorkspaceFiles,
   selfPathReplacements,
 } from '../orchestrator/cronImport.js';
@@ -145,6 +146,7 @@ import {
   exportTemplate,
   importTemplate,
   parseTemplate,
+  pushedParameters,
   readCloneMemory,
   resolveParamValues,
   TemplateParamSchema,
@@ -178,6 +180,13 @@ const MAX_REBUILD_CONCURRENCY = 12;
  *  (already compressed, or sent with a length the client checks) and the
  *  console proxy (review, 2026-09-29). */
 const NO_COMPRESS = { compress: false } as const;
+/** A page size from the query: a whole number in 1–max, else `def`. A
+ *  fractional one reached SQLite's LIMIT as 1.5 and failed with a 500
+ *  (audit, 2026-10-22). */
+function queryLimit(raw: unknown, def: number, max: number): number {
+  const n = Math.floor(Number(raw));
+  return Number.isFinite(n) && n >= 1 ? Math.min(max, n) : def;
+}
 function clampConcurrency(raw: string | undefined): number {
   const n = Math.floor(Number(raw));
   return Number.isFinite(n) && n >= 1 ? Math.min(MAX_REBUILD_CONCURRENCY, n) : 6;
@@ -221,7 +230,7 @@ import type { Agent, AIProfile, Channel } from '../domain/types.js';
 import { LOCAL_OWNER, ownerIdOf, principalOf } from './principal.js';
 import { registerWebChatRoutes, webChatBusy } from './webChat.js';
 import {
-  forwardedClientAddress, GUEST_VIEW_SCRIPT, GUEST_VIEW_SCRIPT_PATH, guestControlUiConfig, guestHttpAllowed, spliceGuest,
+  forwardedClientAddress, GUEST_VIEW_SCRIPT, GUEST_VIEW_SCRIPT_PATH, guestControlUiConfig, guestHttpPath, spliceGuest,
   stripClientIdentity, withConsoleIdentity, withGuestView,
 } from './consoleProxy.js';
 import { ConsoleAccess } from '../orchestrator/consoleAccess.js';
@@ -238,6 +247,17 @@ import {
   SnapshotError,
   writeFileInAgent,
 } from '../orchestrator/snapshots.js';
+
+/** What an adopt says about the source's scheduled tasks. */
+type AdoptCrons = { total: number; carried: number; failed: number; deferred?: number; error?: string; notReady?: boolean };
+/** How long a deferred adopt waits for its agent's gateway to answer, from the first pass that
+ *  found the agent running, before its tasks count as failed. */
+const ADOPT_WAIT_MS = 24 * 3600_000;
+/** A deferred adopt whose gateway did not answer is looked at again this often, not every pass. */
+const ADOPT_RETRY_MS = 3600_000;
+/** Deferred adopts already said to be waiting for their gateway (said once). */
+const adoptWaitSaid = new Set<string>();
+
 
 export interface ApiDeps {
   store: Store;
@@ -1126,11 +1146,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * agent may have moved (another host, or another Hatchabot), been deleted,
    * or been stopped or put to sleep while it waited. Rebuilding then started
    * a second copy on the old daemon polling the same bot, or undid the Stop
-   * (night review, 2026-09-27).
+   * (night review, 2026-09-27). A long operation begun while it waited (a
+   * move held for its owner) keeps the copy stopped: judged again at the
+   * turn, not only when it was queued (audit, 2026-10-20).
    */
-  const staleRebuild = (was: Agent, now: Agent | undefined): string | undefined => {
+  const staleRebuild = (was: Agent, now: Agent | undefined, opId: string): string | undefined => {
     if (rebuildCancelled.has(was.id)) return 'called off by delete or archive';
     if (!now || now.state === 'DELETED' || now.state === 'ARCHIVED') return 'deleted or archived';
+    { const onDisk = store.activeOperationFor(was.id); if (onDisk && onDisk.id !== opId) return `${KIND_LABEL[onDisk.kind] ?? onDisk.kind} is not over`; }
     if (now.migratedTo && !was.migratedTo) return 'moved to another Hatchabot';
     if (now.hostId !== was.hostId || now.runtimeRef !== was.runtimeRef) return 'moved to another machine';
     if (was.state === 'RUNNING' && now.state === 'STOPPED') return now.hibernatedAt ? 'put to sleep' : 'stopped by its owner';
@@ -1180,7 +1203,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       rebuildQueued.delete(agentId);
       try {
         const now = store.getAgent(agentId);
-        const stale = staleRebuild(agent, now);
+        const stale = staleRebuild(agent, now, op.id);
         if (stale) { trace(agentId)('rebuild.skipped', { why: stale }); op.rolledBack(`Not rebuilt: ${stale}.`); return; }
         op.start();
         let rebuilt: Agent;
@@ -2370,7 +2393,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           const from = a.model ?? null;
           const before = snapshotModels(store, [a.id]);
           store.setAgentModel(a.id, cheapest);
-          await applyModelToRuntime(a.id).catch(() => 'failed' as const);
+          // A switch the runtime refused is not a switch: the record goes back and
+          // the budget tries again next pass, its 100% message waiting (budgets.ts).
+          // Counted as made, it kept spending on the dearer model while the owner
+          // was told it had moved (review, 2026-10-22).
+          if ((await applyModelToRuntime(a.id).catch(() => 'failed' as const)) === 'failed') {
+            store.setAgentModel(a.id, from);
+            throw new Error(`the runtime did not take ${cheapest}`);
+          }
           recordChanges(store, before, { by: 'hatchabot', via: 'budget', source: 'budget', why: 'Its monthly budget was reached: the cheapest model its source offers, until the 1st.' });
           return { from, to: cheapest };
         },
@@ -2380,11 +2410,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           const back = pin && !modelOverrideProblem(profile, pin) ? pin : null;
           const before = snapshotModels(store, [a.id]);
           store.setAgentModel(a.id, back);
+          // Unlike the switch down, a runtime that refuses this keeps the record:
+          // its own model is what it should run, the page shows it as waiting
+          // (pendingModel), and the next rebuild puts it on. Kept cheap, a pause
+          // over it would replace the record that remembers its own model.
           await applyModelToRuntime(a.id).catch(() => 'failed' as const);
           recordChanges(store, before, { by: 'hatchabot', via: 'budget', source: 'budget', why: 'Back to its own model: a new month, or its budget raised.' });
           return true;
         },
         log: (event, detail) => { trace(String(detail.agentId ?? 'admin'))(event, detail); },
+        warn: (event, detail) => { app.log.warn(detail, event); },
       }, Date.now(), opts).catch((err) => { app.log.warn({ err: String(err) }, 'budget.pass_failed'); });
     };
     const p = go().finally(() => { if (budgetPassing === p) budgetPassing = null; });
@@ -2591,28 +2626,36 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!copy || copy.job.done) {
       const image = process.env.HATCHABOT_IMAGE ?? 'hatchabot-runtime:latest';
       const local = store.localHostId();
-      const total = local ? (await providerFor(local).listImageTags().catch(() => []))
-        .find((t) => t.tag === image)?.size : undefined;
-      const job: ImageCopy = { startedAt: new Date().toISOString(), bytes: 0, total: total ? parseByteSize(total) || undefined : undefined, done: false };
-      trace()('host.image_copy_started', { host: host.id, image });
-      // On disk (operations.ts): a restart in the middle leaves "interrupted —
-      // Install again", and the Activity list shows it (GET /v1/events).
-      const op = beginOperation(store, 'install-image', null, { image, host: host.name }, { hostId: host.id, requestedBy: ownerIdOf(req) });
-      // A runner on another CPU pulls the published image of the same OpenClaw
-      // instead (installRuntimeImage): the one this release's manifest names,
-      // by digest (#47, 2026-10-10); by tag only for a release made before manifests.
-      const version = local ? (await providerFor(local).currentImageInfo().catch(() => undefined))?.openclawVersion : undefined;
-      const found = version && /^\d{4}\.\d+\.\d+(?:-\d+)?$/.test(version) ? await publishedRuntimeImage(version) : undefined;
-      const published = found && !('problem' in found) ? found : undefined;
-      const unpublished = found && 'problem' in found ? found.problem : undefined;
-      const finished = installRuntimeImage(dockerHost, { image, total: job.total, published, unpublished, onProgress: (p) => { job.bytes = p.bytes; } })
-        .then((r) => {
-          Object.assign(job, { done: true, ok: r.ok, error: r.ok ? undefined : `Image install failed: ${r.error}`, finishedAt: new Date().toISOString(), ...(r.pulled ? { pulled: r.pulled } : {}) });
-          trace()(r.ok ? 'host.image_copied' : 'host.image_copy_failed', { host: host.id, bytes: job.bytes, ...(r.pulled ? { pulled: r.pulled } : {}), ...(r.ok ? {} : { error: r.error }) });
-          if (r.ok) op.done(r.pulled ? `${host.name} pulled the published image ${r.pulled}.` : `The runtime image was copied to ${host.name} (${(job.bytes / 1e9).toFixed(1)} GB).`);
-          else op.fail(job.error ?? 'Image install failed.', INSTALL_AGAIN);
-          return job;
-        });
+      const job: ImageCopy = { startedAt: new Date().toISOString(), bytes: 0, done: false };
+      // The copy is this runner's from here, before anything is awaited: two
+      // requests at once (a double click, two tabs) both found none and started
+      // two multi-GB copies (audit, 2026-10-22).
+      const finished = (async () => {
+        const total = local ? (await providerFor(local).listImageTags().catch(() => []))
+          .find((t) => t.tag === image)?.size : undefined;
+        job.total = total ? parseByteSize(total) || undefined : undefined;
+        trace()('host.image_copy_started', { host: host.id, image });
+        // On disk (operations.ts): a restart in the middle leaves "interrupted —
+        // Install again", and the Activity list shows it (GET /v1/events).
+        const op = beginOperation(store, 'install-image', null, { image, host: host.name }, { hostId: host.id, requestedBy: ownerIdOf(req) });
+        // A runner on another CPU pulls the published image of the same OpenClaw
+        // instead (installRuntimeImage): the one this release's manifest names,
+        // by digest (#47, 2026-10-10); by tag only for a release made before manifests.
+        const version = local ? (await providerFor(local).currentImageInfo().catch(() => undefined))?.openclawVersion : undefined;
+        const found = version && /^\d{4}\.\d+\.\d+(?:-\d+)?$/.test(version) ? await publishedRuntimeImage(version) : undefined;
+        const published = found && !('problem' in found) ? found : undefined;
+        const unpublished = found && 'problem' in found ? found.problem : undefined;
+        const r = await installRuntimeImage(dockerHost, { image, total: job.total, published, unpublished, onProgress: (p) => { job.bytes = p.bytes; } });
+        Object.assign(job, { done: true, ok: r.ok, error: r.ok ? undefined : `Image install failed: ${r.error}`, finishedAt: new Date().toISOString(), ...(r.pulled ? { pulled: r.pulled } : {}) });
+        trace()(r.ok ? 'host.image_copied' : 'host.image_copy_failed', { host: host.id, bytes: job.bytes, ...(r.pulled ? { pulled: r.pulled } : {}), ...(r.ok ? {} : { error: r.error }) });
+        if (r.ok) op.done(r.pulled ? `${host.name} pulled the published image ${r.pulled}.` : `The runtime image was copied to ${host.name} (${(job.bytes / 1e9).toFixed(1)} GB).`);
+        else op.fail(job.error ?? 'Image install failed.', INSTALL_AGAIN);
+        return job;
+      })().catch((e: unknown) => {
+        // Never left "under way" for good: the next request starts again.
+        Object.assign(job, { done: true, ok: false, error: `Image install failed: ${e instanceof Error ? e.message : String(e)}`, finishedAt: new Date().toISOString() });
+        return job;
+      });
       copy = { job, finished };
       imageCopies.set(host.id, copy);
     }
@@ -3108,7 +3151,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const retargetAgentCrons = async (a: Agent & { runtimeRef: string }, why: 'sweep' | 'quick') => {
     const held = store.quietedCrons(a.id);
     const r = await retargetImplicitCrons(providerFor(a.hostId), a.runtimeRef, a.slug, cronTargetFor(store, a), held);
-    if (held.length || r.held.length) store.setQuietedCrons(a.id, r.held, new Date().toISOString());
+    if (held.length || r.held.length) store.setQuietedCrons(a.id, r.held, new Date().toISOString(), held);
     if (r.changed || r.failed) trace(a.id)('cron.retargeted', { changed: r.changed, failed: r.failed, ...(r.held.length ? { waiting: r.held.length } : {}), ...(why === 'quick' ? { quick: true } : {}) });
   };
   /**
@@ -3177,12 +3220,126 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * changing. Tasks a pass could not change are not tried again until they
    * change: the signature of what was due is kept per agent.
    */
+  /**
+   * Point an adopted workspace's OWN absolute paths (its old workspace and
+   * agentDir) at the container copy, in both its files and its crons, so
+   * references resolve. Best-effort: it never fails the adopt itself. Held
+   * under the busy guard (the long cron migration must not race a rebuild or
+   * a delete), and only for a RUNNING agent: against a stopped one the cron
+   * gateway never answers. Undefined when another operation held the agent;
+   * the pending record stays for the next try. `deferred`: run from the
+   * pending list, so only while that adopt is still the agent's pending one
+   * (a newer adopt made since replaced or dropped it), with a short readiness
+   * poll. `wait`: a gateway not answering yet keeps the record for a later
+   * pass (finishDeferredAdopts decides, within its day). Otherwise, as for an
+   * adopt into a running agent (its answer says the tasks were not carried),
+   * the record goes (final audit, 2026-10-22).
+   */
+  const repointAdopted = async (agent: Agent, path: string, deferred = false, wait = false): Promise<AdoptCrons | undefined> => {
+    let crons: AdoptCrons = { total: 0, carried: 0, failed: 0 };
+    const selfEntry = openclawAgentEntryForWorkspace(path);
+    const pendingRow = () => store.listAdoptPending().find((r) => r.agentId === agent.id && r.path === path);
+    let stale = false;
+    const ran = await whileBusy(agent.id, async () => {
+      if (deferred && !pendingRow()) { stale = true; return true; }
+      if (selfEntry) {
+        try {
+          await rewriteWorkspaceFiles(
+            { provider: providerFor(agent.hostId), log: trace(agent.id) },
+            agent.runtimeRef!,
+            agent.slug,
+            selfPathReplacements(selfEntry, agent.slug),
+          );
+        } catch (err) {
+          trace(agent.id)('adopt.path_rewrite_skipped', { error: String(err).slice(0, 200) });
+        }
+      }
+      try {
+        crons = await migrateCrons(
+          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+          agent.id,
+          path,
+          deferred ? { readyTries: 2 } : {},
+        );
+      } catch (err) {
+        trace(agent.id)('cron.migrate_skipped', { error: String(err).slice(0, 200) });
+      }
+      if (crons.notReady && wait && pendingRow()) {
+        // Its gateway did not answer yet (just started, or its runner is out
+        // of reach): the next pass tries again. Said once.
+        if (!adoptWaitSaid.has(`${agent.id}\n${path}`)) {
+          adoptWaitSaid.add(`${agent.id}\n${path}`);
+          trace(agent.id)('adopt.deferred_waiting', { total: crons.total });
+        }
+        return true;
+      }
+      adoptWaitSaid.delete(`${agent.id}\n${path}`);
+      store.clearAdoptPending(agent.id, path);
+      // Deferred tasks that did not come after all: the answer had said "deferred".
+      if (deferred && crons.failed > 0) {
+        trace(agent.id)('adopt.deferred_failed', { total: crons.total, failed: crons.failed, ...(crons.notReady ? { notReady: true } : {}) });
+        opsNotifier.notify(agent.ownerId, `${crons.failed} of the ${crons.total} scheduled task${crons.total === 1 ? '' : 's'} adopted into ${agent.name} could not be brought over${crons.notReady ? ' (its gateway did not answer for a day)' : ''}. Add them again in its Tasks page.`);
+      }
+      return true;
+    }).catch((err) => {
+      // A concurrent op holds the flag: repointing waits for the next pass, not fatal.
+      trace(agent.id)('adopt.repoint_busy', { error: String(err).slice(0, 120) });
+      return false;
+    });
+    return ran && !stale ? crons : undefined;
+  };
+  /** Per deferred adopt (agent + path): how long its agent has been found running (ms, and when
+   *  last seen running), and its last look. In memory: a restart costs one early look and starts
+   *  its day again. */
+  const adoptRan = new Map<string, { ms: number; seen?: number }>();
+  const adoptLastTry = new Map<string, number>();
+  /** Adopts that could not re-point yet (stopped, or busy then): each runs once its agent is running. */
+  const finishDeferredAdopts = async () => {
+    const now = Date.now();
+    const live = new Set<string>();
+    for (const { agentId, path } of store.listAdoptPending()) {
+      const key = `${agentId}\n${path}`;
+      live.add(key);
+      const a = store.getAgent(agentId);
+      if (!a || a.state === 'DELETED' || a.state === 'ARCHIVED') { store.clearAdoptPending(agentId, path); continue; }
+      // Its day counts only while the agent runs: stopped, the clock stops
+      // (counted on, a start after a day gave up at once while the gateway
+      // booted; started afresh, sleeping and waking meant it never gave up).
+      // Review of the final-audit fixes, 2026-10-22.
+      const ran = adoptRan.get(key) ?? { ms: 0 };
+      if (a.state !== 'RUNNING' || !a.runtimeRef) { adoptRan.set(key, { ms: ran.ms }); adoptLastTry.delete(key); continue; }
+      adoptRan.set(key, { ms: ran.ms + (ran.seen === undefined ? 0 : now - ran.seen), seen: now });
+      if (isBusy(a.id)) continue;
+      // Its day starts when it is first found running, not at the adopt
+      // (one started two days later got a single try), and a gateway that did
+      // not answer is looked at again hourly, not every pass: each look held
+      // the agent busy for minutes (final audit, 2026-10-22).
+      const last = adoptLastTry.get(key);
+      if (last !== undefined && now - last < ADOPT_RETRY_MS) continue;
+      adoptLastTry.set(key, now);
+      const wait = adoptRan.get(key)!.ms < ADOPT_WAIT_MS;
+      if (wait) {
+        // One look at its gateway, outside the busy guard: not up yet, the agent stays free.
+        const up = await listCrons(providerFor(a.hostId), a.runtimeRef, a.slug).then(() => true, () => false);
+        if (!up) {
+          if (!adoptWaitSaid.has(key)) { adoptWaitSaid.add(key); trace(a.id)('adopt.deferred_waiting', {}); }
+          continue;
+        }
+      }
+      const crons = await repointAdopted(a, path, true, wait);
+      if (crons && !store.listAdoptPending().some((r) => r.agentId === agentId && r.path === path)) {
+        trace(a.id)('adopt.deferred_done', { total: crons.total, carried: crons.carried, failed: crons.failed });
+      }
+    }
+    for (const k of [...adoptRan.keys()]) if (!live.has(k)) { adoptRan.delete(k); adoptLastTry.delete(k); }
+  };
   const quickTried = new Map<string, string>();
   let quickRunning = false;
   const quickCronRetarget = async () => {
     if (quickRunning) return;
     quickRunning = true;
     try {
+      try { await finishDeferredAdopts(); } catch { /* next time */ }
       for (const a of store.listAllActiveAgents()) {
         if (a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) { quickTried.delete(a.id); continue; }
         try {
@@ -5092,7 +5249,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   /** Has this agent said something in its console since this person last had it open? */
   const unreadFor = async (a: Agent, ownerId: string): Promise<boolean> => {
-    const at = consoleActivity(await sessionsFor(a), { webOnly: !!a.webOnly });
+    // As the console would show them (recentViewerOf): the owner every
+    // conversation, a web-chat guest only their own, anyone else none.
+    const viewer = recentViewerOf(a, ownerId, store.accessRole(a.id, ownerId) ?? '');
+    if (viewer.kind === 'none') return false;
+    const at = consoleActivity(await sessionsFor(a), { webOnly: !!a.webOnly, ...(viewer.kind === 'guest' ? { keys: viewer.keys } : {}) });
     const seen = store.getAgentSeen(ownerId, a.id);
     if (seen === undefined) {
       // First look at this agent: start from now rather than flagging its whole past.
@@ -5251,8 +5412,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * A container whose process quit on its own and was started again by
    * Docker's restart policy (RestartCount went up; a rebuild makes a new
    * container, so it starts from 0) gets a line in its Setup log, with the
-   * exit code — the only trace of an event nothing else records. Genetic
-   * Algorithm Trading, 2026-09-24: the gateway quit with code 0 a second
+   * exit code — the only trace of an event nothing else records. A trading
+   * agent, 2026-09-24: the gateway quit with code 0 a second
    * after a message, at a 2 GiB cap it had hit hundreds of times; the
    * container log had nothing, and neither did Hatchabot. Counts seen since
    * this process started; a restart while Hatchabot was down is not noticed.
@@ -5664,7 +5825,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get<{ Params: { id: string }; Querystring: { limit?: string } }>('/v1/agents/:id/events', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
-    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 60));
+    const limit = queryLimit(req.query.limit, 60, 200);
     const events = store.listEvents([agent.id], limit).map((e) => ({
       at: e.at, event: e.event, label: eventLabel(e.event, e.detail),
       // A little of the detail for the curious; never the whole blob.
@@ -6800,16 +6961,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (store.getHost(caller.agent.hostId)?.kind !== 'local') return machineAway(reply, caller.agent);
       return reply.code(404).send({ error: 'No debug gateway for this agent.' });
     }
-    const path = `/${req.params['*'] ?? ''}`;
+    let path = `/${req.params['*'] ?? ''}`;
     const ready = await consoleAccess.ensureReady(target.agent);
     const identity = ready.mode === 'identity' || (ready.mode === 'unavailable' && !!ready.identity);
     if (caller.role === 'guest') {
       // A guest only ever reaches an identity gateway, and only its chat's paths.
       if (ready.mode !== 'identity') return reply.code(409).send({ code: 'needs-rebuild', error: ready.mode === 'token' ? needsRebuildForGuests(target.agent.name) : ready.reason });
-      if (!guestHttpAllowed(req.method, path)) {
-        app.log.info({ agent: target.agent.id, userId: me, http: `${req.method} ${path.slice(0, 80)}` }, 'console.guest_refused');
+      const judged = guestHttpPath(req.method, path);
+      if (judged === undefined) {
+        app.log.info({ agent: target.agent.id, userId: me, http: `${req.method} ${JSON.stringify(path.slice(0, 80))}` }, 'console.guest_refused');
         return reply.code(403).send({ error: 'That part of the console is for its owner.' });
       }
+      // What the gateway gets is exactly what was judged.
+      path = judged;
     }
     const qs = req.raw.url?.includes('?') ? req.raw.url.slice(req.raw.url.indexOf('?')) : '';
     // The app's document (a route, not a file) is rewritten onto this prefix
@@ -7040,9 +7204,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // startup calls never, others once a day); the service log gets each.
           onRefused: (method) => {
             const name = String(method ?? '').slice(0, 60);
-            if (refusedOnce.has(name)) return;
+            // Bounded too: past this many names, a connection's refusals are only answered.
+            if (refusedOnce.has(name) || refusedOnce.size >= 100) return;
             refusedOnce.add(name);
-            if (guestConsoleLog.refused(caller.agent.id, principal.ownerId, name)) trace(caller.agent.id)('console.guest_refused', { userId: principal.ownerId, method: name });
+            const recorded = guestConsoleLog.refusal(caller.agent.id, principal.ownerId, name);
+            if (recorded) trace(caller.agent.id)('console.guest_refused', { userId: principal.ownerId, method: recorded });
             else app.log.info({ agent: caller.agent.id, userId: principal.ownerId, method: name }, 'console.guest_refused');
           },
         });
@@ -7096,7 +7262,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const state = { unchanged: o.unchanged === true, ...(o.held ? { held: true } : {}) };
     if (e instanceof AppError && conflict) return reply.code(409).send({ error: e.message, conflict, unchanged: o.unchanged !== false });
     if (e instanceof AppError && (e as { stale?: boolean }).stale) return reply.code(409).send({ error: e.message, unchanged: true });
-    if (e instanceof AppError) return reply.code(400).send({ error: e.message, test: (e as AppError & { test?: unknown }).test, ...state });
+    const needs = (e as { needs?: unknown })?.needs;
+    if (e instanceof AppError) return reply.code(400).send({ error: e.message, test: (e as AppError & { test?: unknown }).test, ...(needs ? { needs } : {}), ...state });
     return reply.code(502).send({ error: `The install did not finish: ${(e as Error)?.message ?? e}`, ...state });
   };
   const appView = (a: Agent) => {
@@ -7236,7 +7403,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           app: rel.manifest.app, toSha: rel.sha, fromSha: had?.app === rel.manifest.app ? had.sha : null,
           fromApp: had?.app ?? null, source: label, ref,
         }, { requestedBy: requestedBy ?? a.ownerId });
-        if (replaced) await removeTasks(appDeps(a), replaced.app);
+        if (replaced) await removeTasks(appDeps(a), replaced.app, replaced.manifest as AppManifest);
         try {
           const check = sharedConfigCheck(a, rel.manifest, allowShared, had?.app === rel.manifest.app);
           return await installRelease({ ...withSteps(appDeps(a), op), checkConfig: check }, rel, values);
@@ -7301,7 +7468,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     try {
       const ref = req.body?.ref || 'HEAD';
       const rel = await resolveRelease(appGit, await repoFor(appGit, parseSource(req.body?.source ?? ''), appCacheDir), ref);
-      const missing = fieldsToAsk(rel.manifest).filter((f) => f.required && f.default === undefined && !String((req.body?.values ?? {})[f.key] ?? '').trim()).map((f) => f.key);
+      const missing = fieldsToAsk(rel.manifest).filter((f) => f.required && !String(f.default ?? '').trim() && !String((req.body?.values ?? {})[f.key] ?? '').trim()).map((f) => f.key);
       if (missing.length) return reply.code(400).send({ error: `Needs a value for: ${missing.join(', ')}.` });
       // Judged on what it would be installed with: a mailbox left to the
       // manifest's default (or filled from the owner's address) counts too.
@@ -7380,7 +7547,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     try {
       const n = await whileBusy(a.id, async () => {
         appStillAsWas(a, had);
-        const removed = await removeTasks(appDeps(a), had.app);
+        const removed = await removeTasks(appDeps(a), had.app, had.manifest as AppManifest);
         store.deleteAgentApp(a.id);
         return removed;
       });
@@ -7832,6 +7999,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       throw err;
     }
     if (!out.ok) return reply.code(502).send({ error: out.error });
+    // Quiet only until the owner can be reached: the repair pass points it at them then.
+    if (out.quieted && out.id) store.addQuietedCron(agent.id, out.id, new Date().toISOString());
     trace(agent.id)('cron.created', { name: parsed.data.name, cron: parsed.data.cron, everyMinutes: parsed.data.everyMinutes });
     return reply.code(201).send({ created: true, id: out.id });
   });
@@ -8007,13 +8176,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     try { t = await exportTranscript(providerFor(agent.hostId), agent); }
     catch (err) { return reply.code(502).send({ error: `Couldn't read the chat history: ${String((err as Error).message ?? err).slice(0, 200)}` }); }
     if (!t.messages) return reply.code(404).send({ error: 'No chat history found for this agent yet.' });
-    trace(agent.id)('transcript.exported', { conversations: t.conversations, messages: t.messages });
+    trace(agent.id)('transcript.exported', { conversations: t.conversations, messages: t.messages, ...(t.unreadable ? { unreadable: t.unreadable } : {}) });
     const file = `${agent.slug}-chat-history-${new Date().toISOString().slice(0, 10)}.md`;
     return reply
       .header('content-type', 'text/markdown; charset=utf-8')
       .header('content-disposition', `attachment; filename="${file}"`)
       .header('x-hatchabot-conversations', String(t.conversations))
       .header('x-hatchabot-messages', String(t.messages))
+      .header('x-hatchabot-unreadable', String(t.unreadable))
       .send(t.text);
   });
 
@@ -8420,8 +8590,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // sleeping agent is woken — and both are the caller's own: their agents,
   // the sources they may use.
   app.get<{ Querystring: { limit?: string } }>('/v1/model-scorecard', async (req) => {
-    const limit = Number(req.query?.limit);
-    return buildScorecard(store, ownerIdOf(req), { limit: Number.isFinite(limit) && limit > 0 ? limit : undefined });
+    return buildScorecard(store, ownerIdOf(req), { limit: queryLimit(req.query?.limit, 40, 100) });
   });
   app.get('/v1/model-options', async (req) => modelOptionsFor(store.listAIProfiles(ownerIdOf(req))));
   /**
@@ -8462,7 +8631,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get<{ Querystring: { limit?: string; agent?: string } }>('/v1/model-changes', async (req) => {
     const ownerId = ownerIdOf(req);
     try { evaluateModelChanges(store, Date.now(), ownerId); } catch (err) { app.log.warn({ err: String(err) }, 'model.ledger_eval_failed'); }
-    const limit = Math.min(Math.max(1, Number(req.query?.limit) || 30), 200);
+    const limit = queryLimit(req.query?.limit, 30, 200);
     const names = new Map(store.listAgents(ownerId).map((a) => [a.id, a.name]));
     const agentRef = req.query?.agent;
     const agentId = agentRef ? [...names.entries()].find(([id, n]) => id === agentRef || n.toLowerCase() === agentRef.toLowerCase())?.[0] ?? '-' : undefined;
@@ -8512,7 +8681,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    */
   app.get<{ Querystring: { limit?: string; agent?: string } }>('/v1/token-health', async (req, reply) => {
     const ownerId = ownerIdOf(req);
-    const limit = Number(req.query?.limit);
+    const limit = Math.floor(Number(req.query?.limit));
     let agentId: string | undefined;
     if (req.query?.agent) {
       const ref = String(req.query.agent).toLowerCase();
@@ -8526,12 +8695,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get('/v1/token-incidents', async (req) => {
     const ownerId = ownerIdOf(req);
     const names = new Map(store.listAgents(ownerId).map((a) => [a.id, a.name]));
-    const all = store.listTokenIncidents({ ownerId, sinceIso: new Date(Date.now() - 7 * 86_400_000).toISOString(), limit: 100 });
-    const view = (i: (typeof all)[number]) => ({ id: i.id, agent: names.get(i.agentId) ?? '(deleted agent)', agentId: i.agentId, kind: i.kind, text: i.text, ...(i.fix ? { fix: i.fix } : {}),
+    // Open ones read on their own: under one limit, 100 newer cleared ones hid an older
+    // loop still going (report B09, 2026-10-22).
+    const open = store.listTokenIncidents({ ownerId, open: true, limit: 100 });
+    const recent = store.listTokenIncidents({ ownerId, sinceIso: new Date(Date.now() - 7 * 86_400_000).toISOString(), limit: 100 }).filter((i) => i.clearedAt);
+    const view = (i: (typeof open)[number]) => ({ id: i.id, agent: names.get(i.agentId) ?? '(deleted agent)', agentId: i.agentId, kind: i.kind, text: i.text, ...(i.fix ? { fix: i.fix } : {}),
       count: i.count, ...(i.firstAt ? { since: i.firstAt } : {}), ...(i.lastAt ? { last: i.lastAt } : {}), openedAt: i.openedAt, ...(i.clearedAt ? { clearedAt: i.clearedAt } : {}), told: !!i.toldAt });
     return {
-      open: all.filter((i) => !i.clearedAt).map(view),
-      recent: all.filter((i) => i.clearedAt).map(view),
+      open: open.map(view),
+      recent: recent.map(view),
       notes: ['An incident opens when a loop is still going (its last occurrence within a few hours) and clears itself when it stops. Each is told once on the manager\'s chat. The fixes are cards: compact_agent, set_context_cap, set_cron_enabled, set_peers, rebuild_agent.'],
     };
   });
@@ -8716,6 +8888,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     if (owner) for (const acc of store.listLocalAccounts()) if (acc.displayName) names.push(acc.displayName);
     const hosts = store.listHosts(ownerIdOf(req)).map((h) => h.name);
+    // The addresses this install is reached at, and where its backups go: doctor's lines name them.
+    for (const u of [deps.publicUrl, publicConfig().url]) { const h = hostOf(u); if (h) hosts.push(h); }
+    const paths = [backupsDir()];
     const secretValues = credentialValuesFromEnv(process.env);
     const a = agentRef ? ownedAgent(req, agentRef) ?? (owner ? store.getAgent(agentRef) : undefined) : undefined;
     if (a) names.push(a.name, a.slug);
@@ -8724,7 +8899,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       for (const ref of [...store.listChannelsForAgent(x.id).map((c) => c.secretRef), ...store.listAgentEnv(x.id).map((v) => v.secretRef), store.getAIProfile(x.aiProfileId)?.secretRef]) if (ref) refs.add(ref);
     }
     for (const v of await Promise.all([...refs].map((ref) => secrets.get(ref).catch(() => undefined)))) if (v) secretValues.push(v);
-    return { ...localContext(), names, hosts, secrets: secretValues };
+    return { ...localContext(), names, hosts, paths, secrets: secretValues };
   };
   // Masked again as it leaves — the link, the file, a person's edit — so a draft made before a rule, or an edit, is held to it too.
   const reportView = (raw: { id: string; title: string; body: string; createdAt: string; by: string; agentId?: string; sentAt?: string }, ctx: PublicRedactContext) => {
@@ -8960,7 +9135,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * of the caller's agents, or one of them (?agent=id). From the sampler's hour
    * buckets: nothing is read from a container.
    */
-  app.get<{ Querystring: { range?: string; agent?: string; agents?: string; source?: string } }>('/v1/usage/spend', async (req, reply) => {
+  app.get<{ Querystring: { range?: string; agent?: string; agents?: string; source?: string; tz?: string } }>('/v1/usage/spend', async (req, reply) => {
     const range = (req.query?.range ?? 'week') as SpendRange;
     if (!(range in SPEND_RANGES)) return reply.code(400).send({ error: `range is one of ${Object.keys(SPEND_RANGES).join(', ')}.` });
     let agentId: string | undefined;
@@ -8973,7 +9148,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agentIds = req.query?.agents ? String(req.query.agents).split(',').map((x) => x.trim()).filter((id) => ownedAgent(req, id)) : undefined;
     // ?source=<AI source id>: only the caller's agents on that source (Settings → AI); another account's agents never count.
     const sourceId = req.query?.source ? String(req.query.source) : undefined;
-    return spendSeries(store, ownerIdOf(req), range, { agentId, agentIds, sourceId });
+    // ?tz=<the page's zone>: day slices start at the viewer's midnight; one this machine does not know, its own.
+    const asked = String(req.query?.tz ?? '').slice(0, 64);
+    let tz = machineTz();
+    try { if (asked) { new Intl.DateTimeFormat('en-US', { timeZone: asked }); tz = asked; } } catch { /* not a zone: the machine's */ }
+    return spendSeries(store, ownerIdOf(req), range, { agentId, agentIds, sourceId, tz });
   });
 
   /** The fleet's use in the last hour, 3/6/9/12 hours, day or week, from what the sampler recorded — answers at once. */
@@ -9058,6 +9237,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           .refine((b) => !(b.cron && b.everyMinutes), { message: 'give at most one of cron / everyMinutes' })
           .safeParse(body);
         if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+        // An edit that also turns it on or off does both (it used to drop the switch).
+        if (body.enabled !== undefined && typeof body.enabled !== 'boolean') return reply.code(400).send({ error: 'enabled must be true or false.' });
+        const turn = body.enabled as boolean | undefined;
         if (busyNow(agent, reply)) return reply;
         const provider = providerFor(agent.hostId);
         // Only a task of this agent's, and only one that carries a message:
@@ -9076,7 +9258,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           }));
           if (!out.ok) return reply.code(502).send({ error: out.error });
           trace(agent.id)('cron.edited', { id: job.id, name: parsed.data.name ?? job.name, fields: Object.keys(parsed.data) });
-          return { ok: true, edited: true };
+          if (turn === undefined) return { ok: true, edited: true };
+          if (!(await whileBusy(agent.id, () => setCronEnabled(provider, agent.runtimeRef!, job.id, turn)))) {
+            return reply.code(502).send({ error: `The task was changed, but couldn't be ${turn ? 'enabled' : 'disabled'} — try that again.` });
+          }
+          return { ok: true, edited: true, enabled: turn };
         } catch (err) {
           if (err instanceof CronSystemOwnedError) return reply.code(409).send({ error: err.userMessage });
           if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
@@ -9132,7 +9318,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = runningAgent(req, req.params.id, reply, 'read its scheduled tasks');
       if (!agent) return reply;
-      const limit = Math.min(Math.max(Number(req.query.limit ?? 10) || 10, 1), 50);
+      const limit = queryLimit(req.query.limit, 10, 50);
       try {
         return { runs: await listCronRuns(providerFor(agent.hostId), agent.runtimeRef!, req.params.jobId, limit) };
       } catch (err) {
@@ -10683,7 +10869,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     if (!agent.runtimeRef) return reply.code(409).send({ error: 'This agent has no stored volume to inspect.' });
-    const maxTurns = Math.min(Math.max(Number(req.query.maxTurns ?? 400) || 400, 1), 2000);
+    const maxTurns = queryLimit(req.query.maxTurns, 400, 2000);
     try { return await readTranscript(providerFor(agent.hostId), agent.runtimeRef, agent.slug, { maxTurns }); }
     catch (err) { return reply.code(502).send({ error: err instanceof InspectReadError ? err.message : "Couldn't read the agent's stored files." }); }
   });
@@ -11161,40 +11347,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // STOPPED container the cron gateway never answers, so it would hang the
         // readiness probe and then mislabel every cron "failed".
         const freshAgent = store.getAgent(agent.id)!;
-        let crons: { total: number; carried: number; failed: number; deferred?: number } = { total: 0, carried: 0, failed: 0 };
+        let crons: AdoptCrons = { total: 0, carried: 0, failed: 0 };
         const selfEntry = openclawAgentEntryForWorkspace(path);
+        // Remembered until it has run: into a stopped agent, or one busy
+        // just now, it runs once the agent is running (finishDeferredAdopts).
+        // The answer said "deferred" while nothing kept the work (review
+        // 2026-10-22, A39).
+        if (selfEntry) store.setAdoptPending(agent.id, path, new Date().toISOString());
+        else store.dropAdoptPending(agent.id);
         if (freshAgent.runtimeRef && freshAgent.state === 'RUNNING') {
-          await whileBusy(agent.id, async () => {
-            if (selfEntry) {
-              try {
-                await rewriteWorkspaceFiles(
-                  { provider: providerFor(agent.hostId), log: trace(agent.id) },
-                  freshAgent.runtimeRef!,
-                  freshAgent.slug,
-                  selfPathReplacements(selfEntry, freshAgent.slug),
-                );
-              } catch (err) {
-                trace(agent.id)('adopt.path_rewrite_skipped', { error: String(err).slice(0, 200) });
-              }
-            }
-            try {
-              crons = await migrateCrons(
-                { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-                agent.id,
-                path,
-              );
-            } catch (err) {
-              trace(agent.id)('cron.migrate_skipped', { error: String(err).slice(0, 200) });
-            }
-          }).catch((err) => {
-            // A concurrent op holds the flag — repointing is deferred, not fatal.
-            trace(agent.id)('adopt.repoint_busy', { error: String(err).slice(0, 120) });
-          });
+          crons = (await repointAdopted(freshAgent, path)) ?? crons;
         } else if (selfEntry) {
           // Agent isn't running (adopted into a STOPPED agent): defer the crons
           // rather than attempt them against a down gateway. Report honestly.
-          const pending = readOpenclawCrons(selfEntry.id).length;
+          const read = readOpenclawCronStore(selfEntry.id);
+          const pending = read.crons.length;
           if (pending > 0) crons = { total: pending, carried: 0, failed: 0, deferred: pending };
+          if (read.error) crons = { ...crons, error: read.error };
         }
         return { ...res, crons };
       } catch (err) {
@@ -11495,7 +11664,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return op;
   };
   app.get<{ Querystring: { agentId?: string; limit?: string } }>('/v1/operations', async (req, reply) => {
-    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+    const limit = queryLimit(req.query.limit, 50, 200);
     if (req.query.agentId) {
       const agent = ownedAgent(req, req.query.agentId);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
@@ -11991,14 +12160,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // Faithful copy: reuse the source's own filled values; lenient so a
         // required env/datasource field (whose materialized record lives on
         // the source, not in values) can't make cloning impossible.
+        // The same AI source and machine as the original, where the cloner may
+        // use them: left out, the copy went to the default source (another key
+        // or plan to bill) and the local machine (review, 2026-10-22).
+        const owner = ownerIdOf(req);
+        const source = store.getAIProfile(agent.aiProfileId);
+        const aiProfileId = source && (source.ownerId === owner || source.shared) ? source.id : undefined;
+        const hostId = store.listHosts(owner).some((h) => h.id === agent.hostId) ? agent.hostId : undefined;
         const { agent: clone } = importTemplate(deps, data, {
-          ownerId: ownerIdOf(req), name, values: agent.paramValues ?? {}, lenient: true,
+          ownerId: owner, name, values: agent.paramValues ?? {}, lenient: true, aiProfileId, hostId,
         });
         // Everything from here to the build is undone together on a failure:
         // a failed secret copy used to leave the half-made clone (holding its
         // name, so a retry was refused) and the secrets copied so far (#165).
         const created: string[] = [];
         let notCopied: string[];
+        // A variable whose value could not be read is named, not dropped in
+        // silence: the copy would build without the key its app needs and
+        // nobody told (review, 2026-10-22).
+        const envNotCopied: string[] = [];
         let carried: Awaited<ReturnType<typeof readCloneMemory>>;
         try {
           store.setAgentParent(clone.id, agent.id); // lineage: a clone is a child
@@ -12008,7 +12188,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // answer so the owner is told, not left with tools that fail (night review).
           for (const e of store.listAgentEnv(agent.id)) {
             const value = await secrets.get(e.secretRef).catch(() => undefined);
-            if (value === undefined) continue;
+            if (value === undefined) { envNotCopied.push(e.name); continue; }
             const id = randomUUID();
             const secretRef = `agent-env/${id}`;
             created.push(secretRef);
@@ -12033,9 +12213,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           trace(clone.id)('agent.clone_failed', { sourceAgentId: agent.id, error: String((err as Error).message ?? err).slice(0, 200) });
           throw new TransferError(`Couldn't copy ${agent.name}'s settings to the clone: ${String((err as Error).message ?? err).slice(0, 200)}. Nothing was kept; try again.`);
         }
+        if (envNotCopied.length) trace(clone.id)('agent.clone_env_skipped', { sourceAgentId: agent.id, names: envNotCopied.join(', ') });
         kickProvision(clone.id, { webOnlyIfNoBot: true });
         return reply.code(201).send({
-          ...publicAgent(clone), notCopied,
+          ...publicAgent(clone), notCopied, envNotCopied,
           memoryNotCopied: carried.skipped,
           ...(carried.failed ? { memoryCopyFailed: true } : {}),
         });
@@ -12143,7 +12324,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // current declarations, so a field added after derive reaches the
         // child too (leniently — the child fills its value later; until then
         // the {{placeholder}} renders verbatim, same as any unknown key).
-        const pushedParams = (master.parameters ?? child.parameters ?? [])
+        // The fields the child has after this push: the master's, and the
+        // placeholders the pushed text still uses (pushedParameters).
+        const childParams = pushedParameters(master.parameters, {
+          soul: layer.soul ?? child.paramFiles?.soul,
+          agents: layer.agents ?? child.paramFiles?.agents,
+          persona: layer.persona ?? child.paramFiles?.persona,
+        }, child.parameters);
+        const pushedParams = childParams
           .filter((p) => p.target !== 'env' && p.target !== 'datasource')
           .map((p) => ({ ...p, required: false }));
         const values = resolveParamValues(pushedParams, child.paramValues ?? {});
@@ -12158,15 +12346,31 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             ? await readCapped(child, 'AGENTS.md').catch(() => '')
             : '';
           const childDataSection = extractSection(childAgentsMd, DATA_SOURCES_HEADING);
-          for (const [nameF, text] of [['SOUL.md', layer.soul], ['AGENTS.md', layer.agents]] as const) {
-            if (typeof text !== 'string') continue;
-            let rendered = applyParamValues(text, values);
-            if (nameF === 'AGENTS.md' && childDataSection) {
-              rendered = replaceSection(rendered, DATA_SOURCES_HEADING, childDataSection);
+          // Both files or neither: a SOUL.md written and an AGENTS.md that
+          // failed left the child half on the new definition, with the
+          // bookkeeping below skipped (review, 2026-10-22). What was written
+          // goes back as it was before the push.
+          // A file that read as nothing is not written back as nothing: the
+          // pre-params snapshot is the way back for it.
+          const written: Array<[string, string]> = [];
+          const write = (nameF: string, text: string) =>
+            writeFileInAgent(providerFor(child.hostId), child.runtimeRef!, workspacePath(child.slug, nameF), Buffer.from(text, 'utf8').toString('base64'));
+          try {
+            for (const [nameF, text] of [['SOUL.md', layer.soul], ['AGENTS.md', layer.agents]] as const) {
+              if (typeof text !== 'string') continue;
+              let rendered = applyParamValues(text, values);
+              if (nameF === 'AGENTS.md' && childDataSection) {
+                rendered = replaceSection(rendered, DATA_SOURCES_HEADING, childDataSection);
+              }
+              const before = nameF === 'AGENTS.md' ? childAgentsMd : await readCapped(child, nameF).catch(() => '');
+              const r = await write(nameF, rendered);
+              if (r.code !== 0) throw new Error('write failed');
+              written.push([nameF, before]);
             }
-            const b64 = Buffer.from(rendered, 'utf8').toString('base64');
-            const r = await writeFileInAgent(providerFor(child.hostId), child.runtimeRef!, workspacePath(child.slug, nameF), b64);
-            if (r.code !== 0) throw new Error('write failed');
+          } catch (err) {
+            const back = await Promise.all(written.map(([nameF, before]) => (before ? write(nameF, before).then((r) => r.code === 0, () => false) : false)));
+            if (back.every(Boolean)) throw err;
+            throw new Error(`write failed, and ${written.filter((_, i) => !back[i]).map(([n]) => n).join(', ')} could not be put back: restore the pre-params snapshot`);
           }
         });
         if (typeof layer.persona === 'string') {
@@ -12177,7 +12381,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // and the master's current field declarations come along, so the
         // child's values panel can ask for any newly-added field.
         store.setAgentParamState(child.id, values, layer);
-        if (master.parameters?.length) store.setAgentParameters(child.id, master.parameters);
+        store.setAgentParameters(child.id, childParams.length ? childParams : null);
         // Its OWN managed sections back (its peers, data sources, operator,
         // memory rules): the master's came along in the pushed file and stood
         // until the child's next rebuild (2026-09-28). Best-effort, off the reply.
@@ -13494,9 +13698,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const r = await startStopped(agent);
     if (!r.ok || !r.agent) return reply.code(409).send({ error: r.error ?? 'It could not be started just now — try again shortly.' });
     // Started by hand while a budget has it paused: it runs on until the 1st (budgets.ts).
+    // A cheaper model a budget chose is not a pause: Start leaves its model, and the
+    // budget still puts its own back on the 1st.
     const month = monthKey(Date.now(), machineTz());
     const pause = store.getBudgetPause(agent.id, month);
-    if (pause && !pause.resumedAt) {
+    if (pause && !pause.resumedAt && pause.kind === 'pause') {
       store.resumeBudgetPause(agent.id, month, new Date().toISOString(), 'owner');
       trace(agent.id)('budget.started_by_hand', {});
     }

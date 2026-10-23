@@ -70,6 +70,32 @@ describe('the pre-push check', () => {
     expect(r.stderr).not.toContain('made-up-secret');
   });
 
+  it('finds a name split across a line break: wrapped text, a comment, a quote (2026-10-22)', () => {
+    for (const text of [
+      'Ask what the Mapleford\nHelper agent did.\n',
+      '/**\n * Seen on Mapleford\n * Helper, 2026-09-24.\n */\n',
+      '// the Mapleford\n// Helper agent\n',
+      '> the Mapleford\n> Helper agent\n',
+    ]) {
+      const r = run(['--pre-push', 'origin', 'x'], commit('wrap.md', text));
+      expect(r.status, text).toBe(1);
+      expect(r.stderr).toContain("[agent name] 'Ma…(16)' wrap.md (commit");
+      expect(r.stderr + r.stdout).not.toContain('Mapleford');
+      sh('push', '-q', 'origin', 'main');                 // each case on its own
+    }
+    // Two line breaks (a paragraph between) is not one name.
+    expect(run(['--pre-push', 'origin', 'x'], commit('wrap.md', 'Mapleford\n\nHelper\n')).status).toBe(0);
+    // Only the second half new: a line added under an old one.
+    commit('half.md', 'Ask what the Mapleford\nbot did.\n');
+    sh('push', '-q', 'origin', 'main');
+    const half = run(['--pre-push', 'origin', 'x'], commit('half.md', 'Ask what the Mapleford\nHelper did.\n'));
+    expect(half.status).toBe(1);
+    expect(half.stderr).toContain("[agent name] 'Ma…(16)' half.md (commit");
+    // --text reads a file whole.
+    writeFileSync(join(dir, 'notes.md'), 'release notes: the Mapleford\n  Helper fix\n');
+    expect(run(['--text', join(dir, 'notes.md')]).status).toBe(1);
+  });
+
   it('checks commit messages too', () => {
     writeFileSync(join(repo, 'a.md'), 'x\n'); sh('add', 'a.md'); sh('commit', '-qm', 'Fix for Quillon Varga');
     const r = run(['--pre-push', 'origin', 'x'], `refs/heads/main ${sh('rev-parse', 'HEAD')} refs/heads/main ${'0'.repeat(40)}\n`);

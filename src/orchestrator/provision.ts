@@ -412,13 +412,16 @@ async function runProvisionStepsInner(
       // duplicates fired forever (10th audit). Instead of the all-or-keep
       // batch, each applied (or already-present) entry is dropped from the
       // parked list individually; only genuine failures stay parked.
-      const existing = new Set(
-        (await listCrons(provider, runtimeRef, agent.slug).catch(() => []))
-          .map((c) => c.name)
-          .filter((n): n is string => !!n),
-      );
-      const stillPending: typeof pendingSchedules = [];
-      for (const sch of pendingSchedules) {
+      // A listing that fails is not an empty list: adding then duplicated a
+      // task whose earlier add landed but whose answer was lost. They stay
+      // parked for the next provision instead (A50, 2026-10-22).
+      const listed = await listCrons(provider, runtimeRef, agent.slug).catch((err) => {
+        log('schedule.list_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) });
+        return undefined;
+      });
+      const existing = new Set((listed ?? []).map((c) => c.name).filter((n): n is string => !!n));
+      const stillPending: typeof pendingSchedules = listed ? [] : [...pendingSchedules];
+      for (const sch of listed ? pendingSchedules : []) {
         if (existing.has(sch.name)) { log('schedule.already_present', { agentId, name: sch.name }); continue; }
         const out = await addCron(provider, runtimeRef, agent.slug, {
           name: sch.name, message: sch.message, cron: sch.cron, everyMs: sch.everyMs, tz: sch.tz,
@@ -430,6 +433,7 @@ async function runProvisionStepsInner(
           stillPending.push(sch);
           log('schedule.apply_failed', { agentId, name: sch.name, error: (out as any).error });
         } else {
+          if (out.quieted && out.id) store.addQuietedCron(agentId, out.id, new Date().toISOString());
           log('schedule.applied', { agentId, name: sch.name });
         }
       }
@@ -1759,7 +1763,18 @@ export function sharePathProblem(p: string, opts: { home?: string } = {}): strin
   } catch { /* not there yet — lexical check below */ }
   if (norm === home) return 'Sharing your whole home folder is not allowed — pick a folder inside it.';
   const dataDir = dirname(resolve(process.env.HATCHABOT_DB ?? 'data/hatchabot.sqlite'));
+  // A backup folder of the owner's choosing (a NAS, say) holds the database and
+  // the key that opens every credential in it, as the default one does: the
+  // folder named and where it really is (review, 2026-10-22).
+  const backupDirs: Array<readonly [string, string]> = [];
+  const custom = process.env.HATCHABOT_BACKUP_DIR?.trim();
+  if (custom && custom.startsWith('/')) {
+    const named = resolve(custom).replace(/\/+$/, '') || '/';
+    backupDirs.push([named, 'every backup, including other agents']);
+    try { const real = realpathSync(named); if (real !== named) backupDirs.push([real, 'every backup, including other agents']); } catch { /* not made yet */ }
+  }
   const forbidden = [
+    ...backupDirs,
     [resolve(home, '.claude'), 'that holds your Claude credentials'],
     [resolve(home, '.ssh'), 'that holds your SSH keys'],
     [resolve(home, '.config/hatchabot'), 'that holds Hatchabot access tokens'],

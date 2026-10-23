@@ -6,8 +6,8 @@ What changed lately, in plain words: [whats-new.md](whats-new.md).
 
 **Start here: you don't have to do any of it yourself.** Hatchabot ships with a
 manager — *your Hatchabot agent* — that you talk to in plain words: "which
-agents look unhealthy?", "make a travel agent for the Sicily trip", "put Taco
-Agent back on the fleet image". It reads everything and changes nothing:
+agents look unhealthy?", "make a travel agent for the Sicily trip", "put an
+agent back on the fleet image". It reads everything and changes nothing:
 anything that would alter your fleet comes back as a card you confirm. Nobody
 else's agent platform hands you an agent whose job is running the platform.
 See [Your Hatchabot agent](#your-hatchabot-agent-the-manager).
@@ -545,12 +545,16 @@ rounded), or ask the Hatchabot agent (`set_budget`, a card you confirm).
   moves it to the cheapest model its AI source offers, live, until the 1st —
   it keeps answering; its own model comes back on the 1st or as soon as the
   budget is raised, and a model you set by hand wins for the rest of the
-  month. The switch is in the model ledger as Hatchabot's ("budget"): the
+  month. Stopping and starting it, or archiving it, keeps that promise: an
+  archived agent gets its own model back on its record at once. The switch is
+  in the model ledger as Hatchabot's ("budget"): the
   quality guard gives it no verdict and no switch-back card, and Right-size's
   savings leave it out. *Pause it*: Paused, the agent is stopped as the Stop button
-  does (its tile: "Paused — its monthly budget is used up"), never in the
-  middle of a turn (it waits for three quiet minutes), and an asleep agent is
-  paused without being woken. It starts again on the **1st of next month**, as
+  does (its tile: "Paused — its monthly budget is used up"), not in the
+  middle of a turn if it can help it: it waits for three quiet minutes, but
+  no more than 20 minutes after the limit is reached, so an agent in a loop
+  is still stopped. While it waits you get the 80% message, saying it pauses
+  shortly. An asleep agent is paused without being woken. It starts again on the **1st of next month**, as
   soon as the budget is **raised** (or removed, or set to warn), or when you
   **start it** — then it runs on until the 1st. A rebuild that brings it up
   while it is still over pauses it again. Telegram keeps messages sent to a
@@ -719,7 +723,7 @@ agent with a `why` that states the evidence and the saving; on a Claude plan
 the saving is room in the plan, not money.
 
 **The weekly review.** A scheduled task on your Hatchabot agent, "Weekly token
-review" ("Weekly model review" until v2.120, renamed in place), Mondays 09:00, made when the agent is built and listed with its other
+review" ("Weekly model review" until v2.120, renamed in place), Mondays 09:00 in the agents' time zone (`HATCHABOT_TIMEZONE`, else the machine's), made when the agent is built and listed with its other
 tasks. Its short report goes where the agent already reaches you (its Telegram
 chat if it has one, else its conversation in the app): the Right-size line
 ("Saved by cheaper models: ≈ $X this month", below) when there is a saving, the proposals
@@ -1608,6 +1612,13 @@ per-agent maximum (`HATCHABOT_AGENT_MEMORY_MAX`, 8g); the machine's owner
 beyond it. An agent that hits its cap or has processes killed for memory
 shows under Alerts with a **Give it 1 GB more** button on its sheet.
 
+A Download copy carries the agent's own cap and swap allowance, and an
+import (a restore, or a move to another Hatchabot) applies them under the
+receiving machine's rules. When a member imports, a cap over that machine's
+per-agent maximum gives the agent the machine's default instead, and a swap
+allowance larger than the cap it would sit on is dropped. A class's cap stays
+with the class and does not travel.
+
 The agent is told its budget: `HATCHABOT_MEMORY_CAP` in its environment and a
 "Memory budget" section in its AGENTS.md, refreshed when the cap changes, so
 it sizes its jobs to fit (fewer workers, chunked data) instead of running
@@ -1631,8 +1642,8 @@ container right away (`docker update`, no rebuild, the cap and the allowance
 always together) and at every create, rebuild, move, Start and wake.
 
 **Only where the machine compresses swap.** Hatchabot gives the allowance
-only on a host with zswap on in front of a swap device, or an active zram
-swap device. With plain disk swap, or none, or a host it cannot read (a
+only on a host with zswap on in front of a swap device (with zswap's
+shrinker off), or an active zram swap device. With plain disk swap, or none, or a host it cannot read (a
 runner is read through a one-shot container on its own daemon; unknown means
 no), agents get no swap: the setting is kept, the agent's sheet says it is
 withheld and why, the log says so once, and `hatchabot doctor` names the fix.
@@ -1699,9 +1710,12 @@ The trade-offs:
   give one more swap than its cap.
 - **Never plain disk swap.** Uncompressed disk swap is slow to come back and
   writes the agent's memory — keys included — to disk. With zswap, compressed
-  pages normally stay in memory; only when the pool is full do the oldest go
-  on to the swap file (the script turns zswap's early-writeback shrinker off).
-  zram never writes to disk. With zswap the compressed pool counts against the
+  pages normally stay in memory, but some do reach the swap file: pages that
+  do not compress well, pages swapped while the pool is full (until it has
+  drained to `accept_threshold_percent`), and the oldest pages once the pool
+  is full. Hatchabot gives no swap where zswap's shrinker is on, because it
+  writes cold pages to the swap file early; the script turns it off. zram
+  never writes to disk: for nothing on disk at all, use `--zram`. With zswap the compressed pool counts against the
   container's own memory; with zram it is the host's memory, not the
   container's.
 
@@ -1743,8 +1757,8 @@ that step printed. Moving onto a new
 OpenClaw line is the slow case: its migrations run and the memory index is
 rebuilt, minutes on an agent with a long history. The **Activity** view is the
 other half — the agent's own output. CLI: `hatchabot events <agent> [-n 40]`.
-The management agent reads the same trail (`list_events`), so "what is Cyber
-Advisor doing?" works in its chat too.
+The management agent reads the same trail (`list_events`), so "what is the
+advisor agent doing?" works in its chat too.
 
 ## Files: browse and download from an agent
 

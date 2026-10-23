@@ -3,6 +3,16 @@ import { CACHE_READ_DEFAULT, CACHE_READ_SHARE, CACHE_WRITE_MULTIPLIER, estimateC
 import { MODEL_CATALOG, priceMix } from '../src/orchestrator/modelOptions.js';
 
 describe('estimateCost', () => {
+  it('prices the qualified and dated spellings like the bare name; an inherited name is unknown (review, 2026-10-22)', () => {
+    const bare = estimateCost([{ model: 'claude-opus-4-8', tokens: 1_000_000 }]);
+    expect(bare).toMatchObject({ low: 5, high: 25, partial: false });
+    expect(estimateCost([{ model: 'anthropic/claude-opus-4-8', tokens: 1_000_000 }])).toEqual(bare);
+    expect(estimateCost([{ model: 'claude-opus-4-8-20261001', tokens: 1_000_000 }])).toEqual(bare);
+    // The cache-read share follows the same lookup.
+    const mix = { tokens: 2_000_000, input: 0, output: 0, cacheRead: 1_000_000 };
+    expect(estimateCost([{ model: 'anthropic/claude-opus-5-5', ...mix }]).low).toBeCloseTo(estimateCost([{ model: 'claude-opus-5-5', ...mix }]).low, 9);
+    expect(estimateCost([{ model: 'constructor', tokens: 1_000_000 }])).toEqual({ low: 0, high: 0, partial: true });
+  });
   it('brackets combined-token cost as [all-input, all-output] per model', () => {
     // 1M fable-5 tokens: low = $10 (all input), high = $50 (all output).
     const c = estimateCost([{ model: 'claude-fable-5', tokens: 1_000_000 }]);

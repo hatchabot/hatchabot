@@ -23,6 +23,8 @@ const HEX = /^#[0-9a-f]{6}$/i;
 /** One emoji (flags, ZWJ sequences and skin tones included), and nothing else. */
 export function validIcon(s: unknown): s is string {
   if (typeof s !== 'string' || !s || s.length > 16) return false;
+  // A keycap (1️⃣, #️⃣, *️⃣) is the one emoji that starts with an ASCII character.
+  if (/^[0-9#*]\uFE0F?\u20E3$/u.test(s)) return true;
   if (/[\x00-\x7f]/.test(s)) return false; // no letters, digits, markup
   if (!/\p{Extended_Pictographic}|\p{Regional_Indicator}{2}/u.test(s)) return false;
   if (!/^(?:\p{Extended_Pictographic}|\p{Emoji_Component}|\p{Emoji_Modifier}|‍|️|⃣)+$/u.test(s)) return false;

@@ -11,9 +11,9 @@ import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { clearBusy } from '../src/orchestrator/busy.js';
 import { newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/operations.js';
-import { resolvePendingValues } from '../src/orchestrator/appPending.js';
+import { resolvePendingValues, stashPendingSecrets } from '../src/orchestrator/appPending.js';
 import {
-  AppError, fieldsToAsk, hostGit, installRelease, mergeConfig, parseManifest, parseSource, removeTasks, repoFor, resolveRelease, switchTo, type AgentFacts,
+  AppError, fieldsToAsk, hostGit, installRelease, manifestAt, mergeConfig, parseManifest, parseSource, removeTasks, repoFor, resolveRelease, switchTo, type AgentFacts,
 } from '../src/orchestrator/apps.js';
 
 /**
@@ -225,6 +225,11 @@ describe('installing into an agent', () => {
     const agent = new FakeAgent();
     await expect(installRelease({ provider: agent, runtimeRef: 'x', facts: FACTS }, await rel())).rejects.toThrow(/Needs a value for: mailbox/);
     expect(agent.calls.some((c) => c.what.includes('unittest'))).toBe(false);
+  });
+
+  it('says which fields it needs, so the page can ask for them (final audit, 2026-10-22)', async () => {
+    const e = await installRelease({ provider: new FakeAgent(), runtimeRef: 'x', facts: FACTS }, await rel()).catch((x: unknown) => x);
+    expect((e as { needs?: unknown }).needs).toEqual([expect.objectContaining({ key: 'mailbox' })]);
   });
 
   it('an update keeps the values already in the config', () => {
@@ -862,6 +867,24 @@ describe('an app change cut off by a restart (kill at every step)', () => {
     });
   }
 
+  it('a roll back held after its tasks went on, then "Stay on" the newer: a task the newer renamed comes off too (regression audit, 2026-10-22)', async () => {
+    const w = await world();
+    expect((await w.install()).statusCode).toBe(200);
+    commit(w.dir, { ...MANIFEST, tasks: [{ name: 'tock', every: '5m', command: ['python3', '-m', 'demo', 'tock'] }] });
+    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: {} })).statusCode).toBe(200);
+    const newer = w.agrees()!;
+    crashAt('tasks');
+    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/rollback', headers: hdr });
+    reboot();
+    await w.routes.resumeOperations();
+    const op = opOf(w.store);
+    expect(op).toMatchObject({ kind: 'app-rollback', status: 'held' });
+    expect(w.provider.jobs.map((j) => j.name)).toContain('demoapp-tick');
+    const rec = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'go-back' } });
+    expect(rec.json().operation.status).toBe('rolled_back');
+    expect(w.agrees()!.sha).toBe(newer.sha); // only demoapp-tock: the older release's demoapp-tick is gone
+  });
+
   it('a first install held after the switch: "Go back" leaves no app at all; the record never claimed one', async () => {
     const w = await world();
     crashAt('tasks');
@@ -1174,7 +1197,7 @@ describe('apps: what the 2026-10-10 workflow audit found', () => {
     await installRelease(d(agent), v2, {});
     expect(agent.every('demoapp-tick')).toEqual(['5m']); // not the old one beside it
     agent.jobs.find((j) => j.name === 'demoapp-tick')!.disabled = true;
-    expect(await removeTasks(d(agent), 'demoapp')).toBe(1);
+    expect(await removeTasks(d(agent), 'demoapp', v2.manifest)).toBe(1);
     expect(agent.jobs.filter((j) => j.name.startsWith('demoapp-'))).toEqual([]);
   });
 
@@ -1185,8 +1208,18 @@ describe('apps: what the 2026-10-10 workflow audit found', () => {
     expect(done.tasks).toEqual(['demoapp-tick']);
     expect(agent.jobs.map((j) => j.id)).toEqual(expect.arrayContaining(['own1', 'keep']));
     // One of the app's own without an id is still refused: it could not be taken off.
-    agent.jobs.push({ name: 'demoapp-digest' } as never);
-    await expect(removeTasks(d(agent), 'demoapp')).rejects.toThrow(/incomplete or malformed/);
+    agent.jobs.push({ name: 'demoapp-tick' } as never);
+    await expect(removeTasks(d(agent), 'demoapp', parseManifest(JSON.stringify(MANIFEST)))).rejects.toThrow(/incomplete or malformed/);
+  });
+
+  it('a task of the owner\'s whose name starts like the app\'s is not the app\'s: install, update and Stop app leave it (audit, 2026-10-20)', async () => {
+    const { agent, v2 } = await v1AndV2();
+    // The owner's own task, and another app's, both named "demoapp-…".
+    agent.jobs.push({ id: 'own', name: 'demoapp-digest' }, { id: 'other', name: 'demoapp-extra-tick' });
+    await installRelease(d(agent), v2, {});
+    expect(agent.every('demoapp-tick')).toEqual(['5m']);
+    expect(await removeTasks(d(agent), 'demoapp', v2.manifest)).toBe(1);
+    expect(agent.jobs.map((j) => j.id).sort()).toEqual(['other', 'own']);
   });
 
   it('a change of values on the same commit keeps the live release folder (#92)', async () => {
@@ -1240,5 +1273,103 @@ describe('apps: what the 2026-10-10 workflow audit found', () => {
     agent.breakScript = (s) => s;
     expect(agent.live()).toEqual(before);
     expect(JSON.parse(before.config!)).toMatchObject({ mailbox: 'first@example.org', mode: 'live' });
+  });
+});
+
+describe('apps: what the 2026-10-22 review found', () => {
+  const d = (agent: FakeAgent) => ({ provider: agent, runtimeRef: 'x', facts: FACTS });
+  const withFields = (fields: unknown[]) => parseManifest(JSON.stringify({ ...MANIFEST, config: { fields } }));
+
+  it('a required field keyed like an Object method is asked for, not read from Object (A27)', () => {
+    const m = withFields([{ key: 'constructor', required: true }]);
+    expect(mergeConfig(m, FACTS, {}, {}).missing).toEqual(['constructor']);
+    expect(mergeConfig(m, FACTS, { constructor: 'kept' }, {})).toMatchObject({ config: { constructor: 'kept' }, missing: [] });
+  });
+
+  it('a field made required asks again for a value left blank while it was optional (A28)', () => {
+    const m = withFields([{ key: 'mailbox', label: 'its address', type: 'email', required: true }, { key: 'tags', type: 'list', required: true, default: ['a'] }]);
+    const { config, missing } = mergeConfig(m, FACTS, { mailbox: ' ', tags: [] }, {});
+    expect(missing).toEqual(['mailbox (its address)']);
+    expect(config.tags).toEqual(['a']);
+    // A blank default is no value: a required field with one is asked for too.
+    expect(mergeConfig(withFields([{ key: 'mailbox', type: 'email', required: true, default: '' }]), FACTS, { mailbox: '' }, {}).missing).toEqual(['mailbox']);
+    expect(mergeConfig(withFields([{ key: 'mailbox', type: 'email', required: true, default: '' }]), FACTS, {}, {}).missing).toEqual(['mailbox']);
+    // An optional one keeps its blank, as before.
+    expect(mergeConfig(withFields([{ key: 'mailbox', type: 'email' }]), FACTS, { mailbox: '' }, {}).config.mailbox).toBe('');
+  });
+
+  it("a default is held to its field's type (A52)", () => {
+    expect(() => mergeConfig(withFields([{ key: 'per_day', type: 'number', default: 'lots' }]), FACTS, {}, {}))
+      .toThrow(/the app's default for per_day is not a number \("lots"; its hatchabot\.json needs fixing\)/);
+    expect(mergeConfig(withFields([{ key: 'per_day', type: 'number', default: '5' }, { key: 'dry', type: 'bool', default: 'yes' }, { key: 'note', type: 'number', default: '' }]), FACTS, {}, {}).config)
+      .toMatchObject({ per_day: 5, dry: true, note: '' });
+    // A value given is what counts: the bad default is never read.
+    expect(mergeConfig(withFields([{ key: 'per_day', type: 'number', default: 'lots' }]), FACTS, {}, { per_day: '3' }).config.per_day).toBe(3);
+  });
+
+  it("the same commit's failed tests leave its live folder as it was (A44)", async () => {
+    const dir = repo();
+    const agent = new FakeAgent();
+    agent.jobs = [];
+    const v1 = await resolveRelease(hostGit, dir, 'HEAD');
+    await installRelease(d(agent), v1, { mailbox: 'first@example.org' });
+    const live = join(agent.root('x'), `demoapp/releases/${v1.sha.slice(0, 12)}`);
+    writeFileSync(join(live, 'built.txt'), 'before');
+    const shell = agent.execShell.bind(agent);
+    let sawBuilt = '';
+    agent.execShell = async (ref: string, script: string) => {
+      if (!script.includes('unittest')) return shell(ref, script);
+      // The test writes where it runs, then fails.
+      const at = /^cd '([^']*)'/.exec(script)![1]!.split(APPS).join(agent.root(ref));
+      sawBuilt = readFileSync(join(at, 'built.txt'), 'utf8');
+      writeFileSync(join(at, 'built.txt'), 'changed by a failing test');
+      return { code: 1, stdout: 'FAILED (failures=1)', stderr: '' };
+    };
+    const e = await installRelease(d(agent), v1, { mailbox: 'second@example.org' }).then(() => new Error('installed'), (x: unknown) => x) as Error & { unchanged?: boolean };
+    expect(e.message).toMatch(/Its tests failed/);
+    expect(e.unchanged).toBe(true);
+    expect(sawBuilt).toBe('before');                                   // what it built before came along
+    expect(readFileSync(join(live, 'built.txt'), 'utf8')).toBe('before');
+    expect(JSON.parse(agent.live().config!).mailbox).toBe('first@example.org');
+    expect(agent.live().staging).toBe(false);                          // the copy went with the staging folder
+  });
+
+  it("a mirror follows the repo's default branch when it is renamed (A47)", async () => {
+    const src = repo();
+    const cache = mkdtempSync(join(tmpdir(), 'hb-appcache-'));
+    tmp.push(cache);
+    const first = await manifestAt(hostGit, await repoFor(hostGit, { kind: 'git', url: src }, cache), 'HEAD');
+    gitIn(src, 'branch', '-m', 'main', 'trunk');
+    commit(src);
+    const mirror = await repoFor(hostGit, { kind: 'git', url: src }, cache);
+    const now = await manifestAt(hostGit, mirror, 'HEAD');
+    expect(now.sha).not.toBe(first.sha);
+    expect(now.sha).toBe(gitIn(src, 'rev-parse', 'HEAD').toString().trim());
+  });
+
+  it('waiting secret values are stored all or none (B29)', async () => {
+    const kept = new Map<string, string>();
+    let puts = 0;
+    const secrets = {
+      put: async (r: string, v: string) => { if (++puts === 2) throw new Error('disk full'); kept.set(r, v); },
+      get: async (r: string) => kept.get(r)!, delete: async (r: string) => { kept.delete(r); },
+    };
+    const m = withFields([{ key: 'app_password', secret: true }, { key: 'api_key', secret: true }]);
+    await expect(stashPendingSecrets(secrets, 'a1', m, { app_password: 'made-up-one', api_key: 'made-up-two' })).rejects.toThrow(/disk full/);
+    expect([...kept.keys()]).toEqual([]);
+  });
+
+  it("replacing a waiting install that fails part way keeps the waiting one's secrets (final audit, 2026-10-22)", async () => {
+    const { SecretNotFoundError } = await import('../src/secrets/secretStore.js');
+    const kept = new Map<string, string>([['app-pending/a1/app_password', JSON.stringify('the-old-one')]]);
+    let puts = 0;
+    const secrets = {
+      put: async (r: string, v: string) => { if (++puts === 2) throw new Error('disk full'); kept.set(r, v); },
+      get: async (r: string) => { if (!kept.has(r)) throw new SecretNotFoundError(r); return kept.get(r)!; },
+      delete: async (r: string) => { kept.delete(r); },
+    };
+    const m = withFields([{ key: 'app_password', secret: true }, { key: 'api_key', secret: true }]);
+    await expect(stashPendingSecrets(secrets, 'a1', m, { app_password: 'made-up-new', api_key: 'made-up-two' })).rejects.toThrow(/disk full/);
+    expect([...kept]).toEqual([['app-pending/a1/app_password', JSON.stringify('the-old-one')]]);
   });
 });

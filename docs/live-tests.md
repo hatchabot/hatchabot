@@ -19,9 +19,11 @@ They run **before a release reaches anyone else**:
    `HATCHABOT_PROMOTE_IGNORE_CI=1` does for CI; a rollback is not held to it).
 
 A test is **due** for a release when it has never passed on that release or
-an earlier one, or when a file in its area changed since the release it last
-passed on. A run that skipped (nothing to test with, or a part it could not
-run) or failed does not count, and a run that tested nothing fails. The gate
+an earlier one, when a file in its area changed since the release it last
+passed on, or when its latest run on that release failed (a pass before it,
+on that release or an earlier one, does not clear it). A run that skipped
+(nothing to test with, or a part it could not run) does not count either
+way, and a run that tested nothing fails. The gate
 counts only runs that are committed: `due` says when some are not yet.
 `node scripts/live.mjs list` shows each test's last result.
 

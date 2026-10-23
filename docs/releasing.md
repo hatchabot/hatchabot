@@ -75,7 +75,14 @@ New installs take **`stable`**, which names a release in `channels.json` on
 
 Promote from a `main` that matches `origin/main` exactly (it refuses
 otherwise, so nothing unpushed rides along) and a published release: the
-public repo must have its tag. The commit it lands changes `channels.json`
+public repo must have its tag, and its GitHub release must be published
+(not a draft) with `release-manifest.json` (v2.159.0 and later) — a tag
+whose release workflow failed or is still running is refused. It also
+refuses while a release tagged in the dev repo but not published yet has a
+`channels.json` naming another release for the channel: the publisher
+publishes that tag's whole tree, which would put the channel back
+(`HATCHABOT_PROMOTE_IGNORE_PENDING=1` goes on regardless; promote once it
+is published instead). The commit it lands changes `channels.json`
 and nothing else: other staged or unstaged work is left as it was, and it
 refuses before pushing if the commit would hold anything more. Promoting
 forward asks GitHub first: it refuses a release whose CI run for the push to
@@ -91,10 +98,45 @@ names is published, and copies that one file to the public repo
 (`Update channels`; no wait, no digest). That push starts the public repo's
 `.github/workflows/promote-images.yml`, which moves the runtime image's
 `:stable` or `:beta` to that release's image — by the digest in its
-`release-manifest.json`, one alias at a time; a channel moved back is a
-rollback, so its image moves back too. A release made before the release
-workflow has no manifest: its image tags are left as they are. A failed
-move can be made by hand: Actions → Promote images → Run workflow.
+`release-manifest.json`, one alias at a time; a channel moved back by the
+fast lane is a rollback (the tag states it, `rollback <channel> <from> →
+<to>`, which promote.sh writes and the publisher's gate requires), so its
+image moves back too. Any other push that moves a channel back (a release
+tagged before a promote) fails and moves nothing, as does a channel naming
+a tag with no published release. A release made before the release
+workflow (older than v2.159.0) has no manifest: its image tags are left as
+they are. A failed move can be made by hand: Actions → Promote images → Run
+workflow.
+
+When `land.sh` stops waiting (exit 3) its pull request stays open and
+merges later; promote.sh then exits 3 too and says so. Once it has merged,
+`git pull --rebase` and run the same `promote.sh` again: it finds the
+channel already on `main` and asks for the fast lane. Run again after a
+channel came back on the public repo (a release that carried an older
+`channels.json`), it asks the publisher once more.
+
+The publisher takes fast-lane tags in order, and holds each to the file the
+one before it left. So while an earlier fast-lane tag asking for another
+`channels.json` is still waiting, promote.sh asks for none: its rollback
+line would be worked out against the wrong file, and the gate would refuse
+it. Run it again once the earlier one has reached the public repo (to go
+sooner: `gh workflow run publish.yml -R cksci/publisher`). It refuses before
+the promote commit lands, so nothing reaches main meanwhile. Each tag the
+publisher publishes is an "Update channels" commit on the public repo dated
+with the tag's own date, so promote.sh finds which tags are published:
+every tag dated up to the newest published one is done (before it, one the
+publisher's gate blocked is never published), and every later one is
+waiting unless its file is the public repo's now. A tag with no
+`channels.json` (one made by hand) stops the publisher, so it counts as
+waiting too. Rolling back both channels asks for two files, and the second
+waits for the first. A blocked tag that is still
+the newest is deleted from origin (`git push origin
+:refs/tags/channels-…`) to go on. `HATCHABOT_PROMOTE_IGNORE_WAITING=1` goes
+on regardless; it leaves the waiting-release check above in place. The same wait
+holds `release.sh` back: a commit that already has a rollback in it, but
+whose fast lane has not reached the public repo yet, is refused until it has.
+Only `vX.Y.Z` tags count as waiting releases: the publisher never
+publishes a pre-release tag, so `release.sh` refuses to make one.
 
 On the development machine the CLI has the release verbs too — set
 `HATCHABOT_DEV_DIR=<your checkout>` in `~/.config/hatchabot/env` once:
@@ -224,7 +266,10 @@ management agent stays pinned and moves last.
    on it (`package.json` says X.Y.Z, CHANGELOG has `## [X.Y.Z]`), CI passed
    on that commit's push to `main` (it waits for a run still going), and the
    tag `vX.Y.Z` exists neither in the dev repo nor on the public repo (a
-   name the public repo ever had is used for good). It checks the release
+   name the public repo ever had is used for good), and the commit's
+   `channels.json` names no channel an older release than the dev repo's
+   or the public repo's `main` does (its whole tree is published, so it
+   would put the channel back). It checks the release
    notes (the CHANGELOG section) with `privacy-check.mjs --text`, brings the
    public repo's privacy fingerprints up to date (`--sync-ci`), then makes
    the annotated tag and pushes it, by name, to the dev repo.
@@ -237,8 +282,9 @@ management agent stays pinned and moves last.
 ### What the release workflow does
 
 `.github/workflows/release.yml` (started on the public repo by the
-publisher's push of the tag `vX.Y.Z`; never in the dev repo; one release
-at a time):
+publisher's push of the tag `vX.Y.Z`; never in the dev repo; one run per
+tag, so a release tagged soon after another waits for nothing and is never
+cancelled):
 
 1. **check** (read-only): `scripts/release-check.sh --tagged` — the tag
    names a commit on `main`, and `package.json` and CHANGELOG there say the
@@ -263,8 +309,9 @@ at a time):
    `.sha256` and the manifest, the draft's asset list checked against the
    manifest (names, sizes, digests), then — the tag checked to name that
    commit — the release published.
-6. **latest**: when it is the newest release, `:latest` moves to its image
-   (`promote-images.yml`). `:beta` and `:stable` move only when
+6. **latest**: when it is the newest release — asked again as **publish**
+   publishes it, since another tag's run may have come meanwhile — `:latest`
+   moves to its image (`promote-images.yml`). `:beta` and `:stable` move only when
    `scripts/promote.sh` moves the channel; nothing else moves them, and never
    to an older release unless it is a rollback.
 
@@ -322,7 +369,10 @@ The public repo `hatchabot/hatchabot`:
 
 `kit doctor hatchabot` (in the publish kit) checks all of these. The dev
 repo `cksci/hatchabot-dev` is private, with no branch rules (`land.sh`
-lands every change), and its own CI runners.
+lands every change), and its own CI runners on the main machine: every
+job runs there, `ui` too, with rootless podman for its Chrome container
+(the publish kit's `runner/containers.sh`), so dev CI spends no Actions
+minutes. The public repo's CI runs on GitHub's runners.
 
 ## The privacy check
 
@@ -439,7 +489,8 @@ secret can test guesses against it, so it is kept as a secret.
 
 What it cannot catch: a private value the install has no record of (a
 person mentioned only in conversation, say); a paraphrase or a misspelling;
-a name broken across two lines (text is read a line at a time); pictures
+a name broken across more than one line break (a name wrapped onto the
+next line is found, as the publisher's gate finds it); pictures
 and compressed data inside binary files (no OCR, no unpacking); review summaries, discussions and the wiki; an issue,
 pull request or comment the watch's two days have passed. The rule in `AGENTS.md` — examples come from
 the invented household — stays the first line of defence.
@@ -494,8 +545,7 @@ image pin is missing.
   notes, let CI pass, merge.
 - **What Dependabot does not see:** `ARG NODE_IMAGE=` in
   `docker/Dockerfile.runtime` and `CHROME_IMAGE` in
-  `scripts/ui-clickthrough.mjs` (with the matching `docker pull` in
-  `ci.yml`). Bump those by hand, as below.
+  `scripts/ui-clickthrough.mjs` (with the matching `pull` in `ci.yml`). Bump those by hand, as below.
 - **By hand (and the emergency path, when an action or image must move
   today):** check the upstream release (its notes, and that the tag belongs
   to the project's own repository), then resolve it yourself:

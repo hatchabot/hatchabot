@@ -61,7 +61,9 @@ codebase gets deployed, updated and rolled back from Hatchabot.
   (never the live data); a failure stops the install or update and leaves the
   running version and its config alone.
 - `tasks`: OpenClaw command tasks, named `<app>-<name>`, re-synced on every
-  install, update and rollback. `every` (`1m`, `15m`, `1h`) or `cron`.
+  install, update and rollback. `every` (`1m`, `15m`, `1h`) or `cron`. Only
+  the names the app's manifests make are its own: another task whose name
+  merely starts with `<app>-` is left alone.
 - `env`, `command`, `chat`: placeholders `{app_dir}` (the live release),
   `{data_dir}`, `{agent}` (the OpenClaw agent id), `{name}`, `{env}` (the env
   as `K=V …`).

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Duplex } from 'node:stream';
 import {
-  FrameReader, GUEST_METHODS, LOCAL_BROWSER_ADDRESS, encodeFrame, forwardedClientAddress, guestHttpAllowed,
+  FrameReader, GUEST_METHODS, LOCAL_BROWSER_ADDRESS, encodeFrame, forwardedClientAddress, guestHttpAllowed, guestHttpPath,
   guestRequestVerdict, scrubForGuest, spliceGuest, stripClientIdentity, withConsoleIdentity,
 } from '../src/api/consoleProxy.js';
 
@@ -66,6 +66,20 @@ describe('what a guest may fetch over HTTP', () => {
     ['POST', '/'], ['DELETE', '/chat'], ['GET', '/assets/../../tools/invoke'], ['GET', '/assets/%2e%2e/x'], ['GET', '/secret.json'],
     ['GET', '/mcp'], ['POST', '/mcp'], ['GET', '/metrics'], ['GET', '/systems'], ['GET', '/settings'], ['GET', '/chat/x.json'],
   ])('%s %s is an operator surface, refused', (m, p) => expect(guestHttpAllowed(m, p)).toBe(false));
+  // The path arrives decoded (%5c is already '\'); the gateway reads it with new URL().
+  it.each([
+    ['GET', '/assets/x\\..\\..\\sessions/agent:recipe:main/history'], ['GET', '/assets/..\\..\\metrics'],
+    ['GET', '/assets\\..\\api/artifacts/download/x'], ['GET', '/assets/.\t./.\t./metrics'], ['GET', '/assets/x\n/../../metrics'],
+    ['GET', '/assets/%2E%2e/metrics'], ['GET', '/assets/x#/../../metrics'], ['GET', '/chat?/../../metrics'],
+    ['GET', '/assets/x\u0000y'], ['GET', '/assets/a b.js'],
+  ])('%s %j reads differently at the gateway, refused', (m, p) => expect(guestHttpAllowed(m, p)).toBe(false));
+  it('what is forwarded is what was judged', () => {
+    expect(guestHttpPath('GET', '/assets//index-x.js')).toBe('/assets/index-x.js');
+    // Sent on as '//assets/…', the gateway would read 'assets' as a host and serve /sessions/….
+    expect(guestHttpPath('GET', '//assets/sessions/agent:recipe:main/history')).toBe('/assets/sessions/agent:recipe:main/history');
+    expect(guestHttpPath('GET', '/__openclaw__/workspace-icon/agent%3Ataco%3Amain')).toBe('/__openclaw__/workspace-icon/agent%3Ataco%3Amain');
+    expect(guestHttpPath('GET', '/assets/x\\..\\..\\metrics')).toBeUndefined();
+  });
 });
 
 describe('what a guest may ask the gateway', () => {

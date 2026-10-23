@@ -421,3 +421,38 @@ describe('GET /v1/model-prices', () => {
     expect(s).toMatchObject({ unpriced: [], local: [] });
   });
 });
+
+describe("spend over time: day bars are the viewer's days (audit, 2026-10-20)", () => {
+  it("a month in New York cuts at New York midnight; the route takes the page's zone, and ignores one it does not know", async () => {
+    const w = await world();
+    const now = Date.parse('2026-10-20T16:30:00Z'); // 12:30 in New York (UTC-4)
+    // 22:00 on the 19th and 10:00 on the 20th, New York time.
+    w.store.setModelProfile('c-big', profile({ 'claude-opus-4-8': model({ [Date.parse('2026-10-20T02:00:00Z')]: { input: 1e6 }, [Date.parse('2026-10-20T14:00:00Z')]: { input: 2e6 } }) }), iso(now));
+    const ny = spendSeries(w.store, OWNER, 'month', { now, tz: 'America/New_York', agentId: 'c-big' }); // the world's other agents spend near the real today
+    const day = (at: string) => ny.buckets.find((b) => b.at === at)!;
+    expect(day('2026-10-19T04:00:00.000Z').input).toBe(5);
+    expect(day('2026-10-20T04:00:00.000Z').input).toBe(10);
+    expect(ny.buckets.at(-1)!.at).toBe('2026-10-20T04:00:00.000Z');
+    // Across the clock change (November 1 in New York) a day still starts at its midnight.
+    const nov = spendSeries(w.store, OWNER, 'month', { now: Date.parse('2026-11-20T17:00:00Z'), tz: 'America/New_York' }).buckets.map((b) => b.at);
+    expect(nov).toContain('2026-10-31T04:00:00.000Z');
+    expect(nov).toContain('2026-11-02T05:00:00.000Z');
+    // Where DST starts at midnight (Santiago, 2026-09-06: 00:00 does not exist), that
+    // day starts at 01:00, its first moment, not 23:00 the day before; every other
+    // day at 00:00, each with its own date (regression audit, 2026-10-22).
+    const local = (at: string) => new Date(at).toLocaleString('en-GB', { timeZone: 'America/Santiago', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit' });
+    const scl = spendSeries(w.store, OWNER, 'month', { now: Date.parse('2026-09-20T15:00:00Z'), tz: 'America/Santiago' }).buckets.map((b) => local(b.at));
+    expect(scl).toContain('06/09/2026, 01');
+    expect(scl.filter((x) => !x.endsWith(', 00') && x !== '06/09/2026, 01').slice(1)).toEqual([]); // the first slice may start mid-day
+    expect(new Set(scl.map((x) => x.slice(0, 10))).size).toBe(scl.length);
+    // UTC when no zone is given: what it always was.
+    expect(spendSeries(w.store, OWNER, 'month', { now }).buckets.at(-1)!.at).toBe('2026-10-20T00:00:00.000Z');
+    // The week's 3-hour slices start on the zone's clock too; hour slices stay the clock's hours.
+    expect(spendSeries(w.store, OWNER, 'week', { now, tz: 'America/New_York' }).buckets.at(-1)!.at).toBe('2026-10-20T16:00:00.000Z');
+    expect(spendSeries(w.store, OWNER, 'day', { now, tz: 'Asia/Kolkata' }).buckets.at(-1)!.at).toBe('2026-10-20T16:00:00.000Z');
+    const r = await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=month&tz=America%2FNew_York', headers: as(OWNER) });
+    expect(r.statusCode).toBe(200);
+    expect(new Date(r.json().buckets.at(-1).at).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' })).toMatch(/^0?0$/);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=month&tz=Not%2FA_Zone', headers: as(OWNER) })).statusCode).toBe(200);
+  });
+});

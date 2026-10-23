@@ -185,7 +185,14 @@ async function resumeBackground(ctx: ResumeContext, op: Operation): Promise<void
 
 /** Settle one interrupted operation; a recovery that itself fails is held with [Try again]. */
 async function resumeOne(ctx: ResumeContext, op: Operation, askAttempts?: number): Promise<void> {
-  const settle = () => runKind(ctx, op, undefined, askAttempts);
+  // `op` was read before the wait for the busy flag: the owner may have
+  // settled it meanwhile (a held move they chose to keep here). Only one still
+  // as it was read is settled; one settled already was put back on hold
+  // (audit, 2026-10-20).
+  const settle = async () => {
+    if (ctx.store.getOperation(op.id)?.status !== op.status) return;
+    await runKind(ctx, op, undefined, askAttempts);
+  };
   try {
     // A rebuild or setup is guarded in memory by its own task (re-queued here, it takes the busy flag at its turn).
     if (op.agentId && !BACKGROUND_KINDS.includes(op.kind)) await whileBusy(op.agentId, settle);

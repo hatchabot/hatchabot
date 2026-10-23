@@ -12,9 +12,12 @@ const HOUR = 3_600_000;
 
 function depsFor(w: World, over: Partial<HibernateDeps> = {}): HibernateDeps & { events: Array<[string, string]> } {
   const events: Array<[string, string]> = [];
+  // One time, as a real conversation's is: read again under the lock, a
+  // clock-made one would look like new activity.
+  const quiet = new Date(Date.now() - 10 * HOUR).toISOString();
   return {
     store: w.store, secrets: w.secrets, providerFor: () => w.provider,
-    lastActiveFor: async () => new Date(Date.now() - 10 * HOUR).toISOString(),
+    lastActiveFor: async () => quiet,
     ownCrons: async () => [],
     isBusy: () => false,
     log: (id) => (event) => { events.push([id, event]); },
@@ -46,8 +49,9 @@ describe('the idle rule', () => {
     const tasks = await seedRunningAgent(w, { id: 'a5', slug: 'tasks', accountId: 'tasksbot' });
     const awake = await seedRunningAgent(w, { id: 'a6', slug: 'awake', accountId: 'awakebot' });
     w.store.setHibernatePolicy(awake, 'never');
+    const base = Date.now();
     const deps = depsFor(w, {
-      lastActiveFor: async (a) => new Date(Date.now() - (a.id === recent ? 1 : 10) * HOUR).toISOString(),
+      lastActiveFor: async (a) => new Date(base - (a.id === recent ? 1 : 10) * HOUR).toISOString(),
       isBusy: (id) => id === busy,
       ownCrons: async (a) => (a.id === tasks ? [{ enabled: true }, { enabled: true, system: true }] : [{ enabled: true, system: true }]),
     });
@@ -355,6 +359,26 @@ describe('the 2026-10-11 workflow audit', () => {
     // Hibernate by hand is the owner's own ask: it still works.
     await hibernateAgent(deps, w.store.getAgent(id)!, 'by hand');
     expect(w.store.getAgent(id)!.state).toBe('STOPPED');
+  });
+
+  it('a turn that finishes while the sweep reads its tasks keeps the agent up (review, 2026-10-22)', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w);
+    let active = new Date(Date.now() - 10 * HOUR).toISOString();
+    const deps = depsFor(w, {
+      lastActiveFor: async () => active,
+      // The slow task read: a conversation turn completes meanwhile, its busy flag clear again.
+      ownCrons: async () => { active = new Date().toISOString(); return []; },
+    });
+    expect(await hibernateSweep(deps, Date.now(), 6 * HOUR)).toEqual([]);
+    expect(w.store.getAgent(id)!.state).toBe('RUNNING');
+    expect(deps.events).not.toContainEqual([id, 'hibernate.failed']);
+    // Its activity unreadable at the stop: it stays up too.
+    const unread = depsFor(w, { lastActiveFor: (() => { let n = 0; return async () => { if (++n > 1) throw new Error('gateway down'); return active; }; })() });
+    expect(await hibernateSweep(unread, Date.now() + 30 * 24 * HOUR, 6 * HOUR)).toEqual([]);
+    expect(w.store.getAgent(id)!.state).toBe('RUNNING');
+    // Quiet throughout: it sleeps.
+    expect(await hibernateSweep(depsFor(w, { lastActiveFor: async () => active }), Date.now() + 30 * 24 * HOUR, 6 * HOUR)).toEqual([id]);
   });
 });
 

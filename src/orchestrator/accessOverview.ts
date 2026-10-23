@@ -57,6 +57,15 @@ export const ALERT_MISMATCHES: readonly Mismatch[] = ['extra', 'differs', 'stale
 
 const GIT_BASE = '/home/node/.openclaw';
 const tokenHash = (t: string) => createHash('sha256').update(t).digest('hex').slice(0, 16);
+/** The token the bot's account in openclaw.json holds, from Hatchabot's stored secret; null when it cannot be read. */
+export function botTokenOf(kind: ChannelKind, secret: string | null): string | null {
+  if (!secret) return null;
+  if (kind !== 'slack') return secret;
+  try {
+    const t = (JSON.parse(secret) as { botToken?: unknown } | null)?.botToken;
+    return typeof t === 'string' && t ? t : null;
+  } catch { return null; }
+}
 
 /** Where Hatchabot put each folder and repo, and what it injects — the intent. */
 function intent(store: Store, agent: Agent) {
@@ -103,17 +112,25 @@ export function accessProbeScript(input: { paths: string[]; env: string[] }): st
     'const bad=(k,s,e)=>{for(const c of (k?[k]:["telegram","slack","discord"]))out.unread[c]&&out.unread[c].push(s+": "+er(e))};',
     'if(!cfg)bad(null,"openclaw.json",cfgErr||"not an object");',
     'const adm=(k,x)=>{if(x===undefined||x===null)return;let v=String(x);if(v.startsWith(k+":"))v=v.slice(k.length+1);(out.admitted[k]=out.admitted[k]||[]).includes(v)||out.admitted[k].push(v)};',
-    'const ch=(cfg&&cfg.channels)||{};',
+    'const ch=(cfg&&cfg.channels)||{},off={};',
     'for(const k of ["telegram","slack","discord"]){const x=ch[k];if(!x||typeof x!=="object")continue;const a={};',
     // Channel-level allowFrom/groupAllowFrom admit on every account of that app
     // (OpenClaw's defaults), and an account's groupAllowFrom admits in its
     // groups: read them all, or a list set there reads as "nobody" (B017).
     'const al=(o)=>{if(!o||typeof o!=="object")return;for(const f of ["allowFrom","groupAllowFrom"]){const l=o[f];if(l===undefined||l===null)continue;if(!Array.isArray(l))throw new Error(f+" not a list");for(const y of l)adm(k,y)}};',
-    'try{al(x);for(const [id,v] of Object.entries(x.accounts||{})){a[id]={enabled:!!v&&v.enabled!==false,h:h(v&&(v.botToken||v.token))};al(v)}}catch(e){bad(k,"openclaw.json",e)}',
-    'out.channels[k]={enabled:x.enabled!==false,accounts:a}}',
-    'const cd=d+"/credentials";try{for(const f of fs.readdirSync(cd)){const m=/^(telegram|slack|discord)-.*-allowFrom\\.json$/.exec(f);if(!m)continue;try{for(const y of (JSON.parse(fs.readFileSync(path.join(cd,f),"utf8")).allowFrom||[]))adm(m[1],y)}catch(e){bad(m[1],"allowFrom file",e)}}}catch(e){if(!gone(e))bad(null,"allowFrom files",e)}',
+    // Slack channels and Discord servers admit by their own `users` list, which
+    // Hatchabot writes too (members.ts ROOM_USERS_ADD_JS): someone still in one
+    // still talks to the agent there (review, 2026-10-22).
+    'const rm=(o)=>{if(k==="telegram"||!o||typeof o!=="object")return;for(const key of ["channels","guilds"]){const rs=o[key];if(!rs||typeof rs!=="object")continue;for(const r of Object.values(rs)){if(!r||typeof r!=="object"||r.users===undefined||r.users===null)continue;if(!Array.isArray(r.users))throw new Error(key+" users not a list");for(const y of r.users)adm(k,y)}}};',
+    // A turned-off chat app or account admits nobody: its lists are not
+    // counted (`off`: the app all off, or which of its accounts), so a person
+    // left only there is not "still let in" (review, 2026-10-22).
+    'const on=x.enabled!==false;off[k]={all:!on,a:[]};',
+    'try{const accs=Object.entries(x.accounts||{});const anyOn=!accs.length||accs.some(([,v])=>!!v&&v.enabled!==false);if(!anyOn)off[k].all=true;if(on&&anyOn){al(x);rm(x)}for(const [id,v] of accs){const en=!!v&&v.enabled!==false;a[id]={enabled:en,h:h(v&&(v.botToken||v.token))};if(on&&en){al(v);rm(v)}else off[k].a.push(id.toLowerCase())}}catch(e){bad(k,"openclaw.json",e)}',
+    'out.channels[k]={enabled:on,accounts:a}}',
+    'const cd=d+"/credentials";try{for(const f of fs.readdirSync(cd)){const m=/^(telegram|slack|discord)-(.*)-allowFrom\\.json$/.exec(f);if(!m)continue;const o=off[m[1]];if(o&&(o.all||o.a.includes(m[2].toLowerCase())))continue;try{for(const y of (JSON.parse(fs.readFileSync(path.join(cd,f),"utf8")).allowFrom||[]))adm(m[1],y)}catch(e){bad(m[1],"allowFrom file",e)}}}catch(e){if(!gone(e))bad(null,"allowFrom files",e)}',
     `let st=null;try{st=fs.statSync(${JSON.stringify(PAIRING_DB)})}catch(e){if(!gone(e))bad(null,"pairing store",e)}`,
-    `if(st){try{const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync(${JSON.stringify(PAIRING_DB)},{readOnly:true});try{for(const r of db.prepare("select channel_key, entry from channel_pairing_allow_entries").all())adm(String(r.channel_key),r.entry)}finally{try{db.close()}catch(e){}}}catch(e){bad(null,"pairing store",e)}}`,
+    `if(st){try{const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync(${JSON.stringify(PAIRING_DB)},{readOnly:true});try{for(const r of db.prepare("select channel_key, entry from channel_pairing_allow_entries").all()){const o=off[String(r.channel_key)];if(o&&o.all)continue;adm(String(r.channel_key),r.entry)}}finally{try{db.close()}catch(e){}}}catch(e){bad(null,"pairing store",e)}}`,
     'for(const n of inp.env)out.env[n]=Object.prototype.hasOwnProperty.call(process.env,n);',
     'for(const p of inp.paths){try{fs.statSync(p);out.paths[p]=true}catch(e){out.paths[p]=gone(e)?false:null}}',
     'process.stdout.write(JSON.stringify(out));',
@@ -247,8 +264,13 @@ async function verifyNow(deps: VerifyDeps, agent: Agent, runtimeRef: string): Pr
         const present = !!acct && acct.enabled;
         let detail: string | undefined;
         const ch = mine.find((c) => c.subject === subject);
-        if (present && ch && kind === 'telegram' && acct.h) {
-          const token = await secrets.get(ch.secretRef).catch(() => null);
+        // Every chat app's token, each as it is stored: a Slack secret is JSON
+        // ({botToken, appToken}) and the account in openclaw.json holds its
+        // botToken; Discord's and Telegram's are the token itself. Telegram
+        // alone was compared, so another Discord or Slack bot passed as this
+        // one (review, 2026-10-22).
+        if (present && ch && acct.h) {
+          const token = botTokenOf(kind, await secrets.get(ch.secretRef).catch(() => null));
           if (token && tokenHash(token) !== acct.h) detail = 'differs';
         }
         store.recordAccessCheck(agent.id, kind, subject, present, detail, at);

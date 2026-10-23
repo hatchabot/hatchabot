@@ -6,7 +6,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { RUNTIME_STATE_FILES, catArgv, cleanFileName, cleanRelPath, downloadName, inlineType, listShell, parseListing, putArgv, tarArgv, uploadAllowed } from '../src/orchestrator/agentFiles.js';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -129,7 +129,7 @@ describe('uploads and opening in the browser', () => {
     expect(sh).toContain('realpath -e');
     expect(sh).toContain(`'it'\\''s.txt'`);
     expect(sh).toContain('exit 5');
-    expect(sh).toContain('mv -f');
+    expect(sh).toContain('ln -T'); // no overwrite asked: never replaces a name
     expect(sh).toContain('/home/node/.openclaw/agents/kitchen/agent|'); // the state rule, on the resolved directory
     expect(sh).toContain('if [ -d "$T" ]; then exit 4; fi'); // never into a directory under that name
   });
@@ -158,6 +158,29 @@ describe('uploads and opening in the browser', () => {
       expect(readFileSync(join(home, ws, 'notes.md'), 'utf8')).toBe('uploaded');
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
+  // Review 2026-10-22, A05/A06/A19: the one-shot run for real, under sh, in a temp home.
+  it('a 255-byte name uploads; a failed write leaves no staging file; a name made meanwhile is not replaced', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hb-home-'));
+    const bin = join(home, 'bin'); mkdirSync(bin); mkdirSync(join(home, 'inbox'));
+    try {
+      // HB_CAT: "fail" writes some bytes and fails; "race" makes the target first, as another writer would.
+      writeFileSync(join(bin, 'cat'), '#!/bin/sh\ncase "$HB_CAT" in fail) printf half; exit 1 ;; race) printf theirs > "$HB_RACE" ;; esac\nexec /bin/cat "$@"\n', { mode: 0o755 });
+      const run = (name: string, overwrite: boolean, env: Record<string, string> = {}) =>
+        spawnSync('sh', ['-c', putArgv('inbox', name, overwrite, 'kitchen')[2]!.split('/home/node').join(home)],
+          { input: 'uploaded', env: { PATH: `${bin}:/usr/bin:/bin`, ...env } });
+      const long = 'n'.repeat(252) + '.md';
+      expect(run(long, false).status).toBe(0);
+      expect(readFileSync(join(home, 'inbox', long), 'utf8')).toBe('uploaded');
+      expect(run('broken.md', true, { HB_CAT: 'fail' }).status).not.toBe(0);
+      expect(run('broken.md', false, { HB_CAT: 'fail' }).status).not.toBe(0);
+      const race = join(home, 'inbox', 'race.md');
+      expect(run('race.md', false, { HB_CAT: 'race', HB_RACE: race }).status).toBe(5);
+      expect(readFileSync(race, 'utf8')).toBe('theirs');
+      expect(run('race.md', true).status).toBe(0);   // asked to overwrite: it does
+      expect(readFileSync(race, 'utf8')).toBe('uploaded');
+      expect(readdirSync(join(home, 'inbox')).sort()).toEqual([long, 'race.md'].sort());   // no staging file left behind
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
   it('knows what a browser shows: text as text, pages and images as themselves, unknown binaries download', () => {
     expect(inlineType('notes.md')).toBe('text/plain');
     expect(inlineType('Makefile')).toBe('text/plain');
@@ -166,6 +189,8 @@ describe('uploads and opening in the browser', () => {
     expect(inlineType('photo.JPG')).toBe('image/jpeg');
     expect(inlineType('model.gguf')).toBeUndefined();
     expect(inlineType('data.bin')).toBeUndefined();
+    // Own keys only: Object's own names are not types (audit, 2026-10-22).
+    for (const odd of ['report.constructor', 'x.tostring', 'x.hasownproperty', 'x.valueof']) expect(inlineType(odd), odd).toBeUndefined();
   });
   it('opened in the browser: inline, the right type, sandboxed and unsniffable; a binary still downloads', async () => {
     const { f, provider } = await world();

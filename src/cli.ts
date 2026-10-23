@@ -993,6 +993,8 @@ export function fmtHealth(name: string, h: any): string {
     const t = h.telegram;
     lines.push(`  telegram: ${t.connected ? 'connected' : `disconnected${t.lastError ? ` (${t.lastError})` : ''}`}`);
   }
+  // Discord and Slack degrade it too; said, or "degraded" had no reason (regression audit, 2026-10-22).
+  for (const k of h.reachable && Array.isArray(h.disconnected) ? h.disconnected : []) lines.push(`  ${k}: disconnected`);
   if (h.eventLoop?.degraded) {
     lines.push(`  event loop: degraded${h.eventLoop.reasons?.length ? ' — ' + h.eventLoop.reasons.join(', ') : ''}`);
   }

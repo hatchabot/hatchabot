@@ -316,9 +316,12 @@ export async function gogAccounts(deps: ConnectionSyncDeps, runtimeRef: string):
     // `{"accounts": []}` with none (checked 2026-10-11), so `null` is no
     // answer either.
     if (!Array.isArray(parsed.accounts)) return null;
-    return (parsed.accounts as Array<{ email?: unknown } | null>)
-      .map((a) => (a && typeof a === 'object' ? a.email : undefined))
-      .filter((e): e is string => typeof e === 'string');
+    // An entry without an email (another gog's shape) is no answer either:
+    // dropped, the list read as not naming an account it may well hold, and a
+    // failed remove passed as verified (review, 2026-10-22).
+    const emails = (parsed.accounts as Array<{ email?: unknown } | null>)
+      .map((a) => (a && typeof a === 'object' ? a.email : undefined));
+    return emails.every((e): e is string => typeof e === 'string') ? emails : null;
   } catch {
     return null;
   }

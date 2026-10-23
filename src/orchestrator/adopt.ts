@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, statSync, readdirSync, readFileSync, readlinkSync } from 'node:fs';
+import { existsSync, lstatSync, statSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Store } from '../store/store.js';
 import { sharePathProblem } from './provision.js';
@@ -173,7 +173,23 @@ export async function packWorkspace(preview: Pick<WorkspacePreview, 'path' | 'fi
   // --no-recursion: a listed name that became a folder since the preview
   // does not pull in what is under it.
   const args = ['cz', '-C', preview.path, '--no-recursion', '--null', '-T', '-'];
-  return new Promise<Buffer>((done, fail) => {
+  // Each listed name must still be a plain file reached through no link,
+  // before tar reads it and after: a file swapped for a link went in as the
+  // link, and a folder swapped for one carried a file from outside under a
+  // listed name (review 2026-10-22, B14).
+  const changed = (): string | undefined => {
+    let root: string;
+    try { root = realpathSync(preview.path); } catch { return '.'; }
+    for (const f of preview.files) {
+      const p = resolve(preview.path, f);
+      try { if (!lstatSync(p).isFile() || realpathSync(p) !== resolve(root, f)) return f; } catch { return f; }
+    }
+    return undefined;
+  };
+  const moved = (f: string) => new AdoptError(`${f} in ${preview.path} changed while it was being copied (a link or folder in its place). Nothing was copied — look at the folder and adopt it again.`);
+  const before = changed();
+  if (before) throw moved(before);
+  const tarball = await new Promise<Buffer>((done, fail) => {
     const tar = spawn('tar', args, { stdio: ['pipe', 'pipe', 'pipe'] });
     const out: Buffer[] = [];
     let size = 0;
@@ -189,6 +205,9 @@ export async function packWorkspace(preview: Pick<WorkspacePreview, 'path' | 'fi
     tar.stdin.on('error', () => { /* tar exited early: its exit code says why */ });
     tar.stdin.end(preview.files.map((f) => `./${f}\0`).join(''));
   });
+  const after = changed();
+  if (after) throw moved(after);
+  return tarball;
 }
 
 export interface AdoptDeps extends ProvisionDeps {

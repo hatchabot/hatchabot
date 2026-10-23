@@ -1,4 +1,4 @@
-import { MODEL_CATALOG, modelOption } from './modelOptions.js';
+import { MODEL_CATALOG, modelKey, modelOption } from './modelOptions.js';
 
 /**
  * Model prices in USD per 1M tokens, as [input, output]. The source of truth
@@ -36,6 +36,22 @@ export const MODEL_PRICES: Record<string, [number, number]> = {
 /** A cache read as a share of the input price: a tenth, except where Anthropic lists less. */
 export const CACHE_READ_SHARE: Record<string, number> = { 'claude-opus-5-5': 0.05, 'claude-fable-5-1': 0.025 };
 
+/**
+ * A model's price, under any spelling the code meets (`anthropic/…`, a dated
+ * id): looked up by its catalog key, and only among the table's own entries,
+ * so a name like `constructor` is unknown rather than a function (review,
+ * 2026-10-22: the exact-key lookup priced those spellings at nothing).
+ */
+export function priceOf(model: string): [number, number] | undefined {
+  const k = modelKey(model);
+  return Object.hasOwn(MODEL_PRICES, k) ? MODEL_PRICES[k] : undefined;
+}
+/** A cache read as a share of the input price, for any spelling of the model. */
+export function cacheReadShareOf(model: string): number {
+  const k = modelKey(model);
+  return Object.hasOwn(CACHE_READ_SHARE, k) ? CACHE_READ_SHARE[k]! : CACHE_READ_DEFAULT;
+}
+
 export interface CostRange {
   /** Lower bound: every token priced as input (the realistic end for
    *  agent workloads, where reloaded context dwarfs generated output). */
@@ -60,7 +76,7 @@ export function estimateCost(
   let high = 0;
   let partial = false;
   for (const m of byModel) {
-    const price = MODEL_PRICES[m.model];
+    const price = priceOf(m.model);
     if (!price) {
       if (m.tokens > 0) partial = true;
       continue;
@@ -70,7 +86,7 @@ export function estimateCost(
     // models in CACHE_READ_SHARE), cache writes
     // at 1.25× (Anthropic's 5-minute cache). Without it, the old bracket.
     if (typeof m.input === 'number' && typeof m.output === 'number') {
-      const exact = ((m.input + CACHE_WRITE_MULTIPLIER * (m.cacheWrite ?? 0) + (CACHE_READ_SHARE[m.model] ?? CACHE_READ_DEFAULT) * (m.cacheRead ?? 0)) * price[0] + m.output * price[1]) / 1e6;
+      const exact = ((m.input + CACHE_WRITE_MULTIPLIER * (m.cacheWrite ?? 0) + cacheReadShareOf(m.model) * (m.cacheRead ?? 0)) * price[0] + m.output * price[1]) / 1e6;
       low += exact; high += exact;
       continue;
     }
@@ -104,7 +120,7 @@ export function priceList(): PriceRow[] {
   return Object.entries(MODEL_PRICES)
     .map(([id, [input, output]]) => {
       const opt = modelOption(id);
-      const share = CACHE_READ_SHARE[id] ?? CACHE_READ_DEFAULT;
+      const share = cacheReadShareOf(id);
       const r4 = (x: number) => Math.round(x * 10_000) / 10_000;
       return {
         id, label: opt?.label ?? id, input, output,

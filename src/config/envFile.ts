@@ -158,10 +158,13 @@ export type SyncResult =
  */
 export function multilineSetting(text: string): string | undefined {
   for (const line of text.split('\n')) {
-    const m = LINE.exec(line);
-    if (!m || m[1]) continue;
-    const v = m[3]!.trim();
-    if (/(^|[^\\])(\\\\)*\\$/.test(v)) return m[2];
+    // `export NAME="…` too: the tidy keeps it, but the lines inside the value
+    // would be read (and moved) as settings of their own (audit, 2026-10-22).
+    const p = LINE.exec(line), e = p ? undefined : EXPORTED.exec(line);
+    const m = p && !p[1] ? [p[2]!, p[3]!] : e ? [e[1]!, e[2]!] : undefined;
+    if (!m) continue;
+    const v = m[1]!.trim();
+    if (/(^|[^\\])(\\\\)*\\$/.test(v)) return m[0];
     const q = v[0];
     if (q !== '"' && q !== "'") continue;
     let closed = false;
@@ -169,10 +172,17 @@ export function multilineSetting(text: string): string | undefined {
       if (q === '"' && v[i] === '\\') i++;
       else if (v[i] === q) closed = true;
     }
-    if (!closed) return m[2];
+    if (!closed) return m[0];
   }
   return undefined;
 }
+
+/** The assignments a shell sourcing the file runs, in order (plain and `export`). */
+function assignments(text: string): string[] {
+  return text.split('\n').filter((l) => { const m = LINE.exec(l); return m ? !m[1] : EXPORTED.test(l); }).map((l) => l.trim());
+}
+/** The settings a value names for a shell to expand (`$NAME`, `${NAME}`), outside single quotes. */
+const refs = (v: string) => [...v.trim().replace(/'[^']*'/g, '').matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]!);
 
 /** The new text for a file, refused unless every value in force stays byte-for-byte the same. */
 export function syncEnvText(existing: string): SyncResult {
@@ -185,6 +195,15 @@ export function syncEnvText(existing: string): SyncResult {
   const sameMap = (x: Map<string, string>, y: Map<string, string>) => x.size === y.size && [...x].every(([k, v]) => y.get(k) === v);
   const sourcedBefore = sourcedValues(existing), sourcedAfter = sourcedValues(text);
   const same = rawSame && sameMap(before, after) && sameMap(sourcedBefore, sourcedAfter);
+  // PORT=$CUSTOM_PORT moved above CUSTOM_PORT=8123 reads the same line for
+  // line, but a shell sourcing the file (the macOS launcher) gets another
+  // value: reordered, a file whose value names another of its settings is
+  // left alone (audit, 2026-10-22). A `$` naming none (a password's `pa$$`,
+  // `$HOME`) reads the same in any order: refusing it left the file untidied,
+  // with the same warning at every start (final audit, 2026-10-22).
+  const reordered = JSON.stringify(assignments(existing)) !== JSON.stringify(assignments(text));
+  const dollar = reordered ? [...sourcedBefore].find(([, v]) => refs(v).some((n) => sourcedBefore.has(n)))?.[0] : undefined;
+  if (same && dollar) return { ok: false, error: `${dollar} uses a $ that would be read in another order — left as it was` };
   if (!same) {
     const diff = [...new Set([...before.keys(), ...after.keys(), ...sourcedBefore.keys(), ...sourcedAfter.keys()])]
       .filter((k) => before.get(k) !== after.get(k) || sourcedBefore.get(k) !== sourcedAfter.get(k));

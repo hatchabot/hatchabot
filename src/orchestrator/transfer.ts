@@ -21,6 +21,8 @@ import { beginOperation, handleFor, rethrowIfCrash } from './operations.js';
 import { ENV_NAME_RE, envValueProblem, MAX_IMPORTED_ENV_VARS, reservedEnvProblem } from './envPolicy.js';
 import { buildRecipeOn, derivedByTag, recipeFor, recipeProblem, type ImageRecipe } from './imageRecipe.js';
 import { DERIVED_TAG_PREFIX } from './derivedImage.js';
+import { defaultMemoryCap, formatMemoryCap, memberMemoryMax, parseMemoryCap } from './memoryCap.js';
+import { formatSwapAllowance, parseSwapAllowance } from './swap.js';
 
 /**
  * Export/import: an agent as a single portable file, so "move it to another
@@ -74,6 +76,10 @@ export interface ExportManifest {
     /** Per-agent model override. Applied on import only if the destination
      *  profile's menu still offers it; otherwise dropped to the default. */
     model?: string;
+    /** Its own memory cap and swap allowance ("12g", "off"). Applied on import
+     *  within the destination's rules (importedLimits); absent = its default. */
+    memoryCap?: string;
+    swapAllowance?: string;
   };
   ai: { vendor: string; model: string; models?: string[] };
   /** Absent when the agent is web-only (no Telegram bot). */
@@ -163,6 +169,8 @@ const ManifestSchema = z.object({
     // Its home-screen icon travels with it; a bad value is dropped, not fatal.
     icon: z.string().max(16).optional().catch(undefined),
     iconColor: z.string().max(7).optional().catch(undefined),
+    memoryCap: z.string().max(16).optional().catch(undefined),
+    swapAllowance: z.string().max(16).optional().catch(undefined),
   }),
   // A hint only (the destination picks its own source by vendor): an AI
   // source may name models longer than 64 characters, and refusing those
@@ -371,6 +379,8 @@ export async function exportAgent(
       model: agent.model,
       icon: agent.icon,
       iconColor: agent.iconColor,
+      ...(agent.memoryCap ? { memoryCap: agent.memoryCap } : {}),
+      ...(agent.swapAllowance ? { swapAllowance: agent.swapAllowance } : {}),
     },
     ai: {
       vendor: profile?.vendor ?? 'anthropic',
@@ -412,7 +422,8 @@ export interface ImportOptions {
   /** For a file whose pinned image this machine lacks: build it from the
    *  file's recipe, or run the default image. Unset: ask (ImageDecisionNeeded). */
   image?: 'build' | 'drop';
-  /** The caller owns this machine — the only one who may build an image here. */
+  /** The caller owns this machine — the only one who may build an image here,
+   *  or carry in a memory cap above the per-agent maximum (importedLimits). */
   mayBuild?: boolean;
   /**
    * Checks a bot token with Telegram and returns its username. Set by the
@@ -424,6 +435,24 @@ export interface ImportOptions {
   requestedBy?: string;
   /** Told the operation's id once the agent's row exists (the route returns it). */
   onOperation?: (id: string) => void;
+}
+
+/**
+ * The memory cap and swap allowance a file carries, as this machine allows
+ * them: an agent that needed 12g arrived on the 3g default and failed under
+ * its usual work (report A31, 2026-10-22). A member's import is held to the
+ * per-agent maximum here (HATCHABOT_AGENT_MEMORY_MAX), as Settings holds
+ * them; the machine's owner is not. Swap never exceeds the cap under it. A
+ * value this machine would refuse falls back to its default.
+ */
+export function importedLimits(a: { memoryCap?: string; swapAllowance?: string }, machineOwner: boolean, env: NodeJS.ProcessEnv = process.env): { memoryCap?: string; swapAllowance?: string } {
+  const max = machineOwner ? Infinity : parseMemoryCap(memberMemoryMax(env))!;
+  const capBytes = parseMemoryCap(a.memoryCap);
+  const memoryCap = capBytes && capBytes <= max ? formatMemoryCap(capBytes) : undefined;
+  const swapBytes = parseSwapAllowance(a.swapAllowance);
+  const under = parseMemoryCap(memoryCap ?? defaultMemoryCap(env))!;
+  const swapAllowance = swapBytes !== undefined && swapBytes <= under && swapBytes <= max ? formatSwapAllowance(swapBytes) : undefined;
+  return { ...(memoryCap ? { memoryCap } : {}), ...(swapAllowance ? { swapAllowance } : {}) };
 }
 
 /**
@@ -654,6 +683,10 @@ async function importAgentInner(
   };
   store.insertAgent(agent);
   if (image.pin) store.setAgentImage(agent.id, image.pin);
+  // Before provisioning reads them: the container is made with these limits.
+  const limits = importedLimits(manifest.agent, !!opts.mayBuild);
+  if (limits.memoryCap) store.setAgentMemoryCap(agent.id, limits.memoryCap);
+  if (limits.swapAllowance) store.setAgentSwapAllowance(agent.id, limits.swapAllowance);
   // From here the agent exists but is mid-build: reconcile must not judge it.
   markBusy(agent.id);
   // On disk too: a restart before RUNNING undoes the whole import

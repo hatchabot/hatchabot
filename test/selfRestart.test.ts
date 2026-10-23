@@ -9,8 +9,8 @@ import { parseCgroupMemory } from '../src/providers/provider.js';
 
 /**
  * A container whose process quit on its own and was started again by
- * Docker's restart policy leaves no trace anywhere a person looks (Genetic
- * Algorithm Trading, 2026-09-24: exit 0 a second after a message, nothing in
+ * Docker's restart policy leaves no trace anywhere a person looks (a
+ * trading agent, 2026-09-24: exit 0 a second after a message, nothing in
  * the container log). Hatchabot notices the restart count going up, writes a
  * Setup-log line with the exit code, and flags the agent.
  */

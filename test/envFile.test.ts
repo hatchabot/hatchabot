@@ -62,6 +62,25 @@ describe('putting a .env in order', () => {
     expect(text).toContain('\nexport WEIRD=1\n');
   });
 
+  // Audit, 2026-10-22 (A20, A21).
+  it('leaves a file alone when moving its lines would change what a shell that sources it reads', () => {
+    const dollar = 'MY_PORT=8123\nPORT=$MY_PORT\n';
+    const r = syncEnvText(dollar);
+    expect(r.ok).toBe(false);
+    expect((r as { error: string }).error).toContain('PORT uses a $');
+    // In single quotes a $ is only a character: tidied as before.
+    expect(syncEnvText("HATCHABOT_PASSWORD='pa$$word'\nDOCKER_HOST=unix:///run/user/1000/docker.sock\n").ok).toBe(true);
+    // A $ that names no setting of the file reads the same in any order: tidied too.
+    const loose = syncEnvText('DOCKER_HOST=unix:///run/user/1000/docker.sock\nHATCHABOT_PASSWORD="pa$$w0rd"\nDATA=$HOME/hb\nPORT=8123\n');
+    expect(loose.ok, JSON.stringify(loose)).toBe(true);
+    expect((loose as { changed: boolean }).changed).toBe(true);
+  });
+
+  it('leaves an exported value that runs over several lines alone, as it does a plain one', () => {
+    const r = syncEnvText('export NOTE="first line\nHATCHABOT_REBUILD_POLICY=manual\nlast line"\n');
+    expect(r).toEqual({ ok: false, error: 'NOTE has a value on more than one line, which this tidy cannot keep together — left as it was' });
+  });
+
   it('is settled after one pass: a second changes nothing', () => {
     const once = (syncEnvText(before) as { text: string }).text;
     expect(syncEnvText(once)).toEqual({ ok: true, changed: false });

@@ -199,6 +199,68 @@ describe('claimFirstContact', () => {
     expect(claimed).toBeNull();
   });
 
+  // Review, 2026-10-22 (B16, B17).
+  async function owner() {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'a1',
+      workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } },
+      env: {},
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'RUNNING',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
+    provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [{ id: '999', code: 'ZZZZ' }] }), stderr: '' });
+    provider.execResponses.set('pairing approve', { code: 0, stdout: 'ok', stderr: '' });
+    return { store, provider, runtimeRef };
+  }
+  const allowlisted = (p: MockProvider) => p.execLog.some((a) => a[0] === 'sh-volume' && a[1]!.includes('"policy":"allowlist"'));
+
+  it("another chat app's window does not keep this one's door open once it is claimed", async () => {
+    const { store, provider, runtimeRef } = await owner();
+    store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'guest', role: 'user', status: 'active' });
+    store.openPairingWindow('a1', new Date(Date.now() + 600_000).toISOString(), 'guest', { kind: 'discord' });
+    const claimed = await claimFirstContact(
+      { store, provider, sleep: async () => {} },
+      { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', timeoutMs: 1000 },
+    );
+    expect(claimed).toBe('999');
+    expect(allowlisted(provider)).toBe(true);
+  });
+
+  it("the same chat app's other window still holds the door", async () => {
+    const { store, provider, runtimeRef } = await owner();
+    store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'guest', role: 'user', status: 'active' });
+    store.openPairingWindow('a1', new Date(Date.now() + 600_000).toISOString(), 'guest', { kind: 'telegram' });
+    await claimFirstContact(
+      { store, provider, sleep: async () => {} },
+      { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', timeoutMs: 1000 },
+    );
+    expect(allowlisted(provider)).toBe(false);
+  });
+
+  it('a pairing read that throws is tried again, not the end of the watcher', async () => {
+    const { store, provider, runtimeRef } = await owner();
+    const execShell = provider.execShell.bind(provider);
+    let n = 0;
+    provider.execShell = async (ref, script, o) => {
+      if (++n === 1) throw new Error('docker exec: connection reset');
+      return execShell(ref, script, o);
+    };
+    const events: string[] = [];
+    const claimed = await claimFirstContact(
+      { store, provider, sleep: async () => {}, log: (e) => { events.push(e); } },
+      { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', timeoutMs: 1000, pollIntervalMs: 1 },
+    );
+    expect(claimed).toBe('999');
+    expect(events.filter((e) => e === 'claim.read_failed')).toHaveLength(1);
+    expect(store.pairingWindowOpen('a1')).toBe(false);
+  });
+
   it('returns null when the window closes with no contact', async () => {
     const db = new Database(':memory:');
     const store = new Store(db);

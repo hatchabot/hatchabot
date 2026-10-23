@@ -50,6 +50,10 @@ describe('icon validation', () => {
   it('accepts one emoji, including ZWJ sequences, flags and variation selectors', () => {
     for (const ok of ['📈', '⚖️', '👩‍💻', '🇨🇦', '👍🏽', '☂️']) expect(validIcon(ok), ok).toBe(true);
   });
+  it('accepts a keycap, the one emoji that starts with a digit (audit, 2026-10-22)', () => {
+    for (const ok of ['1️⃣', '#️⃣', '*️⃣', '0⃣']) expect(validIcon(ok), ok).toBe(true);
+    for (const bad of ['1', '12️⃣', 'a️⃣', '1️⃣1️⃣', '1️⃣x']) expect(validIcon(bad), bad).toBe(false);
+  });
   it('refuses text, markup, two emoji and empty', () => {
     for (const bad of ['', 'A', 'ab', '<b>', '📈📈', '1', '📈x', '"><img', ' 📈']) expect(validIcon(bad), bad).toBe(false);
   });

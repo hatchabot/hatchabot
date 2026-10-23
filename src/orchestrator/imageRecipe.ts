@@ -52,6 +52,12 @@ export async function recipeFor(
 ): Promise<ImageRecipe | { problem: string }> {
   const repo = tag.replace(/:[^:]*$/, '');
   const d = derived(tag);
+  // Unread is not "no packages": a recipe from a listing that failed rebuilt
+  // the image without the tools its labels record (A32, 2026-10-22).
+  let tags: Awaited<ReturnType<RuntimeProvider['listImageTags']>>;
+  try { tags = await source.listImageTags(); } catch {
+    return { problem: `this machine's images could not be read just now, so ${tag}'s recipe is not known — try again` };
+  }
   if (d) {
     // Only a derived image that built: a failed or running edit's lines are
     // not what the agent actually runs (night review, 2026-09-28).
@@ -61,14 +67,13 @@ export async function recipeFor(
     // base on the destination lacks. Its labels (inherited from the base, or
     // the base's own) say which: the packages are laid back on, the plugins
     // checked against the destination's base (#128).
-    const tags = await source.listImageTags().catch(() => []);
     const from = tags.find((t) => t.tag === tag) ?? tags.find((t) => t.tag === d.base);
     const packages = from?.extraPackages ?? [];
     const bad = packages.find((p) => !PKG.test(p));
     if (bad) return { problem: `its base records a package "${bad.slice(0, 40)}" that is not a package name` };
     return { tag, base: d.base, packages, lines: d.dockerfile, channels: from?.channels ?? [] };
   }
-  const info = (await source.listImageTags().catch(() => [])).find((t) => t.tag === tag);
+  const info = tags.find((t) => t.tag === tag);
   if (!info) return { problem: `${tag} is not on this machine either, so there is nothing to rebuild it from` };
   if (!info.openclawVersion) return { problem: `${tag} does not say which OpenClaw it runs` };
   // A recipe is "that version, its channels and packages". An engine-free

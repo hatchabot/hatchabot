@@ -272,6 +272,23 @@ describe('an export says what it cannot carry (workflow audit, 2026-10-10)', () 
     expect(parseTemplate((await exportTemplate({ store, provider }, 'a1')).data).schedules).toHaveLength(12);
   });
 
+  it('a task message longer than a template carries is refused by name, not cut to fit (review, 2026-10-22)', async () => {
+    const { store, provider } = await world();
+    provider.execResponses.set('cron list', cronList([job(1), job(2, { payload: { kind: 'agentTurn', message: 'x'.repeat(4001) } })]));
+    await expect(exportTemplate({ store, provider }, 'a1')).rejects.toThrow(/The scheduled task “Task 2” has a message longer than the 4,000 characters/);
+    provider.execResponses.set('cron list', cronList([job(1, { payload: { kind: 'agentTurn', message: 'y'.repeat(4000) } })]));
+    expect(parseTemplate((await exportTemplate({ store, provider }, 'a1')).data).schedules![0]!.message).toHaveLength(4000);
+  });
+
+  it('task names and setup-field labels and options are scanned for personal data too (review, 2026-10-22)', async () => {
+    const { store, provider } = await world();
+    store.setAgentParameters('a1', [{ key: 'who', label: 'Write to jordan@example.org', required: false, type: 'choice', options: ['sam@example.org', 'none'], target: 'soul' }]);
+    provider.execResponses.set('sh', { code: 0, stdout: 'Hello {{who}}.', stderr: '' });
+    provider.execResponses.set('cron list', cronList([job(1, { name: 'Mail riley@example.com' })]));
+    const { personal } = await exportTemplate({ store, provider }, 'a1');
+    expect(personal.emails).toBe(3);
+  });
+
   it('more {{placeholders}} than a template holds is refused, naming the ones past the limit (#172)', async () => {
     const { store, provider } = await world();
     const keys = Array.from({ length: 25 }, (_, i) => `field_${i}`);
@@ -327,5 +344,16 @@ describe('setup-field answers and declarations (workflow audit, 2026-10-10)', ()
     expect(resolveParamValues(p, { k: 'Yes' })).toEqual({ k: 'true' });
     expect(resolveParamValues(p, { k: 'off' })).toEqual({ k: 'false' });
     expect(resolveParamValues(p, { k: 'false' })).toEqual({ k: 'false' });
+  });
+
+  it('a field keyed like an Object method reads only a value given (review, 2026-10-22)', () => {
+    expect(resolveParamValues([field({ key: 'constructor', type: 'boolean', required: false })] as any, {})).toEqual({});
+    expect(resolveParamValues([field({ key: 'toString', required: false })] as any, {})).toEqual({});
+    expect(resolveParamValues([field({ key: 'constructor', type: 'boolean' })] as any, { constructor: 'yes' })).toEqual({ constructor: 'true' });
+  });
+
+  it('spaces alone do not answer a required field (review, 2026-10-22)', () => {
+    expect(() => resolveParamValues([field({})] as any, { k: '   ' })).toThrow(/"K" is required/);
+    expect(resolveParamValues([field({ required: false })] as any, { k: '   ' })).toEqual({ k: '   ' });
   });
 });

@@ -155,6 +155,12 @@ export function uploadAllowed(relDir: string, slug: string, name?: string): bool
  * directory is guarded like a read, the file is written beside its target
  * and moved into place, so a broken upload never leaves a half file. Exit 5
  * when the name exists and overwriting was not asked for.
+ *
+ * The staging file has a short name of its own, not the target's plus a
+ * suffix (a 255-byte name had no room for one), and is removed when the
+ * write fails. Without overwrite it goes into place with `ln -T`, which
+ * refuses a name that appeared while the bytes streamed; `mv -f` would
+ * replace it (review 2026-10-22, A05/A06/A19).
  */
 export function putArgv(relDir: string, name: string, overwrite: boolean, slug: string): string[] {
   const n = q(name);
@@ -168,7 +174,7 @@ export function putArgv(relDir: string, name: string, overwrite: boolean, slug: 
     : `case "$P" in ${ws}|${ws}/*) ;; ${AGENT_HOME}/.openclaw|${AGENT_HOME}/.openclaw/*) exit 6;; esac;`;
   // A directory (or a link to one) under the target name is refused, not
   // written into.
-  return ['sh', '-c', `${guard(relDir)} [ -d "$P" ] || exit 4; ${stateGuard} T="$P"/${n}; if [ -d "$T" ]; then exit 4; fi; if [ -e "$T" ] && [ "${overwrite ? 1 : 0}" != 1 ]; then exit 5; fi; TMP="$T.part-$$-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \\n')"; set -C; cat > "$TMP" && mv -f "$TMP" "$T"`];
+  return ['sh', '-c', `${guard(relDir)} [ -d "$P" ] || exit 4; ${stateGuard} T="$P"/${n}; if [ -d "$T" ]; then exit 4; fi; if [ -e "$T" ] && [ "${overwrite ? 1 : 0}" != 1 ]; then exit 5; fi; TMP="$P/.hatchabot-upload-$$-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \\n').part"; trap 'rm -f "$TMP"' EXIT; trap 'exit 1' HUP INT TERM; set -C; cat > "$TMP" || exit 1; ${overwrite ? 'mv -fT "$TMP" "$T"' : 'ln -T "$TMP" "$T" 2>/dev/null || exit 5'}`];
 }
 
 /**
@@ -190,5 +196,6 @@ export function inlineType(name: string): string | undefined {
     pdf: 'application/pdf', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', mp4: 'video/mp4', webm: 'video/webm',
   };
   if (!ext) return 'text/plain'; // README, Makefile, LICENSE…
-  return map[ext];
+  // Own keys only: "report.constructor" is not Object's constructor.
+  return Object.hasOwn(map, ext) ? map[ext] : undefined;
 }

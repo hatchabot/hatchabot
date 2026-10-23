@@ -101,12 +101,49 @@ export function dockerfileProblem(snippet: string): string | null {
   if (/\\\s*$/.test(unjoined)) return 'The last line ends with a \\ that continues it into nothing — finish that instruction.';
   const lines = unjoined.split('\n');
   for (let i = 0; i < lines.length; i++) {
-    for (const [, dash, word] of lines[i]!.matchAll(/(?<!<)<<(?!<)(-?)\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?/g)) {
+    // A line that starts an instruction is read from an unquoted start, so a
+    // `<<` inside its quotes is text, as BuildKit reads it: `RUN echo "a
+    // <<EOF"` was refused as an open heredoc (review, 2026-10-22). A line
+    // continuing another (`\` before it, blank lines between) may start
+    // inside a quote, so every `<<` on it still counts.
+    let prev = i - 1;
+    while (prev >= 0 && !lines[prev]!.trim()) prev--;
+    const fresh = prev < 0 || !/\\\s*$/.test(lines[prev]!);
+    const quoted = fresh ? quotedSpans(lines[i]!) : [];
+    for (const hit of lines[i]!.matchAll(/(?<!<)<<(?!<)(-?)\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?/g)) {
+      const [, dash, word] = hit;
+      if (quoted.some(([a, b]) => hit.index! > a && hit.index! < b)) continue;
       const closed = lines.slice(i + 1).some((l) => (dash ? l.replace(/^\t+/, '') : l) === word);
       if (!closed) return `The heredoc <<${word} is never closed by a line "${word}".`;
     }
   }
   return null;
+}
+
+/**
+ * The quoted stretches of one line, as [open, close] indexes, read the way
+ * the shell (and BuildKit's lexer) does: no escapes inside '…', `\` escapes
+ * the next character inside "…" and outside. A quote left open runs to the
+ * end of the line.
+ */
+function quotedSpans(line: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  let open = -1;
+  let q = '';
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (q === "'") {
+      if (c === "'") { spans.push([open, i]); q = ''; }
+    } else if (c === '\\') {
+      i++;
+    } else if (q === '"') {
+      if (c === '"') { spans.push([open, i]); q = ''; }
+    } else if (c === '"' || c === "'") {
+      q = c; open = i;
+    }
+  }
+  if (q) spans.push([open, line.length]);
+  return spans;
 }
 
 export function renderDockerfile(base: string, snippet: string): string {

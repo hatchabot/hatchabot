@@ -8,7 +8,8 @@
  */
 // Bumped to evict a shell cached before the app was served no-store: an old
 // copy of index.html made shipped fixes invisible. `activate` deletes every
-// cache whose name isn't this one.
+// older shell cache of its own, and only those: the agents' consoles share
+// this origin and may keep caches of their own (audit, 2026-10-22).
 const CACHE = 'hatchabot-shell-v4';
 const SHELL = ['/', '/manifest.webmanifest', '/icons/icon-192.png?v=2'];
 
@@ -20,7 +21,7 @@ self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => /^(hatchabot|agentclaw)-shell-/.test(k) && k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });

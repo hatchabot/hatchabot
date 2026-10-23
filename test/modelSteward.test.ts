@@ -484,6 +484,27 @@ describe('the weekly model review task', () => {
     expect(jobs.map((j) => j.name)).toEqual(['Weekly model-fit audit']);
   });
 
+  it('off removes the task under both names when a restored volume holds both (B28)', async () => {
+    const { store, provider, runtimeRef, jobs, agent } = await opsWorld();
+    jobs.push({ id: 'old-1', name: MODEL_REVIEW_NAME, enabled: true, payload: {}, schedule: {} });
+    jobs.push({ id: 'old-2', name: 'Weekly model review', enabled: true, payload: {}, schedule: {} });
+    expect(await syncModelReviewCron({ store, provider }, agent, runtimeRef, 'off')).toBe('removed');
+    expect(jobs).toHaveLength(0);
+  });
+
+  it("is scheduled in the agents' zone (HATCHABOT_TIMEZONE), not the machine's (B03)", async () => {
+    const { store, provider, runtimeRef, agent } = await opsWorld();
+    const was = process.env.HATCHABOT_TIMEZONE;
+    process.env.HATCHABOT_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone === 'Pacific/Honolulu' ? 'Asia/Tokyo' : 'Pacific/Honolulu';
+    try {
+      await syncModelReviewCron({ store, provider }, agent, runtimeRef, 'weekly');
+      const add = provider.execLog.find((a) => a[0] === 'cron' && a[1] === 'add')!;
+      expect(add[add.indexOf('--tz') + 1]).toBe(process.env.HATCHABOT_TIMEZONE);
+    } finally {
+      if (was === undefined) delete process.env.HATCHABOT_TIMEZONE; else process.env.HATCHABOT_TIMEZONE = was;
+    }
+  });
+
   it('is only for the management agent', async () => {
     const { store, provider, runtimeRef, jobs, agent } = await opsWorld();
     expect(await syncModelReviewCron({ store, provider }, { ...agent, ops: false }, runtimeRef, 'weekly')).toBe('skipped');

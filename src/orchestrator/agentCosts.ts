@@ -293,12 +293,46 @@ export interface SpendSeries {
   choices: Array<{ id: string; name: string; cost: number }>;
 }
 
+/** How far the zone's wall clock is ahead of UTC at `t`, ms (0 for a zone this machine does not know). */
+export function zoneOffset(t: number, tz: string): number {
+  try {
+    const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      .formatToParts(t).map((x) => [x.type, x.value]));
+    return Date.UTC(+p.year!, +p.month! - 1, +p.day!, +p.hour!, +p.minute!, +p.second!) - Math.floor(t / 1000) * 1000;
+  } catch { return 0; }
+}
+
+/**
+ * Where each slice starts, oldest first. Hour slices are the clock's hours; 3-hour
+ * and day slices start on the viewer's wall clock (`tz`), so a month's bar is one
+ * local day, as budgets count them, not 20:00 to 20:00 west of UTC (audit, 2026-10-20).
+ */
+function sliceStarts(from: number, now: number, size: number, tz: string): number[] {
+  const off = size > HOUR ? (t: number) => zoneOffset(t, tz) : () => 0;
+  // A wall time the clock skips (DST starting at midnight, as in Chile) starts at its
+  // first moment that exists, not the hour before it (regression audit, 2026-10-22).
+  const toUtc = (wall: number) => {
+    const o1 = off(wall), o2 = off(wall - o1), o3 = off(wall - o2);
+    const at = [...new Set([o1, o2, o3])].map((o) => wall - o).filter((t) => t + off(t) >= wall);
+    return at.length ? Math.min(...at) : wall - o3;
+  };
+  const wall0 = Math.floor((from + off(from)) / size) * size;
+  const starts: number[] = [];
+  for (let i = 0; ; i++) {
+    const t = toUtc(wall0 + i * size);
+    if (starts.length && t >= now) break;
+    if (!starts.length || t > starts.at(-1)!) starts.push(t);
+  }
+  return starts;
+}
+
 /**
  * What the owner's agents (or one of them) cost at API prices, slice by slice
  * — new input, cache writes, cache reads, output — and the tokens behind it,
  * from the sampler's hour buckets. The last bucket ends with the current hour.
+ * `tz`: the viewer's zone, where 3-hour and day slices start (UTC when not given).
  */
-export function spendSeries(store: Store, viewer: string, range: SpendRange, opts: { agentId?: string; agentIds?: string[]; sourceId?: string; now?: number } = {}): SpendSeries {
+export function spendSeries(store: Store, viewer: string, range: SpendRange, opts: { agentId?: string; agentIds?: string[]; sourceId?: string; now?: number; tz?: string } = {}): SpendSeries {
   const now = opts.now ?? Date.now();
   // The window is exact — the last `hours` to the minute; an hour bucket it
   // only partly covers counts for that part — and the bars are cut on clock
@@ -306,9 +340,15 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
   const { hours, bucketHours } = SPEND_RANGES[range];
   const size = bucketHours * HOUR;
   const from = now - hours * HOUR;
-  const start = Math.floor(from / size) * size;
-  const n = Math.max(1, Math.ceil((now - start) / size));
-  const out: SpendBucket[] = Array.from({ length: n }, (_, i) => ({ at: new Date(start + i * size).toISOString(), ...noParts(), tokens: 0 }));
+  const starts = sliceStarts(from, now, size, opts.tz ?? 'UTC');
+  const n = starts.length;
+  /** The slice an hour bucket starting at `at` falls in: the last one starting at or before it. */
+  const slice = (at: number) => {
+    let lo = 0, hi = n - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid]! <= at) lo = mid; else hi = mid - 1; }
+    return lo;
+  };
+  const out: SpendBucket[] = starts.map((t) => ({ at: new Date(t).toISOString(), ...noParts(), tokens: 0 }));
   const mine = store.listAgents(viewer).filter((a) => a.state !== 'DELETED' && a.state !== 'DELETING' && store.getAIProfile(a.aiProfileId)?.vendor !== 'local');
   const picked = opts.agentId ? new Set([opts.agentId]) : opts.agentIds?.length ? new Set(opts.agentIds) : undefined;
   // One AI source (Settings → AI): the agents on it NOW. Spend is kept per agent and model, not per source,
@@ -326,7 +366,7 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
         if (!(at + HOUR > from) || at > now) continue;
         const span = Math.max(1, Math.min(HOUR, now - at));
         const w = at >= from ? 1 : Math.max(0, Math.min(1, (at + span - from) / span));
-        const b = out[Math.min(n - 1, Math.max(0, Math.floor((at - start) / size)))]!;
+        const b = out[slice(at)]!;
         const mix: TokenMix = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
         HOUR_FIELDS.forEach((f, i) => { if (f in mix) mix[f as keyof TokenMix] += (Number(v[i]) || 0) * w; });
         const pp = priceParts(model, mix);
@@ -354,7 +394,7 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
     for (const r of rows) {
       const at = Date.parse(`${r.hour}:00:00Z`);
       if (!r.limited || !(at + HOUR > from) || at > now) continue;
-      const b = out[Math.min(n - 1, Math.max(0, Math.floor((at - start) / size)))]!;
+      const b = out[slice(at)]!;
       b.refused = (b.refused ?? 0) + r.limited;
       refused += r.limited;
     }

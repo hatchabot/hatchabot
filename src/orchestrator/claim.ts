@@ -200,7 +200,9 @@ export async function claimFirstContact(
     forgetDmPolicy(opts.agentId); // a window closing re-asserts the door for real
     const agent = deps.store.getAgent(opts.agentId);
     if (!agent || agent.allowKnocks) return;
-    if (deps.store.pairingWindows(opts.agentId).some((w) => w.seat !== seat)) return;
+    // Only this chat app's windows hold its door: a Discord guest's window
+    // kept the Telegram door open after the owner's claim (review, 2026-10-22).
+    if (deps.store.pairingWindows(opts.agentId).some((w) => w.seat !== seat && w.seat.startsWith(`${kindHere}:`))) return;
     const admit = deps.store.listAllowedChannelUserIds(opts.agentId, kindHere);
     if (!admit.length) return; // nobody yet: stay reachable
     await setDmPolicy(policyDeps, {
@@ -209,6 +211,7 @@ export async function claimFirstContact(
     }).catch(() => false);
   };
 
+  let readFailed = false; // said once a window, not every round
   while (Date.now() < deadline) {
     // The watcher runs detached from the provision task, so the agent can be
     // deleted, failed, or removed underneath it. Abandon only when there is
@@ -232,7 +235,18 @@ export async function claimFirstContact(
     if (bound) { deps.store.closePairingWindow(opts.agentId, seat); await restoreDoor(); return bound; }
 
     if (agent.state === 'RUNNING') {
-      const requests = await listPairingRequests(deps.provider, opts.runtimeRef, opts.accountId, kind);
+      // A read that throws (a docker exec that failed) is tried again next
+      // round: thrown out of the loop, it ended the watcher with its window
+      // still stored, and the knock it waited for was never claimed
+      // (review, 2026-10-22).
+      let requests: PairingRequest[];
+      try { requests = await listPairingRequests(deps.provider, opts.runtimeRef, opts.accountId, kind); }
+      catch (e) {
+        if (!readFailed) log('claim.read_failed', { agentId: opts.agentId, kind, error: String((e as Error)?.message ?? e).slice(0, 200) });
+        readFailed = true;
+        await sleep(pollIntervalMs);
+        continue;
+      }
       // Skip requests whose sender already belongs to another membership on
       // this agent: a concurrent window may have just bound them, and binding
       // that id here would swap two people's identities.
@@ -265,7 +279,7 @@ export async function claimFirstContact(
         return null;
       }
       if (first) {
-        const ok = await approvePairing(deps.provider, opts.runtimeRef, opts.accountId, first.code, kind);
+        const ok = await approvePairing(deps.provider, opts.runtimeRef, opts.accountId, first.code, kind).catch(() => false);
         const didBind = ok && (kind === 'telegram'
           ? deps.store.bindMembershipChannelUser(opts.agentId, opts.forUserId, first.id)
           : deps.store.bindMemberIdentity(opts.agentId, opts.forUserId, kind, first.id));

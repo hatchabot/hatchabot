@@ -66,21 +66,25 @@ function settledBlocker(deps: HibernateDeps, a: Agent, locked = false): string |
 
 /** Why this agent may not sleep right now, or undefined when it may. */
 export async function hibernateBlocker(deps: HibernateDeps, a: Agent, now: number, afterMs: number): Promise<string | undefined> {
+  return (await idleBlocker(deps, a, now, afterMs)).blocker;
+}
+/** hibernateBlocker, and the activity it read (`seen`), which the stop checks again under the lock. */
+async function idleBlocker(deps: HibernateDeps, a: Agent, now: number, afterMs: number): Promise<{ blocker?: string; seen?: string }> {
   const settled = settledBlocker(deps, a);
-  if (settled) return settled;
+  if (settled) return { blocker: settled };
   // The idle clock: the newest of its conversations and its last wake — a
   // woken agent gets the whole idle period again, restart or no restart.
   // A read that failed is not "no activity": falling back to the record's own
   // timestamp put an agent to sleep mid-conversation (#99). It stays up.
   let read: string | undefined;
-  try { read = await deps.lastActiveFor(a); } catch { return 'its activity could not be read'; }
+  try { read = await deps.lastActiveFor(a); } catch { return { blocker: 'its activity could not be read' }; }
   const active = read ?? a.updatedAt ?? a.createdAt;
   const last = Math.max(Date.parse(active) || 0, Date.parse(a.wokenAt ?? '') || 0);
-  if (now - last < afterMs) return 'active recently';
+  if (now - last < afterMs) return { blocker: 'active recently' };
   const crons = await deps.ownCrons(a).catch(() => undefined);
-  if (crons === undefined) return 'its scheduled tasks could not be read';
-  if (crons.some((c) => c.enabled && !c.system)) return 'has scheduled tasks';
-  return undefined;
+  if (crons === undefined) return { blocker: 'its scheduled tasks could not be read' };
+  if (crons.some((c) => c.enabled && !c.system)) return { blocker: 'has scheduled tasks' };
+  return { seen: read };
 }
 
 /** The sweep's choice no longer holds once the lock is taken: it stays up, and there is nothing to report. */
@@ -91,9 +95,10 @@ const markPending = new Set<string>();
 
 /**
  * Put an agent to sleep. `opts.idle`: the idle sweep's, so the settings it
- * judged before its activity and task reads are judged again under the lock.
+ * judged before its activity and task reads are judged again under the lock,
+ * and so is the activity it read (`opts.seen`).
  */
-export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string, opts: { idle?: boolean } = {}): Promise<Agent> {
+export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string, opts: { idle?: boolean; seen?: string } = {}): Promise<Agent> {
   const provider = deps.providerFor(a.hostId);
   // The record first, the container second: a crash between the two used to
   // leave a stopped container the wake poll never looked at (30th audit). And
@@ -116,6 +121,13 @@ export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string,
     // meanwhile used to lose to it and the agent was stopped anyway (#219).
     const blocker = opts.idle ? settledBlocker(deps, deps.store.getAgent(a.id) ?? now, true) : undefined;
     if (blocker) throw new NoLongerSleepy(blocker);
+    // A turn that finished during the sweep's task read (its busy flag clear
+    // again) is newer activity than the sweep saw: it stays up (review, 2026-10-22).
+    if (opts.idle) {
+      const fresh = await deps.lastActiveFor(deps.store.getAgent(a.id) ?? now).then((v) => v ?? '', () => undefined);
+      if (fresh === undefined) throw new NoLongerSleepy('its activity could not be read');
+      if ((Date.parse(fresh) || 0) > (Date.parse(opts.seen ?? '') || 0)) throw new NoLongerSleepy('active recently');
+    }
     const t = Date.now();
     bedtime = Math.floor(t / 1000);
     sleptAt = new Date(t).toISOString();
@@ -161,10 +173,10 @@ export async function hibernateSweep(deps: HibernateDeps, now = Date.now(), afte
   const out: string[] = [];
   try {
     for (const a of deps.store.listAllActiveAgents()) {
-      const blocker = await hibernateBlocker(deps, a, now, afterMs);
+      const { blocker, seen } = await idleBlocker(deps, a, now, afterMs);
       if (blocker) continue;
       try {
-        await hibernateAgent(deps, a, `quiet for ${Math.round(afterMs / 60_000)} min`, { idle: true });
+        await hibernateAgent(deps, a, `quiet for ${Math.round(afterMs / 60_000)} min`, { idle: true, seen });
         out.push(a.id);
       } catch (err) {
         if (err instanceof NoLongerSleepy) continue;

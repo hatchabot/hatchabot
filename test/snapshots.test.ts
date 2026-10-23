@@ -139,6 +139,22 @@ describe('restoreSnapshot', () => {
     expect(w.files['MEMORY.md']!.length).toBe(MAX_FILE_BYTES + 1); // untouched
   });
 
+  it("the safety copy taken at the limit never prunes the snapshot being restored (A40)", async () => {
+    const w = fileWorld(SEED);
+    const tick = () => new Promise((r) => setTimeout(r, 3));
+    const target = await captureSnapshot(w.deps, 'a1', { reason: 'pre-edit' });
+    for (let i = 1; i < AUTO_KEEP; i++) {
+      await tick();
+      w.files['MEMORY.md'] = `# Memory\n- note ${i}\n`;
+      await captureSnapshot(w.deps, 'a1', { reason: 'pre-edit' });
+    }
+    await tick();
+    w.files['MEMORY.md'] = 'changed since';
+    await restoreSnapshot(w.deps, 'a1', target.id);
+    expect(w.store.getSnapshot('a1', target.id)).toBeTruthy();   // a restart part-way still has it to finish with
+    expect(w.files['MEMORY.md']).toBe(SEED['MEMORY.md']);
+  });
+
   it('puts the old files back and snapshots the current state first', async () => {
     const w = fileWorld(SEED);
     const good = await captureSnapshot(w.deps, 'a1', { label: 'before the mess' });

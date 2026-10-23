@@ -25,21 +25,43 @@ interface ListedSession {
   agentRuntime?: string | { id?: string; source?: string } | null;
 }
 
-/** Sessions whose own entry names a runtime (OpenClaw calls an unpinned one `implicit`). */
-export async function listRuntimePins(provider: RuntimeProvider, runtimeRef: string, slug: string): Promise<RuntimePin[]> {
-  const res = await provider.exec(runtimeRef,
-    ['gateway', 'call', 'sessions.list', '--json', '--params', JSON.stringify({ agentId: slug, limit: 500 })],
-    { timeoutMs: 30_000 });
-  if (res.code !== 0) throw new Error(`sessions.list failed: ${(res.stderr || res.stdout).slice(0, 200)}`);
-  const body = JSON.parse(res.stdout) as { sessions?: ListedSession[] };
+/** sessions.list answers at most this many rows a call; beyond it, the next pages by offset. */
+const PAGE = 500;
+const MAX_PAGES = 40;
+
+/**
+ * Sessions whose own entry names a runtime (OpenClaw calls an unpinned one
+ * `implicit`). Every page: read once with limit 500, a stale pin on the 501st
+ * conversation was never seen (report B27, 2026-10-22). The first page is
+ * asked exactly as before; a later page that cannot be read is logged and the
+ * pins found so far still count.
+ */
+export async function listRuntimePins(provider: RuntimeProvider, runtimeRef: string, slug: string, log: Log = () => {}): Promise<RuntimePin[]> {
   const out: RuntimePin[] = [];
-  for (const s of body.sessions ?? []) {
-    if (!s.key) continue;
-    const rt = s.agentRuntime;
-    const id = typeof rt === 'string' ? rt : rt?.id;
-    const source = typeof rt === 'string' ? 'session-key' : rt?.source;
-    if (!id || source === 'implicit') continue;
-    out.push({ key: s.key, runtime: id, locked: s.runtimeSelectionLocked === true });
+  const seen = new Set<string>();
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const params = page ? { agentId: slug, limit: PAGE, offset: page * PAGE } : { agentId: slug, limit: PAGE };
+    const res = await provider.exec(runtimeRef,
+      ['gateway', 'call', 'sessions.list', '--json', '--params', JSON.stringify(params)],
+      { timeoutMs: 30_000 });
+    if (res.code !== 0) {
+      if (!page) throw new Error(`sessions.list failed: ${(res.stderr || res.stdout).slice(0, 200)}`);
+      log('runtime.pin_failed', { error: `conversations after the first ${page * PAGE} could not be read: ${(res.stderr || res.stdout).slice(0, 160)}` });
+      break;
+    }
+    const sessions = (JSON.parse(res.stdout) as { sessions?: ListedSession[] }).sessions ?? [];
+    let fresh = 0;
+    for (const s of sessions) {
+      if (!s.key || seen.has(s.key)) continue;
+      seen.add(s.key); fresh++;
+      const rt = s.agentRuntime;
+      const id = typeof rt === 'string' ? rt : rt?.id;
+      const source = typeof rt === 'string' ? 'session-key' : rt?.source;
+      if (!id || source === 'implicit') continue;
+      out.push({ key: s.key, runtime: id, locked: s.runtimeSelectionLocked === true });
+    }
+    // A short page is the last; one with nothing new is a gateway that ignores offset.
+    if (sessions.length < PAGE || !fresh) break;
   }
   return out;
 }
@@ -63,7 +85,7 @@ export async function configuredRuntimes(provider: RuntimeProvider, runtimeRef: 
 
 /** Patch every stale pin back to configured routing. Returns the session keys it cleared. */
 export async function clearStaleRuntimePins(provider: RuntimeProvider, runtimeRef: string, slug: string, log: Log = () => {}): Promise<string[]> {
-  const pins = (await listRuntimePins(provider, runtimeRef, slug)).filter((p) => !p.locked);
+  const pins = (await listRuntimePins(provider, runtimeRef, slug, log)).filter((p) => !p.locked);
   if (!pins.length) return [];
   const allowed = await configuredRuntimes(provider, runtimeRef);
   // Unread, nothing is judged stale: the next start or rebuild looks again.

@@ -155,9 +155,13 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
     // At the agent's own measured price per token when known (cache reads, most
     // of the tokens, cost a tenth of input); else the all-input..all-output bracket.
     const rate = apiTokens > 0 ? store.agentTokenRate(a.id) : undefined;
+    // Without one, each API source's tokens at its own model: all of them at the
+    // largest one's model priced a cheap source's share at the dear one's price
+    // (report B39, 2026-10-22). The agent's own model is its current source's.
+    const modelOn = (pid: string) => (pid === a.aiProfileId ? a.model : undefined) ?? store.getAIProfile(pid)?.model ?? model ?? '';
     let cost: CostRange | null = apiTokens <= 0 ? null
       : rate ? { low: apiTokens * rate.usdPerToken, high: apiTokens * rate.usdPerToken, partial: rate.partial }
-      : estimateCost([{ model: apiModel ?? '', tokens: apiTokens }]);
+      : estimateCost(spent.filter(([pid, n]) => n > 0 && billingOf(pid) === 'api').map(([pid, n]) => ({ model: modelOn(pid), tokens: n })));
     // No price for the model at all: "est. $0.00+" read as nearly free
     // (2026-09-30). Say it is unknown instead.
     const unpriced = pricesNothing(cost);
@@ -216,23 +220,44 @@ export function snapshotDailyUsage(store: Store, now = Date.now()): void {
   for (const [ownerId, list] of byOwner) {
     const byBilling: Record<string, number> = { included: 0, api: 0, local: 0 };
     const billingOf = new Map<string, 'included' | 'api' | 'local'>();
-    let total = 0, any = false;
-    for (const a of list) {
+    const billingOfAgent = (a: Agent) => {
       const p = store.getAIProfile(a.aiProfileId);
       const billing = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
       billingOf.set(a.id, billing);
+      return billing;
+    };
+    let total = 0, any = false;
+    for (const a of list) {
+      const billing = billingOfAgent(a);
       const t = store.latestTokenTotal(a.id); if (t === undefined) continue;
       any = true; total += t;
       byBilling[billing] = (byBilling[billing] ?? 0) + t;
     }
     if (!any) continue;
     store.upsertUsageSnapshot(ownerId, { day: today.day, totalTokens: total, byBilling });
-    const ids = new Set(list.map((a) => a.id));
+    // A deleted agent's use still counts on the days it spent: left out, deleting one
+    // lowered yesterday's and today's cost already recorded (report B38, 2026-10-22).
+    const gone = store.listDeletedAgents(ownerId);
+    for (const a of gone) billingOfAgent(a);
+    const all = [...list, ...gone];
+    const ids = new Set(all.map((a) => a.id));
     for (const { day, startIso, endIso } of [{ ...yesterday, endIso: today.startIso }, { ...today, endIso: undefined }]) {
       // The day's own use, from per-sample deltas: differencing lifetime
       // sums counted an agent's whole history on the day it came back from
       // a long stop, or arrived by import (night review, 2026-09-28).
       const deltas = store.tokenDeltas(ids, startIso).filter((d) => !endIso || d.at < endIso);
+      // Yesterday with no row (the service was down at midnight, or this is its first
+      // day): made from the counters as they stood at midnight, or the backfill wrote
+      // nothing (report B48, 2026-10-22).
+      if (endIso && deltas.length) {
+        const by: Record<string, number> = { included: 0, api: 0, local: 0 };
+        let sum = 0;
+        for (const a of list) {
+          const t = store.latestTokenTotalBefore(a.id, endIso); if (t === undefined) continue;
+          sum += t; by[billingOf.get(a.id)!] = (by[billingOf.get(a.id)!] ?? 0) + t;
+        }
+        store.addUsageSnapshotIfMissing(ownerId, { day, totalTokens: sum, byBilling: by });
+      }
       store.setUsageUsed(ownerId, day, deltas.reduce((s, d) => s + d.delta, 0));
       const perAgent = new Map<string, number>();
       // Priced by the source each reading was taken on, as the Usage view does.
@@ -243,7 +268,7 @@ export function snapshotDailyUsage(store: Store, now = Date.now()): void {
       let low = 0, high = 0;
       for (const [id, tokens] of perAgent) {
         const rate = store.agentTokenRate(id);
-        const a = list.find((x) => x.id === id);
+        const a = all.find((x) => x.id === id);
         const c = rate ? { low: tokens * rate.usdPerToken, high: tokens * rate.usdPerToken }
           : estimateCost([{ model: a?.model ?? store.getAIProfile(a?.aiProfileId ?? '')?.model ?? '', tokens }]);
         low += c.low; high += c.high;

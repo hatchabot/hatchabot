@@ -191,6 +191,24 @@ describe('agent export/import', () => {
     expect(agent.model).toBe('claude-sonnet-5');
   });
 
+  it("carries its memory cap and swap, within the destination's rules (report A31, 2026-10-22)", async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    src.store.setAgentMemoryCap('a1', '12g');
+    src.store.setAgentSwapAllowance('a1', '2g');
+    const { data } = await exportAgent(src.deps, 'a1');
+    // The machine's owner importing: as it was.
+    const own = await installation('owner-b');
+    const a = await importAgent(own.deps, data, { ownerId: 'owner-b', mayBuild: true });
+    expect(own.store.getAgent(a.id)).toMatchObject({ memoryCap: '12g', swapAllowance: '2g' });
+    expect(own.provider.dockerLimits.get(own.store.getAgent(a.id)!.runtimeRef!)?.memory).toBe(12 * 1024 ** 3);
+    // A member: 12g is over the per-agent maximum here (8g), so this machine's default; 2g of swap fits under it.
+    const member = await installation('member-c');   // its own AI source; mayBuild unset: not the machine's owner
+    const b = await importAgent(member.deps, data, { ownerId: 'member-c' });
+    expect(member.store.getAgent(b.id)!.memoryCap).toBeUndefined();
+    expect(member.store.getAgent(b.id)!.swapAllowance).toBe('2g');
+  });
+
   it('drops the override when the destination source cannot serve it', async () => {
     const src = await installation();
     await seedSourceAgent(src);

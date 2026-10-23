@@ -6,8 +6,12 @@
 #   - release.yml calls it for :latest after publishing the newest release;
 #   - a push to main that changes channels.json (the publisher's fast lane,
 #     asked for by scripts/promote.sh) moves :stable/:beta to the release the
-#     channel now names; a channel moved to an older release is a rollback
-#     (promote.sh asked first), so that move may go backwards;
+#     channel now names; a channel moved to an older release by the fast
+#     lane (its commit "Update channels") is a rollback (promote.sh asked
+#     first, the publisher's gate held it to the tag's statement), so that
+#     move may go backwards. Any other push moving one back fails, moving
+#     nothing. A channel naming a tag with no published release fails too;
+#     one with no manifest is skipped only from before v2.159.0;
 #   - by hand (Actions → Promote images → Run workflow), one move.
 #
 # The `plan` job works out the moves; `move` makes them, one alias at a time
@@ -66,6 +70,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
+          HEAD_MSG: ${{ github.event.head_commit.message }}
           VERSION: ${{ inputs.version }}
           ALIAS: ${{ inputs.alias }}
           BACK: ${{ inputs.allow_backwards }}
@@ -85,12 +90,30 @@ jobs:
             OLD=""; echo "$BEFORE" | grep -qE '^0+$' || OLD="$(chan "$BEFORE" "$ch")"
             NEW="$(chan "$AFTER" "$ch")"
             [ -n "$NEW" ] && [ "$NEW" != "$OLD" ] || continue
-            if ! gh release view "$NEW" --repo "$R" --json assets -q '.assets[].name' | grep -qx release-manifest.json; then
+            # No release at all (release.yml failed, or is still running) is
+            # a failure, not a release from before manifests (audit, 2026-10-20).
+            ASSETS="$(gh release view "$NEW" --repo "$R" --json isDraft,assets -q 'if .isDraft then "DRAFT" else .assets[].name end')" \
+              || { echo "::error::$ch → $NEW: $NEW has no release on $R"; exit 1; }
+            [ "$ASSETS" != DRAFT ] || { echo "::error::$ch → $NEW: the release $NEW is still a draft"; exit 1; }
+            if ! printf '%s\n' "$ASSETS" | grep -qx release-manifest.json; then
+              # Every release from v2.159.0 on has one (release-manifest.sh's mf_required).
+              V="${NEW#v}"; V="${V%%-*}"; MAJ="${V%%.*}"; V="${V#*.}"; MIN="${V%%.*}"
+              if [ "$MAJ" -gt 2 ] || { [ "$MAJ" -eq 2 ] && [ "$MIN" -ge 159 ]; }; then
+                echo "::error::$ch → $NEW: the release has no release-manifest.json, which every release from v2.159.0 on has"; exit 1
+              fi
               echo "$ch → $NEW: released before release-manifest.json; the image :$ch is left as it is"; continue
             fi
             BACKWARDS=false
             # "~" sorts a pre-release below its release.
             if [ -n "$OLD" ] && [ "$(printf '%s\n%s\n' "${OLD#v}" "${NEW#v}" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/')" = "${OLD#v}" ]; then BACKWARDS=true; fi
+            # A rollback comes only through the fast lane, whose gate holds it
+            # to a statement in promote.sh's tag. A release commit carrying an
+            # older channels.json (tagged before a promote) is a mistake: it
+            # moved :stable back without a word (audit, 2026-10-20).
+            if [ "$BACKWARDS" = true ] && [ "$(printf '%s\n' "$HEAD_MSG" | sed -n 1p)" != "Update channels" ]; then
+              echo "::error::$ch: ${OLD} → $NEW goes back, and not by the fast lane (the commit is \"$(printf '%s\n' "$HEAD_MSG" | sed -n 1p)\"): the image :$ch is left as it is. Promote $ch forward again (scripts/promote.sh), or move it by hand (Run workflow, allow_backwards)."
+              exit 1
+            fi
             echo "$ch: ${OLD:-unset} → $NEW$([ "$BACKWARDS" = true ] && echo ' (a rollback)')"
             MOVES="$(jq -c --arg v "${NEW#v}" --arg a "$ch" --argjson b "$BACKWARDS" '. + [{version: $v, alias: $a, allow_backwards: $b}]' <<<"$MOVES")"
           done

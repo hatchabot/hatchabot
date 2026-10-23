@@ -122,6 +122,13 @@ describe('fmtHealth / fmtUsage (CLI parity output)', () => {
     expect(out).toMatch(/plugin errors: telegram: boom/);
   });
 
+  it('says which chat app is not connected when Discord or Slack degrades it (regression audit, 2026-10-22)', () => {
+    const out = fmtHealth('Garden', { status: 'degraded', reachable: true, disconnected: ['discord', 'slack'] });
+    expect(out).toMatch(/Garden: degraded/);
+    expect(out).toMatch(/discord: disconnected/);
+    expect(out).toMatch(/slack: disconnected/);
+  });
+
   // The gateway answering is not its AI source answering (2026-09-30).
   it('says when its AI source last answered, or since when it has refused', () => {
     const ok = fmtHealth('Kitchen', { status: 'healthy', reachable: true, aiSource: { name: 'Max', lastAnsweredAt: '2026-09-30T10:00:00.000Z' } });

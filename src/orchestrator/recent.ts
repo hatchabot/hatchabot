@@ -124,11 +124,21 @@ const dbf = path.join(root, "agent", "openclaw-agent.sqlite");
 const jsonf = path.join(root, "sessions", "sessions.json");
 // A key whose read failed is listed in "f", not left out of "s": left out
 // reads as "nothing to show" and is never read again until it moves (#143).
+// The SQLite store first, as webChat.ts reads it: an agent upgraded from
+// 2026.7 can keep its old sessions.json, frozen at the upgrade, and read first
+// it hid every line since (review, 2026-10-22). The file only when the store
+// has no session tables (2026.7) or is not there.
 let db = null, store = null, unreadable = false;
-if (fs.existsSync(jsonf)) { try { store = JSON.parse(fs.readFileSync(jsonf, "utf8")); } catch { unreadable = true; } }
-else if (fs.existsSync(dbf)) {
-  if (!sqlite) unreadable = true;
-  else try { db = new sqlite.DatabaseSync(dbf, { readOnly: true }); try { db.exec("PRAGMA busy_timeout = 2000"); } catch {} } catch { unreadable = true; }
+if (fs.existsSync(dbf) && sqlite) {
+  try {
+    db = new sqlite.DatabaseSync(dbf, { readOnly: true });
+    try { db.exec("PRAGMA busy_timeout = 2000"); } catch {}
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = ? AND name IN (?, ?)").get("table", "session_nodes", "session_windows")) { try { db.close(); } catch {} db = null; }
+  } catch { db = null; unreadable = true; }
+}
+if (!db && !unreadable) {
+  if (fs.existsSync(jsonf)) { try { store = JSON.parse(fs.readFileSync(jsonf, "utf8")); } catch { unreadable = true; } }
+  else if (fs.existsSync(dbf)) unreadable = true; // a store this Node cannot read
 }
 const decode = (r) => {
   if (r.event_json != null) return parse(r.event_json);

@@ -184,6 +184,18 @@ describe('who may chat on the web', () => {
     expect(res.json().reply).toBe('Awake now.');
     expect(w.store.getAgent('a1')).toMatchObject({ state: 'RUNNING', hibernatedAt: undefined });
   });
+
+  it('web chat taken away while the agent wakes sends no turn (review, 2026-10-22)', async () => {
+    const w = await world();
+    await w.provider.stop(w.runtimeRef);
+    w.store.setAgentState('a1', 'STOPPED');
+    w.store.setHibernated('a1', new Date().toISOString());
+    const start = w.provider.start.bind(w.provider);
+    w.provider.start = async (ref) => { w.store.setMembershipWebChat('a1', SAM, false); return start(ref); };
+    const res = await w.chat(SAM, 'wake up');
+    expect(res.statusCode).toBe(403);
+    expect(turns(w.provider)).toHaveLength(0);
+  });
 });
 
 describe("a guest has a member's rights, never the owner's", () => {

@@ -183,7 +183,7 @@ describe('scripts/release.sh tags the version commit in the dev repo once everyt
       w.landed('9.8.7');
       refused(w.release(['9.8.7'], { HB_CI: ci }), w, why);
     }
-  });
+  }, 20_000); // three runs of the script, each fetching the public main
 
   it('refuses when the notes do not pass the privacy check, or the fingerprints cannot be synced', () => {
     const w = world();
@@ -202,6 +202,45 @@ describe('scripts/release.sh tags the version commit in the dev repo once everyt
     const bad = w.release(['latest']);
     expect(bad.status).toBe(1);
     expect(bad.stderr).toContain('"latest" is not a version');
+  });
+});
+
+describe('scripts/release.sh refuses a commit whose channels.json would put a channel back (audit, 2026-10-20)', () => {
+  const channels = (w: ReturnType<typeof world>, stable: string) =>
+    writeFileSync(join(w.work, 'channels.json'), `{\n  "stable": "${stable}",\n  "beta": "v9.8.6"\n}\n`);
+
+  it('the public main names a newer release (a promote copied there since): refused, no tag', () => {
+    const w = world();
+    channels(w, 'v9.8.5'); w.landed('9.8.7');
+    // The fast lane, on the public repo only: a commit there whose channels.json says v9.8.6.
+    w.git(w.work, 'checkout', '-q', '-b', 'pubside'); channels(w, 'v9.8.6');
+    w.git(w.work, 'commit', '-qam', 'Update channels'); w.git(w.work, 'push', '-q', '-f', w.pub, 'pubside:main');
+    w.git(w.work, 'checkout', '-q', 'main');
+    const r = w.release(['9.8.7']);
+    expect(r.status).toBe(1);
+    // The commit is origin's main (a rollback landed there): only the fast lane is behind, so
+    // the advice is to wait for it, not to release another commit (regression audit, 2026-10-22).
+    expect(r.stderr).toContain("says stable → v9.8.5, as origin's main does, but the public repo's main still says v9.8.6");
+    expect(r.stderr).toContain("waiting for the publisher's fast lane");
+    expect(r.stderr).not.toContain('Release a commit that has the promote in it');
+    expect(w.originTag('v9.8.7')).toBe('');
+  });
+
+  it("an earlier commit (--commit) behind origin's main, where a promote has landed: refused", () => {
+    const w = world();
+    channels(w, 'v9.8.5'); const sha = w.landed('9.8.7');
+    channels(w, 'v9.8.6'); w.git(w.work, 'commit', '-qam', 'Promote v9.8.6 to stable'); w.git(w.work, 'push', '-q', 'origin', 'main');
+    const r = w.release(['9.8.7', '--commit', sha]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("but origin's main says v9.8.6");
+    expect(r.stderr).toContain('Release a commit that has the promote in it');
+  });
+
+  it('the same or a newer channel than both mains: tagged', () => {
+    const w = world();
+    channels(w, 'v9.8.6'); w.landed('9.8.7');   // the public main has no channels.json yet
+    const r = w.release(['9.8.7']);
+    expect(r.status, out(r)).toBe(0);
   });
 });
 
@@ -240,6 +279,23 @@ describe('scripts/release-check.sh (the public repo\'s release workflow runs it 
     const p = pre.run('release-check.sh', ['9.9.0-rc.1']);
     expect(p.status, out(p)).toBe(0);
     expect(p.stdout).toContain('newest=false\nprerelease=true');
+  });
+
+  // Audit, 2026-10-22 (A04).
+  it("release.sh tags no pre-release (the publisher publishes X.Y.Z only); release.yml takes the versions release-check.sh takes", () => {
+    const w = world();
+    w.landed('9.9.0-rc.1');
+    const r = w.release(['9.9.0-rc.1']);
+    expect(r.status, out(r)).toBe(2);
+    expect(r.stderr).toContain('is a pre-release');
+    expect(w.originTag('v9.9.0-rc.1')).toBe('');
+    const re = /\[\[ "\$GITHUB_REF" =~ (\S+) \]\]/.exec(readFileSync('.github/workflows/release.yml', 'utf8'))![1]!;
+    const takes = (ref: string) => spawnSync('bash', ['-c', '[[ "$1" =~ $2 ]]', '_', ref, re]).status === 0;
+    for (const v of ['9.8.7', '9.9.0-rc.1']) {
+      expect(takes(`refs/tags/v${v}`), v).toBe(true);
+      expect(w.run('release-check.sh', [v, '--tagged']).stderr).not.toContain('is not a version');
+    }
+    for (const bad of ['refs/tags/v9.9', 'refs/tags/v9.9.0-', 'refs/tags/channels-20261022T000000Z', 'refs/heads/v9.9.0']) expect(takes(bad), bad).toBe(false);
   });
 
   it('a commit on main may be named; one off main is refused', () => {

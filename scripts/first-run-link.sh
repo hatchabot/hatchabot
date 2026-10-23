@@ -11,7 +11,9 @@
 # first-run page fills in and then wipes from the address bar.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-PORT="${1:-$(sed -n 's/^PORT=//p' .env 2>/dev/null | sed -n 1p)}"
+# Quotes and a trailing comment off, as deploy-release.sh reads it: PORT="8123"
+# is a valid setting, and the link said localhost:"8123" (audit, 2026-10-22).
+PORT="${1:-$({ sed -n 's/^PORT=//p' .env 2>/dev/null || true; } | sed -n 1p | sed -e 's/[[:space:]]*#.*$//' -e "s/^['\"]//" -e "s/['\"]$//")}"
 PORT="${PORT:-8080}"
 LOCAL="http://localhost:$PORT"
 

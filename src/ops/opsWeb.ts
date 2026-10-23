@@ -211,13 +211,19 @@ export function makeOpsWeb(deps: OpsWebDeps) {
     if (!r.ok) throw new Error(`The search provider answered ${r.status}.`);
     const html = await r.text();
     const out: Result[] = [];
-    const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>)?/g;
-    for (let m; (m = re.exec(html)) && out.length < 8;) {
+    // One result per title link; its snippet is looked for only up to the next
+    // result. (A lazy match with an optional snippet group ended right after
+    // the link, so every snippet came back empty — audit, 2026-10-22.)
+    const links = [...html.matchAll(/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)];
+    for (let i = 0; i < links.length && out.length < 8; i++) {
+      const m = links[i]!;
+      const rest = html.slice(m.index! + m[0].length, links[i + 1]?.index ?? html.length);
+      const snippet = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/.exec(rest)?.[1] ?? '';
       let url = m[1]!.replace(/&amp;/g, '&');
       const uddg = /[?&]uddg=([^&]+)/.exec(url);
       if (uddg) url = decodeURIComponent(uddg[1]!);
       if (url.startsWith('//')) url = `https:${url}`;
-      if (/^https?:\/\//.test(url)) out.push({ title: strip(m[2] ?? ''), url, snippet: strip(m[3] ?? '').slice(0, 300) });
+      if (/^https?:\/\//.test(url)) out.push({ title: strip(m[2] ?? ''), url, snippet: strip(snippet).slice(0, 300) });
     }
     return out;
   }

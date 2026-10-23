@@ -327,6 +327,14 @@ export function evaluateModelChanges(store: Store, now = Date.now(), ownerId?: s
         const better = beforeFigures(stored, c.from, c.at);
         if (better) { store.setModelChangeBefore(c.id, better); c.before = better; }
       }
+      // Changed again within the same hour: the hour buckets cannot tell its
+      // turns from the next model's. That is unknown, not "0 turns" (B06, 2026-10-22).
+      if (next && hourOf(next.at) <= hourOf(c.at)) {
+        if (c.outcome !== 'not-enough-data') {
+          store.setModelChangeOutcome(c.id, 'not-enough-data', undefined, [`changed again to ${next.to} within the hour, too soon to tell its turns apart`], nowIso);
+        }
+        continue;
+      }
       const after = afterFigures(stored, c.to, c.at, next?.at);
       const ended = !!next && !!stored && Date.parse(stored.at) >= Date.parse(next.at);
       const due = age >= VERDICT_AFTER_DAYS * DAY || (after?.turns ?? 0) >= EARLY_TURNS || ended;
@@ -411,7 +419,15 @@ export function fileGuardProposals(deps: GuardDeps): string[] {
       summary, createdAtMs: now, expiresAtMs: now + GUARD_CARD_TTL_MS, status: 'pending',
       source: 'guard', risk: 'disruptive',
     };
-    store.putMgmtProposal(rec);
+    // The claim is taken back when the card cannot be written: kept, it
+    // stopped every later pass filing the card at all (B07, 2026-10-22).
+    try {
+      store.putMgmtProposal(rec);
+    } catch (err) {
+      store.releaseModelChangeGuard(c.id, id);
+      deps.log?.('model.guard_failed', { agentId: agent.id, changeId: c.id, error: String((err as Error)?.message ?? err).slice(0, 200) });
+      continue;
+    }
     filed.push(id);
     deps.log?.('model.guard_proposed', { agentId: agent.id, changeId: c.id, confirmId: id, from: c.to, to: c.from });
     deps.push?.(agent.ownerId, `↩ Hatchabot suggests switching "${agent.name}" back to ${c.from}: it does worse on ${c.to}.`, (c.reasons ?? []).join('; '));

@@ -78,9 +78,30 @@ const STATIC_ROOT_FILES = /^(favicon[^/]*|apple-touch-icon[^/]*\.png|manifest\.w
  * an operator surface and stays closed to guests.
  */
 export function guestHttpAllowed(method: string, path: string): boolean {
+  return guestHttpPath(method, path) !== undefined;
+}
+
+/**
+ * The path a guest's request is judged on and forwarded as, or undefined when
+ * it is refused. The path arrives decoded; the gateway reads it with
+ * `new URL()`, which takes '\' for '/', drops tabs and newlines, resolves
+ * dot segments (%2e too) and reads a leading '//' as a host. So what is
+ * judged must be exactly what the gateway will read: anything it would read
+ * differently is refused, and only the judged path is sent on.
+ */
+export function guestHttpPath(method: string, path: string): string | undefined {
   const m = method.toUpperCase();
-  const p = path.split('?')[0]!.replace(/\/{2,}/g, '/');
-  if (p.split('/').some((seg) => seg === '..' || seg === '.' || /%2e|%2f|%5c/i.test(seg))) return false;
+  const p = path.replace(/\/{2,}/g, '/');
+  // '?' and '#' here came from %3F / %23: the real query is not part of `path`.
+  if (/[\\?#\x00-\x20\x7f]/.test(p)) return undefined;
+  if (p.split('/').some((seg) => seg === '..' || seg === '.' || /%2e|%2f|%5c/i.test(seg))) return undefined;
+  let read: string;
+  try { read = new URL(p, 'http://gateway').pathname; } catch { return undefined; }
+  if (read !== p) return undefined;
+  return guestPathAllowed(m, p) ? p : undefined;
+}
+
+function guestPathAllowed(m: string, p: string): boolean {
   const segs = p.split('/').filter(Boolean);
   if (m === 'GET' || m === 'HEAD') {
     if (segs.length === 0) return true; // the app itself

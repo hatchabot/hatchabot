@@ -36,6 +36,27 @@ describe('web_search / read_result', () => {
     expect(r.text).not.toContain('x()');
   });
 
+  it('without a Brave key, DuckDuckGo: each result keeps its own snippet, and one with none gets none (audit, 2026-10-22)', async () => {
+    const ddg = [
+      '<div class="result"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.example.com%2Fa&amp;rut=x">First <b>page</b></a>',
+      '<a class="result__snippet" href="//duckduckgo.com/l/?uddg=x">What the <b>first</b> says.</a></div>',
+      '<div class="result"><a rel="nofollow" class="result__a" href="https://docs.example.com/b">Second</a></div>',
+      '<div class="result"><a rel="nofollow" class="result__a" href="https://docs.example.com/c">Third</a>',
+      '<a class="result__snippet" href="https://docs.example.com/c">The third one.</a></div>',
+    ].join('\n');
+    const opsWeb = makeOpsWeb({
+      braveKey: async () => undefined,
+      lookup: async () => ['93.184.216.34'],
+      fetchImpl: (async (url: string) => { if (!String(url).startsWith('https://html.duckduckgo.com/html/')) throw new Error('unrouted ' + url); return page(ddg); }) as any,
+    });
+    const s = await opsWeb('o', 'web_search', { query: 'openclaw release notes' });
+    expect(s.text).toBe([
+      '1. First page\n   https://docs.example.com/a\n   What the first says.',
+      '2. Second\n   https://docs.example.com/b\n   ',
+      '3. Third\n   https://docs.example.com/c\n   The third one.',
+    ].join('\n'));
+  });
+
   it('cannot open anything that was not a result, and results are per owner', async () => {
     const { opsWeb, seen } = web({ [SEARCH]: results(['https://docs.example.com/a']) });
     await opsWeb('o', 'web_search', { query: 'something' });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store, tokenRise } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
@@ -165,5 +165,32 @@ describe('real usage, backfilled (2026-09-28)', () => {
     new Store(db); // a restart: nothing dropped again
     expect(store.latestTokenTotal('a1')).toBe(10);
     expect(store.listUsageSnapshots('o1', 30)).toHaveLength(1);
+  });
+});
+
+describe('a usage pass that runs out of time (report A42, 2026-10-22)', () => {
+  it('starts the next pass with the agents the last one never reached', async () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'A', ownerId: OWNER, name: 'Source A', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/A', createdAt: 'now' } as any);
+    for (let i = 0; i < 12; i++) {
+      store.insertAgent({ id: `r${i}`, ownerId: OWNER, name: `R${i}`, slug: `r${i}`, state: 'RUNNING', runtimeRef: `mock://r${i}`, aiProfileId: 'A', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as any);
+    }
+    // Each agent's log read takes six minutes of the five-minute pass budget.
+    let clock = NOW;
+    const seen: string[] = [];
+    const p: any = {
+      modelCallLog: async (ref: string) => { seen.push(ref); clock += 360_000; return ''; },
+      execShell: async () => ({ code: 0, stdout: JSON.stringify({ models: {}, sessions: 0, first: 0, last: 0 }), stderr: '' }),
+    };
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      await sampleSourceUsage({ store, providerFor: () => p }, NOW);
+      const first = [...seen];
+      expect(first.length).toBeGreaterThan(0);
+      expect(first.length).toBeLessThan(12);
+      await sampleSourceUsage({ store, providerFor: () => p }, NOW);
+      expect(seen.slice(first.length).some((r) => first.includes(r))).toBe(false);
+    } finally { spy.mockRestore(); }
   });
 });

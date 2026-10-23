@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import {
   cronAddArgs,
   readOpenclawCrons,
+  readOpenclawCronStore,
   openclawAgentIdForWorkspace,
   migrateCrons,
   pathPattern,
@@ -110,6 +111,38 @@ describe('self-path rewriting', () => {
     expect(provider.execLog.length).toBe(0);
   });
 
+  // Review 2026-10-22: A11, A12, A35.
+  it('a ~/ path is rewritten as written and as its absolute form; a +, @, % or = sibling is another folder', () => {
+    const to = WORKSPACE_DIR_TEMPLATE.replace('{slug}', 'agent-2');
+    const pairs = selfPathReplacements({ id: 'agent', workspace: '~/work' }, 'agent-2', '/home/u');
+    const text = 'See ~/work/a.md and /home/u/work/b.md, not /home/u/work+archive/c.md, /home/u/work@old or /home/u/work=2.';
+    expect(applyReplacements(text, pairs)).toBe(`See ${to}/a.md and ${to}/b.md, not /home/u/work+archive/c.md, /home/u/work@old or /home/u/work=2.`);
+  });
+
+  it('a path after = is still rewritten: it ends a setting, not a name', () => {
+    const to = WORKSPACE_DIR_TEMPLATE.replace('{slug}', 'agent-2');
+    const pairs = selfPathReplacements({ id: 'agent', workspace: '/home/u/work' }, 'agent-2', '/home/u');
+    expect(applyReplacements('WS=/home/u/work python3 a.py --dir=/home/u/work/notes', pairs))
+      .toBe(`WS=${to} python3 a.py --dir=${to}/notes`);
+  });
+
+  it('an apostrophe in the source path is quoted for the shell, not a reason to skip the files', async () => {
+    const src = { id: 'agent', workspace: "/data/owner's workspace" };
+    const pairs = selfPathReplacements(src, 'agent-2');
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'agent-2', workspace: { files: {}, configPatch: { agentId: 'agent-2', authMode: 'api-key' } }, env: {} });
+    expect((await rewriteWorkspaceFiles({ provider }, runtimeRef, 'agent-2', pairs)).rewrote).toBe(true);
+    const shell = provider.execLog.map((a) => a.join(' ')).find((s) => s.includes('node -e'))!;
+    // The command as the container's shell runs it, with WSDIR pointed at a temp folder.
+    const dir = mkdtempSync(join(tmpdir(), 'acl-rw-'));
+    try {
+      writeFileSync(join(dir, 'MEMORY.md'), "Notes in /data/owner's workspace/notes.md.");
+      const wsdir = WORKSPACE_DIR_TEMPLATE.replace('{slug}', 'agent-2');
+      execFileSync('sh', ['-c', shell.replace(`WSDIR='${wsdir}'`, `WSDIR='${dir}'`).replace(/^.*?PAIRS=/, 'PAIRS=')]);
+      expect(readFileSync(join(dir, 'MEMORY.md'), 'utf8')).toBe(`Notes in ${wsdir}/notes.md.`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it('rewrites only whole paths, never a sibling that starts the same (#80)', async () => {
     const src = { id: 'agent', workspace: '/source/agent' };
     const pairs = selfPathReplacements(src, 'agent-2');
@@ -168,6 +201,67 @@ describe('readOpenclawCrons + workspace resolution', () => {
 
   it('returns [] for a missing DB', () => {
     expect(readOpenclawCrons('garden-advisor', join(root, 'nope.sqlite'))).toEqual([]);
+    expect(readOpenclawCronStore('garden-advisor', join(root, 'nope.sqlite'))).toEqual({ crons: [] });
+  });
+
+  const CHAT = ['55', '50', '0', '03'].join(''); // made up, built at run time
+  it('reads 2026.9\'s one-job_json-per-task store, skipping OpenClaw\'s own upkeep (review A45)', () => {
+    const p = join(root, 'state-2026-9.sqlite');
+    const s = new Database(p);
+    s.exec('CREATE TABLE cron_jobs (job_id TEXT, agent_id TEXT, declaration_key TEXT, job_json TEXT, updated_at INTEGER)');
+    const add = s.prepare('INSERT INTO cron_jobs VALUES (?,?,?,?,?)');
+    add.run('j1', 'garden-advisor', null, JSON.stringify({ id: 'j1', name: 'Daily brief', schedule: { kind: 'cron', expr: '0 8 * * *', tz: 'America/Toronto' }, payload: { kind: 'agentTurn', message: 'Write the brief' }, sessionTarget: 'isolated', delivery: { mode: 'announce', channel: 'telegram', to: CHAT } }), 1);
+    add.run('j2', 'garden-advisor', null, JSON.stringify({ id: 'j2', name: 'Water reminder', schedule: { kind: 'every', everyMs: 3_600_000 }, payload: { kind: 'systemEvent', text: 'Water the plants' }, sessionTarget: 'main' }), 1);
+    add.run('j3', 'garden-advisor', 'openclaw.dreaming', JSON.stringify({ id: 'j3', name: 'upkeep', declarationKey: 'openclaw.dreaming', schedule: { kind: 'cron', expr: '0 3 * * *' }, payload: { kind: 'agentTurn', message: 'x' } }), 1);
+    add.run('j4', 'other-agent', null, JSON.stringify({ id: 'j4', name: 'Not mine', schedule: { kind: 'cron', expr: '0 9 * * *' }, payload: { kind: 'agentTurn', message: 'x' } }), 1);
+    s.close();
+    const r = readOpenclawCronStore('garden-advisor', p);
+    expect(r.error).toBeUndefined();
+    expect(r.crons).toEqual([
+      expect.objectContaining({ name: 'Daily brief', scheduleKind: 'cron', scheduleExpr: '0 8 * * *', scheduleTz: 'America/Toronto', payloadKind: 'agentTurn', payloadMessage: 'Write the brief', sessionTarget: 'isolated', deliveryMode: 'announce', deliveryChannel: 'telegram', deliveryTo: CHAT }),
+      expect.objectContaining({ name: 'Water reminder', scheduleKind: 'every', everyMs: 3_600_000, payloadKind: 'systemEvent', payloadMessage: 'Water the plants', sessionTarget: 'main' }),
+    ]);
+    // …and the reminder goes back in as a system event, not an agent turn (B36).
+    const args = cronAddArgs(r.crons[1]!, 'garden');
+    expect(args).toEqual(expect.arrayContaining(['--system-event', 'Water the plants', '--session', 'main']));
+    expect(args).not.toContain('--message');
+  });
+
+  it('a task stored with no agent is the default agent\'s: OpenClaw runs it as that one (final audit, 2026-10-22)', () => {
+    const p = join(root, 'state-unowned.sqlite');
+    const s = new Database(p);
+    s.exec('CREATE TABLE cron_jobs (job_id TEXT, agent_id TEXT, declaration_key TEXT, job_json TEXT, updated_at INTEGER)');
+    const add = s.prepare('INSERT INTO cron_jobs VALUES (?,?,?,?,?)');
+    add.run('j1', null, null, JSON.stringify({ id: 'j1', name: 'Made with the CLI', schedule: { kind: 'cron', expr: '0 7 * * *' }, payload: { kind: 'agentTurn', message: 'x' } }), 1);
+    add.run('j2', 'garden-advisor', null, JSON.stringify({ id: 'j2', name: 'Its own', schedule: { kind: 'cron', expr: '0 8 * * *' }, payload: { kind: 'agentTurn', message: 'x' } }), 1);
+    s.close();
+    const two = join(root, 'openclaw-two.json');
+    writeFileSync(two, JSON.stringify({ agents: { list: [{ id: 'kitchen' }, { id: 'garden-advisor', default: true }] } }));
+    expect(readOpenclawCronStore('garden-advisor', p, two).crons.map((c) => c.name)).toEqual(['Made with the CLI', 'Its own']);
+    expect(readOpenclawCronStore('kitchen', p, two).crons).toEqual([]);
+    // No default marked: the first entry.
+    expect(readOpenclawCronStore('garden-advisor', p, cfg).crons.map((c) => c.name)).toEqual(['Made with the CLI', 'Its own']);
+  });
+
+  it('an unknown store shape or a corrupt file is an error, never "no tasks" (review A45, A13)', () => {
+    const odd = join(root, 'odd.sqlite');
+    const s = new Database(odd);
+    s.exec('CREATE TABLE cron_jobs (job_id TEXT, agent_id TEXT, blob BLOB)');
+    s.close();
+    expect(readOpenclawCronStore('garden-advisor', odd)).toEqual({ crons: [], error: expect.stringMatching(/shape/) });
+    const corrupt = join(root, 'corrupt.sqlite');
+    writeFileSync(corrupt, 'this is not a database, just bytes '.repeat(200));
+    expect(readOpenclawCronStore('garden-advisor', corrupt)).toEqual({ crons: [], error: expect.stringMatching(/could not be (read|opened)/) });
+  });
+
+  it('an interval that is not whole seconds is not rounded to another one (B49)', () => {
+    expect(cronAddArgs({ scheduleKind: 'every', everyMs: 1500, payloadMessage: 'x' }, 'a')).toBeNull();
+    expect(cronAddArgs({ scheduleKind: 'every', everyMs: 15_000, payloadMessage: 'x' }, 'a')).toEqual(expect.arrayContaining(['--every', '15s']));
+    expect(cronAddArgs({ scheduleKind: 'every', everyMs: 90_000, payloadMessage: 'x' }, 'a')).toEqual(expect.arrayContaining(['--every', '90s']));
+  });
+
+  it('a payload kind it does not know is not guessed at (review B36)', () => {
+    expect(cronAddArgs({ scheduleKind: 'every', everyMs: 60_000, payloadKind: 'webhook', payloadMessage: 'x' }, 'a')).toBeNull();
   });
 
   it('migrateCrons recreates each cron in the container, disabled', async () => {
@@ -190,5 +284,12 @@ describe('readOpenclawCrons + workspace resolution', () => {
     expect(add).toContain('--disabled');
     expect(add).toContain('--cron');
     expect(add).toContain('0 8 * * *');
+
+    // Adopted again (or retried): the task brought over before is there, disabled; no second copy (B37).
+    provider.execResponses.set('cron list', { code: 0, stdout: JSON.stringify({ jobs: [{ id: 'j9', name: 'Daily brief', enabled: false, schedule: { kind: 'cron', expr: '0 8 * * *', tz: 'America/Toronto' }, payload: { kind: 'agentTurn', message: 'Write the brief' } }] }), stderr: '' });
+    const before = provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'add').length;
+    const again = await migrateCrons({ store, provider }, 'a1', join(root, 'ws-tech'), { configPath: cfg, dbPath: db, readyGapMs: 0 });
+    expect(again).toEqual({ total: 1, carried: 1, failed: 0 });
+    expect(provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'add').length).toBe(before);
   });
 });

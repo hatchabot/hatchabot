@@ -238,6 +238,9 @@ export async function installRuntimeImage(
     load.on('close', (code) => {
       opts.onProgress?.({ bytes, total: opts.total });
       if (code === 0 && saveCode === 0) return finish({ ok: true });
+      // The receiver is gone: a sender left running blocks on its full pipe
+      // for good, holding a daemon export (audit, 2026-10-22).
+      if (saveCode === null) save.kill('SIGKILL');
       finish({ ok: false, error: stderr.slice(-400) || `exit ${saveCode ?? '?'}/${code}` });
     });
     save.on('error', (err) => { load.kill('SIGKILL'); finish({ ok: false, error: String(err.message).slice(0, 200) }); });
