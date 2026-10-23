@@ -101,7 +101,7 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
     out.push({
       level: 'warn',
       text: `Running ${f.checkout.tag}, but ${f.checkout.latestTag} is available locally`,
-      fix: `git fetch --tags origin && git checkout ${f.checkout.latestTag} && ./scripts/restart.sh`,
+      fix: `hatchabot upgrade ${f.checkout.latestTag}   (keeps the channel, takes the upgrade lock, rolls back on failure)`,
     });
   } else if (f.checkout?.tag) {
     out.push({ level: 'ok', text: `Release ${f.checkout.tag}` });

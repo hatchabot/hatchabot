@@ -26,7 +26,7 @@ function run(env: string) {
 }
 
 describe('scripts/first-run-link.sh (audit, 2026-10-22)', () => {
-  it('reads a quoted PORT as the port, not with its quotes', () => {
+  it('reads a quoted PORT as the port, not with its quotes', { timeout: 30_000 }, () => { // several bash runs; CI's loaded runner passed 5 s (2026-10-23)
     for (const env of ['PORT="8123"\n', "PORT='8123'\n", 'PORT=8123 # my port\n', 'PORT=8123\n']) {
       const r = run(env);
       expect(r.status, env).toBe(0);

@@ -50,7 +50,19 @@ non-versioned data you're comfortable the agent editing.
   between read-only (`ro`) and read-write (`rw`), without remove-and-re-add;
   applies on the next Rebuild. A public repo can't be made writable (no
   credential to push with) — remove it and add it with a deploy key.
+- `POST /v1/agents/:id/data-sources/:dsId/check` — the **Test** button
+  (v2.165.0). A folder: it exists, the service can read it (and write it, for
+  `rw`), and the agent is on this machine. A repo: `git ls-remote` from this
+  machine with the source's own deploy key (or none, for a public clone),
+  answering `{ ok, refs, message }` or `{ ok: false, reason, message }` with
+  `reason` one of `key-not-added`, `not-found`, `host-key`, `unreachable`,
+  `timeout`, `no-git`, `error`. The key is written to a private temp dir for
+  the one command and removed after it. Nothing is changed by a check.
 - `DELETE /v1/agents/:id/data-sources/:dsId` — remove.
+- Folders are bind mounts of **this** machine's disk: adding one to an agent
+  on a runner is refused (400), and moving an agent that has folders to a
+  runner is refused (409, `folders_stay_here`). An export carries repos with
+  their deploy keys and folders as declarations (docs/moving-agents.md).
 - Legacy folders are still managed via `PATCH /v1/agents/:id { sharedPaths }`
   (the CLI `folders` command and old clients keep working).
 

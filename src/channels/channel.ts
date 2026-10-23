@@ -20,6 +20,8 @@ export interface ChannelProvisionRequest {
   /** Owner opted out of a pool bot for this agent — go straight to the manual
    *  (BotFather walkthrough) path even when the pool has bots. */
   skipPool?: boolean;
+  /** The owner's choice (Settings → Telegram): lease only bots they parked themselves, never a shared house bot. */
+  ownBotsOnly?: boolean;
   /** Bots not to hand out, even as this agent's existing lease: Change bot must get a different one. */
   exclude?: string[];
 }

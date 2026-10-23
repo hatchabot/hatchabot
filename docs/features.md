@@ -318,7 +318,10 @@ and its Telegram bot. The agent list carries `startedAt`, `restarts` and
 
 ### Consoles: tabs, a switcher and an address per agent
 
-Clicking an agent opens its OpenClaw console over the home screen. Since
+Clicking an agent opens its OpenClaw console over the home screen — at once,
+with a spinner ("Opening the console…") until the console has loaded; the
+server reads behind it took seconds on a cold start and used to show nothing
+meanwhile (v2.165.0). Since
 v2.138.0 each agent you open gets a **tab** in the console's top bar: gold on
 the active one, a dot when an agent in another tab has a new reply. Switching
 is instant and keeps your place, because each open console stays loaded
@@ -826,6 +829,15 @@ spending tokens each time — while Telegram showed nothing.
 - **`get_token_health`** (`GET /v1/token-health?agent=&limit=`): one row per
   agent of yours, costliest first.
 
+**Context now** (v2.165.0), at the top of the Usage page: one line per agent —
+its model, how big its **main conversation** was at its last call (the
+Telegram DM and the console), the model's context **window** as the agent's
+OpenClaw states it (or the cap Hatchabot set), how **full** that is, the
+median and 90th-percentile context per call over 30 days, and when the last
+call was. Over 80% full is marked: the agent is close to compacting; compact
+it or cap it from its own Usage tab. From this same read, about hourly while
+the agent runs; nothing is woken for it.
+
   | Part | What | Source |
   |---|---|---|
   | `conversation` | context per call (input + cache) on its conversations — median, 90th percentile, largest, in thousands; the share over 100K; the main conversation (Telegram DM and console share it) at its last call; the largest one; compactions in 30 days | the transcripts |
@@ -1017,6 +1029,13 @@ BotFather tokens; verified before storing), after which creation grabs a bot
 instantly — the header shows "N instant bots ready" and the create dialog
 lets you opt out per agent for a bespoke @handle. (Server-side stocking:
 `HATCHABOT_SECRET_KEY=… npx tsx scripts/pool-add.ts <token>…`.)
+
+**Use only my own bots** (⚙ Settings → Telegram, v2.165.0): a tick per person.
+Your agents then never take a **shared** house bot, even when it is the only
+one free — they ask for a BotFather token (or go without Telegram) instead.
+The "ready" counts you see (the create form, the pool page) follow the choice.
+Shared bots stay listed under "Free — shared with you", marked as not for
+your agents.
 
 **A recycled bot keeps its old chat.** When a pooled bot is leased to a new
 agent, Hatchabot renames it, clears its description and command menu, and posts
@@ -1245,9 +1264,19 @@ new bot slot.
   can message the agent can ask about — and for writable, change — those
   files.
 - **Git repos** — first-class: Hatchabot generates a repo-scoped **deploy
-  key** (copy it from the 🔑 Deploy key button, add it on GitHub), then
-  clones the repo onto the agent's own volume. Read-only or read-write —
-  writes are commits and pushes, never raw writes to your disk.
+  key** (shown above the repo list the moment the repo is added, and again
+  from the 🔑 Deploy key button; add it on GitHub), then clones the repo to
+  `~/.openclaw/<repo>` in the agent's own home (Files → .openclaw). Read-only
+  or read-write — writes are commits and pushes, never raw writes to your
+  disk. Each row's button says what it does: **Make writable** / **Make
+  read-only**.
+- **Test** (v2.165.0) on any row: a folder is checked on this machine (there,
+  readable, writable if the agent may write); a repo is asked for its branch
+  list from this machine with the source's own deploy key, so "the key is not
+  on the repo yet" shows up before a Rebuild fails to clone. A folder on an
+  agent that runs on a runner is reported as not mounted there: folders are
+  this machine's, and since v2.165.0 cannot be added to such an agent, nor can
+  an agent with folders be moved to a runner.
 
 Details: [data-sources.md](data-sources.md). Changes apply on the next
 **Rebuild**.
@@ -1764,9 +1793,13 @@ advisor agent doing?" works in its chat too.
 
 An agent's ⚙ sheet has a **Files** tab (owner only): its home folder as a
 table — name, size, when it changed — folders to open, a ⬇ on every file, and
-**⬇ .tar.gz** for any folder (or the whole folder you are in). A file the
-browser can show (text, images, PDF, pages) is a link that opens in a new tab
-— served sandboxed, so a page an agent wrote cannot act as the app. **⬆
+**⬇ .tar.gz** for any folder (or the whole folder you are in). The column
+headings sort the list (by name, size or when changed; folders stay first;
+remembered on this device, v2.165.0). A text file or an image opens **in the
+tab itself**, with **← Back** to the folder, **Open in a tab** and ⬇ — a new
+browser tab had no obvious way back on a phone. Sound, video and PDF still
+open in a new tab — served sandboxed, so a page an agent wrote cannot act as
+the app. **⬆
 Upload…** (or drop files on the list) puts files from your computer into the
 folder you are in; it asks before replacing one. Uploads may go anywhere in
 the home except OpenClaw's own state under `.openclaw` — the agent's

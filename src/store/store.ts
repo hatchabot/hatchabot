@@ -111,6 +111,13 @@ export interface AgentApp {
   previousSha?: string; previousManifest?: unknown; installedAt: string; testOk?: boolean;
 }
 
+/** The person-level preferences the app keeps (owner_prefs). */
+export type OwnerPrefKey = 'ownBotsOnly';
+export interface OwnerPrefs {
+  /** Telegram: my agents take only bots I parked myself, never a shared house bot. */
+  ownBotsOnly: boolean;
+}
+
 export class Store {
   constructor(private readonly db: Database.Database) {
     this.#migrate();
@@ -615,6 +622,13 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS accounts_email ON accounts (email);
 
+      -- A person's own choices about how the app treats them (not an agent's
+      -- settings): one row per key. Read with getOwnerPref; unknown = default.
+      CREATE TABLE IF NOT EXISTS owner_prefs (
+        owner_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY (owner_id, key)
+      );
+
       -- Telegram ids an account UNLINKED. knownChannelUserId's membership
       -- fallback skips them: the owner seats still bound to an unlinked id
       -- otherwise went on seeding it into every new agent (A069). Linking an
@@ -976,6 +990,8 @@ export class Store {
       // The wake time and the bedtime mark must survive a restart: kept in memory,
       // a deploy forgot every wake and the next sweep put woken agents straight back (2026-09-26).
       `ALTER TABLE agents ADD COLUMN woken_at TEXT`,
+      // A copy of the agent was downloaded while it stood stopped (transfer.ts): cleared when it runs again.
+      `ALTER TABLE agents ADD COLUMN exported_at TEXT`,
       `ALTER TABLE agents ADD COLUMN hibernate_mark INTEGER`,
       `ALTER TABLE agent_classes ADD COLUMN memory_cap TEXT`,
       // Compressed swap (swap.ts): an agent's or a class's allowance on top of its memory cap; "off" or a size, NULL = inherit.
@@ -1847,6 +1863,8 @@ export class Store {
     // a start): a sleeper's mark left on a RUNNING agent showed it ASLEEP and
     // sent the next sweep to stop it again (30th audit).
     if (next === 'RUNNING' && agent.hibernatedAt) this.setHibernated(id, null);
+    // Running again here: the downloaded copy is no longer the one that counts.
+    if (next === 'RUNNING' && agent.exportedAt) this.setAgentExportedAt(id, null);
     // A management agent that is put away or removed has no key any more.
     if (agent.ops && (next === 'ARCHIVED' || next === 'DELETING' || next === 'DELETED')) this.deleteOpsToken(id);
     // Its embed key dies with its state too (the door's file carries only live agents).
@@ -5358,6 +5376,11 @@ export class Store {
   /** Anyone who finds the bot may knock, instead of invitees and people the
    *  owner already knows. Off by default, per agent. */
   /** Asleep since `at` with the update that was waiting then; `null` = awake (the wake time is recorded). */
+  /** A copy of the agent was downloaded (or moved by file) at `at`; null once it runs here again. */
+  setAgentExportedAt(agentId: string, at: string | null): void {
+    this.db.prepare(`UPDATE agents SET exported_at = ? WHERE id = ?`).run(at, agentId);
+  }
+
   setHibernated(agentId: string, at: string | null, mark?: number): void {
     if (at) this.db.prepare(`UPDATE agents SET hibernated_at = ?, hibernate_mark = ? WHERE id = ?`).run(at, mark ?? null, agentId);
     else this.db.prepare(`UPDATE agents SET hibernated_at = NULL, hibernate_mark = NULL, woken_at = ? WHERE id = ?`).run(new Date().toISOString(), agentId);
@@ -5560,6 +5583,22 @@ export class Store {
         )
         .run(ownerId, channelUserId, now);
     })();
+  }
+
+  /** A person's own preference (owner_prefs), or undefined when never set. */
+  getOwnerPref(ownerId: string, key: OwnerPrefKey): string | undefined {
+    const r = this.db.prepare(`SELECT value FROM owner_prefs WHERE owner_id = ? AND key = ?`).get(ownerId, key) as { value: string } | undefined;
+    return r?.value;
+  }
+  /** Set (or, with null, clear) one of a person's preferences. */
+  setOwnerPref(ownerId: string, key: OwnerPrefKey, value: string | null): void {
+    if (value === null) { this.db.prepare(`DELETE FROM owner_prefs WHERE owner_id = ? AND key = ?`).run(ownerId, key); return; }
+    this.db.prepare(`INSERT INTO owner_prefs (owner_id, key, value, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(owner_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`).run(ownerId, key, value, new Date().toISOString());
+  }
+  /** Every preference of a person, as the app's typed shape (defaults filled in). */
+  ownerPrefs(ownerId: string): OwnerPrefs {
+    return { ownBotsOnly: this.getOwnerPref(ownerId, 'ownBotsOnly') === '1' };
   }
 
   /** The account's linked Telegram id, if the explicit link has been made. */
@@ -5983,6 +6022,7 @@ function rowToAgent(r: any): Agent {
     memoryPeakSince: r.memory_peak_since ?? undefined,
     memoryPeakClearedAt: r.memory_peak_cleared_at ?? undefined,
     hibernatedAt: r.hibernated_at ?? undefined,
+    exportedAt: r.exported_at ?? undefined,
     hibernate: r.hibernate === 'never' ? 'never' : undefined,
     wokenAt: r.woken_at ?? undefined,
     hibernateMark: typeof r.hibernate_mark === 'number' ? r.hibernate_mark : undefined,

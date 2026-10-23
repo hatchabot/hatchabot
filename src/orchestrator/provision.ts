@@ -255,6 +255,7 @@ async function provisionChannelOrGoWebOnly(
       slug: agent.slug,
       ownerId: agent.ownerId,
       skipPool,
+      ownBotsOnly: deps.store.ownerPrefs(agent.ownerId).ownBotsOnly,
     });
   } catch (err) {
     if (!(err instanceof ChannelSetupRequired) || !deps.webOnlyIfNoBot || skipPool) throw err;
@@ -570,7 +571,9 @@ export async function buildRuntimeSpec(
   // Both refresh on every rebuild/move because provision re-renders the spec.
   const hostLabel = host.kind === 'local' ? osHostname() : host.name;
   const hostSlug = hostLabel.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63) || 'host';
-  const containerHostname = `${agent.slug.slice(0, 63)}.${hostSlug}`;
+  // Linux caps a hostname at 64 bytes: a long slug plus a long host name made a
+  // container that could not start (audit, 2026-10-23). The agent's part wins.
+  const containerHostname = `${agent.slug.slice(0, 63)}.${hostSlug}`.slice(0, 63).replace(/[.-]+$/, '') || agent.slug.slice(0, 63);
 
   const modelKey =
     subscription || local ? undefined : await secrets.get(requireRef(profile.secretRef));

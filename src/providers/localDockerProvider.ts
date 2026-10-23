@@ -207,6 +207,8 @@ export class LocalDockerProvider implements RuntimeProvider {
    * list: hatchabot-kitchen-helper-9221b8b8. The runtimeRef embeds the full
    * container name, so nothing needs to be re-derived later.
    */
+  runtimeRefFor(spec: { agentId: string; slug: string }): string { return this.#namesFor(spec).runtimeRef; }
+
   #namesFor(spec: { agentId: string; slug: string }) {
     const slug = spec.slug.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 24);
     const container = `${this.prefix}-${slug}-${spec.agentId.slice(0, 8)}`;

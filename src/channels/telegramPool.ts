@@ -167,10 +167,12 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
 
   /** Bots leasable BY THIS USER: their own plus shared house bots. Without an
    *  ownerId (admin script), counts everything unleased. */
-  availableCount(ownerId?: string): number {
+  availableCount(ownerId?: string, ownOnly = false): number {
     const row = (ownerId === undefined
       ? this.db.prepare(`SELECT COUNT(*) AS n FROM telegram_pool WHERE leased_to IS NULL`).get()
-      : this.db
+      : ownOnly
+        ? this.db.prepare(`SELECT COUNT(*) AS n FROM telegram_pool WHERE leased_to IS NULL AND owner_id = ?`).get(ownerId)
+        : this.db
           .prepare(
             `SELECT COUNT(*) AS n FROM telegram_pool
              WHERE leased_to IS NULL AND (owner_id IS NULL OR owner_id = ?)`,
@@ -226,11 +228,13 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // agent's name — and a bot serving "Budget Tracker" while Telegram still calls
     // it "HOA Helper" is worse than a bot with a plain name. When every free
     // bot is rate-limited this changes nothing; there is simply no better pick.
+    // ownBotsOnly (Settings → Telegram): the person asked never to put one of
+    // their agents on a shared house bot, so only their own are offered.
     const free = (
       this.db
         .prepare(
           `SELECT username, secret_ref FROM telegram_pool
-           WHERE leased_to IS NULL AND (owner_id IS NULL OR owner_id = ?)
+           WHERE leased_to IS NULL AND (${req.ownBotsOnly ? 'owner_id = ?' : 'owner_id IS NULL OR owner_id = ?'})
            ORDER BY (rename_after IS NOT NULL AND rename_after > ?) ASC,
                     (owner_id IS NULL) ASC, username`,
         )

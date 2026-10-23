@@ -148,7 +148,9 @@ rebuild, and only when it is missing: after that, the agent updates it with
 `git pull`. A **folder** is a live, read-only (or writable) view of a path on
 the host.
 
-- `src/orchestrator/gitSource.ts` — `normalizeGitUrl`, `buildGitSyncScript`, `buildPublicGitSyncScript`: the accepted URL shapes, and the idempotent clone scripts for the private (deploy key) and public (https) cases. `hostKeyTrustLine`: the git host's SSH key is trusted on first sync only, never replaced.
+- `src/orchestrator/gitSource.ts` — `normalizeGitUrl`, `buildGitSyncScript`, `buildPublicGitSyncScript`: the accepted URL shapes, and the idempotent clone scripts for the private (deploy key) and public (https) cases. `hostKeyTrustLine`: the git host's SSH key is trusted on first sync only, never replaced. `probeGitSource`: the Test button's `git ls-remote` from this machine with the source's key (the key in a private temp dir for the one command), and its one-sentence answers.
+- `src/api/routes.ts` — `'/v1/agents/:id/data-sources/:dsId/check'`: the Test button (a folder checked here; a repo through `probeGitSource`; a folder of an agent on a runner answered `remote`). `folders_stay_here`: the move-host refusal for an agent with folders.
+- `web/index.html` — `renderDataList`, `checkDataSource`, `showDeployKeyForSource`: the Data tab's rows (Make writable / Make read-only, where each lands, Test), and the deploy key box above the repo list.
 - `src/orchestrator/provision.ts` — `syncGitDataSources`, `datasource.git_synced`: where each repo is cloned during provisioning, and the event it logs (`datasource.git_sync_failed` carries git's own error).
 - `src/orchestrator/provision.ts` — `scrubRemovedDataSources`, `datasource.key_left`: a removed source's deploy key taken off the volume and out of the secret store, retried at start, wake and rebuild until confirmed (`data_source_removals` in the store).
 - `src/openclaw/workspace.ts` — `dataSourcesSection`, `DATA_SOURCES_HEADING`: the AGENTS.md section that tells the agent each path.
@@ -192,7 +194,7 @@ per container.
 - `src/orchestrator/moveHost.ts` — `moveAgentToHost`, `completeOnTarget`, `putBack`, `resumeMoveHost`, `recoverMoveHost`, `settleOrphan`: moving an agent between this install's machines, finishing or undoing one a restart cut off, and the held choices when its copy on the other machine could not be removed.
 - `src/orchestrator/migrate.ts` — `migrateAgent`, `preflight`, `destinationHasAgent`, `resumeMigrate`, `recoverMigrate`: moving an agent to another Hatchabot; after a lost answer or a restart, asking that server whether it arrived. `MOVE_HEADER`, `receiveMove`, `moveState` (`src/api/routes.ts` — `'/v1/moves/:id'`; table `move_receipts`): the destination records each move's id before its import awaits anything and answers for that move.
 - `src/api/peerAddress.ts` — `allowedPeerAddress`: peer URL protocol and loopback/link-local checks, including IPv6 literals. `pinnedPeerFetch`, `allowedPeerIp`: every call to another server (registration probe, migration, consolidated `/v1/bots`) checks the address the socket dials and refuses redirects.
-- `src/orchestrator/transfer.ts` — `exportAgent`, `importAgent`, `rollbackImport`, `resumeImport`: the whole-agent archive behind download, moving to another Hatchabot, and restore from a download; an import a restart cut off is undone.
+- `src/orchestrator/transfer.ts` — `exportAgent`, `importAgent`, `rollbackImport`, `resumeImport`: the whole-agent archive behind download, moving to another Hatchabot, and restore from a download; an import a restart cut off is undone. `ExportedDataSource`: the repos (deploy key included) and folders (declarations) that travel with it; `import.folders_not_here` names the folders the destination does not have. `src/store/store.ts` — `setAgentExportedAt`: a downloaded copy exists, so delete does not park the bot. `src/providers/provider.ts` — `runtimeRefFor`: the ref a failed provision would have had, so its volume is destroyed by the rollback.
 - `src/orchestrator/hibernate.ts` — `hibernateSweep`, `wakeSweep`, `wakeAgent`, `hibernateBlocker`: idle agents sleep and wake on demand (off unless HATCHABOT_HIBERNATE_AFTER is set).
 - `src/orchestrator/memoryCap.ts` — `effectiveMemoryCap`, `parseMemoryCap`: per-agent memory limits.
 - `src/orchestrator/swap.ts` — `effectiveSwapAllowance`, `limitsDrift`, `parseSwapProbe`: compressed swap and the limits check.
@@ -224,7 +226,8 @@ already known to the owner's agents, are let in; an invite link opens a short
 window in which a new person's first message is paired. The bot's settings are
 written into OpenClaw by the seed, so channel changes usually need a rebuild.
 
-- `src/channels/telegramPool.ts` — `TelegramPoolProvisioner`, `PoolExhaustedError`, `retryPendingNames`: leasing bots from the pool and renaming them.
+- `src/channels/telegramPool.ts` — `TelegramPoolProvisioner`, `PoolExhaustedError`, `retryPendingNames`: leasing bots from the pool and renaming them. `ownBotsOnly` (the request): only the person's own bots are offered or counted.
+- `src/store/store.ts` — `owner_prefs`, `ownerPrefs`, `setOwnerPref`: a person's own choices (own bots only); `src/api/routes.ts` — `'/v1/account/prefs'`: saving one; `web/index.html` — `setPoolOwnOnly`: the tick in Settings → Telegram.
 - `src/channels/telegramManual.ts` — `TelegramManualProvisioner`, `verifyBotToken`: a bot token pasted by hand.
 - `src/channels/composite.ts` — `CompositeTelegramProvisioner`: pool first, then a manual bot.
 - `src/channels/telegramName.ts` — `setTelegramDisplayName`: the bot's display name.
@@ -417,7 +420,8 @@ advice comes together in one ranked list, Recommended. Every dollar figure is to
 (the model steward) keeps a ledger of model changes and judges each one later.
 
 - `src/api/routes.ts` — `runUsageSample`, `runTokenSteward`, `runBudgetPass`, `runModelGuard`: the background pass.
-- `src/orchestrator/usage.ts` — `agentUsage`, `USAGE_READER_SCRIPT`: tokens per model summed from transcripts.
+- `src/orchestrator/usage.ts` — `agentUsage`, `USAGE_READER_SCRIPT`: tokens per model summed from transcripts. `partial`: rows the read could not decode; the sampler (`src/orchestrator/sourceUsage.ts` — `usage.sample_partial`) then writes no total from that read.
+- `src/orchestrator/tokenHealth.ts` — `windowK`: the model's context window from the agent's OpenClaw config; `web/index.html` — `loadContextNow`: the Context now table at the top of Usage.
 - `src/orchestrator/sourceUsage.ts` — `sampleSourceUsage`, `summarizeSourceUsage`, `parseModelCalls`: per-source requests, tokens and rate limits.
 - `src/orchestrator/fleetUsage.ts` — `computeUsagePeriod`, `snapshotDailyUsage`: the Usage view by period.
 - `src/orchestrator/agentCosts.ts` — `costsFor`, `agentCost`, `spendSeries`, `priceParts`: cost badges and the spend chart.
@@ -501,6 +505,8 @@ classic card look was removed in v2.155.0). Clicking an icon opens the
 agent sheet, whose tabs are rendered by v2Pane. All data comes from the /v1
 API through one fetch helper.
 
+- `web/index.html` — `v2LoadFiles`, `v2FilesSortBy`, `v2FilesOrder`, `v2OpenFile`: the Files tab's list, its sorting (folders first; remembered as `hb-files-sort`) and the in-tab viewer with ← Back (text and images; the rest opens in a new tab).
+- `web/index.html` — `openGateway`, `consoleCoverSay`, `autoApproveConsole`: opening an agent's console: the panel opens at once with the spinner, which stays until the console's frame has loaded.
 - `web/index.html` — `initV2`, `renderV2`, `refresh`, `api`: start-up, the home grid, the periodic reload and the fetch helper.
 - `web/index.html` — `openV2Agent`, `v2Open`, `v2Pane`, `v2RenderSheet`: the agent sheet; v2Pane's tabs are overview, personality, ai, messaging, knowledge, sharing, usage, schedule, files and advanced.
 - `web/index.html` — `v2SetView`, `v2SetSort`, `v2LoadRecent`, `agentAttention`, `v2LoadMachine`: View by, sorting, Activity, Alerts and the machine line.

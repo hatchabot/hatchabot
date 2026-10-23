@@ -243,6 +243,10 @@ export interface RuntimeProvider {
    */
   provision(spec: RuntimeSpec): Promise<{ runtimeRef: string }>;
 
+  /** The ref provision() would answer for this agent, before it has run: so a
+   *  provision that failed after making the volume can still be torn down. */
+  runtimeRefFor?(spec: { agentId: string; slug: string }): string;
+
   start(runtimeRef: string): Promise<void>;
   stop(runtimeRef: string): Promise<void>;
 

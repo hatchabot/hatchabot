@@ -352,6 +352,8 @@ export interface TokenHealthRow {
     compacting?: { since: string; beforeK?: number };
     /** mainNowK is the size a compaction left, newer than the last measured call (until the next call measures it again). */
     mainAfterCompaction?: { at: string; beforeK?: number; already?: boolean };
+    /** The model's whole context window, thousands, as the agent's OpenClaw config states it (when it does). */
+    windowK?: number;
   };
   /** The context cap: set by Hatchabot (and whether it is in the agent's config), and what OpenClaw then compacts at. */
   contextCap?: { tokens?: number; applied: boolean; compactsAtK?: number; model?: string };
@@ -460,11 +462,14 @@ export function tokenHealthRow(a: Agent, profile: AIProfile | undefined, stored:
   row.incidents = ctx.incidents.filter((i) => incidentConcerns(i, a.id) && !i.clearedAt).map((i) => ({ id: i.id, kind: i.kind, text: i.text, ...(i.fix ? { fix: i.fix } : {}), openedAt: i.openedAt, count: i.count }));
   if (h) {
     const mainNow = h.main?.[a.slug];
+    const windowTokens = profile ? h.cfg?.caps?.[`${modelRefOf(a, profile).provider}/${model}`] : undefined;
+    const windowK = typeof windowTokens === 'number' && windowTokens > 0 ? kOf(windowTokens) : undefined;
     row.conversation = {
       calls: h.conv.calls,
       ctxK: { p50: kOf(h.conv.p50), p90: kOf(h.conv.p90), max: kOf(h.conv.max) },
       over100kShare: h.conv.calls ? r2(h.conv.over100k / h.conv.calls) : 0,
       ...(mainNow ? { mainNowK: kOf(mainNow.ctx), mainAt: iso(mainNow.at) } : {}),
+      ...(windowK ? { windowK } : {}),
       ...(h.top?.[0] ? { largest: { kind: h.top[0].kind, nowK: kOf(h.top[0].ctx) } } : {}),
       compactions30d: h.compactions?.n ?? 0,
       ...(h.compactions?.last ? { lastCompaction: { at: iso(h.compactions.last), beforeK: kOf(h.compactions.before) } } : {}),

@@ -53,7 +53,7 @@ describe('checkout freshness', () => {
     const lines = doctorReport({ ...healthy, checkout: { tag: 'v1.8.1', latestTag: 'v1.8.2', dirty: [] } });
     const line = lines.find((l) => l.text.includes('v1.8.1'))!;
     expect(line.level).toBe('warn');
-    expect(line.fix).toContain('git checkout v1.8.2');
+    expect(line.fix).toContain('hatchabot upgrade v1.8.2'); // through the upgrade command, never a bare checkout (audit, 2026-10-23)
   });
 
   it('warns about local changes, because they block the installer', () => {

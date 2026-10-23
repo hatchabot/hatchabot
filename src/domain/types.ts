@@ -149,6 +149,8 @@ export interface Agent {
   allowKnocks?: boolean;
   /** Asleep since (hibernate.ts): stopped by the idle sweep, started again on a message, a console, an ask. */
   hibernatedAt?: string;
+  /** A copy was downloaded (or moved by file) while it stood stopped; its bot is not parked on delete (transfer.ts). Cleared when it runs again. */
+  exportedAt?: string;
   /** `never`: this agent stays awake whatever the machine's idle rule says. */
   hibernate?: 'never';
   /** When it was last woken: the idle clock restarts here, so a woken agent is not put straight back. */

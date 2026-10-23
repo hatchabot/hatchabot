@@ -6,6 +6,7 @@ import { HOUR_FIELDS, type HourField, type WindowModelStats } from './usage.js';
 import { modelKey, modelOption, priceMix, type TokenMix } from './modelOptions.js';
 import { scoreAgent, type StoredProfile } from './modelScorecard.js';
 import { effectiveModel } from './provision.js';
+import { machineTz, monthKey } from './budgets.js';
 
 /**
  * The model-change ledger, the quality guard and the realised saving
@@ -498,7 +499,8 @@ function sourceMonthUSD(store: Store, profileId: string, month: string): number 
  * share of what the source carried. Upgrades are not netted off here.
  */
 export function rightSizeSavings(store: Store, ownerId: string, now = Date.now()): RightSize {
-  const month = new Date(now).toISOString().slice(0, 7);
+  // The machine's month, as budgets and cost days use (audit, 2026-10-23: this was UTC's).
+  const month = monthKey(now, machineTz());
   // Every change still in the ledger: a switch made months ago saves again this month.
   const changes = store.listModelChanges({ ownerId, limit: 5000 }).reverse();
   const agentIds = [...new Set(changes.map((c) => c.agentId))];

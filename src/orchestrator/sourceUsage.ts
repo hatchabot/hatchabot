@@ -157,7 +157,11 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
     // An agent's first reading of real usage writes its last 8 days as the
     // counter would have read them, so the windows are right at once instead
     // of starting empty (2026-09-28, when the source became the transcripts).
-    if (store.latestTokenTotal(a.id) === undefined && u.recent?.length) {
+    // Rows the reader could not decode make the total smaller than the truth; stored,
+    // the next whole read counted them as fresh use (audit, 2026-10-23). The profile
+    // and health below still come from what was read.
+    if (u.partial) deps.log?.('usage.sample_partial', { agentId: a.id, undecodable: u.partial });
+    if (!u.partial && store.latestTokenTotal(a.id) === undefined && u.recent?.length) {
       let running = u.totalTokens - u.recent.reduce((s, [, t]) => s + t, 0);
       let prevAt = new Date(Date.parse(u.recent[0]![0]) - 300_000).toISOString();
       store.addTokenSample(a.id, sourceAt(prevAt), prevAt, running);
@@ -171,7 +175,7 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
         if (at < nowIso) { store.addTokenSample(a.id, sourceAt(at), at, running); prevAt = at; }
       }
     }
-    store.addTokenSample(a.id, source, nowIso, u.totalTokens);
+    if (!u.partial) store.addTokenSample(a.id, source, nowIso, u.totalTokens);
     // The model scorecard's 30 days, from this same read: a review then needs
     // no container at all, and an asleep agent keeps its last profile.
     if (u.profile) {

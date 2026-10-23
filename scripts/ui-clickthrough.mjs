@@ -1271,6 +1271,178 @@ const SCENARIOS = String.raw`(() => {
       eq('no new channels read on a poll', calls('GET', /\/v1\/agents\/a2\/channels$/).length, chans);
       eq('the choice stays', document.getElementById('chanRoomMode-discord')?.value, 'room');
   }
+  // 2026-10-23 (Chris's list): the Data tab says what each button does and where a repo lands; Test checks a source; Files sort and open in place; the console opens at once; own bots only; Context now.
+  Object.assign(T, {
+    dataTabSaysWhatItDoes: async () => {
+      const list = await (await fetch('/v1/agents')).json();
+      const a = list.find((x) => x.id === 'a1');
+      try {
+        openV2Agent('a1', 'knowledge');
+        await until(() => document.getElementById('dataList'));
+        editAgentId = 'a1';
+        renderDataList([
+          { id: 'd1', kind: 'folder', access: 'ro', mountName: 'notes', hostPath: '/home/you/notes' },
+          { id: 'g1', kind: 'git', access: 'rw', mountName: 'thing', repoUrl: 'git@github.com:example-owner/thing.git', pubKey: 'ssh-ed25519 AAAAC3made-up-key-for-the-test test' },
+        ]);
+        const folderRow = document.querySelector('#dataList [data-ds="d1"]'), repoRow = document.querySelector('#repoList [data-ds="g1"]');
+        ok('both rows drawn', !!folderRow && !!repoRow);
+        ok('the folder\'s button says what it does: Make writable', [...folderRow.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Make writable'));
+        ok('the repo\'s button says Make read-only', [...repoRow.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Make read-only'));
+        ok('no arrow-style state words', !/→ writable|→ read-only/.test(folderRow.textContent + repoRow.textContent));
+        ok('the repo row says where it is cloned', repoRow.textContent.includes('~/.openclaw/thing'));
+        const key = document.getElementById('gitKeyOut'), repos = document.getElementById('repoList');
+        ok('the deploy key box sits above the repo list, not in the drawer below', !!(key.compareDocumentPosition(repos) & Node.DOCUMENT_POSITION_FOLLOWING) && !key.closest('details'));
+        // Test on the repo: the host refused the key → the message under the row, and the key shown again.
+        window.__answer = window.__answer || {};
+        window.__answer['POST /v1/agents/a1/data-sources/g1/check'] = [{ body: { ok: false, reason: 'key-not-added', message: 'The git host refused the deploy key. Add it to the repo (🔑 Deploy key), then test again.' } }];
+        [...repoRow.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Test').click();
+        await until(() => repoRow.querySelector('.ds-check')?.textContent.includes('refused the deploy key'));
+        ok('a warning mark', repoRow.querySelector('.ds-check').textContent.startsWith('⚠️'));
+        ok('the key is shown again, with its link', key.style.display !== 'none' && key.textContent.includes('Add deploy key') && key.textContent.includes('made-up-key'));
+        eq('one check request', calls('POST', /\/v1\/agents\/a1\/data-sources\/g1\/check$/).length, 1);
+        // Test on the folder: fine.
+        window.__answer['POST /v1/agents/a1/data-sources/d1/check'] = [{ body: { ok: true, message: 'The folder is there and readable. The agent sees it at /data/notes after its next Rebuild.' } }];
+        [...folderRow.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Test').click();
+        await until(() => folderRow.querySelector('.ds-check')?.textContent.includes('/data/notes'));
+        ok('a tick', folderRow.querySelector('.ds-check').textContent.startsWith('✅'));
+      } finally {
+        try { v2Close(); } catch {}
+        renderDataList(a?.dataSources || []);
+        document.getElementById('gitKeyOut').style.display = 'none';
+      }
+    },
+    filesSortAndOpenInPlace: async () => {
+      const day = (d) => '2026-10-' + String(d).padStart(2, '0') + 'T12:00:00.000Z';
+      window.__override['/v1/agents/a1/fs'] = { path: '', entries: [
+        { name: 'b.md', type: 'file', size: 10, mtime: day(1) },
+        { name: 'a.txt', type: 'file', size: 300, mtime: day(20) },
+        { name: 'zdir', type: 'dir', size: 0, mtime: day(5) },
+        { name: 'c.txt', type: 'file', size: 2000, mtime: day(10) },
+      ] };
+      window.__override['/v1/agents/a1/fs/file'] = 'hello from the stub file';
+      const names = () => [...document.querySelectorAll('#v2FilesDrop tbody tr td:first-child')].map((td) => td.textContent.replace(/^[^\w.]+/, '').trim());
+      const header = (label) => [...document.querySelectorAll('#v2FilesDrop thead a')].find((a) => a.textContent.startsWith(label));
+      try {
+        v2FilesSort = { key: 'name', dir: 1 };
+        openV2Agent('a1', 'files');
+        await until(() => document.querySelector('#v2FilesDrop tbody tr'));
+        eq('folders first, then files by name', names(), ['zdir/', 'a.txt', 'b.md', 'c.txt']);
+        header('Changed').click();
+        await until(() => names()[1] === 'a.txt' && header('Changed')?.textContent.includes('▼'));
+        eq('by when changed, newest first; the folder stays first', names(), ['zdir/', 'a.txt', 'c.txt', 'b.md']);
+        header('Changed').click();
+        await until(() => header('Changed')?.textContent.includes('▲'));
+        eq('again: oldest first', names(), ['zdir/', 'b.md', 'c.txt', 'a.txt']);
+        header('Size').click();
+        await until(() => header('Size')?.textContent.includes('▼'));
+        eq('by size, largest first', names(), ['zdir/', 'c.txt', 'a.txt', 'b.md']);
+        ok('the order is remembered on this device', JSON.parse(localStorage.getItem('hb-files-sort')).key === 'size');
+        header('Name').click();
+        await until(() => header('Name')?.textContent.includes('▲'));
+        // A text file opens here, with a way back — not in a new browser tab.
+        const opened = window.open; let popped = 0; window.open = () => { popped++; return null; };
+        try {
+          [...document.querySelectorAll('#v2FilesDrop tbody a')].find((a) => a.textContent.trim() === 'a.txt').click();
+          await until(() => document.getElementById('v2FileBody'));
+          ok('the file\'s text is shown in the tab', document.getElementById('v2FileBody').textContent.includes('hello from the stub file'));
+          ok('no new browser tab', popped === 0);
+          const back = byText('#v2Files button', '← Back');
+          ok('a Back button', !!back);
+          ok('still a way to a new tab and to download', !!byText('#v2Files a', 'Open in a tab') && !!document.querySelector('#v2Files a[download]'));
+          back.click();
+          await until(() => document.querySelector('#v2FilesDrop tbody tr'));
+          eq('back in the folder, same order', names(), ['zdir/', 'a.txt', 'b.md', 'c.txt']);
+        } finally { window.open = opened; }
+      } finally {
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents/a1/fs']; delete window.__override['/v1/agents/a1/fs/file'];
+        v2FilesSort = { key: 'name', dir: 1 }; try { localStorage.removeItem('hb-files-sort'); } catch {}
+      }
+    },
+    consoleOpensAtOnce: async () => {
+      const list = await (await fetch('/v1/agents')).json();
+      const A = list.find((x) => !x.ops && (x.role ? x.role === 'owner' : true) && x.state === 'RUNNING');
+      ok('a running agent of mine', !!A);
+      window.__override['/v1/agents/' + A.id + '/console/access'] = { role: 'owner', console: 'identity' };
+      window.__override['/v1/agents/' + A.id + '/console/pending'] = { pending: 0 };
+      try { localStorage.removeItem('hb-console-tabs'); } catch {}
+      const realFetch = window.fetch;
+      let release; const gate = new Promise((r) => { release = r; });
+      window.fetch = async (input, init) => { const url = String(typeof input === 'string' ? input : input.url); if (url.includes('/console/access')) await gate; return realFetch(input, init); };
+      try {
+        const opening = openGateway(A.id, A.slug);
+        await until(() => consoleDlg.open);
+        const cover = document.getElementById('consoleCover');
+        ok('the panel is open with a spinner BEFORE the server has answered', !cover.hidden && cover.textContent.includes('Opening the console…'));
+        eq('titled with the agent', document.getElementById('consoleTitle').textContent, A.name);
+        release();
+        await opening;
+        ok('the frame now points at the console', (document.getElementById('consoleFrame').getAttribute('src') || '').includes('/v1/agents/' + A.id + '/ui/chat'));
+      } finally {
+        window.fetch = realFetch;
+        if (consoleDlg.open) closeConsole();
+        delete window.__override['/v1/agents/' + A.id + '/console/access']; delete window.__override['/v1/agents/' + A.id + '/console/pending'];
+        consoleTabs = []; try { localStorage.removeItem('hb-console-tabs'); } catch {}
+      }
+    },
+    poolOwnBotsOnly: async () => {
+      const was = myAccount.prefs;
+      try {
+        myAccount.prefs = { ownBotsOnly: false };
+        await openAiDlg(); showTab('pool');
+        await until(() => document.getElementById('poolOwnOnly') && document.getElementById('poolList').textContent !== 'Loading…');
+        const box = document.getElementById('poolOwnOnly');
+        ok('off to begin with', !box.checked);
+        window.__answer = window.__answer || {};
+        window.__answer['PATCH /v1/account/prefs'] = [{ body: { prefs: { ownBotsOnly: true }, availableBots: 0 } }];
+        box.checked = true; box.dispatchEvent(new Event('change'));
+        await until(() => myAccount.prefs?.ownBotsOnly === true);
+        const sent = calls('PATCH', /\/v1\/account\/prefs$/);
+        eq('the choice is saved at once', sent.map((c) => c.body), [{ ownBotsOnly: true }]);
+        await until(() => calls('GET', /\/v1\/pool$/).length >= 2); // the pool is read again, the count following the choice
+        ok('the box stays ticked after the redraw', document.getElementById('poolOwnOnly').checked);
+      } finally {
+        myAccount.prefs = was;
+        if (aiDlg.open) aiDlg.close();
+      }
+    },
+    usageContextNow: async () => {
+      window.__override['/v1/token-health'] = { rows: [
+        { agent: 'Kitchen', id: 'a1', state: 'running', model: 'anthropic/claude-opus-4-8', conversation: { calls: 12, ctxK: { p50: 40, p90: 90, max: 120 }, mainNowK: 180, mainAt: new Date().toISOString(), windowK: 200 } },
+        { agent: 'Garden', id: 'a2', state: 'asleep', model: 'claude-sonnet-4-5', readHoursAgo: 3, conversation: { calls: 2, ctxK: { p50: 10, p90: 12, max: 12 }, mainNowK: 30 }, contextCap: { tokens: 150000, applied: true, compactsAtK: 130 } },
+      ] };
+      try {
+        openFleetUsage();
+        await until(() => document.querySelector('#fleetContextNow table'));
+        const rows = [...document.querySelectorAll('#fleetContextNow tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent.trim()));
+        eq('the fullest conversation first', rows.map((r) => r[0].split(' ')[0]), ['Kitchen', 'Garden']);
+        ok('Kitchen: 180K of a 200K window = 90%', rows[0][1] === 'claude-opus-4-8' && rows[0][2] === '180K' && rows[0][3].startsWith('200K') && rows[0][4] === '90%');
+        ok('Garden: the cap Hatchabot set counts as its window', rows[1][2] === '30K' && rows[1][3].startsWith('150K') && rows[1][3].includes('cap') && rows[1][4] === '20%');
+        ok('median / 90th per call', rows[0][5] === '40K / 90K');
+      } finally {
+        fleetUsageDlg.close();
+        delete window.__override['/v1/token-health'];
+      }
+    },
+    storageBlockedStillPaints: async () => {
+      // A browser that blocks storage used to stop renderV2 before the grid (audit, 2026-10-23).
+      const desc = Object.getOwnPropertyDescriptor(window, 'localStorage');
+      let blocked = false;
+      try { Object.defineProperty(window, 'localStorage', { configurable: true, get() { throw new DOMException('denied', 'SecurityError'); } }); blocked = true; } catch {}
+      if (!blocked) return; // this browser does not let a page redefine it: nothing to check here
+      try {
+        let threw = false;
+        try { localStorage.getItem('x'); } catch { threw = true; }
+        ok('storage really is blocked for the test', threw);
+        // renderV2 used to throw here (v2RenderWho's unguarded read) before it drew the grid.
+        let err = ''; try { renderV2(); } catch (e) { err = String(e && e.stack || e).slice(0, 400); }
+        ok('renderV2 survives blocked storage' + (err ? ' (threw: ' + err + ')' : ''), !err);
+        ok('the agents are on screen', document.querySelectorAll('#v2groups .v2agent').length > 0);
+      } finally {
+        if (desc) Object.defineProperty(window, 'localStorage', desc); else delete window.localStorage;
+      }
+    },
+  });
   Object.assign(T, {
     modalOnlyDialogs: async () => {
       // A stray click outside must not close the recovery code before "I've saved it", nor the sign-in (night review #19).
@@ -4504,7 +4676,8 @@ const SCENARIOS = String.raw`(() => {
     },
     filesLinksSecondFactor: async () => {
       // The file name (opens in a tab) and its ⬇ ask for the second factor at the public address, as the .tar.gz links do.
-      window.__override['/v1/agents/a1/fs'] = { path: 'notes', entries: [{ name: 'packing-list.md', type: 'file', size: 12, mtime: '' }] };
+      // A .pdf: text and images now open in the tab itself (filesSortAndOpenInPlace); what still goes to a new tab goes by sfOpen.
+      window.__override['/v1/agents/a1/fs'] = { path: 'notes', entries: [{ name: 'packing-list.pdf', type: 'file', size: 12, mtime: '' }] };
       window.__override['/v1/second-factor'] = { factors: [{ id: 'sf-1', kind: 'totp' }], backupCodes: 3, need: 'yes', methods: ['totp', 'backup'], passkeyHere: false };
       const STEP = { status: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
       const pub = appConfig.publicAddress, realOpen = window.open;
@@ -4512,9 +4685,9 @@ const SCENARIOS = String.raw`(() => {
       try {
         openV2Agent('a1', 'files');
         await v2LoadFiles('a1', 'notes');
-        const name = await until(() => [...document.querySelectorAll('#v2Files a')].find((x) => x.textContent === 'packing-list.md'));
+        const name = await until(() => [...document.querySelectorAll('#v2Files a')].find((x) => x.textContent === 'packing-list.pdf'));
         const down = [...document.querySelectorAll('#v2Files a.btn')].find((x) => x.textContent === '⬇');
-        ok('the ⬇ goes by sfLink: ' + down?.getAttribute('onclick'), /sfLink\(event, this, 'packing-list\.md'\)/.test(down?.getAttribute('onclick') || ''));
+        ok('the ⬇ goes by sfLink: ' + down?.getAttribute('onclick'), /sfLink\(event, this, 'packing-list\.pdf'\)/.test(down?.getAttribute('onclick') || ''));
         ok('the name goes by sfOpen', /^return sfOpen\(/.test(name.getAttribute('onclick') || ''));
         let prevented = false; const ev = { preventDefault: () => { prevented = true; } };
         appConfig.publicAddress = false;

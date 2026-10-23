@@ -275,7 +275,15 @@ line and the Hatchabot agent can read them: `hatchabot ops`, `GET
 - **One poller per bot.** Download leaves the source agent STOPPED. Keep it
   that way (or delete it) once the import is live — two copies polling the
   same bot flip-flop messages between them. Telegram needs no changes:
-  bots connect outbound from wherever they run.
+  bots connect outbound from wherever they run. Deleting the stopped source
+  does **not** park its bot in this machine's pool (it would be leased to the
+  next agent here while the copy talks on it); `?recycleBot=1` on the delete
+  parks it anyway. Starting the source again makes it an ordinary agent.
+- **Data sources travel.** Since v2.165.0 the file carries the agent's repos
+  with their deploy keys, and its folders as declarations: a folder comes back
+  only on a machine that has the same path and may share it; the others are
+  listed in the import's log (`import.folders_not_here`). A move to another
+  Hatchabot checks every folder in its preflight.
 - **AI doesn't travel.** The import binds the agent to an AI profile on the
   target (vendor-matched by default, `--profile <id>` to choose). Model
   config is re-applied from the target's profile; memory is untouched.

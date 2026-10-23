@@ -40,6 +40,8 @@ export interface AgentUsage extends UsageSplit {
   lastDay?: { calls: number; tokens: number };
   /** Tokens the newest call carried in (prompt + cache): the size of the conversation now. */
   lastContext?: number;
+  /** Transcript rows (or files) the read could not decode: the totals are smaller than the truth by that much. */
+  partial?: number;
   /** The largest any call carried in. */
   maxContext?: number;
   /** Active span in ms: first call → latest call. */
@@ -520,7 +522,11 @@ export async function agentUsage(
     if (opts.strict) throw new Error(`usage read exited ${res.code}: ${res.stderr.slice(-200)}`);
     return EMPTY;
   }
-  let raw: { models?: Record<string, UsageSplit & { calls: number; sessions: number; maxCtx?: number }>; sessions?: number; first?: number; last?: number; slots?: Record<string, number>; callSlots?: Record<string, number>; day?: { calls?: number; tokens?: number }; lastCtx?: number;
+  // A read that skipped rows it could not decode is smaller than the truth: stored
+  // as a counter reading, the next whole read counted the skipped rows as fresh use
+  // (the 2026-09-28 class; audit, 2026-10-23). Strict callers get the partial read
+  // marked, so the sampler keeps the profile but writes no total from it.
+  let raw: { models?: Record<string, UsageSplit & { calls: number; sessions: number; maxCtx?: number }>; sessions?: number; first?: number; last?: number; slots?: Record<string, number>; callSlots?: Record<string, number>; day?: { calls?: number; tokens?: number }; lastCtx?: number; bad?: number;
     window?: { since?: number; models?: Record<string, WindowModelStats>; promptErrors?: number; hourly?: boolean }; purposes?: Record<string, string>; crons?: number | null;
     health?: TokenHealthRaw };
   try {
@@ -550,6 +556,7 @@ export async function agentUsage(
     tokensPerHour: spanMs && spanMs >= MIN_SPAN_MS ? Math.round(totalTokens / (spanMs / 3_600_000)) : undefined,
     ...(raw.day && typeof raw.day.calls === 'number' ? { lastDay: { calls: raw.day.calls, tokens: Number(raw.day.tokens) || 0 } } : {}),
     ...(typeof raw.lastCtx === 'number' ? { lastContext: raw.lastCtx } : {}),
+    ...(typeof raw.bad === 'number' && raw.bad > 0 ? { partial: raw.bad } : {}),
     ...(byModel.some((m) => m.maxContext !== undefined) ? { maxContext: Math.max(...byModel.map((m) => m.maxContext ?? 0)) } : {}),
     recent: Object.entries(raw.slots ?? {}).filter(([k, v]) => !Number.isNaN(Date.parse(k)) && typeof v === 'number').sort(([a], [b]) => a.localeCompare(b)),
     recentCalls: Object.entries(raw.callSlots ?? {}).filter(([k, v]) => !Number.isNaN(Date.parse(k)) && typeof v === 'number').sort(([a], [b]) => a.localeCompare(b)),

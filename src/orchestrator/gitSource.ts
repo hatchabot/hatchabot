@@ -1,5 +1,5 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -206,4 +206,96 @@ export function buildGitSyncScript(
     `git -C ${q(clone)} config user.name ${q(commit.name)}`,
     `git -C ${q(clone)} config user.email ${q(commit.email)}`,
   ].join('\n');
+}
+
+// ---- Test: can the repo be reached with this source's credential? ----------------
+
+export type GitProbeReason = 'no-git' | 'key-not-added' | 'not-found' | 'host-key' | 'timeout' | 'unreachable' | 'error';
+
+export interface GitProbeResult {
+  ok: boolean;
+  /** Branches and tags the host listed (ok only). */
+  refs?: number;
+  reason?: GitProbeReason;
+  /** One sentence for the person, never the raw stderr (it can carry the URL and the host's wording). */
+  message: string;
+}
+
+/** Runs one command; a test substitutes its own. `code` is null when the command could not start or was killed. */
+export type GitProbeRunner = (
+  cmd: string,
+  args: string[],
+  opts: { env: Record<string, string>; timeoutMs: number },
+) => Promise<{ code: number | null; stdout: string; stderr: string; error?: NodeJS.ErrnoException }>;
+
+const defaultRunner: GitProbeRunner = (cmd, args, opts) =>
+  new Promise((done) => {
+    let stdout = '', stderr = '';
+    try {
+      const child = spawn(cmd, args, { env: { ...process.env, ...opts.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const timer = setTimeout(() => child.kill('SIGKILL'), opts.timeoutMs);
+      child.stdout.on('data', (d) => { stdout += String(d); });
+      child.stderr.on('data', (d) => { stderr += String(d); });
+      child.on('error', (error) => { clearTimeout(timer); done({ code: null, stdout, stderr, error: error as NodeJS.ErrnoException }); });
+      child.on('close', (code) => { clearTimeout(timer); done({ code, stdout, stderr }); });
+    } catch (error) {
+      done({ code: null, stdout, stderr, error: error as NodeJS.ErrnoException });
+    }
+  });
+
+/**
+ * The Test button on a repo (Settings → Data): `git ls-remote` from THIS
+ * machine with the source's own deploy key (or none, for a public clone), so
+ * the owner learns whether the key is on the repo before a Rebuild tries to
+ * clone it. Read access is what can be proven; a push is the only proof of
+ * write access, and this never pushes. The key is written to a private temp
+ * dir for the one command and removed after it, whatever happens.
+ */
+export async function probeGitSource(
+  src: { repoUrl: string; privateKey?: string; access?: string },
+  opts: { run?: GitProbeRunner; timeoutMs?: number } = {},
+): Promise<GitProbeResult> {
+  const run = opts.run ?? defaultRunner;
+  const timeoutMs = opts.timeoutMs ?? 25_000;
+  const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
+  let dir: string | undefined;
+  try {
+    if (!isPublicGitUrl(src.repoUrl)) {
+      if (!src.privateKey) return { ok: false, reason: 'error', message: 'This repo has no deploy key stored. Remove it and add it again.' };
+      dir = mkdtempSync(join(tmpdir(), 'hb-git-probe-'));
+      const key = join(dir, 'key');
+      writeFileSync(key, src.privateKey.endsWith('\n') ? src.privateKey : `${src.privateKey}\n`, { mode: 0o600 });
+      // accept-new: the first contact learns the host's key (into the temp file, not the person's known_hosts);
+      // the agent's own clone still checks it strictly against the key it learnt first.
+      env.GIT_SSH_COMMAND = `ssh -i '${key}' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile='${join(dir, 'known_hosts')}' -o ConnectTimeout=10`;
+    } else {
+      env.GIT_ALLOW_PROTOCOL = 'https';
+    }
+    const r = await run('git', ['-c', 'credential.helper=', 'ls-remote', '--heads', '--tags', '--', src.repoUrl], { env, timeoutMs });
+    if (r.error?.code === 'ENOENT') return { ok: false, reason: 'no-git', message: 'This machine has no `git` command, so the repo cannot be checked from here. The agent clones with its own git.' };
+    if (r.code === null && !r.error) return { ok: false, reason: 'timeout', message: `The git host did not answer within ${Math.round(timeoutMs / 1000)} seconds.` };
+    if (r.code === 0) {
+      const refs = r.stdout.split('\n').filter((l) => /^[0-9a-f]{40,64}\s/.test(l)).length;
+      const write = src.access === 'rw' && !isPublicGitUrl(src.repoUrl)
+        ? ' Write access cannot be tested without pushing: check that the key was added with “Allow write access”.'
+        : '';
+      return { ok: true, refs, message: `Reachable: ${refs} branch${refs === 1 ? '' : 'es'} and tag${refs === 1 ? '' : 's'} listed. Read access works.${write}` };
+    }
+    const err = `${r.stderr}\n${r.error?.message ?? ''}`;
+    if (/Permission denied \(publickey/i.test(err) || /authentication failed/i.test(err)) {
+      return { ok: false, reason: 'key-not-added', message: 'The git host refused the deploy key. Add it to the repo (🔑 Deploy key), then test again.' };
+    }
+    if (/Host key verification failed/i.test(err)) return { ok: false, reason: 'host-key', message: 'The git host\'s SSH key did not match the one on record. Check the host before trusting it.' };
+    if (/Could not resolve hostname|Connection timed out|Network is unreachable|Connection refused|Could not connect|Operation timed out|Temporary failure in name resolution/i.test(err)) {
+      return { ok: false, reason: 'unreachable', message: 'The git host could not be reached from this machine (no network, or the host name is wrong).' };
+    }
+    if (/Repository not found|not found|does not appear to be a git repository|Could not read from remote|403|404/i.test(err)) {
+      return { ok: false, reason: 'not-found', message: isPublicGitUrl(src.repoUrl)
+        ? 'The host says there is no public repo at that address. A private repo needs a deploy key: remove this source and add it again without “Public repo”.'
+        : 'The host says there is no such repo, or this key cannot see it. Check the address, and that the deploy key is on this repo.' };
+    }
+    return { ok: false, reason: 'error', message: `git could not list the repo (exit ${r.code}).` };
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
 }

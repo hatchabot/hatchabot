@@ -123,6 +123,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   // The Files tab reads and writes the agent's whole home: its config and tokens are there.
   r('*', /^\/v1\/agents\/:id\/fs(\/file)?$/, 'step-up', 'An agent\'s Files tab (its home holds its config and tokens)'),
   r(['POST', 'PATCH', 'DELETE'], /^\/v1\/agents\/:id\/data-sources(\/:dsId)?$/, 'step-up', 'Folders of this machine given to an agent, and bringing in workspaces'),
+  r(['POST'], /^\/v1\/agents\/:id\/data-sources\/:dsId\/check$/, 'step-up', 'Folders of this machine given to an agent, and bringing in workspaces'),
   r(['GET'], /^\/v1\/agents\/:id\/app$/, 'signed-in', 'Apps in agents: which app an agent runs'),
   r(['POST', 'DELETE'], /^\/v1\/(apps\/inspect|agents\/:id\/app(\/update|\/rollback|\/pending)?)$/, 'step-up', 'Apps in agents: install, update, roll back or remove (reads this machine\'s folders and git login)'),
   r('*', /^\/v1\/(workspaces\/(inspect|scan-paths)|openclaw\/(agents|quiesce)|agents\/:id\/adopt-workspace)$/, 'step-up', 'Folders of this machine given to an agent, and bringing in workspaces'),
@@ -139,7 +140,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
 
   // ---- signed-in -----------------------------------------------------------
   r(['POST'], /^\/v1\/logout\/everywhere$/, 'signed-in', 'Your own account (who am I, sign out everywhere, security notices)'),
-  r('*', /^\/v1\/account(\/(telegram|discord))?$/, 'signed-in', 'Your own account (who am I, sign out everywhere, security notices)'),
+  r('*', /^\/v1\/account(\/(telegram|discord|prefs))?$/, 'signed-in', 'Your own account (who am I, sign out everywhere, security notices)'),
   r(READ, /^\/v1\/(accounts|users|local-accounts|local-accounts\/me)$/, 'signed-in', 'Your own account (who am I, sign out everywhere, security notices)'),
   r('*', /^\/v1\/security\/(notices|notices\/:id\/seen|devices|posture)$/, 'signed-in', 'Your own account (who am I, sign out everywhere, security notices)'),
   r(READ, /^\/v1\/cli-tokens$/, 'signed-in', 'Command-line tokens: list and revoke'),

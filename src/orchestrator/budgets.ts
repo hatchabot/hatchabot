@@ -212,7 +212,7 @@ export interface BudgetDeps {
   tz?: string;
 }
 
-const pausable = (a: Agent) => !a.ops && !a.migratedTo && !!a.runtimeRef;
+const pausable = (a: Agent) => !a.ops && !a.migratedTo && !!a.runtimeRef && a.state !== 'ARCHIVED';
 const switchable = (a: Agent) => !a.ops && !a.migratedTo && a.state !== 'ARCHIVED';
 
 /**
@@ -288,7 +288,8 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
 
   // 2. Marks, messages, pauses and cheaper models, per budget.
   let told = 0;
-  const scoped = budgets.filter((b) => b.scope === MACHINE || byId.has(b.scope));
+  // An archived agent's budget is neither marked nor told: the view hides it, and it spends nothing (audit, 2026-10-23).
+  const scoped = budgets.filter((b) => b.scope === MACHINE || (byId.has(b.scope) && byId.get(b.scope)!.state !== 'ARCHIVED'));
   for (const b of scoped) {
     const spent = b.scope === MACHINE ? machineSpent : spend.get(b.scope) ?? 0;
     const level = levelOf(spent, b.usd);
@@ -310,7 +311,19 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
         // budget chose does not hold a pause back: pausing is the stronger (#101).
         if (prior && !prior.resumedAt && prior.kind === 'pause' && a.state !== 'RUNNING') continue;
         const asleep = a.state === 'STOPPED' && !!a.hibernatedAt;
-        if (a.state !== 'RUNNING' && !asleep) continue;
+        if (a.state !== 'RUNNING' && !asleep) {
+          // Stopped by hand (or failed) when the limit came: nothing to pause, but the
+          // pause is RECORDED, so Start marks the owner's take-over and the next pass
+          // does not pause it again in silence — the message promises exactly that
+          // (audit, 2026-10-23). FAILED and PROVISIONING agents are judged when they run.
+          if (a.state === 'STOPPED' && (!prior || prior.resumedAt)) {
+            store.addBudgetPause(a.id, month, b.scope, nowIso);
+            paused.push(a.id);
+            acted.push({ a });
+            deps.log?.('budget.paused', { agentId: a.id, scope: b.scope === MACHINE ? MACHINE : 'agent', spent: r2(spent), usd: b.usd, alreadyStopped: true });
+          }
+          continue;
+        }
         const lastOk = Date.parse(store.usageCursor(a.id)?.lastOk ?? '') || 0;
         // Busy, or mid-turn: the next pass. Mid-turn only for so long (PAUSE_WAIT_MS).
         if (deps.isBusy(a.id) || (!asleep && !waitedOut && now - lastOk < QUIET_MS)) { deferred++; continue; }

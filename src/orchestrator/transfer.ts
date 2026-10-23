@@ -15,6 +15,7 @@ import {
   waitForHealthy,
   waitForSkillsSettled,
   type ProvisionDeps,
+  sharePathProblem,
 } from './provision.js';
 import { clearBusy, markBusy } from './busy.js';
 import { beginOperation, handleFor, rethrowIfCrash } from './operations.js';
@@ -23,6 +24,7 @@ import { buildRecipeOn, derivedByTag, recipeFor, recipeProblem, type ImageRecipe
 import { DERIVED_TAG_PREFIX } from './derivedImage.js';
 import { defaultMemoryCap, formatMemoryCap, memberMemoryMax, parseMemoryCap } from './memoryCap.js';
 import { formatSwapAllowance, parseSwapAllowance } from './swap.js';
+import { existsSync } from 'node:fs';
 
 /**
  * Export/import: an agent as a single portable file, so "move it to another
@@ -57,6 +59,18 @@ export function peekFormat(data: Buffer): string | undefined {
   }
 }
 
+export interface ExportedDataSource {
+  kind: 'folder' | 'git';
+  access: 'ro' | 'rw';
+  mountName: string;
+  hostPath?: string;
+  mountAtHostPath?: boolean;
+  repoUrl?: string;
+  pubKey?: string;
+  /** The deploy key's private half (git with a key). */
+  deployKey?: string;
+}
+
 export interface ExportManifest {
   openclawVersion?: string;
   format: typeof EXPORT_FORMAT;
@@ -70,6 +84,11 @@ export interface ExportManifest {
     /** Host folders it could read. Paths are machine-specific — carried as a
      *  declaration so the destination can check them, never auto-applied. */
     sharedPaths?: string[];
+    /** Its data sources (Settings → Data). A repo travels whole, deploy key included
+     *  (the file is a credential already); a folder is a declaration the destination
+     *  re-adds only when the same path is there and safe (audit, 2026-10-23: they
+     *  were dropped, and the clone's key stayed on the volume untracked). */
+    dataSources?: ExportedDataSource[];
     /** Home-screen icon (one emoji) and its tint. */
     icon?: string;
     iconColor?: string;
@@ -165,6 +184,16 @@ const ManifestSchema = z.object({
     persona: z.string().max(8000),
     sharedMemory: z.boolean(),
     sharedPaths: z.array(z.string().max(512)).max(8).optional(),
+    dataSources: z.array(z.object({
+      kind: z.enum(['folder', 'git']),
+      access: z.enum(['ro', 'rw']),
+      mountName: z.string().min(1).max(128),
+      hostPath: z.string().max(512).optional(),
+      mountAtHostPath: z.boolean().optional(),
+      repoUrl: z.string().max(512).optional(),
+      pubKey: z.string().max(4000).optional(),
+      deployKey: z.string().max(16000).optional(),
+    })).max(32).optional(),
     model: z.string().max(64).optional(),
     // Its home-screen icon travels with it; a bad value is dropped, not fatal.
     icon: z.string().max(16).optional().catch(undefined),
@@ -365,6 +394,19 @@ export async function exportAgent(
       ? { tag: agent.image, problem: r.problem }
       : { tag: agent.image, recipe: { base: r.base, packages: r.packages, lines: r.lines, channels: r.channels } };
   }
+  // Its data sources: a repo with its key (the clone on the volume needs it to
+  // pull and push), a folder as a declaration (audit, 2026-10-23).
+  const dataSources: ExportedDataSource[] = [];
+  for (const d of store.listDataSources(agentId)) {
+    const row: ExportedDataSource = { kind: d.kind, access: d.access, mountName: d.mountName,
+      ...(d.hostPath ? { hostPath: d.hostPath } : {}), ...(d.mountAtHostPath ? { mountAtHostPath: true } : {}),
+      ...(d.repoUrl ? { repoUrl: d.repoUrl } : {}), ...(d.pubKey ? { pubKey: d.pubKey } : {}) };
+    if (d.kind === 'git' && d.secretRef) {
+      const key = await secrets.get(d.secretRef).catch(() => undefined);
+      if (key) row.deployKey = key;
+    }
+    dataSources.push(row);
+  }
   const manifest: ExportManifest = {
     format: EXPORT_FORMAT,
     version: EXPORT_VERSION,
@@ -376,6 +418,7 @@ export async function exportAgent(
       persona: agent.persona,
       sharedMemory: agent.sharedMemory,
       sharedPaths: agent.sharedPaths,
+      ...(dataSources.length ? { dataSources } : {}),
       model: agent.model,
       icon: agent.icon,
       iconColor: agent.iconColor,
@@ -410,6 +453,9 @@ export async function exportAgent(
   // left a sleeping agent plain STOPPED, never to wake on a message again
   // (review, 2026-09-29). The busy flag keeps the wake poll off it meanwhile.
   if (agent.hibernatedAt) store.setHibernated(agentId, null);
+  // A copy of it now exists, bot token included: until it runs again, deleting
+  // it here must not park that bot for the next agent (audit, 2026-10-23).
+  store.setAgentExportedAt(agentId, new Date().toISOString());
   log('agent.exported', { agentId, bytes: state.length, ...(dropped.length ? { dropped } : {}) });
   return { filename: `${agent.slug}.hatchabot`, data, dropped };
 }
@@ -695,9 +741,35 @@ async function importAgentInner(
   opts.onOperation?.(op.id);
 
   const secretRef = importSecretRef(agent.id);
+  // Every secret this import makes (env values, deploy keys): rollback deletes them.
   const envSecretRefs: string[] = [];
   let runtimeRef: string | undefined;
   try {
+    // Its data sources come back before the spec is built (the repos are cloned
+    // by the seed, the folders mounted). A folder only when the same path is here
+    // and safe to share — a different machine's path is not quietly mounted.
+    const hostLocal = host.kind === 'local';
+    const skippedFolders: string[] = [];
+    for (const d of manifest.agent.dataSources ?? []) {
+      if (store.listDataSources(agent.id).some((x) => x.mountName === d.mountName)) continue;
+      if (d.kind === 'folder') {
+        const p = d.hostPath ?? '';
+        if (!hostLocal || !p || !existsSync(p) || sharePathProblem(p)) { skippedFolders.push(p || d.mountName); continue; }
+        store.insertDataSource({ id: randomUUID(), agentId: agent.id, kind: 'folder', access: d.access, mountName: d.mountName, hostPath: p, mountAtHostPath: !!d.mountAtHostPath, createdAt: now });
+        continue;
+      }
+      if (!d.repoUrl) continue;
+      const id = randomUUID();
+      let dsSecretRef: string | undefined;
+      if (d.deployKey) {
+        dsSecretRef = `data-source/${id}`;
+        await secrets.put(dsSecretRef, d.deployKey);
+        envSecretRefs.push(dsSecretRef);
+      }
+      store.insertDataSource({ id, agentId: agent.id, kind: 'git', access: d.access, mountName: d.mountName, repoUrl: d.repoUrl,
+        ...(dsSecretRef ? { secretRef: dsSecretRef } : {}), ...(d.pubKey ? { pubKey: d.pubKey } : {}), createdAt: now });
+    }
+    if (skippedFolders.length) log('import.folders_not_here', { agentId: agent.id, folders: skippedFolders.slice(0, 8) });
     op.step('row-made');
     // Memberships travel verbatim, except the owner seat belongs to whoever
     // imports — it's their installation now. Inside the try: a malformed row
@@ -771,7 +843,14 @@ async function importAgentInner(
     // never touches existing workspace files, so memory survives.
     if (image.build) await buildPinned(deps, image.build, opts.ownerId);
     const spec = await buildRuntimeSpec(deps, agent.id);
-    ({ runtimeRef } = await provider.provision(spec));
+    try {
+      ({ runtimeRef } = await provider.provision(spec));
+    } catch (err) {
+      // provision() makes the volume before it can fail in the seed: rollback
+      // needs its name, or the volume stays as an orphan (audit, 2026-10-23).
+      runtimeRef = provider.runtimeRefFor?.({ agentId: agent.id, slug: agent.slug });
+      throw err;
+    }
     store.setAgentRuntimeRef(agent.id, runtimeRef);
     op.step('created');
     await provider.importState(runtimeRef, stateBuf);
@@ -872,6 +951,7 @@ async function rollbackImport(
   for (const ref of envSecretRefs) await secrets.delete(ref).catch(() => {});
   step(() => store.deleteChannelForAgent(agentId, 'all'));
   step(() => store.deleteMemberships(agentId));
+  step(() => { for (const d of store.listDataSources(agentId)) store.deleteDataSource(agentId, d.id); });
   // Env rows too — their secrets are already deleted above; a tombstone
   // keeping references to swept secrets is the residue class the v0.90
   // audit scrubbed.

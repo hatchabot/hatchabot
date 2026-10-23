@@ -404,7 +404,10 @@ case "$MODE" in
   bundle)
     if [ -e "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then die "$DIR already exists and is not a Hatchabot install — move it aside (or set HATCHABOT_DIR), then re-run."; fi
     rmdir "$DIR" 2>/dev/null || true
-    install_bundle || { MODE=native; echo "   using the native install instead"; install_native; } ;;
+    # Not `install_bundle || { …; install_native; }`: bash turns errexit off for
+    # everything run inside a || list, so a failed checkout or apt install in
+    # the fallback was ignored and setup went on with the wrong tree (audit, 2026-10-23).
+    if ! install_bundle; then MODE=native; echo "   using the native install instead"; install_native; fi ;;
   native) install_native ;;
 esac
 echo "   channel $CHANNEL → release $TAG ($( [ -f "$DIR/BUNDLE.json" ] && echo bundle || echo native ))"

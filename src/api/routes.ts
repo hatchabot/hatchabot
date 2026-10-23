@@ -8,7 +8,7 @@ import { agentTimeZone } from '../orchestrator/timezone.js';
 import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
 import { claudePlanAllowed, CLAUDE_PLAN_HOSTED } from '../config/claudePlan.js';
 export { claudePlanAllowed };
-import { existsSync, readFileSync, createWriteStream, mkdirSync, statSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, readFileSync, createWriteStream, mkdirSync, statSync } from 'node:fs';
 import { sampleSourceUsage, summarizeSourceUsage } from '../orchestrator/sourceUsage.js';
 import { computeUsagePeriod, localDay, snapshotDailyUsage, USAGE_PERIODS, type UsagePeriod } from '../orchestrator/fleetUsage.js';
 import { parkDiscordBot, poolRef, publicDiscordBot, type DiscordBotRow } from '../orchestrator/discordPool.js';
@@ -69,7 +69,7 @@ import {
   SEARCH_KEY_REF,
   memoryCapFor,
 } from '../orchestrator/provision.js';
-import { generateDeployKey, isPublicGitUrl, normalizeGitUrl, PUBLIC_REPO_READ_ONLY } from '../orchestrator/gitSource.js';
+import { generateDeployKey, isPublicGitUrl, normalizeGitUrl, probeGitSource, PUBLIC_REPO_READ_ONLY } from '../orchestrator/gitSource.js';
 import QRCode from 'qrcode';
 import { claimFirstContact, holdDoorForKnocks, isKnockWindow, listPairingRequests } from '../orchestrator/claim.js';
 import { AgentBusyError, clearBusy, isBusy, markBusy, whileBusy } from '../orchestrator/busy.js';
@@ -608,6 +608,17 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     { parseAs: 'buffer', bodyLimit: Math.max(272 * 1024 * 1024, FILE_MAX_BYTES) }, // imports, and Files uploads up to their own cap
     (_req, body, done) => done(null, body),
   );
+  // Any other body type reaches ONLY the console proxy, as bytes: the Control UI
+  // sends attachments as multipart, which Fastify refused with 415 before the
+  // proxy saw it (audit, 2026-10-23). Every other route keeps its 415.
+  app.addContentTypeParser(
+    '*',
+    { parseAs: 'buffer', bodyLimit: Math.max(64 * 1024 * 1024, FILE_MAX_BYTES) },
+    (req, body, done) => {
+      if ((req.routeOptions?.url ?? '').startsWith('/v1/agents/:id/ui/')) return done(null, body);
+      done(Object.assign(new Error(`Unsupported Media Type: ${String(req.headers['content-type'] ?? '')}`), { statusCode: 415 }), undefined);
+    },
+  );
 
   /**
    * Resolve an agent by id AND check it belongs to the caller. Every by-id
@@ -805,6 +816,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       archiving: archiving.get(agent.id),
       /** Asleep (hibernate.ts): stopped by the idle rule; a message, its console or an ask wakes it. */
       hibernatedAt: agent.hibernatedAt,
+      /** A copy was downloaded while it stood stopped: deleting it does not park its bot (web: del). */
+      exportedAt: agent.exportedAt,
       hibernate: agent.hibernate,
       /** The management agent's tool lockdown was loosened: key suspended. */
       opsDrift: agent.ops ? opsDriftOf(agent.id) : undefined,
@@ -2146,7 +2159,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get('/v1/agent-classes', async (req) => ({ classes: store.listAgentClasses(ownerIdOf(req)) }));
 
   app.post<{ Body: { name?: string; model?: string; aiProfileId?: string; image?: string } }>('/v1/agent-classes', async (req, reply) => {
-    const b = (req.body ?? {}) as { name?: string; model?: string; aiProfileId?: string };
+    const rawBody = (req.body ?? {}) as Record<string, unknown>;
+    // A number where a string belongs used to reach .trim() and answer 500 (audit, 2026-10-23).
+    for (const k of ['name', 'model', 'aiProfileId']) if (rawBody[k] !== undefined && rawBody[k] !== null && typeof rawBody[k] !== 'string') return reply.code(400).send({ error: `${k}: a string.` });
+    const b = rawBody as { name?: string; model?: string; aiProfileId?: string };
     const name = (b.name ?? '').trim().slice(0, 48);
     if (!name) return reply.code(400).send({ error: 'A class needs a name.' });
     if (store.agentClassByName(ownerIdOf(req), name)) return reply.code(400).send({ error: `There's already a class called "${name}".` });
@@ -2175,6 +2191,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const cls = store.getAgentClass(req.params.id);
       if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
       const b = (req.body ?? {}) as { name?: string; model?: string; aiProfileId?: string; image?: string | null; memoryCap?: string | null; swapAllowance?: string | null };
+      for (const [k, v] of Object.entries(b)) if (v !== undefined && v !== null && typeof v !== 'string') return reply.code(400).send({ error: `${k}: a string.` });
       const name = b.name !== undefined ? (b.name.trim().slice(0, 48) || cls.name) : cls.name;
       let memoryCap = cls.memoryCap;
       if (b.memoryCap !== undefined) {
@@ -2397,9 +2414,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // the budget tries again next pass, its 100% message waiting (budgets.ts).
           // Counted as made, it kept spending on the dearer model while the owner
           // was told it had moved (review, 2026-10-22).
-          if ((await applyModelToRuntime(a.id).catch(() => 'failed' as const)) === 'failed') {
+          // 'rebuild' (a source switch waits for a rebuild) and 'none' (busy, mid-move,
+          // FAILED) are not switches either: the agent kept spending on the dearer
+          // model while the owner was told it had moved (audit, 2026-10-23).
+          const applied = await applyModelToRuntime(a.id).catch(() => 'failed' as const);
+          if (applied !== 'live' && applied !== 'staged') {
             store.setAgentModel(a.id, from);
-            throw new Error(`the runtime did not take ${cheapest}`);
+            throw new Error(`the runtime did not take ${cheapest} (${applied})`);
           }
           recordChanges(store, before, { by: 'hatchabot', via: 'budget', source: 'budget', why: 'Its monthly budget was reached: the cheapest model its source offers, until the 1st.' });
           return { from, to: cheapest };
@@ -3809,7 +3830,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       // Rebuild against the same base by default; allow moving it onto a newer
       // base (e.g. after a fleet promote) without retyping the Dockerfile.
-      const base = (req.body as { base?: string } | null)?.base?.trim() || rec.base;
+      const baseRaw = (req.body as { base?: unknown } | null)?.base;
+      if (baseRaw !== undefined && typeof baseRaw !== 'string') return reply.code(400).send({ error: 'base: a string.' });
+      const base = (baseRaw as string | undefined)?.trim() || rec.base;
       const baseErr = baseProblem(base);
       if (baseErr) return reply.code(400).send({ error: baseErr });
       store.upsertDerivedImage({
@@ -4022,7 +4045,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // user could actually lease. Tokens are personally owned (their minter
       // can revoke them at BotFather), so one user's parked bot is never
       // another user's next lease.
-      availableBots: deps.channel.pool.availableCount(ownerIdOf(req)),
+      availableBots: deps.channel.pool.availableCount(ownerIdOf(req), store.ownerPrefs(ownerIdOf(req)).ownBotsOnly),
       // The roster: the machine owner sees every bot; everyone else their own
       // and the shared house bots — the same rule the Discord pool has.
       ...{
@@ -4154,7 +4177,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     await deps.channel.pool.addToPool(username, token, body?.shared ? null : ownerIdOf(req));
     return reply
       .code(201)
-      .send({ username, availableBots: deps.channel.pool.availableCount(ownerIdOf(req)) });
+      .send({ username, availableBots: deps.channel.pool.availableCount(ownerIdOf(req), store.ownerPrefs(ownerIdOf(req)).ownBotsOnly) });
   });
 
   app.delete<{ Params: { username: string } }>('/v1/pool/:username', async (req, reply) => {
@@ -4169,7 +4192,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     } catch (err) {
       return reply.code(409).send({ error: String(err instanceof Error ? err.message : err) });
     }
-    return { removed: true, availableBots: deps.channel.pool.availableCount(ownerIdOf(req)) };
+    return { removed: true, availableBots: deps.channel.pool.availableCount(ownerIdOf(req), store.ownerPrefs(ownerIdOf(req)).ownBotsOnly) };
   });
 
   /** Ask Telegram about a parked bot: does the token still work, and what is the bot called now. */
@@ -4876,7 +4899,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get('/v1/cli-tokens', async (req) => store.listCliTokens(ownerIdOf(req)));
 
   app.post<{ Body: { label?: string; scope?: string } }>('/v1/cli-tokens', async (req, reply) => {
-    const label = (req.body as { label?: string } | null)?.label ?? 'CLI';
+    const labelRaw = (req.body as { label?: unknown } | null)?.label;
+    if (labelRaw !== undefined && (typeof labelRaw !== 'string' || labelRaw.length > 64)) return reply.code(400).send({ error: 'label: a string of up to 64 characters.' });
+    const label = (labelRaw as string | undefined) ?? 'CLI';
     // scope 'rehost': for another Hatchabot server that will move agents
     // here — it can do that, and nothing else with the token.
     const scope = (req.body as { scope?: string } | null)?.scope;
@@ -7592,6 +7617,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const p = (parsed.data.path ?? '').trim();
       if (!p) return reply.code(400).send({ error: 'A folder path is required.' });
       if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+      // A folder is a bind mount of THIS machine's disk: a runner's docker
+      // cannot see it, and the mount was silently skipped there while the
+      // agent was told it had the data (audit, 2026-10-23).
+      if (store.getHost(agent.hostId)?.kind !== 'local') {
+        return reply.code(400).send({ error: `"${agent.name}" runs on another machine, which cannot see this machine's folders. Move it here first, or give it a git repo instead.` });
+      }
       const problem = sharePathProblem(p);
       if (problem) return reply.code(400).send({ error: problem });
       if (!existsSync(p)) return reply.code(400).send({ error: `No such folder on this machine: ${p}` });
@@ -7691,6 +7722,45 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return publicAgent(store.getAgent(agent.id)!);
     },
   );
+
+  // The Test button (Settings → Data): does this source work from here, now?
+  // A folder: it is there and this service can read it (and write it, if the
+  // agent may). A repo: `git ls-remote` from this machine with the source's own
+  // deploy key, so a key not yet added to the repo is found before a Rebuild
+  // fails to clone. Nothing is changed by a check; one runs per source at a time.
+  const dataSourceChecks = new Set<string>();
+  app.post<{ Params: { id: string; dsId: string } }>('/v1/agents/:id/data-sources/:dsId/check', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const src = store.getDataSource(agent.id, req.params.dsId);
+    if (!src) return reply.code(404).send({ error: 'No such data source.' });
+    if (src.kind === 'folder') {
+      const p = src.hostPath ?? '';
+      if (!p || !existsSync(p)) return { ok: false, reason: 'missing', message: `No such folder on this machine: ${p}` };
+      let st; try { st = statSync(p); } catch { return { ok: false, reason: 'unreadable', message: `${p} cannot be read by the Hatchabot service.` }; }
+      if (!st.isDirectory()) return { ok: false, reason: 'not-a-folder', message: `${p} is a file, not a folder.` };
+      try { accessSync(p, fsConstants.R_OK | fsConstants.X_OK); } catch { return { ok: false, reason: 'unreadable', message: `${p} is there, but the Hatchabot service cannot read it. Check its permissions.` }; }
+      if (src.access === 'rw') {
+        try { accessSync(p, fsConstants.W_OK); } catch { return { ok: false, reason: 'not-writable', message: `${p} can be read, but not written by the Hatchabot service, so the agent could not write there either.` }; }
+      }
+      if (store.getHost(agent.hostId)?.kind !== 'local') {
+        return { ok: false, reason: 'remote', message: `The folder is there, but "${agent.name}" runs on another machine, which cannot see this machine's folders: it is not mounted there. Move the agent here, or remove this folder.` };
+      }
+      const where = src.mountAtHostPath ? p : `/data/${src.mountName}`;
+      return { ok: true, message: `The folder is there and ${src.access === 'rw' ? 'readable and writable' : 'readable'}. The agent sees it at ${where} after its next Rebuild.` };
+    }
+    if (dataSourceChecks.has(src.id)) return reply.code(409).send({ error: 'This repo is being checked already.' });
+    dataSourceChecks.add(src.id);
+    try {
+      let privateKey: string | undefined;
+      if (!isPublicGitUrl(src.repoUrl) && src.secretRef) {
+        try { privateKey = await secrets.get(src.secretRef); } catch { privateKey = undefined; }
+      }
+      const r = await probeGitSource({ repoUrl: src.repoUrl ?? '', privateKey, access: src.access });
+      trace(agent.id)('data_source.checked', { id: src.id, kind: 'git', ok: r.ok, ...(r.reason ? { reason: r.reason } : {}) });
+      return { ...r, ...(r.ok ? { message: `${r.message} The agent clones it to ~/.openclaw/${src.mountName} on its next Rebuild.` } : {}) };
+    } finally { dataSourceChecks.delete(src.id); }
+  });
 
   app.delete<{ Params: { id: string; dsId: string } }>(
     '/v1/agents/:id/data-sources/:dsId',
@@ -8511,7 +8581,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     catch (err) { return reply.code(502).send({ error: `Couldn't read ${agent.name}'s usage: ${String((err as Error).message ?? err).slice(0, 200)}` }); }
     // Its spike warnings of the last week (usageAlerts.ts); the 8-day slots are the sampler's, not the page's.
     const { recent: _recent, ...rest } = u;
-    return { ...rest, alerts: store.usageAlertsSince(new Date(Date.now() - 7 * 86_400_000).toISOString(), { agentId: agent.id }) };
+    // "Conversation size now" is the main conversation's (Telegram DM and console) last call;
+    // the newest call of ANY session (a scheduled run, a sub-agent) is not it (audit, 2026-10-23).
+    const mainNow = u.health?.main?.[agent.slug]?.ctx;
+    return { ...rest, ...(typeof mainNow === 'number' && mainNow > 0 ? { lastContext: mainNow } : {}), alerts: store.usageAlertsSince(new Date(Date.now() - 7 * 86_400_000).toISOString(), { agentId: agent.id }) };
   });
 
   // Fleet usage rollup: every RUNNING agent the caller can see, ranked by
@@ -9409,6 +9482,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return reply.code(202).send({ webOnly: true });
       }
       let token = body.token?.trim();
+      // A spare pool bot's token pasted here went down the manual path and
+      // left its pool row unleased; the pool later leased the same bot to the
+      // next agent, which then failed with "already belongs to…" (audit,
+      // 2026-10-23). The attach route refuses this; so does this one.
+      if (token && agent.pendingAction?.type === 'bot_token') {
+        if (throttled(req, ownerIdOf(req))) return reply.code(429).send({ error: TOKEN_CHECK_THROTTLED });
+        let username: string;
+        try { username = await verifyBotToken(token); }
+        catch (err) {
+          if (err instanceof InvalidBotTokenError) { noteFailure(req, ownerIdOf(req)); return reply.code(400).send({ error: err.userMessage }); }
+          throw err;
+        }
+        if (deps.channel.pool.owns(username)) {
+          return reply.code(409).send({ error: `@${username} is a spare bot in the pool. Use "a ready bot from the pool" instead, or remove it from the pool first.` });
+        }
+      }
 
       // Reuse: the bot a hand-built workspace already owns. Resolved here
       // rather than sent by the client, so the token stays on the server that
@@ -9593,10 +9682,30 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // queued the idle name onto that agent's bot (regression review).
       return reply.code(409).send({ error: `@${result.accountId} already belongs to "${clash.name}".` });
     }
-    store.insertChannel({
-      id: randomUUID(), agentId: agent.id, kind: deps.channel.kind, accountId: result.accountId,
-      secretRef: result.secretRef, deepLink: result.deepLink, createdAt: new Date().toISOString(),
-    });
+    // Under the agent's lock, as the Discord/Slack attach is: two attaches at
+    // once (a double-click) both passed the checks above, and the second's
+    // insert threw ChannelTakenError as a 500 (audit, 2026-10-23).
+    let attached: 'ok' | 'has-one' | 'taken';
+    try {
+      attached = await whileBusy(agent.id, async () => {
+        if (store.getChannelForAgent(agent.id)) return 'has-one' as const;
+        try {
+          store.insertChannel({
+            id: randomUUID(), agentId: agent.id, kind: deps.channel.kind, accountId: result.accountId,
+            secretRef: result.secretRef, deepLink: result.deepLink, createdAt: new Date().toISOString(),
+          });
+        } catch (err) {
+          if (err instanceof ChannelTakenError) return 'taken' as const;
+          throw err;
+        }
+        return 'ok' as const;
+      });
+    } catch (err) {
+      if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+      throw err;
+    }
+    if (attached === 'has-one') return reply.code(409).send({ error: 'It already has a Telegram bot.' });
+    if (attached === 'taken') return reply.code(409).send({ error: `@${result.accountId} was just connected to another agent. Each agent needs its own bot.` });
     store.setAgentWebOnly(agent.id, false);
     await deps.channel.syncDisplayName?.(result.accountId, agent.name).catch(() => {});
 
@@ -9861,7 +9970,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       /** The agent-wide door, shown on every card: applies to every app. */
       allowKnocks: !!agent.allowKnocks,
       /** Spare bots ready for a swap, per app. */
-      spare: { telegram: deps.channel.pool.availableCount?.(agent.ownerId) ?? 0, discord: store.listDiscordBots(agent.ownerId, 'discord').filter((b) => !b.archivedFor).length, slack: store.listDiscordBots(agent.ownerId, 'slack').filter((b) => !b.archivedFor).length },
+      spare: { telegram: deps.channel.pool.availableCount?.(agent.ownerId, store.ownerPrefs(agent.ownerId).ownBotsOnly) ?? 0, discord: store.listDiscordBots(agent.ownerId, 'discord').filter((b) => !b.archivedFor).length, slack: store.listDiscordBots(agent.ownerId, 'slack').filter((b) => !b.archivedFor).length },
     };
   });
 
@@ -11455,7 +11564,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // Zod strips unknown keys — omitting this silently discarded the
           // sender's folder list and made the missing-folders refusal dead
           // code for every real (HTTP) migration.
-          sharedPaths: z.array(z.string().max(512)).max(8).optional(),
+          sharedPaths: z.array(z.string().max(512)).max(40).optional(),
           // The source's runtime-image OpenClaw version, so we can refuse a
           // DOWNGRADE (our image older than the volume's config schema).
           openclawVersion: z.string().max(64).optional(),
@@ -11494,6 +11603,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       if (host.id === agent.hostId) {
         return reply.code(400).send({ error: 'The agent is already on that host.' });
+      }
+      // Folders are bind mounts of this machine's disk; a runner cannot mount
+      // them, and the agent arrived told it had data it could not see (audit,
+      // 2026-10-23). Say so, before anything is stopped.
+      if (host.kind !== 'local') {
+        const folders = [...(agent.sharedPaths ?? []), ...store.listDataSources(agent.id).filter((d) => d.kind === 'folder').map((d) => d.hostPath ?? d.mountName)];
+        if (folders.length) {
+          return reply.code(409).send({
+            error: `"${agent.name}" reads ${folders.length} folder${folders.length === 1 ? '' : 's'} of this machine (${folders.slice(0, 2).join(', ')}${folders.length > 2 ? ', …' : ''}), which ${host.name} cannot see. Remove ${folders.length === 1 ? 'it' : 'them'} from its Data tab first, or move the data into a git repo.`,
+            code: 'folders_stay_here',
+          });
+        }
       }
       // A pinned image lives on the daemon that built it. A runner without it
       // failed deep inside the seed with docker's "pull access denied", after
@@ -11902,6 +12023,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       discordUserId: store.identityOfUserAnywhere(me.ownerId, 'discord'),
       /** True for the account that owns this machine (admin actions in the UI). */
       hostOwner: ownsLocalHost(req),
+      /** This person's own choices (Settings): see OwnerPrefs. */
+      prefs: store.ownerPrefs(me.ownerId),
       /** Memory caps: the fleet default and the most a member may give one agent (the owner is unbound). */
       memoryCapDefault: defaultMemoryCap(),
       memoryCapMax: ownsLocalHost(req) ? formatMemoryCap(MEMORY_CAP_CEILING_BYTES) : memberMemoryMax(),
@@ -11926,6 +12049,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.delete('/v1/account/telegram', async (req) => {
     store.setAccountTelegram(ownerIdOf(req), null);
     return { unlinked: true };
+  });
+  /** A person's own preferences (Settings → Telegram: own bots only). Each key optional; the answer is the whole set. */
+  app.patch<{ Body: { ownBotsOnly?: boolean } }>('/v1/account/prefs', async (req, reply) => {
+    const parsed = z.object({ ownBotsOnly: z.boolean().optional() }).strict().safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    const me = ownerIdOf(req);
+    if (parsed.data.ownBotsOnly !== undefined) store.setOwnerPref(me, 'ownBotsOnly', parsed.data.ownBotsOnly ? '1' : null);
+    return { prefs: store.ownerPrefs(me), availableBots: deps.channel.pool.availableCount(me, store.ownerPrefs(me).ownBotsOnly) };
   });
   /**
    * Forget the caller's Discord identity on every agent: the next bot asks
@@ -12432,9 +12563,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         'something every sibling agent should know. STRICT RULES: no names, no addresses, no amounts, ' +
         'no dates, no identifying specifics of the people or organization you serve — generalize ' +
         'everything. Output ONLY the proposal text as markdown (a heading + concise body), no preamble.';
-      const res = await providerFor(child.hostId).exec(child.runtimeRef!, [
-        'agent', '--agent', child.slug, '-m', prompt,
-      ]);
+      // A model turn: the provider's default exec timeout (60 s) killed any
+      // distillation over a minute and called it "no usable distillation";
+      // and held like a consult, so it does not interleave with one (audit, 2026-10-23).
+      if (a2aInFlight.has(child.id)) return reply.code(429).send({ error: 'It is already answering something — try again when that finishes.' });
+      a2aInFlight.add(child.id);
+      let res;
+      try {
+        res = await providerFor(child.hostId).exec(child.runtimeRef!, [
+          'agent', '--agent', child.slug, '-m', prompt,
+        ], { timeoutMs: ASK_TIMEOUT_MS });
+      } finally { a2aInFlight.delete(child.id); }
       const text = (res.stdout || '').trim();
       if (res.code !== 0 || text.length < 40) {
         return reply.code(502).send({ error: 'The agent produced no usable distillation — try again or give a topic.' });
@@ -13468,7 +13607,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     const old = store.getChannelForAgent(agent.id, 'telegram');
     if (!old) return reply.code(409).send({ error: 'This agent has no Telegram bot to change.' });
-    if (!deps.channel.pool.availableCount(agent.ownerId)) {
+    if (!deps.channel.pool.availableCount(agent.ownerId, store.ownerPrefs(agent.ownerId).ownBotsOnly)) {
       return reply.code(409).send({
         error: 'No spare bot to move to. Add one under ⚙ Settings → Telegram → Add a bot, then try again.',
       });
@@ -13989,7 +14128,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // out. (Pool-leased bots already return via release() below.)
         // Best-effort END TO END: recycling is a bonus, so no failure in it —
         // not even a pool without the newer methods — may block the delete.
-        if (req.query.recycleBot !== '0') {
+        // A copy was downloaded (or moved by file) while it stood stopped: the
+        // bot may answer from there, so it is not parked for the next agent here
+        // unless asked (?recycleBot=1). Parked, the next agent polled the same
+        // bot as the copy (audit, 2026-10-23).
+        const copyElsewhere = !!agent.exportedAt && agent.state !== 'RUNNING';
+        if (copyElsewhere && req.query.recycleBot !== '1') trace(agent.id)('bot.not_parked', { why: 'a copy was downloaded', exportedAt: agent.exportedAt });
+        if (req.query.recycleBot !== '0' && !(copyElsewhere && req.query.recycleBot !== '1')) {
           try {
             if (!deps.channel.pool.owns(channel.accountId)) {
               // Parked under the AGENT'S OWNER: their token, their pool slot —

@@ -50,6 +50,8 @@ export class MockProvider implements RuntimeProvider {
   /** The most recent spec provisioned — lets tests assert what docker would see. */
   lastSpec?: RuntimeSpec;
 
+  runtimeRefFor(spec: { agentId: string; slug: string }): string { return `mock://${spec.agentId}`; }
+
   async provision(spec: RuntimeSpec): Promise<{ runtimeRef: string }> {
     this.lastSpec = spec;
     if (spec.memory) {

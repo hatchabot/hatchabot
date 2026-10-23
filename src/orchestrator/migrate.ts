@@ -549,7 +549,10 @@ async function migrateSteps(
         slug: agent.slug,
         accountId,
         vendor,
-        sharedPaths: agent.sharedPaths,
+        // Every folder it reads: the legacy shares AND the Data tab's folders. The
+        // latter were left out, so the documented refusal ("the agent never arrives
+        // blind") was dead for every folder added since Slice A (audit, 2026-10-23).
+        sharedPaths: [...new Set([...(agent.sharedPaths ?? []), ...deps.store.listDataSources(agent.id).filter((d) => d.kind === 'folder' && d.hostPath).map((d) => d.hostPath!)])],
         openclawVersion: sourceVersion,
       }),
     });

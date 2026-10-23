@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <script>
   // Set the theme before first paint so there's no flash. Default: light.
-  document.documentElement.dataset.theme = localStorage.getItem('theme') || 'light';
+  // Storage can throw (a private window, site data blocked): the page still paints.
+  let theme = 'light'; try { theme = localStorage.getItem('theme') || 'light'; } catch {}
+  document.documentElement.dataset.theme = theme;
 </script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Hatchabot</title>
@@ -703,6 +705,8 @@
   .v2planadd input { flex:1; min-width:0 }
   /* The sheet bar's icon: a button that looks like the icon. */
   .v2sbar .v2iconbtn { background:none; border:0; padding:0; border-radius:12px; flex:none; cursor:pointer }
+  /* Files: the column headings sort the list; the one in force is marked. */
+  .v2fsort { color:var(--dim); text-decoration:none; white-space:nowrap } .v2fsort.on { color:var(--text); font-weight:600 } .v2fsort:hover { color:var(--text) }
   .v2sbar .v2iconbtn:focus-visible { outline:2px solid var(--accent); outline-offset:3px }
   /* Check all: one quiet line while it runs, then what it found. */
   .v2checkall { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; margin:0 0 12px; padding:8px 12px; border:1px solid var(--line); border-radius:12px; font-size:13px }
@@ -1401,10 +1405,12 @@
     <div class="sub">Mounted at <code>/data/&lt;folder&gt;</code> on its next <b>Rebuild</b>. Anyone who can
       message this agent can read them — and change <b>writable</b> ones.</div>
     <h4 class="v2sec" style="margin-top:18px">Git repos</h4>
-    <div class="sub">Cloned into the agent's own space, not your disk — it can read them, and commit when writable.</div>
+    <div class="sub">Each repo is cloned to <code>~/.openclaw/&lt;repo&gt;</code> in the agent's own home (Files → .openclaw), not on your disk.
+      It can read a repo and, when writable, commit and push in it. <b>Test</b> checks from this machine that the repo answers with its key.</div>
+    <div id="gitKeyOut" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
     <div id="repoList" style="margin:6px 0"></div>
     <details class="sec-drawer">
-      <summary><b>📦 Add a repo</b> <span class="sub">— a public one needs no key</span></summary>
+      <summary><b>📦 Add a repo</b> <span class="sub">— a public one needs no key; a private one gets a deploy key to add on the git host</span></summary>
       <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:8px 0 0">
         <input type="checkbox" id="repoPublic" style="width:auto;margin-top:3px;flex:none" onchange="onRepoPublic()">
         <span><b>Public repo</b> — read-only, cloned over https with no deploy key (nothing to add on GitHub)</span></label>
@@ -1417,10 +1423,9 @@
         <button id="repoAddBtn" onclick="addGitSource()">Add repo</button>
       </div>
       <div class="sub" style="margin-top:6px">
-        Cloned into the agent's own space, not your disk. A public repo needs nothing else; for a private
-        or writable one, copy the generated <b>🔑 Deploy key</b> below to GitHub, then Rebuild.
+        A public repo needs nothing else. For a private or writable one, Hatchabot makes a <b>🔑 deploy key</b>: it is shown
+        above this form the moment the repo is added. Add it to the repo on the git host, press <b>Test</b>, then Rebuild.
       </div>
-      <div id="gitKeyOut" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
     </details>
 
   </section>
@@ -1716,6 +1721,10 @@
       its own bots — plus <b>shared</b> house bots donated to everyone on this server.</div></details>
     </div>
     <div class="pool-status" id="poolStatus"></div>
+    <label id="poolOwnOnlyRow" style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-weight:400;margin:0 0 14px">
+      <input type="checkbox" id="poolOwnOnly" style="width:auto;margin-top:3px;flex:none" onchange="setPoolOwnOnly(this.checked)">
+      <span>Use only my own bots <span class="sub">— my agents never take a <b>shared</b> house bot, even when it is the only one free; they ask for a BotFather token (or go without Telegram) instead</span></span>
+    </label>
     <h4 style="margin:0 0 4px">Add a bot</h4>
     <div class="sub">
       Mint one at <a href="https://t.me/botfather" target="_blank" rel="noopener">@BotFather</a>
@@ -3276,7 +3285,7 @@ async function startSession(idToken) {
   const out = await api('/v1/session', { method: 'POST', body: { idToken } });
   // The cookie only carries the subject — remember the email locally so the
   // header can say WHO this browser is signed in as (all tabs share it).
-  if (out.email) localStorage.setItem('hatchabot_email', out.email);
+  if (out.email) { try { localStorage.setItem('hatchabot_email', out.email); } catch {} }
   loginDlg.close();
   $('loginIdPw').value = '';
   await refresh(true);
@@ -3294,7 +3303,7 @@ async function signOut() {
       return;
     }
   }
-  localStorage.removeItem('hatchabot_email');
+  try { localStorage.removeItem('hatchabot_email'); } catch {}
   // Forget Google's remembered pick, so the next sign-in shows the account
   // chooser (with "Use another account") instead of silently re-selecting
   // the same email — this is what makes account SWITCHING actually work.
@@ -3313,7 +3322,7 @@ async function signOutEverywhere() {
   if (!confirm('Sign out on every device? Every browser signed in as you, this one included, will need to sign in again. Command-line sign-ins are ended too; a Google-signed-in hatchabot CLI needs `hatchabot logout` on that computer.')) return;
   try { await api('/v1/logout/everywhere', { method: 'POST' }); }
   catch (e) { if (e.message !== 'auth required') toast(e.message); return; }
-  localStorage.removeItem('hatchabot_email');
+  try { localStorage.removeItem('hatchabot_email'); } catch {}
   try { google.accounts.id.disableAutoSelect(); } catch { /* GSI not loaded */ }
   toast('Signed out on every device.');
   if (!window.__noReload) location.reload(); // the click-through check stays on the page
@@ -4481,6 +4490,7 @@ async function loadPool() {
     // is not. Show only what this account can actually do.
     const sharedRow = $('poolSharedRow');
     if (sharedRow) sharedRow.style.display = myAccount.hostOwner ? '' : 'none';
+    if ($('poolOwnOnly')) $('poolOwnOnly').checked = !!myAccount.prefs?.ownBotsOnly;
     const p = await api('/v1/pool');
     const bots = p.bots ?? [];
     // The at-a-glance answer to "can I make an agent instantly?"
@@ -4496,7 +4506,7 @@ async function loadPool() {
     const GROUPS = [
       ['Free — yours', b => b.mine && !b.leasedTo, 'Ready for your next agent.'],
       ['In use — yours', b => b.mine && b.leasedTo, ''],
-      ['Free — shared with you', b => !b.mine && !b.leasedTo, 'Parked by someone else on this server; your next agent can take one.'],
+      ['Free — shared with you', b => !b.mine && !b.leasedTo, myAccount.prefs?.ownBotsOnly ? 'Parked by someone else on this server. Not for your agents: you chose your own bots only.' : 'Parked by someone else on this server; your next agent can take one.'],
       ['In use — someone else’s', b => !b.mine && b.leasedTo, ''],
     ];
     const row = (b) => `<div class="pair" style="align-items:center;padding:6px 0;border-top:1px solid var(--line)">
@@ -4516,6 +4526,16 @@ async function loadPool() {
         }).join('')
       : '<div class="sub">Empty — add a spare bot above, or park one when deleting an agent.</div>';
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+
+/** Settings → Telegram: my agents take only my own bots. Saved at once; the ready count follows. */
+async function setPoolOwnOnly(on) {
+  try {
+    const r = await api('/v1/account/prefs', { method: 'PATCH', body: { ownBotsOnly: !!on } });
+    myAccount.prefs = r.prefs;
+    toast(on ? 'Your agents take only bots you parked yourself.' : 'Your agents may take a shared house bot again.', 6000);
+    void loadPool();
+  } catch (e) { toast(e.message, 8000); if ($('poolOwnOnly')) $('poolOwnOnly').checked = !!myAccount.prefs?.ownBotsOnly; }
 }
 
 // ---- spare Discord bots and Slack apps (Settings → Discord / Slack) ------------------
@@ -6252,7 +6272,7 @@ let v2SectionsNow = [];
 async function v2CopySection(key) {
   const names = (v2SectionsNow.find(s => s.key === key)?.items ?? []).map(({ a }) => a.name).filter(Boolean);
   if (!names.length) return toast('Nothing to copy.');
-  try { await navigator.clipboard.writeText(names.join('\n')); toast(`Copied ${names.length} name${names.length === 1 ? '' : 's'}.`); }
+  try { if (!(await copyText(names.join('\n')))) throw new Error('no clipboard'); toast(`Copied ${names.length} name${names.length === 1 ? '' : 's'}.`); }
   catch { toast('Could not reach the clipboard — copy them from the list.', 6000); }
 }
 async function openFleetActions(preset) {
@@ -6908,7 +6928,7 @@ $('fabBtn').onclick = () => {
   // one (instant). With an empty pool there is no choice — BotFather it is.
   $('agentPoolRow').style.display = poolAvail > 0 ? 'flex' : 'none';
   $('agentUsePool').checked = true;
-  $('agentPoolCount').textContent = poolAvail > 0 ? `(${poolAvail} ready)` : '';
+  $('agentPoolCount').textContent = poolAvail > 0 ? `(${poolAvail} ready${myAccount.prefs?.ownBotsOnly ? ', yours only' : ''})` : '';
   // An empty pool used to mean "BotFather it is" — and an agent parked on a
   // token nobody had (2026-09-23). Say so, and start it web-only unless a
   // token is coming; a bot can be attached later.
@@ -7620,7 +7640,7 @@ async function loadConnections() {
           </ol>
           <div style="display:flex;gap:8px;align-items:center;margin:4px 0">
             <code id="connRedirectUri" style="flex:1;padding:6px 8px;background:var(--panel-2);border-radius:6px;font-size:12px;word-break:break-all">${esc(cs.redirectUri)}</code>
-            <button onclick="navigator.clipboard.writeText($('connRedirectUri').textContent).then(()=>toast('Copied'))">Copy</button>
+            <button onclick="copyText($('connRedirectUri').textContent).then((ok)=>toast(ok ? 'Copied' : 'Could not copy — select the address and copy it by hand', ok ? 3000 : 8000))">Copy</button>
           </div>
           <div class="sub" style="margin:2px 0 8px">5. Paste the client ID and secret it gives you:</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -7951,20 +7971,23 @@ function renderDataList(sources) {
     : '<span style="color:var(--dim)">read-only</span>';
   const isPublicRepo = d => d.kind === 'git' && /^https:\/\//.test(d.repoUrl || '');
   const icon = d => isPublicRepo(d) ? '🌐' : d.kind === 'git' ? '🔧' : (d.access === 'rw' ? '✏️' : '📁');
+  // Where the agent finds it: a repo is cloned under its home (~/.openclaw/<repo>), a folder is mounted under /data.
   const where = d => isPublicRepo(d)
-    ? `→ cloned in workspace · public, read-only`
+    ? `→ ~/.openclaw/${esc(d.mountName)} · public, read-only`
     : d.kind === 'git'
-    ? `→ cloned in workspace · ${badge(d)}`
+    ? `→ ~/.openclaw/${esc(d.mountName)} · ${badge(d)}`
     : `→ ${d.mountAtHostPath ? esc(d.hostPath) + ' (same path)' : '/data/' + esc(d.mountName)} · ${badge(d)}`;
   // Legacy shared folders have no data-source row to update — they're managed
-  // through sharedPaths, so they get no toggle.
+  // through sharedPaths, so they get no toggle. The button says what it DOES
+  // ("Make writable"), not a state: "→ writable" read as already writable (Chris, 2026-10-23).
   const toggle = d => (d.legacy || isPublicRepo(d)) ? '' :
     `<button onclick="setDataAccess('${jsq(d.id)}','${d.access === 'rw' ? 'ro' : 'rw'}')"
-             title="${d.access === 'rw' ? 'Make read-only' : 'Allow this agent to write here'} — applies on the next rebuild">
-       ${d.access === 'rw' ? '→ read-only' : '→ writable'}</button>`;
-  const line = (d) => `<div class="pair"><span class="grow">${icon(d)} <code>${esc(d.hostPath || d.repoUrl || d.mountName)}</code>
-        <span class="sub">${where(d)}</span></span>
+             title="${d.access === 'rw' ? 'Take write access away' : 'Allow this agent to write here'} — applies on the next rebuild">
+       ${d.access === 'rw' ? 'Make read-only' : 'Make writable'}</button>`;
+  const line = (d) => `<div class="pair" data-ds="${esc(d.id || '')}"><span class="grow">${icon(d)} <code>${esc(d.hostPath || d.repoUrl || d.mountName)}</code>
+        <span class="sub">${where(d)}</span><span class="sub ds-check" style="display:block"></span></span>
         ${toggle(d)}
+        ${d.legacy ? '' : `<button onclick="checkDataSource('${jsq(d.id)}', this)" title="${d.kind === 'git' ? 'Ask the git host from this machine: does the repo answer with this key?' : 'Is the folder there, and can the service read' + (d.access === 'rw' ? ' and write' : '') + ' it?'}">Test</button>`}
         ${d.kind === 'git' && d.pubKey ? `<button onclick="showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to the repo on GitHub">🔑 Deploy key</button>` : ''}
         <button class="danger" onclick="removeDataSource('${jsq(d.id)}')">×</button></div>`;
   // Folders and repos are different things with different rules; listing them
@@ -8013,7 +8036,6 @@ function showDeployKey(id) { showDeployKeyForSource(editData.find(d => d.id === 
 function showDeployKeyForSource(src) {
   if (!src || !src.pubKey) return;
   const el = $('gitKeyOut');
-  el.closest('details')?.setAttribute('open', ''); // the key lives in the git drawer
   el.style.display = '';
   const write = src.access === 'rw';
   // Derive the "add deploy key" page from git@host:owner/repo.git — direct link
@@ -8022,10 +8044,29 @@ function showDeployKeyForSource(src) {
   const link = m && m[1] === 'github.com'
     ? `<a href="https://github.com/${esc(m[2])}/settings/keys/new" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600">Open ${esc(m[2])} → Add deploy key ↗</a>`
     : `Add it at your git host: the repo → Settings → Deploy keys → Add`;
+  const name = (src.repoUrl || src.mountName || '').replace(/^git@[^:]+:/, '').replace(/\.git$/, '');
   el.innerHTML =
-    `<div style="margin-bottom:8px">${link}${write ? ' <span class="sub">— then check “Allow write access”, paste the key below, and Rebuild.</span>' : ' <span class="sub">— paste the key below, then Rebuild.</span>'}</div>` +
+    `<div style="margin-bottom:8px"><b>🔑 Deploy key for ${esc(name)}</b> <button type="button" class="hbtn" style="float:right" onclick="$('gitKeyOut').style.display='none'" aria-label="Hide the deploy key">✕</button></div>` +
+    `<div style="margin-bottom:8px">${link}${write ? ' <span class="sub">— then check “Allow write access”, paste the key below, press Test, and Rebuild.</span>' : ' <span class="sub">— paste the key below, press Test, then Rebuild.</span>'}</div>` +
     `<div style="user-select:all;word-break:break-all">${esc(src.pubKey)}</div>`;
   el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+/** The Test button on a folder or repo: one request, its answer under the row. */
+async function checkDataSource(id, btn) {
+  const row = $('dataList')?.querySelector(`[data-ds="${CSS.escape(id)}"]`) || $('repoList')?.querySelector(`[data-ds="${CSS.escape(id)}"]`);
+  const out = row?.querySelector('.ds-check');
+  if (btn) btn.disabled = true;
+  if (out) { out.style.color = ''; out.textContent = 'Checking…'; }
+  try {
+    const r = await api(`/v1/agents/${editAgentId}/data-sources/${encodeURIComponent(id)}/check`, { method: 'POST', body: {} });
+    if (out) { out.textContent = `${r.ok ? '✅' : '⚠️'} ${r.message}`; out.style.color = r.ok ? '' : 'var(--warn)'; }
+    else toast(r.message, 9000);
+    // A key the host refused: show it again, right here, so the next step is in view.
+    if (!r.ok && r.reason === 'key-not-added') showDeployKey(id);
+  } catch (e) {
+    if (out) { out.textContent = `⚠️ ${e.message}`; out.style.color = 'var(--bad)'; } else toast(e.message, 9000);
+  } finally { if (btn) btn.disabled = false; }
 }
 
 async function addDataSource() {
@@ -8892,9 +8933,43 @@ async function loadFleetUsage() {
     // From the sampler's records, not the containers: it answers at once.
     // The day's answer carries the spike warnings, the savings and the plan share; the chart reads its own range.
     renderFleetUsage(await api('/v1/usage/periods?period=day'));
+    void loadContextNow();
   } catch (e) {
     $('fleetUsageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`;
   }
+}
+/**
+ * Context now (Chris, 2026-10-23): one line per agent — its model, how big its
+ * main conversation is at its last call, the model's window (or the cap
+ * Hatchabot set), and how full that is. From the token steward's last read of
+ * each agent's transcripts; nothing is woken for it.
+ */
+async function loadContextNow() {
+  const box = $('fleetContextNow'); if (!box) return;
+  try {
+    const th = await api('/v1/token-health?limit=100');
+    if (!$('fleetContextNow')) return;
+    const rows = (th.rows || []).filter((r) => r.conversation || r.contextCap?.tokens);
+    if (!rows.length) { box.innerHTML = '<div class="sub">No reading yet — the usage pass reads each agent\'s transcripts about hourly while it runs.</div>'; return; }
+    const num = 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap';
+    const bare = (m) => esc(String(m || '').replace(/^.*\//, ''));
+    const line = (r) => {
+      const c = r.conversation || {};
+      const now = c.mainNowK;
+      const limitK = r.contextCap?.tokens ? Math.round(r.contextCap.tokens / 1000) : c.windowK;
+      const share = now !== undefined && limitK ? Math.min(999, Math.round(now / limitK * 100)) : null;
+      const tone = share === null ? '' : share >= 80 ? 'color:var(--bad);font-weight:600' : share >= 50 ? 'color:var(--warn);font-weight:600' : '';
+      const limit = limitK ? `${fmtN(limitK)}K${r.contextCap?.tokens ? ' <span class="sub" title="A cap Hatchabot set: the agent compacts near it">cap</span>' : ''}` : '<span class="sub">—</span>';
+      const when = c.mainAt ? esc(ago(c.mainAt)) : (r.readHoursAgo !== undefined ? `read ${esc(String(r.readHoursAgo))} h ago` : '');
+      return `<tr><td>${esc(r.agent)}${r.state && r.state !== 'running' ? ` <span class="sub">· ${esc(r.state)}</span>` : ''}</td><td class="sub" style="text-align:left;white-space:nowrap">${bare(r.model)}</td>
+        <td style="${num}">${now !== undefined ? `${fmtN(now)}K` : '<span class="sub">—</span>'}</td><td style="${num}">${limit}</td>
+        <td style="${num};${tone}">${share === null ? '<span class="sub">—</span>' : `${share}%`}</td>
+        <td style="${num}" class="sub">${c.ctxK ? `${fmtN(c.ctxK.p50)}K / ${fmtN(c.ctxK.p90)}K` : '—'}</td><td class="sub" style="white-space:nowrap">${when}</td></tr>`;
+    };
+    const sorted = [...rows].sort((a, b) => (b.conversation?.mainNowK ?? -1) - (a.conversation?.mainNowK ?? -1));
+    box.innerHTML = `<div class="mp-wrap"><table class="mp-tbl"><thead><tr><th style="text-align:left">Agent</th><th style="text-align:left">Model</th><th>Main conversation</th><th>Window</th><th>Full</th><th>Per call (median / 90%)</th><th>Last call</th></tr></thead><tbody>${sorted.map(line).join('')}</tbody></table></div>
+      <div class="sub" style="margin-top:6px">Main conversation = what its last call carried in (Telegram DM and console). Window = the model's context window as the agent's OpenClaw states it, or the cap Hatchabot set. Over 80% full it is close to compacting; compact or cap it from its Usage tab.</div>`;
+  } catch (e) { box.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 /**
  * "Saved by cheaper models" (was the Right-size line, 2026-10-05): each switch
@@ -8934,7 +9009,9 @@ function renderFleetUsage(f) {
   $('fleetUsageBody').innerHTML = `
     ${alerts ? `<div style="margin:0 0 10px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
     ${failLine}
-    <h4 class="v2sec" style="margin-top:4px;display:flex;justify-content:space-between;align-items:baseline">At API prices <a href="#" id="fleetUsagePrices" style="text-transform:none;letter-spacing:0;font-weight:400" onclick="event.preventDefault(); openModelPrices()">model prices</a></h4>
+    <h4 class="v2sec" style="margin-top:4px">Context now</h4>
+    <div id="fleetContextNow"><div class="sub">Loading…</div></div>
+    <h4 class="v2sec" style="margin-top:14px;display:flex;justify-content:space-between;align-items:baseline">At API prices <a href="#" id="fleetUsagePrices" style="text-transform:none;letter-spacing:0;font-weight:400" onclick="event.preventDefault(); openModelPrices()">model prices</a></h4>
     ${spendChartBox('')}
     ${savedByModels(f.rightSize)}
     ${planStar ? `<div class="sub" style="margin-top:12px">* Claude plan use priced at API rates — not money you pay.</div>` : ''}`;
@@ -9908,8 +9985,12 @@ async function del(id, name) {
   // Deliberately annoying: deletion erases the agent's memory for good, so it
   // costs a typed confirmation, not a reflex click.
   const a = agents.find(x => x.id === id);
+  // A copy downloaded while it stood stopped may be answering elsewhere: its bot is not parked then.
+  const copyElsewhere = !!a?.exportedAt && a.state !== 'RUNNING';
   const botNote = a?.botUsername
-    ? `\n\nIts Telegram bot @${a.botUsername} is kept in the Bot pool for the next agent (remove it there if you don't want that). "Delete chat" on it in Telegram clears your old conversation view.`
+    ? copyElsewhere
+      ? `\n\nA copy of it was downloaded, so its Telegram bot @${a.botUsername} is NOT parked for reuse here — the copy may be talking on it. (Settings → Telegram → Add to pool parks it by hand if you want that.)`
+      : `\n\nIts Telegram bot @${a.botUsername} is kept in the Bot pool for the next agent (remove it there if you don't want that). "Delete chat" on it in Telegram clears your old conversation view.`
     : '';
   // Its volume stays in the nightly backup sets until they age out
   // (scripts/backup-volumes.sh, 14 days) — say so, not "forever" (2026-09-30).
@@ -9921,7 +10002,7 @@ async function del(id, name) {
   // on purpose.
   try {
     await api(`/v1/agents/${id}`, { method: 'DELETE' });
-    if (a?.botUsername) toast(`Deleted. Bot @${a.botUsername} is parked in the Bot pool, ready for the next agent.`, 8000);
+    if (a?.botUsername) toast(copyElsewhere ? `Deleted. Bot @${a.botUsername} was left to the downloaded copy, not parked.` : `Deleted. Bot @${a.botUsername} is parked in the Bot pool, ready for the next agent.`, 8000);
     await refresh(false);
   }
   catch (e) { toast(e.message); }
@@ -9971,13 +10052,25 @@ async function openGateway(id, slug) {
   // the panel back when its answer lands.
   const ticket = ++consoleTicket;
   const current = () => ticket === consoleTicket && consoleTabs.some(t => t.id === id && t.frame);
+  // The panel opens NOW, with a spinner: the access and gateway reads below,
+  // and then the console's own load, took seconds on a slow link, during
+  // which a tap on the icon seemed to do nothing (Chris, 2026-10-23).
+  const opening = (agents || []).find(x => x.id === id);
+  if (!$('consoleDlg').open) {
+    $('consoleTitle').textContent = opening?.name || slug;
+    $('consoleGearBtn').style.display = 'none';
+    $('consoleApproveBtn').hidden = true;
+    $('consoleProps').hidden = true;
+    consoleCoverSay('Opening the console…');
+    $('consoleDlg').showModal();
+  } else consoleCoverSay('Opening the console…');
   try {
     // A sleeping agent is woken first, with the cover saying so — the proxy's
     // own wake used to time out before the gateway answered (2026-09-26).
     const sleeper = (agents || []).find(x => x.id === id);
     if (sleeper?.hibernatedAt && sleeper.state === 'STOPPED') {
       $('consoleTitle').textContent = sleeper.name;
-      $('consoleCover').hidden = false; $('consoleCover').lastElementChild.textContent = 'Waking it up — about a minute…';
+      consoleCoverSay('Waking it up — about a minute…');
       $('consoleFrame').src = 'about:blank';
       if (!$('consoleDlg').open) $('consoleDlg').showModal();
       try { await api(`/v1/agents/${id}/wake`, { method: 'POST', body: {} }); }
@@ -10019,7 +10112,14 @@ async function openGateway(id, slug) {
     $('consoleGearBtn').style.display = '';
     renderConsoleChannels(a);
     $('consoleNewTab').onclick = () => window.open(url, '_blank', 'noopener');
-    $('consoleFrame').src = url;
+    const fr = $('consoleFrame');
+    // The spinner stays until the console's page has loaded (or 15 s): a blank
+    // frame for several seconds looked like nothing had happened.
+    consoleCoverSay('Opening the console…');
+    const loaded = () => { if (consoleAgentId === id && $('consoleCover').lastElementChild.textContent === 'Opening the console…') $('consoleCover').hidden = true; };
+    fr.addEventListener('load', loaded, { once: true });
+    setTimeout(loaded, 15000);
+    fr.src = url;
     const tab = consoleTabs.find(t => t.id === id); if (tab) tab.url = url;
     $('consoleApproveBtn').hidden = true;
     if (!$('consoleDlg').open) $('consoleDlg').showModal();
@@ -10032,8 +10132,18 @@ async function openGateway(id, slug) {
     consoleMark(id);
     markConsoleSeen(id);
     void autoApproveConsole(id);
-  } catch (e) { toast(e.message); }
+  } catch (e) {
+    // The panel is open with the spinner: say what went wrong there, not only in a toast.
+    consoleCoverSay(`Could not open it: ${e.message}`);
+    toast(e.message);
+  }
   finally { consoleOpening--; }
+}
+/** Show the console's cover (the spinner and a line of text) over the frame. */
+function consoleCoverSay(text) {
+  const c = $('consoleCover');
+  c.lastElementChild.textContent = text;
+  c.hidden = false;
 }
 
 // ---- Console tabs and the quick switcher (Chris, 2026-10-07) ------------------
@@ -10278,7 +10388,9 @@ async function autoApproveConsole(id) {
   const known = (() => { try { return localStorage.getItem(`hb-console-ok:${id}`) === '1'; } catch { return false; } })();
   const remember = () => { try { localStorage.setItem(`hb-console-ok:${id}`, '1'); } catch {} };
   const uncover = () => { if (consoleAgentId === id) $('consoleCover').hidden = true; };
-  $('consoleCover').hidden = known;
+  // A browser seen before keeps the "Opening…" spinner openGateway put up (it
+  // goes when the frame has loaded); a new one is told about the approval.
+  if (!known) consoleCoverSay('Connecting this browser…');
   // Checking is cheap now (a 50 ms file read), so look often, for ~12 s.
   for (let i = 0; i < 40 && stillOurs(); i++) {
     await new Promise((r) => setTimeout(r, 300));
@@ -13107,6 +13219,61 @@ async function v2LoadUsage(id) {
 
 /** The Files tab: browse the agent's home (read-only), download a file or a folder. */
 const v2FilesPath = new Map();
+/** How the list is ordered: by name, by when changed, or by size; remembered on this device. */
+let v2FilesSort = (() => { try { return JSON.parse(localStorage.getItem('hb-files-sort') || 'null') || { key: 'name', dir: 1 }; } catch { return { key: 'name', dir: 1 }; } })();
+function v2FilesSortBy(id, key) {
+  v2FilesSort = v2FilesSort.key === key ? { key, dir: -v2FilesSort.dir } : { key, dir: key === 'name' ? 1 : -1 };
+  try { localStorage.setItem('hb-files-sort', JSON.stringify(v2FilesSort)); } catch {}
+  void v2LoadFiles(id, v2FilesPath.get(id) || '');
+}
+/** Folders first, then files, each in the chosen order (name: natural, case-blind). */
+function v2FilesOrder(entries) {
+  const { key, dir } = v2FilesSort;
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true });
+  const cmp = key === 'mtime' ? (a, b) => (Date.parse(a.mtime || 0) || 0) - (Date.parse(b.mtime || 0) || 0) || byName(a, b)
+    : key === 'size' ? (a, b) => (a.size || 0) - (b.size || 0) || byName(a, b)
+    : byName;
+  const rank = (e) => (e.type === 'dir' ? 0 : 1);
+  return [...entries].sort((a, b) => rank(a) - rank(b) || dir * cmp(a, b));
+}
+/** A file shown here, in the tab, with a way back: a new browser tab had no obvious way back on a phone (Chris, 2026-10-23). */
+const V2_TEXT_FILE = /\.(txt|md|markdown|log|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|py|m?js|ts|sh|c|cc|cpp|h|sql|xml|s?v|diff|patch|env|html?|svg)$/i;
+const V2_IMAGE_FILE = /\.(png|jpe?g|gif|webp|bmp|ico)$/i;
+const V2_VIEW_MAX = 2 * 1024 * 1024;
+async function v2OpenFile(id, folder, name, size) {
+  const box = $('v2Files'); if (!box || box.dataset.agent !== id) return;
+  const p = (folder ? folder + '/' : '') + name;
+  const gen = (v2FilesGen.get(id) || 0) + 1; v2FilesGen.set(id, gen);
+  const stale = () => box.dataset.agent !== id || v2FilesGen.get(id) !== gen;
+  const url = `/v1/agents/${id}/fs/file?path=${encodeURIComponent(p)}`;
+  const back = `<button onclick="v2LoadFiles('${jsq(id)}','${jsq(folder)}')" title="Back to the folder">← Back</button>`;
+  const bar = `<div class="v2row"><div class="v2k">File</div><div class="v2v">${back}
+      <span style="font-family:ui-monospace,monospace;overflow-wrap:anywhere">~/${esc(folder ? folder + '/' : '')}<b>${esc(name)}</b></span>
+      <span class="sub">${fmtBytes(size || 0)}</span>
+      <a class="btn" href="${url}&inline=1" target="_blank" rel="noopener" onclick="return sfOpen(event, this, '${jsq(`/v1/agents/${id}/fs?path=${encodeURIComponent(folder)}`)}')" title="Open in a new tab">Open in a tab</a>
+      <a class="btn" href="${url}" download onclick="return sfLink(event, this, '${jsq(name)}')" title="Download">⬇</a></div></div>`;
+  box.innerHTML = `${bar}<div class="sub" style="padding:8px 0">Loading…</div>`;
+  const isText = !/\.[a-z0-9]+$/i.test(name) || V2_TEXT_FILE.test(name);
+  if (V2_IMAGE_FILE.test(name)) {
+    box.innerHTML = `${bar}<div id="v2FileBody" style="padding:8px 0"><img src="${url}&inline=1" alt="${esc(name)}" style="max-width:100%;height:auto;border-radius:8px"></div>`;
+    return;
+  }
+  if (!isText || (size || 0) > V2_VIEW_MAX) {
+    box.innerHTML = `${bar}<div id="v2FileBody" class="sub" style="padding:8px 0">${isText ? 'Too big to show here (over 2 MB).' : 'This kind of file is not shown here.'} Open it in a tab or download it.</div>`;
+    return;
+  }
+  try {
+    const res = await sfFetch(`${url}&inline=1`);
+    if (stale()) return;
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
+    const text = await res.text();
+    if (stale()) return;
+    box.innerHTML = `${bar}<pre id="v2FileBody" style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12.5px;line-height:1.45;margin:8px 0;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);max-height:70vh;overflow:auto">${esc(text)}</pre>`;
+  } catch (e) {
+    if (stale()) return;
+    box.innerHTML = `${bar}<div id="v2FileBody" class="sub" style="padding:8px 0;color:var(--bad)">${esc(e.message)}</div>`;
+  }
+}
 // Each read numbered per agent: a slow read of the folder left behind landed
 // after the one clicked into, and showed it under the newer path (#94).
 const v2FilesGen = new Map();
@@ -13127,9 +13294,12 @@ async function v2LoadFiles(id, path) {
   // What the browser can show by itself opens in a new tab (served sandboxed);
   // the rest downloads. Mirrors inlineType() on the server.
   const viewable = (n) => !/\.[a-z0-9]+$/i.test(n) || /\.(txt|md|markdown|log|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|py|m?js|ts|sh|c|cc|cpp|h|sql|xml|s?v|diff|patch|env|html?|svg|png|jpe?g|gif|webp|bmp|ico|pdf|mp3|wav|ogg|m4a|mp4|webm)$/i.test(n);
-  const rows = r.entries.map(e => {
+  const inPage = (n) => !/\.[a-z0-9]+$/i.test(n) || V2_TEXT_FILE.test(n) || V2_IMAGE_FILE.test(n);
+  const rows = v2FilesOrder(r.entries).map(e => {
     const p = (r.path ? r.path + '/' : '') + e.name;
+    // Text and images open here in the tab (with ← Back); sound, video and PDF still open in a new tab.
     const open = e.type === 'dir' ? `<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','${jsq(p)}')">📁 ${esc(e.name)}/</a>`
+      : e.type === 'file' && inPage(e.name) ? `📄 <a href="${dl('file', p)}&inline=1" onclick="event.preventDefault();v2OpenFile('${jsq(id)}','${jsq(r.path || '')}','${jsq(e.name)}',${Number(e.size) || 0})" title="Open here">${esc(e.name)}</a>`
       : e.type === 'file' && viewable(e.name) ? `📄 <a href="${dl('file', p)}&inline=1" target="_blank" rel="noopener" onclick="return sfOpen(event, this, '${jsq(`/v1/agents/${id}/fs?path=${encodeURIComponent(r.path || '')}`)}')" title="Open in a new tab">${esc(e.name)}</a>`
       : `${e.type === 'link' ? '🔗' : '📄'} ${esc(e.name)}`;
     const get = e.type === 'dir' ? `<a class="btn" href="${dl('archive', p)}" onclick="return sfLink(event, this, 'folder.tar.gz')" title="This folder as a .tar.gz">⬇ .tar.gz</a>`
@@ -13144,7 +13314,7 @@ async function v2LoadFiles(id, path) {
       <a class="btn" href="${dl('archive', r.path || '')}" onclick="return sfLink(event, this, 'folder.tar.gz')" title="This folder as a .tar.gz">⬇ Whole folder</a>
       ${canUpload ? `<button onclick="$('v2UploadInput').click()" title="Put a file from this computer into this folder">⬆ Upload…</button><input type="file" id="v2UploadInput" multiple hidden onchange="v2UploadFiles('${jsq(id)}','${jsq(r.path || '')}', this.files)">` : ''}
       <span class="sub">Click a name to open it in a new tab, ⬇ to download. ${canUpload ? 'Drop files on the list to upload them here.' : "OpenClaw's own state — uploads go in the workspace or outside .openclaw."} Its workspace holds what it wrote; memory is under .openclaw.</span></div></div>
-    <div id="v2FilesDrop">${r.entries.length ? `<table class="tbl"><thead><tr><th>Name</th><th class="num">Size</th><th>Changed</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="sub" style="padding:8px 0">Empty folder.</div>'}</div>
+    <div id="v2FilesDrop">${r.entries.length ? `<table class="tbl"><thead><tr>${[['name', 'Name', ''], ['size', 'Size', ' class="num"'], ['mtime', 'Changed', '']].map(([k, l, cls]) => `<th${cls}><a href="#" class="v2fsort${v2FilesSort.key === k ? ' on' : ''}" onclick="event.preventDefault();v2FilesSortBy('${jsq(id)}','${k}')" title="Sort by ${l.toLowerCase()}">${l}${v2FilesSort.key === k ? (v2FilesSort.dir > 0 ? ' ▲' : ' ▼') : ''}</a></th>`).join('')}<th></th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="sub" style="padding:8px 0">Empty folder.</div>'}</div>
     <div id="v2UploadNote" class="sub" hidden></div>`;
   if (canUpload) {
     const drop = $('v2FilesDrop');
@@ -13787,7 +13957,7 @@ async function chanCopyManifest(btn, fallbackName) {
   try {
     const m = await api(`/v1/channels/slack/manifest?name=${encodeURIComponent(name)}`);
     const text = JSON.stringify(m, null, 2);
-    try { await navigator.clipboard.writeText(text); btn.textContent = '✓ Copied'; }
+    try { if (!(await copyText(text))) throw new Error('no clipboard'); btn.textContent = '✓ Copied'; }
     catch {
       // No clipboard (plain http off this machine): show it to copy by hand.
       btn.insertAdjacentHTML('afterend', `<textarea readonly rows="8" style="width:100%;margin-top:6px;font-family:ui-monospace,monospace;font-size:12px">${esc(text)}</textarea>`);
@@ -14027,7 +14197,9 @@ async function v2IconAuto(btn) {
 
 // ---- the header's account menu ---------------------------------------------------------
 function v2RenderWho() {
-  const email = myAccount.email || localStorage.getItem('hatchabot_email') || '';
+  // Guarded: a browser that blocks storage used to throw here, inside renderV2, and the home screen never drew (audit, 2026-10-23).
+  let remembered = ''; try { remembered = localStorage.getItem('hatchabot_email') || ''; } catch {}
+  const email = myAccount.email || remembered;
   const mode = appConfig.authMode;
   const name = email || myAccount.username || (mode === 'password' ? 'This machine' : 'Signed in');
   const initial = (email || myAccount.username || 'H').trim()[0].toUpperCase();
@@ -14171,7 +14343,7 @@ function reportFile(r) {
 }
 async function reportSaveFile() { try { const r = await reportSaveEdits(); if (r) reportFile(r); } catch (e) { toast(e.message); } }
 async function reportCopy() {
-  try { const r = await reportSaveEdits(); if (!r) return; await navigator.clipboard.writeText(`# ${r.title}\n\n${r.body}\n`); toast('Copied.'); }
+  try { const r = await reportSaveEdits(); if (!r) return; if (!(await copyText(`# ${r.title}\n\n${r.body}\n`))) throw new Error('The browser gave no clipboard here — select the text and copy it by hand.'); toast('Copied.'); }
   catch (e) { toast(e.message || 'Could not copy.'); }
 }
 async function reportOpenIssue() {

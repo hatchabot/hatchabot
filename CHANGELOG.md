@@ -2,6 +2,42 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.165.0] — 2026-10-23
+
+### Added
+- **Settings → Data:** a **Test** button on every folder and repo. A folder is checked on this machine (there, readable, writable if the agent may write); a repo is asked for its branch list from this machine with its own deploy key, so "the key is not on the repo yet" shows up before a Rebuild fails to clone. The deploy key now appears above the repo list the moment a repo is added, each row says where the agent finds it (`~/.openclaw/<repo>` for a repo, `/data/<folder>` for a folder), and the access button says what it does: **Make writable** / **Make read-only**.
+- **Files:** the column headings sort the list by name, size or when changed (folders first; remembered on this device). A text file or an image opens in the tab itself, with **← Back** to the folder, **Open in a tab** and ⬇. Sound, video and PDF still open in a new tab.
+- **Usage → Context now:** one line per agent with its model, how big its main conversation was at its last call, the model's context window (or the cap Hatchabot set), how full that is, and the median and 90th-percentile context per call.
+- **Settings → Telegram → Use only my own bots:** a tick per person. Their agents then never take a shared house bot; the ready counts follow the choice.
+- **Console:** opening an agent's console shows the panel at once, with a spinner until the console has loaded. The server reads behind it took seconds on a cold start and showed nothing meanwhile.
+- **Download copy / Move to another Hatchabot:** the file now carries the agent's repos with their deploy keys, and its folders as declarations. A folder comes back only on a machine that has the same path and may share it; the rest are named in the import's log. A move to another Hatchabot checks every folder in its preflight, not only the legacy ones.
+
+### Fixed
+- **Home screen:** a browser that blocks site storage (a private window, cookies blocked for the site) showed "Loading your agents…" for ever. Every storage read and write is guarded now.
+- **Telegram:** two clicks on Add Telegram at once answered the second with a server error (500); it is a plain refusal now, and one bot is attached. A spare pool bot's token pasted while an agent waits for a bot is refused, as it is when adding Telegram later; before, the pool leased the same bot to the next agent, which then failed.
+- **Folders on runners:** a folder is a bind mount of this machine's disk, which a runner cannot see. It was accepted for an agent on a runner and never mounted, while the agent was told it had the data. Adding one to such an agent is refused, moving an agent that has folders to a runner is refused, and Test says so for existing ones.
+- **Delete after Download copy:** deleting a stopped agent whose copy had been downloaded parked its bot in this machine's pool, so the next agent leased the bot the copy talks on. The bot is left alone now (`?recycleBot=1` parks it anyway); starting the source again makes it an ordinary agent.
+- **Budgets:**
+  - A "pause" budget reaching its limit on an agent the owner had stopped by hand said "it is paused … start it in the app (it then runs on until the 1st)" but recorded nothing, so Start was paused again on the next pass in silence. The pause is recorded now, and Start is the owner's take-over as promised.
+  - A "cheaper model" switch was counted as made when the runtime was busy, mid-move or waiting for a rebuild, so the agent kept spending on the dearer model while the owner was told it had moved. Only a switch the runtime took counts.
+  - An archived agent's budget is neither marked nor told about (its page hides it).
+  - "Saved by cheaper models … this month" used UTC's month; it uses the machine's, as every other "this month" does.
+- **Usage:**
+  - A transcript read that skipped rows it could not decode was stored as a counter reading, smaller than the truth, so the next whole read counted the skipped rows as fresh use. Such a read keeps the profile but writes no total.
+  - "Conversation size now" on an agent's Usage tab is its main conversation's last call, not the newest call of any scheduled run or sub-agent.
+- **Import:** an import whose first build failed after the volume was made left the volume behind as an orphan. The rollback destroys it.
+- **Console attachments:** a body type other than JSON or raw bytes (the Control UI sends attachments as multipart) was refused with 415 before the console proxy saw it. The proxy takes any body type; every other route keeps its 415.
+- **Distill** (a child agent's proposal to its master) ran with the 60-second command timeout, so a write-up over a minute was killed and reported as "no usable distillation"; it has the same time as an ask, and is held like a consult.
+- **API:** a number where a string belongs (an agent class's name or model, an image rebuild's base, a CLI token's label) answered a server error; it is a 400 now.
+- **Container name:** an agent with a long name on a runner with a long name got a hostname over Linux's 64 bytes and could not start.
+- **Install:** when the bundle install fell back to the native install, a failed checkout or package install in the fallback was ignored (bash turns `set -e` off inside an `||` list).
+- **Doctor:** the fix for "a newer tag is sitting there unused" is `hatchabot upgrade <tag>`, which keeps the channel, takes the upgrade lock and rolls back on failure, not a bare checkout.
+- **Copy buttons:** three copy buttons (an OAuth redirect address, a section's names, a report) did nothing on a plain-http address; they go through the same copy helper as the rest.
+
+For maintainers:
+- A full audit (docs/audit-2026-10-23.md) by eight parallel reviewers: 77 findings, 26 fixed in this release, the rest listed as a backlog with what each would take.
+- `test/audit2026-10-23.test.ts` holds one test per fix.
+
 ## [2.164.3] — 2026-10-22
 
 ### Fixed

@@ -2549,6 +2549,106 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** the release after `v2.164.1` (the failure names the token it used).
 - **Code:** `scripts/privacy-check.mjs` (`secretsTokenEnv`, `syncCi`)
 
+## Audit fixes in v2.165.0
+
+### "Could not store the previous draft in browser storage. It remains available in this tab." in an agent's console
+- **Check:** the line appears in the console (OpenClaw's own chat page inside Hatchabot) after attaching a file, or a large paste, to a message; the message still sends.
+- **Cause:** OpenClaw's console keeps an unsent draft, attachments included, in the browser's storage so a reload brings it back. A draft larger than the browser allows (big images, several files), or a browser that blocks site storage, cannot be kept there. It is OpenClaw's message, not Hatchabot's.
+- **Fix:** none needed to send: the draft stays in the tab until you send it. Keep attachments under a few megabytes, or put a big file in the agent's **Files** tab (⬆ Upload…) and tell the agent its path. A browser in a private window or with site data blocked shows it for every draft.
+- **Fixed in:** not a Hatchabot defect; noted since `v2.165.0`.
+- **Code:** OpenClaw's Control UI; Hatchabot's part is the proxy in `src/api/routes.ts` (the `/v1/agents/:id/ui/*` route).
+
+### The home screen says "Loading your agents…" for ever in one browser
+- **Check:** the same sign-in works in another browser or window; the stuck one is a private window, or has cookies and site data blocked for the site, and the console (F12) shows a `SecurityError` on `localStorage`.
+- **Cause:** the page read the remembered sign-in email from browser storage while drawing the home screen, with no guard; a browser that refuses storage threw, and the grid was never drawn.
+- **Fix:** upgrade. Every storage read and write is guarded; the page draws without storage (it only forgets per-device conveniences such as the console tabs).
+- **Fixed in:** `v2.165.0`
+- **Code:** `web/index.html` — `v2RenderWho`, `renderV2`
+
+### Add Telegram answered "Something went wrong" (a 500) on a double click
+- **Check:** the agent's timeline shows one `channel.attached`; the second request's reply was a server error; the agent has one bot and works.
+- **Cause:** the Telegram attach route ran outside the agent's lifecycle lock; the second click passed the "already has a bot" check and its insert threw as a server error.
+- **Fix:** upgrade; nothing to repair. The second attach is refused in words now, as the Discord and Slack attach is.
+- **Fixed in:** `v2.165.0`
+- **Code:** `src/api/routes.ts` — the `/v1/agents/:id/telegram` route, `whileBusy`
+
+### A new agent fails with "@bot already belongs to …" after a token was pasted for an earlier one
+- **Check:** the token pasted for the earlier agent (while it waited for a bot) was a spare bot's, listed under Settings → Telegram → Bot pool; that bot now shows in use by the earlier agent, and the later agent failed to start on it.
+- **Cause:** the create-flow token paste did not refuse a pool bot's token; the pool row stayed unleased, so the pool leased the same bot to the next agent.
+- **Fix:** delete the failed agent (its lease goes back) and make it again; the earlier agent keeps the bot. Since the fix the paste is refused: "a spare bot in the pool".
+- **Fixed in:** `v2.165.0`
+- **Code:** `src/api/routes.ts` — the `/v1/agents/:id/channel-token` route
+
+### An agent on a runner says it has a folder it cannot see
+- **Check:** the agent runs on a runner (its tile says so); Settings → Data lists a folder; Test on it answers "runs on another machine … not mounted there"; the agent answers from nothing when asked about the folder.
+- **Cause:** a folder is a bind mount of this machine's disk, which a runner's docker cannot see. The mount was skipped there in silence while the agent's AGENTS.md said it had the data.
+- **Fix:** remove the folder from its Data tab (or move the agent to this machine). Since the fix a folder cannot be added to an agent on a runner, and an agent with folders cannot be moved to one (the move says which folders).
+- **Fixed in:** `v2.165.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/data-sources'`, `folders_stay_here`; `src/providers/localDockerProvider.ts` — the `hostMounts` skip for a remote daemon
+
+### A moved or restored agent lost its repos and folders
+- **Check:** the agent came from Download copy / Restore or Move to another Hatchabot before v2.165.0; its Data tab is empty; its AGENTS.md says "Data sources: None"; a clone is still on its volume under `~/.openclaw/<repo>` (Files → .openclaw).
+- **Cause:** the export carried only the legacy shared folders; the Data tab's repos and folders were not in the file, and the clone's deploy key stayed on the volume untracked.
+- **Fix:** add the repo again (Settings → Data → Add a repo; a new deploy key: add it on the git host, press Test, Rebuild) and delete the old key on the git host. Since the fix the file carries repos with their keys and folders as declarations.
+- **Fixed in:** `v2.165.0`
+- **Code:** `src/orchestrator/transfer.ts` — `ExportedDataSource`, `exportAgent`, `importAgent`; `src/orchestrator/migrate.ts` — the preflight's `sharedPaths`
+
+### After Download copy, the deleted source's bot answered for a new agent here
+- **Check:** the agent was downloaded (or moved by file), the copy runs elsewhere, the stopped source was deleted here, and a new agent made here took the same @bot from the pool; messages flip-flop between the two.
+- **Cause:** deleting the source parked its bot in this machine's pool by default, as any delete does; the copy was still talking on it.
+- **Fix:** on the new agent here, Settings → Telegram → Change bot; then remove the parked bot from the pool. Since the fix, deleting a stopped agent whose copy was downloaded leaves the bot alone (`?recycleBot=1` on the delete parks it on purpose).
+- **Fixed in:** `v2.165.0`
+- **Code:** `src/api/routes.ts` — the `'/v1/agents/:id'` delete route, `bot.not_parked`; `src/store/store.ts` — `setAgentExportedAt`
+
+### A "pause" budget said the agent is paused, Start ran it, and it was stopped again minutes later in silence
+- **Check:** the agent was already stopped by hand when the budget reached 100%; the message said "start it in the app (it then runs on until the 1st)"; after Start, the next budget pass stopped it with no message; Settings → Budgets shows no pause for the month before the fix.
+- **Cause:** with nothing running to pause, the pass recorded no pause, so Start had nothing to mark as the owner's take-over.
+- **Fix:** upgrade, then Start it again (the pass records the pause for a stopped agent now; Start is the take-over). Or raise the budget.
+- **Fixed in:** `v2.165.0`
+- **Code:** `src/orchestrator/budgets.ts` — `runBudgets` (the stopped-agent branch under `atLimit === 'pause'`)
+
+### A "cheaper model" budget said the agent moved, but it still runs on its own model
+- **Check:** the budget message named the cheaper model; the agent's AI tab shows its own model; its timeline has `model.apply_deferred` or a source switch waiting for a rebuild around the time of the message.
+- **Cause:** the switch was counted as made when the runtime was busy, mid-move, failed, or waiting for a rebuild after a source switch; nothing reached the runtime.
+- **Fix:** upgrade; the next pass switches it (and says so) once the runtime takes it. A rebuild lands the model too.
+- **Fixed in:** `v2.165.0`
+- **Code:** `src/api/routes.ts` — the budget `downgrade` dependency, `applyModelToRuntime`
+
+### Usage jumped by an agent's whole history after a quiet period
+- **Check:** the agent's token chart shows a step the size of its lifetime use; the service log has `usage.sample_partial` for it just before (since the fix), or the agent's transcript database has rows that do not decode.
+- **Cause:** a read that skipped rows it could not decode was stored as a counter reading, smaller than the truth; the next whole read counted the skipped rows as fresh use.
+- **Fix:** upgrade. A partial read keeps the agent's profile and health but writes no total; the first whole read after it continues from the last good total.
+- **Fixed in:** `v2.165.0`
+- **Code:** `src/orchestrator/usage.ts` — `partial`; `src/orchestrator/sourceUsage.ts` — `usage.sample_partial`
+
+### An import failed and a volume named after it stays in `docker volume ls` and the backup sets
+- **Check:** `docker volume ls` lists `<prefix>-<slug>-<id>-vol` for an agent that is not in the app; the import's operation shows it failed at its first build (seed or image).
+- **Cause:** the provider makes the volume before the build can fail, and the rollback destroyed only a runtime whose ref it already knew.
+- **Fix:** `docker volume rm <name>` for the leftover. Since the fix the rollback destroys the volume a failed first build made.
+- **Fixed in:** `v2.165.0`
+- **Code:** `src/orchestrator/transfer.ts` — `rollbackImport`; `src/providers/provider.ts` — `runtimeRefFor`
+
+### Attaching a file in an agent's console fails at once (415)
+- **Check:** the browser's network tab shows a `POST …/ui/api/chat/media/outgoing` answered `415 Unsupported Media Type` by Hatchabot (not by the agent's gateway).
+- **Cause:** the body was `multipart/form-data`, which Hatchabot's server refused before the console proxy saw it.
+- **Fix:** upgrade. The proxy takes any body type; every other route keeps its 415.
+- **Fixed in:** `v2.165.0`
+- **Code:** `src/api/routes.ts` — the `'*'` content type parser above the `/v1/agents/:id/ui/*` route
+
+### Distill says "The agent produced no usable distillation" though the agent was writing
+- **Check:** the agent's gateway log shows a turn of over a minute for the distill prompt that was cut off.
+- **Cause:** the distill ran with the 60-second command timeout, while an ask has 280 seconds.
+- **Fix:** upgrade and try again; it now has the ask's time and is held like a consult.
+- **Fixed in:** `v2.165.0`
+- **Code:** `src/api/routes.ts` — the `/v1/agents/:id/distill` route, `ASK_TIMEOUT_MS`
+
+### An agent with a long name on a runner with a long name never starts
+- **Check:** the runner's `docker logs` for the container, or the agent's timeline, says the container could not start with an invalid or too-long hostname.
+- **Cause:** the container's hostname is `<agent>.<host>`; two long names made it longer than Linux's 64 bytes.
+- **Fix:** upgrade and Rebuild (the hostname is cut to 63 bytes, the agent's part first). Or rename the agent shorter.
+- **Fixed in:** `v2.165.0`
+- **Code:** `src/orchestrator/provision.ts` — `containerHostname`
+
 ## Audit fixes in v2.164.2
 
 ### A web-chat guest could open owner-only parts of an agent's console (session history, downloads, metrics)
