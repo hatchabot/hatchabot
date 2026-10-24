@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Store } from '../src/store/store.js';
@@ -168,5 +168,13 @@ describe('public route classification', () => {
     const { readFileSync } = await import('node:fs');
     const doc = readFileSync(resolve(import.meta.dirname, '../docs/public-access.md'), 'utf8');
     for (const row of publicClassTable()) expect(doc, `${row.cls}: ${row.group}`).toContain(`| ${row.cls} | ${row.group} |`);
+  });
+});
+
+describe('web/join.html', () => {
+  it('every value written into the card goes through esc(), the channel label too (CodeQL js/xss-through-dom)', () => {
+    const html = readFileSync(resolve(import.meta.dirname, '../web/join.html'), 'utf8');
+    expect(html).not.toMatch(/\$\{label\}/);
+    expect(html.match(/\$\{esc\(label\)\}/g)?.length).toBeGreaterThanOrEqual(2);
   });
 });

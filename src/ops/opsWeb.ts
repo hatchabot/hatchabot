@@ -104,7 +104,8 @@ export function isPrivateAddress(ip: string): boolean {
 const strip = (html: string): string => html
   .replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ')
   .replace(/<[^>]+>/g, ' ')
-  .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+  // &amp; last: unescaped first, "&amp;lt;" read as "<" (CodeQL js/double-escaping, 2026-10-24).
+  .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
   .replace(/\s+/g, ' ').trim();
 
 export function makeOpsWeb(deps: OpsWebDeps) {

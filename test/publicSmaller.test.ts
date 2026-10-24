@@ -20,6 +20,26 @@ closeAfterEach();
 // ---- C. the smaller ones ---------------------------------------------------------
 
 describe('smaller fixes', () => {
+  it('POST /v1/join counts guesses at a code like the GET does: ten misses, then 429; a used code is not a guess; the right code from elsewhere still joins (CodeQL #79)', async () => {
+    const w = await world({}, { on: true });
+    w.h.store.insertAgent(agentRow('a1', w.owner.id, { state: 'STOPPED' }));
+    const used = createInvite(w.h.store, 'a1', w.owner.id).code;
+    w.h.store.rawDb().prepare(`UPDATE invites SET redeemed_at = 'now' WHERE code = ?`).run(used);
+    for (let i = 0; i < 15; i++) expect((await w.h.pub('/v1/join', { body: { code: used, channel: 'telegram' }, from: '198.51.100.30' })).status).toBe(400);
+    const statuses: number[] = [];
+    for (let i = 0; i < 12; i++) statuses.push((await w.h.pub('/v1/join', { body: { code: `GUESS${i}XYZ`, channel: 'telegram' }, from: '198.51.100.31' })).status);
+    expect(statuses).toEqual([...Array(10).fill(400), 429, 429]);
+    // The guesser's address is locked out of the code check, and nowhere else.
+    const code = createInvite(w.h.store, 'a1', w.owner.id).code;
+    expect((await w.h.pub(`/v1/invites/${code}`, { from: '198.51.100.31' })).status).toBe(429);
+    expect((await w.h.pub('/v1/login', { body: { username: 'owner', password: w.owner.password }, from: '198.51.100.31' })).status).toBe(200);
+    expect((await w.h.pub(`/v1/invites/${code}`, { from: '198.51.100.32' })).json.valid).toBe(true);
+    // The private listener has no other limiter, so it counts there too.
+    const priv: number[] = [];
+    for (let i = 0; i < 12; i++) priv.push((await w.h.app.inject({ method: 'POST', url: '/v1/join', payload: { code: `GUESS${i}XYZ`, channel: 'telegram' }, remoteAddress: '10.1.2.5' })).statusCode);
+    expect(priv).toEqual([...Array(10).fill(400), 429, 429]);
+  });
+
   it('guesses at an invitation code are counted: ten misses, then refused; a real link from elsewhere still opens; the password form is not locked by it', async () => {
     const w = await world({}, { on: true });
     w.h.store.insertAgent(agentRow('a1', w.owner.id, { state: 'STOPPED' }));

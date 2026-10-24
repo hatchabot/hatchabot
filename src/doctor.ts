@@ -3,6 +3,8 @@
 // `doctorReport` turns them into ✓/⚠/✗ lines — pure, so it's tested without
 // a machine.
 import { execFileSync } from 'node:child_process';
+import { request as httpsRequest } from 'node:https';
+import { rootCertificates } from 'node:tls';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -344,6 +346,47 @@ export function envMap(file: string): Record<string, string> {
   return m;
 }
 
+/**
+ * GET the app's home page and read its version marker. A LAN install's certificate is
+ * self-signed: the probe trusts the install's own certificate (`HATCHABOT_TLS_CERT`, the file
+ * the server serves) beside the system roots, and skips the hostname check only for loopback,
+ * where such a certificate often names no address. It never turns certificate checks off
+ * (NODE_TLS_REJECT_UNAUTHORIZED=0 did, process-wide; CodeQL js/disabling-certificate-validation,
+ * 2026-10-24): an https address with no certificate file is checked like any other.
+ */
+export async function probeControlPlane(url: string, certFile?: string): Promise<DoctorFacts['controlPlane']> {
+  const home = `${url.replace(/\/$/, '')}/`;
+  try {
+    if (!home.startsWith('https:')) {
+      const res = await fetch(home, { signal: AbortSignal.timeout(5000) });
+      return { url, ok: res.ok, version: versionMarker(await res.text()) };
+    }
+    const u = new URL(home);
+    const cert = certFile && existsSync(certFile) ? readFileSync(certFile) : undefined;
+    const loopback = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname);
+    const { status, body } = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = httpsRequest(u, {
+        method: 'GET',
+        timeout: 5000,
+        ...(cert ? { ca: [...rootCertificates, cert.toString()] } : {}),
+        ...(cert && loopback ? { checkServerIdentity: () => undefined } : {}),
+      }, (res) => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (c: string) => { if (text.length < 1_000_000) text += c; });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: text }));
+      });
+      req.on('timeout', () => req.destroy(new Error('timed out')));
+      req.on('error', reject);
+      req.end();
+    });
+    return { url, ok: status >= 200 && status < 300, version: versionMarker(body) };
+  } catch (err) {
+    return { url, ok: false, error: String((err as Error).cause ?? (err as Error).message).slice(0, 80) };
+  }
+}
+const versionMarker = (html: string) => /HATCHABOT_VERSION="([^"]+)"/.exec(html)?.[1];
+
 /** Probe this machine. `url` is where the control plane should answer. */
 export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
   let url = urlIn;
@@ -374,14 +417,7 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
   const service: DoctorFacts['service'] = process.platform === 'darwin'
     ? { manager: existsSync(join(homedir(), 'Library/LaunchAgents/com.hatchabot.control-plane.plist')) || existsSync(join(homedir(), 'Library/LaunchAgents/com.agentclaw.control-plane.plist')) ? 'launchd' : 'none', active: !!sh('launchctl', ['list', 'com.hatchabot.control-plane']) || !!sh('launchctl', ['list', 'com.agentclaw.control-plane']) }
     : sh('systemctl', ['--user', 'cat', 'hatchabot.service']) ? { manager: 'systemd', active: sh('systemctl', ['--user', 'is-active', 'hatchabot']) === 'active', enabled: sh('systemctl', ['--user', 'is-enabled', 'hatchabot']) === 'enabled', dockerDenied: serviceDockerDenied() } : { manager: 'none' };
-  let controlPlane: DoctorFacts['controlPlane'] = { url, ok: false };
-  try {
-    // Self-signed TLS is normal on a LAN install: verify the version marker, not the chain.
-    if (url.startsWith('https:')) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-    const res = await fetch(`${url.replace(/\/$/, '')}/`, { signal: AbortSignal.timeout(5000) });
-    const html = await res.text();
-    controlPlane = { url, ok: res.ok, version: /HATCHABOT_VERSION="([^"]+)"/.exec(html)?.[1] };
-  } catch (err) { controlPlane = { url, ok: false, error: String((err as Error).cause ?? (err as Error).message).slice(0, 80) }; }
+  const controlPlane = await probeControlPlane(url, env.HATCHABOT_TLS_CERT);
   const df = sh('df', ['-Pk', '.']); // -P: one line per filesystem on macOS too
   const diskFreeGb = df ? Number(df.split('\n').pop()!.split(/\s+/)[3]) / 1e6 : undefined;
   const bdir = process.env.HATCHABOT_BACKUP_DIR ?? env.HATCHABOT_BACKUP_DIR ?? defaultBackupsDir();

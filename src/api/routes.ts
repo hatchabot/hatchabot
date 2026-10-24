@@ -10244,9 +10244,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * warnings were frozen at connect time, so the card kept nagging after the
    * owner had fixed exactly that. No token is pasted, none is returned.
    */
+  const channelRechecks = new Set<string>();
   app.post<{ Params: { id: string; kind: string } }>('/v1/agents/:id/channels/:kind/recheck', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
+    // One re-check per agent at a time: each is an outbound call to the platform with the stored token,
+    // and nothing else bounded how often (CodeQL js/missing-rate-limiting #74, 2026-10-24).
+    if (channelRechecks.has(agent.id)) return reply.code(409).send({ error: 'This agent is being re-checked already — wait for it.' });
+    channelRechecks.add(agent.id);
+    try {
+    return await (async () => {
     if (req.params.kind === 'telegram') {
       // Telegram's check is getMe: the bot answers, what it is called, and
       // whether BotFather lets it into groups and lets it read them — the
@@ -10305,6 +10312,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     });
     trace(agent.id)('channel.rechecked', { kind: conn.kind, warnings: verified.warnings.length });
     return { ...publicChannel(store.getChannelForAgent(agent.id, conn.kind)!), placesChanged };
+    })();
+    } finally { channelRechecks.delete(agent.id); }
   });
 
   app.patch<{ Params: { id: string; kind: string }; Body: { rooms?: { mode?: string; roomId?: string } } }>('/v1/agents/:id/channels/:kind', async (req, reply) => {
@@ -10969,12 +10978,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return accessOverview(store, agent);
   });
   /** Verify now: look inside the running agent (no side effects) and record what is there. */
+  const accessVerifies = new Set<string>();
   app.post<{ Params: { id: string } }>('/v1/agents/:id/access/verify', async (req, reply) => {
     const agent = accessAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
-    const result = await verifyAgentAccess(connSyncDeps(agent.hostId), agent.id);
-    trace(agent.id)('access.verified', result.status === 'checked' ? { checked: result.checked } : { notCheckable: result.reason });
-    return { result, access: accessOverview(store, store.getAgent(agent.id) ?? agent) };
+    // One verification per agent at a time: each runs commands in the agent's container,
+    // and nothing else bounded how often (CodeQL js/missing-rate-limiting #78, 2026-10-24).
+    if (accessVerifies.has(agent.id)) return reply.code(409).send({ error: 'This agent\'s access is being verified already — wait for it.' });
+    accessVerifies.add(agent.id);
+    try {
+      const result = await verifyAgentAccess(connSyncDeps(agent.hostId), agent.id);
+      trace(agent.id)('access.verified', result.status === 'checked' ? { checked: result.checked } : { notCheckable: result.reason });
+      return { result, access: accessOverview(store, store.getAgent(agent.id) ?? agent) };
+    } finally { accessVerifies.delete(agent.id); }
   });
 
   // ---- read-only inspection (archived / stopped agents) -------------------
@@ -12155,7 +12171,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (busyNow(agent, reply)) return reply;
       const toEmail = (req.body as { toEmail?: string } | null)?.toEmail?.trim();
       const message = (req.body as { message?: string } | null)?.message?.trim();
-      if (!toEmail || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(toEmail)) {
+      // Capped before the regex: on a 1 MiB non-address the pattern backtracked for seconds (CodeQL js/polynomial-redos, 2026-10-24).
+      if (!toEmail || toEmail.length > 254 || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(toEmail)) {
         return reply.code(400).send({ error: 'A valid recipient email is required.' });
       }
       // Shares bind to the recipient by EMAIL on their sign-in. In password
@@ -13107,7 +13124,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Body: { code?: string; name?: string; idToken?: string; channel?: string } }>('/v1/join', async (req, reply) => {
     const body = (req.body ?? {}) as { code?: string; name?: string; idToken?: string; channel?: string };
     if (!body.code) return reply.code(400).send({ error: 'code required' });
+    // Guesses are counted here as on GET /v1/invites/:code: this route answered any number of them, and
+    // on the private listener nothing else limits it (CodeQL js/missing-rate-limiting #79, 2026-10-24).
+    const guard = app.publicAccess?.throttle;
+    if (guard?.throttled(req, undefined, 'link')) return reply.code(429).send({ error: 'Too many attempts — try again later.' });
     const pre = checkInvite(store, body.code);
+    if (!pre.valid && pre.reason === 'unknown') guard?.noteFailure(req, undefined, 'link');
     // A link minted for the management agent before it was refused (2026-09-30).
     if (pre.valid && store.getAgent(pre.agentId)?.ops) return reply.code(400).send({ error: 'This invite is no longer valid.' });
     if (pre.valid && pre.webChat) return joinForWebChat(req, reply, body);

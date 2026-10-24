@@ -289,7 +289,6 @@ installed source and docs to diagnose problems.
 - `src/ops/opsWeb.ts` — `makeOpsWeb`, `OPS_WEB_TOOLS`: web search done by Hatchabot for the jailed manager.
 - `src/ops/push.ts` — `createOpsPush`: Telegram messages to the owner when a card waits.
 - `src/ops/notify.ts` — `createOpsNotifier`: posts outcomes back into the manager's conversation.
-- `src/mgmt/mcpServer.mjs` — `HATCHABOT_TURN_TOKEN`: the same tools as an MCP server for the Claude CLI.
 - `src/openclaw/configWriter.ts` — `OPS_TOOLS_ALLOW`, `OPS_TOOLS_DENY`: the manager's OpenClaw tool lockdown.
 - `src/api/routes.ts` — `'/v1/ops-agent'`, `'/v1/ops-agent/suggest'`, `opsPeerOk`, `runOpsTurn`: creating the manager and asking it things.
 - `src/store/store.ts` — `mgmt_proposals`, `ops_tokens`: cards and door keys.

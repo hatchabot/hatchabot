@@ -5124,7 +5124,7 @@ try {
     if (keep) writeFileSync(join(work, `dom-${label}.html`), dom);
     const m = /data-ui-results="([^"]*)"/.exec(dom);
     if (!m) throw new Error(`the page never reported (no data-ui-results in the ${label} DOM dump${keep ? `; see ${work}/dom-${label}.html` : '; run with --keep'})`);
-    const results = JSON.parse(m[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'));
+    const results = JSON.parse(m[1].replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')); // &amp; last: an unescape in the other order turns "&amp;lt;" into "<" (CodeQL js/double-escaping)
     const done = /data-ui-done="(\d+)"/.exec(dom);
     const running = /data-ui-running="([^"]*)"/.exec(dom);
     if (!done) { failed++; total++; console.log(`✗ ${running?.[1] ?? '(unknown)'}${label === 'phone' ? ' (phone)' : ''} — the page ran out of virtual time on it (${results.length} scenarios reported before it)`); }

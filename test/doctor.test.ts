@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { doctorReport, type DoctorFacts } from '../src/doctor.js';
+import { doctorReport, probeControlPlane, type DoctorFacts } from '../src/doctor.js';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createServer } from 'node:https';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, beforeAll } from 'vitest';
 
 const healthy: DoctorFacts = {
   nodeVersion: 'v22.22.2', dockerCli: true, dockerDaemon: { ok: true, arch: 'arm64', version: '27.1' },
@@ -83,5 +89,38 @@ describe('doctor and Tailscale on a Mac (2026-09-22)', () => {
     const t = lines.find((l) => /Tailscale app found/.test(l.text));
     expect(t?.level).toBe('warn');
     expect(t?.fix).toMatch(/sign in/);
+  });
+});
+
+/** A self-signed certificate made here, for this run only (never a fixture: a private key in the tree would be a secret). */
+function selfSigned(dir: string, name: string, san: string) {
+  const key = join(dir, `${name}.key`); const cert = join(dir, `${name}.crt`);
+  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-keyout', key, '-out', cert, '-subj', '/CN=hatchabot-test', '-addext', `subjectAltName=${san}`], { stdio: 'ignore' });
+  return { key: readFileSync(key), cert: readFileSync(cert), certPath: cert };
+}
+const haveOpenssl = (() => { try { execFileSync('openssl', ['version'], { stdio: 'ignore' }); return true; } catch { return false; } })();
+
+describe.skipIf(!haveOpenssl)('hatchabot doctor probes a TLS install without turning certificate checks off', () => {
+  let dir: string; let close: () => void; let url: string; let own: ReturnType<typeof selfSigned>; let other: ReturnType<typeof selfSigned>;
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hb-doctor-tls-'));
+    own = selfSigned(dir, 'own', 'IP:127.0.0.1,DNS:localhost');
+    other = selfSigned(dir, 'other', 'IP:127.0.0.1');
+    const server = createServer({ key: own.key, cert: own.cert }, (_req, res) => { res.end('<html><script>HATCHABOT_VERSION="9.9.9"</script></html>'); });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    url = `https://127.0.0.1:${(server.address() as { port: number }).port}`;
+    close = () => server.close();
+  });
+  afterAll(() => { close?.(); rmSync(dir, { recursive: true, force: true }); });
+
+  it("trusts the install's own certificate file and reads the version; the process keeps checking certificates", async () => {
+    const before = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    expect(await probeControlPlane(url, own.certPath)).toEqual({ url, ok: true, version: '9.9.9' });
+    expect(process.env.NODE_TLS_REJECT_UNAUTHORIZED).toBe(before);
+  });
+  it('another certificate, or none, is not trusted: the probe fails closed', async () => {
+    expect(await probeControlPlane(url, other.certPath)).toMatchObject({ url, ok: false, error: expect.stringMatching(/self.signed|certificate|unable to verify/i) });
+    expect(await probeControlPlane(url, undefined)).toMatchObject({ url, ok: false });
+    expect(await probeControlPlane(url, join(dir, 'missing.crt'))).toMatchObject({ url, ok: false });
   });
 });

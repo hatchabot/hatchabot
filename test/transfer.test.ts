@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { gzipSync, gunzipSync } from 'node:zlib';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { exportAgent, importAgent, peekFormat, TransferError } from '../src/orchestrator/transfer.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
@@ -543,5 +546,29 @@ describe('issue #20: an archive import checks the version the right way round', 
   ])('%s: accepted, as moveCrossesDown says', async (_name, archive, runtime) => {
     const { result } = await importOnto(await archiveFrom(archive), runtime);
     expect((await result).state).toBe('RUNNING');
+  });
+});
+
+describe("a bundle's folders come back only for the machine's owner (2026-10-24)", () => {
+  it('a member importing a file that names a folder on this machine gets the agent without it; the owner gets the folder', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-transfer-folder-'));
+    try {
+      const src = await installation();
+      await seedSourceAgent(src);
+      src.store.insertDataSource({ id: 'd1', agentId: 'a1', kind: 'folder', access: 'rw', mountName: 'notes', hostPath: dir, createdAt: 'now' });
+      const { data } = await exportAgent(src.deps, 'a1');
+      // Only the owner may share a host folder (the data-sources routes refuse everyone else); an
+      // import bundle is unsigned, so a member's manifest could name any folder here.
+      const member = await installation('owner-b');   // the machine is owner-b's; member-c imports with an AI source of their own
+      member.store.insertAIProfile({ id: 'p2', ownerId: 'member-c', name: 'Claude', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p2', createdAt: 'now' });
+      await member.secrets.put('ai/p2', 'sk-test-2');
+      const events: string[] = [];
+      const m = await importAgent({ ...member.deps, log: (e: string) => { events.push(e); } }, data, { ownerId: 'member-c' });
+      expect(member.store.listDataSources(m.id).filter((d) => d.kind === 'folder')).toEqual([]);
+      expect(events).toContain('import.folders_not_here');
+      const own = await installation('owner-b');
+      const o = await importAgent(own.deps, data, { ownerId: 'owner-b' });
+      expect(own.store.listDataSources(o.id).filter((d) => d.kind === 'folder').map((d) => [d.hostPath, d.access])).toEqual([[dir, 'rw']]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

@@ -31,6 +31,7 @@ function fakeConnector(kind: 'slack' | 'discord', firstAccount = kind === 'slack
       return { ok: true, name };
     },
     async verify(c) {
+      if (verifyHold) await verifyHold;   // a test holds the platform's answer to overlap two calls
       let accountId = firstAccount;
       if (c.token !== 'ok-good' && c.token !== 'ok-spare') throw new ConnectorError('The platform refused it.');
       // A second bot of the same app: its own account id (a swap onto it has to work).
@@ -48,6 +49,7 @@ function fakeConnector(kind: 'slack' | 'discord', firstAccount = kind === 'slack
   };
 }
 const verifyCalls: string[] = [];
+let verifyHold: Promise<void> | undefined;
 const renameCalls: Array<[string, string, string]> = [];
 
 async function setup(opts: { imageChannels?: string[] } = {}) {
@@ -140,6 +142,24 @@ describe('adding Slack or Discord', () => {
 });
 
 describe('checking again, and who it answers', () => {
+  it('one re-check per agent at a time: a second while the platform is still answering is 409, and the next one after runs (CodeQL #74)', async () => {
+    const { inject, add } = await setup();
+    const id = add();
+    expect([200, 202]).toContain((await inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' })).statusCode);
+    let release!: () => void;
+    verifyHold = new Promise<void>((r) => { release = r; });
+    try {
+      const first = inject('POST', `/v1/agents/${id}/channels/discord/recheck`);
+      await new Promise((r) => setTimeout(r, 20));   // the first is inside the platform call
+      const second = await inject('POST', `/v1/agents/${id}/channels/discord/recheck`);
+      expect(second.statusCode).toBe(409);
+      expect(second.json().error).toMatch(/re-checked already/);
+      release();
+      expect((await first).statusCode).toBe(200);
+    } finally { verifyHold = undefined; release(); }
+    expect((await inject('POST', `/v1/agents/${id}/channels/discord/recheck`)).statusCode).toBe(200);
+  });
+
   it('re-check asks the platform again from the stored token: servers and warnings refresh, nothing is pasted or returned', async () => {
     const { inject, add, secrets, store } = await setup();
     const id = add();

@@ -747,8 +747,10 @@ async function importAgentInner(
   try {
     // Its data sources come back before the spec is built (the repos are cloned
     // by the seed, the folders mounted). A folder only when the same path is here
-    // and safe to share — a different machine's path is not quietly mounted.
-    const hostLocal = host.kind === 'local';
+    // and safe to share — a different machine's path is not quietly mounted. And only for the
+    // machine's owner: the data-sources routes let nobody else name a host folder, and an import
+    // bundle is unsigned, so a member's manifest could have named any folder here (2026-10-24).
+    const hostLocal = host.kind === 'local' && host.ownerId === opts.ownerId;
     const skippedFolders: string[] = [];
     for (const d of manifest.agent.dataSources ?? []) {
       if (store.listDataSources(agent.id).some((x) => x.mountName === d.mountName)) continue;

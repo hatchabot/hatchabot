@@ -215,7 +215,9 @@ export async function quiesceOpenclawBots(
   // not leave earlier bots disabled-in-config with no gateway restart — the
   // silent split-poll state this whole module exists to prevent.
   for (const id of accountIds) {
-    if (!accounts[id]) throw new Error(`No Telegram account "${id}" in the OpenClaw config.`);
+    // Own keys only: "__proto__" or "constructor" would pass a truthiness check and the write below
+    // would land on Object.prototype (CodeQL js/prototype-polluting-assignment, 2026-10-24).
+    if (!Object.hasOwn(accounts, id) || !accounts[id]) throw new Error(`No Telegram account "${id}" in the OpenClaw config.`);
   }
 
   // One backup, one atomic write for the whole batch.

@@ -141,6 +141,16 @@ describe('disableOpenclawBot', () => {
 });
 
 describe('quiesceOpenclawBots', () => {
+  it('an id that is not an account of its own ("__proto__") is refused up front, and Object.prototype is untouched', async () => {
+    const cfg = join(root, 'quiesce-proto.json');
+    writeConfig(cfg);
+    let restarts = 0;
+    for (const id of ['__proto__', 'constructor', 'toString'])
+      await expect(quiesceOpenclawBots([id], { configPath: cfg, settleMs: 0, restart: async () => { restarts++; } }), id).rejects.toThrow(/No Telegram account/);
+    expect(restarts).toBe(0);
+    expect(({} as { enabled?: unknown }).enabled).toBeUndefined();
+  });
+
   it('disables each bot, restarts once, and reports which went quiet', async () => {
     const cfg = join(root, 'quiesce.json');
     writeConfig(cfg);

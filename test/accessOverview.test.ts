@@ -500,6 +500,22 @@ describe('the routes: scoping, no secrets, Alerts', () => {
     expect(all.agents.find((a: { agentId: string }) => a.agentId === 'b1').ownerId).toBe(OTHER);
   });
 
+  it('one verification per agent at a time: a second while the first runs in the container is 409; afterwards it runs (CodeQL #78)', async () => {
+    const w = await world();
+    const exec = w.provider.execShell.bind(w.provider);
+    let release!: () => void;
+    const hold = new Promise<void>((r) => { release = r; });
+    w.provider.execShell = async (ref: string, script: string) => { await hold; return exec(ref, script); };
+    const first = w.f.inject({ method: 'POST', url: '/v1/agents/a1/access/verify', headers: H });
+    await new Promise((r) => setTimeout(r, 20));
+    const second = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/access/verify', headers: H });
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error).toMatch(/verified already/);
+    release();
+    expect((await first).statusCode).toBe(200);
+    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/access/verify', headers: H })).statusCode).toBe(200);
+  });
+
   it('Verify now answers the result and the overview, and nothing secret leaves', async () => {
     const w = await world();
     w.inside.channels.telegram!.accounts.TestAgentBot!.h = hash16('another-value');

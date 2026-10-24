@@ -140,10 +140,10 @@ async function join(idToken) {
       <ol class="steps">
         ${chosen === 'slack' ? `<li>You need to be in the <b>${esc(w.team || 'same')}</b> Slack workspace.</li>`
           : `<li>You need to share a server with it${w.servers?.length ? `: join <b>${esc(w.servers.join(', '))}</b> first if you haven't` : ''}.</li>`}
-        <li>Open <b>${esc(data.agentName)}</b> in ${label} below and send it a direct message — that links you to the agent.</li>
+        <li>Open <b>${esc(data.agentName)}</b> in ${esc(label)} below and send it a direct message — that links you to the agent.</li>
         <li>Give it a few seconds, then just chat.</li>
       </ol>
-      ${/^https:\/\//i.test(data.deepLink || '') /* https only: never a javascript: link (review, 2026-10-09) */ ? `<a class="btn" href="${esc(data.deepLink)}" target="_blank" rel="noopener">Open in ${label}</a>`
+      ${/^https:\/\//i.test(data.deepLink || '') /* https only: never a javascript: link (review, 2026-10-09) */ ? `<a class="btn" href="${esc(data.deepLink)}" target="_blank" rel="noopener">Open in ${esc(label)}</a>`
         : `<div class="notice">The agent isn't running right now — ask the owner to start it, then message it.</div>`}`;
       return;
     }

@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.166.2] — 2026-10-24
+
+### Security
+- **Importing a copy:** a bundle's folder data sources were re-attached on the local machine for whoever imported it, where sharing a host folder is otherwise the machine owner's alone (an import file is unsigned, so a member's file could have named any folder). Folders now come back only when the importer owns the machine; others are listed in the import's log as before.
+- **Invites:** `POST /v1/join` now counts guesses at an invitation code as the lookup route already did (ten misses, then refused for a while); on the private listener nothing else limited it.
+- **Bot tokens:** a pasted Telegram token must have a token's shape before it is used in the request to Telegram; one with a slash or a question mark could address another method of Telegram's API with that token (never another host).
+- **`hatchabot doctor`** probed a TLS install with certificate checks turned off process-wide. It now trusts the install's own certificate file beside the system roots and otherwise checks like any client.
+- **Re-check and Verify now** run once per agent at a time (a second call while one runs gets 409): each call asks the platform with the stored token, or runs commands in the agent's container, and nothing bounded how often.
+- **Smaller hardenings from the public repo's code scan (CodeQL):** the quiesce step of Bring in from OpenClaw refuses an account id that is not an account of its own (`__proto__`); the recipient address of a share is capped at 254 characters before the pattern check (a 1 MB non-address stalled the server); the management assistant's web reader unescapes HTML entities once; the join page escapes the channel label too; the retired management MCP server file is removed.
+
 ## [2.166.1] — 2026-10-24
 
 ### Security

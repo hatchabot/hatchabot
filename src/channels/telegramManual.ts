@@ -83,11 +83,18 @@ export class TelegramManualProvisioner implements ChannelProvisioner {
   }
 }
 
+/** The shape of a BotFather token: an id, a colon, URL-safe characters. Nothing else may reach the URL. */
+const BOT_TOKEN_SHAPE = /^\d+:[A-Za-z0-9_-]+$/;
+
 /** Confirms the token works and returns the bot's username. */
 export async function verifyBotToken(
   botToken: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<string> {
+  // The token is pasted by a person and becomes part of the request's path: one with a
+  // slash, a question mark or a dot could call another method of Telegram's API with that
+  // same token (never another host; CodeQL js/request-forgery, 2026-10-24). Refused up front.
+  if (!BOT_TOKEN_SHAPE.test(botToken)) throw new InvalidBotTokenError('not the shape of a bot token');
   const res = await fetchImpl(`https://api.telegram.org/bot${botToken}/getMe`);
   // A Telegram outage / proxy can answer with an HTML error page, not JSON —
   // res.json() then throws a raw TypeError that surfaced as an opaque 500.

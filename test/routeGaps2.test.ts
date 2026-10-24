@@ -461,6 +461,12 @@ describe('sending an agent to someone\'s inbox', () => {
     const noAddr = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/send`, headers: as(), payload: { toEmail: 'not-an-address' } });
     expect(noAddr.statusCode).toBe(400);
     expect(noAddr.json().error).toMatch(/recipient email/);
+    // A long non-address is refused before the regex sees it: the pattern was O(n²) on it (CodeQL js/polynomial-redos).
+    const t0 = Date.now();
+    const long = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/send`, headers: as(), payload: { toEmail: 'a@' + '!.'.repeat(100_000) + '@' } });
+    expect(long.statusCode).toBe(400);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/send`, headers: as(), payload: { toEmail: 'a'.repeat(250) + '@b.co' } })).statusCode).toBe(400);
     const pw = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/send`, headers: as(), payload: { toEmail: 'bob@example.com' } });
     expect(pw.statusCode).toBe(400);
     expect(pw.json().error).toMatch(/identity/);

@@ -398,9 +398,11 @@ table), so "why did it rebuild at 3am" is answerable:
 On a Claude subscription the web chat's model runs through the `claude` CLI.
 It used to call tools through a text protocol ("reply with only a JSON
 object"), which dropped calls the model wrapped in prose and needed a round
-trip per step. Now the CLI is given the assistant's tools as an **MCP server**
-(`src/mgmt/mcpServer.mjs`) and runs its own multi-step loop with real tool
-use.
+trip per step. Now the CLI is given the assistant's tools as an **MCP server** and runs
+its own multi-step loop with real tool use. (The server, `src/mgmt/mcpServer.mjs`,
+went with the built-in management chat it served, retired in v2.2.0; the file
+itself was removed in 2026-10 once a code scan flagged its loopback-only TLS
+toggle. What follows describes how it worked.)
 
 - The MCP server holds no authority. Every call goes to
   `POST /v1/mgmt/mcp` with a **one-turn token**: random, held only while that

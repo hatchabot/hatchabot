@@ -36,6 +36,13 @@ describe('web_search / read_result', () => {
     expect(r.text).not.toContain('x()');
   });
 
+  it('entities are unescaped once: "&amp;lt;" reads as "&lt;", not "<" (CodeQL js/double-escaping)', async () => {
+    const { opsWeb } = web({ [SEARCH]: results(['https://docs.example.com/e']), 'https://docs.example.com/e': () => page('<p>a &amp;lt;b&amp;gt; c, x &amp; y, &quot;q&quot;</p>') });
+    await opsWeb('o', 'web_search', { query: 'entities' });
+    const r = await opsWeb('o', 'read_result', { n: 1 });
+    expect(r.text).toContain('a &lt;b&gt; c, x & y, "q"');
+  });
+
   it('without a Brave key, DuckDuckGo: each result keeps its own snippet, and one with none gets none (audit, 2026-10-22)', async () => {
     const ddg = [
       '<div class="result"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.example.com%2Fa&amp;rut=x">First <b>page</b></a>',

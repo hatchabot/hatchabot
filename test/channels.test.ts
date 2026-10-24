@@ -25,6 +25,15 @@ class MemSecrets implements SecretStore {
 const REQ = { agentId: 'a1', agentName: 'Kitchen', slug: 'kitchen' };
 
 describe('verifyBotToken', () => {
+  it('a pasted value that is not the shape of a token never reaches Telegram: it could steer the request path', async () => {
+    // The token is part of the URL path (https://api.telegram.org/bot<token>/getMe): a slash,
+    // a dot or a query would address another API method with it (CodeQL js/request-forgery).
+    let calls = 0;
+    const spy = (async () => { calls++; return new Response('{}'); }) as unknown as typeof fetch;
+    for (const bad of ['123:abc/../../botOTHER/getUpdates', '123:abc?x=1', '123:abc#f', '123:a.b', 'abc', '123:', '123:abc def', 'https://evil.example/'])
+      await expect(verifyBotToken(bad, spy), bad).rejects.toBeInstanceOf(InvalidBotTokenError);
+    expect(calls).toBe(0);
+  });
   const ok = (username: string): typeof fetch =>
     (async () => new Response(JSON.stringify({ ok: true, result: { username } }),
       { headers: { 'content-type': 'application/json' } })) as any;
