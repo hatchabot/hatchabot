@@ -140,10 +140,20 @@ else
   if [ "${ST%% *}" != completed ]; then
     [ "$WAIT" = 1 ] || die "CI for ${SHA:0:9} is still running: https://github.com/$REPO/actions/runs/$ID — release once it has passed."
     say "CI for ${SHA:0:9} is still running — waiting for it…"
-    gh run watch "$ID" --repo "$REPO" --exit-status >/dev/null 2>&1 || die "CI failed on ${SHA:0:9}: https://github.com/$REPO/actions/runs/$ID"
-  elif [ "$ST" != "completed success" ]; then
-    die "CI failed on ${SHA:0:9} (${ST#completed }): https://github.com/$REPO/actions/runs/$ID"
+    # Polled through the same listing, not `gh run watch`: that reads the
+    # check-run annotations, which a fine-grained token cannot (HTTP 403), so
+    # it exited 1 and every run still going read as "CI failed" (v2.166.0 and
+    # v2.166.1, 2026-10-23/24).
+    WAIT_END=$(( $(date +%s) + ${HATCHABOT_CI_WAIT_SECS:-2700} ))
+    while [ "${ST%% *}" != completed ]; do
+      [ "$(date +%s)" -lt "$WAIT_END" ] || die "CI for ${SHA:0:9} is still running after $(( ${HATCHABOT_CI_WAIT_SECS:-2700} / 60 )) min: https://github.com/$REPO/actions/runs/$ID — release once it has passed."
+      sleep "${HATCHABOT_DISPATCH_POLL:-20}"
+      RUN="$(ci)" || die "Could not ask GitHub about CI for ${SHA:0:9}."
+      [ -n "$RUN" ] || die "CI run $ID for ${SHA:0:9} is no longer listed: https://github.com/$REPO/actions/runs/$ID"
+      ID="${RUN%% *}"; ST="${RUN#* }"
+    done
   fi
+  [ "$ST" = "completed success" ] || die "CI failed on ${SHA:0:9} (${ST#completed }): https://github.com/$REPO/actions/runs/$ID"
   say "✓ $TAG: ${SHA:0:9} is on main, package.json and CHANGELOG say $VERSION, CI passed, the tag is free"
 fi
 

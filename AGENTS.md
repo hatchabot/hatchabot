@@ -53,6 +53,10 @@ key that expired), not a bug. Say which it is.
 
   `test:ui` clicks through the real web page with a stubbed API. A UI change
   gets a scenario in `scripts/ui-clickthrough.mjs`.
+- **The kit checks** run on every pull request (`kit-checks` job): known
+  vulnerable pins in `package-lock.json` and unsafe code patterns. Locally,
+  `python3 -I scripts/kit_checks.py`. Fix a hit rather than except it
+  (docs/releasing.md, "The kit checks").
 - **Live tests, before promoting:** the gates and CI fake Docker, OpenClaw
   and the machines. After a release deploys to the main machine, run
   `node scripts/live.mjs due` and then `node scripts/live.mjs run <name>` for

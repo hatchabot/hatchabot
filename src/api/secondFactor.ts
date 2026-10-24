@@ -36,18 +36,18 @@ const CHALLENGE_TTL_MS = 5 * 60_000;
 /** Passkey ceremonies one person may have pending of each kind (a tab each); the oldest makes way. */
 const PENDING_CEREMONIES = 5;
 
-function seal(secret: Buffer, plain: Buffer): string {
+export function seal(secret: Buffer, plain: Buffer): string {
   const key = createHmac('sha256', secret).update('second-factor-seal').digest();
   const iv = randomBytes(12);
-  const c = createCipheriv('aes-256-gcm', key, iv);
+  const c = createCipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
   const ct = Buffer.concat([c.update(plain), c.final()]);
   return [iv, ct, c.getAuthTag()].map((b) => b.toString('base64url')).join('.');
 }
-function unseal(secret: Buffer, sealed: string): Buffer | undefined {
+export function unseal(secret: Buffer, sealed: string): Buffer | undefined {
   try {
     const [iv, ct, tag] = sealed.split('.').map((s) => Buffer.from(s, 'base64url'));
     const key = createHmac('sha256', secret).update('second-factor-seal').digest();
-    const d = createDecipheriv('aes-256-gcm', key, iv!);
+    const d = createDecipheriv('aes-256-gcm', key, iv!, { authTagLength: 16 });
     d.setAuthTag(tag!);
     return Buffer.concat([d.update(ct!), d.final()]);
   } catch {

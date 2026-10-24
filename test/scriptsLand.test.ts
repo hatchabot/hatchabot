@@ -21,7 +21,7 @@ vi.setConfig({ testTimeout: 30_000 });
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-function world(prState: 'merge' | 'fail' | 'close' | 'noauto' | 'green' | 'queued' | 'runsdown' | 'statusdown' | 'statusonly' = 'merge', required = true) {
+function world(prState: 'merge' | 'fail' | 'kitfail' | 'close' | 'noauto' | 'green' | 'queued' | 'runsdown' | 'statusdown' | 'statusonly' = 'merge', required = true) {
   const root = mkdtempSync(join(tmpdir(), 'hb-land-')); dirs.push(root);
   const bin = join(root, 'bin'); mkdirSync(bin);
   const origin = join(root, 'origin.git');
@@ -35,8 +35,9 @@ case "$1 $2" in
   "api "*/rules/branches/main) ${required ? `echo 1` : `echo 0`} ;;
   # The Actions API, already through --jq: runs as "id<TAB>status<TAB>name", jobs as "name<TAB>state".
   "api "*/actions/runs/11/jobs*) case "${prState}" in
-      noauto|green|statusdown) printf 'test\tpass\nprivacy\tskipping\n' ;;
+      noauto|green|statusdown) printf 'test\tpass\nprivacy\tskipping\nkit-checks\tpass\n' ;;
       fail) printf 'test\tpass\nprivacy\tfail\n' ;;
+      kitfail) printf 'test\tpass\nkit-checks\tfail\n' ;;
       *) printf 'test\tpending\n' ;;
     esac ;;
   # A green commit status, or (statusdown) a status read that fails.
@@ -116,6 +117,17 @@ describe('scripts/land.sh lands commits on main through a pull request', () => {
     expect(r.stderr).toContain('Check(s) failed: privacy');
     expect(w.ghLog()).toMatch(/pr merge \S+ --repo \S+ --disable-auto/);
     expect(w.ghLog()).toMatch(/pr close \S+ --repo \S+ --delete-branch/);
+  });
+
+  it('the kit checks (kit-checks, its own workflow) count: a hit there is a failed check, never merged', () => {
+    const w = world('kitfail', false);
+    writeFileSync(join(w.work, 'b.txt'), 'two\n'); w.git(w.work, 'add', 'b.txt'); w.git(w.work, 'commit', '-q', '-m', 'Add b');
+    const r = w.land();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('Check(s) failed: kit-checks');
+    expect(w.ghLog()).not.toMatch(/pr merge \S+ --repo \S+ --rebase/);
+    expect(w.ghLog()).toMatch(/pr close \S+ --repo \S+ --delete-branch/);
+    expect(w.git(w.origin, 'rev-parse', 'main')).not.toBe(w.git(w.work, 'rev-parse', 'HEAD'));
   });
 
   it('no required checks (the dev repo): waits for every check to pass, skipped ones too, then merges itself', () => {

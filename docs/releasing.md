@@ -23,8 +23,28 @@
   unit tests and the e2e suite) and deployable.
 - Every change lands by pull request (`scripts/land.sh`), so CI has run
   before it reaches `main`: it waits for every check (test, ui, secrets,
-  upgrade) and merges with a rebase. The dev repo has no branch rules, so
-  `land.sh` is the gate; nothing else pushes to `main`.
+  upgrade, kit-checks) and merges with a rebase. The dev repo has no branch
+  rules, so `land.sh` is the gate; nothing else pushes to `main`.
+
+## The kit checks (known vulnerable pins, unsafe code patterns)
+
+The publish kit's dependency and code checks (publish-kit SPEC.md section
+14) run on every pull request as the `kit-checks` job
+(`.github/workflows/kit-checks.yml`, dev repo only) and in `kit preflight`
+before a tag: `osv-scanner` over `package-lock.json`, and `opengrep` with the
+kit's security rules over the tree. Every hit blocks. Locally:
+
+```sh
+python3 -I scripts/kit_checks.py      # fetches the pinned tools once into ~/.cache/publish-kit/checks
+```
+
+`scripts/kit_checks.py` is an unchanged copy of the kit's
+`checks/kit_checks.py` (`kit doctor` compares the two; a new kit release
+means copying it again). Fix a hit rather than except it; an exception in
+`kit-checks.toml` names one advisory id and lock file, or one rule and path,
+with a reason and an expiry date, and is published with the file, so its
+reason carries no private values. `nosemgrep` comments and `.semgrepignore`
+files are not honoured.
 
 ## How a release reaches the public repo
 

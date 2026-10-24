@@ -338,17 +338,23 @@ describe('claimFirstContact', () => {
     const { store, provider, runtimeRef } = await guestSeat();
     const events: string[] = [];
     const renewedUntil = new Date(Date.now() + 60 * 60_000).toISOString();
+    // Real time: the deadline is Date.now() + timeoutMs at the start, and the first round
+    // (opening the window and the door) must land before it. 5 ms did not on a busy CI runner
+    // (the loop never ran, nothing was renewed, the window closed; 2026-10-24): generous now.
+    let polls = 0;
     const claimed = await claimFirstContact(
       {
         store, provider, log: (e) => { events.push(e); },
         sleep: async () => {
+          polls++;
           store.openPairingWindow('a4', renewedUntil, 'guest', { kind: 'telegram' });
-          await new Promise((r) => setTimeout(r, 30)); // past this watcher's deadline
+          await new Promise((r) => setTimeout(r, 700)); // past this watcher's deadline
         },
       },
-      { agentId: 'a4', runtimeRef, accountId: 'bot', forUserId: 'guest', timeoutMs: 5, pollIntervalMs: 1 },
+      { agentId: 'a4', runtimeRef, accountId: 'bot', forUserId: 'guest', timeoutMs: 400, pollIntervalMs: 1 },
     );
     expect(claimed).toBeNull();
+    expect(polls, 'the first round ran before the deadline').toBe(1);
     expect(events).toContain('claim.window_superseded');
     expect(events).not.toContain('claim.window_closed');
     expect(guestWindow(store)?.until).toBe(renewedUntil);

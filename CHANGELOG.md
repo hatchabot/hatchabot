@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.166.1] — 2026-10-24
+
+### Security
+- **Dependencies:** fast-uri 4.1.5 → 4.2.3 (GHSA-333x-w4r6-6crp, GHSA-w74x-v6f9-j3xg, GHSA-wjr9-j795-jxcr, GHSA-xhq7-xmqj-769h: URI parsing flaws in a library fastify's validation uses; found by the publish kit's dependency check).
+- **Stored secrets and second-factor keys:** the AES-GCM seal on bot tokens, API keys and authenticator secrets now fixes the authentication tag at 16 bytes. Node accepted a tag of any length from 4 bytes when none was given, so a tampered row with a cut-down tag would have been far easier to forge (the rows are written by Hatchabot itself, so nothing exploited it). Found by the publish kit's code check, which now runs on every pull request (`kit-checks`).
+
+### Changed
+- Fresh screenshots in `docs/deck` (and on hatchabot.com) from v2.166.0, with Context now on the Usage page; the deck and `docs/whats-new.md` now cover v2.145 → v2.166 (the deck said v2.143, and that app deployment from a repository was "being built now").
+
 ## [2.166.0] — 2026-10-23
 
 ### Security

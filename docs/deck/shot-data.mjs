@@ -135,6 +135,16 @@ export const STUB = `(() => {
     // reloaded the machine's status mid-run, 2026-10-09.)
     '/v1/backups': { backups: [{ date: now.slice(0, 10), hasKey: true, complete: true }], keepDays: 14, missing: [] },
     '/v1/security': { checks: [] },
+    // Context now (Usage), screenshots only: each agent's main conversation at its
+    // last call, its model's window, and the median / 90th-percentile context per
+    // call. Made up. The click-through brings its own rows and expects none here.
+    ...(SHOT ? { '/v1/token-health': { rows: [
+      { agent: 'Budget Tracker', model: 'anthropic/claude-sonnet-5', state: 'running', conversation: { mainNowK: 118, windowK: 200, mainAt: ago(22), ctxK: { p50: 64, p90: 112 }, calls: 402 } },
+      { agent: 'Meal Planner', model: 'anthropic/claude-sonnet-5', state: 'running', conversation: { mainNowK: 71, windowK: 200, mainAt: ago(4), ctxK: { p50: 52, p90: 83 }, calls: 486 } },
+      { agent: 'Homework Helper', model: 'anthropic/claude-sonnet-5', state: 'running', conversation: { mainNowK: 46, windowK: 200, mainAt: ago(58), ctxK: { p50: 31, p90: 57 }, calls: 351 } },
+      { agent: 'Stock Watcher', model: 'anthropic/claude-haiku-4-5', state: 'running', conversation: { mainNowK: 24, windowK: 200, mainAt: ago(130), ctxK: { p50: 19, p90: 33 }, calls: 288 } },
+      { agent: 'Grocery Runner', model: 'anthropic/claude-haiku-4-5', state: 'running', conversation: { mainNowK: 9, windowK: 200, mainAt: ago(310), ctxK: { p50: 8, p90: 14 }, calls: 174 } },
+    ] } } : {}),
   };
   window.fetch = async (input) => {
     const path = String(typeof input === 'string' ? input : input.url).split('?')[0];

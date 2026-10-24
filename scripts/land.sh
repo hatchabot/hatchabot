@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Land this clone's new commits on main through a pull request, in the
 # private dev repo (origin; docs/releasing.md): every change passes CI —
-# test, ui, secrets, upgrade — whoever or whatever made it. This pushes the
-# commits as a branch, opens the pull request, and has it rebase-merged once
+# test, ui, secrets, upgrade, and the publish kit's kit-checks (known
+# vulnerable pins, unsafe code patterns) — whoever or whatever made it. This
+# pushes the commits as a branch, opens the pull request, and has it
+# rebase-merged once
 # its checks pass: by GitHub's auto-merge when main's rules require checks
 # and the repository allows it; otherwise (the dev repo has no such rule)
 # it waits for every check itself and merges. Then it brings local main to

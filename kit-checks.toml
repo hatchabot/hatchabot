@@ -1,0 +1,20 @@
+# The kit checks (publish-kit SPEC.md section 14). Every hit blocks the dev repo's CI and
+# kit preflight unless an exception here names it exactly, with a reason and an expiry date
+# (an expired exception fails like a hit; kit doctor lists those expiring within 14 days).
+
+# The lock files osv-scanner reads: package-lock.json, poetry.lock, uv.lock, Cargo.lock, go.mod...
+# A *.txt is read as a pip requirements file; "parser:path" names osv-scanner's parser (e.g.
+# "requirements.txt:requirements/build.txt"). lock_files = [] when there are none.
+lock_files = ["package-lock.json"]
+
+# [[vuln_exceptions]]
+# id = "GHSA-xxxx-xxxx-xxxx"            # the advisory id (or one of its aliases)
+# lock_file = "package-lock.json"       # one of lock_files
+# reason = "why it does not apply, or what waits for a fix"
+# expires = 2026-12-31                  # a date, no quotes
+
+# [[code_exceptions]]
+# rule = "python.lang.security.insecure-hash-algorithm-sha1"   # the rule id the check prints
+# path = "src/example.py"                                      # one file, no globs
+# reason = "a checksum, not a security use"
+# expires = 2026-12-31

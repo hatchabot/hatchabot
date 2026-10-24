@@ -1,3 +1,107 @@
+# What's new — 2026-10-24 (v2.145 → v2.166)
+
+For people who use Hatchabot, not the change log (that is CHANGELOG.md).
+
+**Advice in one place**
+- **Recommended** (v2.158.0): one ranked list of cost, model and token advice
+  at the top of Usage and on each agent's Usage tab. Each item gives the
+  concern, its evidence, the expected effect in dollars a month, one button
+  that makes the change, and Not now. A cheaper model is offered only on
+  solid evidence (ten turns over three days or more). Your Hatchabot agent's
+  proposals appear there too, marked as its own, and its weekly review reads
+  the same list.
+- **Alerts keeps what needs you now** (v2.158.0): a live loop, a budget at
+  100% and today's spike, each linking to its Recommended item; one cause is
+  messaged once a day.
+- **Context now** (v2.165.0): on Usage, one line per agent with its model,
+  how big its main conversation was at its last call, the model's context
+  window and how full it is.
+
+**Changes that survive a restart**
+- **Moves, imports and restores run on the server and carry on if Hatchabot
+  restarts** (v2.154.0–v2.156.0): each step is written down as it happens,
+  so an automatic upgrade, a crash or a reboot in the middle finishes or
+  undoes the change where the right direction is certain, and otherwise
+  shows the choice under Alerts ("Try again when the runner is back",
+  "Finish the restore", "Put back the copy from before"). The tile shows the
+  step it is on, Activity shows each operation as one line that opens to its
+  steps, and `hatchabot ops` lists what is under way.
+- **A restore keeps a copy of how the agent was** (v2.155.0) before it
+  replaces anything.
+
+**Knowing you can recover, and what each agent can reach**
+- **Recovery readiness** (v2.157.0): each agent's page says "Recoverable
+  from <date> · last drill <date> passed", or the problem in plain words,
+  with **Restore…** that walks you through it. Settings → Backups shows every
+  agent's latest usable backup and drill. An agent left out of backups for
+  more than two days shows under Alerts.
+- **Restore drills, isolated and on a schedule** (v2.157.0): each agent's
+  copy is restored into its own throwaway volume with no network; opt in to
+  Weekly or Daily drills, or run one now.
+- **What each agent can reach** (v2.157.0): Sharing → Access lists its
+  Google accounts, bots, folders, repos, variables, AI source, the agents it
+  may consult and its people — what Hatchabot gave it beside what was last
+  found inside the running agent. Settings → Security lists every agent at
+  once, problems first, and an agent that can still reach something it
+  should not shows under Alerts.
+- **A downloaded copy, or a move, carries the agent's repos with their
+  deploy keys** (v2.165.0), and its folders as declarations.
+
+**The home screen and the agent's page**
+- **One interface** (v2.155.0): the icon home screen is the only one; the
+  classic card look is gone, with a one-time map of where each button went.
+- **Planned**, **My order** and **Check all** (v2.154.0): plan an agent by
+  name and make it with one click; arrange agents the way you put them; run
+  a health check on every running agent at once.
+- **Archive and Delete are at the foot of Overview** (v2.163.0), not at the
+  end of Advanced.
+- **Files** (v2.165.0): sort by name, size or date; text, images, sound,
+  video and PDF open in the tab itself with ← Back (v2.166.0).
+- **Settings → Data has a Test button** (v2.165.0) on every folder and repo,
+  so "the key is not on the repo yet" shows up before a rebuild fails to
+  clone.
+- **Settings → Telegram → Use only my own bots** (v2.165.0): a tick per
+  person whose agents never take a shared house bot.
+- **Settings → Advanced** (v2.157.0) holds other Hatchabot servers and
+  runtime images, folded away; Hosts holds only your machines.
+- **Consoles open at once** (v2.165.0), with a spinner until loaded, and a
+  browser no longer fills up with each console's cached copies (v2.166.0).
+
+**Apps and agents**
+- **Apps in agents, in the web app** (v2.145.0–v2.146.0): New agent → "run
+  an app from a repo", with the Google account the app needs attached before
+  it first runs; the agent's page has an App row with Update (its tests run
+  first), Roll back and Stop app. One copy of an app per account.
+- **An agent's own browser** (v2.151.0), off by default: switched on for one
+  agent, it gets a Chromium of its own in a container beside it, sharing
+  only its network, with a profile kept in memory only.
+- **Without Telegram**: adopt an OpenClaw agent (v2.149.0), clone or import
+  (v2.150.0) web-only, taking no bot from the pool.
+- **Runners run their own memory search** (v2.147.0), so current agents can
+  be built on or moved to a second machine again, and their memories stay
+  there.
+- **The runtime image is OpenClaw 2026.9.8** (v2.161.0); Claude Opus 5.5 on
+  a Claude plan needs it.
+
+**Fixed, in bulk**
+- **Two reliability releases** (v2.160.0, v2.162.0): about 200 fixes from a
+  security review and from the issues two automated reviews filed, each
+  with a test that failed before it and a troubleshooting entry. None let
+  one household account reach another's agents.
+- **The full audit of 2026-10-23** (v2.166.0; docs/audit-2026-10-23.md):
+  eight reviewers, each one area, every top finding reproduced before it was
+  fixed — Push definition, Unlink Discord, budgets starting agents their
+  owner had stopped, scheduled tasks bound to a conversation that was gone,
+  and more.
+
+**How releases are made**
+- **Releases go through a gated publisher** (v2.164.0): work happens in a
+  private development repository; each release tag is checked for private
+  values, held for an hour, checked again, and published as one commit and
+  its tag. Installs and upgrades check each bundle against the release's
+  manifest and pull the image by digest (v2.159.0). Live tests run before a
+  release is promoted (v2.148.0).
+
 # What's new — 2026-10-07 (v2.112 → v2.144)
 
 For people who use Hatchabot, not the change log (that is CHANGELOG.md).

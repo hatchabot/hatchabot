@@ -1,0 +1,21 @@
+# The kit's dependency and code checks (publish-kit SPEC.md section 14): osv-scanner over the lock
+# files kit-checks.toml lists, opengrep with the kit's rules over the code; every hit fails the job
+# unless kit-checks.toml excepts it. scripts/kit_checks.py is an unchanged copy of the kit's
+# checks/kit_checks.py (kit doctor compares the two). Copy this file to .github/workflows/; make the
+# job required for merging to main, as the repo's other checks are.
+name: kit-checks
+on:
+  pull_request:                  # dev CI runs on PRs (SPEC.md S5); kit preflight covers the tag
+permissions:
+  contents: read
+jobs:
+  kit-checks:
+    # Dev repo only: the published copy of this file never runs.
+    if: github.event.repository.private
+    runs-on: hatchabot-dev
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+        with:   # a read-only job keeps no git credentials (test/workflowPins.test.ts)
+          persist-credentials: false
+      - run: python3 -I scripts/kit_checks.py

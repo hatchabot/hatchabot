@@ -48,6 +48,22 @@ describe('LocalSecretStore', () => {
     await expect(s.get('k')).rejects.toThrow(); // GCM auth tag must reject it
   });
 
+  it('refuses a truncated auth tag (the tag length is fixed at 16 bytes)', async () => {
+    // Without authTagLength, Node accepts any tag of 4 to 16 bytes: a row whose tag was cut
+    // to 4 bytes is 2^32 times easier to forge (opengrep gcm-no-tag-length, kit checks 2026-10-24).
+    const db = new Database(':memory:');
+    const s = new LocalSecretStore(db, KEY);
+    await s.put('k', 'v');
+    const row = db.prepare('SELECT tag FROM secrets WHERE ref = ?').get('k') as any;
+    expect(Buffer.from(row.tag)).toHaveLength(16);
+    for (const n of [12, 8, 4]) {
+      db.prepare('UPDATE secrets SET tag = ? WHERE ref = ?').run(Buffer.from(row.tag).subarray(0, n), 'k');
+      await expect(s.get('k'), `${n}-byte tag`).rejects.toThrow();
+    }
+    db.prepare('UPDATE secrets SET tag = ? WHERE ref = ?').run(Buffer.from(row.tag), 'k');
+    expect(await s.get('k')).toBe('v');
+  });
+
   it('throws SecretNotFoundError for an unknown ref', async () => {
     await expect(store().get('nope')).rejects.toBeInstanceOf(SecretNotFoundError);
   });

@@ -35,8 +35,7 @@ echo "gh $*" >> ${JSON.stringify(log)}
 ci="\${HB_CI:-success}"
 case "$1 $2" in
   "run list")
-    case "$ci" in late:*) n=$(cat ${JSON.stringify(log)}.ci 2>/dev/null || echo 0); echo $((n+1)) > ${JSON.stringify(log)}.ci; if [ "$n" -ge 2 ]; then echo "4242 completed \${ci#late:}"; fi ;; none) ;; pr-only) case "$*" in *"--event push"*) ;; *) echo "4243 completed success" ;; esac ;; running:*) echo "4242 in_progress " ;; *) echo "4242 completed $ci" ;; esac ;;
-  "run watch") [ "\${ci#running:}" = success ] ;;
+    case "$ci" in late:*) n=$(cat ${JSON.stringify(log)}.ci 2>/dev/null || echo 0); echo $((n+1)) > ${JSON.stringify(log)}.ci; if [ "$n" -ge 2 ]; then echo "4242 completed \${ci#late:}"; fi ;; none) ;; pr-only) case "$*" in *"--event push"*) ;; *) echo "4243 completed success" ;; esac ;; running:*) n=$(cat ${JSON.stringify(log)}.ci 2>/dev/null || echo 0); echo $((n+1)) > ${JSON.stringify(log)}.ci; if [ "$n" -ge 2 ]; then echo "4242 completed \${ci#running:}"; else echo "4242 in_progress "; fi ;; *) echo "4242 completed $ci" ;; esac ;;
   *) exit 1 ;;
 esac
 `, { mode: 0o755 });
@@ -116,6 +115,20 @@ describe('scripts/release.sh tags the version commit in the dev repo once everyt
     const r = w.release(['9.8.7'], { HB_CI: 'running:success' });
     expect(r.status, out(r)).toBe(0);
     expect(r.stderr).toContain('still running — waiting');
+    // Polled through `gh run list`, never `gh run watch` (it reads check-run annotations, which
+    // a fine-grained token cannot: it exited 1 and a run still going read as failed, 2026-10-24).
+    expect(w.ghLog()).not.toContain('run watch');
+    expect(w.ghLog().split('\n').filter((l) => l.includes('run list')).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('a run waited for that then fails is named as failed, and nothing is tagged', () => {
+    const w = world();
+    w.landed('9.8.7');
+    const r = w.release(['9.8.7'], { HB_CI: 'running:failure' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('still running — waiting');
+    expect(r.stderr).toMatch(/CI failed on \w+ \(failure\)/);
+    expect(w.originTag('v9.8.7')).toBe('');
   });
 
   it('waits for the push\'s CI run to appear: GitHub lists it a few seconds after the merge', () => {

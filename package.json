@@ -1,6 +1,6 @@
 {
   "name": "hatchabot",
-  "version": "2.166.0",
+  "version": "2.166.1",
   "private": true,
   "type": "module",
   "description": "Deployment & management layer for OpenClaw agents",
@@ -45,6 +45,6 @@
     "vitest": "^4.1.12"
   },
   "overrides": {
-    "fast-uri": "^4.1.5"
+    "fast-uri": "^4.2.3"
   }
 }

@@ -53,7 +53,7 @@ export class LocalSecretStore implements SecretStore {
 
   async put(ref: string, value: string): Promise<void> {
     const iv = randomBytes(12);
-    const cipher = createCipheriv(ALGO, this.#key, iv);
+    const cipher = createCipheriv(ALGO, this.#key, iv, { authTagLength: 16 });
     const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
     const tag = cipher.getAuthTag();
     this.db
@@ -70,7 +70,7 @@ export class LocalSecretStore implements SecretStore {
       | { iv: Buffer; tag: Buffer; ciphertext: Buffer }
       | undefined;
     if (!row) throw new SecretNotFoundError(ref);
-    const decipher = createDecipheriv(ALGO, this.#key, row.iv);
+    const decipher = createDecipheriv(ALGO, this.#key, row.iv, { authTagLength: 16 });
     decipher.setAuthTag(row.tag);
     return Buffer.concat([decipher.update(row.ciphertext), decipher.final()]).toString('utf8');
   }

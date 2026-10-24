@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Jar, PUBLIC_HOST, PUBLIC_URL, publicApp, type PublicApp } from './helpers/publicApp.js';
 import { backupCodeHash, base32Decode, totp } from '../src/api/totp.js';
 import { SoftAuthenticator } from './helpers/softAuthenticator.js';
+import { seal, unseal } from '../src/api/secondFactor.js';
 
 let h: PublicApp | undefined;
 afterEach(async () => { await h?.close(); h = undefined; });
@@ -309,5 +310,20 @@ describe('passkey ceremonies', () => {
     // Starting again after the reset works.
     const again = (await mcall('POST', '/v1/second-factor/passkey/options', { current: m.password }, at)).json();
     expect((await mcall('POST', '/v1/second-factor/passkey', key.create({ challenge: again.challenge, origin: at.origin, rpId: PUBLIC_HOST }), at)).statusCode).toBe(200);
+  });
+});
+
+describe('second factors: the seal on a stored secret', () => {
+  it('round-trips, and refuses a truncated auth tag (fixed at 16 bytes)', () => {
+    // Without authTagLength, Node accepts any tag of 4 to 16 bytes, so a sealed value whose tag
+    // was cut short would still open (opengrep gcm-no-tag-length, kit checks 2026-10-24).
+    const secret = Buffer.alloc(32, 7);
+    const sealed = seal(secret, Buffer.from('totp-key'));
+    expect(unseal(secret, sealed)?.toString()).toBe('totp-key');
+    const [iv, ct, tag] = sealed.split('.');
+    expect(Buffer.from(tag!, 'base64url')).toHaveLength(16);
+    for (const n of [12, 8, 4])
+      expect(unseal(secret, [iv, ct, Buffer.from(tag!, 'base64url').subarray(0, n).toString('base64url')].join('.')), `${n}-byte tag`).toBeUndefined();
+    expect(unseal(Buffer.alloc(32, 8), sealed)).toBeUndefined(); // another secret
   });
 });
