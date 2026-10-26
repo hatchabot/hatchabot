@@ -35,6 +35,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/:id/class': 'set_class',
   'POST /v1/agents/:id/move': 'set_group (the group); the order within a group: app: browser — drag or the order arrows on the home screen',
   'POST /v1/agents/icons/auto': 'app: internal — the home screen fills in icons',
+  'POST /v1/agents/:id/icons/suggest': 'app: browser — ideas to choose from in the icon dialog; it changes nothing (the dialog\'s Save is PATCH /v1/agents/:id)',
   'POST /v1/agents/:id/checkpoint': 'checkpoint_memory',
   'POST /v1/agents/:id/compact': 'compact_agent',
   'PUT /v1/agents/:id/context-cap': 'set_context_cap',

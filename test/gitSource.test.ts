@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildGitSyncScript, normalizeGitUrl, gitSyncReason, buildPublicGitSyncScript, isPublicGitUrl } from '../src/orchestrator/gitSource.js';
+import { buildGitRemovalScript, buildGitSyncScript, normalizeGitUrl, gitSyncReason, buildPublicGitSyncScript, isPublicGitUrl } from '../src/orchestrator/gitSource.js';
 
 describe('normalizeGitUrl', () => {
   it('normalizes ssh, ssh://, and https forms to the ssh clone URL', () => {
@@ -63,6 +64,124 @@ describe('buildGitSyncScript', () => {
 
   it('shell-quotes the commit name so spaces are safe', () => {
     expect(script).toContain("user.name 'Stock Watcher'");
+  });
+
+  it('takes away a .pub or -cert.pub beside the key, which ssh would offer instead of it (HB-0001)', () => {
+    const lines = script.split('\n');
+    const write = lines.findIndex((l) => l.includes('base64 -d > /home/node/.openclaw/.ssh/defs_deploy'));
+    const clean = lines.indexOf('rm -f /home/node/.openclaw/.ssh/defs_deploy.pub /home/node/.openclaw/.ssh/defs_deploy-cert.pub');
+    expect(write).toBeGreaterThan(-1);
+    expect(clean).toBeGreaterThan(write);
+    expect(clean).toBeLessThan(lines.findIndex((l) => l.includes('git clone')));
+  });
+});
+
+describe('a stale <key>.pub on the volume no longer makes the host refuse the key (HB-0001)', () => {
+  // The script's key lines in a sandbox (a temp folder for the container's),
+  // then ssh -i that key against a throwaway sshd run as this user on a free
+  // loopback port, which accepts only the stored key. Skipped where there is
+  // no sshd. The failure it guards: ssh offered the .pub's key, never the -i one.
+  // It judges the authentication (ssh's own "Authenticated to" line), not the
+  // remote command: a CI runner's account let the key in, then exited 1.
+  const sshd = '/usr/sbin/sshd';
+  const freePort = () => new Promise<number>((done) => { const srv = createServer().listen(0, '127.0.0.1', () => { const { port } = srv.address() as { port: number }; srv.close(() => done(port)); }); });
+  const keygen = (file: string, comment: string) => execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', comment, '-f', file]);
+
+  it.skipIf(!existsSync(sshd))('the stored key gets in although an old .pub and -cert.pub were beside it', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'hb-stalepub-'));
+    const port = await freePort();
+    try {
+      const sshDir = join(base, '.ssh');
+      mkdirSync(sshDir);
+      keygen(join(base, 'hostkey'), 'host');
+      keygen(join(base, 'stored'), 'stored');
+      keygen(join(base, 'stale'), 'stale');
+      writeFileSync(join(base, 'authorized_keys'), readFileSync(join(base, 'stored.pub')));
+      writeFileSync(join(base, 'sshd_config'), [
+        `Port ${port}`, 'ListenAddress 127.0.0.1', `HostKey ${join(base, 'hostkey')}`,
+        `AuthorizedKeysFile ${join(base, 'authorized_keys')}`, `PidFile ${join(base, 'sshd.pid')}`,
+        'StrictModes no', 'UsePAM no', 'PasswordAuthentication no', 'KbdInteractiveAuthentication no', '',
+      ].join('\n'));
+      const live = spawn(sshd, ['-D', '-e', '-f', join(base, 'sshd_config')], { stdio: 'ignore' });
+      try {
+        const key = join(sshDir, 'defs_deploy');
+        const login = () => spawnSync('ssh', ['-F', '/dev/null', '-i', key, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',
+          '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', '-o', 'LogLevel=VERBOSE', '-p', String(port), '127.0.0.1', 'true'],
+          { env: { PATH: process.env.PATH!, HOME: base }, encoding: 'utf8', timeout: 15_000 });
+        // The left-over files, then the sync script's own key lines.
+        writeFileSync(`${key}.pub`, readFileSync(join(base, 'stale.pub')));
+        writeFileSync(`${key}-cert.pub`, 'not a certificate\n');
+        const b64 = readFileSync(join(base, 'stored')).toString('base64');
+        const lines = buildGitSyncScript({ mountName: 'defs', sshUrl: 'git@git.example.org:example-owner/defs.git', host: 'git.example.org' }, b64, { name: 'Stock Watcher', email: 'stock-watcher@example.org' })
+          .split('\n').filter((l) => /base64 -d|^rm -f/.test(l)).map((l) => l.split('/home/node/.openclaw').join(base));
+        // sshd takes a moment to listen; the stale .pub is refused once it does.
+        let before = login();
+        for (let i = 0; i < 50 && /Connection (refused|reset)|kex_exchange_identification/i.test(before.stderr); i++) { await new Promise((r) => setTimeout(r, 100)); before = login(); }
+        expect(before.stderr).toMatch(/Permission denied \(publickey/);
+        expect(before.stderr).not.toMatch(/Authenticated to/);
+        execFileSync('bash', ['-c', ['set -e', ...lines].join('\n')], { env: { PATH: process.env.PATH!, HOME: base } });
+        expect(readdirSync(sshDir).sort()).toEqual(['defs_deploy']);
+        const after = login();
+        expect(after.stderr).toMatch(/Authenticated to 127\.0\.0\.1 .* using "publickey"/);
+        expect(after.stderr).not.toMatch(/Permission denied/);
+      } finally { live.kill(); }
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+});
+
+describe('removing a git source takes it off the volume (HB-0002)', () => {
+  // The removal script's own lines in a sandbox: a temp folder for the container's.
+  const env = (base: string) => ({ PATH: process.env.PATH!, HOME: base, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' });
+  const volume = (origin?: string) => {
+    const base = mkdtempSync(join(tmpdir(), 'hb-gitrm-'));
+    mkdirSync(join(base, '.ssh'));
+    for (const f of ['defs_deploy', 'defs_deploy.pub', 'defs_deploy-cert.pub', 'other_deploy']) writeFileSync(join(base, '.ssh', f), 'made-up');
+    const clone = join(base, 'defs');
+    const git = (...a: string[]) => execFileSync('git', ['-C', clone, ...a], { env: env(base), encoding: 'utf8' }).trim();
+    if (origin) {
+      execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'init', '-q', clone], { env: env(base) });
+      git('remote', 'add', 'origin', origin);
+      git('config', 'core.sshCommand', 'ssh -i /home/node/.openclaw/.ssh/defs_deploy -o IdentitiesOnly=yes'.split('/home/node/.openclaw').join(base));
+      writeFileSync(join(clone, 'notes.md'), 'work');
+    }
+    return { base, clone, git };
+  };
+  const run = (script: string, base: string) =>
+    spawnSync('bash', ['-c', script.split('/home/node/.openclaw').join(base)], { env: env(base), encoding: 'utf8' });
+
+  it('the key, its .pub and -cert.pub, and the clone of that repo all go; nothing else does', () => {
+    const v = volume('https://github.com/example-owner/defs'); // cloned public, added back with a key: same repo
+    const res = run(buildGitRemovalScript('defs', 'git@github.com:example-owner/defs.git'), v.base);
+    expect(res.status).toBe(0);
+    expect(existsSync(v.clone)).toBe(false);
+    expect(readdirSync(join(v.base, '.ssh'))).toEqual(['other_deploy']);
+    rmSync(v.base, { recursive: true, force: true });
+  });
+
+  it('a folder holding another repo stays; only an sshCommand naming the key is taken off', () => {
+    const v = volume('git@github.com:example-owner/old-notes.git');
+    const res = run(buildGitRemovalScript('defs', 'git@github.com:example-owner/defs.git'), v.base);
+    expect(res.status).toBe(0);
+    expect(readFileSync(join(v.clone, 'notes.md'), 'utf8')).toBe('work');
+    expect(() => v.git('config', '--get', 'core.sshCommand')).toThrow();
+    rmSync(v.base, { recursive: true, force: true });
+  });
+
+  it('keeps the clone when another source has the name now, or the removal predates the address', () => {
+    for (const script of [buildGitRemovalScript('defs', 'git@github.com:example-owner/defs.git', { keepClone: true }), buildGitRemovalScript('defs', null)]) {
+      const v = volume('git@github.com:example-owner/defs.git');
+      expect(run(script, v.base).status).toBe(0);
+      expect(readFileSync(join(v.clone, 'notes.md'), 'utf8')).toBe('work');
+      expect(existsSync(join(v.base, '.ssh', 'defs_deploy.pub'))).toBe(false);
+      expect(() => v.git('config', '--get', 'core.sshCommand')).toThrow();
+      rmSync(v.base, { recursive: true, force: true });
+    }
+  });
+
+  it('a public repo that never cloned: done, with nothing to remove', () => {
+    const v = volume();
+    expect(run(buildGitRemovalScript('defs', 'https://github.com/example-owner/defs.git'), v.base).status).toBe(0);
+    rmSync(v.base, { recursive: true, force: true });
   });
 });
 

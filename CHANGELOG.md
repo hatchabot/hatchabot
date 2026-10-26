@@ -2,6 +2,25 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.167.0] — 2026-10-26
+
+### Added
+- **Usage → Context now: set or take off an agent's context cap** in its row (the **Cap** menu: None, or 100K to 500K below the model's window). It asks first, saying where the agent will compact and whether its conversation is already past that. Until now a cap could be set from a Recommended item or the Hatchabot agent, and taken off only by asking the Hatchabot agent.
+- **Change icon → ✨ Ideas from Hatchabot:** the management AI suggests about eight different emoji for the agent, each on a colour, as a row to choose from; press it again for more (it never repeats one it has shown). Nothing changes until Save. The button used to pick one icon and save it at once, and asked again it often picked the same one. Without an AI (none set up, or it is busy) the keyword table's matches stand in, and the dialog says so. `POST /v1/agents/:id/icons/suggest`.
+
+### Changed
+- **Removing a repo removes it from the agent completely:** its copy in the agent (anything not pushed goes with it, and the confirmation says so), its deploy key with any `.pub` beside it, and its mention in the agent's AGENTS.md, for public repos too. Before, the clone stayed as a folder. Only a folder whose origin is still that repo is deleted; an agent that is asleep or busy has it done at its next start.
+- **The Usage button is a dollar sign** (it was a bar chart), in the header and on an agent's Overview → Checks.
+
+### Fixed
+- **Sharing → Access** drew the grey parts of each line (its mark, its note, when it was last seen) each on a line of its own, which squeezed the words between them to one a line. A rule meant for a settings row's own note reached into the lines inside it; it no longer does. Each thing is one line now: its mark, what it is with its note, and when it was last seen. **Verify now** sits beside the summary.
+- **Usage → Spending** stacked every label, box and button on a line of its own, for the same reason. It is two lines now, **Tell me** and **Limit**, with their boxes in line and the menu its own size.
+- **Overview → App** had no outline, unlike the rows around it.
+- **A repo that never cloned although its deploy key was on the repo** ("The repo rejected this agent's deploy key", while Test passed): a `<repo>_deploy.pub` left beside the key made ssh offer that file's key instead. Each sync now removes a `.pub` or `-cert.pub` beside the key. Rebuild an agent that has the message.
+- **Check all flagged nearly every agent** with "Gateway is only bound to loopback…" and "Gateway bound to "auto" (0.0.0.0) (network-accessible)": OpenClaw's doctor describing how Hatchabot runs every agent with a console. Both are counted as known now, matched line for line; an unauthenticated or any other bind still shows.
+- **On an iPhone home-screen app the View by pills were hidden behind the header**, and scrolling up never brought them out: the header was pinned below the status bar and covered what followed it. It now holds the status bar in its own padding.
+- **Usage → Context now** showed a 1M window as "1.0kK". Its "Per call (median / 90%)" column is two now, **Typical call** and **1 in 10 over**, with a note on what they measure; **Window** is the model's own, and the cap has its own column.
+
 ## [2.166.2] — 2026-10-24
 
 ### Security

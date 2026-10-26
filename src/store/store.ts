@@ -1113,6 +1113,9 @@ export class Store {
       // limit came, v2.166.0): it closes on the 1st or a raise, and the budget never
       // starts the agent — before, it started every hand-stopped agent on the 1st.
       `ALTER TABLE budget_pauses ADD COLUMN already_stopped INTEGER NOT NULL DEFAULT 0`,
+      // The removed git source's address (v2.167.0): its clone is deleted only
+      // when the folder still holds that repo. NULL (older removals): key only.
+      `ALTER TABLE data_source_removals ADD COLUMN repo_url TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -3635,16 +3638,16 @@ export class Store {
   }
 
   /** Record what removing a repo source must still scrub, BEFORE its row goes. */
-  addDataSourceRemoval(r: { id: string; agentId: string; mountName?: string | null; secretRef?: string | null }): void {
+  addDataSourceRemoval(r: { id: string; agentId: string; mountName?: string | null; secretRef?: string | null; repoUrl?: string | null }): void {
     if (!r.mountName && !r.secretRef) return;
     this.db
-      .prepare(`INSERT OR REPLACE INTO data_source_removals (id, agent_id, mount_name, secret_ref, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(r.id, r.agentId, r.mountName ?? null, r.secretRef ?? null, new Date().toISOString());
+      .prepare(`INSERT OR REPLACE INTO data_source_removals (id, agent_id, mount_name, secret_ref, repo_url, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(r.id, r.agentId, r.mountName ?? null, r.secretRef ?? null, r.repoUrl ?? null, new Date().toISOString());
   }
 
-  dataSourceRemovals(agentId: string): Array<{ id: string; mountName: string | null; secretRef: string | null; since: string }> {
+  dataSourceRemovals(agentId: string): Array<{ id: string; mountName: string | null; secretRef: string | null; repoUrl: string | null; since: string }> {
     return (this.db.prepare(`SELECT * FROM data_source_removals WHERE agent_id = ? ORDER BY created_at`).all(agentId) as any[])
-      .map((r) => ({ id: r.id, mountName: r.mount_name ?? null, secretRef: r.secret_ref ?? null, since: r.created_at }));
+      .map((r) => ({ id: r.id, mountName: r.mount_name ?? null, secretRef: r.secret_ref ?? null, repoUrl: r.repo_url ?? null, since: r.created_at }));
   }
 
   /** One half confirmed gone; the record goes when both are. */

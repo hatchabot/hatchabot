@@ -240,7 +240,10 @@ The header holds:
 - **Icons are picked for you.** The first time the new screen sees agents
   without one, your management AI chooses an emoji and colour for each from
   its name and description (or, with no AI set up, a keyword table does).
-  Change any of them by clicking the icon in its settings. Icons travel with
+  Change any of them with **Change icon** on its Overview: pick an emoji,
+  paste any one, or press **✨ Ideas from Hatchabot** for a row of the AI's
+  suggestions, each on a colour (press again for different ones). Nothing
+  changes until you press Save. Icons travel with
   the agent: backups, shared copies and agents sent to someone else keep
   theirs.
 
@@ -666,8 +669,7 @@ It is also pinned to the OpenClaw version it was created on, so a bad upgrade
 can't take your manager down with the fleet. Secrets, deleting agents,
 promoting a base image and accounts stay in the app.
 
-Until you set one up, the older built-in chat remains in that box where a
-Claude source exists.
+Until you set one up, that box offers to: **Set it up** (it needs an AI source).
 
 ## Right-size: the model steward
 
@@ -832,11 +834,16 @@ spending tokens each time — while Telegram showed nothing.
 **Context now** (v2.165.0), at the top of the Usage page: one line per agent —
 its model, how big its **main conversation** was at its last call (the
 Telegram DM and the console), the model's context **window** as the agent's
-OpenClaw states it (or the cap Hatchabot set), how **full** that is, the
-median and 90th-percentile context per call over 30 days, and when the last
-call was. Over 80% full is marked: the agent is close to compacting; compact
-it or cap it from its own Usage tab. From this same read, about hourly while
-the agent runs; nothing is woken for it.
+OpenClaw states it, its **cap**, how **full** it is (against the cap when there
+is one), and how much its calls carried over 30 days: a **typical call** (half
+carried less) and **1 in 10 over** (one call in ten carried more). Every call
+carries the whole conversation so far, so these are what it costs. Over 80%
+full is marked: the agent is close to compacting. The **Cap** menu sets a cap
+(100K to 500K, below the model's window) or takes it off (None), after saying
+what it does: OpenClaw then compacts at about the cap less 20K, and a
+conversation already past that compacts before its next turn. A local model
+has no menu. From this same read, about hourly while the agent runs; nothing
+is woken for it.
 
   | Part | What | Source |
   |---|---|---|
@@ -1269,7 +1276,9 @@ new bot slot.
   `~/.openclaw/<repo>` in the agent's own home (Files → .openclaw). Read-only
   or read-write — writes are commits and pushes, never raw writes to your
   disk. Each row's button says what it does: **Make writable** / **Make
-  read-only**.
+  read-only**. **×** removes a repo from the agent completely (v2.167.0): its
+  copy in the agent with anything not pushed, its deploy key, and its line in
+  the agent's AGENTS.md; it asks first. Delete the key on the repo's host too.
 - **Test** (v2.165.0) on any row: a folder is checked on this machine (there,
   readable, writable if the agent may write); a repo is asked for its branch
   list from this machine with the source's own deploy key, so "the key is not
@@ -2056,7 +2065,7 @@ credential kind, the agents on it and each agent's current model (pins and
 pending switches flagged), plus a models-in-use tally. Each icon's tooltip
 names its model, and its sheet's AI tab its source.
 
-Per-agent, the sheet's **Usage** tab (and Overview → Checks → 📊 Usage) shows lifetime tokens and calls,
+Per-agent, the sheet's **Usage** tab (and Overview → Checks → 💲 Usage) shows lifetime tokens and calls,
 the last 24 hours, the conversation's size now — each call re-sends it — the
 split between new input, cache reads, cache writes and output, calls per model,
 billing context. Advanced → Checks has **❤️ Health** (checks its gateway

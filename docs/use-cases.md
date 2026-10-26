@@ -63,7 +63,7 @@ regression or the candidate gate); **manual** = only a person has exercised it;
 | id | Use case | Surfaces | Coverage |
 |---|---|---|---|
 | D1 | Rename (the bot's name follows) | U C A M | auto (rename, channelRoutes) |
-| D2 | Icon and colour; auto-pick icons | U A | auto (agentIcons.test.ts) |
+| D2 | Icon and colour; auto-pick icons; ideas to choose from | U A | auto (agentIcons.test.ts; ui-clickthrough: iconIdeas) |
 | D3 | Group; drag between groups; new group by drop; rename a group | U A M | auto (agentGrouping, groupsMove) |
 | D4 | Class; define classes | U A M | auto (agentClasses.test.ts) |
 | D5 | Edit SOUL/AGENTS/MEMORY | U M | auto (agentFiles.test.ts, workspace.test.ts) |
@@ -125,6 +125,7 @@ regression or the candidate gate); **manual** = only a person has exercised it;
 |---|---|---|---|
 | G1 | Share a host folder (ro / rw) | U C A | auto (dataSources) |
 | G2 | Add a git repo | U C | auto (gitSource) |
+| G2a | Remove a git repo: its clone, key and AGENTS.md mention go | U | auto (gitSource.test.ts, dataSources.test.ts; ui-clickthrough: removeRepoSource) |
 | G3 | Stop sharing | U C | auto |
 | G4 | Google connections | U A | auto (googleConnections) |
 | G5 | Files: browse, download, upload | U C A | auto (agentFiles.test.ts) |
@@ -179,6 +180,7 @@ regression or the candidate gate); **manual** = only a person has exercised it;
 | J10 | Badges and marks | U | none (UI only) |
 | J11 | List agents | C M | auto |
 | J12 | Per-agent usage by model | U C A | auto |
+| J13 | Context now: each agent's conversation, window and calls; set or take off a context cap there | U A M | auto (tokenSteward.test.ts; ui-clickthrough: usageContextNow, usageContextCap) |
 
 ## K. Backups, copying & moving
 | id | Use case | Surfaces | Coverage |
@@ -210,7 +212,6 @@ regression or the candidate gate); **manual** = only a person has exercised it;
 | M5 | Morning check; split suggestions | U M | auto (opsSuggest) |
 | M6 | Rebuild after tampering | U | auto (opsDrift) |
 | M7 | Its tools | M | auto (mgmtCoverage.test.ts) |
-| M8 | The older Claude chat box | U | none (UI only) |
 
 ## N. Security & operator settings
 | id | Use case | Surfaces | Coverage |

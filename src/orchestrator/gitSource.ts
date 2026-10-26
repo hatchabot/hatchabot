@@ -129,9 +129,14 @@ const shq = (v: string) => `'${v.replace(/'/g, "'\\''")}'`;
  * The same repo by its other address (public https or deploy-key ssh) stays,
  * and the script repoints its remote.
  */
-export function retainedCloneCheck(clone: string, url: string): string {
+/** Every origin a clone of this repo can have: ssh or https, with or without .git. */
+function sameRepoUrls(url: string): string[] {
   const n = normalizeGitUrl(url);
-  const same = [...new Set(n ? [n.sshUrl, n.httpsUrl, n.sshUrl.replace(/\.git$/, ''), n.httpsUrl.replace(/\.git$/, '')] : [url])];
+  return [...new Set(n ? [n.sshUrl, n.httpsUrl, n.sshUrl.replace(/\.git$/, ''), n.httpsUrl.replace(/\.git$/, '')] : [url])];
+}
+
+export function retainedCloneCheck(clone: string, url: string): string {
+  const same = sameRepoUrls(url);
   return `if [ -d ${shq(clone)}/.git ]; then cur=$(git -C ${shq(clone)} config --get remote.origin.url || true); ` +
     `case "$cur" in ${same.map(shq).join('|')}) ;; *) aside=${shq(clone)}.replaced-$(date +%Y%m%d%H%M%S); ` +
     `mv ${shq(clone)} "$aside"; echo "Another repository's clone was here ($cur): kept at $aside" >&2 ;; esac; fi`;
@@ -195,6 +200,10 @@ export function buildGitSyncScript(
     'set -e',
     `mkdir -p ${sshDir} && chmod 700 ${sshDir}`,
     `echo ${q(privKeyB64)} | base64 -d > ${key} && chmod 600 ${key}`,
+    // ssh reads <key>.pub and <key>-cert.pub beside an -i key and offers
+    // THAT key: one left from an earlier key made the host refuse every
+    // clone, while Test (a fresh temp dir) passed (HB-0001).
+    `rm -f ${key}.pub ${key}-cert.pub`,
     hostKeyTrustLine(src.host, kh),
     retainedCloneCheck(clone, src.sshUrl),
     `if [ ! -d ${q(clone)}/.git ]; then GIT_SSH_COMMAND=${q(sshCmd)} git clone ${q(src.sshUrl)} ${q(clone)}; fi`,
@@ -206,6 +215,33 @@ export function buildGitSyncScript(
     `git -C ${q(clone)} config user.name ${q(commit.name)}`,
     `git -C ${q(clone)} config user.email ${q(commit.email)}`,
   ].join('\n');
+}
+
+/**
+ * What removing a git source takes off the agent's volume (HB-0002): its
+ * deploy key with any .pub and -cert.pub beside it, and its clone, but only a
+ * clone whose origin is still this repo (anything else at that path is not
+ * ours). With `keepClone` (another source has that name now) or no repo
+ * address (a removal recorded before v2.167.0), only the key goes, and a
+ * clone's core.sshCommand that names it. Exits 0 only when all that is gone.
+ * `mountName` is checked by the caller: [A-Za-z0-9_-] first, then also dots.
+ */
+export function buildGitRemovalScript(mountName: string, repoUrl: string | null, opts: { keepClone?: boolean } = {}): string {
+  const base = '/home/node/.openclaw';
+  const key = `${base}/.ssh/${mountName}_deploy`;
+  const clone = `${base}/${mountName}`;
+  const unsetKey = `case "$(git -C ${clone} config --get core.sshCommand 2>/dev/null)" in *${key}*) git -C ${clone} config --unset-all core.sshCommand ;; esac`;
+  const lines = [`rm -f ${key} ${key}.pub ${key}-cert.pub`];
+  if (repoUrl && !opts.keepClone) {
+    const same = sameRepoUrls(repoUrl).map(shq).join('|');
+    lines.push(`if [ -d ${clone}/.git ]; then case "$(git -C ${clone} config --get remote.origin.url 2>/dev/null)" in ${same}) rm -rf ${clone} ;; *) ${unsetKey} ;; esac; fi`);
+    lines.push(`if [ -d ${clone}/.git ]; then case "$(git -C ${clone} config --get remote.origin.url 2>/dev/null)" in ${same}) exit 1 ;; esac; fi`);
+  } else {
+    lines.push(`if [ -d ${clone}/.git ]; then ${unsetKey}; fi`);
+  }
+  lines.push(`if [ -d ${clone}/.git ]; then case "$(git -C ${clone} config --get core.sshCommand 2>/dev/null)" in *${key}*) exit 1 ;; esac; fi`);
+  lines.push(`[ ! -e ${key} ] && [ ! -e ${key}.pub ] && [ ! -e ${key}-cert.pub ]`);
+  return lines.join('\n');
 }
 
 // ---- Test: can the repo be reached with this source's credential? ----------------

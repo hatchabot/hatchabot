@@ -127,7 +127,7 @@ import { modelOption, modelOptionsFor, SUBSCRIPTION_MIN_OPENCLAW, subscriptionMo
 import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
 import { createOpsPush, unannounced } from '../ops/push.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
-import { pickIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
+import { pickIcons, suggestIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
 import { ENV_NAME_RE, envValueProblem, MAX_AGENT_ENV_VARS, reservedEnvProblem } from '../orchestrator/envPolicy.js';
 import { registerMgmtChat } from './mgmtChat.js';
 import { registerReachRoutes } from './reachRoutes.js';
@@ -7809,19 +7809,27 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       const src = store.getDataSource(agent.id, req.params.dsId);
       if (!src) return reply.code(404).send({ error: 'No such data source.' });
-      // Drop the deploy key's private half too — in the store AND on the
-      // volume (the clone's files stay, as a folder it has). What that takes
-      // is recorded BEFORE the row goes, so a failed scrub is retried at the
-      // next start, wake or rebuild instead of only traced, with the key
-      // still usable and nothing left that named it.
-      const deployKey = src.kind === 'git' && !!src.secretRef;
-      if (deployKey) store.addDataSourceRemoval({ id: src.id, agentId: agent.id, mountName: src.mountName, secretRef: src.secretRef });
+      // A repo goes from the agent completely (HB-0002): the deploy key's
+      // private half in the store, and on the volume the key and the clone.
+      // What that takes is recorded BEFORE the row goes, so a failed scrub is
+      // retried at the next start, wake or rebuild instead of only traced,
+      // with the key still usable and nothing left that named it.
+      const git = src.kind === 'git';
+      const deployKey = git && !!src.secretRef;
+      if (git) store.addDataSourceRemoval({ id: src.id, agentId: agent.id, mountName: src.mountName, secretRef: src.secretRef, repoUrl: src.repoUrl });
       store.deleteDataSource(agent.id, req.params.dsId);
-      const done = deployKey
-        ? await scrubRemovedDataSources({ store, secrets, provider: providerFor(agent.hostId) }, agent.id, agent.runtimeRef, agent.state === 'RUNNING', trace(agent.id))
+      const provider = providerFor(agent.hostId);
+      const running = agent.state === 'RUNNING';
+      const done = git
+        ? await scrubRemovedDataSources({ store, secrets, provider }, agent.id, agent.runtimeRef, running, trace(agent.id))
         : true;
+      // Its AGENTS.md stops listing the repo now, not at the next rebuild.
+      if (git && running && agent.runtimeRef) {
+        void syncDataSourceDocs({ store, secrets, provider, channel: deps.channel, log: trace(agent.id) }, agent.id, agent.runtimeRef, trace(agent.id)).catch(() => {});
+      }
       return {
         ...publicAgent(store.getAgent(agent.id)!),
+        ...(git ? { removedRepo: { repo: src.repoUrl, scrubbed: done } } : {}),
         // A copy of the key can outlive anything done here (the git host
         // still trusts it): the page says to delete it there too.
         ...(deployKey ? { removedKey: { repo: src.repoUrl, scrubbed: done } } : {}),
@@ -7893,6 +7901,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // or, with `redo`, for the named ones. One call to the owner's management
   // AI covers the batch; without one (or if it fails) a keyword table picks.
   // Either way the result is validated to one emoji and a palette colour.
+  const iconCompleter = (ownerId: string, maxTokens: number): IconCompleter | undefined => {
+    const profile = pickMgmtProfile(store, ownerId);
+    return profile
+      ? async (system, user) => {
+          const r = await runMgmtCompletion(
+            { secrets, apiComplete: deps.mgmtLlmComplete, cliComplete: deps.mgmtCliComplete },
+            profile,
+            { system, tools: [], messages: [{ role: 'user', content: user }], maxTokens },
+          );
+          return (r.content as Array<{ type?: string; text?: string }>)
+            .filter((c) => c?.type === 'text' && typeof c.text === 'string')
+            .map((c) => c.text)
+            .join('\n');
+        }
+      : undefined;
+  };
   const iconRuns = new Set<string>();
   app.post<{ Body: { ids?: string[]; redo?: boolean } }>('/v1/agents/icons/auto', async (req, reply) => {
     const ownerId = ownerIdOf(req);
@@ -7911,21 +7935,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (iconRuns.has(ownerId)) return reply.code(429).send({ error: 'Already picking icons — give it a moment.' });
     iconRuns.add(ownerId);
     try {
-      const profile = pickMgmtProfile(store, ownerId);
-      const complete: IconCompleter | undefined = profile
-        ? async (system, user) => {
-            const r = await runMgmtCompletion(
-              { secrets, apiComplete: deps.mgmtLlmComplete, cliComplete: deps.mgmtCliComplete },
-              profile,
-              { system, tools: [], messages: [{ role: 'user', content: user }], maxTokens: 4000 },
-            );
-            return (r.content as Array<{ type?: string; text?: string }>)
-              .filter((c) => c?.type === 'text' && typeof c.text === 'string')
-              .map((c) => c.text)
-              .join('\n');
-          }
-        : undefined;
-      const picks = await pickIcons(targets.map((a) => ({ id: a.id, name: a.name, persona: a.persona })), complete);
+      const picks = await pickIcons(targets.map((a) => ({ id: a.id, name: a.name, persona: a.persona })), iconCompleter(ownerId, 4000));
       for (const p of picks) {
         // Re-check at write time: the owner may have chosen one meanwhile.
         const now = store.getAgent(p.id);
@@ -7936,6 +7946,30 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return { assigned: picks.length, via, icons: picks.map(({ id, icon, color }) => ({ id, icon, color })) };
     } finally {
       iconRuns.delete(ownerId);
+    }
+  });
+
+  // Ideas for one agent's icon (the icon dialog's ✨ button): one AI call for a
+  // handful of different emoji, none of those the dialog has already shown.
+  // Nothing is saved: the person picks one, and the dialog's Save sets it.
+  const iconIdeaRuns = new Set<string>();
+  app.post<{ Params: { id: string }; Body: { exclude?: string[] } }>('/v1/agents/:id/icons/suggest', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const b = (req.body ?? {}) as { exclude?: unknown };
+    if (b.exclude !== undefined && (!Array.isArray(b.exclude) || b.exclude.length > 200 || b.exclude.some((x) => typeof x !== 'string'))) {
+      return reply.code(400).send({ error: 'exclude must be a list of emoji.' });
+    }
+    const ownerId = ownerIdOf(req);
+    if (iconIdeaRuns.has(ownerId)) return reply.code(429).send({ error: 'Already thinking of icons — give it a moment.' });
+    iconIdeaRuns.add(ownerId);
+    try {
+      return await suggestIcons({ name: agent.name, persona: agent.persona }, {
+        exclude: (b.exclude as string[] | undefined) ?? [],
+        complete: iconCompleter(ownerId, 1000),
+      });
+    } finally {
+      iconIdeaRuns.delete(ownerId);
     }
   });
 

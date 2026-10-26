@@ -111,6 +111,37 @@ describe('doctorLint', () => {
     ]);
   });
 
+  it('mutes the console bind and device-pairing warnings every agent has, in both OpenClaw wordings, and no other bind', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    const f = (checkId: string, severity: string, message: string) => ({ checkId, severity, message });
+    const pair = 'core/doctor/node-hosting-preconditions';
+    p.execResponses.set('doctor', {
+      code: 0,
+      stdout: JSON.stringify({
+        ok: false, checksRun: 37,
+        findings: [
+          // Seen on every agent with a console (2026.9.6 and 2026.9.8 images, 2026-10-25).
+          f(pair, 'warning', 'Gateway is only bound to loopback. Set gateway.publicOrigin to your public HTTPS origin, configure plugins.entries.device-pair.config.publicUrl, enable tailscale serve, or set gateway.bind=lan.'),
+          f(pair, 'warning', 'Gateway is only bound to loopback. Set gateway.bind=lan, enable tailscale serve, or configure plugins.entries.device-pair.config.publicUrl.'),
+          f('core/doctor/security', 'warning', 'WARNING: Gateway bound to "auto" (0.0.0.0) (network-accessible).'),
+          // Still shown: another bind, no auth, or a pairing finding in other words.
+          f('core/doctor/security', 'warning', 'WARNING: Gateway bound to "lan" (192.168.0.10) (network-accessible).'),
+          f('core/doctor/security', 'critical', 'CRITICAL: Gateway bound to "auto" (0.0.0.0) without authentication.'),
+          f(pair, 'warning', 'Configured gateway.publicOrigin is invalid.'),
+        ],
+      }),
+      stderr: '',
+    });
+    const d = (await doctorLint(p, ref))!;
+    expect(d.mutedCount).toBe(3);
+    expect(d.findings.map((x) => x.message)).toEqual([
+      'CRITICAL: Gateway bound to "auto" (0.0.0.0) without authentication.',
+      'WARNING: Gateway bound to "lan" (192.168.0.10) (network-accessible).',
+      'Configured gateway.publicOrigin is invalid.',
+    ]);
+  });
+
   it('lists the worst first and counts what it leaves out, so 20 notes cannot hide an error (audit, 2026-10-22)', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);

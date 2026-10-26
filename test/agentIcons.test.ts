@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { ICON_PALETTE, colorFor, keywordIcon, parseChoices, pickIcons, validIcon, validIconColor } from '../src/orchestrator/agentIcons.js';
+import { ICON_PALETTE, IDEA_COUNT, colorFor, keywordIcon, parseChoices, parseIdeas, pickIcons, suggestIcons, validIcon, validIconColor } from '../src/orchestrator/agentIcons.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { Agent, AIProfile } from '../src/domain/types.js';
 
@@ -92,6 +92,53 @@ describe('picking icons', () => {
   });
 });
 
+describe('icon ideas (the icon dialog)', () => {
+  it('asks once for several, keeps valid ones, and never repeats what was shown', async () => {
+    const seen: string[] = [];
+    const out = await suggestIcons({ name: 'Stock Watcher', persona: 'watches our shares' }, {
+      exclude: ['📈', '⚖️'],
+      complete: async (_system, user) => {
+        seen.push(user);
+        return '```json\n[{"icon":"📈","color":"#3aa36b"},{"icon":"⚖","color":"#3aa36b"},{"icon":"🔭","color":"#5a7fd6"},'
+          + '{"icon":"<b>","color":"#5a7fd6"},{"icon":"🐂","color":"#123456"},{"icon":"🔭","color":"#d05a5a"},{"icon":"🪙"}]\n```';
+      },
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain('Already shown: ["📈","⚖️"]');
+    expect(seen[0]).toContain(`Give ${IDEA_COUNT}.`);
+    // Shown ones are left out (⚖ without its selector too), markup is dropped, a repeat counts once,
+    // and a missing or invented colour takes a stable palette pick.
+    expect(out.via).toBe('ai');
+    expect(out.ideas.map((i) => i.icon)).toEqual(['🔭', '🐂', '🪙']);
+    expect(out.ideas[0]!.color).toBe('#5a7fd6');
+    expect(ICON_PALETTE).toContain(out.ideas[1]!.color as (typeof ICON_PALETTE)[number]);
+    expect(out.ideas[2]!.color).toBe(colorFor('Stock Watcher 🪙'));
+  });
+  it('caps the answer at the count asked for', async () => {
+    const many = JSON.stringify(['🔭', '🐂', '🪙', '🧩', '🐝', '🌱', '🗺️', '🎯', '🧭', '🛰️'].map((icon) => ({ icon, color: '#3a8fd0' })));
+    const out = await suggestIcons({ name: 'Stock Watcher' }, { complete: async () => many });
+    expect(out.ideas).toHaveLength(IDEA_COUNT);
+  });
+  it('an AI answer with only repeats is an AI answer with nothing new', async () => {
+    const out = await suggestIcons({ name: 'Stock Watcher' }, { exclude: ['🔭'], complete: async () => '[{"icon":"🔭","color":"#3a8fd0"}]' });
+    expect(out).toEqual({ via: 'ai', ideas: [] });
+  });
+  it('without an AI, or when it fails or answers junk, the keyword table stands in', async () => {
+    for (const complete of [undefined, async () => { throw new Error('429'); }, async () => 'no idea']) {
+      const out = await suggestIcons({ name: 'Stock Watcher', persona: 'and our taxes' }, { complete });
+      expect(out.via).toBe('keywords');
+      expect(out.ideas.map((i) => i.icon)).toEqual(['📈', '🧾', '🤖']);
+    }
+    const again = await suggestIcons({ name: 'Stock Watcher', persona: 'and our taxes' }, { exclude: ['📈', '🧾', '🤖'] });
+    expect(again).toEqual({ via: 'keywords', ideas: [] });
+  });
+  it('parseIdeas keeps one emoji each and palette colours only', () => {
+    expect(parseIdeas('nothing')).toEqual([]);
+    expect(parseIdeas('[{"icon":"📈📈"},{"icon":"🐂","color":"#3A8FD0"},{"icon":"🐝","color":"red"}]'))
+      .toEqual([{ icon: '🐂', color: '#3a8fd0' }, { icon: '🐝', color: '' }]);
+  });
+});
+
 describe('clearing an agent from Alerts', () => {
   it('PATCH stores the fingerprint of what was flagged, the list carries it, and null shows it again', async () => {
     const { store, f } = await world();
@@ -159,6 +206,41 @@ describe('icon routes', () => {
     const r = await f.inject({ method: 'POST', url: '/v1/agents/icons/auto', headers: H, payload: { ids: ['a1'], redo: true } });
     expect(r.json().icons).toEqual([{ id: 'a1', icon: '💹', color: '#3a8fd0' }]);
     expect(store.getAgent('a1')?.icon).toBe('💹');
+    await f.close();
+  });
+
+  it('suggest gives ideas for one agent and saves nothing', async () => {
+    const { store, f, calls } = await world('[{"icon":"🔭","color":"#5a7fd6"},{"icon":"🐂","color":"#d05a5a"}]');
+    store.insertAIProfile(PROFILE);
+    store.insertAgent(agent('a1', 'Stock Watcher', { icon: '📈', iconColor: '#3aa36b', persona: 'watches our shares' }));
+    const r = await f.inject({ method: 'POST', url: '/v1/agents/a1/icons/suggest', headers: H, payload: { exclude: ['🪙', 'not an emoji'] } });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual({ via: 'ai', ideas: [{ icon: '🔭', color: '#5a7fd6' }, { icon: '🐂', color: '#d05a5a' }] });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('watches our shares');
+    expect(calls[0]).toContain('🪙');
+    expect(calls[0]).not.toContain('not an emoji'); // only emoji reach the prompt
+    expect(store.getAgent('a1')).toMatchObject({ icon: '📈', iconColor: '#3aa36b' });
+    await f.close();
+  });
+
+  it('suggest is for the owner only, and refuses a bad exclude list', async () => {
+    const { store, f, calls } = await world('[]');
+    store.insertAIProfile(PROFILE);
+    store.insertAgent({ ...agent('x1', 'Stock Watcher'), ownerId: 'someone-else' });
+    store.insertAgent(agent('a1', 'Recipe Box'));
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/x1/icons/suggest', headers: H, payload: {} })).statusCode).toBe(404);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/icons/suggest', headers: H, payload: { exclude: 'x' } })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/icons/suggest', headers: H, payload: { exclude: [1] } })).statusCode).toBe(400);
+    expect(calls).toHaveLength(0);
+    await f.close();
+  });
+
+  it('suggest without any AI source answers from the keyword table', async () => {
+    const { store, f } = await world();
+    store.insertAgent(agent('a1', 'Recipe Box'));
+    const r = await f.inject({ method: 'POST', url: '/v1/agents/a1/icons/suggest', headers: H, payload: {} });
+    expect(r.json()).toMatchObject({ via: 'keywords', ideas: [{ icon: '🍳' }, { icon: '🤖' }] });
     await f.close();
   });
 });

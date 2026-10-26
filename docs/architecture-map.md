@@ -153,7 +153,7 @@ the host.
 - `src/api/routes.ts` — `'/v1/agents/:id/data-sources/:dsId/check'`: the Test button (a folder checked here; a repo through `probeGitSource`; a folder of an agent on a runner answered `remote`). `folders_stay_here`: the move-host refusal for an agent with folders.
 - `web/index.html` — `renderDataList`, `checkDataSource`, `showDeployKeyForSource`: the Data tab's rows (Make writable / Make read-only, where each lands, Test), and the deploy key box above the repo list.
 - `src/orchestrator/provision.ts` — `syncGitDataSources`, `datasource.git_synced`: where each repo is cloned during provisioning, and the event it logs (`datasource.git_sync_failed` carries git's own error).
-- `src/orchestrator/provision.ts` — `scrubRemovedDataSources`, `datasource.key_left`: a removed source's deploy key taken off the volume and out of the secret store, retried at start, wake and rebuild until confirmed (`data_source_removals` in the store).
+- `src/orchestrator/provision.ts` — `scrubRemovedDataSources`, `datasource.key_left`: a removed source's deploy key (with any .pub beside it) and its clone taken off the volume, and the key out of the secret store, retried at start, wake and rebuild until confirmed (`data_source_removals` in the store); the script is `buildGitRemovalScript` in `src/orchestrator/gitSource.ts`.
 - `src/openclaw/workspace.ts` — `dataSourcesSection`, `DATA_SOURCES_HEADING`: the AGENTS.md section that tells the agent each path.
 - `src/api/routes.ts` — `'/v1/agents/:id/data-sources'`, `'/v1/agents/:id/data-sources/:dsId'`: add, change and remove a source.
 - `web/index.html` — `addGitSource`: the agent sheet's "add a repo" form.
@@ -510,6 +510,7 @@ API through one fetch helper.
 - `web/index.html` — `openGateway`, `consoleCoverSay`, `autoApproveConsole`: opening an agent's console: the panel opens at once with the spinner, which stays until the console's frame has loaded.
 - `web/index.html` — `initV2`, `renderV2`, `refresh`, `api`: start-up, the home grid, the periodic reload and the fetch helper.
 - `web/index.html` — `openV2Agent`, `v2Open`, `v2Pane`, `v2RenderSheet`: the agent sheet; v2Pane's tabs are overview, personality, ai, messaging, knowledge, sharing, usage, schedule, files and advanced.
+- `src/orchestrator/agentIcons.ts` — `pickIcons`, `suggestIcons`, `keywordIcon`, `validIcon`: agents' icons. The management AI picks one for each agent without one (`src/api/routes.ts` — `'/v1/agents/icons/auto'`) and gives ideas to choose from in the icon dialog, never repeating what it showed (`'/v1/agents/:id/icons/suggest'`; nothing is saved there); the keyword table stands in without an AI, and every answer is cut down to one emoji and a palette colour. `web/index.html` — `openV2Icon`, `v2IconIdeas`, `v2MaybeAutoIcons`: the icon dialog with its ✨ Ideas, and the home screen asking for the missing icons.
 - `web/index.html` — `v2SetView`, `v2SetSort`, `v2LoadRecent`, `agentAttention`, `v2LoadMachine`: View by, sorting, Activity, Alerts and the machine line.
 - `web/index.html` — `v2PlannedHTML`, `loadTodos`, `createFromTodo`, `retireMadeTodos`: the Planned group (ghost tiles; the plans are the agent-todos routes).
 - `web/index.html` — `v2PlaceInGroup`, `v2MoveInGroup`, `v2DropTarget`, `sortGroup`: My order — drag within a group, Move earlier / later, a group's kept A→Z (the agent move and group sort routes).

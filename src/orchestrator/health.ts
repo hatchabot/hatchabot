@@ -39,6 +39,21 @@ const MUTED = [
       /^Paths: [\w.*[\]-]+(?:, [\w.*[\]-]+)*(?: \(\+\d+ more\))?$/,
       /^Agents or workspace tools that can read config files may see these API keys\/tokens\.$/,
       /^Migrate them to SecretRefs with [^\n]*openclaw secrets configure[^\n]*, then verify with [^\n]*openclaw secrets audit --check[^\n]*\.$/,
+      // An agent with a console binds "auto" inside its container, behind its
+      // password or the doorman's proxy auth; the host publishes the port on
+      // loopback only (configWriter.buildConfigCommands). The no-auth variant
+      // is critical and never muted; any other bind still shows.
+      /^(?:WARNING: )?Gateway bound to "auto" \(0\.0\.0\.0\) \(network-accessible\)\.$/,
+    ],
+  },
+  {
+    // Pairing devices straight to the gateway (OpenClaw's node hosting /
+    // device-pair), which Hatchabot does not use. It says "loopback" even for
+    // bind "auto". Wordings of 2026.9.6 and 2026.9.8.
+    checkId: 'core/doctor/node-hosting-preconditions',
+    patterns: [
+      /^Gateway is only bound to loopback\. Set gateway\.bind=lan, enable tailscale serve, or configure plugins\.entries\.device-pair\.config\.publicUrl\.$/,
+      /^Gateway is only bound to loopback\. Set gateway\.publicOrigin to your public HTTPS origin, configure plugins\.entries\.device-pair\.config\.publicUrl, enable tailscale serve, or set gateway\.bind=lan\.$/,
     ],
   },
 ];

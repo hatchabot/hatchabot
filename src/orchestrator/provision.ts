@@ -72,7 +72,7 @@ if (!hit) { console.error('Unknown peer "' + peer + '". Available: ' + peers.map
  * Verified in the runtime dist that OpenClaw reads this name (2026-09-04).
  */
 export const SEARCH_KEY_REF = 'media/brave-api-key';
-import { buildGitSyncScript, buildPublicGitSyncScript, gitSyncReason, isPublicGitUrl } from './gitSource.js';
+import { buildGitRemovalScript, buildGitSyncScript, buildPublicGitSyncScript, gitSyncReason, isPublicGitUrl } from './gitSource.js';
 import type { Agent, Channel, Host } from '../domain/types.js';
 import { briefCause } from '../domain/redact.js';
 import { opsToolsFingerprint } from '../ops/opsTools.js';
@@ -1403,7 +1403,8 @@ export async function syncGitDataSources(
  * Scrub what removed repo sources left behind (store.addDataSourceRemoval):
  * the deploy key's private half in the secret store, and on the volume the
  * key file and the clone's ssh config, which let the agent keep pulling and
- * pushing after "stop sharing" (use-case walk-through, 2026-09-27). Each half
+ * pushing after "stop sharing" (use-case walk-through, 2026-09-27), and since
+ * v2.167.0 the clone itself, public sources' too (HB-0002). Each half
  * is settled only once confirmed; a failure stays recorded for the next
  * start, wake or rebuild (a failed scrub used to be only traced, and the
  * key stayed with nothing to retry it). `running` picks a docker exec over a
@@ -1427,26 +1428,21 @@ export async function scrubRemovedDataSources(
       }
     }
     if (!r.mountName) continue;
-    // Never a shape the script can't hold safely: nothing of ours is there.
-    if (!/^[A-Za-z0-9._-]+$/.test(r.mountName)) { store.settleDataSourceRemoval(r.id, { volume: true }); continue; }
+    // Never a shape the script can't hold safely (no "..", no leading dot):
+    // nothing of ours is there.
+    if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(r.mountName)) { store.settleDataSourceRemoval(r.id, { volume: true }); continue; }
     // Added again under the same name with a key of its own: its sync writes
     // the new key over the old one, and scrubbing now would take the new one.
-    const again = store.listDataSources(agentId).some((d) => d.kind === 'git' && d.mountName === r.mountName && !!d.secretRef);
-    if (again) { store.settleDataSourceRemoval(r.id, { volume: true }); continue; }
+    const again = store.listDataSources(agentId).filter((d) => d.kind === 'git' && d.mountName === r.mountName);
+    if (again.some((d) => !!d.secretRef)) { store.settleDataSourceRemoval(r.id, { volume: true }); continue; }
     if (!runtimeRef) continue;
-    const base = '/home/node/.openclaw';
-    // Judged by what is left, not by the commands' exits: unsetting a key
-    // that is already gone exits non-zero, and that is the goal reached.
-    const repo = `${base}/${r.mountName}`;
-    const script = [
-      `rm -f ${base}/.ssh/${r.mountName}_deploy`,
-      `if [ -d ${repo}/.git ]; then git -C ${repo} config --unset-all core.sshCommand 2>/dev/null; ! git -C ${repo} config --get core.sshCommand >/dev/null 2>&1 || exit 1; fi`,
-      `[ ! -e ${base}/.ssh/${r.mountName}_deploy ]`,
-    ].join('\n');
+    // The key, and the clone unless a source of that name (public) owns the
+    // folder now (HB-0002). Judged by what is left, not by each command's exit.
+    const script = buildGitRemovalScript(r.mountName, r.repoUrl, { keepClone: again.length > 0 });
     const res = await (running ? provider.execShell(runtimeRef, script) : provider.execShellOnVolume(runtimeRef, script)).catch(() => undefined);
     if (res?.code === 0) {
       store.settleDataSourceRemoval(r.id, { volume: true });
-      log('datasource.key_removed', { agentId, name: r.mountName });
+      log('datasource.key_removed', { agentId, name: r.mountName, clone: !!r.repoUrl && !again.length });
     } else {
       log('datasource.key_left', { agentId, name: r.mountName, where: 'volume' });
     }

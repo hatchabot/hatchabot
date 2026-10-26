@@ -346,3 +346,54 @@ describe('a removed repo source whose key could not be scrubbed is retried (A054
     expect(w.provider.execLog.some((c) => c[0] === 'sh-volume' && c[1]!.includes('recipes_deploy'))).toBe(true);
   });
 });
+
+describe('removing a repo takes its clone off the agent too (HB-0002)', () => {
+  async function live(repoUrl: string, pub = false) {
+    const w = await world();
+    const provider = new MockProvider();
+    const f = Fastify();
+    await registerRoutes(f, { store: w.store, secrets: w.secrets, providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'kitchen', workspace: { files: {}, configPatch: { agentId: 'kitchen', authMode: 'api-key' } }, env: {} } as any);
+    w.store.setAgentRuntimeRef('a1', runtimeRef);
+    const added = (await addSource(f, { kind: 'git', access: 'ro', repoUrl, ...(pub ? { public: true } : {}) })).json();
+    return { ...w, f, provider, runtimeRef, id: added.dataSources[0].id as string };
+  }
+  const del = (f: any, id: string) => f.inject({ method: 'DELETE', url: `/v1/agents/a1/data-sources/${id}`, headers: as });
+  const removals = (p: MockProvider, mark: number) => p.execLog.slice(mark).filter((c) => c[0] === 'sh' && String(c[1]).includes('_deploy')).map((c) => String(c[1]));
+
+  it('a public repo (no key): its clone is deleted, and the answer says the repo went', async () => {
+    const w = await live('https://github.com/example-owner/recipes.git', true);
+    const mark = w.provider.execLog.length;
+    const res = await del(w.f, w.id);
+    expect(res.json().removedRepo).toEqual({ repo: 'https://github.com/example-owner/recipes.git', scrubbed: true });
+    expect(res.json().removedKey).toBeUndefined();
+    const [script] = removals(w.provider, mark);
+    expect(script).toContain('rm -rf /home/node/.openclaw/recipes');
+    expect(w.store.dataSourceRemovals('a1')).toEqual([]);
+  });
+
+  it('a deploy-key repo: the key, its .pub and the clone, in one script', async () => {
+    const w = await live('git@example.org:example-owner/recipes.git');
+    const mark = w.provider.execLog.length;
+    const res = await del(w.f, w.id);
+    expect(res.json().removedKey.scrubbed).toBe(true);
+    const [script] = removals(w.provider, mark);
+    expect(script).toContain('rm -f /home/node/.openclaw/.ssh/recipes_deploy /home/node/.openclaw/.ssh/recipes_deploy.pub /home/node/.openclaw/.ssh/recipes_deploy-cert.pub');
+    expect(script).toContain("'git@example.org:example-owner/recipes.git'");
+    expect(script).toContain('rm -rf /home/node/.openclaw/recipes');
+  });
+
+  it('a public repo added again under the name keeps the folder; a failed removal waits with its address', async () => {
+    const w = await live('git@example.org:example-owner/recipes.git');
+    w.provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'busy' });
+    await del(w.f, w.id);
+    expect(w.store.dataSourceRemovals('a1')).toMatchObject([{ id: w.id, mountName: 'recipes', repoUrl: 'git@example.org:example-owner/recipes.git' }]);
+    w.provider.execResponses.delete('sh');
+    await addSource(w.f, { kind: 'git', access: 'ro', repoUrl: 'https://github.com/example-owner/recipes.git', public: true });
+    const mark = w.provider.execLog.length;
+    expect(await scrubRemovedDataSources({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.runtimeRef, true)).toBe(true);
+    const [script] = removals(w.provider, mark);
+    expect(script).toContain('rm -f /home/node/.openclaw/.ssh/recipes_deploy');
+    expect(script).not.toContain('rm -rf');
+  });
+});

@@ -58,7 +58,8 @@ non-versioned data you're comfortable the agent editing.
   `reason` one of `key-not-added`, `not-found`, `host-key`, `unreachable`,
   `timeout`, `no-git`, `error`. The key is written to a private temp dir for
   the one command and removed after it. Nothing is changed by a check.
-- `DELETE /v1/agents/:id/data-sources/:dsId` — remove.
+- `DELETE /v1/agents/:id/data-sources/:dsId` — remove. A repo goes from the agent
+  completely: its key and clone (`removedRepo`, `removedKey` in the answer).
 - Folders are bind mounts of **this** machine's disk: adding one to an agent
   on a runner is refused (400), and moving an agent that has folders to a
   runner is refused (409, `folders_stay_here`). An export carries repos with
@@ -75,5 +76,7 @@ non-versioned data you're comfortable the agent editing.
   half shown to add to the repo — read, or write for `rw`); `syncGitDataSources`
   clones it onto the volume on the next provision/rebuild (idempotent, and
   best-effort so a not-yet-authorized key never fails the boot). Deleting a git
-  source scrubs the private key.
+  source scrubs the private key; since v2.167.0 it also deletes the clone from
+  the agent (only a folder whose origin is still that repo), public repos' too,
+  and the agent's AGENTS.md stops listing it at once on a running agent.
 - **Phase 2:** **Google Drive** via rclone + Google sign-in.

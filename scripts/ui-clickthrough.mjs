@@ -1449,10 +1449,60 @@ const SCENARIOS = String.raw`(() => {
         await until(() => document.querySelector('#fleetContextNow table'));
         const rows = [...document.querySelectorAll('#fleetContextNow tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent.trim()));
         eq('the fullest conversation first', rows.map((r) => r[0].split(' ')[0]), ['Kitchen', 'Garden']);
-        ok('Kitchen: 180K of a 200K window = 90%', rows[0][1] === 'claude-opus-4-8' && rows[0][2] === '180K' && rows[0][3].startsWith('200K') && rows[0][4] === '90%');
-        ok('Garden: the cap Hatchabot set counts as its window', rows[1][2] === '30K' && rows[1][3].startsWith('150K') && rows[1][3].includes('cap') && rows[1][4] === '20%');
-        ok('median / 90th per call', rows[0][5] === '40K / 90K');
+        const capSel = (id) => document.querySelector('#fleetContextNow tr[data-agent="' + id + '"] select.ctxcap');
+        ok('Kitchen: 180K of a 200K window = 90%', rows[0][1] === 'claude-opus-4-8' && rows[0][2] === '180K' && rows[0][3] === '200K' && rows[0][5] === '90%');
+        eq('Kitchen has no cap; the menu offers only caps below its window', [capSel('a1').value, [...capSel('a1').options].map((o) => o.textContent)], ['', ['None', '100K', '150K']]);
+        ok('Garden: Full counts against the cap Hatchabot set', rows[1][2] === '30K' && capSel('a2').value === '150000' && rows[1][5] === '20%');
+        ok('typical call and 1 in 10 over, each in its own column', rows[0][6] === '40K' && rows[0][7] === '90K');
+        ok('the note says what they mean', document.getElementById('fleetContextNow').textContent.includes('one in ten carried more'));
       } finally {
+        fleetUsageDlg.close();
+        delete window.__override['/v1/token-health'];
+      }
+    },
+    usageContextCap: async () => {
+      // Set or take off a cap where its figures are (Chris, 2026-10-25): it asks first, and a No changes nothing.
+      window.__override['/v1/token-health'] = { rows: [
+        { agent: 'Kitchen', id: 'a1', state: 'running', billing: 'api', model: 'claude-opus-4-8', conversation: { calls: 12, ctxK: { p50: 140, p90: 170, max: 190 }, mainNowK: 180, mainAt: new Date().toISOString(), windowK: 1000 } },
+        { agent: 'Garden', id: 'a2', state: 'asleep', billing: 'api', model: 'claude-sonnet-4-5', conversation: { calls: 2, ctxK: { p50: 10, p90: 12, max: 12 }, mainNowK: 30 }, contextCap: { tokens: 150000, applied: false, compactsAtK: 130 } },
+        { agent: 'Local', id: 'a3', state: 'running', billing: 'local', model: 'qwen3', conversation: { calls: 4, ctxK: { p50: 8, p90: 9, max: 9 }, mainNowK: 9 } },
+      ] };
+      window.__answer = window.__answer || {};
+      const capSel = (id) => document.querySelector('#fleetContextNow tr[data-agent="' + id + '"] select.ctxcap');
+      const puts = (id) => calls('PUT', new RegExp('^/v1/agents/' + id + '/context-cap$'));
+      const was = window.__confirmAnswer;
+      try {
+        openFleetUsage();
+        // The page keeps the last scenario's table until this reading arrives: wait for a row only it has.
+        await until(() => document.querySelector('#fleetContextNow tr[data-agent="a3"]'));
+        ok('a local model has no menu', !capSel('a3'));
+        const kitchenCells = [...document.querySelector('#fleetContextNow tr[data-agent="a1"]').children].map((td) => td.textContent.trim());
+        eq('a 1M window reads 1M (it read "1.0kK")', kitchenCells[3], '1M');
+        ok('a cap not yet in its settings says so', document.querySelector('#fleetContextNow tr[data-agent="a2"]').textContent.includes('pending'));
+        // No: nothing sent, the menu goes back.
+        window.__confirmAnswer = false;
+        const asked = window.__confirms.length;
+        capSel('a1').value = '150000'; capSel('a1').dispatchEvent(new Event('change'));
+        ok('it asks, saying the conversation is past the point: ' + window.__confirms.at(-1), window.__confirms.length === asked + 1 && window.__confirms.at(-1).includes('about 130K') && window.__confirms.at(-1).includes('180K now'));
+        ok('a No sends nothing and puts the menu back', !puts('a1').length && capSel('a1').value === '');
+        // Yes: set.
+        window.__confirmAnswer = true;
+        window.__answer['PUT /v1/agents/a1/context-cap'] = [{ body: { tokens: 150000, outcome: 'applied', compactsAt: 130000, message: '"Kitchen" now compacts its conversations at about 130K tokens.' } }];
+        const reads = calls('GET', /^\/v1\/token-health$/).length;
+        capSel('a1').value = '150000'; capSel('a1').dispatchEvent(new Event('change'));
+        await until(() => puts('a1').length === 1);
+        eq('a cap is sent', puts('a1')[0].body, { tokens: 150000 });
+        await until(() => document.getElementById('toast').textContent.includes('compacts its conversations at about 130K'));
+        await until(() => calls('GET', /^\/v1\/token-health$/).length > reads);
+        // Taking one off.
+        await until(() => capSel('a2'));
+        capSel('a2').value = ''; capSel('a2').dispatchEvent(new Event('change'));
+        ok('taking it off asks too: ' + window.__confirms.at(-1), window.__confirms.at(-1).includes("Take Garden's context cap off"));
+        await until(() => puts('a2').length === 1);
+        eq('null takes it off', puts('a2')[0].body, { tokens: null });
+      } finally {
+        window.__confirmAnswer = was;
+        if (window.__answer) delete window.__answer['PUT /v1/agents/a1/context-cap'];
         fleetUsageDlg.close();
         delete window.__override['/v1/token-health'];
       }
@@ -3348,6 +3398,14 @@ const SCENARIOS = String.raw`(() => {
         openV2Agent(meal.id, 'usage');
         const input = await until(() => document.getElementById('bgUsd_' + meal.id));
         eq('the row shows its budget', input.value, '50');
+        // Two lines, not a word a line (2026-10-25): each label beside its boxes, the menu its own size.
+        const mid = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+        const stepIn = document.getElementById('bgStep_' + meal.id), atSel = document.getElementById('bgAt_' + meal.id);
+        const stepSave = stepIn.closest('.bg-form').querySelector('button'), limitSave = input.closest('.bg-form').querySelector('button');
+        const bgLabel = (t) => [...document.querySelectorAll('#v2BudgetRow .bg-rows > .sub')].find((s) => s.textContent === t);
+        ok('"Tell me", its box and its Save on one line', Math.abs(mid(bgLabel('Tell me')) - mid(stepIn)) < 10 && Math.abs(mid(stepIn) - mid(stepSave)) < 10);
+        ok('"Limit", its box, the menu and Save on one line', Math.abs(mid(bgLabel('Limit')) - mid(input)) < 10 && Math.abs(mid(input) - mid(atSel)) < 10 && Math.abs(mid(atSel) - mid(limitSave)) < 10);
+        ok('the menu is its own size: ' + Math.round(atSel.getBoundingClientRect().width), atSel.getBoundingClientRect().width < 220);
         input.value = '60'; document.getElementById('bgAt_' + meal.id).value = 'pause';
         const mark = window.__calls.length;
         document.getElementById('bgUsd_' + meal.id).closest('.bg-form').querySelector('button').click();
@@ -3527,6 +3585,11 @@ const SCENARIOS = String.raw`(() => {
         await until(() => byText('#v2AppRow', 'Demo App'));
         const rowText = document.getElementById('v2AppRow').textContent;
         ok('the row says which app, which commit, from where: ' + rowText.replace(/\s+/g, ' ').slice(0, 120), rowText.includes('a1b2c3d4e5f6') && rowText.includes('/home/tester/demoapp') && rowText.includes('its tests passed'));
+        // Outlined like the rows around it: it sits in a holder, which the outline rule missed (2026-10-25).
+        const outline = (el) => { const cs = getComputedStyle(el); return [cs.borderTopWidth, cs.borderBottomWidth, cs.borderTopStyle, cs.borderRadius, cs.backgroundColor].join(' '); };
+        const aiRow = [...document.querySelectorAll('#v2Pane > .v2row')].find(r => r.querySelector('.v2k')?.textContent === 'AI');
+        const appOutline = outline(document.querySelector('#v2AppRow > .v2row')), aiOutline = aiRow && outline(aiRow);
+        ok('the App row is outlined like the AI row: ' + appOutline, !!aiRow && appOutline === aiOutline && /^1px 1px solid 12px/.test(appOutline));
         ok('Update is the main button', document.getElementById('v2AppUpdateBtn').classList.contains('primary'));
         ok('no Roll back without an earlier release', !byText('#v2AppRow button', 'Roll back'));
         // A failing update: the output shows, the button comes back, nothing changed.
@@ -3563,6 +3626,56 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/agents/a1/app'];
         if (window.__answer) delete window.__answer['POST /v1/agents/a1/app/update'];
         if (typeof v2AgentId !== 'undefined' && v2AgentId) v2Close();
+      }
+    },
+    // The icon dialog's ✨ (2026-10-25): ideas to choose from, more on each press, nothing saved until Save.
+    iconIdeas: async () => {
+      const ideaBtns = () => [...document.querySelectorAll('#v2IconIdeas [data-emoji]')];
+      const asks = () => calls('POST', /^\/v1\/agents\/a1\/icons\/suggest$/);
+      const ready = () => !document.getElementById('v2IconAutoBtn').disabled;
+      window.__answer = window.__answer || {};
+      window.__answer['POST /v1/agents/a1/icons/suggest'] = [
+        { body: { via: 'ai', ideas: [{ icon: '🪙', color: '#e0a13a' }, { icon: '🔭', color: '#5a7fd6' }, { icon: '🐝', color: '#c9b03a' }] } },
+        { body: { via: 'ai', ideas: [{ icon: '🧩', color: '#8a6fd0' }] } },
+        { body: { via: 'keywords', ideas: [] } },
+      ];
+      const mark = window.__calls.length;
+      const patches = () => window.__calls.slice(mark).filter((c) => c.method === 'PATCH');
+      try {
+        openV2Icon('a1');
+        const was = document.getElementById('v2IconInput').value;
+        ok('no ideas until asked', document.getElementById('v2IconIdeasBox').hidden && !ideaBtns().length);
+        document.getElementById('v2IconAutoBtn').click();
+        await until(() => ideaBtns().length === 3);
+        ok('each idea is drawn on its colour', ideaBtns()[1].style.getPropertyValue('--tint') === '#5a7fd6');
+        ok('asking changed nothing: the box still says ' + was, document.getElementById('v2IconInput').value === was && !patches().length);
+        ideaBtns()[1].click();
+        ok('a pick fills the box and the colour', document.getElementById('v2IconInput').value === '🔭' && v2IconColor === '#5a7fd6');
+        ok('and is marked chosen', ideaBtns()[1].getAttribute('aria-pressed') === 'true' && ideaBtns()[0].getAttribute('aria-pressed') === 'false');
+        ok('the preview shows it', document.getElementById('v2IconPreview').textContent.includes('🔭'));
+        await until(ready);
+        ok('the button now asks for more: ' + document.getElementById('v2IconAutoBtn').textContent, document.getElementById('v2IconAutoBtn').textContent.includes('More ideas'));
+        document.getElementById('v2IconAutoBtn').click();
+        await until(() => ideaBtns().length === 4);
+        const shown = asks().at(-1).body.exclude;
+        ok('the second ask leaves out what was shown: ' + JSON.stringify(shown), ['🪙', '🔭', '🐝'].every((e) => shown.includes(e)));
+        ok('the earlier ideas stay on show', ideaBtns()[0].dataset.emoji === '🪙' && ideaBtns()[3].dataset.emoji === '🧩');
+        await until(ready);
+        document.getElementById('v2IconAutoBtn').click();
+        await until(() => document.getElementById('v2IconNote').textContent.includes('isn’t available'));
+        ok('without the AI it says so, and keeps what it had', ideaBtns().length === 4);
+        ok('still nothing saved', !patches().length);
+        await until(ready);
+        document.getElementById('v2IconSaveBtn').click();
+        const patch = await until(() => patches().find((c) => c.path === '/v1/agents/a1'));
+        eq('Save sends the pick', { icon: patch.body.icon, iconColor: patch.body.iconColor }, { icon: '🔭', iconColor: '#5a7fd6' });
+        await until(() => !v2IconDlg.open);
+        openV2Icon('a1');
+        ok('opened again, it starts without ideas', document.getElementById('v2IconIdeasBox').hidden && !ideaBtns().length && !document.getElementById('v2IconNote').textContent);
+        v2IconDlg.close();
+      } finally {
+        if (window.__answer) delete window.__answer['POST /v1/agents/a1/icons/suggest'];
+        if (v2IconDlg.open) v2IconDlg.close();
       }
     },
     // Final audit, 2026-10-22: an update that needs a value it has not got
@@ -3741,14 +3854,27 @@ const SCENARIOS = String.raw`(() => {
       const key = 'DELETE /v1/agents/a1/data-sources/ds1';
       try {
         editAgentId = 'a1';
-        editData = [{ id: 'ds1', kind: 'git', mountName: 'recipes', access: 'ro' }];
+        editData = [{ id: 'ds1', kind: 'git', mountName: 'recipes', access: 'ro', repoUrl: 'git@example.org:example-owner/recipes.git' }];
         window.__answer = window.__answer || {};
-        window.__answer[key] = [{ status: 200, body: { dataSources: [], removedKey: { repo: 'git@example.org:example-owner/recipes.git', scrubbed: false } } }];
+        const gone = { repo: 'git@example.org:example-owner/recipes.git', scrubbed: false };
+        window.__answer[key] = [{ status: 200, body: { dataSources: [], removedRepo: gone, removedKey: gone } }];
         window.__confirmAnswer = true;
+        const asked = window.__confirms.length;
         await removeDataSource('ds1');
+        const q = window.__confirms[asked] || '';
+        ok('it asks first, saying the clone goes with what was not pushed (HB-0002): ' + q, q.includes('~/.openclaw/recipes') && q.includes('not pushed') && q.includes('deploy key'));
         const said = document.getElementById('toast').textContent;
         ok('it says to delete the key on the host: ' + said, said.includes('Deploy keys'));
-        ok('and that taking it off the agent is retried', said.includes('retried at its next start'));
+        ok('and that taking it off the agent is retried', said.includes('at its next start'));
+        // A public repo: no key to mention, and it went at once.
+        editData = [{ id: 'ds1', kind: 'git', mountName: 'recipes', access: 'ro', repoUrl: 'https://example.org/example-owner/recipes.git' }];
+        window.__answer[key] = [{ status: 200, body: { dataSources: [], removedRepo: { repo: 'https://example.org/example-owner/recipes.git', scrubbed: true } } }];
+        const asked2 = window.__confirms.length;
+        await removeDataSource('ds1');
+        const q2 = window.__confirms[asked2] || '';
+        ok('a public repo: the copy goes, no deploy key named: ' + q2, q2.includes('is deleted') && !q2.includes('deploy key'));
+        const said2 = document.getElementById('toast').textContent;
+        ok('and no rebuild asked for: ' + said2, said2.startsWith('Removed, with its copy') && !said2.includes('Rebuild'));
       } finally {
         editAgentId = prev; editData = prevData;
         if (window.__answer) delete window.__answer[key];
@@ -4481,6 +4607,14 @@ const SCENARIOS = String.raw`(() => {
         ok('the limits are said: ' + box.textContent.slice(0, 120), box.textContent.includes('Not checked:') && box.textContent.includes('saved for itself'));
         ok('the summary line counts the problem', document.getElementById('v2AccessWhen').textContent.includes('1 it should not have'));
         ok('Verify now is there', !!document.getElementById('v2AccessVerify'));
+        // A line a thing (2026-10-25): the row's grey parts were each pushed to a line of their own,
+        // which squeezed its words to one a line. Its mark, words and time sit side by side now.
+        const line = accRow('self@example.org'), [mk, words, when] = line.children;
+        const top = (el) => el.getBoundingClientRect().top, wide = (el) => el.getBoundingClientRect().width;
+        ok('mark, words and time on one line: ' + [mk, words, when].map((el) => Math.round(top(el))), Math.abs(top(words) - top(when)) < 6 && Math.abs(top(mk) - top(words)) < 6);
+        ok('the words have most of the row: ' + Math.round(wide(words)) + ' of ' + Math.round(wide(line)), wide(words) > wide(line) * 0.6);
+        const vb = document.getElementById('v2AccessVerify').getBoundingClientRect(), wb = document.getElementById('v2AccessWhen').getBoundingClientRect();
+        ok('Verify now sits beside the summary line', vb.top < wb.bottom && vb.bottom > wb.top);
         v2Close();
       } finally { delete window.__override['/v1/agents/a1/access']; v2AccessCache = null; if (v2AgentDlg.open) v2Close(); }
     },
@@ -5038,6 +5172,29 @@ const SCENARIOS = String.raw`(() => {
       }
       ok('the page does not scroll sideways: ' + document.documentElement.scrollWidth + ' > ' + innerWidth, document.documentElement.scrollWidth <= innerWidth);
     },
+    phoneChipsBelowTheStatusBar: async () => {
+      // An iPhone home-screen app: a 59px status bar inside the page (safe-area inset).
+      // The header pinned at the inset covered what came right after it: on an install
+      // with Setup done, the first row of View by chips, which at the top of the page
+      // could never be scrolled into view (HB-0096).
+      const root = document.documentElement;
+      try {
+        root.style.setProperty('--safe-top', '59px');
+        scrollTo(0, 0);
+        await until(() => document.querySelector('.v2views button'));
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const header = document.getElementById('v2Header');
+        const head = header.getBoundingClientRect();
+        const next = [...header.parentElement.children].slice([...header.parentElement.children].indexOf(header) + 1)
+          .find((e) => e.offsetHeight > 0 && getComputedStyle(e).position !== 'fixed');
+        const below = next.getBoundingClientRect();
+        ok('the header starts at the top, under the status bar: ' + Math.round(head.top), Math.round(head.top) === 0);
+        ok('and ends below it: ' + Math.round(head.bottom), head.bottom >= 59 + 30);
+        ok('what follows it (' + (next.id || next.className) + ') starts below it: ' + Math.round(below.top) + ' >= ' + Math.round(head.bottom), below.top >= head.bottom - 1);
+      } finally {
+        root.style.removeProperty('--safe-top');
+      }
+    },
     phoneFileHasAWayBack: async () => {
       // A file opened from Files on a phone: ← Back is on the screen (the app from the home screen has no browser bar).
       window.__override['/v1/agents/a1/fs'] = { path: '', entries: [{ name: 'notes.txt', type: 'file', size: 10, mtime: '' }] };
@@ -5055,6 +5212,30 @@ const SCENARIOS = String.raw`(() => {
       } finally {
         try { v2Close(); } catch {}
         delete window.__override['/v1/agents/a1/fs']; delete window.__override['/v1/agents/a1/fs/file']; v2FilesPath.delete('a1');
+      }
+    },
+    phoneAccessAndSpendingFit: async () => {
+      // Sharing → Access and Usage → Spending on a phone (2026-10-25): nothing past the edge, and an
+      // Access row's words keep most of its width (they were squeezed to a word a line).
+      const month = new Date().toISOString().slice(0, 7);
+      window.__override['/v1/agents/a1/access'] = accOv();
+      window.__override['/v1/budgets'] = { month, tz: 'UTC', agents: [{ id: 'a1', name: 'Homework Helper', state: 'RUNNING', billing: 'api', spent: 12, lastMonth: 10, monthlyNow: 14, suggested: 20,
+        alertEvery: { every: 5, month, spent: 12, passed: 2, next: 15 }, budget: { scope: 'a1', usd: 20, atLimit: 'warn', month, spent: 12, pct: 60, level: 0, resetsOn: 'next 1st' } }] };
+      v2AccessCache = null;
+      const outside = (sel) => [...document.querySelectorAll(sel)].filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && (r.left < 0 || r.right > innerWidth); }).map((el) => el.textContent.trim().slice(0, 30));
+      try {
+        openV2Agent('a1', 'sharing');
+        await until(() => document.querySelectorAll('#v2Access .v2accrow').length === 4);
+        ok('Access fits the screen: ' + JSON.stringify(outside('#v2Access *')), !outside('#v2Access *').length);
+        const row = accRow('self@example.org');
+        ok('a row\'s words keep most of it: ' + Math.round(row.children[1].getBoundingClientRect().width) + ' of ' + Math.round(row.getBoundingClientRect().width), row.children[1].getBoundingClientRect().width > row.getBoundingClientRect().width * 0.5);
+        v2Close();
+        openV2Agent('a1', 'usage');
+        await until(() => document.getElementById('bgUsd_a1'));
+        ok('Spending fits the screen: ' + JSON.stringify(outside('#v2BudgetRow *')), !outside('#v2BudgetRow *').length);
+      } finally {
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents/a1/access']; delete window.__override['/v1/budgets']; v2AccessCache = null;
       }
     },
   };

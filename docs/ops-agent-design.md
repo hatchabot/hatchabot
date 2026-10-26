@@ -31,8 +31,9 @@ Status, 2026-09-20:
   - failures are caught while the card is written, not on Confirm: a derived
     image name it cannot use, and reaching for `delete_base_image` on a derived
     tag.
-- **Not done, on purpose:** retiring the older built-in chat. That waits until
-  the agent has been used for real.
+- **Done:** the older built-in chat is retired (2026-10-25, after the agent
+  had been used for real since September); without an agent, the hub offers
+  to set one up.
 
 ## Why
 
@@ -278,7 +279,7 @@ becomes the approvals channel.
    one-click "Set up the Hatchabot agent", web-only by default.
 5. **Surfaces**: hub as a thin client, console with the proposals strip around
    it, the nightly digest.
-6. **Drift check and posture entries.** Then retire the built-in chat.
+6. **Drift check and posture entries.** Then retire the built-in chat (done).
 
 Each step ships on its own. Steps 1 and 2 are useful even if the rest were
 never built.

@@ -935,7 +935,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ### A git data source added again still holds the old repo, or a writable one cannot push ("PUSH-DISABLED-read-only-public-clone")
 - **Check:** in the agent, `git -C ~/.openclaw/<mount> remote -v` shows another repo than the source's card, or a push URL of `PUSH-DISABLED-read-only-public-clone` for a source added with a deploy key.
-- **Cause:** removing a git source keeps its clone on the volume. A source added again at the same mount found that clone and skipped cloning, keeping its old address and, from a public source, its disabled push URL.
+- **Cause:** removing a git source kept its clone on the volume (until v2.167.0, which deletes it). A source added again at the same mount found that clone and skipped cloning, keeping its old address and, from a public source, its disabled push URL.
 - **Fix:** upgrade and rebuild the agent. A clone of the same repo is repointed (and can push again with a deploy key); a clone of another repo is moved aside to `<mount>.replaced-<time>` (its files are kept) and the new repo cloned.
 - **Fixed in:** `v2.160.0` (#88, #89)
 - **Code:** `src/orchestrator/gitSource.ts` — `retainedCloneCheck`, `buildGitSyncScript`, `buildPublicGitSyncScript`
@@ -1164,6 +1164,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/provision.ts` — `scrubRemovedDataSources`; `src/api/routes.ts` — `/v1/agents/:id/data-sources/:dsId`
 
+### A repo never clones: "The repo rejected this agent's deploy key", though the key is on the repo and Test passes
+- **Check:** the source's card keeps the message after every rebuild, its trail shows `datasource.git_sync_failed` with "Permission denied (publickey)", yet **Test** on the row says the repo answered. In the agent's console: `ssh-keygen -y -f ~/.openclaw/.ssh/<repo>_deploy | ssh-keygen -lf -` and `ssh-keygen -lf ~/.openclaw/.ssh/<repo>_deploy.pub` give different fingerprints (`ssh-keygen -lf` on the key itself reads the .pub, so it shows the wrong one).
+- **Cause:** a `<repo>_deploy.pub` (or `-cert.pub`) left beside the key, from a key made there before. ssh offers the key in the .pub file, not the one given with `-i`, so the host never sees the stored key. Test passes because it writes the key to a fresh folder.
+- **Fix:** upgrade and rebuild: each sync removes the .pub and -cert.pub beside the key. Before upgrading: in the agent's console, `mv ~/.openclaw/.ssh/<repo>_deploy.pub ~/<repo>_deploy.pub.old`, then rebuild.
+- **Fixed in:** `v2.167.0`
+- **Code:** `src/orchestrator/gitSource.ts` — `buildGitSyncScript`, `probeGitSource`; `src/orchestrator/provision.ts` — `syncGitDataSources`
+
 ### Deleting an agent fails: "Couldn't remove all of the agent's stored keys"
 - **Check:** the agent shows FAILED with "Delete could not remove all of its stored keys — tap Delete again"; the server log says `secret delete failed during delete`.
 - **Cause:** the secret store refused a delete (often a busy or locked database). Before v2.160.0 the failure was ignored, the agent was marked deleted, and its env values, deploy keys or call token stayed stored with nothing naming them.
@@ -1205,6 +1212,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** read the finding and act on it: it is a real one (a token readable by others, sent over plain HTTP, and so on). Errors are never hidden.
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/health.ts` — `MUTED`, `isMuted`, `doctorLint`
+
+### Check all flags nearly every agent: "Gateway is only bound to loopback. Set gateway.publicOrigin …" and "Gateway bound to "auto" (0.0.0.0) (network-accessible)"
+- **Check:** the alert says "Health check: N settings to fix" with these two lines, on every agent that has a console (agents without one bind loopback and do not get the second); Overview → Check health lists them as warnings from `core/doctor/node-hosting-preconditions` and `core/doctor/security`.
+- **Cause:** OpenClaw's `doctor --lint` reports how Hatchabot runs every agent. The gateway binds "auto" inside the container, behind the agent's password or the console proxy's sign-in, and the machine publishes its port to itself only. The loopback line is OpenClaw's device pairing, which Hatchabot does not use (it says "loopback" even for "auto"). Before v2.167.0 Check all listed both; they are now counted as known, like the plaintext-config warning.
+- **Fix:** nothing to change on the agents; do not follow OpenClaw's advice here (`gateway.bind=lan` or `loopback` breaks the console). Upgrade and run Check all again; until then, read past these two and look at what else Check health lists (the "…" is the rest). An error, an unauthenticated bind, or any other bind still shows.
+- **Fixed in:** `v2.167.0`
+- **Code:** `src/orchestrator/health.ts` — `isMuted`, `doctorLint`; `src/openclaw/configWriter.ts` — `buildConfigCommands`
 
 ### An agent lost its conversations or its login after a file was uploaded into its folder
 - **Check:** in Files, `.openclaw/agents/<agent>/agent` shows `openclaw-agent.sqlite` (or its `-wal`, `-shm`, `-journal`), `auth-profiles.json` or `auth-state.json` changed at the time someone uploaded a file of that name, just before the trouble began.
@@ -1636,6 +1650,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade; they wrap. The click-through gate (`npm run test:ui`) opens the page a second time at a phone's width and checks every sort button is inside the screen.
 - **Fixed in:** `v2.166.0`
 - **Code:** `web/index.html` — `.v2binsort`; `scripts/ui-clickthrough.mjs` — `phoneSortButtonsReachable`
+
+### On an iPhone, the View by pills under the header can't be seen, even at the top of the page
+- **Check:** Hatchabot added to an iPhone's home screen (no browser bar): the first row of View by pills (Groups, Alerts, Machine …), or the Setup line when it shows, is hidden behind the header, and scrolling up does not bring it out. In Safari with its address bar it is fine.
+- **Cause:** as a home-screen app the page draws under the iPhone's status bar (about 59 px), and the header was pinned that far down, so at the top of the page it sat over the first ~59 px below it.
+- **Fix:** upgrade: the header is pinned at the very top with the status bar inside its own padding, so everything after it starts below it. The click-through gate's phone run sets a 59 px status bar and checks it.
+- **Fixed in:** `v2.167.0`
+- **Code:** `web/index.html` — `.v2top`, `--safe-top`; `scripts/ui-clickthrough.mjs` — `phoneChipsBelowTheStatusBar`
 
 ### A file opened from Files on a phone has no way back
 - **Check:** the app was opened from the phone's home screen (installed), a sound, video or PDF file was tapped in an agent's Files tab, and it filled the screen with no Back: the installed app has no browser bar.

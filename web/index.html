@@ -280,8 +280,14 @@
   /* v2 header: one quiet bar. Brand left; New agent, Settings and the account
      menu right. Inbox shows only when something is waiting in it. */
   body.v2 .v2top { display:flex }
-  .v2top { position:sticky; top:env(safe-area-inset-top, 0px); z-index:30; flex-direction:row; align-items:center; gap:8px;
-           margin:0 -20px 14px; padding:12px 20px;
+  /* The status bar's height on an iPhone home-screen app (black-translucent,
+     viewport-fit=cover; 0 elsewhere). One variable, so test:ui can set it. */
+  :root { --safe-top:env(safe-area-inset-top, 0px) }
+  /* Pinned at 0 with the status bar inside its padding: pinned at the inset
+     instead, it sat over the first ~59px below it at the top of the page, and
+     on an iPhone the View by chips could never be scrolled into view (HB-0096). */
+  .v2top { position:sticky; top:0; z-index:30; flex-direction:row; align-items:center; gap:8px;
+           margin:0 -20px 14px; padding:12px 20px; padding-top:calc(12px + var(--safe-top));
            /* Plain: the page's own ground, no tint, no shadow (Chris, 2026-09-24 — the
               gold wash was too much). Still sticky, with a hairline once the page scrolls. */
            background:color-mix(in srgb, var(--bg) 92%, transparent);
@@ -465,8 +471,10 @@
      Its rows and the sections it borrows from editDlg are drawn as
      cards by CSS alone: the rows are regenerated on every render, and the
      borrowed sections go home again when the sheet closes, so neither is
-     re-parented to get its outline. */
+     re-parented to get its outline. The App row is drawn into a holder of
+     its own after its fetch, so it is named through that holder. */
   .v2sheet .v2pane > .v2row,
+  .v2sheet .v2pane > #v2AppRow > .v2row,
   .v2sheet .v2pane > [data-v2slot]:not(:empty):not([data-v2slot="paneEditTg"]) {
     border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin:8px 0; background:var(--panel) }
   .v2sheet .v2pane > .v2row:last-child { border-bottom:1px solid var(--line) }
@@ -607,6 +615,8 @@
   table.mp-tbl { border-collapse:collapse; width:100%; font-size:13px }
   .mp-tbl th { text-align:right; font-weight:600; color:var(--dim); font-size:12px; padding:4px 8px; border-bottom:1px solid var(--line); white-space:nowrap }
   .mp-tbl td { text-align:right; padding:5px 8px; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; white-space:nowrap }
+  /* Usage → Context now: the Cap menu in its row, the row's own size. */
+  .mp-tbl select.ctxcap { width:auto; margin:0; padding:2px 6px; font-size:12.5px }
   .mp-tbl th:first-child, .mp-tbl td:first-child { text-align:left; padding-left:0 }
   .mp-tbl tr.mp-old td { color:var(--dim) }
   .mp-note { margin:8px 0 0; line-height:1.5 }
@@ -624,6 +634,9 @@
   .bg-tbl td.bg-l { text-align:left; white-space:normal }
   .bg-hi { color:var(--warn, #b7791f); font-weight:600 }
   .bg-form { display:flex; gap:8px; align-items:center; flex-wrap:wrap }
+  .bg-form select { width:auto }
+  /* The agent's Usage tab: "Tell me" and "Limit" as a two-line form, their boxes in line. */
+  .bg-rows { display:grid; grid-template-columns:auto minmax(0, 1fr); gap:8px 12px; align-items:baseline }
   /* Recommended (recommendations.ts): the top of Usage, and each agent's Usage tab. */
   .rec-list { display:grid; gap:8px; margin:0 0 14px }
   .rec-item { border:1px solid var(--line); border-radius:10px; padding:8px 12px; font-size:14px; background:var(--panel) }
@@ -744,7 +757,7 @@
   .v2sheet { width:min(860px, 100vw); max-width:none; height:100%; max-height:none; margin:0 0 0 auto; border-radius:0; padding:0;
              border:0; border-left:1px solid var(--line); display:none; flex-direction:column }
   .v2sheet[open] { display:flex }
-  .v2sbar { display:flex; align-items:center; gap:10px; padding:10px 14px; padding-top:calc(10px + env(safe-area-inset-top, 0px)); border-bottom:1px solid var(--line) }
+  .v2sbar { display:flex; align-items:center; gap:10px; padding:10px 14px; padding-top:calc(10px + var(--safe-top)); border-bottom:1px solid var(--line) }
   .v2sbar .v2ic { width:40px; height:40px; border-radius:12px; font-size:21px; cursor:pointer }
   .v2sbar .v2ic::after { inset:-4px; border-radius:15px }
   .v2sbar .v2ic.mono .v2em { font-size:18px }
@@ -762,7 +775,20 @@
   .ucard { border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin:8px 0; background:var(--panel); min-width:0 }
   label.v2k { margin:0 } /* a row key that names its select: looks like the others */
   .v2v { display:flex; gap:8px; align-items:center; flex-wrap:wrap; min-width:0 }
-  .v2v .sub { flex-basis:100% }
+  /* A row's own note takes a line. Only its own: reaching into a line laid out
+     inside the row (Access, Spending) stacked every grey word on a line of its
+     own, and squeezed the text between them to a word wide (2026-10-25). */
+  .v2v > .sub { flex-basis:100% }
+  /* What an agent can reach (Sharing → Access, Settings → Security): a line per
+     thing — its mark, what it is with its note, and when it was last seen. */
+  .v2acchead { display:flex; align-items:center; gap:6px 10px; flex-wrap:wrap }
+  .v2acchead > .grow { min-width:200px }
+  .v2accgroup { margin:10px 0 0 }
+  .v2accgroup > b { display:block; font-size:13px; margin-bottom:2px }
+  .v2accrow { display:grid; grid-template-columns:1.4em minmax(0, 1fr) auto; gap:8px; align-items:baseline; padding:4px 0; font-size:13.5px }
+  .v2accrow + .v2accrow { border-top:1px solid var(--line) }
+  .v2accrow > :first-child { text-align:center }
+  .v2accrow > :last-child { white-space:nowrap; font-size:12px }
   .ord { display:inline-flex; flex-direction:column; gap:1px; margin-right:2px }
   .ordbtn { padding:0 5px; font-size:9px; line-height:1.35; border-radius:5px; min-width:20px }
   .ordbtn:disabled { opacity:.32; cursor:default }
@@ -815,6 +841,9 @@
   .v2sec { margin:10px 0 0; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); font-weight:650 }
   .v2emoji { display:flex; flex-wrap:wrap; gap:4px; margin:6px 0 }
   .v2emoji button { font-size:20px; width:38px; height:38px; padding:0; line-height:1 }
+  /* The AI's ideas, each on the colour it suggests (a choice sets both). */
+  .v2ideas button { background:color-mix(in srgb, var(--tint) 30%, var(--panel)); border-color:color-mix(in srgb, var(--tint) 60%, var(--line)) }
+  .v2ideas button[aria-pressed="true"] { outline:2px solid var(--text); outline-offset:1px }
   .v2swatches { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0 }
   .v2swatches button { width:26px; height:26px; border-radius:50%; padding:0; border:2px solid transparent }
   .v2swatches button[aria-pressed="true"] { border-color:var(--text) }
@@ -828,7 +857,7 @@
   @keyframes v2slide { from { transform:translateX(24px); opacity:.6 } }
   @media (prefers-reduced-motion: reduce) { body.v2 dialog.v2panel { animation:none } }
   .v2pbar { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px; margin:0 -22px 16px;
-    padding:10px 16px 10px 12px; padding-top:calc(10px + env(safe-area-inset-top, 0px)); background:var(--panel); border-bottom:1px solid var(--line) }
+    padding:10px 16px 10px 12px; padding-top:calc(10px + var(--safe-top)); background:var(--panel); border-bottom:1px solid var(--line) }
   .v2ptitle { flex:1; min-width:0 }
   .v2ptitle h2, .v2ptitle h3 { margin:0 !important; font-size:16px; font-weight:650; overflow:hidden; text-overflow:ellipsis }
   .v2ptitle > div { margin:0 !important }
@@ -912,7 +941,7 @@
         <dt>💬 History</dt><dd><b>Data → History</b></dd>
         <dt>Wake, Start, Retry, Sleep, Restore</dt><dd>the bar at the top of its page</dd>
         <dt>Rebuild, 🏷 Group, its place in the group</dt><dd><b>Overview</b> (sort by <b>My order</b> to see your order)</dd>
-        <dt>Stop, 📊 Usage, ❤️ Health, Logs</dt><dd><b>Overview → Checks</b>, and <b>Usage</b></dd>
+        <dt>Stop, 💲 Usage, ❤️ Health, Logs</dt><dd><b>Overview → Checks</b>, and <b>Usage</b></dd>
         <dt>Move, Download copy, 📥 Archive, Delete</dt><dd><b>Advanced</b></dd>
         <dt>OpenClaw (debug)</dt><dd>click the icon, or 💬 Chat</dd>
         <dt>Import, 📋 Templates</dt><dd><b>New</b> → open a .hatchabot file / start from a template</dd>
@@ -932,7 +961,7 @@
         <div class="v2hubactions" id="v2HubActions" aria-label="Fleet actions">
           <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" aria-label="Inbox" title="Agents people have sent you"><span class="v2glyph em" aria-hidden="true">📥</span><span class="lbl">Inbox</span><span class="v2count" id="v2InboxCount"></span></button>
           <button class="v2btn" id="v2ConsoleBtn" onclick="openConsoleHome()" aria-label="Consoles" title="Consoles — back to the agent you were talking to; ⌘K / Ctrl+K to switch"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.9A8 8 0 1 1 21 12z"/></svg></span><span class="lbl">Consoles</span></button>
-          <button class="v2btn" id="v2UsageBtn" onclick="openFleetUsage()" aria-label="Usage" title="Usage — requests and tokens across your agents, by hour, day or week"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V11M10 20V5M16 20v-6M21 20H3"/></svg></span><span class="lbl">Usage</span></button>
+          <button class="v2btn" id="v2UsageBtn" onclick="openFleetUsage()" aria-label="Usage" title="Usage — requests and tokens across your agents, by hour, day or week"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5v19M17 5.5H9.5a3.25 3.25 0 0 0 0 6.5h5a3.25 3.25 0 0 1 0 6.5H6.5"/></svg></span><span class="lbl">Usage</span></button>
           <button class="v2btn" id="v2ResBtn" onclick="openFleetResources()" aria-label="Resources" title="Resources — CPU, memory and swap of every agent, machine by machine"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M10 10h4v4h-4zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></span><span class="lbl">Resources</span></button>
           <button class="v2btn" id="v2BulkBtn" hidden onclick="openFleetActions()" aria-label="Bulk actions" title="Bulk actions — switch model, rebuild, stop or start a selection of agents, picked by AI source, group, machine or state"><span class="v2glyph em" aria-hidden="true">⚡</span><span class="lbl">Bulk actions</span></button>
           <button class="v2btn" onclick="openAiDlg()" aria-label="Settings" title="Settings — AI sources, people, Telegram bots, machines, backups, security"><span class="v2glyph em" aria-hidden="true">⚙️</span><span class="lbl">Settings</span></button>
@@ -989,12 +1018,17 @@
       <input type="text" id="v2IconInput" maxlength="16" placeholder="Pick one below, or paste any emoji" oninput="v2IconPreview()">
     </div>
   </div>
+  <div id="v2IconIdeasBox" hidden>
+    <label>Ideas from Hatchabot</label>
+    <div class="v2emoji v2ideas" id="v2IconIdeas"></div>
+  </div>
+  <div class="sub" id="v2IconNote"></div>
   <div class="v2emoji" id="v2EmojiRow"></div>
   <label>Colour</label>
   <div class="v2swatches" id="v2Swatches"></div>
   <div class="err" id="v2IconErr"></div>
   <div class="actions">
-    <button id="v2IconAutoBtn" onclick="v2IconAuto(this)" title="Hatchabot picks from its name and description">✨ Let Hatchabot pick</button>
+    <button id="v2IconAutoBtn" onclick="v2IconIdeas(this)" title="Hatchabot's AI suggests icons from its name and description. Nothing changes until you Save.">✨ Ideas from Hatchabot</button>
     <span class="spacer" style="flex:1"></span>
     <button onclick="v2IconDlg.close()">Cancel</button>
     <button class="primary" id="v2IconSaveBtn" onclick="v2IconSave(this)">Save</button>
@@ -4206,10 +4240,10 @@ function accessMark(r) {
 }
 function accessRowsHTML(ov) {
   if (!ov.groups.length) return '<div class="sub">Nothing: no accounts, bots, folders, variables or people beyond you.</div>';
-  return ov.groups.map(g => `<div class="v2accgroup" style="margin:6px 0 2px"><b>${esc(g.title)}</b>${g.rows.map(r => `
-      <div class="pair v2accrow" data-kind="${esc(r.kind)}" data-mismatch="${esc(r.mismatch || '')}" style="align-items:baseline;gap:6px;padding:2px 0">
+  return ov.groups.map(g => `<div class="v2accgroup"><b>${esc(g.title)}</b>${g.rows.map(r => `
+      <div class="v2accrow" data-kind="${esc(r.kind)}" data-mismatch="${esc(r.mismatch || '')}">
         ${accessMark(r)}
-        <span class="grow">${esc(r.label)}${r.managed ? '' : ' <span class="sub">· not managed</span>'}${r.mismatch ? ` <span class="warn">— ${esc(ACCESS_MISMATCH_WORDS[r.mismatch] || r.mismatch)}</span>` : ''}${r.pendingRemoval ? `<span class="sub"> · removal pending${r.pendingRemoval.since ? ` since ${esc(ago(r.pendingRemoval.since))}` : ''}</span>` : ''}${r.note ? `<span class="sub"> · ${esc(r.note)}</span>` : ''}</span>
+        <span>${esc(r.label)}${r.managed ? '' : ' <span class="sub">· not managed</span>'}${r.mismatch ? ` <span class="warn">— ${esc(ACCESS_MISMATCH_WORDS[r.mismatch] || r.mismatch)}</span>` : ''}${r.pendingRemoval ? `<span class="sub"> · removal pending${r.pendingRemoval.since ? ` since ${esc(ago(r.pendingRemoval.since))}` : ''}</span>` : ''}${r.note ? `<span class="sub"> · ${esc(r.note)}</span>` : ''}</span>
         <span class="sub">${r.verified.at ? esc(ago(r.verified.at)) : ''}</span>
       </div>`).join('')}</div>`).join('');
 }
@@ -4228,12 +4262,12 @@ async function v2LoadAccess(id, fresh = false, given = null) {
   const el = $('v2Access'); if (!el || v2AgentId !== id) return;
   const s = ov.summary;
   const head = [s.mismatches ? `<span class="warn">⚠ ${s.mismatches} it should not have</span>` : '', s.missing ? `<span class="warn">${s.missing} not found</span>` : '', s.pending ? `${s.pending} removal${s.pending === 1 ? '' : 's'} pending` : ''].filter(Boolean).join(' · ');
-  el.innerHTML = `<div class="pair" style="align-items:center;gap:8px;flex-wrap:wrap">
+  el.innerHTML = `<div class="v2acchead">
       <span class="grow sub" id="v2AccessWhen">${accessCheckedLine(ov)}${head ? ` ${head}` : ''}</span>
       <button id="v2AccessVerify" onclick="v2VerifyAccess('${jsq(id)}', this)" title="Look inside the running agent now: its Google accounts, bot, folders, keys, variable names and who it lets in. Nothing is changed.">Verify now</button>
     </div>
     <div id="v2AccessRows">${accessRowsHTML(ov)}</div>
-    <div class="sub" style="margin-top:6px">Not checked: ${ov.notChecked.map(esc).join(' ')}</div>`;
+    <div class="sub" style="margin-top:10px">Not checked: ${ov.notChecked.map(esc).join(' ')}</div>`;
 }
 async function v2VerifyAccess(id, btn) {
   if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
@@ -5081,7 +5115,7 @@ async function v2PaintRecovery(id) {
   })() : '';
   el.innerHTML = `<span id="v2RecoveryLine"${RECOVERY_BAD.includes(r.status) ? ' class="warn"' : ''}>${esc(r.line)}</span>
     ${can ? `<button type="button" id="v2RecoveryBtn" aria-expanded="${!!pick}" onclick="v2RecoveryToggle('${jsq(id)}')">Restore…</button>` : ''}
-    ${!v2Readiness.canRestore && r.latestUsable ? '<span class="sub">Only this machine\'s owner can restore it.</span>' : ''}
+    ${!v2Readiness.canRestore && r.latestUsable ? '<span class="sub" style="flex-basis:100%">Only this machine\'s owner can restore it.</span>' : ''}
     ${guided}`;
 }
 /** Restore… opens the guided restore with its newest usable backup chosen (and closes it again). */
@@ -8106,7 +8140,11 @@ async function setDataAccess(id, access) {
 async function removeDataSource(id) {
   const src = editData.find(d => d.id === id);
   if (!src) return;
-  if (!confirm(`Remove ${src.kind === 'folder' ? 'the folder' : 'the source'} “${src.mountName}” from this agent?${src.kind === 'git' ? ' Its deploy key is deleted with it.' : ''}`)) return;
+  // A repo goes from the agent completely (HB-0002): its clone too, so say what that loses.
+  const repoNote = src.kind === 'git'
+    ? ` Its copy in the agent (~/.openclaw/${src.mountName}) is deleted, with any changes not pushed${src.repoUrl && !/^https?:/.test(src.repoUrl) ? ', and so is its deploy key' : ''}.`
+    : '';
+  if (!confirm(`Remove ${src.kind === 'folder' ? 'the folder' : 'the repo'} “${src.mountName}” from this agent?${repoNote}`)) return;
   try {
     let updated;
     if (src.legacy) {
@@ -8119,10 +8157,11 @@ async function removeDataSource(id) {
     renderDataList(updated.dataSources);
     // Hatchabot deletes its copies of a deploy key, but the repo's host still
     // trusts the key until it is deleted there too.
-    const rk = updated.removedKey;
-    toast(rk
-      ? `Removed. Also delete its deploy key on the repo's host (the repo's settings → Deploy keys)${rk.scrubbed ? '' : '. The key could not be taken off the agent just now: that is retried at its next start'}. Rebuild to apply the rest.`
-      : 'Removed — Rebuild to apply it', rk ? 15000 : undefined);
+    const rk = updated.removedKey, rr = updated.removedRepo;
+    const later = rr && !rr.scrubbed ? ' The agent could not be reached just now: its copy and key go at its next start (retried until done).' : '';
+    toast(rr
+      ? `Removed, with its copy in the agent.${rk ? ' Also delete its deploy key on the repo’s host (the repo’s settings → Deploy keys).' : ''}${later}`
+      : 'Removed — Rebuild to apply it', rk || later ? 15000 : undefined);
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }
 }
@@ -8642,9 +8681,11 @@ async function v2LoadBudgetRow(id) {
     const d = await api('/v1/budgets');
     const a = (d.agents || []).find((x) => x.id === id);
     if (!a || $('v2BudgetRow')?.dataset.agent !== id) return;
-    el.innerHTML = `<div class="bg-form"><span class="sub">Tell me</span>${bgStepControls(id, a.alertEvery)}${a.alertEvery ? `<span class="sub">${bgStepState(a.alertEvery)}</span>` : ''}</div>
-      <div class="bg-form" style="margin-top:6px"><span class="sub">Limit</span>${bgControls(id, a.budget, a.suggested, a.manager)}</div>
-      <div class="sub" style="margin-top:4px">${a.budget ? bgState(a.budget) + ' · ' : ''}${bgMoney(a.spent)} in ${esc(bgMonthName(d.month))} so far, ${bgMoney(a.lastMonth)} last month, about ${bgMoney(a.monthlyNow)} a month at its pace now (API prices${a.billing === 'plan' ? '; on your Claude plan an equivalent' : ''}).${a.alertEvery || a.budget ? '' : ` Every $${Math.max(1, Math.round(a.suggested / 4))} would tell you a few times a month.`} <a href="#" onclick="openBudgets();return false">All budgets</a></div>`;
+    el.innerHTML = `<div class="bg-rows">
+        <span class="sub">Tell me</span><div class="bg-form">${bgStepControls(id, a.alertEvery)}${a.alertEvery ? `<span class="sub">${bgStepState(a.alertEvery)}</span>` : ''}</div>
+        <span class="sub">Limit</span><div class="bg-form">${bgControls(id, a.budget, a.suggested, a.manager)}</div>
+      </div>
+      <div class="sub" style="margin-top:8px">${a.budget ? bgState(a.budget) + ' · ' : ''}${bgMoney(a.spent)} in ${esc(bgMonthName(d.month))} so far, ${bgMoney(a.lastMonth)} last month, about ${bgMoney(a.monthlyNow)} a month at its pace now (API prices${a.billing === 'plan' ? '; on your Claude plan an equivalent' : ''}).${a.alertEvery || a.budget ? '' : ` Every $${Math.max(1, Math.round(a.suggested / 4))} would tell you a few times a month.`} <a href="#" onclick="openBudgets();return false">All budgets</a></div>`;
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 /** Settings → AI sources, with Budgets open. */
@@ -8953,25 +8994,68 @@ async function loadContextNow() {
     if (!$('fleetContextNow')) return;
     const rows = (th.rows || []).filter((r) => r.conversation || r.contextCap?.tokens);
     if (!rows.length) { box.innerHTML = '<div class="sub">No reading yet — the usage pass reads each agent\'s transcripts about hourly while it runs.</div>'; return; }
+    ctxNowRows = new Map(rows.map((r) => [r.id, r]));
     const num = 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap';
     const bare = (m) => esc(String(m || '').replace(/^.*\//, ''));
     const line = (r) => {
       const c = r.conversation || {};
       const now = c.mainNowK;
-      const limitK = r.contextCap?.tokens ? Math.round(r.contextCap.tokens / 1000) : c.windowK;
+      const capK = r.contextCap?.tokens ? Math.round(r.contextCap.tokens / 1000) : undefined;
+      const limitK = capK ?? c.windowK;
       const share = now !== undefined && limitK ? Math.min(999, Math.round(now / limitK * 100)) : null;
       const tone = share === null ? '' : share >= 80 ? 'color:var(--bad);font-weight:600' : share >= 50 ? 'color:var(--warn);font-weight:600' : '';
-      const limit = limitK ? `${fmtN(limitK)}K${r.contextCap?.tokens ? ' <span class="sub" title="A cap Hatchabot set: the agent compacts near it">cap</span>' : ''}` : '<span class="sub">—</span>';
       const when = c.mainAt ? esc(ago(c.mainAt)) : (r.readHoursAgo !== undefined ? `read ${esc(String(r.readHoursAgo))} h ago` : '');
-      return `<tr><td>${esc(r.agent)}${r.state && r.state !== 'running' ? ` <span class="sub">· ${esc(r.state)}</span>` : ''}</td><td class="sub" style="text-align:left;white-space:nowrap">${bare(r.model)}</td>
-        <td style="${num}">${now !== undefined ? `${fmtN(now)}K` : '<span class="sub">—</span>'}</td><td style="${num}">${limit}</td>
+      return `<tr data-agent="${esc(r.id)}"><td>${esc(r.agent)}${r.state && r.state !== 'running' ? ` <span class="sub">· ${esc(r.state)}</span>` : ''}</td><td class="sub" style="text-align:left;white-space:nowrap">${bare(r.model)}</td>
+        <td style="${num}">${now !== undefined ? `${kTok(now)}` : '<span class="sub">—</span>'}</td><td style="${num}">${c.windowK ? `${kTok(c.windowK)}` : '<span class="sub">—</span>'}</td>
+        <td style="${num}">${ctxCapControl(r)}</td>
         <td style="${num};${tone}">${share === null ? '<span class="sub">—</span>' : `${share}%`}</td>
-        <td style="${num}" class="sub">${c.ctxK ? `${fmtN(c.ctxK.p50)}K / ${fmtN(c.ctxK.p90)}K` : '—'}</td><td class="sub" style="white-space:nowrap">${when}</td></tr>`;
+        <td style="${num}">${c.ctxK ? `${kTok(c.ctxK.p50)}` : '<span class="sub">—</span>'}</td><td style="${num}" class="sub">${c.ctxK ? `${kTok(c.ctxK.p90)}` : '—'}</td>
+        <td class="sub" style="white-space:nowrap">${when}</td></tr>`;
     };
     const sorted = [...rows].sort((a, b) => (b.conversation?.mainNowK ?? -1) - (a.conversation?.mainNowK ?? -1));
-    box.innerHTML = `<div class="mp-wrap"><table class="mp-tbl"><thead><tr><th style="text-align:left">Agent</th><th style="text-align:left">Model</th><th>Main conversation</th><th>Window</th><th>Full</th><th>Per call (median / 90%)</th><th>Last call</th></tr></thead><tbody>${sorted.map(line).join('')}</tbody></table></div>
-      <div class="sub" style="margin-top:6px">Main conversation = what its last call carried in (Telegram DM and console). Window = the model's context window as the agent's OpenClaw states it, or the cap Hatchabot set. Over 80% full it is close to compacting; compact or cap it from its Usage tab.</div>`;
+    box.innerHTML = `<div class="mp-wrap"><table class="mp-tbl"><thead><tr><th style="text-align:left">Agent</th><th style="text-align:left">Model</th><th>Main conversation</th><th>Window</th>
+        <th title="Where it compacts instead of near the model's window: at about the cap less 20K">Cap</th><th>Full</th>
+        <th title="Half its calls to the model in the last 30 days carried less than this">Typical call</th><th title="One call in ten carried more than this">1 in 10 over</th><th>Last call</th></tr></thead><tbody>${sorted.map(line).join('')}</tbody></table></div>
+      <div class="sub" style="margin-top:6px"><b>Main conversation</b>: what its last call carried (its Telegram DM and console share one conversation). <b>Window</b>: the model's context window, as the agent's OpenClaw states it. <b>Cap</b>: where Hatchabot has it compact instead: at about the cap less 20K, a summary replaces the older turns. <b>Full</b> counts against the cap when there is one; over 80% it is close to compacting.</div>
+      <div class="sub" style="margin-top:4px"><b>Typical call</b> and <b>1 in 10 over</b>: how much each call to the model carried in the last 30 days (its conversations; scheduled tasks left out). Half its calls carried less than the typical figure, and one in ten carried more than the other. Every call carries the whole conversation so far, so this is what costs, and what a cap keeps down.</div>`;
   } catch (e) { box.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+/** A size in thousands of tokens: 520K, 1M, 1.5M (fmtN's own "k" made a 1M window "1.0kK"). */
+const kTok = (k) => (k >= 1000 ? `${+(k / 1000).toFixed(1)}M` : `${k}K`);
+/** The last Context now reading, by agent id: what a cap change asks about. */
+let ctxNowRows = new Map();
+const CTX_CAPS = [100_000, 150_000, 200_000, 300_000, 500_000];
+/** Context now's Cap cell: a menu (None, or a cap below the model's window). A local model costs nothing per token: no menu. */
+function ctxCapControl(r) {
+  if (r.billing === 'local') return '<span class="sub" title="A local model costs nothing per token: no cap is needed">—</span>';
+  const cur = r.contextCap?.tokens || 0;
+  const windowT = (r.conversation?.windowK || 0) * 1000;
+  const caps = [...new Set([...CTX_CAPS.filter((t) => !windowT || t < windowT), ...(cur ? [cur] : [])])].sort((a, b) => a - b);
+  const pending = cur && !r.contextCap?.applied ? ' <span class="sub" title="Stored; written into its settings when it is next running">pending</span>' : '';
+  return `<select class="ctxcap" aria-label="Context cap for ${esc(r.agent)}" data-was="${cur || ''}" onchange="setContextCap('${jsq(r.id)}', this)">
+      <option value=""${cur ? '' : ' selected'}>None</option>${caps.map((t) => `<option value="${t}"${t === cur ? ' selected' : ''}>${kTok(Math.round(t / 1000))}</option>`).join('')}</select>${pending}`;
+}
+/** Set or take off an agent's context cap from Context now, once the person agrees to what it does. */
+async function setContextCap(id, sel) {
+  const r = ctxNowRows.get(id); if (!r) return;
+  const tokens = sel.value ? Number(sel.value) : null;
+  const atK = tokens ? Math.round((tokens - Math.min(20_000, tokens / 4)) / 1000) : 0;
+  const nowK = r.conversation?.mainNowK;
+  const windowK = r.conversation?.windowK;
+  const ask = tokens === null
+    ? `Take ${r.agent}'s context cap off? It then compacts near its model's full window${windowK ? ` (${kTok(windowK)})` : ''}, so each call can carry more.`
+    : `Cap ${r.agent}'s conversations at ${kTok(tokens / 1000)}? OpenClaw compacts them at about ${kTok(atK)}: a summary replaces the older turns.${nowK > atK ? ` Its main conversation is ${kTok(nowK)} now, so its next turn starts with a compaction.` : ''}`;
+  if (!confirm(ask)) { sel.value = sel.dataset.was; return; }
+  sel.disabled = true;
+  try {
+    const out = await api(`/v1/agents/${id}/context-cap`, { method: 'PUT', body: { tokens } });
+    toast(out.message || 'Saved.', 7000);
+  } catch (e) {
+    toast(e.message, 8000);
+    sel.value = sel.dataset.was;
+  } finally { sel.disabled = false; }
+  void loadContextNow();
+  void loadRecommended('', true); // a cap settles a "large conversation" item
 }
 /**
  * "Saved by cheaper models" (was the Right-size line, 2026-10-05): each switch
@@ -13629,7 +13713,7 @@ function v2Pane(a, tab) {
       ${a.state !== 'ARCHIVED' ? row(v2ChannelKinds(a).length > 1 ? 'Messaging' : 'Telegram', v2ChannelKinds(a).length
         ? `<span>${v2ChannelKinds(a).map(k => k === 'telegram' ? `Telegram · @${esc(a.botUsername)}` : V2_CHAN_LABEL[k]).join(' · ')}</span>${run ? agentChannelLinks(a).map(l => `<a class="btn" href="${esc(l.url)}" target="_blank" rel="noopener">Open ${V2_CHAN_LABEL[l.kind]}</a>`).join('') : ''}${B('Manage…', goto('messaging'))}`
         : `<span>None — you talk to it here.</span>${B('Add an app…', goto('messaging'))}`) : ''}
-      ${run ? row('Checks', `${B('❤️ Check health', `v2InlineHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}${B('Setup log', `openSetupLog('${id}','${n}')`)}
+      ${run ? row('Checks', `${B('❤️ Check health', `v2InlineHealth('${id}','${n}')`)}${B('💲 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}${B('Setup log', `openSetupLog('${id}','${n}')`)}
         ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}
         <div id="v2HealthSlot" hidden style="flex-basis:100%"></div>`) : built ? row('Checks', `${B('Logs', `openLogs('${id}','${n}')`)}${B('Setup log', `openSetupLog('${id}','${n}')`)}`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Rebuild', `${B('↻ Rebuild', `rebuild('${id}')`, 'class="primary" title="A fresh container on the current image. Its memory, files and members are kept."')}
@@ -14220,12 +14304,17 @@ v2AgentDlg.addEventListener('close', () => { if (v2AgentDlg.open) return; v2Park
 const V2_EMOJI = ['📈', '💹', '🧾', '⚖️', '💰', '🏢', '🏡', '🚗', '✈️', '🧭', '📅', '✅', '☑️', '🍳', '🥗', '🏃', '🩺', '🛡️',
   '💻', '🖥️', '🏛️', '🎓', '📚', '🎮', '📺', '💼', '🚀', '💡', '🎨', '🎵', '💐', '🎤', '📰', '🌮', '🌴', '🤖'];
 let v2IconFor = null, v2IconColor = null;
+/** Ideas the AI gave in this opening of the dialog: all on show, and left out of the next ask. */
+let v2IconIdeasShown = [];
 function openV2Icon(id) {
   const a = v2Find(id); if (!a) return;
   v2IconFor = id; v2IconColor = a.iconColor || v2ColorFor(a.name);
   $('v2IconName').textContent = a.name;
   $('v2IconInput').value = a.icon || '';
   $('v2IconErr').textContent = '';
+  v2IconIdeasShown = [];
+  $('v2IconIdeas').innerHTML = ''; $('v2IconIdeasBox').hidden = true; $('v2IconNote').textContent = '';
+  $('v2IconAutoBtn').textContent = '✨ Ideas from Hatchabot';
   $('v2EmojiRow').innerHTML = V2_EMOJI.map(e => `<button type="button" data-emoji="${e}" aria-label="${e}">${e}</button>`).join('');
   v2RenderSwatches();
   v2IconPreview();
@@ -14234,6 +14323,12 @@ function openV2Icon(id) {
 $('v2EmojiRow').addEventListener('click', (e) => {
   const b = e.target.closest('[data-emoji]'); if (!b) return;
   $('v2IconInput').value = b.dataset.emoji; v2IconPreview();
+});
+$('v2IconIdeas').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-emoji]'); if (!b) return;
+  $('v2IconInput').value = b.dataset.emoji;
+  v2IconColor = b.dataset.color;
+  v2RenderSwatches(); v2IconPreview();
 });
 function v2RenderSwatches() {
   $('v2Swatches').innerHTML = V2_PALETTE.map(c => `<button type="button" data-color="${c}" style="background:${c}" aria-label="Colour ${c}" aria-pressed="${c === v2IconColor}"></button>`).join('');
@@ -14246,6 +14341,7 @@ function v2IconPreview() {
   const a = v2Find(v2IconFor); if (!a) return;
   const icon = $('v2IconInput').value.trim();
   $('v2IconPreview').innerHTML = v2IconHTML({ ...a, icon: icon || undefined, iconColor: v2IconColor }, { glyph: '' });
+  for (const b of $('v2IconIdeas').querySelectorAll('[data-emoji]')) b.setAttribute('aria-pressed', String(b.dataset.emoji === icon && b.dataset.color === v2IconColor));
 }
 async function v2IconSave(btn) {
   const icon = $('v2IconInput').value.trim();
@@ -14257,18 +14353,27 @@ async function v2IconSave(btn) {
   } catch (e) { $('v2IconErr').textContent = /single emoji/.test(e.message) ? 'That isn’t a single emoji. Pick one above, or paste just one.' : e.message; }
   finally { btn.disabled = false; }
 }
-async function v2IconAuto(btn) {
-  btn.disabled = true; btn.textContent = 'Picking…';
+/** The ✨ button: ideas to choose from, added to those already on show; nothing is saved until Save. */
+async function v2IconIdeas(btn) {
+  const id = v2IconFor;
+  btn.disabled = true; btn.textContent = 'Thinking…';
+  $('v2IconErr').textContent = '';
   try {
-    const r = await api('/v1/agents/icons/auto', { method: 'POST', body: { ids: [v2IconFor], redo: true } });
-    const got = r.icons?.[0];
-    if (got) { $('v2IconInput').value = got.icon; v2IconColor = got.color; v2RenderSwatches(); v2IconPreview(); }
-    $('v2IconErr').textContent = r.via === 'keywords'
-      ? 'The management AI wasn’t available (none set up, or it’s busy), so this was picked from its name. It’s saved; try again later for an AI pick.'
-      : 'Picked and saved.';
-    await refresh(false);
-  } catch (e) { $('v2IconErr').textContent = e.message; }
-  finally { btn.disabled = false; btn.textContent = '✨ Let Hatchabot pick'; }
+    const current = $('v2IconInput').value.trim();
+    const r = await api(`/v1/agents/${id}/icons/suggest`, { method: 'POST', body: { exclude: [...new Set([...v2IconIdeasShown, ...(current ? [current] : [])])] } });
+    if (v2IconFor !== id || !v2IconDlg.open) return; // closed, or opened for another agent, while it thought
+    const ideas = r.ideas || [];
+    v2IconIdeasShown.push(...ideas.map(i => i.icon));
+    $('v2IconIdeas').insertAdjacentHTML('beforeend', ideas.map(i =>
+      `<button type="button" data-emoji="${esc(i.icon)}" data-color="${esc(i.color)}" style="--tint:${esc(i.color)}" aria-label="${esc(i.icon)}" aria-pressed="false">${esc(i.icon)}</button>`).join(''));
+    $('v2IconIdeasBox').hidden = !v2IconIdeasShown.length;
+    $('v2IconNote').textContent = r.via === 'keywords'
+      ? `The management AI isn’t available (none set up, or it’s busy)${ideas.length ? ', so these come from its name and description' : ''}. Try again later for more.`
+      : ideas.length ? 'Pick one, then Save. Press ✨ again for different ones.'
+      : 'No new ideas this time. Paste any emoji in the box above, or pick from the row below.';
+    v2IconPreview();
+  } catch (e) { if (v2IconFor === id) $('v2IconErr').textContent = e.message; }
+  finally { btn.disabled = false; btn.textContent = v2IconIdeasShown.length ? '✨ More ideas' : '✨ Ideas from Hatchabot'; }
 }
 
 // ---- the hub: the management bot at the centre --------------------------------------------
@@ -14517,8 +14622,8 @@ function v2InlineHealth(id, name) {
 /**
  * The hub: this account's management agent. An OpenClaw agent that runs on
  * any AI source; it prepares changes and they wait in "Alerts".
- * Until one is set up, the older built-in chat (Claude-only) stays as a stopgap
- * where it can work at all.
+ * Until one is set up, the hub offers to set it up (the older Claude-only chat
+ * is retired).
  */
 /**
  * People knocking on your agents, on the home screen beside the changes waiting

@@ -277,7 +277,7 @@ gone, and the knowledge-pack test if the map does.
 | Rebuild / Update | Overview → Rebuild; notices |
 | 📥 Archive, 📤 Restore, 🔍 Inspect, Delete | Advanced → Careful; the sheet's bar; drag to Archived or the bin |
 | 🏷 Group | Overview → Group; drag between groups |
-| 📊 Usage, ❤️ Health, Logs (per agent) | Overview → Checks, Usage |
+| 💲 Usage, ❤️ Health, Logs (per agent) | Overview → Checks, Usage |
 | OpenClaw (debug) | the agent's icon, 💬 Chat |
 | Members list with remove × | Sharing → Remove |
 | Bulk actions, Rebuild all | ⚡ Bulk actions (Rebuild all at its foot) |
