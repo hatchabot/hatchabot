@@ -260,6 +260,29 @@ export function mergeConfig(m: AppManifest, facts: AgentFacts, existing: Record<
   return { config: out, missing, missingKeys, unfilled };
 }
 
+/**
+ * Every value the config holds under a secret field (each item of a list),
+ * longest first, as written and as it appears inside JSON. A value under
+ * four characters is left: masking it would garble the output, not hide a key.
+ */
+export function secretValues(m: AppManifest, config: Record<string, unknown>): string[] {
+  const out = new Set<string>();
+  for (const f of m.config?.fields ?? []) {
+    if (!f.secret) continue;
+    const v = config[f.key];
+    for (const x of Array.isArray(v) ? v : [v]) {
+      if (typeof x !== 'string' && typeof x !== 'number') continue;
+      for (const s of [String(x), String(x).trim(), JSON.stringify(String(x)).slice(1, -1)]) if (s.trim().length >= 4) out.add(s);
+    }
+  }
+  return [...out].sort((a, b) => b.length - a.length);
+}
+
+/** `text` with every one of `secrets` replaced by a mask (an app's tests may print a key they were given). */
+export function maskSecrets(text: string, secrets: readonly string[]): string {
+  return secrets.reduce((t, s) => t.split(s).join('••••••'), text);
+}
+
 const INVALID = Symbol('invalid');
 const blank = (v: unknown) => v === null || (typeof v === 'string' && !v.trim()) || (Array.isArray(v) && !v.length);
 const TYPE_WORD: Record<string, string> = { number: 'a number', bool: 'true or false', list: 'a list (a, b, c)', email: 'an email address', text: 'text' };
@@ -402,6 +425,8 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
   let switching = false;
   let crashed = false;
   let keepStaging = false;
+  /** The secret fields' values, masked in the tests' output before it is kept anywhere. */
+  let secrets: string[] = [];
   try {
     // 1. the code, and an empty staging folder for its data while it is tested.
     // The same commit as the live one (a change of values only) keeps the live
@@ -438,6 +463,7 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
       }
       if (unfilled.length) throw new AppError(`Hatchabot has nothing to fill ${unfilled.join(', ')} with; set that up, then try again.`);
       d.checkConfig?.(config, existing);
+      secrets = secretValues(m, config);
       const w = await d.provider.writeToVolume(d.runtimeRef,
         ['sh', '-c', `umask 077 && cat > ${sq(staged)}`], Buffer.from(JSON.stringify(config, null, 2) + '\n'));
       if (w.code !== 0) throw new AppError(`Could not write ${staged}.`);
@@ -460,7 +486,8 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
       const tv = appVars(m, d.facts, { app_dir: testDir, data_dir: stage });
       const envStr = Object.entries(tv.envMap).map(([k, v]) => `${k}=${sq(v)}`).join(' ');
       const r = await sh(d, `cd ${sq(testDir)} && env ${envStr} ${m.test.map((a) => sq(expand(a, tv))).join(' ')} 2>&1`, 15 * 60_000);
-      test = { ok: r.code === 0, output: (r.stdout + r.stderr).slice(-3000) };
+      // Masked whole, then cut: a cut first could leave half a secret at its edge.
+      test = { ok: r.code === 0, output: maskSecrets(r.stdout + r.stderr, secrets).slice(-3000) };
       if (!test.ok) {
         log('app.test_failed', { app: m.app, sha: short });
         throw Object.assign(new AppError(`Its tests failed, so ${short} was not switched on:\n${test.output.slice(-1500)}`), { test });

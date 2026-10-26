@@ -64,6 +64,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/doctor.ts` — `runtimeImage`; `scripts/build-runtime-image.sh`
 
+### After re-running setup, new agents still run an old OpenClaw, and setup said "Runtime image already present"
+- **Check:** `docker image inspect hatchabot-runtime:latest --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}'` prints nothing (or `<no value>`): an old or hand-built image with no version label.
+- **Cause:** setup compared versions only when the image had a version label; an unlabelled `:latest` was kept as it was.
+- **Fix:** `./scripts/build-runtime-image.sh` in the install folder, then rebuild agents when convenient (memory is kept). Setup now counts an image with no version label as older than the release's default and fetches the default.
+- **Fixed in:** `v2.169.0`
+- **Code:** `scripts/setup-host.sh` — `HAVE`
+
 ### A shared-host tenant (its `.env` sets `DOCKER_HOST`): setup said "Runtime image already present", but agents cannot start for want of the image
 - **Check:** `grep ^DOCKER_HOST= <install>/.env` names the tenant's daemon, and `DOCKER_HOST=<that value> docker image ls hatchabot-runtime` is empty, while plain `docker image ls hatchabot-runtime` lists it.
 - **Cause:** setup wrote `DOCKER_HOST` into `.env` for the service but looked for (and would have fetched) the runtime image on the daemon of the shell it ran in, which already had one.
@@ -176,19 +183,33 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.168.0`
 - **Code:** `scripts/upgrade.sh` — `restore_deps`; `scripts/deploy-release.sh` — `restore_deps`
 
+### A bundle install is broken after an upgrade was cut off, and every upgrade since says "Already on vX.Y.Z"
+- **Check:** the install has `BUNDLE.json` and no `.git`, and a `.prev-release` folder; some top-level folders (`scripts`, `.node`, `node_modules`, …) are missing or from the older release (`cat VERSION` against `BUNDLE.json`'s `tag`).
+- **Cause:** a bundle upgrade swaps the new release in one top-level name at a time. Killed part-way (a power cut, SIGKILL), it left the tree half old, half new; before v2.169.0 it kept no record of that, `BUNDLE.json` was often the new one already, and every later run read it and stopped. From v2.169.0 the swap writes `.swapping` first and names each file in it before moving it in, swaps `scripts/` first, and the next run (or channel timer tick) puts the previous release back before it upgrades again.
+- **Fix:** upgrade from a release with the fix: `hatchabot upgrade` repairs, then upgrades. On a tree cut off by an older release: in the install folder, for each name in `.prev-release`, `rm -rf ./<name>` then `mv .prev-release/<name> .`, then `hatchabot upgrade`. `.env` and `data/` are never part of the swap.
+- **Fixed in:** `v2.169.0`
+- **Code:** `scripts/upgrade.sh` — `restore_prev`, `SWAPPING`, `not_ours`; `scripts/follow-channel.sh` — `.swapping`
+
 ### `hatchabot upgrade beta` is undone: the channel file says stable again
-- **Check:** `cat ~/.config/hatchabot/channel` against `systemctl --user cat hatchabot-follow-channel` (its ExecStart channel).
+- **Check:** `cat <install>/data/channel` (before v2.169.0, `~/.config/hatchabot/channel`) against `systemctl --user cat hatchabot-follow-channel` (its ExecStart channel).
 - **Cause:** the timer's own upgrade saved its channel over the one chosen by hand.
 - **Fix:** upgrade, then run `hatchabot upgrade beta` again (or reinstall the timer with `follow-channel.sh --install beta`). Before v2.168.0 the timer also went on following the channel it was installed with; see the next entry.
 - **Fixed in:** `v2.153.0`
 - **Code:** `scripts/upgrade.sh` — `HATCHABOT_UPGRADE_BY_TIMER`
 
 ### After `hatchabot upgrade beta`, the channel timer still upgrades along stable
-- **Check:** `cat ~/.config/hatchabot/channel` says `beta`, but `journalctl --user -u hatchabot-follow-channel` shows a new beta release never installed, or `newer than stable`; `systemctl --user cat hatchabot-follow-channel` names `stable` in its ExecStart.
+- **Check:** `cat <install>/data/channel` (before v2.169.0, `~/.config/hatchabot/channel`) says `beta`, but `journalctl --user -u hatchabot-follow-channel` shows a new beta release never installed, or `newer than stable`; `systemctl --user cat hatchabot-follow-channel` names `stable` in its ExecStart.
 - **Cause:** the timer resolved the channel named in its own unit on every tick and read the remembered channel only for a version pin, so switching channels changed what `hatchabot upgrade` follows but not what the timer follows.
-- **Fix:** upgrade. From v2.168.0 each tick follows the channel chosen last (`~/.config/hatchabot/channel`, written by `hatchabot upgrade <channel>`, the installer and `follow-channel.sh --install`), and the unit's channel only when none is remembered. On an older release, reinstall the timer: `./scripts/follow-channel.sh --install beta`. Public access counts the channel the same way, so a switch away from stable turns its safeguard off.
+- **Fix:** upgrade. From v2.168.0 each tick follows the channel chosen last (from v2.169.0 the install's `data/channel`, before it `~/.config/hatchabot/channel`; written by `hatchabot upgrade <channel>`, the installer and `follow-channel.sh --install`), and the unit's channel only when none is remembered. On an older release, reinstall the timer: `./scripts/follow-channel.sh --install beta`. Public access counts the channel the same way, so a switch away from stable turns its safeguard off.
 - **Fixed in:** `v2.168.0`
 - **Code:** `scripts/follow-channel.sh` — `REMEMBERED`; `src/ops/autoUpgrade.ts` — `autoUpgradeStatus`
+
+### Choosing a channel in one install (`hatchabot upgrade beta`) moved another install of the same user onto it
+- **Check:** two installs under one user (a test clone beside the one the service runs, say); `cat ~/.config/hatchabot/channel` names the channel chosen in the other one, and `journalctl --user -u hatchabot-follow-channel` shows the timer following it.
+- **Cause:** before v2.169.0 the channel chosen last was one file for every install of the user's, `~/.config/hatchabot/channel`, so choosing a channel (or pinning a version) in one install changed what every other install's `hatchabot upgrade` and channel timer followed. From v2.169.0 each install keeps its own in its `data/channel`; the user's file is read only by an install with none of its own yet, and written only for a pin to a release from before v2.169.0, which reads nothing else.
+- **Fix:** upgrade, then in each install name its channel once: `hatchabot upgrade stable` (or `beta`, or a version) from that install's folder.
+- **Fixed in:** `v2.169.0`
+- **Code:** `scripts/upgrade.sh` — `remember_channel`, `remembered_channel`; `scripts/follow-channel.sh` — `REMEMBERED`; `install.sh` — `remember_channel`; `src/ops/autoUpgrade.ts` — `autoUpgradeStatus`
 
 ### The channel timer keeps retrying a release that failed, and sets aside one it never tried
 - **Check:** `cat ~/.local/state/hatchabot/follow-channel-failed` names a release older than the one in the timer's log line `Upgrading vA → vB` that failed, right after the channel was promoted.
@@ -210,6 +231,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade, then re-run `scripts/install-service.sh`. On older releases, run `groupadd docker` or export USER.
 - **Fixed in:** `v2.153.0`
 - **Code:** `scripts/install-service.sh` — `DOCKER_GID`
+
+### The installer says "Docker's install script could not be checked" or "Node 22 could not be installed from NodeSource"
+- **Check:** the line above it says `… is not the file this installer was checked with (its sha256 differs)` or `could not download …`.
+- **Cause:** the installer runs Docker's install script only at the commit it pins, and adds NodeSource's apt repo only with the signing key it pins, each checked by its sha256 before anything runs as root. A download that failed, or a file that is not the pinned one (a changed key, a proxy rewriting the download), is refused. Before v2.169.0 it piped get.docker.com and NodeSource's setup script into a root shell unchecked, the second with `sudo -E`.
+- **Fix:** install Docker (https://docs.docker.com/engine/install/) or Node 22+ (https://nodejs.org) by hand, then re-run the installer; it skips what is already there. A refused file that keeps being refused is worth a **Report a problem**: the pin may need moving.
+- **Fixed in:** `v2.169.0`
+- **Code:** `install.sh` — `fetch_pinned`, `nodesource_repo`, `DOCKER_INSTALL_COMMIT`
+
+### The installer says "Could not download release vX.Y.Z's bundle, or what checks it, just now"
+- **Check:** the line above it says `could not download hatchabot-…tar.gz: curl <n>, HTTP <code>` or `could not fetch the release's manifest`; `curl -sI https://github.com` from the same machine.
+- **Cause:** the network (or GitHub) did not answer while the installer fetched the release's bundle or its manifest. Before v2.169.0 that silently became a native install instead (git, Node 22 and a compiler installed, then a clone), which the machine could run the bundle without.
+- **Fix:** re-run the installer once the connection is back; nothing was installed. `HATCHABOT_NATIVE=1` installs from source on purpose.
+- **Fixed in:** `v2.169.0`
+- **Code:** `install.sh` — `install_bundle`
 
 ### The service never starts after setup, and its log says "Invalid environment assignment, ignoring" (Node in a folder with a space in its name)
 - **Check:** `journalctl --user -u hatchabot` shows `Invalid environment assignment, ignoring: …` and then `env: 'bash': No such file or directory`; `systemctl --user cat hatchabot` has an `Environment=PATH=` line whose first folder has a space (Node installed there, or a bundle install in such a folder).
@@ -437,6 +472,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.162.0`
 - **Code:** `web/index.html` — `idSendVerification`, `idSignUp`; `src/api/identity.ts` — `principalFor`
 
+### The sign-in screen says "This page is open over plain http from another device"
+- **Check:** the address bar shows `http://` and a LAN address or name (not `localhost` or `127.0.0.1`).
+- **Cause:** over plain http, what you sign in with (a password, or Google's sign-in token) and the session cookie it starts cross your network unencrypted, so anyone who can watch that network can copy the session. The sign-in still works; the notice says so.
+- **Fix:** open Hatchabot at its https address (the setup guide's "Turn on HTTPS" step: the tailnet address), or on the machine itself at `http://localhost:8080`.
+- **Fixed in:** `v2.169.0`
+- **Code:** `web/index.html` — `plainHttpFromAfar`, `showLogin`
+
 ### "Sign out" seemed to work, but the app is back, still signed in
 - **Check:** the page said nothing and reloaded into the app; the service was restarting or the network dropped at that moment.
 - **Cause:** the session cookie can only be ended by the server; before v2.162.0 a sign-out that never reached it was treated as done, and the reload found the cookie still valid.
@@ -445,11 +487,11 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `web/index.html` — `signOut`
 
 ### Creating the first account asks for a "setup code"
-- **Check:** you are on the first-run page from another device than the Hatchabot machine (or under rootless Docker).
-- **Cause:** by design: before any account exists, only someone on the machine itself, or holding the code printed at start-up, may create the owner account.
-- **Fix:** use the link the installer printed (it carries the code after `#setup=`), or find "first-run setup code" in the server log, or run `hatchabot accounts create <you> --host-owner` on the machine.
-- **Fixed in:** —
-- **Code:** `src/index.ts` — `first-run setup code`; `src/api/accountsAuth.ts` — `first-run setup code`; `scripts/first-run-link.sh` — `setup=`
+- **Check:** you are on the first-run page from another device than the Hatchabot machine, or under rootless Docker, or on Docker Desktop (a Mac: from `v2.169.0` even at `localhost`).
+- **Cause:** by design: before any account exists, only someone on the machine itself, or holding the code printed at start-up, may create the owner account. Under rootless Docker and Docker Desktop an agent's request reaches Hatchabot from the machine's own loopback, so loopback is not proof of being on the machine there, and the code is asked of everyone (before `v2.169.0` a prompt-injected agent on a Mac could create the owner account in that window).
+- **Fix:** use the link the installer printed (it carries the code after `#setup=`), or find "first-run setup code" in the server log (`data/server.log` on a Mac), or run `hatchabot accounts create <you> --host-owner` on the machine.
+- **Fixed in:** `v2.169.0` (Docker Desktop asks for the code too)
+- **Code:** `src/index.ts` — `first-run setup code`; `src/api/accountsAuth.ts` — `onThisMachine`; `src/api/auth.ts` — `loopbackIsRemote`; `src/ops/opsServer.ts` — `dockerDesktop`; `scripts/first-run-link.sh` — `setup=`
 
 ### Sign-in refuses after several wrong passwords
 - **Check:** the sign-in answers "Too many failed attempts — try again later." (HTTP 429).
@@ -457,6 +499,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** wait 15 minutes; a forgotten password is reset as in the next entry.
 - **Fixed in:** `v2.97.1`
 - **Code:** `src/api/auth.ts` — `HATCHABOT_LOGIN_FAILS_PER_WINDOW`, `FAIL_WINDOW_MS`
+
+### An invitation or reset link says "Too many attempts — try again later."
+- **Check:** the link's page answers 429 after several links that had been used or had expired were opened from the same address.
+- **Cause:** from `v2.169.0` the link lookup (`GET /v1/local-accounts/claim`) counts misses like sign-in does (10 per 15 minutes per address), so codes cannot be guessed at speed. It is the links' own count: the password form is not locked by it.
+- **Fix:** wait 15 minutes, then open the newest link; ask for a new one if it has expired.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/api/accountsAuth.ts` — `registerAccountRoutes`; `src/api/auth.ts` — `throttleKeys`
 
 ### The owner is locked out of the app
 - **Check:** "Forgot password?" is unavailable (no Telegram linked) and the recovery code is lost.
@@ -698,6 +747,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.168.0`
 - **Code:** `src/api/routes.ts` — `subscriptionRuntimeProblem`, `applyClassToAgent`; `src/orchestrator/modelOptions.ts` — `SUBSCRIPTION_MIN_OPENCLAW`
 
+### After changing a Claude plan source's default model and switching agents to it, some of them fail every message with "request format rejected, HTTP 400"
+- **Check:** the new default is claude-opus-5-5, the source is a Claude subscription, and the failing agents run OpenClaw older than 2026.9.7 (Settings → Advanced → Runtime images); their gateway logs have `claude_code_version_too_old`.
+- **Cause:** "Change the default, and switch these agents" moved every ticked agent without the runtime check a class model or a single agent's model gets.
+- **Fix:** upgrade: a ticked agent whose runtime is too old keeps the model it runs, and the message says which ones were not switched and why. For one already moved, set its model back in Hatchabot, or give it a newer runtime image first.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/api/routes.ts` — `'/v1/ai-profiles/:id/apply-default-model'`, `subscriptionRuntimeProblem`
+
+### A Claude source's model menu leaves out models the newer agents on it can run
+- **Check:** the source's agents run different runtime images (one on a runner, or one pinned to an older image); `openclaw models list --provider anthropic --all` in the console of the agent on the newest image lists the missing model.
+- **Cause:** the menu came from the first running agent found on the source; one on an older image has a smaller catalog, and its list pruned the menu (and flagged the missing models as stale) for every agent on the source.
+- **Fix:** upgrade: the agent on the newest OpenClaw is asked, and the answer says which version it came from. On an older version, stop or update the agent on the old image while you pick the model.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/api/routes.ts` — `'/v1/ai-profiles/:id/available-models'`; `src/orchestrator/runtimeModels.ts` — `runtimeModels`
+
+### A class saved without complaint, but giving it to an agent fails: the model "isn't one of this source's models"
+- **Check:** the class has an AI source of its own and a model that source's menu does not list (or the source is a local model server).
+- **Cause:** a class's model was only checked against its source when the class was given to an agent, not when it was saved.
+- **Fix:** upgrade: the class is refused when it is saved, with the reason. For one saved before, edit the class's model (or add the model to the source's switchable list).
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agent-classes'`, `modelOverrideProblem`
+
 ## Telegram, Discord and Slack
 
 ### Discord or Slack ended up connected to a different agent than the one the sheet named
@@ -727,6 +797,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: requests, approvals and removals now use the database when the files are gone.
 - **Fixed in:** `v2.69.0`
 - **Code:** `src/orchestrator/claim.ts` — `pairingListShell`, `PAIRING_DB`
+
+### An agent upgraded from OpenClaw 2026.7 shows no knock card, or someone let in is still not admitted
+- **Check:** the agent runs 2026.9; `credentials/telegram-pairing.json` (or a `-allowFrom.json`) is still on its volume next to `state/openclaw.sqlite` (Files, or `docker run --rm -v <volume>:/v alpine ls /v/.openclaw/credentials`).
+- **Cause:** OpenClaw's 2026.9 migration moves those files into its database and removes them, but leaves one it cannot read or place. Hatchabot read and wrote that file in preference to the database, so the database's requests were hidden and an approval went where 2026.9 does not look.
+- **Fix:** upgrade: requests are read from both stores (the database first), and a deny or a grant writes both. The left-over file can be deleted by hand once it is empty.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/orchestrator/claim.ts` — `pairingListShell`; `src/orchestrator/members.ts` — `denyPairing`, `grantChannelAccess`
 
 ### `hatchabot pairing` stops with "Not found" and lists no requests, although someone is waiting
 - **Check:** `hatchabot pairing <agent>` for the agent with the knock lists it; the fleet has a running agent with no chat app (web chat only) or one shared with you as a member.
@@ -790,6 +867,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** fix the app (run its tests where you develop it), commit, and run `hatchabot app update <agent>` again; `hatchabot app status <agent>` shows what is running.
 - **Fixed in:** —
 - **Code:** `src/orchestrator/apps.ts` — `installRelease`
+
+### An app's API key or password shows in plain text in the "tests failed" error or the agent's log
+- **Check:** the app's settings include a secret field (its `hatchabot.json` marks it `"secret": true`), and its tests print the value they were given; the error from Install or Update, or the app's pending error, shows it.
+- **Cause:** the last lines of the tests' output were put in the error, the event log and traces as they were.
+- **Fix:** upgrade: every secret field's value is replaced by `••••••` in the tests' output before it is kept anywhere. A value shorter than four characters is not masked. Change a key that was already shown, and stop the app's tests printing it.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/orchestrator/apps.ts` — `installRelease`, `secretValues`, `maskSecrets`
 
 ### A failed app update changed the running app's settings (mailbox, mode)
 - **Check:** after an Update that failed (its tests failed, or "Could not switch to …"), `docker exec <agent> cat ~/.openclaw/apps/<app>/data/config.json` shows the values given to the failed update, while the App row still shows the old commit.
@@ -909,6 +993,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** set it up (Settings → You for Telegram; give the agent a bot), then install again or press Try again on the agent's page.
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/apps.ts` — `mergeConfig`, `installRelease`
+
+### An app's row stays on "Updating… (tests first)" with the button greyed out
+- **Check:** Update, Roll back, Stop app or Try again answered (a toast said what happened), but the App row still shows the pressed button; closing and reopening the agent shows the app as it is.
+- **Cause:** after the action the page reads the app again, and before v2.169.0 a failed read (the service restarting, a network blip) left the row as it was, button disabled.
+- **Fix:** upgrade: the row then says it could not read the app, with **Read again**. On an older version, close and reopen the agent.
+- **Fixed in:** `v2.169.0`
+- **Code:** `web/index.html` — `v2LoadApp`, `v2AppUpdate`
 
 ### An app task you had turned off stays after Stop app, or runs twice after an Update
 - **Check:** `openclaw cron list --all` in the agent's console shows an `<app>-<task>` job that is disabled (left after Stop app), or one disabled beside an enabled one of the same name after an Update.
@@ -1071,7 +1162,35 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.168.0`
 - **Code:** `src/api/routes.ts` — `'/v1/join'`; `src/orchestrator/invite.ts` — `redeemInvite`
 
+### People on Discord or Slack were told the agent "no longer answers" there, but it still does
+- **Check:** removing Discord or Slack from the agent answered "Its runtime could not be confirmed stopped", "busy" or "changed meanwhile", and the bot is still listed on the agent.
+- **Cause:** the goodbye DMs went out before the removal took the agent's lock and stopped it, so a removal that was then refused had already told everyone.
+- **Fix:** upgrade: the goodbye goes out only once the agent holds still and is stopped, just before its bot is parked. Tell those people it is still there, or remove it again.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/channels/:kind'`, `dmChannelPeople`
+
+### A new agent on a pool bot answers messages that were sent to the bot's previous agent
+- **Check:** the agent was just created (or brought back) on a bot from the pool that served another agent within the last day; its first replies answer messages sent before it existed. The service log has no `pool.updates_dropped` line for that bot at the lease, or has `pool.updates_not_dropped`.
+- **Cause:** Telegram keeps a bot's unconfirmed updates for up to 24 hours. A pool bot released by one agent and leased to another still held what people had sent the first, and the new agent's gateway read them as its own.
+- **Fix:** upgrade. A lease now confirms every waiting update before the new agent starts. `pool.updates_not_dropped` with "Conflict" means the previous agent's gateway was still polling the bot: stop it, then Change bot on the new agent.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/channels/telegramPool.ts` — `provision`, `#dropWaitingUpdates`
+
+### Some members never got the "archived" or "removed" goodbye from an agent's bot
+- **Check:** the agent has many members; the service log's `pool.farewell` line for it shows `failed` above 0.
+- **Cause:** the goodbyes were sent in a plain loop that ignored Telegram's "Too Many Requests" answer, so on a large membership the ones past the rate limit were dropped.
+- **Fix:** upgrade. A goodbye refused for the rate limit is sent again after the wait Telegram asks for, up to 30 seconds in all; those it still cannot reach are counted in `pool.farewell`. Tell them the new link yourself.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/channels/telegramPool.ts` — `#farewell`, `FAREWELL_WAIT_MS`
+
 ## Agents, builds and rebuilds
+
+### A rebuild stops with "A shared folder is no longer safe to mount", for a folder brought in from OpenClaw
+- **Check:** the agent's Data lists a folder shared at its own path (brought in with "Bring in from OpenClaw"); the message names it, and says it is a symlink, is or holds a folder that may not be shared, or "would cover" a path such as `/usr`, `/opt` or `/home/node`.
+- **Cause:** every shared folder is checked again at each build, and a folder shared at its own path lands at that same path inside the agent, which may not be on or over the agent's home or the image's system folders. Before v2.169.0 those folders were left out of the check.
+- **Fix:** remove the folder from the agent's Data and share it again at `/data` (without "at its own path"), or share a folder that is safe; then rebuild.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/orchestrator/provision.ts` — `hostPathTargetProblem`, `sharePathProblem`, `buildRuntimeSpec`
 
 ### A rebuild or setup fails with `seed failed at "<step>": …`
 - **Check:** the agent's Setup log (`rebuild.failed` / `provision.failed`) names the step, then the tail of stderr and stdout.
@@ -1227,6 +1346,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/archive.ts` — `resumeArchive`; `src/orchestrator/quiesce.ts` — `stopAndConfirm`
 
+### An archive of a stopped agent whose copy was downloaded ended "left as it was", and its bot is gone
+- **Check:** the agent was stopped with a downloaded copy (Detach or Archive warned about it); its archive operation says "interrupted by a restart before its bot was given back"; the agent still lists a Telegram bot that the pool no longer has.
+- **Cause:** Hatchabot restarted after the bot was left to the copy (a pool bot taken out of the pool) but before that was recorded, and the restart undid the archive as if nothing had been given up.
+- **Fix:** upgrade: such an archive is finished after a restart. On an older version, archive the agent again.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/orchestrator/archive.ts` — `resumeArchive`, `leaveBotToCopy`
+
 ### Agent-to-agent consults always fail with an unauthorized caller
 - **Check:** the agent has peers, yet `/message` calls from it are refused; the stored `agent-call-token/<id>` secret does not match the live hash.
 - **Cause:** the token's hash was saved before its secret; a failed write or two grants at once left them different, and nothing repaired it.
@@ -1255,6 +1381,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0` (#166)
 - **Code:** `src/api/routes.ts` — `'/v1/agents/:id/peers'`
 
+### An agent's "## Peers" section in AGENTS.md is cut short, or text from a peer's name reads as an instruction
+- **Check:** one of the agent's peers has a name with a line break, a `#`, a run of backticks or `**` in it (an imported template's name can); in the agent's AGENTS.md, "## Peers" ends at a heading that came from that name, or the list's bold runs on.
+- **Cause:** before v2.169.0 each peer's name went into the section as it was, as bold markdown, so a line break plus `## …` started a heading of its own in the agent's standing instructions.
+- **Fix:** upgrade, then rebuild the agent (or change its peers): each name is written on one line in a code span. Renaming the peer to plain words also fixes it on older versions.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/openclaw/workspace.ts` — `peerToolsSection`, `peerOneLine`; `src/orchestrator/provision.ts` — `syncDataSourceDocs`
+
 ### An agent's browser keeps disappearing, or a test install removed it
 - **Check:** another Hatchabot (a second install, or a smoke test with its own `HATCHABOT_PREFIX`) uses the same Docker, and the Setup log shows "its browser removed".
 - **Cause:** each install's sweep listed every browser on the daemon and removed those it didn't know.
@@ -1275,6 +1408,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** a full copy always brings its bot. For a new agent with no bot, export a template and import that.
 - **Fixed in:** `v2.153.0`
 - **Code:** `src/api/routes.ts` — `'/v1/agents/import'`
+
+### After importing a downloaded agent, your first message to its bot gets a pairing code
+- **Check:** the agent came from a Download (a full copy) or a move; Members shows you as owner with no Telegram; a knock card (or `hatchabot pairing <agent>`) shows your request.
+- **Cause:** an import drops the previous owner's Telegram from the owner's seat but started nothing to watch for yours, so your first message waited for approval by hand.
+- **Fix:** upgrade: the owner's seat takes your Telegram when this machine already knows it, and otherwise your first message is claimed for half an hour after the import, as with a new agent (never the previous owner's). Until then, approve your own request from the knock card.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/orchestrator/transfer.ts` — `watchOwner`; `src/api/routes.ts` — `watchImportedOwner`
 
 ### "New agent from a repo" says the name is taken after a failed first try
 - **Check:** an agent with the app's name exists and is still being made or has failed, with no app installed (its App row is empty, or shows a pending install).
@@ -1311,6 +1451,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.168.0`
 - **Code:** `src/api/routes.ts` — `'/v1/agents/:id/data-sources'`; `src/orchestrator/provision.ts` — `syncDataSourceDocs`
 
+### An AGENTS.md edit saved just after a memory cap, About you, Push definition or removing a repo is gone
+- **Check:** shortly before the save, the agent's memory cap or the machine's agent memory default was changed, About you (the operator profile) was saved, its master pushed its definition, or a repo was removed from it; the saved text is not in AGENTS.md, which has the text from before the save with its "## Memory budget", "## About the operator" or "## Data sources" section updated.
+- **Cause:** before v2.169.0 those changes rewrote AGENTS.md's managed sections in the background without holding the agent, as adding a public repo did before v2.168.0. The rewrite read AGENTS.md, and a save made before it wrote back was written over with the older text.
+- **Fix:** upgrade: each rewrite holds the agent, so a save in those seconds is refused with "Another operation is already running on this agent"; save again once it is over. An agent busy with something else when the change is made gets its sections at its next start or rebuild. On an older version, write the edit again.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/api/routes.ts` — `syncDocsHeld`, `'/v1/operator-profile'`, `'/v1/machine-defaults'`, `'/v1/agents/:id/push-definition'`; `src/orchestrator/provision.ts` — `syncDataSourceDocs`
+
 ### An agent's template or downloaded copy will not import: "That template file is malformed or from an incompatible version" or "That export is malformed … (agent.dataSources)"
 - **Check:** the agent has more than 32 data sources (Settings → Data lists them).
 - **Cause:** a template and a full copy carry at most 32 data sources, but adding a source had no limit, so an agent could hold more and its own export could not be read back.
@@ -1324,6 +1471,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade, remove one of the two sources, and rebuild the agent so its clone is the one kept. Since this release a name being added is held until its source is saved, and the second add is refused.
 - **Fixed in:** `v2.168.0`
 - **Code:** `src/api/routes.ts` — `addingSources`, `'/v1/agents/:id/data-sources'`
+
+### Sharing a folder "at its own path" says "… is already shared with this agent", but it is not
+- **Check:** the agent already shares another folder at its host path whose path differs only in where the `/` and `-` fall (`/srv/recipes/family` and `/srv/recipes-family`).
+- **Cause:** a host-path folder was told apart by a name flattened from its path, and the two paths flatten to the same name.
+- **Fix:** upgrade: a host-path folder clashes only with the same folder, and its name gets a number when another has it.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/data-sources'`
 
 ### A failed app install or update shows no test output
 - **Check:** the error says the tests failed, but no output appears under it.
@@ -1860,6 +2014,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.162.0`
 - **Code:** `src/orchestrator/hibernate.ts` — `telegramHasMail`, `markBefore`
 
+### A sleeping agent answers on its old build after a change that needs a rebuild
+- **Check:** the agent's tile shows a required rebuild, the machine's sleep time (`HATCHABOT_HIBERNATE_AFTER`) is 10 minutes or less, and the timeline shows `agent.hibernated` and wakes but no rebuild.
+- **Cause:** a wake starts an agent as it is, and the machine's own rebuilds only rebuild running agents idle for 10 minutes; with a short sleep time the agent fell asleep again first, every time.
+- **Fix:** upgrade: an agent waiting for a required rebuild is not put to sleep until the rebuild has run (unless rebuilds are set to manual, where nothing would rebuild it). Before that, press Rebuild on the agent.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/orchestrator/hibernate.ts` — `idleBlocker`, `requiredRebuildDue`; `src/api/routes.ts` — `hibernateDeps`
+
 ### An agent set to "Never sleep" was put to sleep anyway
 - **Check:** `agent.hibernated` on the timeline, by the idle sweep (`quiet for … min`), seconds after its sleep setting was changed to never.
 - **Cause:** the idle sweep read the setting before it read the agent's activity and tasks, and stopped it without looking again.
@@ -1995,6 +2156,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.168.0`
 - **Code:** `src/orchestrator/snapshots.ts` — `snapshotsInUse`; `src/api/routes.ts` — `snapshotsInUse`
 ## Console and web chat
+
+### On a phone, the keyboard covers the box you are typing in (a panel, the web chat, the console)
+- **Check:** the page is open on a phone; tapping a text box in a panel, the web chat or the console brings up the keyboard over it, and the box cannot be scrolled into sight.
+- **Cause:** the keyboard covers the bottom of the screen without making the page shorter, and before v2.169.0 panels and dialogs kept their full height under it.
+- **Fix:** upgrade: while the keyboard is up, panels, dialogs, the console and the web chat fit the part of the screen above it, and the box being typed in is scrolled into view. On an older version, turn the phone sideways or close the keyboard to read what is under it.
+- **Fixed in:** `v2.169.0`
+- **Code:** `web/index.html` — `fitVisualViewport`
 
 ### The console says "Control UI did not start"
 - **Check:** the agent runs OpenClaw 2026.9; the page's script links start with `/assets/`.
@@ -2171,6 +2339,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** re-run the runner setup snippet (it writes a managed `~/.ssh/config` block with `IdentitiesOnly`); check no older hand-made `Host` block shadows it. See docs/runner-setup.md.
 - **Fixed in:** —
 - **Code:** `src/orchestrator/runnerSetup.ts` — `IdentitiesOnly`
+
+### A tcp:// runner is refused ("reached over TLS only"), or stopped answering after an upgrade
+- **Check:** the runner's address starts `tcp://`; on the Hatchabot machine, `ls "${DOCKER_CERT_PATH:-$HOME/.docker}"` lacks `ca.pem`, `cert.pem` or `key.pem`; `docker -H tcp://<runner>:2376 --tlsverify version` fails.
+- **Cause:** a `tcp://` runner is spoken to over verified TLS only. Plain `tcp://` carried every call, the agent's bot token among them, unencrypted to a daemon that checks nobody.
+- **Fix:** use `ssh://user@host` (remove the runner and add it again), or set up TLS on that Docker daemon and put its client certificates in `~/.docker` (or `DOCKER_CERT_PATH` in the service's environment). See docs/runner-setup.md.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/providers/runnerEndpoint.ts` — `dockerConnArgs`, `tcpTlsProblem`
 
 ### Moving an agent to a runner fails with "pull access denied for hatchabot-runtime"
 - **Check:** the agent is pinned to an image the runner does not have.
@@ -2713,6 +2888,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/sourceUsage.ts` — `sampleAgentUsage`, `logKey`
 
+### An AI source shows fewer refused (rate-limited) calls than its agents' logs, or a refusal no model call made
+- **Check:** `docker logs --timestamps <container> | grep 'model-fetch] response.*status=429'` shows two refusals in the same millisecond, or the line counted has the `[model-fetch] response` marker quoted inside another line (a message or a tool's output) rather than at its start.
+- **Cause:** refusals were keyed by agent and millisecond, so the second of two in one millisecond was dropped; a marker anywhere in a line counted as a call; and the log's stdout and stderr shared one line buffer, so a half line of each could be joined and the call lost.
+- **Fix:** upgrade; nothing to do by hand. Each refusal is kept by its log line's own stamp, only OpenClaw's own lines count, and each stream is read on its own.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/orchestrator/sourceUsage.ts` — `parseModelCalls`; `src/store/store.ts` — `addLimitHit`; `src/providers/localDockerProvider.ts` — `modelCallLog`
+
 ### After a rebuild that switched an agent's AI source, its last hour of calls shows under both sources
 - **Check:** Usage for the old and the new source both show the same calls in the hour before the rebuild (the agent's requests are about doubled across the two).
 - **Cause:** before v2.162.0 each sample rewrites the last hour of successful calls from the transcripts, and filed all of it under the source running now, while the old source still had those calls.
@@ -2766,8 +2948,8 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Check:** the agents were stopped by you, not by a budget, when a "pause" budget (theirs or the machine's) reached 100%; each one's timeline shows `budget.paused` with `alreadyStopped: true`, then `budget.resumed` with `new-month` or `budget-raised`, and the agent is RUNNING.
 - **Cause:** v2.165.0 began recording a pause for an agent that was already stopped (so Start could be the owner's take-over it promised), but recorded it like any pause, and the pass that ends pauses started every open one. A machine budget's pool is every agent, so each hand-stopped agent started on the 1st and began spending.
 - **Fix:** upgrade, and stop the agents again. The record now remembers that the budget stopped nothing: it closes on the 1st or a raise with no start (`budget.pause_closed`), and the 100% message says "it was already stopped, so it stays stopped" (or how many "already stopped stay so").
-- **Fixed in:** `v2.166.0`
-- **Code:** `src/orchestrator/budgets.ts` — `runBudgets`, `alreadyStopped`, `budgetMessage`; `src/store/store.ts` — `addBudgetPause`, `already_stopped`
+- **Fixed in:** `v2.166.0`; `v2.169.0` for a pause v2.165.0 had already recorded before the upgrade (still read as the budget's own; it is now marked from its `budget.paused` event)
+- **Code:** `src/orchestrator/budgets.ts` — `runBudgets`, `alreadyStopped`, `budgetMessage`; `src/store/store.ts` — `addBudgetPause`, `already_stopped`, `2026-10-26-budget-pause-already-stopped`
 ### Usage → Spend over time: the day you deleted your last agent shows less than it spent
 - **Check:** every agent of yours was deleted (or the last one was) after it had been working that day; the day's bar in Spend over time is lower than the Usage tab showed before the delete, and it stays so the next day, while a day on which some agent of yours survived is right.
 - **Cause:** the daily point was made for the owners of active agents only. Once your last agent was gone, your days were never finished, so the readings its last hours had added were never counted, though deleted agents' use is meant to stay (v2.164.2).
@@ -2853,6 +3035,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade and share or make the child (New child) again: an agent with Setup fields now travels as its placeholder layer. In a copy already made, change the text by hand or with Setup values after adding the placeholders back.
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/template.ts` — `exportTemplate`
+
+### A shared copy of an agent with Setup fields is missing a change the agent made to its own AGENTS.md
+- **Check:** the agent has Setup fields; its live AGENTS.md (or SOUL.md) has text the copy lacks, and that text was written by the agent itself or in its console, not saved in the app's Files editor.
+- **Cause:** an agent with Setup fields travels as its setup version, `{{placeholders}}` and all, so a copy can give its own answers. A Files editor save updates that version; a change made any other way does not, and before v2.169.0 the copy left it out without a word.
+- **Fix:** upgrade: Share a copy and Send to someone name the files that changed this way before anything leaves. To include the change, open the file in the agent's Files and save it there, putting `{{field}}` back wherever a copy should give its own answer; then share again.
+- **Fixed in:** `v2.169.0`
+- **Code:** `src/orchestrator/template.ts` — `exportTemplate`; `web/index.html` — `editedNote`, `personalCheck`, `openSendAgent`
 
 ### Import or New child: "… must be yes or no (true/false)"
 - **Check:** the answer given for a yes/no setup field (from the CLI, a script, or the field's declared default) is not one of yes, no, true, false, on, off, 1, 0.
@@ -3021,6 +3210,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** fix each ✗ line as it says, or `hatchabot reach off`.
 - **Fixed in:** —
 - **Code:** `src/doctor.ts` — `publicAccessLines`; `src/api/safeguards.ts` — `evaluateSafeguards`
+
+### At the public address, one visitor's wrong passwords lock everyone out ("Too many failed attempts")
+- **Check:** the service log has `public.no_client_address` (from `v2.169.0`): public requests are arriving without `X-Forwarded-For`.
+- **Cause:** the public address counts sign-in failures and requests per visitor, by the address in `X-Forwarded-For`, which Tailscale Funnel sets. Something else in front of the public port (another proxy, or a connection straight to it) does not send it, so every visitor is the one visitor "unknown".
+- **Fix:** serve the public address through `hatchabot reach on` (Tailscale Funnel) only, or make the proxy in front set `X-Forwarded-For`; wait out the 15-minute lockout.
+- **Fixed in:** `v2.169.0` (the log line; the counting is unchanged)
+- **Code:** `src/api/trust.ts` — `publicClientAddress`; `src/api/publicAccess.ts` — `public.no_client_address`, `overCeiling`
 
 ### At the public address, Download / Import / Share a copy / Upload fails with "second factor required"
 - **Check:** the page is opened at the public address, and the toast or upload note says "second factor required" (an HTTP 401 with `secondFactor: "step-up"`).
@@ -3252,10 +3448,10 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ### After clearing the peaks (or changing a memory cap) and a rebuild, an agent shows no cap hits although it is short of memory
 - **Check:** Status → Resources shows 0 cap hits for the agent, while `docker exec <container> cat /sys/fs/cgroup/memory.events` shows a `max` count above 0; the peaks were cleared, or its cap changed, before a rebuild, start or wake.
-- **Cause:** clearing kept the old container's count as the starting point, and the new container's count starts again from zero, so its hits were subtracted away until it passed the old one's total.
-- **Fix:** upgrade; a count below the starting point is taken as a new container's and shown whole. On older versions, clear the peaks again after the rebuild.
-- **Fixed in:** `v2.168.0`
-- **Code:** `src/api/routes.ts` — `capHitsSince`, `'/v1/resources'`; `src/store/store.ts` — `rebaseMemoryCapHits`, `clearMemoryPeaks`
+- **Cause:** clearing kept the old container's count as the starting point, and the new container's count starts again from zero, so its hits were subtracted away until it passed the old one's total. v2.168.0 caught a count below the starting point; a new container that had already passed the old total when it was first read still showed only the hits beyond it.
+- **Fix:** upgrade; the starting point remembers when its container started, and a count from a container that started later is shown whole. On older versions, clear the peaks again after the rebuild.
+- **Fixed in:** `v2.168.0` (a count below the starting point), `v2.169.0` (any later container, by its start time)
+- **Code:** `src/api/routes.ts` — `capHitsSince`, `'/v1/resources'`; `src/store/store.ts` — `rebaseMemoryCapHits`, `clearMemoryPeaks`; `src/providers/localDockerProvider.ts` — `stats`
 
 ## Audit fixes in v2.158.2
 

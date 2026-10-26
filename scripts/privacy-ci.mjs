@@ -38,7 +38,9 @@
  * wrapped onto the next line is found (as the publisher's gate finds it;
  * not across two breaks, a paragraph between). Names keep their case as privacy-check.mjs does ("Condo B" is not
  * "condo board"); slugs, emails, machine names and ids match in any case;
- * secrets as written.
+ * secrets as written. A line is read decoded too (decodedViews): its
+ * percent-encoding, HTML character references and base64 runs, so a name
+ * written as Maple%20Ford, Maple&#32;Ford or in base64 is found (HB-0070).
  *
  * Exit 0: clean; 1: found something; 2: usage; 3: incomplete — no secret (a
  * pull request from a fork gets none), a garbled one, a range, a git command or
@@ -56,7 +58,7 @@ export const CATS = { A: 'agent name', S: 'agent slug', E: 'email', I: 'person i
 export const LETTER = Object.fromEntries(Object.entries(CATS).map(([k, v]) => [v, k]));
 export const IDENTITY_FILE = 'scripts/privacy-identity.txt';
 export const SECRET_NAME = 'PRIVACY_FINGERPRINTS';
-export const NOT_COVERED = 'pictures and compressed data inside binary files (no OCR, no unpacking; the text inside them is read); a private value the owner\'s install does not record; a value split across more than one line break, or paraphrased';
+export const NOT_COVERED = 'pictures and compressed data inside binary files (no OCR, no unpacking; the text inside them is read); a private value the owner\'s install does not record; a value split across more than one line break, or paraphrased; encodings other than percent, HTML and base64 (runs of 8 characters or more), or one inside another';
 const DIGEST_BYTES = 16;
 /** Parts of a word longer than this are not tried in every combination (a long URL). */
 const MAX_SPAN = 16;
@@ -82,6 +84,43 @@ export function textInside(b) {
   const out = [];
   for (const t of [b.toString('utf8'), b.toString('utf16le'), b.subarray(1).toString('utf16le')]) out.push(...(t.match(runs) ?? []));
   return out.join('\n');
+}
+
+const HTML_NAMED = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', lsquo: '\u2018', rsquo: '\u2019' };
+/**
+ * What a line says once decoded, for a value hidden in an encoding (HB-0070):
+ * percent-encoding (a URL, + as a space), HTML character references (&#39;
+ * &#x2019; &amp; …), and runs of base64, standard or URL-safe, of 8 characters
+ * or more that decode to text (a run that is plainly a word, all lower case
+ * or with no lower case at all, is not tried). [{ how, text }]: only what
+ * differs from the line, so nothing for most lines. privacy-check.mjs reads
+ * lines this way too.
+ */
+export function decodedViews(line) {
+  const s = String(line), out = [];
+  if (/%[0-9A-Fa-f]{2}/.test(s)) {
+    const t = s.replace(/\+/g, ' ').replace(/(?:%[0-9A-Fa-f]{2})+/g, (m) => {
+      try { return decodeURIComponent(m); } catch { return Buffer.from(m.replace(/%/g, ''), 'hex').toString('latin1'); }
+    });
+    out.push({ how: 'percent-encoded', text: t });
+  }
+  const ref = /&(#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z]{2,6});/g;
+  if (ref.test(s)) {
+    const t = s.replace(ref, (m, e) => {
+      if (e[0] !== '#') return HTML_NAMED[e.toLowerCase()] ?? m;
+      const n = /^#[xX]/.test(e) ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
+    });
+    if (t !== s) out.push({ how: 'HTML-encoded', text: t });
+  }
+  for (const run of s.match(/[A-Za-z0-9+/_-]{8,}={0,2}/g) ?? []) {
+    if (!/[a-z]/.test(run) || !/[A-Z0-9]/.test(run)) continue;
+    const b = Buffer.from(run.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    const t = b.toString('utf8');
+    // Text, not bytes: no control characters, nothing that was not UTF-8.
+    if (b.length >= 6 && !/[\p{C}\uFFFD]/u.test(t.replace(/[\t\r\n]/g, ''))) out.push({ how: 'base64', text: t });
+  }
+  return out;
 }
 
 /**
@@ -143,10 +182,16 @@ export const mask = (value) => `${[...value].slice(0, 2).join('')}…(${[...valu
  * ("x-Condo B" holds "Condo B"), and a single word any of its parts.
  */
 export function scanLine(line, fp) {
-  const ws = words(line);
-  if (!ws.length) return [];
   const out = [], seen = new Set();
-  const hit = (set, d, cand) => { if (set.has(d) && !seen.has(d)) { seen.add(d); out.push({ cat: fp.cats[d] ?? '?', shown: mask(cand) }); } };
+  wordHits(line, fp, out, seen);
+  for (const v of decodedViews(line)) wordHits(v.text, fp, out, seen, v.how);
+  return out;
+}
+/** scanLine's look at one text: hits not yet `seen` go in `out`, marked `how` they were found when decoded. */
+function wordHits(line, fp, out, seen, how) {
+  const ws = words(line);
+  if (!ws.length) return;
+  const hit = (set, d, cand) => { if (set.has(d) && !seen.has(d)) { seen.add(d); out.push({ cat: fp.cats[d] ?? '?', shown: mask(cand), ...(how ? { how } : {}) }); } };
   const check = (cand) => {
     const d = digest(fp.key, cand);
     hit(fp.exact, d, cand);
@@ -163,7 +208,6 @@ export function scanLine(line, fp) {
       }
     }
   }
-  return out;
 }
 
 /**
@@ -188,7 +232,7 @@ export function scanText(text, where, fp, { lines = true } = {}) {
   return out;
 }
 
-const label = (h) => `[${h.cat} ${CATS[h.cat] ?? 'private value'}] '${h.shown}' ${h.where}${h.line ? ':' + h.line : ''}`;
+const label = (h) => `[${h.cat} ${CATS[h.cat] ?? 'private value'}${h.how ? `, ${h.how}` : ''}] '${h.shown}' ${h.where}${h.line ? ':' + h.line : ''}`;
 
 // ---- the owner's identity ---------------------------------------------------------
 const git = (cwd, ...a) => spawnSync('git', ['-C', cwd, '-c', 'core.quotePath=false', ...a], { encoding: 'utf8', maxBuffer: 1 << 30 });

@@ -206,3 +206,21 @@ cat > /dev/null; exit 0
     });
   });
 });
+
+describe('HB-0029: tcp:// runners need a TLS client certificate here', () => {
+  it('tcpTlsProblem names what is missing; ssh:// never needs one', async () => {
+    const { tcpTlsProblem, dockerConnArgs } = await import('../src/providers/runnerEndpoint.js');
+    const { mkdtempSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const empty = mkdtempSync(join(tmpdir(), 'hb-certs-'));
+    expect(tcpTlsProblem('tcp://runner:2376', { DOCKER_CERT_PATH: empty })).toMatch(/ca\.pem, cert\.pem, key\.pem/);
+    expect(tcpTlsProblem('ssh://runner@host', { DOCKER_CERT_PATH: empty })).toBeUndefined();
+    for (const f of ['ca.pem', 'cert.pem', 'key.pem']) writeFileSync(join(empty, f), 'made-up\n');
+    expect(tcpTlsProblem('tcp://runner:2376', { DOCKER_CERT_PATH: empty })).toBeUndefined();
+    // Default place: ~/.docker of the given home.
+    expect(tcpTlsProblem('tcp://runner:2376', {}, empty)).toMatch(/\.docker/);
+    expect(dockerConnArgs('tcp://runner:2376')).toEqual(['-H', 'tcp://runner:2376', '--tlsverify']);
+    expect(dockerConnArgs('ssh://runner@host')).toEqual(['-H', 'ssh://runner@host']);
+  });
+});

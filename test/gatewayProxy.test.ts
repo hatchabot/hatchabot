@@ -131,6 +131,11 @@ describe('Control UI websocket proxy', () => {
     expect(res.echoed).toBe('yes');
   });
 
+  it('closes an upgrade to any other path at once, rather than leaving it open (HB-0056)', async () => {
+    const { port } = await world({ ownerId: OWNER, via: 'identity' });
+    expect((await upgrade(port, '/v1/not-a-console')).status).toBe('DESTROYED');
+  });
+
   it('destroys an upgrade with no session rather than forwarding it', async () => {
     // This is the hole that kept the websocket out of 0.63.0: a hand-rolled
     // principal would fall back to LOCAL_OWNER and forward anonymously.

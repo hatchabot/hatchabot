@@ -329,6 +329,13 @@ postureDaily.unref();
     process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK = '1';
     app.log.info('rootless docker: loopback peers are not treated as local');
   }
+  // Docker Desktop (its Linux edition too): containers reach this machine's
+  // loopback through the VM, so loopback is not "this machine" either, and
+  // the ops door's loopback allowance applies only here (opsServer.ts).
+  if (!process.env.HATCHABOT_DOCKER_DESKTOP && (await (localProvider as { desktop?: () => Promise<boolean> } | undefined)?.desktop?.().catch(() => false))) {
+    process.env.HATCHABOT_DOCKER_DESKTOP = '1';
+    app.log.info('docker desktop: loopback peers are not treated as local');
+  }
   // With no sign-in every request is the owner, and loopback-only binding does
   // not keep agents out here: they reach this process from 127.0.0.1.
   if (process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK === '1' && !authIsEnabled(authModeFromEnv(), process.env.HATCHABOT_PASSWORD)) {

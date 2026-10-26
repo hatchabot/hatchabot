@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
 
 // Every test here runs real shell scripts (git, bash, a fake gh) in a sandbox. On the
@@ -50,8 +50,34 @@ describe('scripts/follow-channel.sh', () => {
     };
     // Its records are its own, keyed on its path as the upgrade lock is (audit #034).
     const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', app], { encoding: 'utf8' }).trim();
-    return { root, home, run, follow, log, asked, state, tries: join(state, `follow-channel-tries-${key}`), failed: join(state, `follow-channel-failed-${key}`), channelFile: join(home, '.config', 'hatchabot', 'channel') };
+    return { root, home, run, follow, log, asked, state, tries: join(state, `follow-channel-tries-${key}`), failed: join(state, `follow-channel-failed-${key}`), channelFile: join(app, 'data', 'channel'), userChannelFile: join(home, '.config', 'hatchabot', 'channel') };
   }
+
+  it('a bundle swap that was cut off with the new BUNDLE.json in is handed to upgrade.sh to repair, not taken as done (HB-0049)', () => {
+    const w = world();
+    const app = join(w.root, 'app');
+    writeFileSync(join(app, 'BUNDLE.json'), JSON.stringify({ tag: 'v1.1.0' }) + '\n');
+    expect(w.run(0).status).toBe(0);
+    expect(lines(w.log)).toEqual([]); // on it already: nothing to do
+    writeFileSync(join(app, '.swapping'), 'from v1.0.0\n');
+    expect(w.run(0).status).toBe(0);
+    expect(lines(w.log)).toEqual(['upgrade stable timer=1 target=v1.1.0']);
+  });
+
+  it('follows its own install\'s channel, not another install\'s choice; the user\'s one file only when it has none (HB-0235)', () => {
+    const w = world();
+    const other = world({ root: w.root, home: w.home }, 'other');
+    expect(w.follow('--install', 'stable').status).toBe(0);
+    // `hatchabot upgrade beta` in the other install: its own file.
+    mkdirSync(dirname(other.channelFile), { recursive: true }); writeFileSync(other.channelFile, 'beta\n');
+    expect(w.run(0).status).toBe(0);
+    expect(lines(w.asked)).toEqual(['stable']);
+    // An install from before v2.169.0 knew only the user's file: read when this install has none.
+    rmSync(w.channelFile);
+    mkdirSync(dirname(w.userChannelFile), { recursive: true }); writeFileSync(w.userChannelFile, 'beta\n');
+    expect(w.run(0).status).toBe(0);
+    expect(lines(w.asked)).toEqual(['stable', 'beta']);
+  });
 
   it('asks upgrade.sh as the timer (so it leaves the chosen channel alone), for the release it resolved', () => {
     const w = world();

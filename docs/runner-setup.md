@@ -39,7 +39,11 @@ into a terminal *on the runner*. It does three idempotent things:
 ### 3. Add the address
 
 Enter a name and `ssh://user@host` (or `tcp://host:2376` if you've set up a
-TLS-guarded TCP socket yourself). On add, the control plane automatically:
+TLS-guarded TCP socket yourself). A `tcp://` runner is always spoken to over
+verified TLS (`docker --tlsverify`) with this machine's client certificate:
+`ca.pem`, `cert.pem` and `key.pem` in `$DOCKER_CERT_PATH`, else `~/.docker`.
+Without them the address is refused; plain, unencrypted `tcp://` is not
+supported. On add, the control plane automatically:
 
 - pins its dedicated key for that hostname in `~/.ssh/config`
   (`IdentitiesOnly yes`) — this is what makes the **headless service** work:

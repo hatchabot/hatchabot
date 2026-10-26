@@ -324,3 +324,12 @@ describe('the git host key is trusted on first use only (#202)', () => {
     expect(gitSyncReason('@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.')).toMatch(/not the key this agent trusted/);
   });
 });
+
+describe('HB-0237: the sync scripts refuse a mount name with shell syntax', () => {
+  it('throws rather than paste it into a shell line', () => {
+    const commit = { name: 'Stock Watcher', email: 'stock-watcher@example.org' };
+    expect(() => buildGitSyncScript({ mountName: 'x$(id)', sshUrl: 'git@git.example.org:example-owner/x.git', host: 'git.example.org' }, 'QkFTRTY0', commit)).toThrow(/not allowed/);
+    expect(() => buildPublicGitSyncScript({ mountName: '../x', httpsUrl: 'https://git.example.org/example-owner/x.git' }, commit)).toThrow(/not allowed/);
+    expect(buildGitSyncScript({ mountName: 'defs.v2', sshUrl: 'git@git.example.org:example-owner/defs.v2.git', host: 'git.example.org' }, 'QkFTRTY0', commit)).toContain('defs.v2');
+  });
+});

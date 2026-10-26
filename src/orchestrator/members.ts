@@ -320,23 +320,28 @@ export async function denyPairing(
   const script = `node -e '
     const fs = require("fs");
     const f = ${JSON.stringify(pairingStorePath(opts.kind ?? 'telegram'))};
-    if (!fs.existsSync(f)) {
-      // 2026.9: the request is a row in the state database.
-      if (!fs.existsSync(${JSON.stringify(PAIRING_DB)})) { console.log("0"); process.exit(0); }
+    let n = 0;
+    // 2026.9: the request is a row in the state database. Both stores, as the
+    // list reads both: a 2026.7 file left on a 2026.9 volume (HB-0033).
+    if (fs.existsSync(${JSON.stringify(PAIRING_DB)})) {
       ${PAIRING_DB_JS.open(false)}
-      const r = db.prepare("delete from channel_pairing_requests where channel_key = ? and code = ?").run(${JSON.stringify(opts.kind ?? 'telegram')}, ${JSON.stringify(opts.code)});
-      console.log(String(r.changes)); process.exit(0);
+      try { n += db.prepare("delete from channel_pairing_requests where channel_key = ? and code = ?").run(${JSON.stringify(opts.kind ?? 'telegram')}, ${JSON.stringify(opts.code)}).changes; }
+      catch (e) { if (!fs.existsSync(f)) throw e; }
     }
-    const d = JSON.parse(fs.readFileSync(f, "utf8"));
-    const before = Array.isArray(d.requests) ? d.requests.length : 0;
-    d.requests = (Array.isArray(d.requests) ? d.requests : [])
-      .filter((r) => String(r && r.code) !== ${JSON.stringify(opts.code)});
-    if (d.requests.length !== before) {
-      const tmp = f + ".tmp";
-      fs.writeFileSync(tmp, JSON.stringify(d, null, 2), { mode: 0o600 }); // credentials stay 0600
-      fs.renameSync(tmp, f);                                             // atomic swap
+    let d = null;
+    try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch (e) { if (fs.existsSync(f) && !fs.existsSync(${JSON.stringify(PAIRING_DB)})) throw e; }
+    if (d) {
+      const before = Array.isArray(d.requests) ? d.requests.length : 0;
+      d.requests = (Array.isArray(d.requests) ? d.requests : [])
+        .filter((r) => String(r && r.code) !== ${JSON.stringify(opts.code)});
+      if (d.requests.length !== before) {
+        const tmp = f + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(d, null, 2), { mode: 0o600 }); // credentials stay 0600
+        fs.renameSync(tmp, f);                                             // atomic swap
+      }
+      n += before - d.requests.length;
     }
-    console.log(String(before - d.requests.length));'`;
+    console.log(String(n));'`;
   const res = await provider.execShellOnVolume(opts.runtimeRef, script);
   if (res.code !== 0) {
     throw new AdmitError('Turning that request away failed — try again in a moment.');
@@ -383,12 +388,19 @@ export async function grantChannelAccess(
       if (!a.some((x) => String(x) === t.id)) a.push(t.id);
       return a;
     };
-    if (fs.existsSync(${JSON.stringify(PAIRING_DB)}) && !fs.existsSync(t.cred)) {
-      // 2026.9: approvals are rows in the state database, not a file.
-      ${PAIRING_DB_JS.open(false)}
-      const next = db.prepare("select coalesce(max(sort_order), -1) + 1 as n from channel_pairing_allow_entries where channel_key = ? and lower(account_id) = lower(?)").get(t.channel, t.acct).n;
-      db.prepare("insert or ignore into channel_pairing_allow_entries (channel_key, account_id, entry, sort_order, updated_at) values (?, ?, ?, ?, ?)").run(t.channel, t.acct, t.id, next, Date.now());
-    } else {
+    // 2026.9: approvals are rows in the state database, not a file. A file
+    // there too (from 2026.7, or one a 2026.9 migration left in place) gets the
+    // id as well: written to the file alone, a 2026.9 gateway never saw it (HB-0033).
+    let inDb = false;
+    if (fs.existsSync(${JSON.stringify(PAIRING_DB)})) {
+      try {
+        ${PAIRING_DB_JS.open(false)}
+        const next = db.prepare("select coalesce(max(sort_order), -1) + 1 as n from channel_pairing_allow_entries where channel_key = ? and lower(account_id) = lower(?)").get(t.channel, t.acct).n;
+        db.prepare("insert or ignore into channel_pairing_allow_entries (channel_key, account_id, entry, sort_order, updated_at) values (?, ?, ?, ?, ?)").run(t.channel, t.acct, t.id, next, Date.now());
+        inDb = true;
+      } catch (e) { if (!fs.existsSync(t.cred)) throw e; }
+    }
+    if (fs.existsSync(t.cred) || !inDb) {
       const d = fs.existsSync(t.cred) ? JSON.parse(fs.readFileSync(t.cred, "utf8")) : {};
       d.allowFrom = add(d.allowFrom);
       writeAtomic(t.cred, d);
@@ -454,7 +466,7 @@ export async function grantRoomAccess(
     const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
     let changed = false;
     ${ROOM_USERS_ADD_JS}
-    if (changed) { fs.writeFileSync(cfgPath + ".tmp", JSON.stringify(cfg, null, 2)); fs.renameSync(cfgPath + ".tmp", cfgPath); }
+    if (changed) { fs.writeFileSync(cfgPath + ".tmp", JSON.stringify(cfg, null, 2), { mode: 0o600 }); fs.renameSync(cfgPath + ".tmp", cfgPath); }
     console.log(changed ? "added" : "unchanged");'`;
   const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script).catch(() => ({ code: 1, stdout: '', stderr: '' }));
   if (res.code !== 0) {
@@ -553,7 +565,7 @@ export async function setDmPolicy(
     // nobody in it admits nobody, including the owner.
     if (t.admit.length) acc.allowFrom = [...have, ...missing];
     const tmp = cfgPath + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 }); // the config holds bot tokens: stays 0600
     fs.renameSync(tmp, cfgPath);   // atomic: the gateway re-reads per message
     console.log("set");'`;
   const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
@@ -728,7 +740,7 @@ export function keepOnlyTelegramAccountScript(accountId: string | undefined): st
     const keep = ${JSON.stringify(accountId ?? null)};
     for (const k of Object.keys(tg.accounts)) if (k !== keep) delete tg.accounts[k];
     if (!Object.keys(tg.accounts).length) tg.enabled = false;
-    fs.writeFileSync(f + ".tmp", JSON.stringify(cfg, null, 2)); fs.renameSync(f + ".tmp", f);'`;
+    fs.writeFileSync(f + ".tmp", JSON.stringify(cfg, null, 2), { mode: 0o600 }); fs.renameSync(f + ".tmp", f);'`;
 }
 
 /**
@@ -750,7 +762,7 @@ export const DROP_CHAT_ACCOUNTS_SCRIPT = `node -e '
       if (c.enabled !== false) { c.enabled = false; n++; }
       if (c.accounts && Object.keys(c.accounts).length) { c.accounts = {}; n++; }
     }
-    if (n) { fs.writeFileSync(f + ".tmp", JSON.stringify(cfg, null, 2)); fs.renameSync(f + ".tmp", f); }'`;
+    if (n) { fs.writeFileSync(f + ".tmp", JSON.stringify(cfg, null, 2), { mode: 0o600 }); fs.renameSync(f + ".tmp", f); }'`;
 
 /**
  * The on-volume scrub of chat ids from an agent's allowlists: the approval
@@ -765,7 +777,7 @@ export function allowlistScrubScript(targets: Array<{ channel: string; acct: str
     const fs = require("fs");
     const writeAtomic = (f, obj) => {
       const tmp = f + ".tmp";
-      fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
+      fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 }); // the allowlist and config stay 0600
       fs.renameSync(tmp, f);   // atomic: the gateway re-reads per message
     };
     const targets = ${JSON.stringify(targets)};

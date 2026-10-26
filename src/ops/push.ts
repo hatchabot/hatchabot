@@ -21,6 +21,8 @@ export interface OpsPushDeps {
   appUrl?(): string | undefined;
   /** A DM through the manager's Discord bot to the owner, when it has one and the owner is linked there. */
   sendDiscord?(ownerId: string, text: string): Promise<boolean>;
+  /** Whether that Discord DM has anywhere to go (the manager has a Discord bot and the owner is linked there). */
+  discordLinked?(ownerId: string): boolean;
   /** How many pushes an owner may get per hour (a flood of knocks must not become a flood of pushes). */
   perHour?: number;
   fetchImpl?: typeof fetch;
@@ -99,7 +101,9 @@ export function createOpsPush(deps: OpsPushDeps): OpsPush {
     async waiting(ownerId, headline, detail) {
       const chatId = deps.chatId(ownerId);
       const token = chatId ? await deps.botToken(ownerId).catch(() => undefined) : undefined;
-      if (!token && !deps.sendDiscord) return false; // nowhere to push to
+      // Nowhere to push to: not counted, so an owner with no manager bot does
+      // not have their hour spent on pushes that could never be sent.
+      if (!token && (!deps.sendDiscord || deps.discordLinked?.(ownerId) === false)) return false;
       const slot = budget.take(ownerId);
       if (slot === 'drop') { deps.log?.('ops.push', { ok: false, error: 'hourly push limit; more is waiting in the app' }); return false; }
       const where = deps.appUrl?.();

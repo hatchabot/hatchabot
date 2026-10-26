@@ -76,10 +76,21 @@ umask 077
 # taken over. A run that finds the set locked stops before it writes anything.
 LOCK="$DEST/.backup-lock"
 holder=""
+# Whether pid $1 is running. Another user's run (two installs sharing a base)
+# answers kill -0 with "not permitted", and was taken for dead: its lock was
+# taken over mid-run (HB-0071). Only "no such process" is gone, as the app's
+# own check has it (src/orchestrator/backups.ts, lockHeld).
+pid_alive() {
+  local e
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  e="$(LC_ALL=C kill -0 "$1" 2>&1)" && return 0
+  case "$e" in *"No such process"*) return 1 ;; esac
+  return 0
+}
 lock_busy() {
   holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
   # No pid yet: a run that has just made the lock — unless the lock is old.
-  { [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; } || { [ -z "$holder" ] && [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; }
+  { [ -n "$holder" ] && pid_alive "$holder"; } || { [ -z "$holder" ] && [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; }
 }
 locked_out() {
   echo "✗ Another backup run${holder:+ (pid $holder)} is writing $DEST — this one stops; that run's record will say how it went." >&2

@@ -207,9 +207,12 @@ Any other install can follow a channel on its own — a hosted tenant on
 ./scripts/follow-channel.sh --uninstall
 ```
 
-Each tick follows the channel chosen last (`~/.config/hatchabot/channel`:
-`hatchabot upgrade beta` switches it, and `--install` writes it), so the
-channel in the unit is only the default. It upgrades through `upgrade.sh`
+Each tick follows the channel chosen last for that install (its
+`data/channel`: `hatchabot upgrade beta` switches it, and `--install` writes
+it), so the channel in the unit is only the default. Before v2.169.0 it was
+one `~/.config/hatchabot/channel` for every install of the user's, still read
+by an install with no channel of its own, and still written for a pin to a
+release that old (the only file it reads). It upgrades through `upgrade.sh`
 (forward only; the previous release restored if the new one does not start),
 handing it the release it resolved, so a release set aside is the one tried. A release that failed is not retried until the
 channel names a newer one. One whose install keeps failing (no network, a
@@ -221,9 +224,10 @@ channel moves within about ten minutes.
 So the rhythm is: tag and deploy to your own machines as often as you like;
 promote to `beta` when a release is worth testers' time; promote to `stable`
 once it has run for a while without surprises. Rolling `stable` back is the
-same command with an older tag (it asks first). CI checks that every tag
-`channels.json` names exists. The installer remembers each machine's channel
-(`~/.config/hatchabot/channel`), so re-running it upgrades along that channel.
+same command with an older tag (it asks first; with no terminal,
+`HATCHABOT_PROMOTE_BACK=1` is the yes). CI checks that every tag
+`channels.json` names exists. The installer remembers each install's channel
+(its `data/channel`), so re-running it upgrades along that channel.
 
 The installer script is on that schedule too: hatchabot.com's `install.sh`
 fetches it from the release `stable` names, not from `main`. A change to
@@ -445,6 +449,11 @@ names. The text inside a file git treats as binary (a name in a PDF's or a
 photo's metadata, a SQLite file) is read, as UTF-8 and UTF-16, since
 2026-10-10, and by the GitHub-side `privacy` job too since v2.162.0: each
 run of text is split into words like a line and looked up the same way.
+From v2.169.0 both read each line decoded as well: percent-encoding (`%20`,
+`+`), HTML character references (`&#39;`, `&amp;`) and base64 runs of 8
+characters or more that decode to text, and a hit found that way says so
+(`[agent name, base64]`). Other encodings, and one inside another, are not
+covered. A typographic apostrophe (O’Neil) counts as a plain one.
 `--public` always prints how many accepted historical commits it left
 out (below). The clone's own git identity (`user.name`, `user.email`) and
 the identities in `scripts/privacy-identity.txt` (the maintainer's author

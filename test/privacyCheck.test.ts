@@ -414,6 +414,42 @@ describe('--text (release notes)', () => {
   });
 });
 
+describe('a value written another way is still found (HB-0070)', () => {
+  const b64 = (s: string) => Buffer.from(s).toString('base64');
+  const textOf = (body: string) => { const f = join(dir, 'notes.md'); writeFileSync(f, `### Fixed\n${body}\n`); return run(['--text', f]); };
+
+  it('a name with a typographic apostrophe, where the install has a plain one (and the other way round)', () => {
+    const d = new Database(db);
+    d.prepare('insert into memberships values (?, ?)').run('123456789013', "Ilse O'Rourke");
+    d.prepare('insert into memberships values (?, ?)').run('123456789014', 'Bram D\u2019Souza');
+    d.close();
+    for (const body of ['Thanks to Ilse O\u2019Rourke.', 'Thanks to Ilse O\u02bcRourke.', "Thanks to Bram D'Souza."]) {
+      const r = textOf(body);
+      expect(r.status, body + r.stdout + r.stderr).toBe(1);
+      expect(r.stdout).toMatch(/\[person name\] '(Il|Br)…\(1[23]\)' .*notes\.md:2/);
+      expect(r.stdout + r.stderr).not.toMatch(/Rourke|Souza/);
+    }
+  });
+
+  it('percent-encoded, HTML-encoded and base64: found, masked, and marked how', () => {
+    for (const [body, how] of [
+      ['https://example.org/?a=Mapleford%20Helper', 'percent-encoded'],
+      ['<b>Mapleford&#x20;Helper</b>', 'HTML-encoded'],
+      [`blob ${b64('agent: Mapleford Helper')}`, 'base64'],
+      [`key ${b64('made-up-secret-value-0001')}`, 'base64'],
+    ] as const) {
+      const r = textOf(body);
+      expect(r.status, body + r.stdout + r.stderr).toBe(1);
+      expect(r.stdout, body).toContain(`, ${how}] '`);
+      expect(r.stdout, body).toContain('notes.md:2');
+      expect(r.stdout + r.stderr).not.toContain('Mapleford');
+    }
+    const clean = textOf(`https://example.org/?a=Budget%20Tracker ${b64('Budget Tracker')} Budget&#32;Tracker`);
+    expect(clean.status, clean.stdout + clean.stderr).toBe(0);
+    expect(clean.stdout).toContain('encodings other than percent, HTML and base64');
+  });
+});
+
 describe('--export-values (the publish kit\'s provider, scripts/private-values)', () => {
   const lines = (out: string) => out.split('\n').filter(Boolean).map((l) => JSON.parse(l) as { cat: string; match: string; value: string });
 

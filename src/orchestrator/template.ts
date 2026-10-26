@@ -6,7 +6,7 @@ import type { Agent, TemplateParam } from '../domain/types.js';
 import type { Store } from '../store/store.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import { CORE_FILES, CoreFileTooBigError, MAX_FILE_BYTES, readCoreFile, SnapshotError, workspacePath } from './snapshots.js';
-import { DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, PEERS_HEADING, removeSection } from '../openclaw/workspace.js';
+import { DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, PEERS_HEADING, removeSection, SCHEDULED_RESULTS_HEADING } from '../openclaw/workspace.js';
 import { scanPersonalData, type PersonalScan } from '../domain/personalData.js';
 
 /**
@@ -198,7 +198,7 @@ export async function exportTemplate(
   deps: TemplateDeps,
   agentId: string,
   opts: { includeMemory?: boolean } = {},
-): Promise<{ filename: string; data: Buffer; personal: PersonalScan }> {
+): Promise<{ filename: string; data: Buffer; personal: PersonalScan; edited: string[] }> {
   const { store, provider } = deps;
   const agent = store.getAgent(agentId);
   if (!agent?.runtimeRef) throw new TransferError('This agent has no runtime to export yet.');
@@ -220,11 +220,19 @@ export async function exportTemplate(
   // never replaced the author's (#164).
   const layer = agent.parameters?.length ? agent.paramFiles : undefined;
   const files: Record<string, string> = {};
+  // The files whose live text is not what the layer renders: changed outside
+  // the Files editor (by the agent itself, in its console) after the values
+  // were applied. The copy carries the layer without those changes, so the
+  // sharer is told (HB-0117); the layer stays the source, or the author's
+  // answers would travel in place of the fields again (#164).
+  const edited: string[] = [];
   for (const name of wanted) {
     const raw = name === 'SOUL.md' ? layer?.soul : name === 'AGENTS.md' ? layer?.agents : undefined;
     let text: string;
     if (typeof raw === 'string') {
       text = raw;
+      const live = await readCoreFile(provider, agent.runtimeRef, agent.slug, name).catch(() => undefined);
+      if (live !== undefined && comparable(live) !== comparable(applyParamValues(raw, agent.paramValues ?? {}))) edited.push(name);
     } else {
       try {
         // A file that is not there exports empty; one that is there but could
@@ -312,7 +320,18 @@ export async function exportTemplate(
     filename: `${agent.slug}.template.hatchabot`,
     data: gzipSync(Buffer.from(JSON.stringify(manifest))),
     personal,
+    edited,
   };
+}
+
+/**
+ * A core file as the agent's own text: without the sections Hatchabot writes
+ * for this machine (they differ from the layer's by design), trailing spaces
+ * or runs of blank lines. Two files the same here differ in nothing anyone wrote.
+ */
+function comparable(text: string): string {
+  return removeSection(stripManagedSections(text), SCHEDULED_RESULTS_HEADING)
+    .split('\n').map((l) => l.trimEnd()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 /** A clone's memory budget: what one exec's output can carry with room to spare. */

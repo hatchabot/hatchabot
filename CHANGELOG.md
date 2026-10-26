@@ -2,6 +2,77 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.169.0] — 2026-10-26
+
+### Security
+- **Runners:** a `tcp://` runner was spoken to in clear, the agent's bot token included, to a daemon that checks nobody. It is now TLS only (`--tlsverify`), and adding one without this machine's client certificate (`ca.pem`, `cert.pem`, `key.pem` in `DOCKER_CERT_PATH` or `~/.docker`) is refused. A `tcp://` address with no port now means 2376. **A runner added over plain `tcp://` stops answering after this upgrade;** see docs/runner-setup.md.
+- **First run on a Mac:** on Docker Desktop an agent reaches Hatchabot from the machine's own loopback, so before any account existed it could create the owner account without the setup code. Docker Desktop is now treated like rootless Docker: the first account needs the setup code even at localhost, and the installer's links carry it.
+- **Management agent's door:** a door that fell back to 127.0.0.1 on Linux let any local process past its peer check. The loopback allowance now applies only on Docker Desktop; elsewhere only a signed doorman gets in.
+- **Installer:** installing Docker or Node 22 ran whatever get.docker.com or NodeSource's setup script served that day, as root, and the NodeSource one under `sudo -E` with all of your environment. Docker's install script is now pinned to one commit and runs only if its checksum matches. Node comes from NodeSource's apt repo, signed by a pinned key, with no script.
+- **Telegram pool:** a pool bot leased to a new agent within a day could pass it messages sent to the bot's previous agent. The lease now clears the bot's waiting messages before the new agent starts.
+- **Apps:** if an app's tests printed a secret setting (an API key or password), that value was stored in plain text in the "tests failed" error, the event log and traces. Secret values are now masked.
+- **Members:** adding or removing members, and two restore clean-ups, rewrote the allowlist and `openclaw.json` (which holds bot tokens) as readable by other users in the container. They stay 0600.
+- **Import:**
+  - A crafted file's repo folder name reached a shell inside the agent when the repo synced. Such a repo is now left out of the import.
+  - Folders brought in from OpenClaw skipped the share re-check at each build, and their place inside the agent was never checked. Both are checked now, and a folder shared at its own path cannot land on the agent's home or system folders.
+- **Invitation links:** looking up an invitation or reset code was not throttled. Misses now count (10 per 15 minutes per address), in a bucket of their own, so they never lock anyone out of the password form.
+- **Web chat guests:** a guest's console path containing `;` or a literal `%` was passed to the gateway, which could read it differently from the check. Such paths are now refused.
+- **Memory search:**
+  - An archived or deleted agent's key kept working at the memory search door for up to five minutes. It now stops at once.
+  - The door's `/health` answered anyone who could reach its port. It now needs a key.
+
+### Fixed
+- **AGENTS.md:** a save made just after a memory cap change, the machine's agent memory default, About you, Push definition or removing a repo could be written over by the background rewrite of the file's managed sections. That rewrite now holds the agent, so a save in those seconds is refused with "Another operation is already running on this agent".
+- **Peers:** a peer's name went into the agent's "## Peers" section as raw markdown, so a name with a line break and a heading cut the section short. Each name is now written on one line, in a code span.
+- **Sharing:** a copy of an agent with Setup fields left out, without a word, changes the agent or its console made to its AGENTS.md or SOUL.md. Share a copy and Send to someone now name those files and say how to include the change.
+- **Apps:** when the re-read after Update, Roll back, Stop app or Try again failed, the App row kept a greyed-out "Updating…" button. It now says it could not read the app, with Read again.
+- **Connections:** the attach picker could keep the previous agent's accounts when the list failed to load. It is now emptied first, and Attach stays off.
+- **Phones:** the keyboard covered the box being typed in, in panels, dialogs, the web chat and the console. They now fit the part of the screen above the keyboard. Small controls are at least 24 px on touch screens.
+- **Usage:**
+  - An AI source missed a second rate-limit refusal in the same millisecond, and could lose a call whose log line arrived in pieces. Each refusal is now kept, and each log stream is read on its own.
+  - A `[model-fetch] response … status=429` marker quoted inside another log line (a message, a tool's output) counted as a refused call. Only OpenClaw's own call lines count now.
+  - An API-key agent's price line said "API key" for a model id with a provider prefix or a date. It now finds the model's price.
+- **Classes:** a class could be saved with a model its own AI source doesn't offer (or any model on a local source), and failed only when given to an agent. It is now refused when saved, with the reason.
+- **AI sources:**
+  - Switching agents to a new default model on a Claude plan moved agents whose runtime was too old for it, and every message then failed with "request format rejected, HTTP 400". Those agents now keep their model, and the message names them.
+  - A Claude source's model menu came from whichever agent was found first, so an agent on an older image pruned it for everyone. The agent on the newest runtime is asked now.
+  - An agent's AI source could be changed while a rebuild or a move was running on it, so it could finish half on the old source and half on the new. The switch is now refused, or the agent is skipped with the reason, until that is done.
+- **Sleep:** with a short sleep time (10 minutes or less), an agent waiting for a required rebuild woke on its old build and fell asleep again before the machine's own rebuild reached it, every time. It now stays up until that rebuild has run (unless rebuilds are set to manual).
+- **Usage:** the usage periods API priced each window at the agent's lifetime rate, so a week mostly on a cheap model was priced at the dear one's share. An agent whose window was all API now takes the window's own price, as the page does.
+- **Budgets:** a pause v2.165.0 recorded on an agent already stopped by hand was still read as the budget's own after the upgrade, so lifting it started the agent. Those pauses are now marked from their own event.
+- **Resources:** after a clear or a new memory cap, a rebuilt container that had already passed the old cap-hit total showed only the hits beyond it. Hits from a later container now count in full.
+- **Telegram:** some members never got an archived or removed agent's goodbye; on a large membership, Telegram's rate limit dropped the rest. A goodbye refused for the rate limit is now sent again after the wait Telegram asks for, and the ones that still fail are counted in the log.
+- **Pushes:** an owner whose manager had no Telegram and who was not linked on Discord still had pushes counted against their hourly limit. Those pushes are now skipped and not counted.
+- **Runners, AI sources, memory service:** clicking Add twice quickly made two runners or two AI sources, or a guest key that had already been replaced. The second click now gets "already being added".
+- **Family accounts:** switching from a shared password wrote the new sign-in mode before creating your account, so a crash between the two left an install with nobody to sign in as. The account is now made first; if the `.env` cannot be written, the account is removed again.
+- **Discord and Slack:** removing one told everyone "no longer answers here" even when the removal was then refused (busy, or the agent could not be stopped). The goodbye now goes out only when the removal goes ahead.
+- **Data sources:** sharing a folder at its own path said "already shared" when another shared folder's path differed only in its `/` and `-` (`/srv/recipes/family` and `/srv/recipes-family`). Both are now shared.
+- **API:** sending a bot token to an agent that was not waiting for one answered 202 and did nothing; it now answers 409. An app's `values` that are not an object are refused with 400.
+- **Bot pool:** a member's pool list named other accounts' agents that hold shared house bots. Those bots now show as in use, without the name.
+- **Settings:** any member could read the machine-wide memory search counts and the rebuild queue and settings. Like their changes, these are now the machine owner's only.
+- **Hosts:** a member's machine list carried the machine record's settings. It now leaves out the settings of machines that are not theirs.
+- **Connections:** a WebSocket request to any address other than a console stayed open on the private address until the browser gave up. It is now closed at once.
+- **Import:** your first message to an imported agent's bot got a pairing code you had to approve by hand. The owner's seat now takes your Telegram when this machine knows it; otherwise your first message is claimed, as with a new agent, and never the previous owner's.
+- **Archive:** an archive of a stopped agent whose copy was downloaded, cut off by a restart after its bot was left to the copy, was undone and left the agent stopped on a bot it no longer had. It is now finished.
+- **Pairing:** on an agent upgraded from OpenClaw 2026.7, a pairing file the 2026.9 migration left behind hid every request in the database, and an approval went where 2026.9 does not look. Requests are now read from both stores, and deny and approve write both.
+- **Moves:** a pool bot leaving with a moved agent or a downloaded copy was released and then removed, so a new agent could lease it in between. It now goes in one step.
+- **Runners:** on a daemon that still had the image under its pre-rename name, the first build's setup step ran before the new name existed. The name is now made first.
+- **Adopt:** bringing agents in from OpenClaw rewrote your `openclaw.json` in place, so a crash or full disk could truncate it. It is now replaced whole.
+- **Transfer:** a Download, a move and a restore's safety copy carried the caches every agent rebuilds by itself. They now leave them out, as the nightly backup does, about a third less.
+- **Setup:** re-running setup kept a runtime image with no OpenClaw version label (an old or hand-built one), so new agents ran an unknown OpenClaw. It now fetches the release's default image. The first-install message no longer says the image is being built when it is downloaded.
+- **Upgrade:** a bundle upgrade cut off part-way (a power cut, a kill) left a half-swapped install, and every later upgrade said "Already on vX.Y.Z". The next upgrade or channel timer tick now puts the previous release back first, then upgrades. A folder of the same name is no longer moved inside the old one. This protection starts with the upgrade after the one to this release.
+- **Installer:** a network blip while downloading the bundle silently became a native install, with git, Node and a compiler. It now stops with nothing installed; only a release with no bundle falls back to native.
+- **Backups:** a backup run by another user sharing the same backup folder was taken for a dead run, and its lock was taken over mid-run. It is now left alone.
+- **Channels:** `hatchabot upgrade beta` in one install changed the channel every other install of the same user followed. Each install now keeps its own channel in `data/channel`.
+- **Privacy check:** a private name written with a typographic apostrophe, or percent-encoded, HTML-encoded or base64-encoded, was not found. Both the pre-push check and CI's now find it, and say which encoding it was in.
+
+### Changed
+- **Sign-in:** opened over plain http from another device, the sign-in screen now says that what you sign in with and the session cross your network unencrypted, and points to the https address. Signing in still works.
+- **Peers:** names in the "## Peers" section are shown as code instead of bold. Agents get the new form at their next sync.
+- **Public access:** when visitors arrive without X-Forwarded-For, which Tailscale Funnel sets, the log now says so once (`public.no_client_address`). Without it, every visitor shares one sign-in lockout.
+- **Performance:** fleet usage and the pending join requests read agents six at a time, and pending requests come from the half-minute cache. The Hatchabot agent's lockdown check reads its config file instead of starting the OpenClaw CLI twice every ten minutes. The home screen's per-agent `docker inspect` is kept for 20 seconds and shared between tabs.
+- **Promote:** moving a channel back with no terminal stopped silently, or waited forever. It now says why it stopped; `HATCHABOT_PROMOTE_BACK=1` gives the yes.
+
 ## [2.168.0] — 2026-10-26
 
 ### Security

@@ -26,6 +26,7 @@ import type { SecretStore } from '../secrets/secretStore.js';
 import type { ContainerStats, ExecResult, RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
 import { ProviderError, parseByteSize } from '../providers/provider.js';
 import { pingRunner, resolveProvider } from '../providers/resolveProvider.js';
+import { tcpTlsProblem } from '../providers/runnerEndpoint.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
 import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
@@ -34,7 +35,7 @@ import { ensureOpsServer, loopbackDoorman } from '../ops/opsServer.js';
 import { enableServe, tailnetInfo, writeEnvVar, writePublicUrl } from '../ops/tailnet.js';
 import { randomBytes } from 'node:crypto';
 import { hashPassword, newRecoveryCode, normalizeRecoveryCode, passwordProblem, usernameProblem } from './accountsAuth.js';
-import { noteFailure, throttled } from './auth.js';
+import { loopbackIsRemote, noteFailure, throttled } from './auth.js';
 import { cookieFromHeader, requestIsHttps, SESSION_COOKIE_NAME, type RequestLike } from './sessionCookie.js';
 import { foreignRequest } from './requestOrigin.js';
 import { isControlUiDocument, rebaseControlUi } from './controlUiRebase.js';
@@ -58,6 +59,7 @@ import {
   buildRuntimeSpec,
   type ProvisionDeps,
   sharePathProblem,
+  hostPathTargetProblem,
   rebuildAgent,
   renderRefusedRecently,
   renderRefusalOf,
@@ -125,7 +127,7 @@ import { OPS_DIGEST_MESSAGE, OPS_SUGGEST_MESSAGE } from '../ops/opsAgent.js';
 import { buildScorecard } from '../orchestrator/modelScorecard.js';
 import { assessModelChange, backfillModelLedger, evaluateModelChanges, fileGuardProposals, recordChanges, rightSizeSavings, snapshotModels, EARLY_TURNS as EARLY_TURNS_N, VERDICT_AFTER_DAYS as VERDICT_DAYS, type ChangeMeta, type ModelFigures } from '../orchestrator/modelLedger.js';
 import type { PendingConfirm } from '../mgmt/pendingStore.js';
-import { modelOption, modelOptionsFor, SUBSCRIPTION_MIN_OPENCLAW, subscriptionModelProblem } from '../orchestrator/modelOptions.js';
+import { modelOption, modelOptionsFor, openclawAtLeast, SUBSCRIPTION_MIN_OPENCLAW, subscriptionModelProblem } from '../orchestrator/modelOptions.js';
 import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
 import { createOpsPush, unannounced } from '../ops/push.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
@@ -429,6 +431,17 @@ const CreateAgent = z.object({
 });
 
 /**
+ * `fn` over every item, six at a time, results in order: a docker exec per
+ * running agent, all at once, measurably slows the box (the pairing sweep
+ * learned this at 26 agents; HB-0058).
+ */
+async function sixAtATime<T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += 6) out.push(...(await Promise.all(items.slice(i, i + 6).map(fn))));
+  return out;
+}
+
+/**
  * A per-agent model override is only valid for a cloud profile and must be one
  * the profile actually offers — its default plus its switchable menu — so a
  * typo can't provision green and fail on first use. Returns an error string,
@@ -639,6 +652,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   /** Whom a recycled pool bot just wrote to; never the owner's first knock. */
   const priorChatIdsOf = (username: string): string[] =>
     (deps.channel.pool as { priorChatIds?: (u: string) => string[] }).priorChatIds?.(username) ?? [];
+  /** An imported agent with nobody in the owner's seat on its bot: claim the importer's first message (HB-0076). */
+  const watchImportedOwner = (agent: Agent, o: { accountId: string; excludeIds: string[] }): void => {
+    if (!agent.runtimeRef) return;
+    void claimFirstContact(
+      { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+      { agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: o.accountId, forUserId: agent.ownerId, timeoutMs: 30 * 60_000, excludeIds: o.excludeIds },
+    ).catch((err) => app.log.error({ err, agentId: agent.id }, 'owner claim after import failed'));
+  };
 
   /**
    * Point a Slack/Discord bot's name at the agent's (Telegram has its own
@@ -1513,25 +1534,41 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const problem = usernameProblem(username) ?? passwordProblem(password);
     if (problem) return reply.code(400).send({ error: problem });
 
-    const envPath = join(process.cwd(), '.env');
-    // The .env first: if it cannot be written, nothing has changed yet.
-    const wrote = await writeEnvVar(envPath, 'HATCHABOT_AUTH', 'accounts', (cur) => cur === 'password',
-      'Written by Hatchabot: one account per person (Settings → You).')
-      .catch((err: unknown) => ({ ok: false, error: String(err) }));
-    if (!wrote.ok) return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
-
     const { hash, salt } = await hashPassword(password);
-    const id = `acct-${randomUUID()}`;
-    store.insertLocalAccount({
-      id, username, pwHash: hash, pwSalt: salt, hostOwner: true, disabled: false,
-      createdAt: new Date().toISOString(),
-    });
-    const adopted = store.adoptLocalOwnerData(id);
-    store.recordAccount(id, username.includes('@') ? username : undefined);
     // The host owner is the one person nobody can send a reset link to: a
     // recovery code, shown once, as the first-run bootstrap gives one.
     const recoveryCode = newRecoveryCode();
-    { const rc = await hashPassword(normalizeRecoveryCode(recoveryCode)); store.setLocalAccountRecovery(id, rc.hash, rc.salt); }
+    const rc = await hashPassword(normalizeRecoveryCode(recoveryCode));
+    // The account first, then the .env: written first, a crash before the
+    // account left an install in accounts mode with nobody to sign in as
+    // (HB-0063). Checked again in one transaction: another request may have
+    // made one while this one hashed.
+    const id = `acct-${randomUUID()}`;
+    const made = store.transact((): boolean => {
+      if (store.countLocalAccounts() > 0) return false;
+      store.insertLocalAccount({
+        id, username, pwHash: hash, pwSalt: salt, hostOwner: true, disabled: false,
+        createdAt: new Date().toISOString(),
+      });
+      store.recordAccount(id, username.includes('@') ? username : undefined);
+      store.setLocalAccountRecovery(id, rc.hash, rc.salt);
+      return true;
+    });
+    if (!made) return reply.code(409).send({ error: 'An account already exists — restart to finish switching.' });
+
+    const envPath = join(process.cwd(), '.env');
+    const wrote = await writeEnvVar(envPath, 'HATCHABOT_AUTH', 'accounts', (cur) => cur === 'password',
+      'Written by Hatchabot: one account per person (Settings → You).')
+      .catch((err: unknown) => ({ ok: false, error: String(err) }));
+    if (!wrote.ok) {
+      // Nothing has changed then: the account goes again.
+      store.deleteLocalAccount(id);
+      return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
+    }
+    // Adopted last: in password mode the install's data must stay where the
+    // shared password sees it until the switch is certain. A crash before
+    // this, the first sign-in adopts it (index.ts).
+    const adopted = store.adoptLocalOwnerData(id);
     trace()('auth.family_accounts_on', { adopted });
 
     // Only a supervised process may exit to restart: under `npm run dev`
@@ -1763,9 +1800,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Google sign-in and local accounts can run together: the login screen
     // needs to know whether to offer both.
     localAccounts: deps.authMode === 'accounts' || (deps.authMode === 'identity' && process.env.HATCHABOT_LOCAL_ACCOUNTS === '1'),
-    // Under a rootless daemon nobody is "on this machine" (agents share its
-    // loopback): the first account needs the setup code even at localhost.
-    setupCodeRequired: process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK === '1',
+    // Under a rootless daemon or Docker Desktop nobody is "on this machine"
+    // (agents share its loopback): the first account needs the setup code
+    // even at localhost.
+    setupCodeRequired: loopbackIsRemote(),
     // Surfaced so the UI can show "N of M agents" instead of only revealing the
     // ceiling as a 429 at create time. 0 = no limit. Archived agents don't count.
     maxAgentsPerAccount: Number(process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT ?? 0),
@@ -1974,6 +2012,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     return undefined;
   };
+  /**
+   * Bring a RUNNING agent's managed AGENTS.md sections up to date (its memory
+   * budget, data sources, operator, peers), held busy like every other change
+   * to its files: the sync reads AGENTS.md, works out its sections, then
+   * writes the whole file, and a save made meanwhile was written over without
+   * a snapshot (audit #096, HB-0230). A save now waits for it ("another
+   * operation"). An agent already busy is skipped, not queued: its next start
+   * or rebuild writes the sections. Best-effort; never rejects.
+   */
+  const syncDocsHeld = (a: Agent, provider = providerFor(a.hostId)): Promise<void> =>
+    whileBusy(a.id, () => syncDataSourceDocs({ store, secrets, provider, channel: deps.channel, log: trace(a.id) }, a.id, a.runtimeRef!, trace(a.id)))
+      .catch(() => { /* busy, or the sync failed: the next rebuild writes them */ });
   const setMemoryCap = async (req: FastifyRequest, agent: Agent, cap: string | null): Promise<{ error?: string; status?: number; applied?: string }> => {
     let own: string | null = null;
     if (cap !== null) {
@@ -1986,10 +2036,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     }
     const effective = effectiveMemoryCap({ memoryCap: own ?? undefined }, agent.classId ? store.getAgentClass(agent.classId) : undefined);
-    let baseline: number | undefined;
+    let baseline: number | undefined, baselineStartedAt: string | undefined;
     const provider = providerFor(agent.hostId);
     if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) {
-      try { baseline = (await provider.info(agent.runtimeRef)).memCapHits; } catch { /* no reading: no baseline */ }
+      try { const info = await provider.info(agent.runtimeRef); baseline = info.memCapHits; baselineStartedAt = info.startedAt; } catch { /* no reading: no baseline */ }
       if (provider.updateMemory) {
         // The swap allowance rides along (a lower cap can shrink it): a call without it would take it away.
         const limits = agentMemoryLimits(store, { ...agent, memoryCap: own ?? undefined });
@@ -1997,12 +2047,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         catch (err) { return { status: 502, error: err instanceof ProviderError ? err.userMessage : "Couldn't change the container's memory cap." }; }
       }
     }
-    store.setAgentMemoryCap(agent.id, own, baseline);
+    store.setAgentMemoryCap(agent.id, own, baseline, baselineStartedAt);
     trace(agent.id)('memory.cap_set', { cap: own ?? 'default', effective, live: !!agent.runtimeRef });
-    // Tell the agent its new budget (AGENTS.md); best-effort, off the request.
-    if (agent.runtimeRef && agent.state === 'RUNNING') {
-      void syncDataSourceDocs({ store, secrets, provider, channel: deps.channel, log: trace(agent.id) }, agent.id, agent.runtimeRef, trace(agent.id)).catch(() => {});
-    }
+    // The agent hears its new budget (AGENTS.md) once the whole change is
+    // stored: PATCH /v1/agents/:id syncs at its end (HB-0230).
     return { applied: effective };
   };
 
@@ -2063,6 +2111,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const target = store.getAIProfile(switching ? cls.aiProfileId! : agent.aiProfileId);
     if (!target) return { rebuild: false, error: switching ? 'class source unavailable' : 'agent has no AI source' };
     if (switching && agent.ops && target.vendor === 'local') return { rebuild: false, error: "the Hatchabot agent can't use a local model" };
+    // Not under a rebuild or a move: it reads the source as it goes (HB-0063).
+    if (switching && isBusy(agent.id)) return { rebuild: false, error: 'busy (a rebuild, a move or a backup) — apply the class again when that is done' };
     if (switching) {
       if (target.ownerId !== agent.ownerId && !target.shared) return { rebuild: false, error: 'class source unavailable' };
       // Same layered guard as create/switch: a machine-login Max source is never
@@ -2166,12 +2216,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const prev = operatorFanout.get(ownerId) ?? Promise.resolve();
     const run = prev.then(async () => {
       for (const a of targets) {
-        try {
-          await syncDataSourceDocs(
-            { store, secrets, provider: providerFor(a.hostId), channel: deps.channel, log: trace(a.id) },
-            a.id, a.runtimeRef!, trace(a.id),
-          );
-        } catch { /* best-effort */ }
+        // Held busy per agent (HB-0230): one that became busy since is skipped.
+        await syncDocsHeld(a);
       }
     });
     operatorFanout.set(ownerId, run.catch(() => undefined));
@@ -2228,6 +2274,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (b.aiProfileId) {
       const src = store.getAIProfile(b.aiProfileId);
       if (!src || (src.ownerId !== ownerIdOf(req) && !src.shared)) return reply.code(400).send({ error: 'Unknown AI source.' });
+      // A class with its own source: its model is checked as an agent's would be,
+      // now, not when the class is first given to an agent (HB-0060).
+      const prob = modelOverrideProblem(src, b.model?.trim() || undefined);
+      if (prob) return reply.code(400).send({ error: prob });
     }
     const image = (b as { image?: string }).image?.trim() || undefined;
     if (image && !IMAGE_TAG_RE.test(image)) return reply.code(400).send({ error: 'That image tag is not valid.' });
@@ -2280,6 +2330,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // class (a rename, a model) answer "Unknown AI source" (night review).
         if (!usable && b.aiProfileId !== undefined) return reply.code(400).send({ error: 'Unknown AI source.' });
         if (!usable) aiProfileId = undefined;
+        // A model or source this edit names must go together, as on create (HB-0060).
+        const prob = usable && (b.model !== undefined || b.aiProfileId !== undefined) ? modelOverrideProblem(src!, model) : undefined;
+        if (prob) return reply.code(400).send({ error: prob });
       }
       store.upsertAgentClass({ id: cls.id, ownerId: cls.ownerId, name, model, aiProfileId, image, memoryCap, swapAllowance });
       // Propagate the (possibly changed) model/source/image to every agent in the class.
@@ -2632,8 +2685,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // screen's machine line and its alert (2026-10-05).
     const reach = new Map(await Promise.all(hosts.filter((h) => h.kind !== 'local').map(async (h) =>
       [h.id, await (async () => (await providerFor(h.id).reachable?.()) ?? true)().catch(() => undefined)] as const)));
-    return hosts.map((h) => ({
+    // A machine's settings (a runner's Docker address) are its owner's: a
+    // member is listed only this machine and their own, and gets no settings
+    // of a machine that is not theirs (HB-0059).
+    return hosts.map(({ settings, ...h }) => ({
       ...h,
+      ...(admin || h.ownerId === ownerId ? { settings } : {}),
       ...(reach.has(h.id) && reach.get(h.id) !== undefined ? { reachable: reach.get(h.id) } : {}),
       agentCount: active.filter((a) => a.hostId === h.id).length,
       // The local host's stored NAME is a label ("This machine (studio-mini)");
@@ -2903,6 +2960,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     },
   };
   (app as unknown as { embedderForProvision?: typeof embedderForProvision }).embedderForProvision = embedderForProvision;
+  // An archived or deleted agent's key leaves its door's file at once (HB-0027).
+  // A service that is off has no door running: its next start writes the file.
+  store.onEmbedKeyRetired = (hostId) => {
+    try { const svc = embedderFor(hostId ?? store.localHostId()); if (svc.enabled) svc.syncKeys(); }
+    catch (err) { trace()('embed.keys_sync_failed', { host: hostId, error: String(err).slice(0, 200) }); }
+  };
   /**
    * The fleet's engine choice: what new agents get, and moving the rest.
    * A move marks the agents; `now` rebuilds the idle running ones through the
@@ -2919,7 +2982,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       pending: all.filter(switchPendingFor).length,
     };
   };
-  app.get('/v1/embed-default', async () => embedFleetView());
+  // The machine owner's, like its PUT: the counts are the whole machine's
+  // fleet, other accounts' agents included (HB-0061).
+  app.get('/v1/embed-default', async (req, reply) => (ownsLocalHost(req) ? embedFleetView() : reply.code(403).send({ error: MACHINE_OWNER_ONLY })));
   app.put<{ Body: { default?: string } }>('/v1/embed-default', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const mode = req.body?.default;
@@ -3021,11 +3086,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * a new one's (a rebuild, a start, a wake) counting from zero, so the
    * baseline goes and the reading counts whole — subtracted, real pressure
    * read zero until the new container passed the old one's total (audit #054).
+   * A reading from a container that started after the baseline's (`startedAt`)
+   * is a new counter too, even once it has passed the old total (HB-0234).
    */
-  const capHitsSince = (a: Agent, raw: number | undefined): number | undefined => {
+  const capHitsSince = (a: Agent, raw: number | undefined, startedAt?: string): number | undefined => {
     if (raw === undefined) return undefined;
     const base = a.memoryCapBaseline ?? 0;
-    if (raw >= base) return raw - base;
+    const sameContainer = !startedAt || !a.memoryCapBaselineStartedAt || startedAt === a.memoryCapBaselineStartedAt;
+    if (raw >= base && sameContainer) return raw - base;
     store.rebaseMemoryCapHits(a.id, base);
     return raw;
   };
@@ -3038,9 +3106,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const provider = providerFor(hostId);
       let rows: ContainerStats[] = [];
       try { rows = provider.stats ? await statsFor(hostId, provider) : []; } catch { rows = []; }
-      const hits = new Map(rows.map((r) => [r.name, r.memCapHits ?? 0]));
+      const byName = new Map(rows.map((r) => [r.name, r]));
       for (const a of list) {
-        store.clearMemoryPeaks(a.id, hits.get(a.runtimeRef?.replace(/^docker:\/\//, '') ?? '') ?? 0);
+        const r = byName.get(a.runtimeRef?.replace(/^docker:\/\//, '') ?? '');
+        store.clearMemoryPeaks(a.id, r?.memCapHits ?? 0, r?.startedAt);
         trace(a.id)('memory.peaks_cleared', { agentId: a.id });
         n++;
       }
@@ -3077,7 +3146,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           if (a) {
             if (!visible.has(r.name) && !owner) return [];
             // Since the owner last cleared the peaks (Status → Resources), when they did.
-            r = { ...r, memPeakBytes: peakSinceClear(a, r.memPeakBytes, r.memBytes), memCapHits: capHitsSince(a, r.memCapHits), clearedAt: a.memoryPeakClearedAt } as typeof r & { clearedAt?: string };
+            r = { ...r, memPeakBytes: peakSinceClear(a, r.memPeakBytes, r.memBytes), memCapHits: capHitsSince(a, r.memCapHits, r.startedAt), clearedAt: a.memoryPeakClearedAt } as typeof r & { clearedAt?: string };
             return [{ ...r, agentId: a.id, agentName: a.name, role: a.ops ? 'hatchabot' as const : 'agent' as const, mine: a.ownerId === ownerId, shared: a.ownerId !== ownerId && visible.has(r.name) }];
           }
           if (!owner) return [];
@@ -3128,6 +3197,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const raw = (req.body as { name?: unknown } | null)?.name;
     const name = typeof raw === 'string' ? raw.trim() : '';
+    // One at a time per name: a double click minted two keys, and the one
+    // shown could be the one the second had already replaced (HB-0062).
+    if (!holdOnce(req, `embed-guest:${name}`)) return reply.code(409).send({ error: `A key for ${name} is already being made.` });
     let key: string;
     try { key = embedder.addGuest(name); } catch (err) { return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) }); }
     app.log.warn({ guest: name, ownerId: ownerIdOf(req) }, 'embed.guest_key_issued');
@@ -3249,6 +3321,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // rebuild was skipped and the change it carried lost (regression review).
     // And a long operation on disk (operations.ts): a held move must not be woken by a message.
     isBusy: (id) => isBusy(id) || a2aInFlight.has(id) || inflight.has(id) || webChatBusy(webChatInFlight, id) || !!store.activeOperationFor(id),
+    // Only when the machine rebuilds on its own: under "manual" it would never sleep.
+    // rebuildNeedOf is defined further down (called only at sweep time).
+    requiredRebuildDue: async (a) => rebuildPolicy() !== 'manual' && (await rebuildNeedOf(a))?.need?.level === 'required',
     log: (id) => (event, detail) => trace(id)(event, detail ?? {}),
     fetchImpl: deps.oauthFetch,
   };
@@ -3999,13 +4074,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const parsed = z
       .object({
         name: z.string().trim().min(1).max(64),
-        // ssh://user@host is the simplest secure transport; tcp:// needs TLS set
-        // up out of band. Reject anything that isn't one of those schemes.
+        // ssh://user@host is the simplest secure transport; tcp:// is spoken
+        // to over TLS only (runnerEndpoint.ts). Reject anything else.
         dockerHost: z.string().trim().regex(/^(ssh|tcp):\/\/\S+$/, 'Use ssh://user@host or tcp://host:port'),
       })
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
     const { name, dockerHost } = parsed.data;
+    const tlsProblem = tcpTlsProblem(dockerHost);
+    if (tlsProblem) return reply.code(400).send({ error: tlsProblem });
+    // One at a time per endpoint: a double click on Add made two runners (HB-0062).
+    if (!holdOnce(req, `host-add:${ownerIdOf(req)}:${dockerHost}`)) return reply.code(409).send({ error: 'That machine is already being added.' });
 
     // For ssh:// endpoints, pin our dedicated key + accept-new in ~/.ssh/config
     // BEFORE the first probe — this is what makes the headless service (no
@@ -4155,6 +4234,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
 
   app.get('/v1/pool', async (req) => {
+    // Names only of agents this caller may see: a shared house bot held by
+    // another account's agent is "in use", not that agent's name (HB-0036).
+    const seen = ownsLocalHost(req) ? undefined : new Set(store.listVisibleAgents(ownerIdOf(req)).map((a) => a.id));
     return {
       // Per-user: YOUR bots plus shared house bots — what a create by this
       // user could actually lease. Tokens are personally owned (their minter
@@ -4172,7 +4254,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
                 leasedTo: b.leasedTo,
                 // Which agent wears this bot right now — names beat ids in
                 // a roster meant for humans.
-                leasedToName: b.leasedTo ? store.getAgent(b.leasedTo)?.name : undefined,
+                leasedToName: b.leasedTo && (!seen || seen.has(b.leasedTo)) ? store.getAgent(b.leasedTo)?.name : undefined,
                 ownerId: ownsLocalHost(req) ? b.ownerId : undefined, // undefined = shared house bot
                 shared: !b.ownerId,
                 mine: b.ownerId === ownerIdOf(req),
@@ -4367,6 +4449,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const parsed = CreateAIProfile.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
     const body = parsed.data;
+    // One at a time per name: a double click on Add made two sources (HB-0062).
+    if (!holdOnce(req, `ai-profile-add:${ownerIdOf(req)}:${body.name}`)) return reply.code(409).send({ error: `${body.name} is already being added.` });
     // Hosted: no Claude plan sources of any kind (a setup token, or this
     // machine's login), and a setup token pasted as an "API key" gets the
     // same answer rather than "make it a subscription source".
@@ -4632,6 +4716,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       tally.skipped.push({ name: a.name, reason: "a machine-login Max source can't run another account's agent" });
       return;
     }
+    // Not under a rebuild or a move: it reads the source as it goes (HB-0063).
+    if (isBusy(a.id)) {
+      tally.skipped.push({ name: a.name, reason: 'busy (a rebuild, a move or a backup) — switch it when that is done' });
+      return;
+    }
     store.setAgentAIProfile(a.id, target.id);
     // Drop a model pin the new source doesn't offer, so the agent falls back
     // to the new default instead of provisioning healthy and failing on use.
@@ -4773,6 +4862,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // not yet applied to it is not what it runs: pinned to that, the "held"
       // agent changed model at its next rebuild (audit #098).
       // Selected = clear the override so it follows the new default.
+      // A selected agent whose OpenClaw is too old for the new default on a
+      // subscription is held like the rest instead: switched, every message
+      // would fail with an opaque HTTP 400 (subscriptionRuntimeProblem; the
+      // rule a class model and the model route keep, audit #069). Said per
+      // agent in `notSwitched` (HB-0232). An agent with no container is judged
+      // on the image it would be built on.
+      const notSwitched: Array<{ id: string; name: string; reason: string }> = [];
+      for (const a of mine) {
+        if (!applyIds.has(a.id)) continue;
+        const tooOld = await subscriptionRuntimeProblem(a, profile, newDefault, a.runtimeRef ? undefined : (a.image ?? null));
+        if (tooOld) { applyIds.delete(a.id); notSwitched.push({ id: a.id, name: a.name, reason: tooOld }); }
+      }
       const heldModels = new Set<string>();
       let held = 0;
       let applied = 0; // agents actually changed — NOT the ids the caller sent
@@ -4833,7 +4934,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // echoed applyIds.size, which over-reported when the caller passed ids
       // that aren't theirs (a shared profile's other users) — they're filtered
       // out of `mine`, so nothing happened to them.
-      return { profile: safe, applied, held, live, staged, classDetached };
+      return { profile: safe, applied, held, live, staged, classDetached, ...(notSwitched.length ? { notSwitched } : {}) };
     },
   );
 
@@ -4923,10 +5024,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // actually serves: a static list once offered claude-opus-5, which the
     // claude-cli (Max) runtime has no catalog entry for — it became a fleet
     // default and every conversation broke on compaction. See runtimeModels.
-    const live = store
+    // The agent on the NEWEST OpenClaw is asked: the first one found could run
+    // an older image (a runner's, a pinned one), whose smaller catalog pruned
+    // the menu for every agent on the source (HB-0082). The answer says which
+    // runtime it came from.
+    const running = store
       .listAgents(ownerIdOf(req))
-      .find((a) => a.aiProfileId === profile.id && a.state === 'RUNNING' && a.runtimeRef);
-    if (live) {
+      .filter((a) => a.aiProfileId === profile.id && a.state === 'RUNNING' && a.runtimeRef)
+      .slice(0, 12);
+    const versions = await Promise.all(running.map(async (a) => ({
+      a, v: (await providerFor(a.hostId).info(a.runtimeRef!).catch(() => undefined))?.openclawVersion,
+    })));
+    const newer = (x?: string, y?: string) => (x && y ? (openclawAtLeast(x, y) ? (openclawAtLeast(y, x) ? 0 : -1) : 1) : x ? -1 : y ? 1 : 0);
+    versions.sort((x, y) => newer(x.v, y.v));
+    for (const { a: live, v } of versions.slice(0, 2)) {
       const found = await runtimeModels(providerFor(live.hostId), live.runtimeRef!, 'anthropic');
       const usable = found.filter((m) => m.catalogued).map((m) => m.id);
       // Only trust a non-empty answer; an old CLI without --all returns nothing.
@@ -4937,7 +5048,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // menu rather than keep presenting a model that breaks on compaction.
         const listed = [profile.model, ...(profile.models ?? [])].filter(Boolean) as string[];
         const stale = [...new Set(listed.filter((m) => !usable.includes(m)))];
-        return { models: usable, stale, source: 'runtime' as const };
+        return { models: usable, stale, source: 'runtime' as const, ...(v ? { openclawVersion: v } : {}) };
       }
     }
     // Fallback: a curated current list (no live agent to ask yet, e.g. the
@@ -5133,6 +5244,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!row || !me || !conn?.dm) return false;
       const secret = await secrets.get(row.secretRef).catch(() => undefined);
       return secret ? conn.dm(secret, me, text) : false;
+    },
+    discordLinked: (ownerId) => {
+      const ops = store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops);
+      return !!(ops && store.getChannelForAgent(ops.id, 'discord') && store.memberIdentities(ops.id, ownerId).discord && connectorFor('discord')?.dm);
     },
     log: (event, detail) => app.log.info(detail, event),
   });
@@ -5632,7 +5747,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           if (a.hostId !== local) { unreachable.add(a.hostId); continue; }
         }
         // And tell the agent its new budget (AGENTS.md), as a per-agent change does.
-        if (a.state === 'RUNNING') void syncDataSourceDocs({ store, secrets, provider: prov, channel: deps.channel, log: trace(a.id) }, a.id, a.runtimeRef!, trace(a.id)).catch(() => {});
+        if (a.state === 'RUNNING') void syncDocsHeld(a, prov);
       }
     } else if (spec.key === 'agentSwap') {
       for (const a of fleet) {
@@ -5667,13 +5782,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { running, current, imageBehind, need: rebuildNeed(running, imageBehind, undefined, { running: running.openclawVersion, current: current.openclawVersion }) };
   };
 
-  app.get('/v1/rebuild-policy', async () => ({
+  // Machine settings, read as they are set: by the machine owner (HB-0061).
+  // A member's page has rebuildConcurrency in /v1/config.
+  app.get('/v1/rebuild-policy', async (req, reply) => (!ownsLocalHost(req) ? reply.code(403).send({ error: MACHINE_OWNER_ONLY }) : {
     policy: rebuildPolicy(),
     policies: REBUILD_POLICIES,
     quietHours: process.env.HATCHABOT_REBUILD_QUIET_HOURS ?? '3-5',
   }));
   /** How many rebuilds run at once on this machine (the rest wait their turn). Owner-set; lives in .env. */
-  app.get('/v1/rebuild-concurrency', async () => ({ atOnce: rebuildGate.limit, queued: rebuildQueued.size, running: inflight.size, max: MAX_REBUILD_CONCURRENCY }));
+  app.get('/v1/rebuild-concurrency', async (req, reply) => (!ownsLocalHost(req) ? reply.code(403).send({ error: MACHINE_OWNER_ONLY })
+    : { atOnce: rebuildGate.limit, queued: rebuildQueued.size, running: inflight.size, max: MAX_REBUILD_CONCURRENCY }));
   app.put<{ Body: { atOnce?: unknown } }>('/v1/rebuild-concurrency', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const n = Number(req.body?.atOnce);
@@ -5879,7 +5997,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           memoryCap: a.memoryCap,
           memoryCapEffective: rebuild?.running.memoryLimitBytes ? formatMemoryCap(rebuild.running.memoryLimitBytes) : memoryCapFor(store, a),
           memoryPeakBytes: peakSinceClear(a, rebuild?.running.memPeakBytes, undefined),
-          memoryCapHits: capHitsSince(a, rebuild?.running.memCapHits),
+          memoryCapHits: capHitsSince(a, rebuild?.running.memCapHits, rebuild?.running.startedAt),
           memoryKills: rebuild?.running.memOomKills,
           // Its swap (swap.ts): the allowance it should have, what the container
           // runs with, how much sits in swap now, and why none is given here.
@@ -6278,6 +6396,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const problem = modelOverrideProblem(target, model);
         if (problem) return reply.code(400).send({ error: problem });
       }
+      // A rebuild or a move holding the agent reads its source as it goes: a
+      // switch meanwhile could finish it on a mix of the two (HB-0063).
+      if (switchingProfile && isBusy(agent.id)) {
+        return reply.code(409).send({ error: 'The agent is busy (a rebuild, a move or a backup) — switch its AI source when that is done.' });
+      }
 
       // Two live applies can fail (the memory cap's docker update and the
       // memory-policy rewrite, both 502). Every refusal is above or here; the
@@ -6482,6 +6605,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         store.setAgentModel(agent.id, null);
       }
       if (flippingMemory) store.setAgentSharedMemory(agent.id, shared!);
+      // A new memory cap: tell the agent its budget (AGENTS.md), off the
+      // request. Last, so the sync reads everything this change stored, and
+      // so it cannot hold the agent while the policy rewrite above needs it.
+      if (parsed.data.memoryCap !== undefined && agent.runtimeRef && agent.state === 'RUNNING') void syncDocsHeld(agent);
       const classDetached = (switchingProfile || model !== undefined) && detachClassIfDrifted(agent.id);
       if (switchingProfile || model !== undefined) recordLedger(req, model !== undefined ? 'model' : 'source-switch', ledgerBefore);
 
@@ -7335,7 +7462,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.server.on('upgrade', async (rawReq, socket, head) => {
     const url = rawReq.url ?? '';
     const m = /^\/v1\/agents\/([^/]+)\/ui\/?([^?]*)/.exec(url);
-    if (!m) return; // not ours — leave it alone
+    // Not a console: nobody else answers upgrades here, and one left alone
+    // stayed open until the client gave up (HB-0056). The public listener does the same.
+    if (!m) { if (app.server.listenerCount('upgrade') <= 1) socket.destroy(); return; }
     const deny = () => socket.destroy();
     // A page on another site — a neighbouring tenant's is the SAME site, so
     // SameSite does not stop it — must not open a console with this
@@ -7516,6 +7645,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return a;
   };
 
+  /**
+   * An app's `values`: setting name to value, or none. A string or a list
+   * was taken key by key (each character a setting), so anything else is
+   * refused before it is used (HB-0064).
+   */
+  const appValuesOk = (req: FastifyRequest, reply: FastifyReply): boolean => {
+    const v = (req.body as { values?: unknown } | null | undefined)?.values;
+    if (v === undefined || v === null || z.record(z.string(), z.unknown()).safeParse(v).success) return true;
+    reply.code(400).send({ error: 'values must be an object of setting names and their values.' });
+    return false;
+  };
+
   /** What a repo's manifest says, and what it will ask for. */
   app.post<{ Body: { source?: string; ref?: string } }>('/v1/apps/inspect', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: "Only this machine's owner can read a repo from it." });
@@ -7662,6 +7803,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** Install an app into this agent (or replace the one it has, from a new source). */
   app.post<{ Params: { id: string }; Body: { source?: string; ref?: string; values?: Record<string, unknown>; allowShared?: boolean } }>('/v1/agents/:id/app', async (req, reply) => {
     const a = appTarget(req, reply); if (!a) return reply;
+    if (!appValuesOk(req, reply)) return reply;
     try {
       const done = await installFromSource(a, req.body?.source ?? '', req.body?.ref || 'HEAD', req.body?.values ?? {}, req.body?.allowShared === true, ownerIdOf(req));
       return { app: appView(a), test: done.test ?? null };
@@ -7673,6 +7815,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: "Only this machine's owner can install an app (it reads this machine's folders and git login)." });
     const a = ownedAgent(req, req.params.id);
     if (!a || a.state === 'DELETED' || a.state === 'ARCHIVED') return reply.code(404).send({ error: 'Not found' });
+    if (!appValuesOk(req, reply)) return reply;
     // No source: try the waiting one again (its page's "Try again").
     const waiting = store.getAppPending(a.id);
     if (!req.body?.source && waiting) {
@@ -7707,6 +7850,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** Install the newest commit (or a given ref) from where it came. */
   app.post<{ Params: { id: string }; Body: { ref?: string; values?: Record<string, unknown>; allowShared?: boolean } }>('/v1/agents/:id/app/update', async (req, reply) => {
     const a = appTarget(req, reply); if (!a) return reply;
+    if (!appValuesOk(req, reply)) return reply;
     const had = store.getAgentApp(a.id);
     if (!had) return reply.code(404).send({ error: `${a.name} has no app installed.` });
     try {
@@ -7840,17 +7984,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (problem) return reply.code(400).send({ error: problem });
       if (!existsSync(p)) return reply.code(400).send({ error: `No such folder on this machine: ${p}` });
       const atHostPath = parsed.data.atHostPath === true;
-      // Host-path mounts key their unique name off the full path (two folders
-      // can share a basename); /data mounts key off the basename as before.
-      const mountName = atHostPath
+      const targetProblem = atHostPath ? hostPathTargetProblem(p) : undefined;
+      if (targetProblem) return reply.code(400).send({ error: targetProblem });
+      // A host-path mount lives at its own path: it clashes only with the same
+      // folder. Its name, flattened from the path, is just a label kept unique:
+      // /a/b and /a-b both flatten to a-b, and the second was refused as
+      // "already shared" (HB-0074). /data mounts key off the basename, which
+      // is where they live.
+      const bare = (x: string) => x.replace(/\/+$/, '') || '/';
+      if (atHostPath && store.listDataSources(agent.id).some((d) => d.kind === 'folder' && d.mountAtHostPath && bare(d.hostPath ?? '') === bare(p))) {
+        return reply.code(409).send({ error: `${p} is already shared with this agent.` });
+      }
+      let mountName = atHostPath
         ? p.replace(/^\/+|\/+$/g, '').replace(/[^\w.-]+/g, '-')
         : basename(p.replace(/\/+$/, ''));
+      if (atHostPath) for (let n = 2, base = mountName; clashes(mountName); n++) mountName = `${base}-${n}`;
       if (clashes(mountName)) {
-        return reply.code(409).send({
-          error: atHostPath
-            ? `${p} is already shared with this agent.`
-            : `Another source already lives at /data/${mountName}. Rename or remove it first.`,
-        });
+        return reply.code(409).send({ error: `Another source already lives at /data/${mountName}. Rename or remove it first.` });
       }
       store.insertDataSource({
         id: randomUUID(), agentId: agent.id, kind: 'folder', access, mountName,
@@ -8008,9 +8158,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         ? await scrubRemovedDataSources({ store, secrets, provider }, agent.id, agent.runtimeRef, running, trace(agent.id))
         : true;
       // Its AGENTS.md stops listing the repo now, not at the next rebuild.
-      if (git && running && agent.runtimeRef) {
-        void syncDataSourceDocs({ store, secrets, provider, channel: deps.channel, log: trace(agent.id) }, agent.id, agent.runtimeRef, trace(agent.id)).catch(() => {});
-      }
+      if (git && running && agent.runtimeRef) void syncDocsHeld(agent, provider);
       return {
         ...publicAgent(store.getAgent(agent.id)!),
         ...(git ? { removedRepo: { repo: src.repoUrl, scrubbed: done } } : {}),
@@ -8856,8 +9004,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const visible = store.listAgents(ownerId);
     const running = visible.filter((a) => a.state === 'RUNNING' && a.runtimeRef);
     const skipped0 = visible.filter((a) => a.state !== 'RUNNING' || !a.runtimeRef).length;
-    const results = await Promise.all(
-      running.map(async (a) => {
+    const results = await sixAtATime(
+      running, async (a) => {
         try {
           // Strict, so a failed read lands in `skipped` below instead of counting as 0 (review, 2026-09-29).
           const u = await agentUsage(providerFor(a.hostId), a.runtimeRef!, a.slug, { strict: true });
@@ -8871,7 +9019,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         } catch {
           return null; // unreachable container — treat as skipped, not zero
         }
-      }),
+      },
     );
     const agentsUsage = results
       .filter((r): r is NonNullable<typeof r> => r !== null)
@@ -9505,7 +9653,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const PERIOD_HOURS: Record<string, number> = { hour: 1, '3h': 3, '6h': 6, '9h': 9, '12h': 12, day: 24, week: 168 };
     let pricing: ReturnType<typeof windowPricing> | undefined;
     try { pricing = windowPricing(store, ownerId, PERIOD_HOURS[period] ?? 24); } catch (err) { app.log.warn({ err: String(err) }, 'usage.pricing_failed'); }
-    return { ...computeUsagePeriod(store, ownerId, period as UsagePeriod), sampledAt: usageSampledAt, alerts, ...(rightSize ? { rightSize } : {}), ...(pricing ? { pricing } : {}) };
+    return { ...computeUsagePeriod(store, ownerId, period as UsagePeriod, Date.now(), (id) => pricing?.agents[id]?.cost), sampledAt: usageSampledAt, alerts, ...(rightSize ? { rightSize } : {}), ...(pricing ? { pricing } : {}) };
   });
 
   /** Daily fleet-usage snapshots for the trend chart, oldest → newest, with a
@@ -9727,11 +9875,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       const body = (req.body ?? {}) as { token?: string; fromWorkspace?: string; webOnly?: boolean };
+      // Only while it is parked on this very step: anywhere else a token was
+      // stashed, nothing ran, and the answer was 202 (HB-0064).
+      if (agent.pendingAction?.type !== 'bot_token') return reply.code(409).send({ error: 'This agent is not waiting for a bot token.' });
       // No bot to give it (the pool is empty and there is no spare token):
       // go on without Telegram — the agent becomes web-only, as if created so,
-      // and provisioning resumes. Only while it is parked on this very step.
+      // and provisioning resumes.
       if (body.webOnly === true) {
-        if (agent.pendingAction?.type !== 'bot_token') return reply.code(409).send({ error: 'This agent is not waiting for a bot token.' });
         store.setAgentWebOnly(agent.id, true);
         store.setAgentPendingAction(agent.id, null);
         trace(agent.id)('telegram.skipped', { why: 'no bot available' });
@@ -9743,7 +9893,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // left its pool row unleased; the pool later leased the same bot to the
       // next agent, which then failed with "already belongs to…" (audit,
       // 2026-10-23). The attach route refuses this; so does this one.
-      if (token && agent.pendingAction?.type === 'bot_token') {
+      if (token) {
         if (throttled(req, ownerIdOf(req))) return reply.code(429).send({ error: TOKEN_CHECK_THROTTLED });
         let username: string;
         try { username = await verifyBotToken(token); }
@@ -10578,13 +10728,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy with another change — try again in a moment.' });
     // The bot is parked for the next agent (its tokens, rooms and name kept)
     // rather than thrown away — Discord's and Slack's alike.
-    // Say goodbye while the token is still the agent's (Telegram's detach
-    // farewell): people who reached it here lose it.
-    const told = await dmChannelPeople(agent, conn.kind, row.secretRef, `👋 ${agent.name} no longer answers on ${conn.label}. Its owner took it off ${conn.label}; it is not gone. Reach it another way, or ask its owner.`);
     let parked = false;
-    // Stop, park and delete under the busy flag, and only the bot this
-    // request was about: a swap from another tab during the farewells used to
-    // have its NEW bot's row deleted here, losing both bots (night review).
+    let told = 0;
+    // Stop, say goodbye, park and delete under the busy flag, and only the
+    // bot this request was about: a swap from another tab during the
+    // farewells used to have its NEW bot's row deleted here, losing both bots
+    // (night review). The goodbye is inside too, once the agent is stopped:
+    // sent first, people were told it had gone from a bot that a concurrent
+    // change then kept, or that could not be stopped (HB-0064).
     let outcome: 'done' | 'changed' | 'busy' | 'not-stopped';
     try {
       outcome = await whileBusy(agent.id, async () => {
@@ -10592,6 +10743,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (!now || now.accountId !== row.accountId) return 'changed' as const;
         const stopped = await stopForBotHandover(agent);
         if (!stopped) return 'not-stopped' as const;
+        // While the token is still the agent's (Telegram's detach farewell):
+        // people who reached it here lose it.
+        told = await dmChannelPeople(agent, conn.kind, now.secretRef, `👋 ${agent.name} no longer answers on ${conn.label}. Its owner took it off ${conn.label}; it is not gone. Reach it another way, or ask its owner.`);
         try { await parkDiscordBot({ store, secrets }, agent.ownerId, now); parked = true; }
         catch (err) { trace(agent.id)('channel.park_failed', { kind: conn.kind, error: String(err).slice(0, 200) }); }
         if (!parked) await secrets.delete(now.secretRef).catch(() => {});
@@ -12194,7 +12348,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
         body,
         { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId), verifyToken: deps.verifyImportedToken,
-          onOperation: (id) => { operation = id; receipt.operation(id); onOperation?.(id); } },
+          onOperation: (id) => { operation = id; receipt.operation(id); onOperation?.(id); }, watchOwner: watchImportedOwner },
       ).then(
         (agent) => { receipt.finished('landed'); return agent; },
         (err: unknown) => { if (!(err instanceof ImportCleanupPending)) receipt.finished('failed'); throw err; },
@@ -12241,13 +12395,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (agent.ops) return reply.code(409).send({ error: OPS_STAYS_HERE });
       if (busyNow(agent, reply)) return reply;
       try {
-        const { filename, data, personal } = await exportTemplate(
+        const { filename, data, personal, edited } = await exportTemplate(
           { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
           agent.id,
           { includeMemory: req.query.excludeMemory === undefined },
         );
-        // Header-sized: the first 20 places, the rest counted.
-        const brief = { ...personal, hits: personal.hits.slice(0, 20), more: personal.more + Math.max(0, personal.hits.length - 20) };
+        // Header-sized: the first 20 places, the rest counted. `edited`: the
+        // files changed outside the Files editor, which the copy carries
+        // without those changes (HB-0117).
+        const brief = { ...personal, hits: personal.hits.slice(0, 20), more: personal.more + Math.max(0, personal.hits.length - 20), edited };
         return reply
           .type('application/octet-stream')
           .header('content-disposition', `attachment; filename="${filename}"`)
@@ -12271,12 +12427,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (agent.ops) return reply.code(409).send({ error: OPS_STAYS_HERE });
       if (busyNow(agent, reply)) return reply;
       try {
-        const { personal } = await exportTemplate(
+        const { personal, edited } = await exportTemplate(
           { store, provider: providerFor(agent.hostId) },
           agent.id,
           { includeMemory: req.query.excludeMemory === undefined },
         );
-        return personal;
+        return { ...personal, edited };
       } catch (err) {
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
@@ -12852,9 +13008,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // Its OWN managed sections back (its peers, data sources, operator,
         // memory rules): the master's came along in the pushed file and stood
         // until the child's next rebuild (2026-09-28). Best-effort, off the reply.
-        if (child.runtimeRef && child.state === 'RUNNING') {
-          void syncDataSourceDocs({ store, secrets, provider: providerFor(child.hostId), channel: deps.channel, log: trace(child.id) }, child.id, child.runtimeRef, trace(child.id)).catch(() => {});
-        }
+        if (child.runtimeRef && child.state === 'RUNNING') void syncDocsHeld(child);
         trace(child.id)('definition.pushed', { from: master.id });
         results.push({ id: child.id, name: child.name, ok: true });
       } catch (err) {
@@ -13097,7 +13251,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
           body,
           { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId), verifyToken: deps.verifyImportedToken,
-            onOperation: (id) => { operation = id; onOperation?.(id); } },
+            onOperation: (id) => { operation = id; onOperation?.(id); }, watchOwner: watchImportedOwner },
         );
         if (waitAsked(req)) return reply.code(201).send({ ...publicAgent(await run()), kind: 'agent', operation });
         // A full copy runs in the background once its record exists (phase
@@ -13615,15 +13769,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const knockCache = new Map<string, { at: number; value: Awaited<ReturnType<typeof pairingRequestsFor>> }>();
   const KNOCK_CACHE_MS = process.env.VITEST ? 0 : Number(process.env.HATCHABOT_KNOCK_CACHE_MS ?? 30_000);
   const forgetKnocks = (agentId: string) => knockCache.delete(agentId);
-  app.get<{ Params: { id: string } }>('/v1/agents/:id/pairing', async (req, reply) => {
-    const agent = ownedAgent(req, req.params.id);
-    if (!agent?.runtimeRef || !store.listChannelsForAgent(agent.id).length) return reply.code(404).send({ error: 'Not found' });
-    if (agent.state !== 'RUNNING') return [];
+  const cachedKnocks = async (agent: Agent) => {
     const hit = knockCache.get(agent.id);
     if (hit && Date.now() - hit.at < KNOCK_CACHE_MS) return hit.value;
     const value = await pairingRequestsFor(agent);
     if (KNOCK_CACHE_MS > 0) knockCache.set(agent.id, { at: Date.now(), value });
     return value;
+  };
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/pairing', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent?.runtimeRef || !store.listChannelsForAgent(agent.id).length) return reply.code(404).send({ error: 'Not found' });
+    if (agent.state !== 'RUNNING') return [];
+    return cachedKnocks(agent);
   });
 
   // Every pending "wants to join" request across the caller's RUNNING agents,
@@ -13634,9 +13791,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    *
    * The retired Telegram management bot polled /v1/pending and pushed each
    * request; nothing did afterwards, so a join request waited until someone
-   * opened the app (2026-09-19). This sweep does it instead — but only for an
-   * owner whose management agent HAS a Telegram bot, so an install that cannot
-   * be pushed to costs nothing: no bot, no docker exec.
+   * opened the app (2026-09-19). This sweep does it instead — told only to an
+   * owner whose management agent has a Telegram or Discord bot. Every live
+   * agent with a bot is still read, one at a time: the same read turns
+   * strangers away (30th audit), so reading only pushable owners' agents
+   * would leave theirs knocking (HB-0058).
    */
   const announcedPairings = new Set<string>();
   // One sweep at a time: a slow pass finishing after a newer one forgot knocks
@@ -13716,10 +13875,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const mine = store
       .listAgents(ownerIdOf(req))
       .filter((a) => a.state === 'RUNNING' && a.runtimeRef && store.listChannelsForAgent(a.id).length);
-    const perAgent = await Promise.all(
-      mine.map(async (a) => {
+    // Each agent's knocks from the half-minute cache the per-agent route keeps
+    // (approve and deny clear it), six reads at a time: every poll was a docker
+    // exec per agent, all at once (HB-0058).
+    const perAgent = await sixAtATime(
+      mine, async (a) => {
         try {
-          const reqs = await pairingRequestsFor(a);
+          const reqs = await cachedKnocks(a);
           return reqs.map((r) => ({
             agentId: a.id,
             agentName: a.name,
@@ -13735,7 +13897,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         } catch {
           return []; // an unreachable agent shouldn't sink the whole list
         }
-      }),
+      },
     );
     return perAgent.flat();
   });

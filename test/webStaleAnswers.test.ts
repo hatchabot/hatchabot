@@ -74,7 +74,7 @@ function page(names: string[], extra: Record<string, unknown> = {}) {
     editDlg: { close: () => closed.push('edit') }, inviteDlg: { showModal: noop }, proposalsDlg: { showModal: noop },
     esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), ago: () => 'just now',
     sourceOptionLabel: (p: { name: string }) => p.name, localClashWarning: () => '', confirmRebuild: () => true,
-    showEditTab: noop, populateImagePicker: async () => {}, embedModeText: () => '', renderSetupValues: noop, renderGroupAccess: noop,
+    showEditTab: noop, populateImagePicker: async () => {}, embedModeText: () => '', renderSetupValues: noop, renderBotWho: noop,
     renderEditMembers: async () => {}, renderParamList: noop, renderDataList: noop, renderEnvList: noop, renderClassList: noop,
     v2ChannelKinds: () => ['telegram'], location: { origin: 'https://hatchabot.example' }, navigator: {}, document: { querySelectorAll: () => [] },
     editAgentId: 'a1', editLoaded: null, editLoadGen: 0, editReverting: new Set(), EDIT_REVERTING: 'Reverting…',

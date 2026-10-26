@@ -15,7 +15,9 @@
  *   and the inputs at 256, times out at 60 s;
  * - forwards the body unchanged to the server with the server's own key and
  *   returns the answer as it came;
- * - `GET /health` answers for the server behind it.
+ * - `GET /health` answers for the server behind it, to a caller holding the
+ *   server's key or an agent's (Hatchabot's own start-up check sends the
+ *   server's): a neighbour without one cannot probe that the door is up (HB-0040).
  * It never logs or stores a request body — they are people's memories. One
  * line per call: agent id, input count, bytes, milliseconds, status.
  */
@@ -45,11 +47,13 @@ export function doorScript(): string {
     ' b.t=Math.min(cap,b.t+(now-b.at)*cap/60000);b.at=now;if(b.t<1)return false;b.t-=1;return true;}',
     'function send(res,code,obj){res.writeHead(code,{"content-type":"application/json"});res.end(JSON.stringify(obj));}',
     'const server=http.createServer((req,res)=>{',
-    ' if(req.method==="GET"&&req.url==="/health"){',
+    ' const a=req.headers.authorization||"";const tok=a.startsWith("Bearer ")?a.slice(7):"";',
+    ' if(req.method==="GET"&&req.url==="/health"){loadKeys();const sk=upkey();',
+    '  const h=(x)=>crypto.createHash("sha256").update(x).digest();',
+    '  if(!tok||!((sk&&crypto.timingSafeEqual(h(tok),h(sk)))||keys[h(tok).toString("hex")])){send(res,401,{error:"unauthorized"});return;}',
     '  fetch(UP+"/health",{signal:AbortSignal.timeout(5000)}).then(r=>send(res,r.ok?200:503,{ok:r.ok})).catch(()=>send(res,503,{ok:false}));return;}',
     ' if(req.method!=="POST"||req.url!=="/v1/embeddings"){send(res,404,{error:"not found"});return;}',
     ' loadKeys();',
-    ' const a=req.headers.authorization||"";const tok=a.startsWith("Bearer ")?a.slice(7):"";',
     ' const agent=tok?keys[crypto.createHash("sha256").update(tok).digest("hex")]:undefined;',
     ' if(!agent){send(res,401,{error:"unauthorized"});req.resume();return;}',
     ' if(!allow(agent)){send(res,429,{error:"rate limited"});req.resume();return;}',

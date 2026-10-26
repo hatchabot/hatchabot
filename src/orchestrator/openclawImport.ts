@@ -6,7 +6,7 @@
  * one manual step that trips people up. Every write backs the config up first.
  */
 import { spawn } from 'node:child_process';
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { openclawConfigAgents, openclawUserPath } from '../openclaw/configWriter.js';
@@ -128,6 +128,28 @@ export async function discoverOpenclawAgents(
   return out;
 }
 
+/**
+ * Write the person's openclaw.json whole or not at all (HB-0080): a temp file
+ * beside the real file (a symlinked config stays a symlink), with its mode,
+ * synced, then renamed over it. A crash or a full disk mid-write used to leave
+ * their running OpenClaw a truncated config.
+ */
+function writeConfigAtomic(configPath: string, cfg: unknown): void {
+  const target = realpathSync(configPath);
+  const tmp = `${target}.hatchabot-${process.pid}.tmp`;
+  const fd = openSync(tmp, 'w', statSync(target).mode & 0o7777);
+  try {
+    writeSync(fd, `${JSON.stringify(cfg, null, 2)}\n`);
+    fsyncSync(fd);
+    closeSync(fd);
+    renameSync(tmp, target);
+  } catch (err) {
+    try { closeSync(fd); } catch { /* already closed */ }
+    rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+
 /** Set one Telegram account's `enabled: false` in the OpenClaw config, backing
  *  the file up first. Returns whether a change was actually made. */
 export function disableOpenclawBot(accountId: string, configPath = openclawConfigPath()): { changed: boolean } {
@@ -139,7 +161,7 @@ export function disableOpenclawBot(accountId: string, configPath = openclawConfi
   // Recoverable: keep the last pre-edit copy beside the config.
   copyFileSync(configPath, `${configPath}.agentclaw-bak`);
   acct.enabled = false;
-  writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`);
+  writeConfigAtomic(configPath, cfg);
   return { changed: true };
 }
 
@@ -230,7 +252,7 @@ export async function quiesceOpenclawBots(
   }
   if (changed) {
     copyFileSync(configPath, `${configPath}.agentclaw-bak`);
-    writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`);
+    writeConfigAtomic(configPath, cfg);
   }
 
   // Restart unconditionally so the disables take effect AND any lingering

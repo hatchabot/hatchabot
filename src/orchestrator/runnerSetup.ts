@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { appendFile, mkdir, readFile, chmod } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { dockerConnArgs } from '../providers/runnerEndpoint.js';
 
 const execFileP = promisify(execFile);
 
@@ -170,26 +171,26 @@ export async function installRuntimeImage(
   // agent built there dies with "exec format error" (2026-10-09). The two
   // daemons say what they run on; when they differ the runner pulls the
   // published image of the same OpenClaw (multi-arch) instead.
-  const [here, there] = await Promise.all([dockerArch(docker, []), dockerArch(docker, ['-H', endpoint])]);
+  const [here, there] = await Promise.all([dockerArch(docker, []), dockerArch(docker, dockerConnArgs(endpoint))]);
   if (here && there && here !== there) {
     if (!opts.published) {
       return { ok: false, error: `This machine's image is built for ${here}, and that runner is ${there}: a copy would not run there, and there is no published image of this version to pull instead${opts.unpublished ? ` (${opts.unpublished.replace(/\.$/, '')})` : ''}.` };
     }
     const { ref, openclawVersion } = opts.published;
-    const pulled = await dockerRun(docker, ['-H', endpoint, 'pull', '--quiet', ref], opts.timeoutMs ?? 3 * 3600_000);
+    const pulled = await dockerRun(docker, [...dockerConnArgs(endpoint), 'pull', '--quiet', ref], opts.timeoutMs ?? 3 * 3600_000);
     if (pulled.code !== 0) {
       return { ok: false, error: `That runner is ${there} and this machine ${here}, so it needs the published image ${ref}, and pulling it there failed: ${pulled.stderr.slice(-300) || `exit ${pulled.code}`}` };
     }
     // The tag must hold the OpenClaw asked for (build-runtime-image.sh's rule: a pulled image proves its version by its label).
-    const has = (await dockerRun(docker, ['-H', endpoint, 'image', 'inspect', '--format', '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}', ref], 60_000)).stdout.trim();
+    const has = (await dockerRun(docker, [...dockerConnArgs(endpoint), 'image', 'inspect', '--format', '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}', ref], 60_000)).stdout.trim();
     if (has !== openclawVersion) return { ok: false, error: `The published image ${ref} carries OpenClaw ${has || 'unknown'}, not ${openclawVersion}; not using it.` };
-    const tagged = await dockerRun(docker, ['-H', endpoint, 'tag', ref, image], 60_000);
+    const tagged = await dockerRun(docker, [...dockerConnArgs(endpoint), 'tag', ref, image], 60_000);
     if (tagged.code !== 0) return { ok: false, error: `Tagging ${ref} as ${image} on the runner failed: ${tagged.stderr.slice(-300)}` };
     return { ok: true, pulled: ref };
   }
   return new Promise((resolve) => {
     const save = spawn(docker, ['save', image]);
-    const load = spawn(docker, ['-H', endpoint, 'load']);
+    const load = spawn(docker, [...dockerConnArgs(endpoint), 'load']);
     // Fast compression: the layers are plain tars, so even level 1 roughly
     // halves what crosses the link, at little CPU here.
     const gzip = createGzip({ level: 1 });

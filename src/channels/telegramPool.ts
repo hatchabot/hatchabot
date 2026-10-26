@@ -27,6 +27,13 @@ import type {
  */
 const IDLE_RENAME_DELAY_MS = Number(process.env.HATCHABOT_IDLE_RENAME_MS ?? 15 * 60_000);
 
+/**
+ * How long a farewell may spend waiting out Telegram's rate limit, in all.
+ * Release is awaited by delete and archive, so the wait is bounded; members
+ * it could not reach are counted in the log.
+ */
+const FAREWELL_WAIT_MS = 30_000;
+
 /** Telegram errors that no retry can fix: the token is not a token any more. */
 export function permanentTelegramFailure(error: unknown): boolean {
   return /unauthorized|bot was deleted|not found|invalid token/i.test(String(error ?? ''));
@@ -44,6 +51,8 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       log?: (event: string, detail: Record<string, unknown>) => void;
       /** Retry waits for renames; tests pass zeros. */
       renameBackoffMs?: readonly number[];
+      /** The wait a farewell honours on a 429; tests pass an instant one. */
+      sleep?: (ms: number) => Promise<void>;
     } = {},
   ) {
     this.db.exec(`
@@ -184,17 +193,20 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
   /**
    * Remove an UNLEASED bot from the pool, scrubbing its stored token. A leased
    * bot is refused — it is some agent's live identity; delete that agent (or
-   * let it release) first.
+   * let it release) first. `leasedTo` also takes it while leased to that one
+   * agent: a bot leaving with it (a move, a downloaded copy) goes in one
+   * statement, where a release and then a remove let a lease take it between
+   * the two (HB-0065).
    */
-  async removeFromPool(username: string): Promise<void> {
+  async removeFromPool(username: string, opts: { leasedTo?: string } = {}): Promise<void> {
     const row = this.db
       .prepare(`SELECT username, secret_ref, leased_to FROM telegram_pool WHERE username = ? COLLATE NOCASE`)
       .get(username) as { username: string; secret_ref: string; leased_to: string | null } | undefined;
     if (!row) throw new Error(`@${username} is not in the pool.`);
-    if (row.leased_to) throw new Error(`@${username} is leased to an agent — delete that agent first.`);
+    if (row.leased_to && row.leased_to !== opts.leasedTo) throw new Error(`@${username} is leased to an agent — delete that agent first.`);
     // The row goes first, and only while still unleased: a lease taken while the
     // secret store answered would have lost its bot (review R14, 2026-10-23).
-    const gone = this.db.prepare(`DELETE FROM telegram_pool WHERE username = ? AND leased_to IS NULL`).run(row.username);
+    const gone = this.db.prepare(`DELETE FROM telegram_pool WHERE username = ? AND (leased_to IS NULL OR leased_to = ?)`).run(row.username, opts.leasedTo ?? null);
     if (gone.changes === 0) throw new Error(`@${username} was leased to an agent just now — delete that agent first.`);
     await this.secrets.delete(row.secret_ref).catch(() => {});
   }
@@ -263,6 +275,10 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // chat header reads correctly (the @username can't change via API).
     // Best-effort and bounded: a rename is cosmetic; Telegram rate-limits
     // setMyName, and neither a limit nor an outage may block provisioning.
+    // First, forget what was sent to the bot's previous life: Telegram keeps
+    // unconfirmed updates for a day, and the new agent's gateway would read
+    // them as messages to it (HB-0051).
+    await this.#dropWaitingUpdates(free.secret_ref, free.username);
     this.#park(free.username, req.agentName, 0);
     await this.#applyDisplayName(free.secret_ref, free.username, req.agentName);
     // A recycled bot may still be sitting in someone's Telegram list with the
@@ -462,6 +478,36 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
   }
 
   /**
+   * Confirm every update waiting on a bot being leased, so none reaches the
+   * agent it is leased to. A negative offset makes Telegram forget every
+   * update before the newest; the second call confirms that one too. Runs
+   * before the new agent's gateway exists, so it never competes with a
+   * poller of its own; a 409 means the previous agent's is still polling.
+   * Best-effort like the rest of the lease, but logged when it fails.
+   */
+  async #dropWaitingUpdates(secretRef: string, username: string): Promise<void> {
+    try {
+      const token = await this.secrets.get(secretRef);
+      const f = this.opts.fetchImpl ?? fetch;
+      const ask = async (offset: number) => {
+        const res = await f(`https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&limit=1&timeout=0`, { signal: AbortSignal.timeout(5000) });
+        return (await res.json().catch(() => ({}))) as { ok?: boolean; description?: string; result?: Array<{ update_id?: unknown }> };
+      };
+      const newest = await ask(-1);
+      if (newest.ok !== true) {
+        this.opts.log?.('pool.updates_not_dropped', { username, error: String(newest.description ?? 'no answer').slice(0, 160) });
+        return;
+      }
+      const id = Number(newest.result?.[0]?.update_id);
+      if (!Number.isSafeInteger(id)) return; // nothing was waiting
+      const confirmed = await ask(id + 1);
+      this.opts.log?.(confirmed.ok === true ? 'pool.updates_dropped' : 'pool.updates_not_dropped', { username, ...(confirmed.ok === true ? {} : { error: String(confirmed.description ?? 'no answer').slice(0, 160) }) });
+    } catch (err) {
+      this.opts.log?.('pool.updates_not_dropped', { username, error: String((err as Error)?.message ?? err).slice(0, 160) });
+    }
+  }
+
+  /**
    * Clear the per-bot state the Bot API CAN reset on a recycle: description,
    * short description, and the command menu — all set by (or for) the previous
    * agent and otherwise inherited by the next one. BotFather-only settings
@@ -604,15 +650,33 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
             'This agent has been removed, so it will not reply here any more. ' +
             'This bot may be reassigned to a different agent later; if it starts ' +
             'answering again, everything above belongs to the old one.';
+      // One at a time, and a 429 is waited out (its retry_after) and tried
+      // again, up to FAREWELL_WAIT_MS in all: sent in a plain loop, a large
+      // membership ran into the rate limit and the rest were never told
+      // where the agent went (HB-0039).
+      const send = this.opts.fetchImpl ?? fetch;
+      const sleep = this.opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+      let sent = 0, failed = 0, waitLeft = FAREWELL_WAIT_MS;
       for (const { id } of ids) {
         if (!/^\d{1,32}$/.test(id)) continue;
-        await (this.opts.fetchImpl ?? fetch)(`https://api.telegram.org/bot${token}/sendMessage`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ chat_id: id, text }),
-          signal: AbortSignal.timeout(5000),
-        }).catch(() => {});
+        let ok = false;
+        for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+          const res = await send(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ chat_id: id, text }),
+            signal: AbortSignal.timeout(5000),
+          }).catch(() => undefined);
+          const body = (await res?.json().catch(() => ({}))) as { ok?: boolean; parameters?: { retry_after?: unknown } } | undefined;
+          ok = body?.ok === true;
+          const wait = res?.status === 429 ? Number(body?.parameters?.retry_after) * 1000 : NaN;
+          if (ok || !(wait >= 0) || wait > waitLeft) break;
+          waitLeft -= wait;
+          await sleep(wait);
+        }
+        if (ok) sent++; else failed++;
       }
+      this.opts.log?.('pool.farewell', { agentId, reason, sent, failed });
     } catch {
       /* cosmetic — never blocks a release */
     }

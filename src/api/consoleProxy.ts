@@ -93,8 +93,11 @@ export function guestHttpPath(method: string, path: string): string | undefined 
   const m = method.toUpperCase();
   const p = path.replace(/\/{2,}/g, '/');
   // '?' and '#' here came from %3F / %23: the real query is not part of `path`.
-  if (/[\\?#\x00-\x20\x7f]/.test(p)) return undefined;
-  if (p.split('/').some((seg) => seg === '..' || seg === '.' || /%2e|%2f|%5c/i.test(seg))) return undefined;
+  // ';' (matrix parameters) and a literal '%' (from %25: a second round of
+  // decoding at the gateway) are refused too: no path a guest's chat uses
+  // has either, and a router could read them otherwise than this check (HB-0055).
+  if (/[\\?#;%\x00-\x20\x7f]/.test(p)) return undefined;
+  if (p.split('/').some((seg) => seg === '..' || seg === '.')) return undefined;
   let read: string;
   try { read = new URL(p, 'http://gateway').pathname; } catch { return undefined; }
   if (read !== p) return undefined;

@@ -61,10 +61,11 @@ export class ArchiveError extends Error {
  * here polled the same bot as the copy (audit #099).
  */
 export async function leaveBotToCopy(channel: ArchiveDeps['channel'], accountId: string, agentId: string, log: (event: string, detail: Record<string, unknown>) => void): Promise<void> {
-  await channel.release(accountId, { reason: 'moved', agentId });
-  if (!channel.pool.owns(accountId)) return;
-  // Released, so it may be removed; left leased (a slot used up) rather than freed when it cannot be.
-  try { await channel.pool.removeFromPool(accountId); }
+  if (!channel.pool.owns(accountId)) { await channel.release(accountId, { reason: 'moved', agentId }); return; }
+  // Taken out while still this agent's, in one statement (a release first freed
+  // it for a lease to take before the remove, HB-0065); left leased (a slot
+  // used up) rather than freed when it cannot be.
+  try { await channel.pool.removeFromPool(accountId, { leasedTo: agentId }); }
   catch (err) { log('bot.retire_failed', { agentId, accountId, error: String(err instanceof Error ? err.message : err).slice(0, 200) }); }
 }
 
@@ -103,9 +104,12 @@ export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<
           throw new ArchiveError("Couldn't confirm its runtime stopped, so its bot was not given up. Try again when its machine answers.");
         }
       }
-      op.step('stopped');
+      // Which way the bot goes is recorded with the stop: a bot left to a
+      // copy cannot be taken back, so a restart part way finishes (HB-0233).
+      const toCopy = !!row && !agent.migratedTo && copyElsewhere(agent);
+      op.step('stopped', toCopy ? { leaveToCopy: true } : undefined);
 
-      if (row && !agent.migratedTo && copyElsewhere(agent)) {
+      if (row && toCopy) {
         log('bot.not_parked', { agentId, why: 'a copy was downloaded', exportedAt: agent.exportedAt });
         await leaveBotToCopy(channel, row.accountId, agentId, log);
       } else if (row && !agent.migratedTo) {
@@ -194,8 +198,12 @@ export async function resumeArchive(deps: ArchiveDeps, opId: string): Promise<vo
   const agent = row.agentId ? deps.store.getAgent(row.agentId) : undefined;
   if (!agent || agent.state === 'DELETED') { op.fail('Interrupted by a restart; the agent is gone.'); return; }
   if (agent.state === 'ARCHIVED') { await finishArchive(deps, op, agent.id); return; }
-  const p = row.params as { wasRunning?: boolean; accountId?: string | null };
-  const released = row.step === 'bot-released' || row.step === 'archived' || (() => {
+  const p = row.params as { wasRunning?: boolean; accountId?: string | null; leaveToCopy?: boolean };
+  // Its bot was being left to a downloaded copy: there is nothing to undo to
+  // (a pool bot gone from the pool left it stopped with a channel row whose
+  // bot was gone, HB-0233), so it is finished; leaving it again is harmless.
+  const toCopy = !!p.leaveToCopy && row.step === 'stopped';
+  const released = toCopy || row.step === 'bot-released' || row.step === 'archived' || (() => {
     if (!p.accountId) return false;
     const entry = deps.channel.pool.list().find((e) => e.username.toLowerCase() === String(p.accountId).toLowerCase());
     return !!entry && entry.leasedTo !== agent.id;
@@ -218,6 +226,7 @@ export async function resumeArchive(deps: ArchiveDeps, opId: string): Promise<vo
         return;
       }
     }
+    if (toCopy && p.accountId && deps.store.getChannelForAgent(agent.id)) await leaveBotToCopy(deps.channel, p.accountId, agent.id, deps.log);
     await finishArchive(deps, op, agent.id);
     return;
   }

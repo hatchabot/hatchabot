@@ -44,8 +44,10 @@ LINK="$URL${CODE:+/#setup=$CODE}"
 
 echo
 echo "  Open Hatchabot:  $LINK"
-[ "$URL" = "$LOCAL" ] || echo "  (on this machine: $LOCAL)"
-[ -z "$CODE" ] || echo "  Setup code: $CODE — the link and the QR code carry it; you need it only to create the first account from another device."
+# Docker Desktop and rootless Docker ask for the code at localhost too (agents
+# reach this machine's loopback there), so the local link carries it as well.
+[ "$URL" = "$LOCAL" ] || echo "  (on this machine: $LOCAL${CODE:+/#setup=$CODE})"
+[ -z "$CODE" ] || echo "  Setup code: $CODE — the links and the QR code carry it; you need it only to create the first account."
 # The QR code: the qrcode package Hatchabot already has, in the terminal.
 NODE="node"; [ -x .node/bin/node ] && NODE=".node/bin/node"
 "$NODE" -e 'require("qrcode").toString(process.argv[1], { type: "terminal", small: true }, (e, s) => { if (!e) process.stdout.write("\n" + s + "\n"); })' "$LINK" 2>/dev/null || true

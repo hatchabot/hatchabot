@@ -103,6 +103,20 @@ describe('computeUsagePeriod', () => {
     expect(den.cost!.low).toBeCloseTo((1_000_400 * 5 + 1_000_000 * 1) / 1e6, 6);
   });
 
+  it('an all-API agent takes the window\'s own price when there is one, not the lifetime rate (HB-0067)', () => {
+    const store = world();
+    store.setAgentTokenRate('den', 0.6 / 1e6, false, iso(0)); // the lifetime blend
+    const den = computeUsagePeriod(store, OWNER, 'hour', NOW, (id) => (id === 'den' ? 0.42 : undefined)).agents[0]!;
+    expect(den.cost).toEqual({ low: 0.42, high: 0.42, partial: false });
+    // No window figure (nothing priced in it): the measured rate, as before.
+    expect(computeUsagePeriod(store, OWNER, 'hour', NOW, () => undefined).agents[0]!.cost!.low).toBeCloseTo(400 * 0.6 / 1e6, 9);
+    // Partly on the subscription: the window figure would price the plan part too.
+    store.setAgentAIProfile('den', 'sub');
+    store.addTokenSample('den', 'sub', iso(5 * MIN), 125_900);
+    const mixed = computeUsagePeriod(store, OWNER, 'hour', NOW, () => 0.42).agents.find((a) => a.name === 'Den')!;
+    expect(mixed.cost!.low).toBeCloseTo(400 * 0.6 / 1e6, 9);
+  });
+
   // 2026-09-30: an unpriced model showed "est. $0.00+"; and billing followed
   // the agent's current source, not the one the tokens were spent on.
   it('an API model with no known price is marked unpriced, not priced at $0', () => {

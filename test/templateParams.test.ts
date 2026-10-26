@@ -8,6 +8,7 @@ import { registerRoutes } from '../src/api/routes.js';
 import { beginOperation } from '../src/orchestrator/operations.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import { MAX_FILE_BYTES } from '../src/orchestrator/snapshots.js';
+import { isBusy } from '../src/orchestrator/busy.js';
 
 /**
  * Sharing Phase 2a over HTTP: declaring setup fields on an agent, and filling
@@ -619,6 +620,29 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     expect(res.json().pushed).toBe(1);
     // style is gone; the undeclared {{region}} the pushed text uses is asked for, as derive does.
     expect(store.getAgent(child.id)!.parameters).toEqual([{ key: 'region', label: 'region', required: true, type: 'text', target: 'soul' }]);
+  });
+
+  it("the child's docs sync after a push holds the child: a save meanwhile is refused (HB-0230)", async () => {
+    const { f, provider, child } = await withChild();
+    provider.execResponses.set('sh', { code: 0, stdout: 'IMPROVED {{style}} playbook v2.\n', stderr: '' });
+    const shell = provider.execShell.bind(provider);
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>((r) => { enter = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    let paused = false;
+    provider.execShell = async (ref: string, script: string, opts?: any) => {
+      if (!paused && script === `cat "/home/node/.openclaw/agents/${child.slug}/agent/AGENTS.md" 2>/dev/null || true`) { paused = true; enter(); await gate; }
+      return shell(ref, script, opts);
+    };
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(res.json().pushed).toBe(1);
+    await entered;
+    const save = await f.inject({ method: 'PUT', url: `/v1/agents/${child.id}/files/AGENTS.md`, headers: H, payload: { content: '# Rules\nThe owner\'s edit.\n' } });
+    expect(save.statusCode).toBe(409);
+    expect(save.json().error).toMatch(/Another operation/);
+    release();
+    for (let i = 0; i < 100 && isBusy(child.id); i++) await new Promise((r) => setTimeout(r, 5));
+    expect(isBusy(child.id)).toBe(false);
   });
 
   it('a push whose second file fails puts the first back, and the child keeps its definition (review, 2026-10-22)', async () => {

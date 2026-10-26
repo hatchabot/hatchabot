@@ -11,8 +11,10 @@
 # one does not come up. A release that failed is remembered and not retried;
 # the channel naming a newer one clears it.
 #
-# The channel it follows is the one chosen last, in ~/.config/hatchabot/channel
-# (`hatchabot upgrade beta`, the installer, --install here); the timer's own
+# The channel it follows is the one chosen last for this install, in its
+# data/channel (`hatchabot upgrade beta`, the installer, --install here; before
+# v2.169.0 one ~/.config/hatchabot/channel for every install of the user's,
+# still read when the install has none of its own: HB-0235); the timer's own
 # argument only when none is (a version there is a pin: the timer waits).
 #
 # For installs that follow a channel unattended — a hosted tenant on stable,
@@ -25,7 +27,7 @@ DIR="$PWD"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/hatchabot"
 UNITS="$HOME/.config/systemd/user"
 NAME=hatchabot-follow-channel
-CHANNEL_FILE="$HOME/.config/hatchabot/channel"
+CHANNEL_FILE="$DIR/data/channel"; USER_CHANNEL_FILE="$HOME/.config/hatchabot/channel"
 
 valid() { case "${1:-}" in stable|beta|latest) return 0 ;; *) return 1 ;; esac; }
 
@@ -80,7 +82,8 @@ valid "$CHANNEL" || { echo "Usage: $0 stable|beta|latest   (or --install <channe
 # `hatchabot upgrade beta` said it switched, while every tick went on
 # following stable (audit #043).
 REMEMBERED=""
-if [ -f "$CHANNEL_FILE" ]; then REMEMBERED="$(tr -d '[:space:]' < "$CHANNEL_FILE")"; fi
+if [ -f "$CHANNEL_FILE" ]; then REMEMBERED="$(tr -d '[:space:]' < "$CHANNEL_FILE")"
+elif [ -f "$USER_CHANNEL_FILE" ]; then REMEMBERED="$(tr -d '[:space:]' < "$USER_CHANNEL_FILE")"; fi
 # Pinned by hand to a version (hatchabot upgrade vX.Y.Z): leave it there.
 case "$REMEMBERED" in v[0-9]*) exit 0 ;; esac
 if valid "$REMEMBERED"; then CHANNEL="$REMEMBERED"; fi
@@ -92,7 +95,9 @@ TARGET="$("$DIR/scripts/release-target.sh" "$CHANNEL" 2>/dev/null)" || exit 0
 [ -n "$TARGET" ] || exit 0
 if [ -f BUNDLE.json ] && [ ! -d .git ]; then CUR="$(sed -nE 's/.*"tag":"([^"]+)".*/\1/p' BUNDLE.json)"
 else CUR="$(git describe --tags --exact-match 2>/dev/null || true)"; fi
-[ "$CUR" = "$TARGET" ] && exit 0
+# A bundle swap that was cut off (.swapping) may have the new BUNDLE.json in
+# already: upgrade.sh repairs it, so it runs (HB-0049).
+[ "$CUR" = "$TARGET" ] && [ ! -f .swapping ] && exit 0
 mkdir -p "$STATE"
 # This install's own records, keyed on its path as the upgrade lock is: one
 # file for every install of the user's let a release that failed on one set

@@ -30,11 +30,24 @@ DIR="${HATCHABOT_DIR:-$HOME/hatchabot}"
 #   latest  the newest tagged release, whatever it is
 #   v2.30.3 exactly that release
 # Set it with HATCHABOT_CHANNEL=beta, or as the first argument. An install
-# remembers its channel, so re-running this upgrades along the same one.
-CHANNEL_FILE="$HOME/.config/hatchabot/channel"
+# remembers its channel, so re-running this upgrades along the same one: in
+# its own data/channel from v2.169.0 (HB-0235; one ~/.config/hatchabot/channel
+# for every install of the user's before, still read when there is no other).
+CHANNEL_FILE="$DIR/data/channel"; USER_CHANNEL_FILE="$HOME/.config/hatchabot/channel"
 CHANNEL="${HATCHABOT_CHANNEL:-${1:-}}"
-if [ -z "$CHANNEL" ] && [ -f "$CHANNEL_FILE" ]; then CHANNEL="$(tr -d '[:space:]' < "$CHANNEL_FILE")"; fi
+if [ -z "$CHANNEL" ] && [ -f "$CHANNEL_FILE" ]; then CHANNEL="$(tr -d '[:space:]' < "$CHANNEL_FILE")"
+elif [ -z "$CHANNEL" ] && [ -f "$USER_CHANNEL_FILE" ]; then CHANNEL="$(tr -d '[:space:]' < "$USER_CHANNEL_FILE")"; fi
 CHANNEL="${CHANNEL:-stable}"
+# remember_channel RELEASE: $CHANNEL for this install, which runs RELEASE. A
+# release from before v2.169.0 reads only the user's file, so it goes there
+# (as upgrade.sh's remember_channel does).
+remember_channel() {
+  local v="${1#v}" a b old=0
+  v="${v%%[-+]*}"; a="${v%%.*}"; v="${v#*.}"; b="${v%%.*}"
+  case "$a.$b" in *[!0-9.]*|.*|*.) ;; *) { [ "$a" -lt 2 ] || { [ "$a" -eq 2 ] && [ "$b" -lt 169 ]; }; } && old=1 ;; esac
+  if [ "$old" = 1 ]; then mkdir -p "$(dirname "$USER_CHANNEL_FILE")"; printf '%s\n' "$CHANNEL" > "$USER_CHANNEL_FILE"; rm -f "$CHANNEL_FILE"
+  else mkdir -p "$DIR/data"; printf '%s\n' "$CHANNEL" > "$CHANNEL_FILE"; fi
+}
 SLUG="${HATCHABOT_SLUG:-hatchabot/hatchabot}"
 REPO="${HATCHABOT_REPO:-https://github.com/$SLUG.git}"
 RAW="https://raw.githubusercontent.com/$SLUG"
@@ -45,6 +58,7 @@ ME="${USER:-$(id -un)}"
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 die() { printf '\n\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+sha256() { if have sha256sum; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 # The setup script asks for a password: give it a terminal even when this
 # script arrived through a pipe.
 [ -t 0 ] || { [ -r /dev/tty ] && exec </dev/tty; } || true
@@ -68,6 +82,40 @@ say "Hatchabot installer — $OS $(uname -m)"
 [ "$(id -u)" != 0 ] || die "Run this as your own user, not root (no sudo): Hatchabot installs as a user service."
 [ "$OS" = Linux ] || [ "$OS" = Darwin ] || die "Linux or macOS only (found $OS). On Windows, use WSL2 with Docker Desktop."
 
+# Docker's and NodeSource's setup run as root, so they are pinned (HB-0035):
+# get.docker.com and NodeSource's setup_22.x serve whatever is current that
+# day. Docker's script is taken at one commit of docker/docker-install and run
+# only when its sha256 matches; NodeSource needs no script at all, only its apt
+# repo and that repo's signing key, checked by its sha256. Either still installs
+# the newest Docker Engine or Node 22 from the vendor's signed packages. To move
+# a pin: fetch the file at the new commit, read it, put its sha256 here.
+DOCKER_INSTALL_COMMIT=ada7a567e59b3935bd601bb21e422da50e80e376
+DOCKER_INSTALL_SHA256=2b102d809152ea157a59f171319f489d971273b2d26dd7e9a6d1d737ce89289d
+NODESOURCE_GPG_SHA256=b42e0321dabdc24e892115da705cf061167eac12a317f23d329862d0aa0a271d
+# fetch_pinned URL SHA256 FILE: FILE holds URL's content, and it is the file this installer was checked with.
+fetch_pinned() {
+  curl -fsSL --retry 3 -o "$3" "$1" || { echo "   could not download $1" >&2; return 1; }
+  [ "$(sha256 "$3")" = "$2" ] || { echo "   $1 is not the file this installer was checked with (its sha256 differs) — not running it." >&2; return 1; }
+}
+# NodeSource's Node 22 apt repo, as its setup script would add it, with only
+# the key checked here trusted for it. Nothing of the caller's environment
+# reaches root (that script ran under `sudo -E`).
+nodesource_repo() {
+  local key arch
+  arch="$(dpkg --print-architecture)"
+  case "$arch" in amd64|arm64) ;; *) echo "   NodeSource has no Node 22 for $arch." >&2; return 1 ;; esac
+  key="$(mktemp)"
+  fetch_pinned https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key "$NODESOURCE_GPG_SHA256" "$key" || { rm -f "$key"; return 1; }
+  sudo install -D -m 644 "$key" /etc/apt/keyrings/nodesource.asc || { rm -f "$key"; return 1; }
+  rm -f "$key"
+  # The repo as NodeSource's own script writes it, in place of any it wrote before.
+  sudo rm -f /etc/apt/sources.list.d/nodesource.list
+  printf 'Types: deb\nURIs: https://deb.nodesource.com/node_22.x\nSuites: nodistro\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/nodesource.asc\n' "$arch" \
+    | sudo tee /etc/apt/sources.list.d/nodesource.sources >/dev/null
+  printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' | sudo tee /etc/apt/preferences.d/nodejs >/dev/null
+  sudo apt-get update
+}
+
 # ---- 1/3 Docker: the one prerequisite -------------------------------------------
 say "1/3 Docker"
 # Docker works for this user only through `sg docker` (just added to the group;
@@ -81,11 +129,15 @@ if ! have docker; then
     else
       die "Install Docker Desktop for Mac (https://docs.docker.com/desktop/setup/install/mac-install/), start it, then re-run."
     fi
-  elif ask "Docker is missing. Install Docker Engine with the official script (get.docker.com)?"; then
+  elif ask "Docker is missing. Install Docker Engine with Docker's official install script?"; then
     # Docker's script has been seen to end non-zero after installing Docker
     # fine; under pipefail that ended this installer with no word (clean VM,
     # 2026-10-06). What counts is whether docker is there afterwards.
-    curl -fsSL https://get.docker.com | sh || have docker || die "Docker's installer failed (see above) — install Docker (https://docs.docker.com/engine/install/), then re-run."
+    get_docker="$(mktemp)"
+    fetch_pinned "https://raw.githubusercontent.com/docker/docker-install/$DOCKER_INSTALL_COMMIT/install.sh" "$DOCKER_INSTALL_SHA256" "$get_docker" \
+      || { rm -f "$get_docker"; die "Docker's install script could not be checked — install Docker (https://docs.docker.com/engine/install/), then re-run."; }
+    LOAD_SCRIPT_COMMIT_SHA="$DOCKER_INSTALL_COMMIT" sh "$get_docker" || have docker || { rm -f "$get_docker"; die "Docker's installer failed (see above) — install Docker (https://docs.docker.com/engine/install/), then re-run."; }
+    rm -f "$get_docker"
     sudo systemctl enable --now docker >/dev/null 2>&1 || true
     sudo usermod -aG docker "$ME" || true
   else die "Install Docker (https://docs.docker.com/engine/install/), then re-run."; fi
@@ -201,7 +253,6 @@ fi
 
 # ---- 2/3 Hatchabot ----------------------------------------------------------------
 say "2/3 Hatchabot $TAG → $DIR"
-sha256() { if have sha256sum; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 # ---- release manifest reader (the same text is in install.sh; test/releaseManifest.test.ts keeps them equal) ----
 # Read with awk, not node or python: the installer has neither when it checks a
 # bundle (the bundle's own Node is not run until the bundle is checked), and
@@ -306,12 +357,20 @@ mf_matches() {
 # ---- end of the release manifest reader ----
 # The prebuilt bundle: download, check its hash, unpack, and run its own
 # self-check (its Node opens a database with its driver) before it goes in.
-# Any failure returns non-zero, and the native install takes over.
+# Returns 1 when there is no bundle to use (the native install takes over),
+# 2 when it could not be downloaded or checked for now (no network, a server
+# error): a blip used to turn into a native install, git, Node and a compiler
+# included, that nobody asked for (HB-0071).
 install_bundle() {
-  local name="hatchabot-$TAG-$PLATFORM.tar.gz" tmp want mrc mf
+  local name="hatchabot-$TAG-$PLATFORM.tar.gz" tmp want mrc mf code rc=0
   tmp="$(mktemp -d)"
   echo "   downloading ${name}…"
-  curl -fsSL --retry 3 -o "$tmp/$name" "$BUNDLES/$TAG/$name" || { echo "   (no bundle for $TAG on $PLATFORM)"; rm -rf "$tmp"; return 1; }
+  code="$(curl -sSL --retry 3 -o "$tmp/$name" -w '%{http_code}' "$BUNDLES/$TAG/$name" 2>/dev/null)" || rc=$?
+  case "$rc:$code" in
+    0:200|0:000) ;;   # 000: a file:// test bed
+    0:404|37:*) echo "   (no bundle for $TAG on $PLATFORM)"; rm -rf "$tmp"; return 1 ;;
+    *) echo "   (could not download ${name}: curl ${rc}, HTTP ${code:-none})"; rm -rf "$tmp"; return 2 ;;
+  esac
   # What the release vouches for (#38): its release-manifest.json names the
   # bundle's size and sha256, and a manifest that is there but unreadable, or
   # for another release, is refused — never passed over for the weaker check.
@@ -329,7 +388,7 @@ install_bundle() {
     want="$(curl -fsSL --retry 3 "$BUNDLES/$TAG/$name.sha256" 2>/dev/null | cut -d' ' -f1)"
     [ -n "$want" ] && [ "$want" = "$(sha256 "$tmp/$name")" ] || { echo "   (the bundle's checksum does not match — not using it)"; rm -rf "$tmp"; return 1; }
   else
-    echo "   (could not fetch the release's manifest to check the bundle — not using it)"; rm -rf "$tmp"; return 1
+    echo "   (could not fetch the release's manifest to check the bundle — not using it)"; rm -rf "$tmp"; return 2
   fi
   tar -xzf "$tmp/$name" -C "$tmp" || { rm -rf "$tmp"; return 1; }
   ( cd "$tmp/hatchabot" && ./.node/bin/node -e 'new (require("better-sqlite3"))(":memory:").exec("SELECT 1")' ) >/dev/null 2>&1 \
@@ -353,7 +412,7 @@ install_native() {
   if ! node_ok; then
     if [ "$OS" = Darwin ] && have brew; then ask "Node 22+ is missing. Install it with Homebrew?" && brew install node@22 && brew link --overwrite node@22 || die "Install Node 22+ (https://nodejs.org), then re-run."
     elif have apt-get && ask "Node 22+ is missing. Install Node 22 from NodeSource (apt)?"; then
-      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs
+      { nodesource_repo && sudo apt-get install -y nodejs; } || die "Node 22 could not be installed from NodeSource (see above) — install Node 22+ (https://nodejs.org), then re-run."
     else die "Install Node 22+ (https://nodejs.org or https://github.com/Schniz/fnm), then re-run."; fi
     node_ok || die "Node is still not 22+ on PATH. Open a new shell and re-run."
   fi
@@ -394,7 +453,7 @@ case "$MODE" in
   bundle-existing)
     if set_up; then
       # A bundle install already here: an upgrade, with its own rollback.
-      mkdir -p "$(dirname "$CHANNEL_FILE")"; printf '%s\n' "$CHANNEL" > "$CHANNEL_FILE"
+      remember_channel "$TAG"
       cd "$DIR"
       exec ./scripts/with-docker.sh ./scripts/upgrade.sh "$CHANNEL"
     fi
@@ -409,7 +468,7 @@ case "$MODE" in
     # 2026-10-09). A clone never set up, or whose setup did not finish, is a
     # first install (its .env is kept).
     if set_up; then
-      mkdir -p "$(dirname "$CHANNEL_FILE")"; printf '%s\n' "$CHANNEL" > "$CHANNEL_FILE"
+      remember_channel "$TAG"
       cd "$DIR"
       [ -x scripts/with-docker.sh ] && exec ./scripts/with-docker.sh ./scripts/upgrade.sh "$CHANNEL"
       exec ./scripts/upgrade.sh "$CHANNEL"
@@ -421,16 +480,21 @@ case "$MODE" in
     # Not `install_bundle || { …; install_native; }`: bash turns errexit off for
     # everything run inside a || list, so a failed checkout or apt install in
     # the fallback was ignored and setup went on with the wrong tree (audit, 2026-10-23).
-    if ! install_bundle; then MODE=native; echo "   using the native install instead"; install_native; fi ;;
+    brc=0; install_bundle || brc=$?
+    case "$brc" in
+      0) ;;
+      2) die "Could not download release $TAG's bundle, or what checks it, just now (no network?). Nothing was installed: re-run when the connection is back. (HATCHABOT_NATIVE=1 installs from source instead.)" ;;
+      *) MODE=native; echo "   using the native install instead"; install_native ;;
+    esac ;;
   native) install_native ;;
 esac
 echo "   channel $CHANNEL → release $TAG ($( [ -f "$DIR/BUNDLE.json" ] && echo bundle || echo native ))"
 
-mkdir -p "$(dirname "$CHANNEL_FILE")"
-# Remember it OUTSIDE the install: a file inside would be an untracked change,
-# and the next upgrade's "local changes?" check would refuse to move. A pinned
-# version is remembered too — re-running stays pinned until told otherwise.
-printf '%s\n' "$CHANNEL" > "$CHANNEL_FILE"
+# Remembered in data/, which git ignores: anywhere else in the install it
+# would be an untracked change, and the next upgrade's "local changes?" check
+# would refuse to move. A pinned version is remembered too — re-running stays
+# pinned until told otherwise.
+remember_channel "$TAG"
 
 # ---- 3/3 set up ---------------------------------------------------------------------
 say "3/3 Setting up"

@@ -1105,6 +1105,16 @@ const SCENARIOS = String.raw`(() => {
           .catch(() => { throw new Error('the Usage tab showed: ' + JSON.stringify((document.getElementById('v2UsageBody') || { textContent: '(no tab body)' }).textContent.slice(0, 160)) + ' state=' + JSON.stringify(agents.find((x) => x.id === 'a1')?.state)); });
       } finally { v2Close(); delete window.__override['/v1/agents/a1/usage']; }
     },
+    billingLineIds: async () => {
+      // The usage page's price line finds a model by its own id: a provider prefix or a dated id found none (HB-0067).
+      const saved = profiles, a = agents.find((x) => x.id === 'a1'), was = a.aiProfileId;
+      try {
+        profiles = [...profiles, { id: 'pk-spare', name: 'Spare key', vendor: 'anthropic', kind: 'api_key' }];
+        a.aiProfileId = 'pk-spare';
+        const line = billingLine('a1', ['anthropic/claude-sonnet-5-20260115']);
+        ok('a prefixed, dated id still finds its price: ' + line, line.includes('anthropic/claude-sonnet-5-20260115 at $' + MODEL_PRICES['claude-sonnet-5'][0] + '/$'));
+      } finally { profiles = saved; a.aiProfileId = was; }
+    },
     agentUsageReadFails: async () => {
       // A read that fails says so; it used to read "No sessions yet — nothing used" (review, 2026-09-29).
       window.__answer = { 'GET /v1/agents/a1/usage': [{ status: 502, body: { error: "Couldn't read Homework Helper's usage: usage read exited 3: database is locked" } }] };
@@ -1575,6 +1585,16 @@ const SCENARIOS = String.raw`(() => {
       const r = v2IconDlg.getBoundingClientRect();
       if (r.left > 3 && r.top > 3) { outside(v2IconDlg); ok('an ordinary dialog still closes on an outside click', !v2IconDlg.open); }
       if (v2IconDlg.open) v2IconDlg.close();
+    },
+    plainHttpSignIn: async () => {
+      // Signing in over plain http from another device says it crosses the network in the clear (HB-0109).
+      ok('a LAN address over http is warned', plainHttpFromAfar({ protocol: 'http:', hostname: '192.168.1.20' }));
+      ok('the https address is not', !plainHttpFromAfar({ protocol: 'https:', hostname: 'hatchabot.tail0000.ts.net' }));
+      ok('nor this machine itself', !plainHttpFromAfar({ protocol: 'http:', hostname: 'localhost' }) && !plainHttpFromAfar({ protocol: 'http:', hostname: '127.0.0.1' }));
+      showLogin();
+      await until(() => loginDlg.open);
+      ok('on this machine the sign-in shows no warning', document.getElementById('loginPlainHttp').hidden);
+      loginDlg.close();
     },
     memberPane: async () => {
       // A member of a Discord-only agent is sent to Discord; an asleep agent still offers its link (night review #20).
@@ -2128,6 +2148,11 @@ const SCENARIOS = String.raw`(() => {
         await openGateway('a1', a.slug);
         await until(() => document.getElementById('consoleDlg').open);
         ok('not rebuilt: the token rides in the fragment as before', document.getElementById('consoleFrame').getAttribute('src').endsWith('#token=made-up-console-token'));
+        // A new tab keeps its address in the browser's history: never the token's (HB-0023).
+        const opened = []; const realOpen = window.open;
+        window.open = (u) => { opened.push(String(u)); return null; };
+        try { document.getElementById('consoleNewTab').click(); } finally { window.open = realOpen; }
+        ok('New tab carries no token: ' + opened[0], opened.length === 1 && !opened[0].includes('token') && opened[0].includes('#console='));
       } finally {
         if (document.getElementById('consoleDlg').open) closeConsole();
         delete window.__override['/v1/agents/a1/console/access']; delete window.__override['/v1/agents/a1/gateway'];
@@ -2352,6 +2377,43 @@ const SCENARIOS = String.raw`(() => {
         ok('the scan leaves MEMORY.md out, as the send does', calls('GET', /\/v1\/agents\/a1\/export\/scan$/).at(-1).url.includes('excludeMemory=1'));
         ok('the dialog no longer promises safe contents', !/safe contents/i.test(document.getElementById('sendAgentDlg').textContent));
       } finally {
+        delete window.__override['/v1/agents/a1/export/scan'];
+        if (sendAgentDlg.open) sendAgentDlg.close();
+      }
+    },
+    // HB-0117: a configured copy whose AGENTS.md the agent changed itself travels without that change, and both ways of sharing say so.
+    shareEdited: async () => {
+      const prev = window.fetch;
+      try {
+        const brief = { emails: 0, phones: 0, tokens: 0, more: 0, hits: [], edited: ['AGENTS.md'] };
+        window.fetch = async (input, init) => {
+          const url = String(typeof input === 'string' ? input : input.url);
+          if (!/\/v1\/agents\/a1\/export(\?|$)/.test(url)) return prev(input, init);
+          return new Response(new Blob(['x']), { status: 200, headers: {
+            'content-type': 'application/octet-stream',
+            'content-disposition': 'attachment; filename="homework-helper.template.hatchabot"',
+            'x-hatchabot-personal': encodeURIComponent(JSON.stringify(brief)) } });
+        };
+        window.__confirmAnswer = false;
+        const n0 = window.__confirms.length;
+        await saveFromServer('/v1/agents/a1/export?excludeMemory=1', 'agent-template.json', personalCheck);
+        const said = window.__confirms.slice(n0);
+        ok('the download asks once, naming the edited file: ' + said[0], said.length === 1 && said[0].includes('Its AGENTS.md was changed outside the Files editor') && said[0].includes('without those changes'));
+        ok('and mentions no people', !said[0].includes('This copy mentions'));
+        ok('Cancel: not saved', document.getElementById('toast').textContent.includes('Not saved'));
+        window.__override['/v1/agents/a1/export/scan'] = brief;
+        openSendAgent('a1', 'Homework Helper');
+        const scan = document.getElementById('sendScan');
+        await until(() => scan.textContent.includes('changed outside the Files editor'));
+        ok('the send dialog says it too: ' + scan.textContent.replace(/\s+/g, ' ').slice(0, 160), scan.textContent.includes('The copy mentions no email addresses') && scan.textContent.includes('open AGENTS.md in its Files and save it there'));
+        // A copy with no edits says nothing of them.
+        window.__override['/v1/agents/a1/export/scan'] = { ...brief, edited: [] };
+        sendAgentDlg.close();
+        openSendAgent('a1', 'Homework Helper');
+        await until(() => scan.textContent.includes('The copy mentions no email addresses'));
+        ok('no edits: no note', !scan.textContent.includes('Files editor'));
+      } finally {
+        window.fetch = prev; window.__confirmAnswer = true;
         delete window.__override['/v1/agents/a1/export/scan'];
         if (sendAgentDlg.open) sendAgentDlg.close();
       }
@@ -3014,7 +3076,12 @@ const SCENARIOS = String.raw`(() => {
         openApplyModel('p1', 'claude-haiku-4-5', [], onProfile, 'Claude token');
         await until(() => applyModelDlg.open);
         eq('one ticked by default (the follower, not the pinned one)', document.getElementById('applyModelBtn').textContent, 'Save, and switch 1');
-        applyModelDlg.close();
+        // The server held it back: its runtime is too old for the model on a plan (HB-0232).
+        window.__answer = { 'POST /v1/ai-profiles/p1/apply-default-model': [{ body: { applied: 0, held: 2, live: 0, staged: 0, notSwitched: [{ id: 'a1', name: 'Homework Helper', reason: 'too old' }] } }] };
+        document.getElementById('applyModelBtn').click();
+        await until(() => document.getElementById('toast').textContent.includes('not switched'));
+        ok('the toast names the agent that was not switched and why: ' + document.getElementById('toast').textContent,
+          document.getElementById('toast').textContent.includes('not switched: Homework Helper (its runtime is too old for claude-haiku-4-5'));
       } finally { if (applyModelDlg.open) applyModelDlg.close(); }
     },
   });
@@ -3742,6 +3809,85 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/agents/a1/app'];
         if (window.__answer) delete window.__answer['POST /v1/agents/a1/app/update'];
         if (typeof v2AgentId !== 'undefined' && v2AgentId) v2Close();
+      }
+    },
+    // Audit 2026-10-23, B20: the re-read after an action fails: the row says so, with a way to read again,
+    // instead of keeping a pressed, disabled Updating button.
+    appRowReadFails: async () => {
+      const SHA = 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0';
+      const APP = { app: 'demoapp', name: 'Demo App', source: '/home/tester/demoapp', ref: 'HEAD', sha: SHA, previousSha: null,
+        installedAt: new Date(Date.now() - 3600e3).toISOString(), testOk: true, tasks: ['demoapp-tick'] };
+      try {
+        window.__override['/v1/agents/a1/app'] = { app: APP, pending: null, canChange: true };
+        v2AppCache = null;
+        openV2Agent('a1', 'overview');
+        await until(() => document.getElementById('v2AppUpdateBtn'));
+        window.__answer = window.__answer || {};
+        window.__answer['POST /v1/agents/a1/app/update'] = [{ status: 200, body: { unchanged: true, app: APP } }];
+        window.__answer['GET /v1/agents/a1/app'] = [{ status: 500, body: { error: 'The machine is restarting.' } }];
+        document.getElementById('v2AppUpdateBtn').click();
+        await until(() => byText('#v2AppRow', "Couldn't read its app"));
+        ok('it says why: ' + document.getElementById('v2AppRow').textContent.replace(/\s+/g, ' ').trim(), document.getElementById('v2AppRow').textContent.includes('The machine is restarting.'));
+        ok('no disabled button is left', ![...document.querySelectorAll('#v2AppRow button')].some((b) => b.disabled));
+        byText('#v2AppRow button', 'Read again').click();
+        await until(() => document.getElementById('v2AppUpdateBtn') && !document.getElementById('v2AppUpdateBtn').disabled);
+        ok('Read again shows the row', byText('#v2AppRow', 'Demo App'));
+        v2Close();
+      } finally {
+        delete window.__override['/v1/agents/a1/app'];
+        if (window.__answer) { delete window.__answer['POST /v1/agents/a1/app/update']; delete window.__answer['GET /v1/agents/a1/app']; }
+        if (typeof v2AgentId !== 'undefined' && v2AgentId) v2Close();
+      }
+    },
+    // Audit 2026-10-23, B20: the attach picker is emptied before the accounts are read, so a failed
+    // read cannot leave the previous agent's accounts selectable.
+    attachPickerNotStale: async () => {
+      const was = editAgentId;
+      try {
+        const pick = document.getElementById('connAttachPick');
+        pick.innerHTML = '<option value="old">someone@example.org</option>';
+        document.getElementById('connAttachBtn').disabled = false;
+        editAgentId = 'a1';
+        window.__answer = window.__answer || {};
+        window.__answer['GET /v1/connections'] = [{ status: 500, body: { error: 'Something failed.' } }];
+        await renderConnections();
+        await until(() => pick.textContent.includes('could not read your accounts'));
+        ok('the old list is gone', !pick.textContent.includes('someone@example.org') && pick.value === '');
+        ok('Attach is off', document.getElementById('connAttachBtn').disabled);
+      } finally {
+        editAgentId = was;
+        if (window.__answer) delete window.__answer['GET /v1/connections'];
+      }
+    },
+    // Audit 2026-10-23, B20: with the phone keyboard up, a dialog fits the part of the screen above it.
+    keyboardFitsDialogs: async () => {
+      try {
+        openSendAgent('a1', 'Homework Helper');
+        const fake = { height: 300, offsetTop: 40, scale: 1 };
+        fitVisualViewport(fake, true);
+        ok('the page knows the keyboard is up', document.documentElement.classList.contains('kbd'));
+        const r = sendAgentDlg.getBoundingClientRect();
+        ok('a panel fits above it: top ' + Math.round(r.top) + ', bottom ' + Math.round(r.bottom), Math.round(r.top) === 40 && r.bottom <= 340 + 1);
+        // A plain dialog (the console's kind) sits at the top of what is visible, and scrolls when taller.
+        const plain = document.createElement('dialog');
+        plain.innerHTML = '<div style="height:900px">Tall</div>';
+        document.body.append(plain);
+        plain.showModal();
+        const p = plain.getBoundingClientRect();
+        plain.close(); plain.remove();
+        ok('a plain dialog fits above it: top ' + Math.round(p.top) + ', bottom ' + Math.round(p.bottom), Math.round(p.top) === 48 && p.bottom <= 340 + 1);
+        // Zoomed in is not the keyboard.
+        fitVisualViewport({ ...fake, scale: 2 });
+        ok('zoomed in: no keyboard', !document.documentElement.classList.contains('kbd'));
+        fitVisualViewport();
+        ok('keyboard down: as before', !document.documentElement.classList.contains('kbd'));
+        // Touch screens get controls of at least 24 px (a mouse keeps the compact look).
+        const rules = [...document.styleSheets].flatMap((sh) => [...sh.cssRules]).filter((x) => x.conditionText && x.conditionText.includes('pointer: coarse'));
+        const text = rules.map((x) => x.cssText).join(' ');
+        ok('a touch rule sizes the small controls: ' + text.slice(0, 120), ['.v2gtools button', '.ordbtn', '.v2planx', '.ctabx'].every((sel) => text.includes(sel)) && text.includes('min-height: 24px'));
+      } finally {
+        fitVisualViewport();
+        if (sendAgentDlg.open) sendAgentDlg.close();
       }
     },
     appFromRepo: async () => {

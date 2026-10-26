@@ -158,6 +158,23 @@ describe('over the API', () => {
     expect(b.provision.mock.calls.map((c) => c[0].agentId)).toEqual(['old']);
   });
 
+  it('an idle agent waiting for a required rebuild is not put to sleep before the sweep rebuilds it, unless rebuilds are manual (HB-0034)', async () => {
+    const b = await box();
+    b.agent('sleepy-old'); b.agent('sleepy-fine');
+    b.provider.infoOverride.set('docker://sleepy-old', { onAgentNetwork: false });
+    b.provider.infoOverride.set('docker://sleepy-fine', { onAgentNetwork: true });
+    b.provider.execShell = async () => ({ code: 0, stdout: '{}', stderr: '' }); // its conversations: none, so idle
+    process.env.HATCHABOT_HIBERNATE_AFTER = '5m';
+    try {
+      const blocker = async (id: string) => (await b.f.inject({ method: 'GET', url: `/v1/agents/${id}/hibernate`, headers: H })).json().blocker;
+      expect(await blocker('sleepy-old')).toBe('a required rebuild comes first');
+      // Past the rebuild check (the stub has no task list to read next).
+      expect(await blocker('sleepy-fine')).toBe('its scheduled tasks could not be read');
+      process.env.HATCHABOT_REBUILD_POLICY = 'manual';
+      expect(await blocker('sleepy-old')).toBe('its scheduled tasks could not be read'); // nothing would rebuild it: it may sleep
+    } finally { delete process.env.HATCHABOT_HIBERNATE_AFTER; }
+  });
+
   it('the sweep leaves an agent whose conversations could not be read (#157)', async () => {
     const b = await box();
     b.agent('unread');

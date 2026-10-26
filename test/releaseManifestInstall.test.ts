@@ -200,6 +200,46 @@ describe('install.sh checks the bundle against the release manifest (#38)', () =
     expect(r.stdout).toContain("could not fetch the release's manifest to check the bundle");
     expect(read(w.log)).not.toContain(`${NAME}.sha256`);
     expect(existsSync(join(w.dir, 'BUNDLE.json'))).toBe(false);
+    // A blip, not a refusal: the installer stops, it does not go native (HB-0071).
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('Nothing was installed: re-run when the connection is back');
+    expect(read(w.log)).not.toContain('git clone');
+  });
+
+  it('a bundle download that fails (the network, not a 404) stops the installer instead of a native install (HB-0071)', () => {
+    const w = installWorld();
+    publish(w, TAG, 'linux-x64');
+    writeFileSync(join(w.releases, TAG, `${NAME}.down`), '');
+    const r = w.run();
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).toContain(`could not download ${NAME}`);
+    expect(r.stderr).toContain(`Could not download release ${TAG}'s bundle`);
+    expect(r.stdout).not.toContain('using the native install instead');
+    expect(read(w.log)).not.toContain('git clone');
+    expect(existsSync(join(w.dir, 'BUNDLE.json'))).toBe(false);
+  });
+
+  it('the channel is remembered in the install\'s own data/channel; for a release from before v2.169.0, in the user\'s file it reads (HB-0235)', () => {
+    const userFile = (w: { home: string }) => join(w.home, '.config', 'hatchabot', 'channel');
+    const now = installWorld();
+    publish(now, 'v2.169.0', 'linux-x64');
+    const r = now.run('v2.169.0');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(read(join(now.dir, 'data', 'channel'))).toBe('v2.169.0\n');
+    expect(existsSync(userFile(now))).toBe(false);
+    const before = installWorld();
+    publish(before, TAG, 'linux-x64');
+    expect(before.run().status).toBe(0);
+    expect(read(userFile(before))).toBe(`${TAG}\n`);
+    expect(existsSync(join(before.dir, 'data', 'channel'))).toBe(false);
+  });
+
+  it('no bundle published for the release (a 404): the native install, as before', () => {
+    const w = installWorld();
+    const r = w.run('v2.0.7');
+    expect(r.stdout).toContain('(no bundle for v2.0.7 on linux-x64)');
+    expect(r.stdout).toContain('using the native install instead');
+    expect(read(w.log)).toContain('git clone');
   });
 
   it('a release from v2.159.0 on with no manifest is refused — its .sha256 is not trusted instead (B071)', () => {

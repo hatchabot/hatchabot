@@ -333,6 +333,33 @@ describe('an export says what it cannot carry (workflow audit, 2026-10-10)', () 
     expect(store.getAgentSeed(agent.id)['SOUL.md']).toBe('A brisk advisor.');
     expect(agent.persona).toBe('a brisk one');
   });
+
+  it('a configured copy whose AGENTS.md was changed outside the Files editor says so: the copy carries the layer without it (HB-0117)', async () => {
+    const { store, provider } = await world();
+    store.setAgentParameters('a1', [{ key: 'style', label: 'Style', required: true, type: 'choice', options: ['calm', 'brisk'], target: 'soul' }]);
+    store.setAgentParamState('a1', { style: 'calm' }, { soul: 'A {{style}} advisor.', agents: 'Answer in a {{style}} voice.\n' });
+    const live: Record<string, string> = {
+      'SOUL.md': 'A calm advisor.',
+      // What the layer renders, plus what Hatchabot writes for this machine and some spacing: not an edit.
+      'AGENTS.md': 'Answer in a calm voice.  \n\n\n## Memory budget\n- 4g\n\n## Scheduled results\n- web chat\n',
+    };
+    const shell = provider.execShell.bind(provider);
+    provider.execShell = async (ref: string, script: string, opts?: any) => {
+      const name = /\/agent\/([A-Z]+\.md)/.exec(script)?.[1];
+      if (script.startsWith('head -c') && name) return { code: 0, stdout: live[name] ?? '', stderr: '' };
+      return shell(ref, script, opts);
+    };
+    expect((await exportTemplate({ store, provider }, 'a1', { includeMemory: false })).edited).toEqual([]);
+    // The agent added a rule to its own AGENTS.md in its console.
+    live['AGENTS.md'] = 'Answer in a calm voice.\nNever book before 9am.\n\n## Memory budget\n- 4g\n';
+    const out = await exportTemplate({ store, provider }, 'a1', { includeMemory: false });
+    expect(out.edited).toEqual(['AGENTS.md']);
+    // Still the layer, placeholders and all (#164).
+    expect(parseTemplate(out.data).files['AGENTS.md']).toBe('Answer in a {{style}} voice.\n');
+    // An agent with no setup layer exports its live files: nothing to say.
+    store.setAgentParameters('a1', null);
+    expect((await exportTemplate({ store, provider }, 'a1', { includeMemory: false })).edited).toEqual([]);
+  });
 });
 
 describe('setup-field answers and declarations (workflow audit, 2026-10-10)', () => {

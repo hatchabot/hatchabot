@@ -16,6 +16,7 @@ prebuilt bundle on supported machines.
 | Apple-silicon Mac | Downloads the bundle; offers Docker Desktop through Homebrew if Docker is missing |
 | Anything else: Alpine (musl), older glibc, 32-bit, Intel Mac | The native install: git, Node 22 and build tools, then a clone at the release |
 | A release with no bundle, a bundle that is not the one the release's manifest names (or a manifest it cannot read), a checksum mismatch, or a bundle that fails its self-check | Falls back to the native install automatically, and says why |
+| The bundle, or the manifest that checks it, cannot be downloaded just now (no network, a server error) | Stops, having installed nothing: re-run when the connection is back |
 
 `HATCHABOT_NATIVE=1` forces the native install. A clone that is already
 installed (`~/hatchabot/.git`) keeps upgrading as a clone; a bundle install

@@ -65,7 +65,10 @@ and the three clean installs (their own throwaway VMs) — and `run-due` runs
 them alongside the others, each test's output in its own log file.
 
 Not automated (check by hand before a release that touches them): Telegram
-end to end (only a person can message a bot), Google connections
+end to end (only a person can message a bot), including a pool bot handed
+to a new agent (send a message to a free pool bot, make a test agent that
+takes it, and see that the agent never gets that message; the
+`pool.updates_dropped` log line says the lease cleared it), Google connections
 (`node scripts/connection-health.mjs` reads yours), a runner going to sleep
 mid-move, an install on a Mac.
 

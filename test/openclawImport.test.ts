@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync, chmodSync, symlinkSync, lstatSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
@@ -131,6 +131,24 @@ describe('disableOpenclawBot', () => {
     expect(JSON.parse(readFileSync(`${cfg}.agentclaw-bak`, 'utf8')).channels.telegram.accounts.a1bot.enabled).toBe(true);
     // second call is a no-op
     expect(disableOpenclawBot('a1bot', cfg)).toEqual({ changed: false });
+  });
+
+  it('replaces the file whole by a rename, keeping its mode and a symlink, with no temp file left (HB-0080)', () => {
+    const dir = join(root, 'atomic');
+    mkdirSync(dir, { recursive: true });
+    const real = join(dir, 'real.json');
+    writeConfig(real);
+    chmodSync(real, 0o600);
+    const link = join(dir, 'openclaw.json');
+    symlinkSync(real, link);
+    const inode = statSync(real).ino;
+    expect(disableOpenclawBot('a1bot', link)).toEqual({ changed: true });
+    // A new file renamed into place, not the old one rewritten where it stands.
+    expect(statSync(real).ino).not.toBe(inode);
+    expect(statSync(real).mode & 0o777).toBe(0o600);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(JSON.parse(readFileSync(real, 'utf8')).channels.telegram.accounts.a1bot.enabled).toBe(false);
+    expect(readdirSync(dir).filter((f) => f.endsWith('.tmp'))).toEqual([]);
   });
 
   it('throws for an unknown account', () => {

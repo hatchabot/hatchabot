@@ -103,16 +103,24 @@ if ! L exec "$VM" -- sh -c 'timeout 8 ping -c1 -W5 1.1.1.1 >/dev/null 2>&1'; the
 fi
 
 # ---- 1. host prep (what the provisioner does to a new host, once) ----------------
-root >"$OUT/hostprep.log" 2>&1 <<'EOF'
+# Docker's and NodeSource's setup as install.sh pins them (HB-0035): the same
+# commit and checksums, handed to the VM ahead of the script.
+PINS="$(grep -E '^(DOCKER_INSTALL_COMMIT|DOCKER_INSTALL_SHA256|NODESOURCE_GPG_SHA256)=[0-9a-f]+$' "$REPO/install.sh")"
+[ "$(printf '%s\n' "$PINS" | wc -l)" = 3 ] || { echo "install.sh's pins for Docker and NodeSource are not where this script looks."; exit 2; }
+{ printf '%s\n' "$PINS"; cat <<'EOF'
 set -e; export DEBIAN_FRONTEND=noninteractive
+pinned() { curl -fsSL --retry 3 -o "$3" "$1" && echo "$2  $3" | sha256sum -c - >/dev/null || { echo "$1 is not the file install.sh pins"; exit 1; }; }
 # Agents on one daemon are kept apart on the network (enable_icc=false), which needs br_netfilter — root's job, a rootless daemon cannot load it.
 modprobe br_netfilter && echo br_netfilter > /etc/modules-load.d/br_netfilter.conf
 [ -f /var/lib/hb-shared-prepped ] && { echo "already prepped"; exit 0; }
-command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+command -v docker >/dev/null || { pinned "https://raw.githubusercontent.com/docker/docker-install/$DOCKER_INSTALL_COMMIT/install.sh" "$DOCKER_INSTALL_SHA256" /root/get-docker.sh; LOAD_SCRIPT_COMMIT_SHA="$DOCKER_INSTALL_COMMIT" sh /root/get-docker.sh; }
 apt-get -qq update
 apt-get -qq install -y uidmap slirp4netns dbus-user-session nftables git build-essential python3 curl expect
 command -v node >/dev/null && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ] \
-  || { curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null; apt-get -qq install -y nodejs; }
+  || { pinned https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key "$NODESOURCE_GPG_SHA256" /tmp/nodesource.asc
+       install -D -m 644 /tmp/nodesource.asc /etc/apt/keyrings/nodesource.asc
+       printf 'Types: deb\nURIs: https://deb.nodesource.com/node_22.x\nSuites: nodistro\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/nodesource.asc\n' "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/nodesource.sources
+       apt-get -qq update; apt-get -qq install -y nodejs; }
 # Rootless Docker's --memory/--pids-limit need the user slice to own its cgroup controllers.
 mkdir -p /etc/systemd/system/user@.service.d
 printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > /etc/systemd/system/user@.service.d/delegate.conf
@@ -122,6 +130,7 @@ nft list table inet hb >/dev/null 2>&1 || { nft add table inet hb; nft add chain
 touch /var/lib/hb-shared-prepped
 echo "prepped: docker $(docker --version | awk '{print $3}') node $(node --version)"
 EOF
+} | root >"$OUT/hostprep.log" 2>&1
 grep -q "prepped" "$OUT/hostprep.log" && ok "host prepared: $(grep -o 'prepped.*' "$OUT/hostprep.log" | tail -1)" || { bad "host prep — $(tail -3 "$OUT/hostprep.log" | tr '\n' ' ')"; exit 1; }
 
 # ---- 2. tenants -----------------------------------------------------------------

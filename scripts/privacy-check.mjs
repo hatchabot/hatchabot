@@ -53,7 +53,7 @@ import { homedir, hostname, networkInterfaces, tmpdir, userInfo } from 'node:os'
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { IDENTITY_FILE, SECRET_NAME, allowedIdentities, buildFingerprints, publishedIdentities, textInside, withoutAllowedLines, withoutOwnTrailers } from './privacy-ci.mjs';
+import { IDENTITY_FILE, SECRET_NAME, allowedIdentities, buildFingerprints, decodedViews, publishedIdentities, textInside, withoutAllowedLines, withoutOwnTrailers } from './privacy-ci.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -63,7 +63,7 @@ const has = (name) => args.includes(name);
 
 export const CLEAN = 0, FOUND = 1, USAGE = 2, INCOMPLETE = 3;
 /** Never read, in any mode: said with every result, so "clean" is never unrestricted. */
-export const NOT_COVERED = 'pictures and compressed data inside binary files (no OCR, no unpacking)';
+export const NOT_COVERED = 'pictures and compressed data inside binary files (no OCR, no unpacking); encodings other than percent, HTML and base64 (runs of 8 characters or more), or one inside another';
 
 // ---- what is private --------------------------------------------------------
 /** "KEY=value" lines of an env file. */
@@ -185,9 +185,14 @@ const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // across lines and only the publisher's gate saw them (2026-10-22); its rule
 // is the same, a value split across one line break.
 const GAP = '(?:[^\\S\\n]+|[^\\S\\n]*\\r?\\n[^A-Za-z0-9\\n]*)';
+// Every apostrophe as the plain one, in values and in text alike: a name
+// written with a typographic one (O’Neil) passed as not the value (HB-0070).
+// One character for one, so a hit's line is where it was.
+const flat = (s) => s.replace(/[\u2018\u2019\u02bc\u2032\u00b4]/g, "'");
 /** One matcher per value: names as written, the rest in any case; whole words. */
 function matchers(values) {
-  return [...values].map(([value, meta]) => {
+  return [...values].map(([raw, meta]) => {
+    const value = flat(raw);
     const named = ['agent name', 'person name', 'bot'].includes(meta.cat) && /[A-Z]/.test(value);
     const caseless = !meta.secret && !named;
     const edge = meta.secret ? '' : '(?<![A-Za-z0-9])';
@@ -195,24 +200,30 @@ function matchers(values) {
     const body = meta.secret ? esc(value) : value.split(/\s+/).map(esc).join(GAP);
     // `look` is the quick look before the pattern: the first word, as a gap may come after it.
     const look = (meta.secret ? value : value.split(/\s+/)[0]).toLowerCase();
-    return { value, ...meta, low: value.toLowerCase(), look, re: new RegExp(edge + body + tail, caseless ? 'i' : '') };
+    return { value: raw, ...meta, low: value.toLowerCase(), look, re: new RegExp(edge + body + tail, caseless ? 'i' : '') };
   });
 }
 export const mask = (value) => `${value.slice(0, 2)}…(${value.length})`;
-/** Hits in one text: { where, line, cat, shown }. */
+/**
+ * Hits in one text: { where, line, cat, shown }, one per value. A value not
+ * in the text as it is may be in a line of it decoded (percent, HTML, base64:
+ * decodedViews), and is then marked `how`.
+ */
 export function scan(text, where, ms) {
+  text = flat(text);
   const low = text.toLowerCase();
   const out = [];
+  let views;
   for (const m of ms) {
-    if (!low.includes(m.look)) continue;
-    const r = m.re.exec(text);
-    if (!r) continue;
-    const line = text.slice(0, r.index).split('\n').length;
-    out.push({ where, line, cat: m.cat, shown: mask(m.value) });
+    const r = low.includes(m.look) ? m.re.exec(text) : null;
+    if (r) { out.push({ where, line: text.slice(0, r.index).split('\n').length, cat: m.cat, shown: mask(m.value) }); continue; }
+    views ??= text.split('\n').flatMap((l, i) => decodedViews(l).map((v) => ({ ...v, text: flat(v.text), low: flat(v.text).toLowerCase(), line: i + 1 })));
+    const v = views.find((x) => x.low.includes(m.look) && m.re.test(x.text));
+    if (v) out.push({ where, line: v.line, cat: m.cat, shown: mask(m.value), how: v.how });
   }
   return out;
 }
-const report = (hits, say = console.log) => { for (const h of hits) say(`  [${h.cat}] '${h.shown}' ${h.where}${h.line ? ':' + h.line : ''}`); };
+const report = (hits, say = console.log) => { for (const h of hits) say(`  [${h.cat}${h.how ? `, ${h.how}` : ''}] '${h.shown}' ${h.where}${h.line ? ':' + h.line : ''}`); };
 
 /**
  * The publishing clone's own git identity (user.name, user.email): it is on

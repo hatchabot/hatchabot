@@ -98,6 +98,16 @@ describe('automatic upgrades: what counts as on', () => {
     expect(await autoUpgradeStatus(probes({ unit: beta, pin: 'stable\n' }))).toEqual({ ok: true, channel: 'stable' });
     expect((await autoUpgradeStatus(probes({ unit: beta, pin: 'v2.100.0\n' }))).ok).toBe(false);
   });
+  it('the channel is the timer\'s install\'s own (data/channel), before the user\'s one file (HB-0235)', async () => {
+    const files: Record<string, string> = {
+      '/home/x/hatchabot/data/channel': 'stable\n',
+      '/home/x/.config/hatchabot/channel': 'beta\n',   // another install of the user's chose beta
+    };
+    const p = { ...probes(), readFile: async (f: string) => (f.endsWith('.service') ? '[Service]\nExecStart=/usr/bin/env bash "/home/x/hatchabot/scripts/follow-channel.sh" stable\n' : files[f]) };
+    expect(await autoUpgradeStatus(p)).toEqual({ ok: true, channel: 'stable' });
+    delete files['/home/x/hatchabot/data/channel'];   // an install from before v2.169.0: the user's file, as before
+    expect(await autoUpgradeStatus(p)).toMatchObject({ ok: false, channel: 'beta' });
+  });
 });
 
 describe('who has owner rights, and their factors, straight from the database', () => {

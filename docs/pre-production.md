@@ -98,8 +98,10 @@ capabilities by default.
   both cover them now (backups v2.133.0, reconcile v2.134.0).
 - Backup restore proceeds after its own safety snapshot fails (`exportState`
   rejects past ~1 GB on `maxBuffer`), then runs a destructive replace.
-- `openclawImport` rewrites the user's live `openclaw.json` non-atomically.
-- `tcp://` runner endpoints are accepted with no TLS enforcement.
+- `openclawImport` rewrote the user's live `openclaw.json` non-atomically
+  (fixed in v2.169.0: a temp file renamed over it).
+- `tcp://` runner endpoints were accepted with no TLS enforcement (fixed in
+  v2.169.0: TLS only, `--tlsverify`, and refused without a client certificate).
 
 ## 8. Every DM member shares one conversation thread
 

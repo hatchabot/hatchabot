@@ -4,7 +4,7 @@
  * (tcp://127.0.0.1:1) refuses fast, so the best-effort reachability ping returns
  * quickly with reachable:false without stalling the test.
  */
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -17,6 +17,10 @@ const RUNNER = 'tcp://127.0.0.1:1';
 // the real ~/.ssh of whoever runs the tests.
 beforeAll(() => {
   process.env.HATCHABOT_SSH_DIR = mkdtempSync(join(tmpdir(), 'acl-hostflows-ssh-'));
+  // A tcp:// runner is TLS only (HB-0029): made-up client certificate files for it.
+  const certs = mkdtempSync(join(tmpdir(), 'acl-hostflows-certs-'));
+  for (const f of ['ca.pem', 'cert.pem', 'key.pem']) writeFileSync(join(certs, f), 'made-up\n');
+  process.env.DOCKER_CERT_PATH = certs;
 });
 
 describe('Runner hosts — POST /v1/hosts', () => {
@@ -34,10 +38,38 @@ describe('Runner hosts — POST /v1/hosts', () => {
     expect(list.some((h: any) => h.id === host.id)).toBe(true);
   });
 
+  it('refuses a tcp:// runner this machine has no TLS client certificate for (HB-0029)', async () => {
+    const w = await makeWorld();
+    const had = process.env.DOCKER_CERT_PATH;
+    process.env.DOCKER_CERT_PATH = mkdtempSync(join(tmpdir(), 'acl-hostflows-nocerts-'));
+    try {
+      const res = await w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name: 'Plain', dockerHost: RUNNER } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/TLS only.*ca\.pem, cert\.pem, key\.pem/);
+      expect(w.store.listHosts(w.owner).some((h) => h.name === 'Plain')).toBe(false);
+    } finally { process.env.DOCKER_CERT_PATH = had; }
+  });
+
   it('refuses a non-host-owner (403) and a bad endpoint scheme (400)', async () => {
     const w = await makeWorld();
     expect((await w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as('intruder'), payload: { name: 'x', dockerHost: RUNNER } })).statusCode).toBe(403);
     expect((await w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name: 'x', dockerHost: 'http://nope' } })).statusCode).toBe(400);
+  });
+});
+
+describe('Runner hosts — GET /v1/hosts for a member (HB-0059)', () => {
+  it('lists the member this machine without its settings, and never the owner\'s runner', async () => {
+    const w = await makeWorld();
+    w.store.insertHost({ id: 'h-local', ownerId: w.owner, kind: 'local', provider: 'mock', name: 'This machine', settings: { note: 'the owner\'s' }, createdAt: 'now' } as never);
+    const runner = (await w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name: 'Runner 1', dockerHost: RUNNER } })).json();
+    const owner = (await w.f.inject({ method: 'GET', url: '/v1/hosts', headers: as() })).json();
+    expect(owner.find((h: any) => h.id === runner.id).settings.dockerHost).toBe(RUNNER);
+    const member = (await w.f.inject({ method: 'GET', url: '/v1/hosts', headers: as('member') })).json();
+    expect(member.some((h: any) => h.id === runner.id)).toBe(false);
+    const local = member.find((h: any) => h.id === 'h-local');
+    expect(local).toBeTruthy();
+    expect(local.settings).toBeUndefined();
+    expect(JSON.stringify(member)).not.toContain(RUNNER);
   });
 });
 

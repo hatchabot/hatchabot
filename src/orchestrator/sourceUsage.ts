@@ -40,9 +40,13 @@ export function logKey(iso: string): string {
 }
 
 // docker logs --timestamps prefixes each line with its RFC3339 time; OpenClaw's
-// line then reads "[provider-transport-fetch] [model-fetch] response provider=…
-// model=… status=429 elapsedMs=…". Start lines (no status) are ignored.
-const CALL_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s.*\[model-fetch\] response provider=(\S+)(?:.*?\smodel=(\S+))?.*?\sstatus=(\d{3})\b/;
+// line then reads "<its own time> [provider-transport-fetch] [model-fetch]
+// response provider=… model=… status=429 elapsedMs=…". Start lines (no status)
+// are ignored. The marker must open the line (after at most OpenClaw's time and
+// its subsystem tags): one quoted inside another line — a message, a tool's
+// output an agent logged — is not a call, and counted as one it skewed the
+// owner's refusals (HB-0005).
+const CALL_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+(?:\d{4}-\d{2}-\d{2}T\S+\s+)?(?:\[[\w.:-]+\]\s+){0,3}\[model-fetch\] response provider=(\S+)(?:.*?\smodel=(\S+))?.*?\sstatus=(\d{3})\b/;
 
 export function parseModelCalls(text: string): ModelCall[] {
   const out: ModelCall[] = [];
@@ -132,7 +136,7 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
       // Successes are counted from the transcripts below: OpenClaw logs only
       // those slower than a second, so the log missed 10–28% (review, 2026-09-29).
       if (c.status >= 200 && c.status < 300) { lastOk = c.at; }
-      else if (c.status === 429) { b.limited++; sb.limited++; lastLimited = c.at; store.addLimitHit(a.id, src, c.at, c.model); limited++; }
+      else if (c.status === 429) { b.limited++; sb.limited++; lastLimited = c.at; store.addLimitHit(a.id, src, c.at, c.model, c.key); limited++; }
       else { b.failed++; sb.failed++; }
       per.buckets.set(hourOf(c.at), b);
       per.slots.set(slotOf(c.at), sb);

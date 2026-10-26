@@ -713,7 +713,7 @@ describe('AGENTS.md "## Data sources" stays in step with reality', () => {
     p.execLog.length = 0;
     await rebuildAgent(w.deps, agent.id);
     expect(written(p)).toContain('## Peers');
-    expect(written(p)).toContain('**Peer**');
+    expect(written(p)).toContain('- `Peer`');
     expect(p.execLog.some((c) => c[0] === 'sh' && String(c[1]).includes('call-agent'))).toBe(true);
     expect(w.store.agentsWithPeersPending('o').has(agent.id)).toBe(false);
     // Revoke → rebuild: section gone, tool + manifest removed.

@@ -463,6 +463,19 @@ exec "$@"
     expect(existsSync(lock)).toBe(false);
   });
 
+  // Pid 1 is another user's (root's) process whenever the tests run as anyone else.
+  it.skipIf(process.getuid?.() === 0)('a lock held by another user\'s run (two installs sharing a base) is not taken for a dead one (HB-0071)', () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    const lock = join(w.today(), '.backup-lock');
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, 'pid'), '1');
+    const r = w.run();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/Another backup run \(pid 1\) is writing/);
+    expect(readFileSync(join(lock, 'pid'), 'utf8')).toBe('1');
+    expect(existsSync(join(w.today(), 'hatchabot.sqlite'))).toBe(false);
+  });
+
   it('two runs that both find a dead run\'s lock: only one takes it over, and neither removes the other\'s lock (#215)', async () => {
     const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
     const lock = join(w.today(), '.backup-lock');

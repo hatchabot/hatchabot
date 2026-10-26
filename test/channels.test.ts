@@ -398,7 +398,9 @@ describe('a rename that never reached Telegram is retried, then remembered', () 
   /** Fails the first `failures` calls at the TRANSPORT layer, then succeeds. */
   const flaky = (failures: number) => {
     const state = { calls: 0 };
-    const fetchImpl = (async () => {
+    const fetchImpl = (async (url: any) => {
+      // The lease's drain of waiting updates is not a rename: not counted.
+      if (String(url).includes('/getUpdates')) return new Response('{"ok":true,"result":[]}');
       state.calls++;
       if (state.calls <= failures) {
         // Exactly how undici surfaces a connection failure: the reason is on
@@ -591,5 +593,75 @@ describe('Change bot and moves: the pool (night review, 2026-09-27)', () => {
     const again = await pool.provision(REQ);
     await pool.release(again.accountId, { agentId: 'a1' });
     expect(sent.some((b) => b.includes('removed'))).toBe(true);
+  });
+});
+
+describe('a re-leased pool bot and its farewells (HB-0051, HB-0039)', () => {
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+  it('the lease confirms every update waiting for the previous agent before anything else', async () => {
+    const urls: string[] = [];
+    const fetchImpl = (async (url: any) => {
+      const u = String(url);
+      urls.push(u.replace(/^.*\/bot[^/]+\//, ''));
+      if (u.includes('getUpdates?offset=-1')) return json({ ok: true, result: [{ update_id: 7340, message: { text: 'for the old agent' } }] });
+      return json({ ok: true, result: [] });
+    }) as unknown as typeof fetch;
+    const events: string[] = [];
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl, log: (e) => events.push(e) });
+    await pool.addToPool('recycled', 'tok');
+    await pool.provision(REQ);
+    expect(urls.slice(0, 2)).toEqual(['getUpdates?offset=-1&limit=1&timeout=0', 'getUpdates?offset=7341&limit=1&timeout=0']);
+    expect(events).toContain('pool.updates_dropped');
+    // The idempotent re-lease of the same agent drops nothing.
+    urls.length = 0;
+    await pool.provision(REQ);
+    expect(urls.filter((u) => u.startsWith('getUpdates'))).toEqual([]);
+  });
+
+  it('a refused drain (the old gateway still polling) is logged, and the lease still goes ahead', async () => {
+    const fetchImpl = (async (url: any) => String(url).includes('getUpdates')
+      ? json({ ok: false, error_code: 409, description: 'Conflict: terminated by other getUpdates request' }, 409)
+      : json({ ok: true })) as unknown as typeof fetch;
+    const events: Array<[string, Record<string, unknown>]> = [];
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl, log: (e, d) => events.push([e, d]) });
+    await pool.addToPool('recycled', 'tok');
+    expect((await pool.provision(REQ)).accountId).toBe('recycled');
+    expect(events.find(([e]) => e === 'pool.updates_not_dropped')?.[1].error).toContain('Conflict');
+  });
+
+  it('the farewell waits out a 429 and still reaches everyone; one it cannot wait for is counted', async () => {
+    const tries = new Map<string, number>();
+    let longLimit = false;
+    const fetchImpl = (async (url: any, init: any) => {
+      if (!String(url).endsWith('/sendMessage')) return json({ ok: true });
+      const chat = String(JSON.parse(String(init?.body)).chat_id);
+      tries.set(chat, (tries.get(chat) ?? 0) + 1);
+      if (chat === '5002' && (longLimit || tries.get(chat) === 1)) {
+        return json({ ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: longLimit ? 3600 : 3 } }, 429);
+      }
+      return json({ ok: true });
+    }) as unknown as typeof fetch;
+    const slept: number[] = [];
+    const events: Array<[string, Record<string, unknown>]> = [];
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE memberships (agent_id TEXT, channel_user_id TEXT, status TEXT)`);
+    for (const id of ['5001', '5002', '5003']) db.prepare(`INSERT INTO memberships VALUES ('a1', ?, 'active')`).run(id);
+    const pool = new TelegramPoolProvisioner(db, new MemSecrets(), {
+      fetchImpl, sleep: async (ms) => { slept.push(ms); }, log: (e, d) => events.push([e, d]),
+    });
+    await pool.addToPool('recycled', 'tok');
+    await pool.provision(REQ);
+    await pool.release('recycled', { agentId: 'a1' });
+    expect(slept).toEqual([3000]);
+    expect(tries.get('5002')).toBe(2);
+    expect(events.find(([e]) => e === 'pool.farewell')?.[1]).toMatchObject({ sent: 3, failed: 0 });
+
+    // A limit longer than the farewell may wait: not waited for, counted as not told.
+    longLimit = true; slept.length = 0; events.length = 0;
+    await pool.provision(REQ);
+    await pool.release('recycled', { agentId: 'a1' });
+    expect(slept).toEqual([]);
+    expect(events.find(([e]) => e === 'pool.farewell')?.[1]).toMatchObject({ sent: 2, failed: 1 });
   });
 });

@@ -236,6 +236,27 @@ describe('the model picker offers only what the runtime can actually serve', () 
     expect(body.stale).toContain('claude-opus-5');
   });
 
+  it('asks the agent on the newest OpenClaw, not the first one found (HB-0082)', async () => {
+    const { store, f, provider } = await world();
+    // a1 (found first) runs an old image whose catalog lacks sonnet-5; a3 runs the newest.
+    const old = store.getAgent('a1')!.runtimeRef!, newest = store.getAgent('a3')!.runtimeRef!;
+    provider.infoOverride.set(old, { openclawVersion: '2026.7.1' });
+    provider.infoOverride.set(store.getAgent('a2')!.runtimeRef!, { openclawVersion: '2026.9.6' });
+    provider.infoOverride.set(newest, { openclawVersion: '2026.9.8' });
+    const asked: string[] = [];
+    const small = JSON.stringify({ models: [{ key: 'anthropic/claude-opus-4-8', name: 'Claude Opus 4.8' }] });
+    provider.exec = async (ref: string, argv: string[]) => {
+      if (argv[0] !== 'models') return { code: 0, stdout: '', stderr: '' };
+      asked.push(ref);
+      return { code: 0, stdout: ref === newest ? CATALOG : small, stderr: '' };
+    };
+    const body = (await f.inject({ method: 'GET', url: '/v1/ai-profiles/p1/available-models', headers: as })).json();
+    expect(asked).toEqual([newest]);
+    expect(body).toMatchObject({ source: 'runtime', openclawVersion: '2026.9.8' });
+    expect(body.models).toContain('claude-sonnet-5');
+    expect(body.stale).not.toContain('claude-sonnet-5');
+  });
+
   it('falls back to the curated list when no live agent can be asked — and that list has no opus-5', async () => {
     const { f, provider } = await world();
     provider.execResponses.set('models list', { code: 1, stdout: '', stderr: 'unknown option --all' });
@@ -256,5 +277,33 @@ describe('apply-default-model reports what it actually changed', () => {
     // a1 is mine, x1 is not → applied must be 1, not the 2 ids sent.
     expect(res.json().applied).toBe(1);
     expect(store.getAgent('x1')!.model).toBeUndefined(); // genuinely untouched
+  });
+});
+
+describe('apply-default-model on a Claude plan holds an agent whose runtime is too old for the model (HB-0232)', () => {
+  it('the too-old agent keeps its model and is named; the rest switch', async () => {
+    const { store, f, provider } = await world();
+    store.insertAIProfile({ id: 'p-sub', ownerId: OWNER, name: 'Claude plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', models: [], secretRef: 'ai/sub', createdAt: 'now' } as any);
+    store.setAgentAIProfile('a1', 'p-sub');
+    store.setAgentAIProfile('a2', 'p-sub');
+    provider.infoOverride.set(store.getAgent('a1')!.runtimeRef!, { openclawVersion: '2026.9.6' });
+    provider.infoOverride.set(store.getAgent('a2')!.runtimeRef!, { openclawVersion: '2026.9.8' });
+    const res = await apply(f, 'p-sub', { model: 'claude-opus-5-5', apply: ['a1', 'a2'] });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ applied: 1, held: 1, notSwitched: [{ id: 'a1', name: 'Follower1' }] });
+    expect(res.json().notSwitched[0].reason).toMatch(/needs OpenClaw 2026\.9\.7/);
+    // Held = pinned to what it runs, which stays on the menu.
+    expect(store.getAgent('a1')!.model).toBe('claude-opus-4-8');
+    expect(effectiveModel(store.getAgent('a1')!, store.getAIProfile('p-sub')!)).toBe('claude-opus-4-8');
+    expect(store.getAgent('a2')!.model).toBeUndefined();
+    expect(effectiveModel(store.getAgent('a2')!, store.getAIProfile('p-sub')!)).toBe('claude-opus-5-5');
+  });
+
+  it('an API-key source is not judged on the plan rule', async () => {
+    const { store, f, provider } = await world();
+    provider.infoOverride.set(store.getAgent('a1')!.runtimeRef!, { openclawVersion: '2026.9.6' });
+    const res = await apply(f, 'p1', { model: 'claude-opus-5-5', apply: ['a1'] });
+    expect(res.json()).toMatchObject({ applied: 1 });
+    expect(res.json().notSwitched).toBeUndefined();
   });
 });

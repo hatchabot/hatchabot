@@ -19,6 +19,7 @@ import {
   principalFor,
 } from './identity.js';
 import { routedPath } from './routedPath.js';
+import { dockerDesktop } from '../ops/opsServer.js';
 
 /** The agent-to-agent consult (its caller's token is checked in the handler): only when the router matched that very route. */
 const isAgentMessageRoute = (req: FastifyRequest): boolean => req.method === 'POST' && req.routeOptions?.url === '/v1/agents/:id/message';
@@ -52,9 +53,15 @@ const failures = new Map<string, { n: number; until: number }>();
  * a remote client cannot forge its way to a different bucket). The account
  * being tried is a second bucket, so hopping addresses does not help either.
  */
-/** Set at boot when the docker daemon is rootless (index.ts), or by an operator: containers share this process's loopback. */
+/**
+ * Containers reach this process from loopback: set at boot when the docker
+ * daemon is rootless (index.ts), or by an operator; and on Docker Desktop,
+ * where `host.docker.internal` is this machine's loopback, so an agent's
+ * request looked typed on the machine and could create the first account
+ * without the setup code (HB-0024).
+ */
 export function loopbackIsRemote(): boolean {
-  return process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK === '1';
+  return process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK === '1' || dockerDesktop();
 }
 /**
  * The account a failure is counted against, as a key of bounded size: anyone

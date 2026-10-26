@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { MockProvider } from '../src/providers/mockProvider.js';
@@ -68,8 +68,11 @@ describe('who the door lets in', () => {
 });
 
 describe('Docker Desktop: the door on loopback', () => {
+  afterEach(() => { delete process.env.HATCHABOT_DOCKER_DESKTOP; });
+
   it('accepts a loopback peer when no Docker address could be bound, and still refuses container addresses that are not doormen', async () => {
     const { ensureOpsServer, opsBoundHost, loopbackDoorman } = await import('../src/ops/opsServer.js');
+    process.env.HATCHABOT_DOCKER_DESKTOP = '1';
     const { peerOk } = await world(() => ['172.20.0.2']);
     // Bind the way a Mac does: no docker address available, loopback taken.
     await ensureOpsServer([undefined]);
@@ -83,5 +86,16 @@ describe('Docker Desktop: the door on loopback', () => {
     // Its own address still works, and a stranger's still does not.
     expect(await peerOk('172.20.0.2')).toBe(true);
     expect(await peerOk('172.20.0.9')).toBe(false);
+  }, 10_000);
+
+  it('on Linux a door that fell back to loopback lets no bare loopback peer in (HB-0019)', async () => {
+    const { ensureOpsServer, opsBoundHost, loopbackDoorman } = await import('../src/ops/opsServer.js');
+    process.env.HATCHABOT_DOCKER_DESKTOP = '0';
+    const { peerOk } = await world(() => ['172.20.0.2']);
+    await ensureOpsServer([undefined]);
+    expect(opsBoundHost()).toBe('127.0.0.1');
+    expect(loopbackDoorman('127.0.0.1')).toBe(false);
+    expect(await peerOk('127.0.0.1')).toBe(false);
+    expect(await peerOk('172.20.0.2')).toBe(true);
   }, 10_000);
 });

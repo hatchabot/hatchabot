@@ -339,6 +339,27 @@ describe('archive: killed at every step, then a restart', () => {
   });
 });
 
+describe('archive of a stopped agent whose copy was downloaded, killed after its bot left (HB-0233)', () => {
+  for (const pooled of [false, true]) {
+    it(`${pooled ? 'a pool bot' : 'a pasted bot'}: the restart finishes it — archived, stopped, no channel row for a bot that is gone`, async () => {
+      const a = await archiveWorld(pooled);
+      await a.w.provider.stop(a.ref);
+      a.w.store.setAgentState(a.id, 'STOPPED');
+      a.w.store.setAgentExportedAt(a.id, '2026-10-20T08:00:00.000Z');
+      crashAt('bot-released'); // left to the copy (a pool bot taken out of the pool); not yet recorded
+      await expect(archiveAgent(a.deps, a.id)).rejects.toBeInstanceOf(SimulatedCrash);
+      reboot(a.id);
+      await resumeOperations(a.ctx);
+      const op = a.w.store.listOperations([a.id])[0]!;
+      expect(op.status).toBe('succeeded');
+      expect(a.w.store.getAgent(a.id)!.state).toBe('ARCHIVED');
+      expect((await a.w.provider.status(a.ref)).phase).toBe('stopped');
+      expect(a.w.store.getChannelForAgent(a.id)).toBeUndefined();
+      expect(a.w.channel.pool.entries.some((e: { username: string }) => e.username === 'testagentbot')).toBe(false);
+    });
+  }
+});
+
 // ---- the rebuild queue and setup ----------------------------------------------
 
 describe('the rebuild queue survives a restart', () => {

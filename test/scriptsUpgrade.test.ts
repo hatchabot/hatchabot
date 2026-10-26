@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
 
 // Every test here runs real shell scripts (git, bash, a fake gh) in a sandbox. On the
@@ -33,7 +33,7 @@ function world() {
   mkdirSync(join(src, 'scripts'));
   writeFileSync(join(src, 'scripts', 'upgrade.sh'), readFileSync('scripts/upgrade.sh'), { mode: 0o755 });
   writeFileSync(join(src, 'scripts', 'release-target.sh'), readFileSync('scripts/release-target.sh'), { mode: 0o755 });
-  writeFileSync(join(src, '.gitignore'), 'node_modules/\nnode_modules.prev/\n');
+  writeFileSync(join(src, '.gitignore'), 'node_modules/\nnode_modules.prev/\ndata/\n');
   writeFileSync(join(src, 'package.json'), '{"name":"x","version":"1.0.0"}\n');
   writeFileSync(join(src, 'channels.json'), '{"stable":"v1.0.0","beta":"v1.0.0"}\n');
   git(src, 'add', '-A'); git(src, 'commit', '-q', '-m', 'v1'); git(src, 'tag', 'v1.0.0');
@@ -92,7 +92,7 @@ describe('scripts/upgrade.sh', () => {
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.1.0');
     expect(existsSync(join(w.install, 'node_modules.prev'))).toBe(false);
-    expect(readFileSync(join(w.home, '.config', 'hatchabot', 'channel'), 'utf8').trim()).toBe('stable');
+    expect(readFileSync(join(w.install, 'data', 'channel'), 'utf8').trim()).toBe('stable');
   });
 
   it('after a run killed right after moving node_modules aside, a failed install still rolls back to those dependencies (audit #033)', () => {
@@ -221,6 +221,37 @@ describe('scripts/upgrade.sh says 1 only for a release that did not come up (rev
     const r = run(w, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_UPGRADE_BY_TIMER: '1' }, ['stable']);
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(readFileSync(join(w.home, '.config', 'hatchabot', 'channel'), 'utf8').trim()).toBe('beta');
+  });
+});
+
+describe('the channel chosen last is the install\'s own (HB-0235)', () => {
+  const userFile = (w: World) => join(w.home, '.config', 'hatchabot', 'channel');
+  it('naming a channel writes this install\'s data/channel, and leaves the user\'s one file (another install\'s) alone', () => {
+    const w = world();
+    mkdirSync(dirname(userFile(w)), { recursive: true });
+    writeFileSync(userFile(w), 'beta\n');
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readFileSync(join(w.install, 'data', 'channel'), 'utf8').trim()).toBe('stable');
+    expect(readFileSync(userFile(w), 'utf8').trim()).toBe('beta');
+    expect(w.git(w.install, 'status', '--porcelain')).toBe(''); // data/ is ignored: no "local changes" next time
+  });
+
+  it('with no channel of its own, the user\'s file is followed, as before v2.169.0', () => {
+    const w = world();
+    mkdirSync(dirname(userFile(w)), { recursive: true });
+    writeFileSync(userFile(w), 'v1.0.0\n');
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'true' });
+    expect(r.stdout).toContain('Already on v1.0.0 (v1.0.0).');
+  });
+
+  it('a pin to a release from before v2.169.0 goes in the user\'s file, the only one that release reads', () => {
+    const w = world();
+    mkdirSync(join(w.install, 'data')); writeFileSync(join(w.install, 'data', 'channel'), 'stable\n');
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['v1.0.0']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readFileSync(userFile(w), 'utf8').trim()).toBe('v1.0.0');
+    expect(existsSync(join(w.install, 'data', 'channel'))).toBe(false);
   });
 });
 

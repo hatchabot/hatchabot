@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { LocalDockerProvider } from './localDockerProvider.js';
+import { dockerConnArgs } from './runnerEndpoint.js';
 import type { RuntimeProvider } from './provider.js';
 import type { Host } from '../domain/types.js';
 
@@ -19,7 +20,7 @@ export async function pingRunner(
   try {
     const { stdout } = await execFileP(
       opts.docker ?? 'docker',
-      ['-H', dockerHost, 'version', '--format', '{{.Server.Version}}'],
+      [...dockerConnArgs(dockerHost), 'version', '--format', '{{.Server.Version}}'],
       { timeout: opts.timeoutMs ?? 8000, killSignal: 'SIGKILL' },
     );
     const version = stdout.trim();
@@ -32,7 +33,7 @@ export async function pingRunner(
     try {
       await execFileP(
         opts.docker ?? 'docker',
-        ['-H', dockerHost, 'image', 'inspect', opts.image ?? 'hatchabot-runtime:latest',
+        [...dockerConnArgs(dockerHost), 'image', 'inspect', opts.image ?? 'hatchabot-runtime:latest',
           '--format', 'ok'],
         { timeout: opts.timeoutMs ?? 8000, killSignal: 'SIGKILL' },
       );

@@ -46,6 +46,7 @@ const MIN = 60_000;
 /** A rise spreads over at most this much time before its reading (readings are ten minutes apart; a pass can run late). */
 const SPREAD_MAX_MS = 20 * MIN;
 const SPAN: Record<UsagePeriod, { ms: number; bucketMinutes: number }> = {
+  // Requests count by 5-minute slot from the one holding `from`: the hour reads 60–65 minutes back (HB-0067).
   hour: { ms: 60 * MIN, bucketMinutes: 5 },
   // A few hours back (Chris, 2026-09-28): 15-minute bars to 6 hours, 30 after.
   '3h': { ms: 3 * 60 * MIN, bucketMinutes: 15 },
@@ -68,7 +69,13 @@ function bucketStart(iso: string, bucketMinutes: number): string {
   return new Date(Math.floor(t / (bucketMinutes * MIN)) * bucketMinutes * MIN).toISOString();
 }
 
-export function computeUsagePeriod(store: Store, ownerId: string, period: UsagePeriod, now = Date.now()): UsagePeriodView {
+/**
+ * `windowCost`: an agent's API price for this window at the window's own model
+ * mix (agentCosts.ts windowPricing, what the page shows). An agent whose window
+ * was all API takes it; without it the measured rate is a lifetime blend, and a
+ * week mostly on a cheap model was priced at the dear one's share (HB-0067).
+ */
+export function computeUsagePeriod(store: Store, ownerId: string, period: UsagePeriod, now = Date.now(), windowCost?: (agentId: string) => number | undefined): UsagePeriodView {
   const { ms, bucketMinutes } = SPAN[period];
   const from = new Date(now - ms).toISOString(), to = new Date(now).toISOString();
   // The owner's own agents: usage is what THEIR plan spends. A shared agent's
@@ -159,7 +166,9 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
     // largest one's model priced a cheap source's share at the dear one's price
     // (report B39, 2026-10-22). The agent's own model is its current source's.
     const modelOn = (pid: string) => (pid === a.aiProfileId ? a.model : undefined) ?? store.getAIProfile(pid)?.model ?? model ?? '';
+    const inWindow = apiTokens > 0 && spent.every(([pid, n]) => n <= 0 || billingOf(pid) === 'api') ? windowCost?.(a.id) : undefined;
     let cost: CostRange | null = apiTokens <= 0 ? null
+      : inWindow !== undefined && inWindow > 0 ? { low: inWindow, high: inWindow, partial: false }
       : rate ? { low: apiTokens * rate.usdPerToken, high: apiTokens * rate.usdPerToken, partial: rate.partial }
       : estimateCost(spent.filter(([pid, n]) => n > 0 && billingOf(pid) === 'api').map(([pid, n]) => ({ model: modelOn(pid), tokens: n })));
     // No price for the model at all: "est. $0.00+" read as nearly free

@@ -101,14 +101,23 @@ if docker image inspect hatchabot-runtime:latest >/dev/null 2>&1; then
   # release's default, the way an upgrade does (2026-09-25).
   WANT="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | sed -n 1p)"
   HAVE="$(docker image inspect hatchabot-runtime:latest --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}' 2>/dev/null || true)"
-  if [ -n "$WANT" ] && [ -n "$HAVE" ] && [ "$HAVE" != "$WANT" ] && [ "$(printf '%s\n%s\n' "$HAVE" "$WANT" | sed 's/-/~/' | sort -V | sed -n 1p)" = "$(printf '%s' "$HAVE" | sed 's/-/~/')" ]; then
+  [ "$HAVE" != "<no value>" ] || HAVE=""
+  if [ -n "$WANT" ] && [ -z "$HAVE" ]; then
+    # No version label: an old or hand-built image, OpenClaw unknown. Every
+    # image Hatchabot builds or publishes carries one, so it counts as older
+    # (HB-0041). Kept, it left new agents building on whatever it holds.
+    say "Runtime image here carries no OpenClaw version label; this release's default is $WANT — fetching it…"
+    ./scripts/build-runtime-image.sh || echo "⚠ Could not fetch the $WANT image now — run ./scripts/build-runtime-image.sh later, or Settings → Images."
+  elif [ -n "$WANT" ] && [ "$HAVE" != "$WANT" ] && [ "$(printf '%s\n%s\n' "$HAVE" "$WANT" | sed 's/-/~/' | sort -V | sed -n 1p)" = "$(printf '%s' "$HAVE" | sed 's/-/~/')" ]; then
     say "Runtime image here carries OpenClaw $HAVE; this release's default is $WANT — fetching it…"
     ./scripts/build-runtime-image.sh || echo "⚠ Could not fetch the $WANT image now — run ./scripts/build-runtime-image.sh later, or Settings → Images."
   else
     say "Runtime image already present — keeping the existing :latest."
   fi
 else
-  say "Building the agent runtime image (a few minutes on first run)…"
+  # build-runtime-image.sh pulls this release's published image and builds
+  # only when none is published (HB-0021).
+  say "Getting the agent runtime image (downloads it, or builds it if none is published)…"
   ./scripts/build-runtime-image.sh
 fi
 

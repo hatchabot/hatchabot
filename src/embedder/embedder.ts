@@ -393,7 +393,7 @@ export class EmbedderService {
     if (p.reachable && !(await p.reachable())) return 'unreachable';
     const s = await this.status();
     if (s.embedder === 'running' && s.door === 'running') {
-      this.syncKeys(); // retired keys (archive, delete) leave the file within a tick
+      this.syncKeys(); // archive and delete rewrite the file at once (store.onEmbedKeyRetired); this catches any other change
       // The engine grows under load and never gives the memory back: after
       // the fleet's overnight re-index it sat at its 2 GiB cap, idle, one big
       // request from being killed (2026-09-24; a restart returned it to

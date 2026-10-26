@@ -718,7 +718,14 @@ describe('recovery codes (beta blocker #3: the host owner with no Telegram)', ()
 });
 
 describe('the 30th audit: containers on loopback', () => {
-  afterEach(() => { delete process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK; });
+  afterEach(() => { delete process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK; delete process.env.HATCHABOT_DOCKER_DESKTOP; });
+  it('on Docker Desktop an agent at host.docker.internal (loopback here) cannot create the first account without the code (HB-0024)', async () => {
+    process.env.HATCHABOT_DOCKER_DESKTOP = '1';
+    const { f } = await app();
+    const res = await bootstrap(f);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toMatch(/setup code/);
+  });
   it('under a rootless daemon a loopback bootstrap needs the setup code like anyone else', async () => {
     process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK = '1';
     const { f } = await app();
@@ -728,5 +735,17 @@ describe('the 30th audit: containers on loopback', () => {
     const { setupCode } = await import('../src/api/accountsAuth.js');
     const ok = await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'chris', password: 'correct-horse', setupCode: setupCode() } });
     expect(ok.statusCode).toBe(201);
+  });
+});
+
+describe('the claim link lookup (HB-0054)', () => {
+  it('counts misses and refuses a guesser, without locking anyone out of the password form', async () => {
+    const { f } = await app();
+    expect((await bootstrap(f, 'harbor', 'correct-horse')).statusCode).toBe(201);
+    let last = 0;
+    for (let i = 0; i < 12; i++) last = (await f.inject({ method: 'GET', url: `/v1/local-accounts/claim?code=guess-${i}` })).statusCode;
+    expect(last).toBe(429);
+    // The link bucket is its own: the password form still works from here.
+    expect((await signIn(f, 'harbor', 'correct-horse')).statusCode).toBe(200);
   });
 });

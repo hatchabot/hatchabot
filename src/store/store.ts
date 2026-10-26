@@ -318,9 +318,11 @@ export class Store {
       CREATE TABLE IF NOT EXISTS usage_cursor (
         agent_id TEXT PRIMARY KEY, last_ts TEXT NOT NULL, last_ok TEXT, last_limited TEXT, last_ok_profile TEXT
       );
+      -- One row per refusal: log_key is docker's nanosecond stamp of its log
+      -- line, so two refusals in one millisecond are two rows (HB-0003).
       CREATE TABLE IF NOT EXISTS limit_hits (
-        agent_id TEXT NOT NULL, profile_id TEXT, at TEXT NOT NULL, model TEXT,
-        PRIMARY KEY (agent_id, at)
+        agent_id TEXT NOT NULL, profile_id TEXT, at TEXT NOT NULL, model TEXT, log_key TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (agent_id, at, log_key)
       );
       CREATE INDEX IF NOT EXISTS limit_hits_profile ON limit_hits (profile_id, at);
       CREATE TABLE IF NOT EXISTS token_samples (
@@ -986,6 +988,8 @@ export class Store {
       // Per-agent and per-class memory cap (memoryCap.ts); the baseline hides cap hits from before the last change.
       `ALTER TABLE agents ADD COLUMN memory_cap TEXT`,
       `ALTER TABLE agents ADD COLUMN memory_cap_baseline INTEGER`,
+      // …and when the container it was read from started: a later start is a new counter (HB-0234).
+      `ALTER TABLE agents ADD COLUMN memory_cap_baseline_started TEXT`,
       // "Clear peaks" on Status → Resources: the peak the kernel keeps is
       // since the container started and root's to reset, so the app keeps
       // its own high-water mark from when the owner last cleared it.
@@ -1185,6 +1189,18 @@ export class Store {
          WHERE applied_profile_prev IS NOT NULL AND applied_profile_at IS NOT NULL AND applied_profile_id IS NOT NULL
            AND applied_profile_prev != applied_profile_id`);
     });
+    // Pauses v2.165.0 recorded on an agent already stopped by hand came before
+    // already_stopped and read as the budget's own: lifting one started an
+    // agent its owner had stopped. That pass's event says which they were
+    // (budget.paused with alreadyStopped, written moments after the row): an
+    // open pause with that event is marked; one with no event left is as it was (HB-0095).
+    this.runOnce('2026-10-26-budget-pause-already-stopped', () => {
+      this.db.exec(`UPDATE budget_pauses SET already_stopped = 1
+        WHERE already_stopped = 0 AND kind = 'pause' AND resumed_at IS NULL
+          AND EXISTS (SELECT 1 FROM agent_events e WHERE e.agent_id = budget_pauses.agent_id AND e.event = 'budget.paused'
+            AND CASE WHEN json_valid(e.detail) THEN json_extract(e.detail, '$.alreadyStopped') END = 1
+            AND e.at >= budget_pauses.paused_at AND julianday(e.at) - julianday(budget_pauses.paused_at) < 10.0 / 1440)`);
+    });
     this.runOnce('2026-09-29-dm-policy-unchanged', () => {
       this.db.exec(`DELETE FROM agent_events WHERE event = 'channel.dm_policy' AND CASE WHEN json_valid(detail) THEN json_extract(detail, '$.result') END = 'unchanged'`);
     });
@@ -1209,6 +1225,27 @@ export class Store {
           DROP TABLE model_call_hours;
           ALTER TABLE model_call_hours_v2 RENAME TO model_call_hours;
           CREATE INDEX IF NOT EXISTS model_call_hours_profile ON model_call_hours (profile_id, hour);
+        `);
+      })();
+    }
+
+    // limit_hits was keyed on (agent_id, at): a second refusal in the same
+    // millisecond was ignored. Rebuilt with the log line's own stamp in the
+    // key; older rows keep '' there (HB-0003).
+    const hitsKey = this.db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'limit_hits'`)
+      .get() as { sql?: string } | undefined;
+    if (hitsKey?.sql && !/log_key/.test(hitsKey.sql)) {
+      this.db.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE limit_hits_v2 (
+            agent_id TEXT NOT NULL, profile_id TEXT, at TEXT NOT NULL, model TEXT, log_key TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (agent_id, at, log_key)
+          );
+          INSERT INTO limit_hits_v2 (agent_id, profile_id, at, model) SELECT agent_id, profile_id, at, model FROM limit_hits;
+          DROP TABLE limit_hits;
+          ALTER TABLE limit_hits_v2 RENAME TO limit_hits;
+          CREATE INDEX IF NOT EXISTS limit_hits_profile ON limit_hits (profile_id, at);
         `);
       })();
     }
@@ -1778,14 +1815,14 @@ export class Store {
    * Move a group section one place up/down in the viewer's list, by rewriting
    * the whole section order after the swap. Returns false at the boundary.
    */
-  /** Forget an agent's peaks: cap hits count from `capHitsNow`, the peak from the next reading. */
-  clearMemoryPeaks(agentId: string, capHitsNow: number): void {
-    this.db.prepare(`UPDATE agents SET memory_cap_baseline = ?, memory_peak_since = 0, memory_peak_cleared_at = ?, updated_at = ? WHERE id = ?`)
-      .run(capHitsNow, new Date().toISOString(), new Date().toISOString(), agentId);
+  /** Forget an agent's peaks: cap hits count from `capHitsNow` (read from a container that started at `startedAt`), the peak from the next reading. */
+  clearMemoryPeaks(agentId: string, capHitsNow: number, startedAt?: string): void {
+    this.db.prepare(`UPDATE agents SET memory_cap_baseline = ?, memory_cap_baseline_started = ?, memory_peak_since = 0, memory_peak_cleared_at = ?, updated_at = ? WHERE id = ?`)
+      .run(capHitsNow, startedAt ?? null, new Date().toISOString(), new Date().toISOString(), agentId);
   }
-  /** The cap-hit counter restarted below the baseline (a new container): count from zero, unless a newer baseline was set meanwhile. */
+  /** The cap-hit counter restarted (a new container): count from zero, unless a newer baseline was set meanwhile. */
   rebaseMemoryCapHits(agentId: string, from: number): void {
-    this.db.prepare(`UPDATE agents SET memory_cap_baseline = NULL WHERE id = ? AND memory_cap_baseline = ?`).run(agentId, from);
+    this.db.prepare(`UPDATE agents SET memory_cap_baseline = NULL, memory_cap_baseline_started = NULL WHERE id = ? AND memory_cap_baseline = ?`).run(agentId, from);
   }
   /** A reading above the high-water mark kept since the last clear raises it; returns the mark. */
   bumpMemoryPeak(agentId: string, bytes: number): number {
@@ -1898,8 +1935,14 @@ export class Store {
     if (next === 'RUNNING' && agent.exportedAt) this.setAgentExportedAt(id, null);
     // A management agent that is put away or removed has no key any more.
     if (agent.ops && (next === 'ARCHIVED' || next === 'DELETING' || next === 'DELETED')) this.deleteOpsToken(id);
-    // Its embed key dies with its state too (the door's file carries only live agents).
-    if (next === 'ARCHIVED' || next === 'DELETING' || next === 'DELETED') this.deleteEmbedToken(id);
+    // Its embed key dies with its state too (the door's file carries only live
+    // agents), and the door's file is told now, not at its next health tick:
+    // a container still running kept a working key for up to five minutes (HB-0027).
+    if (next === 'ARCHIVED' || next === 'DELETING' || next === 'DELETED') {
+      const keyHost = this.embedTokenHost(id);
+      this.deleteEmbedToken(id);
+      if (keyHost !== undefined) this.onEmbedKeyRetired?.(keyHost);
+    }
     // A deleted agent leaves nothing behind: its unread marks and channel
     // identities go with it (the rows are keyed by agent id, which is never reused).
     if (next === 'DELETED') {
@@ -3141,6 +3184,8 @@ export class Store {
   commitEmbedToken(agentId: string): void {
     this.db.prepare(`UPDATE embed_tokens SET prev_token_hash = NULL WHERE agent_id = ?`).run(agentId);
   }
+  /** Called when archive or delete drops an agent's embed key: the machine whose door had it (routes.ts rewrites that door's file). */
+  onEmbedKeyRetired?: (hostId: string | null) => void;
   deleteEmbedToken(agentId: string): void {
     this.db.prepare(`DELETE FROM embed_tokens WHERE agent_id = ?`).run(agentId);
   }
@@ -4349,8 +4394,9 @@ export class Store {
   failedSlotsForAgent(agentId: string, profileId: string, afterSlot: string): string[] {
     return (this.db.prepare(`SELECT slot FROM model_call_slots WHERE agent_id = ? AND profile_id = ? AND failed > 0 AND slot > ? ORDER BY slot`).all(agentId, profileId, afterSlot) as Array<{ slot: string }>).map((r) => r.slot);
   }
-  addLimitHit(agentId: string, profileId: string, at: string, model: string): void {
-    this.db.prepare(`INSERT OR IGNORE INTO limit_hits (agent_id, profile_id, at, model) VALUES (?, ?, ?, ?)`).run(agentId, profileId, at, model || null);
+  /** One refusal; `logKey` (docker's nanosecond stamp) keeps two in one millisecond apart, the same line read twice once. */
+  addLimitHit(agentId: string, profileId: string, at: string, model: string, logKey = ''): void {
+    this.db.prepare(`INSERT OR IGNORE INTO limit_hits (agent_id, profile_id, at, model, log_key) VALUES (?, ?, ?, ?, ?)`).run(agentId, profileId, at, model || null, logKey);
   }
   addTokenSample(agentId: string, profileId: string, at: string, total: number): void {
     this.db.prepare(`INSERT OR REPLACE INTO token_samples (agent_id, profile_id, at, total) VALUES (?, ?, ?, ?)`).run(agentId, profileId, at, total);
@@ -4933,10 +4979,10 @@ export class Store {
 
   /** Pin (or clear, with null) the agent's runtime image. Takes effect on rebuild. */
   /** The agent's own memory cap (null = back to its class's / the fleet default); the baseline is the cap hits at that moment. */
-  setAgentMemoryCap(id: string, cap: string | null, baseline?: number): void {
+  setAgentMemoryCap(id: string, cap: string | null, baseline?: number, baselineStartedAt?: string): void {
     this.db
-      .prepare(`UPDATE agents SET memory_cap = ?, memory_cap_baseline = ?, updated_at = ? WHERE id = ?`)
-      .run(cap, baseline ?? null, new Date().toISOString(), id);
+      .prepare(`UPDATE agents SET memory_cap = ?, memory_cap_baseline = ?, memory_cap_baseline_started = ?, updated_at = ? WHERE id = ?`)
+      .run(cap, baseline ?? null, baseline === undefined ? null : baselineStartedAt ?? null, new Date().toISOString(), id);
   }
   /** The agent's own swap allowance ("2g" or "off"; null = back to its class's / the fleet setting). */
   setAgentSwapAllowance(id: string, swap: string | null): void {
@@ -6104,6 +6150,7 @@ function rowToAgent(r: any): Agent {
     browser: !!r.browser,
     memoryCap: r.memory_cap ?? undefined,
     memoryCapBaseline: r.memory_cap_baseline ?? undefined,
+    memoryCapBaselineStartedAt: r.memory_cap_baseline_started ?? undefined,
     swapAllowance: r.swap_allowance ?? undefined,
     memoryPeakSince: r.memory_peak_since ?? undefined,
     memoryPeakClearedAt: r.memory_peak_cleared_at ?? undefined,

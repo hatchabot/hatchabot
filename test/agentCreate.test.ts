@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
@@ -84,12 +84,13 @@ describe('POST /v1/agents name collision', () => {
 });
 
 describe('a refused bot token must not stay pending', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
   it('forgets the token when it already belongs to another agent', async () => {
     // Stands in for the real provisioner: submitToken() stashes the identity
     // for that agent, exactly as TelegramManualProvisioner does.
     const pending = new Map<string, string>();
     const channel = {
-      pool: { availableCount: () => 0 },
+      pool: { availableCount: () => 0, owns: () => false },
       async submitToken(agentId: string) {
         pending.set(agentId, 'chessclubbot');
         return { username: 'chessclubbot' };
@@ -113,6 +114,9 @@ describe('a refused bot token must not stay pending', () => {
       state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '',
       sharedMemory: true, createdAt: 'now', updatedAt: 'now',
     });
+    // Parked for a token, as provisioning leaves it; Telegram's getMe stubbed.
+    store.setAgentPendingAction('tech', { type: 'bot_token', instructions: 'Paste a bot token.' } as never);
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ ok: true, result: { username: 'chessclubbot' } }), { headers: { 'content-type': 'application/json' } }));
 
     const res = await f.inject({
       method: 'POST', url: '/v1/agents/tech/channel-token', headers: as,
@@ -123,6 +127,24 @@ describe('a refused bot token must not stay pending', () => {
     // The point: the rejected token is gone, so a later Retry cannot resume
     // provisioning onto Chess Club's bot.
     expect(pending.has('tech')).toBe(false);
+  });
+
+  it('an agent not waiting for a token is refused, and nothing is stashed (HB-0064)', async () => {
+    const pending = new Map<string, string>();
+    const channel = {
+      pool: { availableCount: () => 0, owns: () => false },
+      async submitToken(agentId: string) { pending.set(agentId, 'pantrybot'); return { username: 'pantrybot' }; },
+    };
+    const { store, f } = await world(channel);
+    store.insertAgent({
+      id: 'pantry', ownerId: OWNER, name: 'Pantry', slug: 'pantry',
+      state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '',
+      sharedMemory: true, createdAt: 'now', updatedAt: 'now',
+    });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/pantry/channel-token', headers: as, payload: { token: '123:abc' } });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/not waiting for a bot token/);
+    expect(pending.size).toBe(0);
   });
 
 });

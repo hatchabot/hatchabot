@@ -792,6 +792,14 @@
   .ord { display:inline-flex; flex-direction:column; gap:1px; margin-right:2px }
   .ordbtn { padding:0 5px; font-size:9px; line-height:1.35; border-radius:5px; min-width:20px }
   .ordbtn:disabled { opacity:.32; cursor:default }
+  /* On a touch screen the small controls are at least 24 × 24 px to hit:
+     a group's ⚡/⧉/↑/↓/Hide, a source's ▲/▼, a plan's ×, a console tab's ×
+     (audit 2026-10-23, B20). A mouse keeps the compact look. */
+  @media (pointer: coarse) {
+    .v2ghead .v2gtools button, .ordbtn, .v2planx, .ctabx { min-width:24px; min-height:24px }
+    .v2planx { width:24px; height:24px }
+    .ordbtn { font-size:11px }
+  }
   .v2pill { font-size:12px; border-radius:999px; padding:2px 9px; border:1px solid var(--line) }
   /* The status lives beside the icon in the sheet's bar, not as a row in the
      pane below it — one statement of how the agent is, where you look first. */
@@ -856,6 +864,15 @@
   body.v2 dialog.v2panel::backdrop { background:rgba(0,0,0,.45) }
   @keyframes v2slide { from { transform:translateX(24px); opacity:.6 } }
   @media (prefers-reduced-motion: reduce) { body.v2 dialog.v2panel { animation:none } }
+  /* While a phone's keyboard is up (html.kbd), a dialog fits the part of the
+     screen above it and sits at its top, scrolling when taller; a sheet (every
+     panel, the agent's) is that part's full height; the console and the web
+     chat's log shrink to it. --vvh and --vvt are that part's height and top
+     (fitVisualViewport; audit 2026-10-23, B20). */
+  html.kbd dialog[open] { max-height: calc(var(--vvh) - 16px); margin-top: calc(var(--vvt) + 8px); margin-bottom: auto; }
+  html.kbd body.v2 dialog.v2panel[open], html.kbd .v2sheet[open] { height: var(--vvh); max-height: var(--vvh); margin-top: var(--vvt); margin-bottom: auto; }
+  html.kbd .console-dlg { height: calc(var(--vvh) - 16px); }
+  html.kbd .wchat-log { max-height: max(96px, calc(var(--vvh) - 240px)); }
   .v2pbar { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px; margin:0 -22px 16px;
     padding:10px 16px 10px 12px; padding-top:calc(10px + var(--safe-top)); background:var(--panel); border-bottom:1px solid var(--line) }
   .v2ptitle { flex:1; min-width:0 }
@@ -1062,6 +1079,7 @@
 
 <dialog id="loginDlg" closedby="none">
   <h3 style="margin:0 0 4px">Welcome back</h3>
+  <div class="sub" id="loginPlainHttp" hidden style="margin:0 0 8px;padding:6px 8px;border-radius:6px;background:color-mix(in srgb, var(--warn) 12%, transparent)">This page is open over plain http from another device: what you sign in with, and the session it starts, cross your network unencrypted. Sign in at this Hatchabot's https address instead (the setup guide's "Turn on HTTPS" step), or on the machine itself.</div>
   <form id="pwLogin" onsubmit="event.preventDefault();doLogin()">
     <div class="sub">Enter the Hatchabot password for this machine.</div>
     <input type="text" name="username" value="hatchabot" autocomplete="username" hidden readonly>
@@ -2730,6 +2748,32 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+/**
+ * The phone keyboard covers the bottom of the screen without making the page
+ * any shorter, so a dialog, the console and the web chat sat under it (audit
+ * 2026-10-23, B20). While it is up (the visible part well short of the
+ * window, not zoomed in), html.kbd and --vvh/--vvt fit them above it (the
+ * CSS by `dialog.v2panel`), and the field being typed in is scrolled into view.
+ */
+function fitVisualViewport(vv = window.visualViewport, resized = false) {
+  if (!vv) return;
+  const root = document.documentElement;
+  const kbd = vv.scale <= 1.01 && innerHeight - vv.height > 120;
+  const h = `${Math.round(vv.height)}px`, t = `${Math.round(vv.offsetTop)}px`;
+  // Scrolling fires this often: only a change restyles the page.
+  if (root.classList.contains('kbd') !== kbd) root.classList.toggle('kbd', kbd);
+  if (root.style.getPropertyValue('--vvh') !== h) root.style.setProperty('--vvh', h);
+  if (root.style.getPropertyValue('--vvt') !== t) root.style.setProperty('--vvt', t);
+  const el = document.activeElement;
+  if (kbd && resized && el?.closest?.('dialog[open]') && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) {
+    requestAnimationFrame(() => el.scrollIntoView({ block: 'nearest' }));
+  }
+}
+if (window.visualViewport) {
+  visualViewport.addEventListener('resize', () => fitVisualViewport(visualViewport, true));
+  visualViewport.addEventListener('scroll', () => fitVisualViewport(visualViewport));
+  fitVisualViewport();
+}
 // Stamped into the page by the server. Shown in the header so a stale tab is
 // obvious at a glance rather than something to argue about.
 let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editData = [];
@@ -3421,11 +3465,16 @@ async function idSignUp() {
   } catch (e) { $('loginErr').textContent = e.message; }
 }
 
+/** Plain http, and not this machine: a sign-in here crosses the network in the clear (HB-0109). */
+function plainHttpFromAfar(loc = location) {
+  return loc.protocol === 'http:' && !/^(localhost|127\.\d+\.\d+\.\d+|\[::1\])$/i.test(loc.hostname);
+}
 function showLogin() {
   if ($('sfBlock')) $('sfBlock').hidden = true; // the next sign-in is judged afresh
   if (!loginDlg.open) {
     $('loginErr').textContent = '';
     $('idVerify').hidden = true;
+    $('loginPlainHttp').hidden = !plainHttpFromAfar();
     loadConfig().then(() => {
       loginDlg.showModal();
       (appConfig.authMode === 'identity' ? $('loginEmail') : $('loginPw')).focus();
@@ -6013,6 +6062,9 @@ async function applyModelToSelected() {
     const later = (r.applied || 0) - (r.live || 0) - (r.staged || 0);
     if (later > 0) bits.push(`${later} apply on next rebuild`);
     if (r.held) bits.push(`${r.held} kept on their own model`);
+    // Ticked, but its runtime is too old for the model on a Claude plan: kept on its own (HB-0232).
+    const notSw = r.notSwitched || [];
+    if (notSw.length) bits.push(`not switched: ${notSw.map(x => x.name).join(', ')} (${notSw.length > 1 ? 'their runtimes are' : 'its runtime is'} too old for ${model} on a Claude plan — give ${notSw.length > 1 ? 'them' : 'it'} a newer runtime image first)`);
     toast(apply.length
       ? `Default is now ${model}${bits.length ? ' — ' + bits.join(', ') : ''}.`
       : `Default is now ${model} for new agents. Existing agents keep their models.`, 7000);
@@ -6859,21 +6911,6 @@ function aiKindChanged() {
       : '';
   }
 }
-/** Who else answers in this room. Several agents can share one Telegram group —
- *  each is its own bot and answers only its own @mentions. Telegram never
- *  delivers one bot's message to another, so agents in a room don't hear each
- *  other; that's what peers (A2A) are for. */
-function renderRoomMates(a, ga) {
-  const el = $('tgRoomMates');
-  if (!el) return;
-  if (ga.mode !== 'room' || !ga.roomId) { el.hidden = true; return; }
-  const mates = (agents || []).filter(x => x.id !== a?.id && x.groupAccess?.mode === 'room' && x.groupAccess?.roomId === ga.roomId);
-  el.hidden = false;
-  el.innerHTML = mates.length
-    ? `Also in this room: ${mates.map(m => `<b>${esc(m.name)}</b>`).join(', ')}. Each answers its own @mentions — and they can't hear each other's replies (Telegram never delivers one bot's message to another), so connect them as <b>peers</b> if they need to consult each other.`
-    : 'You can point other agents at this same room — each answers its own @mentions there.';
-}
-
 /** Show the free-text box only when "Other…" is chosen. */
 function aiModelSelectChanged() {
   const other = $('aiModelSelect').value === '__other';
@@ -7607,6 +7644,10 @@ async function renderConnections() {
   // this it carries over whatever the previous agent card left it on.
   $('connNoSend').checked = true;
   // The attach picker: the caller's vault, minus accounts already on this agent.
+  // Emptied first: a failed read left the previous agent's list selectable
+  // (audit 2026-10-23, B20).
+  $('connAttachPick').innerHTML = '<option value="">Loading your accounts…</option>';
+  $('connAttachBtn').disabled = true;
   api('/v1/connections').then(({ connections }) => {
     if (editAgentId !== forId) return;
     const open = connections.filter(c => !c.attachedTo.some(a => a.id === forId));
@@ -7614,7 +7655,9 @@ async function renderConnections() {
       ? open.map(c => `<option value="${c.id}">${DEMO ? 'account' : esc(c.email)}</option>`).join('')
       : '<option value="">— no unattached accounts; connect one in ⚙ Settings → Connections —</option>';
     $('connAttachBtn').disabled = !open.length;
-  }).catch(() => {});
+  }).catch(() => {
+    if (editAgentId === forId) $('connAttachPick').innerHTML = '<option value="">— could not read your accounts; reopen to try again —</option>';
+  });
   try {
     const { accounts } = await api(`/v1/agents/${forId}/connections`);
     if (editAgentId !== forId) return; // dialog moved on while we fetched
@@ -7640,7 +7683,7 @@ async function attachConnection() {
       : r.error ? `Attached, but not live yet: ${r.error}` : 'Attached — lands on the next rebuild/start.', 8000);
     await renderConnections();
   } catch (e) { toast(e.message, 10000); }
-  finally { $('connAttachBtn').disabled = false; }
+  finally { $('connAttachBtn').disabled = !$('connAttachPick').value; }
 }
 
 // ---- platform connections (main Settings → Connections) --------------------
@@ -7823,7 +7866,7 @@ function prepareEdit(id, name, tab = 'def') {
   if ($('editEmbedMode')) { $('editEmbedMode').value = cur?.embedMode || 'baked'; $('embedModeStatus').textContent = cur ? embedModeText(cur) : ''; }
   editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
   renderSetupValues(cur);
-  renderGroupAccess(cur);
+  renderBotWho(cur);
   void renderEditMembers();
   renderParamList();
   $('setupFieldsRow').open = false; // definitions drawer starts closed; values are the everyday surface
@@ -8764,19 +8807,16 @@ function fmtTokens(n) {
   return String(v);
 }
 function fmtUsd(n) { return '$' + (n < 10 ? n.toFixed(2) : n < 100 ? n.toFixed(1) : Math.round(n)); }
-// A cost range as one label — collapses when the bounds print the same; the
-// server sends the range because OpenClaw reports combined in+out tokens.
-function fmtCostRange(c) {
-  const lo = fmtUsd(c.low), hi = fmtUsd(c.high);
-  return (lo === hi ? lo : `${lo}–${hi}`) + (c.partial ? '+' : '');
-}
 function billingLine(agentId, models) {
   const a = (agents ?? []).find(x => x.id === agentId);
   const p = (profiles ?? []).find(x => x.id === a?.aiProfileId);
   if (!p) return '';
   if (p.vendor === 'local') return 'local model — no API cost';
   if (p.kind === 'subscription') return `included (${esc(p.name)})`;
-  const priced = models.map(m => MODEL_PRICES[m] ? `${esc(m)} at $${MODEL_PRICES[m][0]}/$${MODEL_PRICES[m][1]} per 1M in/out` : null).filter(Boolean);
+  // By the model's own id, as the server prices it (modelKey): a transcript's
+  // "anthropic/…" prefix or dated id found no price (HB-0067).
+  const key = (m) => String(m).replace(/^[a-z-]+\//, '').replace(/-\d{8}$/, '');
+  const priced = models.map(m => MODEL_PRICES[key(m)] ? `${esc(m)} at $${MODEL_PRICES[key(m)][0]}/$${MODEL_PRICES[key(m)][1]} per 1M in/out` : null).filter(Boolean);
   return priced.length ? priced.join(' · ') : 'API key';
 }
 async function openUsage(id, name) {
@@ -9521,56 +9561,11 @@ async function addKnownPerson(userId, name) {
   } catch (e) { toast(e.message); }
 }
 
-function onGroupModeChange() {
-  if (!$('tgGroupMode')) return;
-  const room = $('tgGroupMode').value === 'room';
-  $('tgGroupRoom').style.display = room ? '' : 'none';
-  $('tgGroupFindBtn').style.display = room ? '' : 'none';
-  $('tgGroupModeHelp').textContent = room
-    ? '⚠ In that room, BEING IN THE ROOM is the invite — group admins control who that is. The agent only answers @mentions there. Add the bot to the group, say anything in it, then Find rooms.'
-    : $('tgGroupMode').value === 'off'
-      ? 'The agent will not respond in any group.'
-      : 'Groups work as a shared surface for people already admitted; anyone else in the room is ignored.';
-}
-
-function renderGroupAccess(a) {
-  const ga = a?.groupAccess ?? { mode: 'members' };
+/** The bot's handle beside the Telegram card's "The bot" heading. */
+function renderBotWho(a) {
   const who = $('tgBotWho');
   if (who) who.textContent = a?.botUsername ? `— @${a.botUsername}` : '';
-  if (!$('tgGroupMode')) return; // the card draws these now (2026-09-25)
-  $('tgGroupMode').value = ga.mode;
-  if (ga.mode === 'room' && ga.roomId) {
-    $('tgGroupRoom').innerHTML = `<option value="${esc(ga.roomId)}">room ${esc(ga.roomId)}</option>`;
-  }
-  renderRoomMates(a, ga);
-  onGroupModeChange();
-  if ($('tgRichMessages')) $('tgRichMessages').value = a?.richMessages === false ? 'off' : 'on';
-  renderAllowKnocks(a);
-  // A non-default group setting is live state the owner should SEE — open
-  // the drawer for it; the default keeps the tab compact.
-  $('tgGroupDrawer').open = ga.mode !== 'members';
 }
-
-/**
- * A bot username is findable, so strangers do message agents. Invite only
- * (the default) means the agent is deaf to anyone it is not expecting: a
- * person with an invite link, or someone you already know from another
- * agent. Their knock is turned away without ever reaching you.
- */
-function renderAllowKnocks(a) {
-  const sel = $('tgAllowKnocks'); if (!sel) return;
-  sel.value = a?.allowKnocks ? 'on' : 'off';
-  $('tgAllowKnocksHelp').innerHTML = a?.allowKnocks
-    ? 'Anyone who finds the bot can ask, and waits under <b>Alerts</b> — how it worked before v2.13.'
-    // Said as it is (2026-09-30): an open window answers anyone, not only the invitee.
-    : 'Only people you invite, or already know from another agent. Strangers get no answer — except while an invite or ‘Let them in again’ window is open (30 minutes): then anyone who messages gets a pairing reply, and the first one is let in unless the invite named their @handle.';
-}
-
-
-
-
-
-
 
 async function showBotToken() {
   const btn = $('botTokenBtn'), input = $('editBotToken');
@@ -9723,8 +9718,6 @@ function cronScheduleLabel(c) {
   if (c.scheduleKind === 'at' && c.atMs) return 'once at ' + new Date(c.atMs).toLocaleString();
   return c.scheduleKind || 'schedule';
 }
-/** The tasks live in the agent's Schedule tab. */
-function openCrons(id) { return openV2Agent(id, 'schedule'); }
 function prepareCrons(id, name) {
   cronAgentId = id;
   $('cronTriggers').checked = !!(agents.find(x => x.id === id) || {}).cronTriggers;
@@ -10250,7 +10243,10 @@ async function openGateway(id, slug) {
     consoleGuest = false;
     $('consoleGearBtn').style.display = '';
     renderConsoleChannels(a);
-    $('consoleNewTab').onclick = () => window.open(url, '_blank', 'noopener');
+    // Hatchabot's own address for it, never the frame's: a gateway not rebuilt
+    // takes its token in the fragment, and a new tab keeps that in the
+    // browser's history (HB-0023). consoleMark sets the same below.
+    $('consoleNewTab').onclick = () => window.open(consoleAddress(slug || id), '_blank', 'noopener');
     const fr = $('consoleFrame');
     // The spinner stays until the console's page has loaded (or 15 s): a blank
     // frame for several seconds looked like nothing had happened.
@@ -10822,12 +10818,14 @@ function openSendAgent(id, name) {
   scan.style.color = ''; scan.textContent = 'Checking what the copy mentions…';
   api(`/v1/agents/${id}/export/scan?excludeMemory=1`).then(p => {
     if (sendAgentId !== id) return;
-    const what = personalSummary(p);
-    if (!what) { scan.textContent = 'The copy mentions no email addresses, phone numbers or keys.'; return; }
+    const what = personalSummary(p), edits = editedNote(p);
+    const editsHtml = edits ? `<div style="margin-top:6px">${esc(edits)}</div>` : '';
+    if (edits) scan.style.color = 'var(--warn)';
+    if (!what) { scan.innerHTML = esc('The copy mentions no email addresses, phone numbers or keys.') + editsHtml; return; }
     scan.style.color = 'var(--warn)';
     scan.innerHTML = `This copy mentions <b>${esc(what)}</b> — read it before you send it.
       <details><summary>Where</summary><div>${(p.hits || []).map(h => `${esc(h.where)}, line ${Number(h.line) || 0}: <span class="pii">${esc(h.sample)}</span>`).concat(p.more ? [`…and ${Number(p.more)} more`] : []).join('<br>')}</div>
-      <div>Fix them in its Personality or Files, then send.</div></details>`;
+      <div>Fix them in its Personality or Files, then send.</div></details>${editsHtml}`;
   }).catch(e => { if (sendAgentId === id) scan.textContent = `Couldn't check what the copy mentions: ${e.message}`; });
   api('/v1/accounts').then(r => {
     $('accountEmails').innerHTML = (r.accounts || []).filter(a => a.email).map(a => `<option value="${esc(a.email)}">`).join('');
@@ -10942,15 +10940,28 @@ function personalWhere(p) {
   return (p?.hits || []).map(h => `${h.where}, line ${h.line}: ${h.sample}`)
     .concat(p?.more ? [`…and ${p.more} more`] : []);
 }
-/** Ask before saving a copy that mentions people. False = don't save. */
+// A configured copy travels as its setup version ({{fields}} and all); the
+// files the agent or its console changed since the values were applied are
+// not in it (HB-0117). The server names them (edited).
+function editedNote(p) {
+  const f = (Array.isArray(p?.edited) ? p.edited : []).filter(n => n === 'SOUL.md' || n === 'AGENTS.md');
+  if (!f.length) return '';
+  const files = f.join(' and ');
+  return `Its ${files} ${f.length === 1 ? 'was' : 'were'} changed outside the Files editor (by the agent itself, or in its console) after its setup values were applied. ` +
+    `The copy carries its setup version, without those changes. To include them, open ${files} in its Files and save it there, ` +
+    'putting {{field}} back wherever a copy should give its own answer.';
+}
+/** Ask before saving a copy that mentions people, or leaves out edits. False = don't save. */
 function personalCheck(res) {
   let p = null;
   try { p = JSON.parse(decodeURIComponent(res.headers.get('x-hatchabot-personal') || '')); } catch { p = null; }
-  const what = personalSummary(p);
-  if (!what) return true;
-  return confirm(`This copy mentions ${what} — read it before you send it.\n\n` +
-    `Where (fix them in its Personality or Files, then share again):\n• ${personalWhere(p).join('\n• ')}\n\n` +
-    "OK — save the file anyway. Cancel — don't save it.");
+  const what = personalSummary(p), edits = editedNote(p);
+  if (!what && !edits) return true;
+  return confirm([
+    what ? `This copy mentions ${what} — read it before you send it.\n\n` +
+      `Where (fix them in its Personality or Files, then share again):\n• ${personalWhere(p).join('\n• ')}` : '',
+    edits,
+  ].filter(Boolean).join('\n\n') + "\n\nOK — save the file anyway. Cancel — don't save it.");
 }
 
 /**
@@ -13159,7 +13170,15 @@ let v2AppCache = null;
 async function v2LoadApp(id, fresh = false) {
   let r = !fresh && v2AppCache && v2AppCache.id === id && Date.now() - v2AppCache.at < 30_000 ? v2AppCache.r : null;
   if (!r) {
-    try { r = await api(`/v1/agents/${id}/app`); } catch { return; }
+    try { r = await api(`/v1/agents/${id}/app`); } catch (e) {
+      // The re-read after an action: say so, or the row kept its pressed,
+      // disabled "Updating…" until the sheet was reopened (audit 2026-10-23, B20).
+      const el = $('v2AppRow');
+      if (fresh && el && v2AgentId === id) {
+        el.innerHTML = `<div class="v2row"><div class="v2k">App</div><div class="v2v"><span class="sub">Couldn't read its app: ${esc(e.message)}</span><button onclick="v2LoadApp('${jsq(id)}', true)">Read again</button></div></div>`;
+      }
+      return;
+    }
     v2AppCache = { id, at: Date.now(), r };
   }
   const el = $('v2AppRow'); if (!el || v2AgentId !== id) return;

@@ -20,6 +20,14 @@ function checkHandlers(file, html, js) {
   const handlers = new Set(
     [...html.matchAll(/\son[a-z]+="\s*([A-Za-z_$][\w$]*)\s*[(.]/g)].map((m) => m[1]),
   );
+  // And the handlers a helper puts into the attribute: B(label, `fn(…)`) in
+  // the agent page and its App row, and `onclick="${setup}"` (or ${call})
+  // whose code is a literal set elsewhere. A function renamed and used only
+  // there shipped a dead button unseen (audit 2026-10-23, B20).
+  for (const m of js.matchAll(/\bB\(\s*(?:'[^']*'|`[^`]*`|"[^"]*"|[\w$.]+)\s*,\s*[`']\s*([A-Za-z_$][\w$]*)\s*\(/g)) handlers.add(m[1]);
+  for (const m of js.matchAll(/\b(?:const|let)\s+(?:call|setup)\s*=([^\n]*)/g)) {
+    for (const c of m[1].matchAll(/[`']\s*([A-Za-z_$][\w$]*)\s*\(/g)) handlers.add(c[1]);
+  }
   // Definitions: function declarations, const/let/var fn = ..., plus DOM ids
   // (elements with an id are window globals, e.g. someDlg.close()).
   const defined = new Set([

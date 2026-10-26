@@ -13,9 +13,11 @@ import { join } from 'node:path';
  * (hatchabot-follow-channel.timer, systemd --user) is enabled and active; it
  * follows `stable` (not beta or latest: a public box runs what was promoted);
  * and nobody pinned this machine to a version by hand. The channel it follows
- * is the one chosen last, in ~/.config/hatchabot/channel (`hatchabot upgrade
- * beta` switches it), else the one its service was installed with; vX.Y.Z
- * there is a pin, which pauses the timer's upgrades.
+ * is the one chosen last for the install the timer runs (`hatchabot upgrade
+ * beta` switches it): its data/channel, else ~/.config/hatchabot/channel (one
+ * for every install of the user's, before v2.169.0; HB-0235), else the one its
+ * service was installed with; vX.Y.Z there is a pin, which pauses the timer's
+ * upgrades.
  *
  * A Mac has no timer (follow-channel.sh needs systemd), so the answer there
  * is no, and public access stays off.
@@ -51,7 +53,9 @@ export async function autoUpgradeStatus(p: AutoUpgradeProbes = realProbes()): Pr
   const active = await p.systemctl(['is-active', TIMER]);
   if (active !== 'active') return { ok: false, why: 'The channel timer is installed but not running.' };
   const unit = await p.readFile(join(p.home, '.config/systemd/user/hatchabot-follow-channel.service'));
-  const pin = (await p.readFile(join(p.home, '.config/hatchabot/channel')))?.trim();
+  // The install the timer runs, from its ExecStart (follow-channel.sh --install writes it quoted).
+  const dir = /^ExecStart=.*?"([^"]+)\/scripts\/follow-channel\.sh"/m.exec(unit ?? '')?.[1];
+  const pin = ((dir ? await p.readFile(join(dir, 'data', 'channel')) : undefined) ?? await p.readFile(join(p.home, '.config/hatchabot/channel')))?.trim();
   // As follow-channel.sh decides it on each tick (audit #043).
   const channel = pin && /^(stable|beta|latest)$/.test(pin) ? pin : /^ExecStart=.*follow-channel\.sh"?\s+(\S+)\s*$/m.exec(unit ?? '')?.[1];
   if (channel !== 'stable') {

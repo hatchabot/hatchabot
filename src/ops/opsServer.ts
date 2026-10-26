@@ -244,7 +244,26 @@ export const loopbackDoorman = (ip: string): boolean =>
   // Under a rootless daemon every container is a loopback peer: there the
   // doorman's preamble is the proof, and a bare loopback peer is nobody.
   process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK !== '1' &&
+  // Only Docker Desktop: a door that fell back to 127.0.0.1 on Linux would
+  // otherwise let every local process past the peer check (HB-0019). A
+  // doorman's preamble still gets it in there.
+  dockerDesktop() &&
   boundHost === '127.0.0.1' && (normalizeIp(ip) === '127.0.0.1' || ip === '::1');
+
+/**
+ * Docker in a VM on this machine (Docker Desktop: macOS, Windows, or its Linux
+ * edition), whose containers reach this machine's loopback through the VM's
+ * forwarder — their connections arrive from 127.0.0.1. HATCHABOT_DOCKER_DESKTOP
+ * says so (index.ts sets it when the daemon reports Docker Desktop). Unset,
+ * macOS and Windows count as Desktop: Docker runs in a VM there anyway, and a
+ * probe asked before Docker Desktop has started would have said no.
+ */
+export function dockerDesktop(): boolean {
+  const forced = process.env.HATCHABOT_DOCKER_DESKTOP;
+  if (forced === '1' || forced === 'true') return true;
+  if (forced === '0' || forced === 'false') return false;
+  return process.platform === 'darwin' || process.platform === 'win32';
+}
 export function setOpsHandlers(h: OpsHandlers): void { handlersRef = h; }
 /** The registered handlers (tests drive the door through these). */
 export const getOpsHandlers = (): OpsHandlers | undefined => handlersRef;

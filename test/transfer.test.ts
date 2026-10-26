@@ -572,3 +572,59 @@ describe("a bundle's folders come back only for the machine's owner (2026-10-24)
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+describe('HB-0237: an imported repo source keeps a name the sync script can hold', () => {
+  it('a git mount name with shell syntax, or an address the add route would refuse, is left out; a plain one comes back', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    src.store.insertDataSource({ id: 'g1', agentId: 'a1', kind: 'git', access: 'ro', mountName: 'recipes', repoUrl: 'https://git.example.org/example-owner/recipes.git', createdAt: 'now' });
+    const { data } = await exportAgent(src.deps, 'a1');
+    const manifest = JSON.parse(gunzipSync(data).toString('utf8'));
+    manifest.agent.dataSources.push(
+      { kind: 'git', access: 'ro', mountName: 'x$(touch /tmp/owned)', repoUrl: 'https://git.example.org/example-owner/x.git' },
+      { kind: 'git', access: 'ro', mountName: 'other', repoUrl: 'git@-oProxyCommand=sh:example-owner/other.git' },
+    );
+    const events: string[] = [];
+    const dst = await installation('importer');
+    const a = await importAgent({ ...dst.deps, log: (e: string) => { events.push(e); } }, gzipSync(Buffer.from(JSON.stringify(manifest))), { ownerId: 'importer' });
+    expect(dst.store.listDataSources(a.id).map((d) => d.mountName)).toEqual(['recipes']);
+    expect(events).toContain('import.repos_refused');
+  });
+});
+
+describe("HB-0076: an imported agent's new owner is not left a pairing request to approve by hand", () => {
+  it('an importer this machine does not know yet: the owner watch starts, never for the previous owner', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const dst = await installation('importer');
+    const watched: Array<{ agentId: string; accountId: string; excludeIds: string[] }> = [];
+    const a = await importAgent(dst.deps, data, { ownerId: 'importer', watchOwner: (agent, o) => { watched.push({ agentId: agent.id, ...o }); } });
+    expect(dst.store.getMembership(a.id, 'importer')?.channelUserId).toBeUndefined();
+    expect(watched).toEqual([{ agentId: a.id, accountId: 'kitchenbot', excludeIds: ['111'] }]);
+  });
+
+  it('an importer whose Telegram this machine knows is seated with it at once, and nothing is watched', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const dst = await installation('importer');
+    dst.store.insertMembership({ id: 'mx', agentId: 'earlier-agent', userId: 'importer', role: 'owner', status: 'active', channelUserId: '333', joinedAt: '2026-10-01T00:00:00.000Z' });
+    const watched: string[] = [];
+    const a = await importAgent(dst.deps, data, { ownerId: 'importer', watchOwner: (agent) => { watched.push(agent.id); } });
+    expect(dst.store.getMembership(a.id, 'importer')?.channelUserId).toBe('333');
+    expect(watched).toEqual([]);
+  });
+
+  it('a known id the file seats as somebody else is not given to the owner too', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const dst = await installation('importer');
+    dst.store.insertMembership({ id: 'mx', agentId: 'earlier-agent', userId: 'importer', role: 'owner', status: 'active', channelUserId: '222', joinedAt: '2026-10-01T00:00:00.000Z' });
+    const watched: string[] = [];
+    const a = await importAgent(dst.deps, data, { ownerId: 'importer', watchOwner: (agent) => { watched.push(agent.id); } });
+    expect(dst.store.getMembership(a.id, 'importer')?.channelUserId).toBeUndefined();
+    expect(watched).toEqual([a.id]);
+  });
+});

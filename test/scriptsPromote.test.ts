@@ -197,6 +197,33 @@ describe('scripts/promote.sh asks CI first (it was red for eight days unseen, 20
   });
 });
 
+describe('scripts/promote.sh moving a channel back with no terminal (HB-0071)', () => {
+  const back = (w: ReturnType<typeof world>, input: string, extra: Record<string, string> = {}) => spawnSync('bash', [join(w.work, 'scripts', 'promote.sh'), 'v0.9.0'], {
+    cwd: w.work, encoding: 'utf8', input, timeout: 20_000,
+    env: scriptEnv(join(w.work, '..', 'home'), `${join(w.work, '..', 'bin')}:/usr/bin:/bin`, { HATCHABOT_LAND_DIRECT: '1', ...extra }),
+  });
+
+  it('nothing on stdin: refuses, saying why and how to say yes, and changes nothing', () => {
+    const w = world();
+    w.git(w.work, 'tag', 'v0.9.0'); w.publish('v0.9.0');
+    const r = back(w, '');
+    expect(r.error, 'it waited').toBeUndefined();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('move it BACK to v0.9.0?');
+    expect(r.stderr).toContain('Nothing changed: moving stable back to v0.9.0 needs a yes (in a terminal, or HATCHABOT_PROMOTE_BACK=1)');
+    expect(w.channels()).not.toContain('"stable": "v0.9.0"');
+  });
+
+  it('HATCHABOT_PROMOTE_BACK=1 is the yes', () => {
+    const w = world();
+    w.git(w.work, 'tag', 'v0.9.0'); w.publish('v0.9.0');
+    const r = back(w, '', { HATCHABOT_PROMOTE_BACK: '1' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('Moving stable back from v1.0.0 to v0.9.0 (HATCHABOT_PROMOTE_BACK=1).');
+    expect(w.channels()).toContain('"stable": "v0.9.0"');
+  });
+});
+
 describe('scripts/promote.sh asks for the live tests (docs/live-tests.md)', () => {
   /** The sandbox with the live register and a record; node on PATH. */
   const withLive = (record: string) => {

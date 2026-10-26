@@ -332,6 +332,50 @@ describe('--text: the release notes, in the release workflow (release.yml, 2026-
   });
 });
 
+describe('a value hidden in an encoding is found decoded (HB-0070)', () => {
+  const text = (blob: string, file: string) => spawnSync('node', [CI, '--text', file], {
+    cwd: dir, encoding: 'utf8', env: scriptEnv(dir, PATH(), { PRIVACY_FINGERPRINTS: blob }),
+  });
+  const b64 = (s: string) => Buffer.from(s).toString('base64');
+
+  it('percent-encoded, HTML character references and base64 (standard or URL-safe), each masked and marked how', () => {
+    const blob = exportBlob();
+    const notes = join(dir, 'notes.md');
+    for (const [line, how] of [
+      ['See https://example.org/a?agent=Mapleford%20Helper&x=1', 'percent-encoded'],
+      ['<p>Mapleford&#32;Helper</p>', 'HTML-encoded'],
+      [`data: ${b64('Mapleford Helper')}`, 'base64'],
+      [`token=${b64('mail someone@example.org').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')}`, 'base64'],
+    ]) {
+      writeFileSync(notes, `### Fixed\n${line}\n`);
+      const r = text(blob, notes);
+      expect(r.status, line + shown(r)).toBe(1);
+      expect(r.stdout, line).toContain(`, ${how}] '`);
+      expect(r.stdout, line).toContain(`${notes}:2`);
+      masked(r);
+    }
+  });
+
+  it('encoded text that names nothing private stays clean', () => {
+    const blob = exportBlob();
+    const notes = join(dir, 'notes.md');
+    writeFileSync(notes, `### Fixed\n- Budget%20Tracker, Budget&#32;Tracker and ${b64('Budget Tracker')}; configuration checkoutFacts sha512-${b64('x'.repeat(30))}\n`);
+    const r = text(blob, notes);
+    expect(r.status, shown(r)).toBe(0);
+  });
+
+  it('a typographic apostrophe splits words as a plain one does', () => {
+    const d = new Database(db);
+    d.prepare('insert into memberships values (?, ?)').run('123456789013', "Ilse O'Rourke");
+    d.close();
+    const notes = join(dir, 'notes.md');
+    writeFileSync(notes, '### Fixed\nThanks to Ilse O\u2019Rourke.\n');
+    const r = text(exportBlob(), notes);
+    expect(r.status, shown(r)).toBe(1);
+    expect(r.stdout).toContain(`[P person name] 'Il…(`);
+  });
+});
+
 describe('--sync-ci', () => {
   it('hands the blob to gh on stdin, never in its arguments, and prints counts only', () => {
     const r = check(['--sync-ci', '--repo', 'example/project']);

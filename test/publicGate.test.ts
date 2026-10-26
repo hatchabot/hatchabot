@@ -228,3 +228,19 @@ describe('the public listener: who gets what', () => {
     expect(priv.headers['content-security-policy']).toBeUndefined();
   });
 });
+
+describe('the public listener: the visitor\'s address (HB-0057)', () => {
+  it('says once, in the log, when requests come without X-Forwarded-For', async () => {
+    h = await publicApp();
+    await h.addAccount('owner', { owner: true });
+    await h.app.publicAccess!.evaluate();
+    const warned: string[] = [];
+    const real = h.app.log.warn.bind(h.app.log);
+    h.app.log.warn = ((o: unknown, msg?: string) => { warned.push(String(msg ?? o)); return real(o as never, msg as never); }) as never;
+    await h.pub('/');
+    expect(warned.filter((m) => m === 'public.no_client_address')).toHaveLength(0);
+    await h.pub('/', { headers: { 'x-forwarded-for': '' } });
+    await h.pub('/', { headers: { 'x-forwarded-for': '' } });
+    expect(warned.filter((m) => m === 'public.no_client_address')).toHaveLength(1);
+  });
+});

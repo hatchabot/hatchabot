@@ -109,6 +109,23 @@ describe('POST /v1/agents/:id/data-sources', () => {
     expect(res.json().error).toMatch(/already shared/i);
   });
 
+  it('atHostPath: two folders whose paths differ only in separators are both shared, each with its own name (HB-0074)', async () => {
+    const { store, f } = await world();
+    const root = tmp();
+    mkdirSync(join(root, 'recipes', 'family'), { recursive: true });
+    mkdirSync(join(root, 'recipes-family'));
+    // Both flatten to "…recipes-family": the second was refused as "already shared".
+    expect((await addSource(f, { kind: 'folder', access: 'ro', path: join(root, 'recipes', 'family'), atHostPath: true })).statusCode).toBe(200);
+    expect((await addSource(f, { kind: 'folder', access: 'ro', path: join(root, 'recipes-family'), atHostPath: true })).statusCode).toBe(200);
+    const names = store.listDataSources('a1').map((d) => d.mountName);
+    expect(names).toHaveLength(2);
+    expect(new Set(names).size).toBe(2);
+    // The same folder with a trailing slash is still the same folder.
+    const again = await addSource(f, { kind: 'folder', access: 'ro', path: `${join(root, 'recipes-family')}/`, atHostPath: true });
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toMatch(/already shared/i);
+  });
+
   it('rejects git for now (Slice B)', async () => {
     const { f } = await world();
     const res = await addSource(f, { kind: 'git', access: 'ro', path: 'x' });
@@ -439,5 +456,15 @@ describe('a public repo added to a running agent (audit #096)', () => {
     for (let i = 0; i < 50 && isBusy('a1'); i++) await new Promise((r) => setTimeout(r, 5));
     expect((await save()).statusCode).toBe(200);
     expect(text).toBe(changed);
+  });
+});
+
+describe('HB-0053: a folder shared at its own path cannot land on the agent\'s system paths', () => {
+  it('refuses /usr/share at its host path, and takes it at /data', async () => {
+    const { f } = await world();
+    const res = await addSource(f, { kind: 'folder', access: 'ro', path: '/usr/share', atHostPath: true });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/would cover \/usr/);
+    expect((await addSource(f, { kind: 'folder', access: 'ro', path: '/usr/share' })).statusCode).toBe(200);
   });
 });

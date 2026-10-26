@@ -29,7 +29,7 @@ import { clearStaleRuntimePins } from './runtimePins.js';
 import { syncConnections } from './googleConnections.js';
 import { verifyAgentAccess } from './accessOverview.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
-import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, removeInstallSections, operatorSection, peerToolsSection, removeSection, replaceSection, scheduledResultsSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, SCHEDULED_RESULTS_HEADING } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, removeInstallSections, operatorSection, peerOneLine, peerToolsSection, removeSection, replaceSection, scheduledResultsSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, SCHEDULED_RESULTS_HEADING } from '../openclaw/workspace.js';
 import { effectiveMemoryCap, memoryBudgetSection } from './memoryCap.js';
 import { agentMemoryLimits } from './swap.js';
 
@@ -755,9 +755,17 @@ export async function buildRuntimeSpec(
   // Refused here, before anything is stopped, the agent keeps running.
   for (const p of [
     ...(agent.sharedPaths ?? []),
-    ...store.listDataSources(agent.id).filter((d) => d.kind === 'folder' && d.hostPath && !d.mountAtHostPath).map((d) => d.hostPath!),
+    ...store.listDataSources(agent.id).filter((d) => d.kind === 'folder' && d.hostPath).map((d) => d.hostPath!),
   ]) {
     const problem = sharePathProblem(p);
+    if (problem) throw new ProviderError(`shared folder refused at build: ${problem}`, `A shared folder is no longer safe to mount: ${problem} Remove it from the agent's Data, then rebuild.`);
+  }
+  // A folder brought in from OpenClaw is mounted at its own path: judged as a
+  // place inside the container too, and judged again here like every share
+  // (it was left out of the check above, HB-0053).
+  for (const d of store.listDataSources(agent.id)) {
+    if (d.kind !== 'folder' || !d.hostPath || !d.mountAtHostPath) continue;
+    const problem = hostPathTargetProblem(d.hostPath);
     if (problem) throw new ProviderError(`shared folder refused at build: ${problem}`, `A shared folder is no longer safe to mount: ${problem} Remove it from the agent's Data, then rebuild.`);
   }
   const seedFiles = store.getAgentSeed(agentId);
@@ -1575,7 +1583,7 @@ export async function syncDataSourceDocs(
     if (peers.length) {
       next = replaceSection(next, '## Peers', peerToolsSection(peers.map((p) => ({ name: p.name }))));
       const b64s = Buffer.from(CALL_AGENT_SCRIPT, 'utf8').toString('base64');
-      const b64m = Buffer.from(JSON.stringify(peers.map((p) => ({ name: p.name, id: p.id }))), 'utf8').toString('base64');
+      const b64m = Buffer.from(JSON.stringify(peers.map((p) => ({ name: peerOneLine(p.name), id: p.id }))), 'utf8').toString('base64');
       await provider
         .execShell(
           runtimeRef,
@@ -1876,6 +1884,24 @@ export function sharePathProblem(p: string, opts: { home?: string } = {}): strin
   for (const [bad, why] of forbidden) {
     // Inside a forbidden path, or an ANCESTOR of one (sharing /var hands over docker.sock).
     if (norm === bad || norm.startsWith(`${bad}/`) || bad.startsWith(`${norm}/`)) return `Refusing ${norm}: ${why}.`;
+  }
+  return undefined;
+}
+
+/**
+ * A folder mounted at its host path lands there inside the container too: never
+ * on or over the agent's own home or the image's system paths, nor in place of
+ * its scratch folders (a folder inside /tmp is fine; /tmp itself is not) (HB-0053).
+ */
+export function hostPathTargetProblem(p: string): string | undefined {
+  const norm = resolve(p).replace(/\/+$/, '') || '/';
+  const within = ['/home/node', '/opt', '/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/dev', '/proc', '/sys'];
+  const itself = ['/tmp', '/var', '/run'];
+  for (const bad of [...within, ...itself]) {
+    const inside = within.includes(bad) && norm.startsWith(`${bad}/`);
+    if (norm === '/' || norm === bad || inside || bad.startsWith(`${norm}/`)) {
+      return `Refusing ${norm}: inside the agent it would cover ${bad}, which the agent itself runs from. Share it at /data instead.`;
+    }
   }
   return undefined;
 }

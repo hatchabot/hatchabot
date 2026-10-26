@@ -369,11 +369,14 @@ if [ -n "$G" ] && [ -L "$G/hatchabot" ]; then
 else
   echo "  (was not linked)"
 fi
-# The CLI's token and channel pin belong to the USER, not this install (a
-# production checkout beside a test one shares them): only --purge takes them.
+# The CLI's token, and the channel file installs before v2.169.0 kept, belong
+# to the USER, not this install (a production checkout beside a test one
+# shares them): only --purge takes them. This install's own channel
+# (data/channel, HB-0235) goes with a purge too.
 if [ "$PURGE" = 1 ]; then
   [ -f "$HOME/.config/hatchabot/env" ] && rm -f "$HOME/.config/hatchabot/env" && echo "  removed ~/.config/hatchabot/env"
   [ -f "$HOME/.config/hatchabot/channel" ] && rm -f "$HOME/.config/hatchabot/channel" && echo "  removed the channel pin"
+  [ -f "$REPO/data/channel" ] && rm -f "$REPO/data/channel" && echo "  removed this install's channel"
 fi
 
 if have docker; then

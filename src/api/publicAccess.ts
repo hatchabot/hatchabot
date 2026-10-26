@@ -571,10 +571,23 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
 
   // ---- the gate: first half (before the sign-in hook) -------------------------
 
+  // Every limit per visitor reads X-Forwarded-For, which tailscaled sets.
+  // Without it every visitor is "unknown", one bucket: one person's misses
+  // would lock out everyone. Said once a run, so a front end that does not
+  // send it is found from the log (HB-0057).
+  let toldNoAddress = false;
   app.addHook('onRequest', async (req, reply) => {
     if (!isPublic(req)) return;
     if (!serving) return reply.code(503).header('retry-after', '300').send({ error: NOT_SERVING });
-    if (overCeiling(publicClientAddress(req))) return reply.code(429).header('retry-after', '60').send({ error: 'Too many requests. Try again in a minute.' });
+    const visitor = publicClientAddress(req);
+    if (visitor === 'unknown' && !toldNoAddress) {
+      toldNoAddress = true;
+      app.log.warn({
+        forwardedFor: req.headers['x-forwarded-for'] === undefined ? 'absent' : 'not an address',
+        why: 'A public request came without the visitor\'s address (X-Forwarded-For, which tailscale funnel sets): such visitors share one sign-in lockout and one request limit.',
+      }, 'public.no_client_address');
+    }
+    if (overCeiling(visitor)) return reply.code(429).header('retry-after', '60').send({ error: 'Too many requests. Try again in a minute.' });
     // The name the visitor asked for must be the public one (tailscaled passes it on as X-Forwarded-Host).
     const asked = req.headers['x-forwarded-host'];
     const askedHost = (Array.isArray(asked) ? asked[0] : asked)?.split(',')[0]?.trim().toLowerCase().replace(/:\d+$/, '');

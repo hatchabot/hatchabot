@@ -20,7 +20,7 @@ afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, f
 const shim = (dir: string, name: string, body: string) => writeFileSync(join(dir, name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
 const TENANT = 'unix:///run/made-up-tenant/docker.sock';
 
-function host() {
+function host(label = '2026.9.8') {
   const root = mkdtempSync(join(tmpdir(), 'hb-setup-host-')); dirs.push(root);
   const app = join(root, 'app'), bin = join(root, 'bin'), home = join(root, 'home'), log = join(root, 'calls.log');
   for (const d of [join(app, 'scripts'), join(app, 'docker'), join(app, 'node_modules', '.bin'), bin, home]) mkdirSync(d, { recursive: true });
@@ -33,7 +33,7 @@ function host() {
   // The machine's default daemon has the image; the tenant's daemon has none.
   shim(bin, 'docker', `echo "docker on \${DOCKER_HOST:-default}: $*" >> '${log}'
 case "$1 $2" in
-  "image inspect") [ "\${DOCKER_HOST:-}" != '${TENANT}' ] || exit 1; case "$*" in *--format*) echo 2026.9.8 ;; esac ;;
+  "image inspect") [ "\${DOCKER_HOST:-}" != '${TENANT}' ] || exit 1; case "$*" in *--format*) echo '${label}' ;; esac ;;
 esac
 exit 0`);
   shim(bin, 'uname', 'echo Linux');
@@ -51,7 +51,7 @@ describe('scripts/setup-host.sh prepares the runtime image on the daemon the ser
     const r = h.run({ HATCHABOT_SETUP_ENV: `DOCKER_HOST=${TENANT}\nHATCHABOT_PREFIX=t1` });
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(readFileSync(join(h.app, '.env'), 'utf8')).toContain(`DOCKER_HOST=${TENANT}`);
-    expect(r.stdout).toContain('Building the agent runtime image');
+    expect(r.stdout).toContain('Getting the agent runtime image (downloads it, or builds it if none is published)');
     expect(r.stdout).not.toContain('Runtime image already present');
     const calls = h.calls();
     expect(calls).toContain(`build on ${TENANT}`);
@@ -75,5 +75,29 @@ describe('scripts/setup-host.sh prepares the runtime image on the daemon the ser
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(r.stdout).toContain('Runtime image already present');
     expect(h.calls().some((c) => c.includes(TENANT))).toBe(false);
+  });
+});
+
+describe('scripts/setup-host.sh brings an older :latest up to this release\'s default', () => {
+  it('an image with no OpenClaw version label (old or hand-built) is fetched, not kept (HB-0041)', () => {
+    for (const label of ['', '<no value>']) {
+      const h = host(label);
+      const r = h.run();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toContain('carries no OpenClaw version label');
+      expect(r.stdout).not.toContain('Runtime image already present');
+      expect(h.calls()).toContain('build on default');
+    }
+  });
+
+  it('an older label is fetched; the same or a newer one is kept', () => {
+    const older = host('2026.7.1'); const ro = older.run();
+    expect(ro.stdout).toContain('carries OpenClaw 2026.7.1');
+    expect(older.calls()).toContain('build on default');
+    for (const label of ['2026.9.8', '2026.10.1']) {
+      const h = host(label); const r = h.run();
+      expect(r.stdout, label).toContain('Runtime image already present');
+      expect(h.calls(), label).not.toContain('build on default');
+    }
   });
 });

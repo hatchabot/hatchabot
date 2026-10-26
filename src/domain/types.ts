@@ -190,6 +190,9 @@ export interface Agent {
   swapAllowance?: string;
   /** Cap hits the container had recorded when the cap was last set — hits before that are old news. */
   memoryCapBaseline?: number;
+  /** When the container the baseline was read from started (docker State.StartedAt): another
+   *  start counts its cap hits from zero, whatever their number (HB-0234). */
+  memoryCapBaselineStartedAt?: string;
   /** The high-water mark kept since the owner last cleared the peaks (Resources), and when. */
   memoryPeakSince?: number;
   memoryPeakClearedAt?: string;

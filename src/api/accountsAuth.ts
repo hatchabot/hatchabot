@@ -239,7 +239,7 @@ export function registerAccountRoutes(
   app: FastifyInstance,
   deps: AccountsAuthDeps,
   guard: {
-    throttled: (req: FastifyRequest, who?: string) => boolean; noteFailure: (req: FastifyRequest, who?: string) => void; clearFailures?: (who: string) => void;
+    throttled: (req: FastifyRequest, who?: string, scope?: 'link') => boolean; noteFailure: (req: FastifyRequest, who?: string, scope?: 'link') => void; clearFailures?: (who: string) => void;
     /** auth.ts reserve: a place in the count while a guess is being checked (undefined: refused). */
     reserve?: (req: FastifyRequest, who?: string) => (() => void) | undefined;
   },
@@ -406,8 +406,16 @@ export function registerAccountRoutes(
 
   /** Is this claim link still good? Lets the page show the username it is for. */
   app.get<{ Querystring: { code?: string } }>('/v1/local-accounts/claim', async (req, reply) => {
+    // Misses are counted, as at the join route: guessing codes here cost
+    // nothing (HB-0054). The link bucket, not the sign-in one: a page on
+    // another site can send anyone's browser to junk links, and that must
+    // not lock them out of the password form.
+    if (guard.throttled(req, undefined, 'link')) return reply.code(429).send({ error: 'Too many attempts — try again later.' });
     const account = req.query.code ? store.localAccountByClaim(req.query.code) : undefined;
-    if (!account) return reply.code(404).send({ error: 'That link has been used already, or it has expired.' });
+    if (!account) {
+      guard.noteFailure(req, undefined, 'link');
+      return reply.code(404).send({ error: 'That link has been used already, or it has expired.' });
+    }
     if (ownerFirstClaimFromPublic(req, account)) return reply.code(403).send({ error: OWNER_CLAIM_PRIVATE_ONLY });
     // The code is the credential, so this tells only its holder; the link is kept for the private address.
     if (ownerRecoveryFromPublic(req, account)) return reply.code(403).send({ error: OWNER_RECOVERY_PRIVATE_ONLY, privateOnly: true });

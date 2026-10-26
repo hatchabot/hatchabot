@@ -60,10 +60,10 @@ function channelStub(availableBots = 0) {
       if (ex) { ex.token = t; ex.ownerId = ownerId ?? null; }
       else entries.push({ username: u, token: t, ownerId: ownerId ?? null });
     },
-    removeFromPool: async (u: string) => {
+    removeFromPool: async (u: string, o: { leasedTo?: string } = {}) => {
       const e = entries.find((x) => x.username === u);
       if (!e) throw new Error(`@${u} is not in the pool.`);
-      if (e.leasedTo) throw new Error(`@${u} is leased to an agent — delete that agent first.`);
+      if (e.leasedTo && e.leasedTo !== o.leasedTo) throw new Error(`@${u} is leased to an agent — delete that agent first.`);
       entries.splice(entries.indexOf(e), 1);
     },
   };

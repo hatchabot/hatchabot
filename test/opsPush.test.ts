@@ -125,5 +125,20 @@ describe('a push budget, and Discord when Telegram cannot carry it (2026-09-25)'
     const nothing = createOpsPush({ botToken: async () => undefined, chatId: () => undefined, fetchImpl: stubFetch(calls) });
     expect(await nothing.waiting('o3', 'x')).toBe(false);
   });
+  it('an owner with nowhere to push to is not charged: once linked, the full hour is still theirs (HB-0037)', async () => {
+    let linked = false;
+    const dms: string[] = [];
+    const push = createOpsPush({
+      botToken: async () => undefined, chatId: () => undefined, perHour: 2,
+      sendDiscord: async (_o, text) => { if (!linked) return false; dms.push(text); return true; },
+      discordLinked: () => linked,
+    });
+    for (let i = 0; i < 5; i++) expect(await push.waiting('o1', `knock ${i}`)).toBe(false);
+    linked = true;
+    expect(await push.waiting('o1', 'one')).toBe(true);
+    expect(await push.waiting('o1', 'two')).toBe(true);
+    expect(dms[0]).not.toContain('last of these'); // the first of two, not "the last"
+    expect(dms[1]).toContain('last of these for this hour');
+  });
 });
 

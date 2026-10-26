@@ -658,3 +658,58 @@ describe('a download stream from a volume (#178)', () => {
     expect(await drain(s)).toBe('first half');
   });
 });
+
+describe('HB-0065: a pre-rename daemon gets the new image name before the seed runs in it', () => {
+  it('tags agentclaw-runtime:<tag> as hatchabot-runtime:<tag> before the seed one-shot', async () => {
+    const dd = mkdtempSync(join(tmpdir(), 'acl-legacy-alias-'));
+    const log = join(dd, 'argv.log');
+    const st = join(dd, 'docker');
+    writeFileSync(st, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\ncase "$*" in "image inspect --format {{.Id}} hatchabot-runtime:"*) exit 1;; esac\nexit 0\n`, { mode: 0o755 });
+    await new LocalDockerProvider({ docker: st, image: 'hatchabot-runtime:2026.9.6-1' }).provision(spec() as any);
+    const lines = readFileSync(log, 'utf8').split('\n');
+    const tag = lines.findIndex((l) => l === 'tag agentclaw-runtime:2026.9.6-1 hatchabot-runtime:2026.9.6-1');
+    const seedRun = lines.findIndex((l) => l.startsWith('run ') && l.includes('seed.sh'));
+    expect(tag).toBeGreaterThanOrEqual(0);
+    expect(seedRun).toBeGreaterThan(tag);
+  });
+});
+
+describe('HB-0029: a tcp:// runner is spoken to over verified TLS only', () => {
+  it('every docker call to a tcp:// endpoint carries --tlsverify; ssh:// does not', async () => {
+    const dd = mkdtempSync(join(tmpdir(), 'acl-tcp-tls-'));
+    const log = join(dd, 'argv.log');
+    const st = join(dd, 'docker');
+    writeFileSync(st, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nexit 0\n`, { mode: 0o755 });
+    const reachProbe = async () => true;
+    await new LocalDockerProvider({ docker: st, host: 'tcp://10.0.0.9:2376', reachProbe }).status('kitchen-helper-df918a55');
+    await new LocalDockerProvider({ docker: st, host: 'ssh://runner@10.0.0.9', reachProbe }).status('kitchen-helper-df918a55');
+    const lines = readFileSync(log, 'utf8').trim().split('\n');
+    expect(lines.filter((l) => l.startsWith('-H tcp://')).every((l) => l.startsWith('-H tcp://10.0.0.9:2376 --tlsverify '))).toBe(true);
+    expect(lines.some((l) => l.startsWith('-H tcp://'))).toBe(true);
+    expect(lines.filter((l) => l.startsWith('-H ssh://')).some((l) => l.includes('--tlsverify'))).toBe(false);
+    expect(remoteTarget('tcp://10.0.0.9')).toEqual({ host: '10.0.0.9', port: 2376 });
+  });
+});
+
+describe('HB-0050: info() does not run docker inspect on every poll', () => {
+  it('a second ask within the window, or one at the same moment, reuses the answer; start, stop and provision forget it', async () => {
+    const dd = mkdtempSync(join(tmpdir(), 'acl-info-cache-'));
+    const log = join(dd, 'argv.log');
+    const st = join(dd, 'docker');
+    writeFileSync(st, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\ncase "$1" in inspect) echo 'sha256:abc|2026.9.6|telegram|3|hatchabot-agents,|2026-10-20T08:00:00Z||||0|2026-10-20T08:00:01Z|0|0|abcdef123456|0';; esac\nexit 0\n`, { mode: 0o755 });
+    const p = new LocalDockerProvider({ docker: st, image: 'test-image:latest' });
+    const ref = 'kitchen-helper-df918a55';
+    const inspects = () => readFileSync(log, 'utf8').split('\n').filter((l) => l.startsWith('inspect -f {{.Image}}')).length;
+    const [a, b] = await Promise.all([p.info(ref), p.info(ref)]);
+    expect(a.openclawVersion).toBe('2026.9.6');
+    expect(b.imageId).toBe('sha256:abc');
+    expect((await p.info(ref)).containerGen).toBe(3);
+    expect(inspects()).toBe(1);
+    await p.stop(ref);
+    await p.info(ref);
+    expect(inspects()).toBe(2);
+    await p.start(ref);
+    await p.info(ref);
+    expect(inspects()).toBe(3);
+  });
+});

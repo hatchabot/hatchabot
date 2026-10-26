@@ -75,15 +75,24 @@ export const PAIRING_DB_JS = {
   open: (readOnly: boolean) => `const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(${JSON.stringify(PAIRING_DB)}${readOnly ? ', { readOnly: true }' : ''}); ${readOnly ? '' : 'db.exec("PRAGMA busy_timeout=5000");'}`,
 };
 
-/** The shell that prints a channel's pending requests as the file's JSON, from whichever store exists. */
+/**
+ * The shell that prints a channel's pending requests in the file's JSON shape:
+ * the database's rows first, then the file's not already listed. Both, not
+ * whichever exists: 2026.7 creates the tables but keeps requests in the file,
+ * and a 2026.9 volume can keep a 2026.7 file its migration left in place
+ * (unreadable, say), which used to hide every request in the database (HB-0033).
+ * An unreadable file or database adds nothing.
+ */
 export function pairingListShell(kind: ChannelKind): string {
-  const file = JSON.stringify(pairingStorePath(kind));
   const node = [
-    PAIRING_DB_JS.open(true),
-    `const rows = db.prepare("select request_id, code, created_at, last_seen_at, meta_json from channel_pairing_requests where channel_key = ?").all(${JSON.stringify(kind)});`,
-    'process.stdout.write(JSON.stringify({ version: 1, requests: rows.map((r) => { let meta = {}; try { meta = JSON.parse(r.meta_json || "{}"); } catch (e) {} return { id: r.request_id, code: r.code, createdAt: r.created_at, lastSeenAt: r.last_seen_at, meta }; }) }));',
+    'const fs = require("fs"); const out = []; const seen = new Set();',
+    `try { if (fs.existsSync(${JSON.stringify(PAIRING_DB)})) { ${PAIRING_DB_JS.open(true)}`,
+    `for (const r of db.prepare("select request_id, code, created_at, last_seen_at, meta_json from channel_pairing_requests where channel_key = ?").all(${JSON.stringify(kind)})) {`,
+    'let meta = {}; try { meta = JSON.parse(r.meta_json || "{}"); } catch (e) {} seen.add(String(r.code)); out.push({ id: r.request_id, code: r.code, createdAt: r.created_at, lastSeenAt: r.last_seen_at, meta }); } } } catch (e) {}',
+    `try { const d = JSON.parse(fs.readFileSync(${JSON.stringify(pairingStorePath(kind))}, "utf8")); for (const r of (d && Array.isArray(d.requests) ? d.requests : [])) { if (r && !seen.has(String(r.code))) { seen.add(String(r.code)); out.push(r); } } } catch (e) {}`,
+    'process.stdout.write(JSON.stringify({ version: 1, requests: out }));',
   ].join(' ');
-  return `if [ -f ${file} ]; then cat ${file}; elif [ -f ${JSON.stringify(PAIRING_DB)} ]; then node -e '${node}' 2>/dev/null || true; fi`;
+  return `node -e '${node}' 2>/dev/null || true`;
 }
 
 /**

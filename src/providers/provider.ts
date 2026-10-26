@@ -478,6 +478,8 @@ export interface ContainerStats {
   memOomKills?: number;
   /** How much of it sits in swap now (cgroup memory.swap.current; with zswap, before compression), when readable. */
   swapBytes?: number;
+  /** When the container last started (docker State.StartedAt): its cgroup counters count from then. */
+  startedAt?: string;
 }
 
 /** cgroup v2 memory.events + memory.peak (+ memory.swap.current) text → the ContainerStats memory fields. */

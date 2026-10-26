@@ -78,6 +78,8 @@ class FakeAgent extends MockProvider {
   /** A disabled job is listed only with `--all`, as OpenClaw does; a job of the agent's own may have no name. */
   jobs: Array<{ id: string; name: string; argv?: string[]; disabled?: boolean }> = [{ id: 'old1', name: 'demoapp-tick' }, { id: 'keep', name: 'daily-brief' }];
   testCode = 0;
+  /** What the app's tests print (default: unittest's last line). */
+  testOutput?: string;
   /** The config file the app's tests found in their {data_dir}. */
   testSaw: string[] = [];
   failAdd: (name: string) => boolean = () => false;
@@ -132,7 +134,7 @@ class FakeAgent extends MockProvider {
       const home = /DEMO_HOME='([^']*)'/.exec(script)?.[1];
       const f = home ? join(home.split(APPS).join(this.root(ref)), 'config.json') : '';
       this.testSaw.push(f && existsSync(f) ? readFileSync(f, 'utf8') : '');
-      return { code: this.testCode, stdout: this.testCode ? 'FAILED (failures=1)' : 'OK', stderr: '' };
+      return { code: this.testCode, stdout: this.testOutput ?? (this.testCode ? 'FAILED (failures=1)' : 'OK'), stderr: '' };
     }
     return this.#run(ref, script);
   }
@@ -222,6 +224,26 @@ describe('installing into an agent', () => {
       .rejects.toThrow(/tests failed, so .* was not switched on/);
     expect(agent.calls.some((c) => c.what.includes('mv -T current.new current'))).toBe(false);
     expect(agent.calls.some((c) => c.what.startsWith('["cron"'))).toBe(false);
+  });
+
+  it("a secret setting's value printed by failing tests is masked in the error and the kept output (HB-0052)", async () => {
+    const withKey = { ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'feed_code', type: 'text', required: true, secret: true }] } };
+    const r = await resolveRelease(hostGit, repo(withKey), 'HEAD');
+    const agent = new FakeAgent();
+    agent.testCode = 1;
+    agent.testOutput = 'calling with demo-key-not-real-0042\n{"feed_code": "demo-key-not-real-0042"}\nFAILED (failures=1)';
+    const e = (await installRelease({ provider: agent, runtimeRef: 'x', facts: FACTS }, r, { mailbox: 'demo@example.org', feed_code: 'demo-key-not-real-0042' })
+      .catch((x: unknown) => x)) as Error & { test?: { output: string } };
+    expect(e.message).toMatch(/tests failed/);
+    expect(e.message).not.toContain('demo-key-not-real');
+    expect(e.message).toContain('calling with ••••••');
+    expect(e.test!.output).not.toContain('demo-key-not-real');
+    // A value kept from the live config (an update that gives none) is masked too.
+    agent.testCode = 0; agent.testOutput = 'OK';
+    await installRelease({ provider: agent, runtimeRef: 'x', facts: FACTS }, r, { mailbox: 'demo@example.org', feed_code: 'demo-key-not-real-0042' });
+    agent.testCode = 1; agent.testOutput = 'still demo-key-not-real-0042';
+    const again = (await installRelease({ provider: agent, runtimeRef: 'x', facts: FACTS }, r, {}).catch((x: unknown) => x)) as Error;
+    expect(again.message).toContain('still ••••••');
   });
 
   it('a required value missing stops it before anything runs', async () => {
@@ -464,6 +486,21 @@ describe('the app routes', () => {
     expect(gone.json()).toMatchObject({ removed: true });
     expect(store.getAgentApp('a1')).toBeUndefined();
     expect(provider.calls.some((c) => c.what.startsWith('["cron","rm"'))).toBe(true);
+  });
+
+  it('values that are not an object of settings are refused on install, pending and update (HB-0064)', async () => {
+    const { f, store, provider } = await app();
+    const dir = repo();
+    for (const values of ['mailbox=demo@example.org', ['demo@example.org'], 42]) {
+      for (const url of ['/v1/agents/a1/app', '/v1/agents/a1/app/pending', '/v1/agents/a1/app/update']) {
+        const r = await f.inject({ method: 'POST', url, headers: as, payload: { source: dir, values } });
+        expect(r.statusCode, `${url} ${JSON.stringify(values)}`).toBe(400);
+        expect(r.json().error).toMatch(/values must be an object/);
+      }
+    }
+    expect(store.getAgentApp('a1')).toBeUndefined();
+    expect(store.getAppPending('a1')).toBeUndefined();
+    expect(provider.calls).toEqual([]);
   });
 
   it('an update whose source now names another app is refused; the old app, its record and its tasks stay (audit #012)', async () => {

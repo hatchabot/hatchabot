@@ -31,6 +31,9 @@ export interface HibernateDeps {
   /** The agent's own scheduled tasks (OpenClaw's built-in ones excluded). */
   ownCrons: (a: Agent) => Promise<Array<{ enabled: boolean; system?: boolean }>>;
   isBusy: (agentId: string) => boolean;
+  /** A required rebuild is waiting and the machine rebuilds on its own: the
+   *  rebuild sweep only rebuilds running agents, so it stays up for it (HB-0034). */
+  requiredRebuildDue?: (a: Agent) => Promise<boolean>;
   /** After a wake, once the store says RUNNING: e.g. clearing stale runtime pins when the gateway is up. */
   afterWake?: (a: Agent) => void;
   log: (agentId: string) => (event: string, detail?: Record<string, unknown>) => void;
@@ -81,6 +84,9 @@ async function idleBlocker(deps: HibernateDeps, a: Agent, now: number, afterMs: 
   const active = read ?? a.updatedAt ?? a.createdAt;
   const last = Math.max(Date.parse(active) || 0, Date.parse(a.wokenAt ?? '') || 0);
   if (now - last < afterMs) return { blocker: 'active recently' };
+  // Asleep, a wake starts it on its old build, and with a short idle period it
+  // slept again before the sweep reached it, every time (HB-0034).
+  if (await deps.requiredRebuildDue?.(a).catch(() => false)) return { blocker: 'a required rebuild comes first' };
   const crons = await deps.ownCrons(a).catch(() => undefined);
   if (crons === undefined) return { blocker: 'its scheduled tasks could not be read' };
   if (crons.some((c) => c.enabled && !c.system)) return { blocker: 'has scheduled tasks' };

@@ -80,3 +80,34 @@ describe('moving the rest', () => {
     expect((await b.f.inject({ method: 'POST', url: '/v1/embed/move-all', headers: { 'x-hatchabot-owner': 'member' }, payload: { mode: 'shared' } })).statusCode).toBe(403);
   });
 });
+
+describe('a retired key (HB-0027)', () => {
+  it('archive and delete rewrite the door\'s key file at once, not at the next health tick', async () => {
+    const b = await box();
+    const svc = (b.f as unknown as { embedder: EmbedderService }).embedder;
+    let synced = 0;
+    svc.syncKeys = () => { synced++; };
+    b.agent('kept'); b.agent('gone');
+    b.store.setEmbedToken('kept', 'hash-kept', null);
+    b.store.setEmbedToken('gone', 'hash-gone', null);
+    b.store.setAgentState('gone', 'ARCHIVED');
+    expect(synced).toBe(1);
+    expect(b.store.embedTokenHost('gone')).toBeUndefined();
+    b.store.setAgentState('kept', 'DELETING');
+    expect(synced).toBe(2);
+    // An agent with no key changes nothing.
+    b.agent('keyless');
+    b.store.setAgentState('keyless', 'ARCHIVED');
+    expect(synced).toBe(2);
+  });
+});
+
+describe('machine-wide reads are the machine owner\'s (HB-0061)', () => {
+  it('a member is refused the fleet counts and the rebuild settings; the owner reads them', async () => {
+    const b = await box();
+    for (const url of ['/v1/embed-default', '/v1/rebuild-policy', '/v1/rebuild-concurrency']) {
+      expect((await b.f.inject({ method: 'GET', url, headers: { 'x-hatchabot-owner': 'member' } })).statusCode, url).toBe(403);
+      expect((await b.f.inject({ method: 'GET', url, headers: H })).statusCode, url).toBe(200);
+    }
+  });
+});

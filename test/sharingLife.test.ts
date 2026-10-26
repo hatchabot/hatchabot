@@ -97,12 +97,13 @@ describe('what a shared copy mentions', () => {
     expect(res.statusCode).toBe(200);
     const p = JSON.parse(decodeURIComponent(String(res.headers['x-hatchabot-personal'])));
     expect(p).toMatchObject({ emails: 1, phones: 1, tokens: 0 });
+    expect(p.edited).toEqual([]); // HB-0117: no setup layer, nothing left out
     expect(p.hits[0]).toMatchObject({ kind: 'email', sample: 'owner@example.com' });
     expect(JSON.parse(gunzipSync(res.rawPayload).toString('utf8')).format).toBe('hatchabot-template');
 
     const scan = await w.f.inject({ method: 'GET', url: '/v1/agents/a1/export/scan?excludeMemory=1', headers: as() });
     expect(scan.statusCode).toBe(200);
-    expect(scan.json()).toMatchObject({ emails: 1, phones: 1 });
+    expect(scan.json()).toMatchObject({ emails: 1, phones: 1, edited: [] }); // edited: HB-0117
     expect((await w.f.inject({ method: 'GET', url: '/v1/agents/a1/export/scan', headers: as('someone-else') })).statusCode).toBe(404);
   });
 });

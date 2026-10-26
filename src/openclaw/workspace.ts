@@ -218,13 +218,34 @@ export function scheduledResultsSection(slug: string, conversation: boolean): st
 
 export const PEERS_HEADING = '## Peers';
 
+/** A peer's name on one line: how the Peers section and peers.json (call-agent) both name it. */
+export function peerOneLine(name: string): string {
+  return name.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029\s]+/g, ' ').trim() || '(unnamed)';
+}
+
+/**
+ * A peer's name as written in its "## Peers" line: on one line, and in a code
+ * span, so nothing in it is read as markdown. A name is free text (an import
+ * keeps whatever the template had): a line break followed by `## …` ended the
+ * section early and put the rest into the agent's standing instructions, and
+ * `**` broke the list (HB-0087). A code span keeps the name as it is, so the
+ * agent can pass it to call-agent unchanged; its fence is one backtick longer
+ * than any run of them in the name (CommonMark).
+ */
+function peerNameSpan(name: string): string {
+  const one = peerOneLine(name);
+  const tick = '`'.repeat(Math.max(0, ...(one.match(/`+/g) ?? []).map((r) => r.length)) + 1);
+  const pad = one.startsWith('`') || one.endsWith('`') ? ' ' : '';
+  return `${tick}${pad}${one}${pad}${tick}`;
+}
+
 /**
  * The AGENTS.md section listing the OTHER agents this one may consult, and how.
  * Managed by Hatchabot (owner-granted peers). Uses indented code, not a fence,
  * so it can't perturb fence parity in replaceSection.
  */
 export function peerToolsSection(peers: Array<{ name: string }>): string {
-  const list = peers.map((p) => `- **${p.name}**`).join('\n');
+  const list = peers.map((p) => `- ${peerNameSpan(p.name)}`).join('\n');
   return `${PEERS_HEADING}
 
 You can consult these other agents when a question is squarely in their domain —

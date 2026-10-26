@@ -53,15 +53,23 @@ finish() {
 }
 trap finish EXIT
 
-CHANNEL_FILE="$HOME/.config/hatchabot/channel"
+# The channel chosen last is this install's own, in data/channel (HB-0235):
+# the one file in ~/.config/hatchabot was every install's of the user's, so
+# `hatchabot upgrade beta` in a test clone moved the production install's
+# timer onto beta. That file is still read when this install has none of its
+# own, and still written for a release from before v2.169.0, the only one it
+# reads (remember_channel). install.sh and follow-channel.sh do the same.
+CHANNEL_FILE="$DIR/data/channel"; USER_CHANNEL_FILE="$HOME/.config/hatchabot/channel"; PER_INSTALL_FROM=v2.169.0
+remembered_channel() { local f; for f in "$CHANNEL_FILE" "$USER_CHANNEL_FILE"; do [ -f "$f" ] && { tr -d '[:space:]' < "$f"; return 0; }; done; return 0; }
 ARG="${1:-}"
 CHANNEL="$ARG"
-[ -z "$CHANNEL" ] && [ -f "$CHANNEL_FILE" ] && CHANNEL="$(tr -d '[:space:]' < "$CHANNEL_FILE")"
+[ -n "$CHANNEL" ] || CHANNEL="$(remembered_channel)"
 CHANNEL="${CHANNEL:-stable}"
 
 # A bundle install (install.sh) has no clone: it upgrades by swapping in the
 # next release's bundle (below), and resolves channels without git.
-BUNDLED=0; [ -f BUNDLE.json ] && [ ! -d .git ] && BUNDLED=1
+# (Or a swap that was cut off, which may have moved BUNDLE.json aside: below.)
+BUNDLED=0; { [ -f BUNDLE.json ] || [ -f .swapping ]; } && [ ! -d .git ] && BUNDLED=1
 # The newer of two versions. `sort -V` alone ranks v2.35.0-beta.1 ABOVE v2.35.0,
 # which stranded a beta tester on the prerelease; "~" sorts below everything.
 vernewer() { printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/'; }
@@ -83,12 +91,22 @@ fi
 # — even when there is nothing to install today. Not when the channel timer
 # asks (follow-channel.sh): it named its own channel, and writing that undid a
 # `hatchabot upgrade beta` within ten minutes (review, 2026-10-09).
+# remember_channel VALUE [RELEASE]: VALUE for this install. RELEASE, the one
+# it will run, from before v2.169.0 reads only the user's file: it goes there
+# (and this install's own goes, so the two cannot disagree once it is back).
+remember_channel() {
+  if [ -n "${2:-}" ] && [ "$(vernewer "$2" "$PER_INSTALL_FROM")" != "$2" ]; then
+    mkdir -p "$(dirname "$USER_CHANNEL_FILE")"; echo "$1" > "$USER_CHANNEL_FILE"; rm -f "$CHANNEL_FILE"
+  else
+    mkdir -p "$(dirname "$CHANNEL_FILE")"; echo "$1" > "$CHANNEL_FILE"
+  fi
+}
 if [ "${HATCHABOT_UPGRADE_BY_TIMER:-}" != 1 ]; then
-case "$ARG" in stable|beta|latest) mkdir -p "$(dirname "$CHANNEL_FILE")"; echo "$ARG" > "$CHANNEL_FILE" ;; esac
+case "$ARG" in stable|beta|latest) remember_channel "$ARG" ;; esac
 # A version named by hand is a pin: the channel timer leaves this machine
 # alone until a channel is named again (a rollback used to be undone within
 # ten minutes; use-case audit, 2026-09-27).
-case "$ARG" in v[0-9]*) mkdir -p "$(dirname "$CHANNEL_FILE")"; echo "$ARG" > "$CHANNEL_FILE"
+case "$ARG" in v[0-9]*) remember_channel "$ARG" "$ARG"
   echo "Pinned to $ARG — automatic upgrades pause here. Follow a channel again with: hatchabot upgrade stable" ;; esac
 fi
 
@@ -132,6 +150,47 @@ if ! take_lock; then
     rmdir "$LOCK_PATH.clearing" 2>/dev/null || true
   fi
   take_lock || { echo "Another upgrade of $DIR is running (lock $LOCK_PATH)."; exit 4; }
+fi
+
+# A bundle swap moves the old release's files into .prev-release, then the
+# new one's in, one by one. Cut off part-way (SIGKILL, a power cut), it left
+# the tree half old, half new; BUNDLE.json was often the new one already, so
+# every later run said "Already on vNEW" and the install stayed broken
+# (HB-0049). The swap writes .swapping before its first move, and names each
+# file in it before moving that file in: the next run puts the previous
+# release back first, then upgrades as usual.
+SWAPPING="$DIR/.swapping"; PREV="$DIR/.prev-release"
+# A name a bundle's file list may not touch: a path, or what is this machine's.
+not_ours() { case "$1" in ''|*/*|.|..|.env|data|.swapping|.prev-release) return 0 ;; esac; return 1; }
+# Back to the release in .prev-release: what came in from the new bundle
+# removed, the previous files moved back. Run again after a cut, it goes on.
+restore_prev() {
+  local line f
+  if [ -f "$SWAPPING" ]; then
+    while IFS= read -r line; do
+      case "$line" in "in "?*) f="${line#in }" ;; *) continue ;; esac
+      not_ours "$f" || rm -rf "${DIR:?}/$f"
+    done < "$SWAPPING"
+  fi
+  for f in "$PREV"/* "$PREV"/.[!.]*; do
+    [ -e "$f" ] || continue
+    # One of that name still here (moved in before it was written down) would
+    # take the old one inside itself, a directory in a directory (HB-0071).
+    rm -rf "${DIR:?}/${f##*/}"
+    mv "$f" "$DIR/" || return 1
+  done
+  rm -rf "$PREV"
+  # The new release's unpacked bundle, beside the install, goes with it.
+  STAGED="$(sed -n 's/^stage //p' "$SWAPPING" 2>/dev/null | sed -n 1p)"
+  case "$STAGED" in "$(dirname "$DIR")"/.hatchabot-next-*) rm -rf "$STAGED" ;; esac
+  rm -f "$SWAPPING"
+}
+if [ "$BUNDLED" = 1 ] && [ -f "$SWAPPING" ]; then
+  echo "An upgrade of $DIR was cut off part-way — putting $(sed -n 's/^from //p' "$SWAPPING" | sed -n 1p) back first."
+  WAS_RESTARTED=0; ! grep -qx restarted "$SWAPPING" || WAS_RESTARTED=1
+  restore_prev || { echo "Could not put the previous release back (above): $PREV holds its files."; exit 3; }
+  # The service was already restarted onto the new release: back onto this one.
+  if [ "$WAS_RESTARTED" = 1 ]; then PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh" || true; fi
 fi
 
 # What is installed, read only once the lock is held: read before it, a run
@@ -191,36 +250,46 @@ if [ "$BUNDLED" = 1 ]; then
   [ -f "$NEW/.bundle-files" ] || ( cd "$NEW" && ls -A > .bundle-files )
   [ -f .bundle-files ] || ls -A "$NEW" > .bundle-files.guess
   OLDLIST="$( [ -f .bundle-files ] && cat .bundle-files || cat .bundle-files.guess )"; rm -f .bundle-files.guess
-  PREV="$DIR/.prev-release"
   rm -rf "$PREV"; mkdir -p "$PREV"
-  # What came in from the new bundle, one name a line: a swap that stops
-  # part-way (a failed mv) is undone from this and $PREV, not from a file list
-  # that may itself be half moved.
-  MOVED_IN=""
+  # What came in from the new bundle is written in .swapping (above), one name
+  # a line, BEFORE it moves: a swap that stops part-way (a failed mv, or this
+  # run killed) is undone from that and $PREV, not from a file list that may
+  # itself be half moved.
   rollback_bundle() {
     echo "Rolling back to ${CUR}…"
-    while IFS= read -r f; do [ -n "$f" ] && rm -rf "${DIR:?}/$f"; done <<< "$MOVED_IN"
-    for f in "$PREV"/* "$PREV"/.[!.]*; do [ -e "$f" ] && mv "$f" "$DIR/"; done
-    rm -rf "$PREV"
+    restore_prev || return 1
     # The old release's restart, on its own Node — only when the service was
     # restarted onto the new one; otherwise the old release never stopped.
     if [ "$RESTARTED" = 1 ]; then PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh"; fi
     return 0
   }
   undo() { rollback_bundle; }
+  printf 'from %s\nto %s\nstage %s\n' "$CUR" "$TARGET" "$STAGE" > "$SWAPPING"
   CHANGING=1
-  while IFS= read -r f; do
-    [ -n "$f" ] && [ -e "$DIR/$f" ] || continue
-    mv "$DIR/$f" "$PREV/" || { echo "Could not move $DIR/$f aside."; exit 3; }
-  done <<< "$OLDLIST"
+  # One name at a time, the old one aside and the new one straight in, and
+  # scripts/ first: cut off, the tree is short at most the one name being
+  # swapped, and holds the new upgrade.sh that repairs it. (Every old name
+  # aside first left an install with no scripts at all until the end.)
   while IFS= read -r f; do
     [ -n "$f" ] && [ -e "$NEW/$f" ] || continue
+    ! not_ours "$f" || continue
+    printf 'in %s\n' "$f" >> "$SWAPPING"
+    # One already here goes aside, whether the old release listed it or not:
+    # moved onto, a folder takes the new one inside itself (HB-0071).
+    if [ -e "$DIR/$f" ]; then mv "$DIR/$f" "$PREV/" || { echo "Could not move $DIR/$f aside."; exit 3; }; fi
     mv "$NEW/$f" "$DIR/" || { echo "Could not move the new $f into $DIR."; exit 3; }
-    MOVED_IN="$MOVED_IN$f"$'\n'
-  done < "$NEW/.bundle-files"
-  RESTARTED=1
+  done < <(grep -x scripts "$NEW/.bundle-files" || true; grep -vx scripts "$NEW/.bundle-files" || true)
+  # What the old release had and this one does not.
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -e "$DIR/$f" ] || continue
+    ! not_ours "$f" || continue
+    ! grep -qxF "in $f" "$SWAPPING" || continue
+    mv "$DIR/$f" "$PREV/" || { echo "Could not move $DIR/$f aside."; exit 3; }
+  done <<< "$OLDLIST"
+  RESTARTED=1; echo restarted >> "$SWAPPING"
   PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh" || { CHANGING=0; ROLLED_BACK=1; rollback_bundle || true; exit 1; }
   CHANGING=0
+  rm -f "$SWAPPING"
   rm -rf "$PREV"
   echo "Now on $TARGET."
 else

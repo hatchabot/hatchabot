@@ -5,6 +5,7 @@
 #   ./scripts/promote.sh v2.31.0            # stable
 #   ./scripts/promote.sh v2.32.0-beta.1 beta
 #   HATCHABOT_PROMOTE_TRAILERS='Co-Authored-By: …' ./scripts/promote.sh v2.31.0
+#   HATCHABOT_PROMOTE_BACK=1 ./scripts/promote.sh v2.30.0   # back, with no one to ask
 #
 # Tagging a release makes it `latest` and nothing more; `stable` only moves
 # when you run this. That is what lets you release several times a day
@@ -200,9 +201,17 @@ if [ "$CURRENT" = "$TAG" ]; then echo "$CH already points at $TAG on main."; fas
 # should never happen by accident.
 # "~" sorts below everything in sort -V, so a prerelease ranks below its final release.
 NEWER="$(printf '%s\n%s\n' "$CURRENT" "$TAG" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/')"
+# The yes comes from a terminal, or a line on stdin; with no terminal and
+# nothing on stdin the question used to end the script with no word (read
+# failing under set -e), or wait for ever on a pipe nobody wrote to (HB-0071).
+# HATCHABOT_PROMOTE_BACK=1 is the yes for a script.
 if [ -n "$CURRENT" ] && [ "$NEWER" = "$CURRENT" ]; then
-  read -r -p "$CH is at $CURRENT; move it BACK to $TAG? [y/N] " ok
-  [ "$ok" = "y" ] || die "Nothing changed."
+  ok=""
+  if [ "${HATCHABOT_PROMOTE_BACK:-}" = 1 ]; then ok=y; echo "Moving $CH back from $CURRENT to $TAG (HATCHABOT_PROMOTE_BACK=1)."
+  elif [ -t 0 ]; then read -r -p "$CH is at $CURRENT; move it BACK to $TAG? [y/N] " ok || ok=""
+  else echo "$CH is at $CURRENT; move it BACK to $TAG? (a y on stdin within 30 s, or HATCHABOT_PROMOTE_BACK=1)" >&2; read -r -t 30 ok || ok=""
+  fi
+  [ "$ok" = "y" ] || die "Nothing changed: moving $CH back to $TAG needs a yes (in a terminal, or HATCHABOT_PROMOTE_BACK=1)."
 fi
 
 # CI must have passed on the commit the tag names. It failed for eight days

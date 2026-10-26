@@ -119,7 +119,11 @@ describe('the embed door', () => {
     expect((await call('agent-c-key', { input: 'z' })).status).toBe(200);
   });
 
-  it('answers /health for the server behind it', async () => {
-    expect((await fetch(`http://127.0.0.1:${doorPort}/health`)).status).toBe(200);
+  it('answers /health for the server behind it, only to a caller with a key (HB-0040)', async () => {
+    const health = (key?: string) => fetch(`http://127.0.0.1:${doorPort}/health`, key ? { headers: { authorization: `Bearer ${key}` } } : {});
+    expect((await health()).status).toBe(401);
+    expect((await health('not-a-key')).status).toBe(401);
+    expect((await health('server-secret')).status).toBe(200);
+    expect((await health('agent-c-key')).status).toBe(200);
   });
 });

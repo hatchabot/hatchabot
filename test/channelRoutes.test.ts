@@ -52,7 +52,7 @@ const verifyCalls: string[] = [];
 let verifyHold: Promise<void> | undefined;
 const renameCalls: Array<[string, string, string]> = [];
 
-async function setup(opts: { imageChannels?: string[] } = {}) {
+async function setup(opts: { imageChannels?: string[]; dm?: ChannelConnector['dm'] } = {}) {
   const store = new Store(new Database(':memory:'));
   const secrets = new MemSecrets();
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
@@ -63,7 +63,7 @@ async function setup(opts: { imageChannels?: string[] } = {}) {
   await registerRoutes(f, {
     store, secrets: secrets as never, providers: new Map([['mock', provider]]),
     channel: { kind: 'telegram', pool: { owns: () => false } } as never,
-    connectors: { slack: fakeConnector('slack'), discord: fakeConnector('discord') },
+    connectors: { slack: fakeConnector('slack'), discord: { ...fakeConnector('discord'), ...(opts.dm ? { dm: opts.dm } : {}) } },
   } as never);
   let n = 0;
   const add = (over: Record<string, unknown> = {}) => {
@@ -230,6 +230,25 @@ describe('changing and removing', () => {
     expect(parked).toMatchObject({ ownerId: OWNER, botName: 'Bot' });
     expect(parked.servers.length).toBeGreaterThan(0); // what the last check knew travels with it
     expect((await inject('DELETE', `/v1/agents/${id}/channels/discord`)).statusCode).toBe(404);
+  });
+
+  it('removing Discord says goodbye only once the agent is stopped: a stop that fails tells nobody (HB-0064)', async () => {
+    const told: string[] = [];
+    const { store, add, inject, provider } = await setup({ dm: async (_secret, id) => { told.push(id); return true; } });
+    const id = add({ state: 'RUNNING' });
+    await inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' });
+    store.bindMemberIdentity(id, OWNER, 'discord', '3000000000000000001');
+    // The runtime cannot be confirmed stopped: the bot stays, and nobody hears it has gone.
+    const realStatus = provider.status.bind(provider);
+    provider.status = async () => ({ phase: 'running' }) as never;
+    const r = await inject('DELETE', `/v1/agents/${id}/channels/discord`);
+    expect(r.statusCode).toBe(409);
+    expect(told).toEqual([]);
+    expect(store.getChannelForAgent(id, 'discord')).toBeDefined();
+    // Once it stops, the goodbye goes out with the removal.
+    provider.status = realStatus;
+    expect((await inject('DELETE', `/v1/agents/${id}/channels/discord`)).statusCode).toBe(202);
+    expect(told).toEqual(['3000000000000000001']);
   });
 
   it('removing Slack parks the app too: both tokens move to the pool, workspace and channels kept (2026-09-25)', async () => {

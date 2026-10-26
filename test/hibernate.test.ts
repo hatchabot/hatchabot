@@ -73,6 +73,17 @@ describe('the idle rule', () => {
     // Already asleep: the next sweep leaves it (not running) and touches nothing else.
     expect(await hibernateSweep(deps, now, 6 * HOUR)).toEqual([]);
   });
+
+  it('an agent with a required rebuild waiting stays up for it; a check that fails does not hold it (HB-0034)', async () => {
+    const w = await makeWorld();
+    const due = await seedRunningAgent(w, { id: 'r1', slug: 'due', accountId: 'duebot' });
+    const odd = await seedRunningAgent(w, { id: 'r2', slug: 'odd', accountId: 'oddbot' });
+    const deps = depsFor(w, { requiredRebuildDue: async (a) => { if (a.id === odd) throw new Error('docker said no'); return a.id === due; } });
+    const now = Date.now();
+    expect(await hibernateBlocker(deps, w.store.getAgent(due)!, now, 6 * HOUR)).toBe('a required rebuild comes first');
+    expect(await hibernateSweep(deps, now, 6 * HOUR)).toEqual([odd]);
+    expect(w.store.getAgent(due)!.state).toBe('RUNNING');
+  });
 });
 
 describe('waking', () => {

@@ -42,6 +42,20 @@ describe('GET /v1/pool', () => {
   });
 });
 
+describe('GET /v1/pool: who holds a shared bot (HB-0036)', () => {
+  it('names the agent only to those who may see it; others see it in use', async () => {
+    const w = await makeWorld();
+    await seedRunningAgent(w, { id: 'a1', name: 'Kitchen' });
+    await w.channel.pool.addToPool('sparebot', 'tok-1');
+    w.channel.pool.entries[0].leasedTo = 'a1';
+    const owner = (await w.f.inject({ method: 'GET', url: '/v1/pool', headers: as() })).json();
+    expect(owner.bots[0]).toMatchObject({ username: 'sparebot', leasedTo: 'a1', leasedToName: 'Kitchen' });
+    const other = (await w.f.inject({ method: 'GET', url: '/v1/pool', headers: as('someone-else') })).json();
+    expect(other.bots[0].leasedTo).toBeTruthy(); // still shown in use
+    expect(other.bots[0].leasedToName).toBeUndefined();
+  });
+});
+
 describe('POST /v1/pool', () => {
   it('verifies the token with Telegram and stocks the pool', async () => {
     const w = await makeWorld();

@@ -8,7 +8,7 @@ import { sampleAgentUsage, summarizeSourceUsage } from '../src/orchestrator/sour
 import { Store } from '../src/store/store.js';
 import { hibernateSweep, resetHibernateState, type HibernateDeps } from '../src/orchestrator/hibernate.js';
 import { exportAgent, importAgent } from '../src/orchestrator/transfer.js';
-import { archiveAgent } from '../src/orchestrator/archive.js';
+import { archiveAgent, leaveBotToCopy } from '../src/orchestrator/archive.js';
 import { createAgentRecord, runProvisionSteps } from '../src/orchestrator/provision.js';
 import { accessOverview, verifyAgentAccess } from '../src/orchestrator/accessOverview.js';
 import { PAIRING_DB } from '../src/orchestrator/claim.js';
@@ -176,6 +176,43 @@ describe('cap hits after a clear count again once a new container starts (audit 
     expect(list.json().find((a: { id: string }) => a.id === id).memoryCapHits).toBe(1300);
   });
 
+  it('a new container that passed the old total before it was read still counts whole (HB-0234)', async () => {
+    const w = await world();
+    const id = await seedRunningAgent(w);
+    const name = 'hatchabot-fixture-a1';
+    const mockRef = w.store.getAgent(id)!.runtimeRef!;
+    w.store.setAgentRuntimeRef(id, `docker://${name}`);
+    const row = (hits: number, startedAt: string) => [{ name, cpuPct: 1, memBytes: 100, memLimitBytes: 1000, pids: 1, memCapHits: hits, memPeakBytes: 100, startedAt }];
+    let clock = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const shown = async () => {
+      clock += 4000; // past the three-second stats cache
+      const res = await w.f.inject({ method: 'GET', url: '/v1/resources', headers: as() });
+      return res.json().hosts[0].containers.find((c: { agentId?: string }) => c.agentId === id).memCapHits as number;
+    };
+    const first = '2026-10-24T08:00:00.000Z', second = '2026-10-25T08:00:00.000Z';
+    w.provider.statsRows = row(1200, first);
+    await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/resources/clear`, headers: as(), payload: {} });
+    expect(w.store.getAgent(id)).toMatchObject({ memoryCapBaseline: 1200, memoryCapBaselineStartedAt: first });
+    w.provider.statsRows = row(1230, first);
+    expect(await shown()).toBe(30);
+    // Rebuilt, and under pressure: 1500 hits before anyone looked. All of them are the new container's.
+    w.provider.statsRows = row(1500, second);
+    expect(await shown()).toBe(1500);
+    expect(w.store.getAgent(id)!.memoryCapBaseline).toBeUndefined();
+    // The agent list judges by the container's start too.
+    w.store.clearMemoryPeaks(id, 1500, second);
+    w.provider.infoOverride.set(`docker://${name}`, { memCapHits: 1600, startedAt: '2026-10-26T08:00:00.000Z' });
+    const list = await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as() });
+    expect(list.json().find((a: { id: string }) => a.id === id).memoryCapHits).toBe(1600);
+    // A cap set takes the start with its baseline.
+    w.store.setAgentRuntimeRef(id, mockRef);
+    w.provider.infoOverride.set(mockRef, { memCapHits: 1600, startedAt: '2026-10-26T08:00:00.000Z' });
+    const cap = await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { memoryCap: '2g' } });
+    expect(cap.statusCode).toBe(200);
+    expect(w.store.getAgent(id)).toMatchObject({ memoryCapBaseline: 1600, memoryCapBaselineStartedAt: '2026-10-26T08:00:00.000Z' });
+  });
+
   it('a new container that has not reached the baseline shows its own hits in the agent list too', async () => {
     const w = await world();
     const id = await seedRunningAgent(w);
@@ -309,6 +346,42 @@ describe('a downloaded copy keeps its bot when the stopped original is deleted o
       await expect(nextLease(source, pool)).rejects.toThrow(/exhausted/);
       expect(calls, kind).not.toContain('sendMessage');
     }
+  });
+});
+
+describe('a pool bot leaving with its agent goes in one step (HB-0065)', () => {
+  function realPool(w: World) {
+    const pool = new TelegramPoolProvisioner((w.store as unknown as { db: Database.Database }).db, w.secrets, {
+      fetchImpl: (async () => new Response('{"ok":true,"result":true}', { headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch,
+      renameBackoffMs: [],
+    });
+    return pool;
+  }
+  it('removeFromPool with leasedTo takes a bot leased to that agent, and still refuses one leased to another', async () => {
+    const w = await world();
+    const pool = realPool(w);
+    await pool.addToPool('kitchenpoolbot', 'fixture-pool-bot-value', w.owner);
+    await pool.addToPool('gardenpoolbot', 'fixture-pool-bot-value-2', w.owner);
+    await pool.provision({ agentId: 'kitchen', agentName: 'Kitchen', slug: 'kitchen', ownerId: w.owner, exclude: ['gardenpoolbot'] });
+    await pool.provision({ agentId: 'garden', agentName: 'Garden', slug: 'garden', ownerId: w.owner });
+    await expect(pool.removeFromPool('gardenpoolbot', { leasedTo: 'kitchen' })).rejects.toThrow(/leased to an agent/);
+    await pool.removeFromPool('kitchenpoolbot', { leasedTo: 'kitchen' });
+    expect(pool.list().map((e) => e.username)).toEqual(['gardenpoolbot']);
+  });
+  it('a bot left to a downloaded copy is never free for a lease between its release and its removal', async () => {
+    const w = await world();
+    const pool = realPool(w);
+    await pool.addToPool('kitchenpoolbot', 'fixture-pool-bot-value', w.owner);
+    await pool.provision({ agentId: 'kitchen', agentName: 'Kitchen', slug: 'kitchen', ownerId: w.owner });
+    // A create leases whatever is free the moment a release frees it.
+    let stolen: string | undefined;
+    const release = async (name: string, opts: unknown) => {
+      await pool.release(name, opts as never);
+      stolen = (await pool.provision({ agentId: 'next', agentName: 'Next', slug: 'next', ownerId: w.owner }).catch(() => undefined))?.accountId;
+    };
+    await leaveBotToCopy({ pool, release } as never, 'kitchenpoolbot', 'kitchen', () => {});
+    expect(stolen).toBeUndefined();
+    expect(pool.list()).toEqual([]);
   });
 });
 

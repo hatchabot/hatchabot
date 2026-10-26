@@ -43,7 +43,8 @@ function volume() {
   } }));
   const run = (script: string) => execFileSync('sh', ['-c', script.replaceAll(HOME, dir)], { encoding: 'utf8' });
   const rows = (sql: string) => { const d = new Database(join(dir, 'state', 'openclaw.sqlite'), { readonly: true }); try { return d.prepare(sql).all(); } finally { d.close(); } };
-  return { dir, run, rows, done: () => rmSync(dir, { recursive: true, force: true }) };
+  const exec = (sql: string) => { const d = new Database(join(dir, 'state', 'openclaw.sqlite')); try { d.exec(sql); } finally { d.close(); } };
+  return { dir, run, rows, exec, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 async function world() {
@@ -70,11 +71,44 @@ describe('pairing requests on a 2026.9 volume (database, no files)', () => {
     } finally { v.done(); }
   });
 
-  it('the file still wins where it exists (2026.7)', () => {
+  it('a 2026.7 volume (the tables made but empty, requests in the file) lists the file\'s', () => {
     const v = volume();
     try {
+      v.exec('delete from channel_pairing_requests');
       writeFileSync(join(v.dir, 'credentials', 'telegram-pairing.json'), JSON.stringify({ version: 1, requests: [{ id: '9', code: 'FILE1', meta: {} }] }));
       expect(parsePairingList(run(v, pairingListShell('telegram')))).toEqual([{ id: '9', code: 'FILE1', meta: { username: undefined, firstName: undefined } }]);
+    } finally { v.done(); }
+  });
+
+  it('a 2026.7 file left on a 2026.9 volume no longer hides the database: its rows first, then the file\'s; an unreadable file adds nothing (HB-0033)', () => {
+    const v = volume();
+    try {
+      const f = join(v.dir, 'credentials', 'telegram-pairing.json');
+      writeFileSync(f, JSON.stringify({ version: 1, requests: [{ id: '9', code: 'FILE1', meta: {} }, { id: '555', code: 'CODE1', meta: {} }] }));
+      expect(parsePairingList(run(v, pairingListShell('telegram'))).map((r) => r.code)).toEqual(['CODE1', 'FILE1']);
+      writeFileSync(f, '{"version":1,"requests":[{"id":"9",');
+      expect(parsePairingList(run(v, pairingListShell('telegram'))).map((r) => r.code)).toEqual(['CODE1']);
+    } finally { v.done(); }
+  });
+
+  it('with a left-over file, deny takes the request from both stores and grant writes both (HB-0033)', async () => {
+    const { store, provider, runtimeRef } = await world();
+    provider.execResponses.set('sh-volume', { code: 0, stdout: '2\n', stderr: '' });
+    await denyPairing({ store, provider }, { agentId: 'a1', runtimeRef, code: 'CODE1', kind: 'telegram' });
+    await grantChannelAccess({ store, provider }, { agentId: 'a1', runtimeRef, kind: 'telegram', accountId: 'FamBot', channelUserId: '888' });
+    const [deny, grant] = provider.execLog.filter((a) => a[0] === 'sh-volume').map((a) => a[1]!);
+    const v = volume();
+    try {
+      const f = join(v.dir, 'credentials', 'telegram-pairing.json');
+      const cred = join(v.dir, 'credentials', 'telegram-fambot-allowFrom.json');
+      writeFileSync(f, JSON.stringify({ version: 1, requests: [{ id: '555', code: 'CODE1', meta: {} }] }));
+      writeFileSync(cred, JSON.stringify({ version: 1, allowFrom: ['555'] }));
+      expect(run(v, deny!).trim()).toBe('2');
+      expect(v.rows(`select code from channel_pairing_requests where channel_key='telegram'`)).toEqual([]);
+      expect(JSON.parse(readFileSync(f, 'utf8')).requests).toEqual([]);
+      run(v, grant!);
+      expect(v.rows(`select entry from channel_pairing_allow_entries where channel_key='telegram' and entry='888'`)).toEqual([{ entry: '888' }]);
+      expect(JSON.parse(readFileSync(cred, 'utf8')).allowFrom).toEqual(['555', '888']);
     } finally { v.done(); }
   });
 

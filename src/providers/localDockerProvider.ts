@@ -40,7 +40,8 @@ export interface LocalDockerOptions {
   docker?: string;
   /**
    * A remote Docker endpoint (a `DOCKER_HOST` value — `ssh://user@vm` is the
-   * simplest secure transport, or `tcp://ip:2376` with TLS set up out of band).
+   * simplest secure transport, or `tcp://ip:2376`, always spoken to over
+   * verified TLS with this machine's client certificate: runnerEndpoint.ts).
    * When set, every docker command targets that daemon via `-H`, the workspace
    * seed is streamed in over stdin instead of bind-mounted (the seed dir is on
    * THIS box, not the remote), and host-path bind mounts are skipped (they name
@@ -71,6 +72,8 @@ export interface LocalDockerOptions {
  * every operation here is coarse enough that process spawn cost is noise.
  */
 import { DEFAULT_PREFIX, dockerNames, LEGACY_PREFIXES } from './dockerNames.js';
+import { dockerConnArgs } from './runnerEndpoint.js';
+import { STATE_CACHE_EXCLUDES } from './volumeCopy.js';
 export { DEFAULT_PREFIX, LEGACY_PREFIXES };
 /** Docker image reference: repo[:tag] — no leading dash, so it can't parse as a flag. */
 /** basename() for a model path — the container sees the file under /models. */
@@ -125,7 +128,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     this.prefix = opts.prefix ?? DEFAULT_PREFIX;
     this.docker = opts.docker ?? 'docker';
     this.remote = !!opts.host;
-    this.#conn = opts.host ? ['-H', opts.host] : [];
+    this.#conn = opts.host ? dockerConnArgs(opts.host) : [];
     this.#target = opts.host ? remoteTarget(opts.host) : undefined;
     this.#reachProbe = opts.reachProbe ?? tcpReachable;
     this.key = this.remote ? 'remote-docker' : 'local-docker';
@@ -244,6 +247,12 @@ export class LocalDockerProvider implements RuntimeProvider {
       ? { ...this.#names(spec.previousRef), runtimeRef: spec.previousRef }
       : this.#namesFor(spec);
 
+    // The image's name first: the seed below runs in it, so a pre-rename
+    // daemon's alias has to exist before that, not only for the container (HB-0065).
+    const image = spec.image ?? this.image;
+    if (!IMAGE_REF_RE.test(image)) throw new ProviderError(`bad image ref ${image}`, 'That image name is not valid.');
+    await this.#ensureImage(image);
+
     // `docker volume create` is idempotent by name — a retry reuses the volume.
     await this.#must(['volume', 'create', volume], 'Could not create the agent volume.');
 
@@ -330,14 +339,12 @@ export class LocalDockerProvider implements RuntimeProvider {
       // on this box (or tunnelling to it), never for the whole LAN/tailnet.
       args.push('-p', `127.0.0.1:${p.host}:${p.container}`);
     }
-    const image = spec.image ?? this.image;
-    if (!IMAGE_REF_RE.test(image)) throw new ProviderError(`bad image ref ${image}`, 'That image name is not valid.');
-    await this.#ensureImage(image);
     // The environment (AI keys, the setup token, the manager's door and proxy
     // keys) goes in a 0600 file the docker client reads, never on its command
     // line: /proc/<pid>/cmdline is readable by every user on the machine, and
     // on a shared host those are other tenants (night review, 2026-09-28).
     await this.#withEnvFile(spec.env, (flag, childEnv) => this.#must([...args, ...flag, image, 'openclaw', 'gateway'], 'The agent runtime could not be created.', childEnv));
+    this.#infoCache.delete(container);
 
     return { runtimeRef };
   }
@@ -550,16 +557,19 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   async start(runtimeRef: string): Promise<void> {
     const { container } = this.#names(runtimeRef);
-    await this.#must(['start', container], 'The agent could not start. Try again?');
+    try { await this.#must(['start', container], 'The agent could not start. Try again?'); }
+    finally { this.#infoCache.delete(container); }
   }
 
   async stop(runtimeRef: string): Promise<void> {
     const { container } = this.#names(runtimeRef);
-    await this.#must(['stop', '-t', '10', container], 'The agent could not be stopped.');
+    try { await this.#must(['stop', '-t', '10', container], 'The agent could not be stopped.'); }
+    finally { this.#infoCache.delete(container); }
   }
 
   async destroy(runtimeRef: string, opts?: { purge?: boolean }): Promise<void> {
     const { container, volume } = this.#names(runtimeRef);
+    this.#infoCache.delete(container);
     // #docker turns every non-zero exit (including an unreachable daemon) into
     // a RESULT, so ignoring it made destroy() unable to fail — and callers that
     // branch on failure (moveHost's orphan check, delete's "runtime may have
@@ -790,14 +800,39 @@ export class LocalDockerProvider implements RuntimeProvider {
     return this.#runStdin(['run', '--rm', '-i', ...one.flags, '--network', 'none', '-v', `${volume}:/home/node`, this.image, ...argv], input, one.name);
   }
 
+  /**
+   * The container's inspect answer, kept INFO_CACHE_MS and shared by callers
+   * asking at once: the home screen's poll asked for every agent's every 8 s,
+   * per open tab, one `docker inspect` process each (HB-0050). Forgotten at
+   * this provider's own create, start, stop, update and destroy; the memory
+   * readings beside it are read fresh each time.
+   */
+  readonly #infoCache = new Map<string, { at: number; res: Promise<ExecResult> }>();
+
   async info(runtimeRef: string): Promise<RuntimeInfo> {
     const { container } = this.#names(runtimeRef);
-    const res = await this.#docker([
+    const hit = this.#infoCache.get(container);
+    let pending = hit && Date.now() - hit.at < INFO_CACHE_MS ? hit.res : undefined;
+    if (!pending) {
+      pending = this.#inspectInfo(container);
+      const entry = { at: Date.now(), res: pending };
+      this.#infoCache.set(container, entry);
+      // Only an answer is kept: a failure (gone, daemon away) is asked again next time.
+      void pending.then((r) => { if (r.code !== 0 && this.#infoCache.get(container) === entry) this.#infoCache.delete(container); });
+    }
+    return this.#infoAnswer(await pending);
+  }
+
+  #inspectInfo(container: string): Promise<ExecResult> {
+    return this.#docker([
       'inspect',
       '-f',
       `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "hatchabot.gen" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.Created}}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}|{{ index .Config.Labels "org.hatchabot.plugin-install" }}|{{.RestartCount}}|{{.State.StartedAt}}|{{.State.ExitCode}}|{{.HostConfig.Memory}}|{{.Id}}|{{.HostConfig.MemorySwap}}`,
       container,
     ]);
+  }
+
+  #infoAnswer(res: ExecResult): RuntimeInfo {
     if (res.code !== 0) return {};
     const [imageId, openclawVersion, channels, gen, nets, created, engine, plugins, install, restarts, started, exitCode, memLimit, fullId, swapLimit] = res.stdout.trim().split('|');
     return {
@@ -924,21 +959,26 @@ export class LocalDockerProvider implements RuntimeProvider {
       const child = spawn(this.docker, this.#argv(['logs', '--since', sinceIso, '--timestamps', container]));
       const keep: string[] = [];
       let loops = 0;
-      let buf = '';
-      const eat = (chunk: Buffer) => {
-        buf += chunk.toString('utf8');
-        let nl;
-        while ((nl = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-          if (line.includes('[model-fetch] response') && keep.length < 200_000) keep.push(line);
-          // …and the loop lines token health counts (a channel message stalled
-          // and retried, a compaction that failed): tokenHealth.ts LOOP_LINE.
-          else if (LOOP_LINE.test(line) && loops++ < 20_000) keep.push(line);
-        }
-        if (buf.length > 1_000_000) buf = ''; // a pathological line: drop it
+      // One line buffer per stream: docker writes the container's stdout and
+      // stderr to ours separately, and a shared buffer spliced a half line of
+      // one onto a half line of the other — a model call that never parsed (HB-0006).
+      const eater = () => {
+        let buf = '';
+        return (chunk: Buffer) => {
+          buf += chunk.toString('utf8');
+          let nl;
+          while ((nl = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+            if (line.includes('[model-fetch] response') && keep.length < 200_000) keep.push(line);
+            // …and the loop lines token health counts (a channel message stalled
+            // and retried, a compaction that failed): tokenHealth.ts LOOP_LINE.
+            else if (LOOP_LINE.test(line) && loops++ < 20_000) keep.push(line);
+          }
+          if (buf.length > 1_000_000) buf = ''; // a pathological line: drop it
+        };
       };
-      child.stdout.on('data', eat);
-      child.stderr.on('data', eat);
+      child.stdout.on('data', eater());
+      child.stderr.on('data', eater());
       const timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
       timer.unref();
       // A failure must REJECT. Resolving with "" made a dead docker daemon
@@ -963,6 +1003,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     const res = await this.#docker(['stats', '--no-stream', '--format', '{{json .}}'], 30_000);
     if (res.code !== 0) throw new ProviderError(`docker stats failed: ${res.stderr.slice(-300)}`, "Couldn't read container usage.");
     const out: ContainerStats[] = [];
+    const ids = new Map<string, ContainerStats>();
     for (const line of res.stdout.split('\n')) {
       if (!line.trim()) continue;
       let j: { Name?: string; ID?: string; CPUPerc?: string; MemUsage?: string; PIDs?: string };
@@ -973,14 +1014,27 @@ export class LocalDockerProvider implements RuntimeProvider {
       // guard blind, 30th audit) — and the old spelling's.
       if (!name.startsWith(`${this.prefix}-`) && !name.startsWith('agentclaw-')) continue;
       const [used, limit] = (j.MemUsage ?? '').split('/');
-      out.push({
+      const row: ContainerStats = {
         name,
         cpuPct: Number((j.CPUPerc ?? '0').replace('%', '')) || 0,
         memBytes: parseByteSize(used ?? ''),
         memLimitBytes: parseByteSize(limit ?? ''),
         pids: Number(j.PIDs) || 0,
         ...this.#cgroupMemory(j.ID ?? ''),
-      });
+      };
+      out.push(row);
+      if (/^[0-9a-f]{12,64}$/.test(j.ID ?? '')) ids.set(j.ID!, row);
+    }
+    // When each started, in one more call: its cgroup counters (cap hits) count
+    // from then, so a reading is judged against the right container (HB-0234).
+    // None when it cannot be read; the counters are still shown.
+    if (ids.size) {
+      const ins = await this.#docker(['inspect', '-f', '{{.Id}}|{{.State.StartedAt}}', ...ids.keys()], 30_000).catch(() => undefined);
+      for (const l of ins?.stdout.split('\n') ?? []) {
+        const [id, started] = l.trim().split('|');
+        const row = id ? [...ids].find(([short]) => id.startsWith(short))?.[1] : undefined;
+        if (row && started && !Number.isNaN(Date.parse(started)) && !started.startsWith('0001-')) row.startedAt = new Date(started).toISOString();
+      }
     }
     return out;
   }
@@ -1019,6 +1073,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     if (!/^\d+(\.\d+)?[mg]$/.test(cap)) throw new ProviderError(`bad memory cap ${cap}`, 'That memory cap is not valid.');
     if (swap !== undefined && !/^\d+(\.\d+)?[mg]$/.test(swap)) throw new ProviderError(`bad swap allowance ${swap}`, 'That swap allowance is not valid.');
     const res = await this.#docker(['update', ...(await this.#memoryArgs(cap, swap)), container]);
+    this.#infoCache.delete(container);
     if (res.code !== 0) throw new ProviderError(`docker update failed: ${res.stderr.slice(-300)}`, "Couldn't change the container's memory cap.");
   }
 
@@ -1131,7 +1186,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     try {
       const { stdout } = await execFileP(
         this.docker,
-        this.#argv(['run', '--rm', ...one.flags, '--network', 'none', '-v', `${volume}:/vol:ro`, 'alpine', 'tar', 'cz', '-C', '/vol', '.']),
+        this.#argv(['run', '--rm', ...one.flags, '--network', 'none', '-v', `${volume}:/vol:ro`, 'alpine', 'tar', 'cz', ...STATE_CACHE_EXCLUDES, '-C', '/vol', '.']),
         { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024, timeout: IO_TIMEOUT_MS, killSignal: 'SIGKILL' },
       );
       return stdout as Buffer;
@@ -1762,12 +1817,14 @@ export class LocalDockerProvider implements RuntimeProvider {
     if (joined.code !== 0) throw new ProviderError(`embed door network connect failed: ${joined.stderr.slice(-500)}`, "Could not connect the embedding service's door to its server.");
     // Loading the model takes a few seconds; the door's /health answers for the server.
     // A runner's door is on that machine's own addresses, out of reach from
-    // here: it is asked from inside its container instead.
+    // here: it is asked from inside its container instead. Either way with
+    // the server's key: the door answers /health to no one without a key (HB-0040).
     const deadline = Date.now() + 90_000;
+    const serverKey = () => { try { return readFileSync(spec.serverKeyFile, 'utf8').trim(); } catch { return ''; } };
     while (Date.now() < deadline) {
       const ok = this.remote
-        ? (await this.#docker(['exec', door, 'node', '-e', 'fetch("http://127.0.0.1:8093/health").then((r)=>process.exit(r.ok?0:1),()=>process.exit(1))'])).code === 0
-        : await this.#fetch(`http://${spec.doorBind}:${spec.doorPort}/health`, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false);
+        ? (await this.#docker(['exec', door, 'node', '-e', 'let k="";try{k=require("fs").readFileSync(process.env.EMBED_SERVER_KEY_FILE,"utf8").trim()}catch{}fetch("http://127.0.0.1:8093/health",{headers:{authorization:"Bearer "+k}}).then((r)=>process.exit(r.ok?0:1),()=>process.exit(1))'])).code === 0
+        : await this.#fetch(`http://${spec.doorBind}:${spec.doorPort}/health`, { headers: { authorization: `Bearer ${serverKey()}` }, signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false);
       if (ok) return this.embedderStatus();
       await new Promise((r) => setTimeout(r, 1500));
     }
@@ -2072,6 +2129,8 @@ export function seedFailure(res: { stdout: string; stderr: string }, secrets: st
 
 
 const REACH_PROBE_MS = 2_500;
+/** How long a container's inspect answer serves info() (HB-0050): two of every three of the home screen's 8 s polls. */
+const INFO_CACHE_MS = 20_000;
 const REACH_OK_MS = 15_000;
 const REACH_DOWN_MS = 30_000;
 const UNREACHABLE_WORDS = "the machine isn't answering (asleep or offline)";
@@ -2080,7 +2139,8 @@ const UNREACHABLE_WORDS = "the machine isn't answering (asleep or offline)";
 export function remoteTarget(dockerHost: string): { host: string; port: number } | undefined {
   const m = /^(ssh|tcp):\/\/(?:[^@/\s]+@)?(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+)(?::(\d{1,5}))?\/?$/.exec(dockerHost.trim());
   if (!m) return undefined;
-  const port = m[3] ? Number(m[3]) : m[1] === 'ssh' ? 22 : 2375;
+  // tcp:// is TLS only (runnerEndpoint.ts): docker's TLS port when none is named.
+  const port = m[3] ? Number(m[3]) : m[1] === 'ssh' ? 22 : 2376;
   return { host: m[2]!.replace(/^\[|\]$/g, ''), port };
 }
 

@@ -29,6 +29,8 @@ import { existsSync } from 'node:fs';
 import { MAX_FILE_BYTES } from './snapshots.js';
 import { MAX_TEMPLATE_PARAMS, PARAM_KEY_RE, TemplateParamSchema } from './template.js';
 import { MAX_DATA_SOURCES } from './dataSourceLimits.js';
+import { GIT_MOUNT_NAME_RE, normalizeGitUrl } from './gitSource.js';
+import { STATE_CACHE_EXCLUDES } from '../providers/volumeCopy.js';
 import { manifestSchema as appManifestSchema } from './apps.js';
 
 /**
@@ -340,7 +342,7 @@ export async function estimateStateBytes(provider: ProvisionDeps['provider'], ru
   const script =
     `s=$(du -sb /home/node 2>/dev/null | cut -f1); ` +
     `if [ -n "$s" ] && [ "$s" -le ${MAX_RAW_STATE_BYTES} ]; then echo "$s"; ` +
-    `else tar cz -C /home/node . 2>/dev/null | wc -c; fi`;
+    `else tar cz ${STATE_CACHE_EXCLUDES.join(' ')} -C /home/node . 2>/dev/null | wc -c; fi`;
   try {
     const res = await provider.execShellOnVolume(runtimeRef, script, { readOnly: true });
     const n = Number(res.stdout.trim());
@@ -551,6 +553,12 @@ export interface ImportOptions {
   requestedBy?: string;
   /** Told the operation's id once the agent's row exists (the route returns it). */
   onOperation?: (id: string) => void;
+  /**
+   * Called once it runs with a Telegram bot and nobody in the owner's seat on
+   * it: the route watches for the importer's first message (claimFirstContact),
+   * never one from `excludeIds`, the previous owner's (HB-0076).
+   */
+  watchOwner?: (agent: Agent, opts: { accountId: string; excludeIds: string[] }) => void;
 }
 
 /**
@@ -848,6 +856,7 @@ async function importAgentInner(
     // bundle is unsigned, so a member's manifest could have named any folder here (2026-10-24).
     const hostLocal = host.kind === 'local' && host.ownerId === opts.ownerId;
     const skippedFolders: string[] = [];
+    const skippedRepos: string[] = [];
     for (const d of manifest.agent.dataSources ?? []) {
       if (store.listDataSources(agent.id).some((x) => x.mountName === d.mountName)) continue;
       if (d.kind === 'folder') {
@@ -857,6 +866,9 @@ async function importAgentInner(
         continue;
       }
       if (!d.repoUrl) continue;
+      // The clone's name and address reach the sync script's shell lines: an
+      // unsigned bundle is held to what the add route makes (HB-0237).
+      if (!GIT_MOUNT_NAME_RE.test(d.mountName) || !normalizeGitUrl(d.repoUrl)) { skippedRepos.push(d.mountName.slice(0, 64)); continue; }
       const id = randomUUID();
       let dsSecretRef: string | undefined;
       if (d.deployKey) {
@@ -868,6 +880,7 @@ async function importAgentInner(
         ...(dsSecretRef ? { secretRef: dsSecretRef } : {}), ...(d.pubKey ? { pubKey: d.pubKey } : {}), createdAt: now });
     }
     if (skippedFolders.length) log('import.folders_not_here', { agentId: agent.id, folders: skippedFolders.slice(0, 8) });
+    if (skippedRepos.length) log('import.repos_refused', { agentId: agent.id, names: skippedRepos.slice(0, 8) });
     op.step('row-made');
     // Memberships travel verbatim, except the owner seat belongs to whoever
     // imports — it's their installation now. Inside the try: a malformed row
@@ -880,6 +893,12 @@ async function importAgentInner(
       (a, b) => (a.role === 'owner' ? 0 : 1) - (b.role === 'owner' ? 0 : 1),
     );
     const seen = new Set<string>();
+    // The importer's own Telegram, when this machine knows it, as a new agent
+    // is born with it (createAgentRecord): their first message just works. Not
+    // when the file seats that id as somebody else (one person, two seats).
+    const known = store.knownChannelUserId(opts.ownerId);
+    const ownerChannelUserId = known && !manifest.memberships.some((m) => m.role !== 'owner' && m.channelUserId === known) ? known : undefined;
+    const previousOwnerIds = manifest.memberships.flatMap((m) => (m.role === 'owner' && m.channelUserId && m.channelUserId !== known ? [m.channelUserId] : []));
     for (const m of ordered) {
       const userId = m.role === 'owner' ? opts.ownerId : m.userId;
       // Dedup by RESULTING userId: a `user` row whose id already equals the
@@ -899,7 +918,7 @@ async function importAgentInner(
         // Carrying it over would (a) admit the stranger to this bot and
         // (b) poison knownChannelUserId so every future agent seeds and skips
         // the claim onto that stranger's id.
-        channelUserId: m.role === 'owner' ? undefined : m.channelUserId,
+        channelUserId: m.role === 'owner' ? ownerChannelUserId : m.channelUserId,
         status: m.status,
         joinedAt: now,
       });
@@ -994,6 +1013,13 @@ async function importAgentInner(
     log('agent.imported', { agentId: agent.id, slug: agent.slug, from: manifest.exportedAt });
     const done = store.setAgentState(agent.id, 'RUNNING');
     op.done('Imported.');
+    // Nobody in the owner's seat on its bot: the importer's first message is
+    // claimed, as a new agent's is, rather than left a pairing request to
+    // find and approve by hand (HB-0076).
+    const chan = store.getChannelForAgent(agent.id);
+    if (chan?.kind === 'telegram' && !store.getMembership(agent.id, opts.ownerId)?.channelUserId) {
+      opts.watchOwner?.(done, { accountId: chan.accountId, excludeIds: previousOwnerIds });
+    }
     return done;
   } catch (err) {
     rethrowIfCrash(err);

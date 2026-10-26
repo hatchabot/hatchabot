@@ -57,7 +57,7 @@ describe('what a guest may fetch over HTTP', () => {
     ['GET', '/'], ['GET', '/chat'], ['GET', '/chat/recipe/guest/abc'], ['GET', '/assets/index-x.js'], ['GET', '/fonts/a.woff2'],
     ['GET', '/favicon.svg'], ['GET', '/sw.js'], ['GET', '/manifest.webmanifest'], ['GET', '/control-ui-config.json'],
     ['GET', '/api/users/0ef51984-a983-430b-8282-88762f780209/avatar'], ['GET', '/__openclaw__/assistant-media'],
-    ['GET', '/__openclaw__/workspace-icon/agent%3Ataco%3Amain'], ['HEAD', '/assets/x.css'], ['POST', '/api/chat/media/outgoing'],
+    ['GET', '/__openclaw__/workspace-icon/agent:taco:main'], ['HEAD', '/assets/x.css'], ['POST', '/api/chat/media/outgoing'],
   ])('%s %s is the chat app', (m, p) => expect(guestHttpAllowed(m, p)).toBe(true));
   it.each([
     ['POST', '/tools/invoke'], ['GET', '/v1/models'], ['POST', '/v1/chat/completions'], ['POST', '/v1/responses'],
@@ -72,12 +72,15 @@ describe('what a guest may fetch over HTTP', () => {
     ['GET', '/assets\\..\\api/artifacts/download/x'], ['GET', '/assets/.\t./.\t./metrics'], ['GET', '/assets/x\n/../../metrics'],
     ['GET', '/assets/%2E%2e/metrics'], ['GET', '/assets/x#/../../metrics'], ['GET', '/chat?/../../metrics'],
     ['GET', '/assets/x\u0000y'], ['GET', '/assets/a b.js'],
+    // A ';' (matrix parameters) or a literal '%' (sent as %25, decoded again by a router): HB-0055.
+    ['GET', '/chat;/../metrics'], ['GET', '/assets/x;y.js'], ['GET', '/chat/%6detrics'], ['GET', '/__openclaw__/workspace-icon/a%3Ab'],
   ])('%s %j reads differently at the gateway, refused', (m, p) => expect(guestHttpAllowed(m, p)).toBe(false));
   it('what is forwarded is what was judged', () => {
     expect(guestHttpPath('GET', '/assets//index-x.js')).toBe('/assets/index-x.js');
     // Sent on as '//assets/…', the gateway would read 'assets' as a host and serve /sessions/….
     expect(guestHttpPath('GET', '//assets/sessions/agent:recipe:main/history')).toBe('/assets/sessions/agent:recipe:main/history');
-    expect(guestHttpPath('GET', '/__openclaw__/workspace-icon/agent%3Ataco%3Amain')).toBe('/__openclaw__/workspace-icon/agent%3Ataco%3Amain');
+    // Fastify hands the path on decoded: agent%3Ataco%3Amain arrives as this.
+    expect(guestHttpPath('GET', '/__openclaw__/workspace-icon/agent:taco:main')).toBe('/__openclaw__/workspace-icon/agent:taco:main');
     expect(guestHttpPath('GET', '/assets/x\\..\\..\\metrics')).toBeUndefined();
   });
 });

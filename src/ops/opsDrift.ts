@@ -31,6 +31,20 @@ export function lockdownProblem(tools: unknown, mcpServers: unknown): string | u
   return undefined;
 }
 
+/**
+ * The two settings read straight from the manager's config file: one `node -e`
+ * instead of two OpenClaw CLI starts (4–8 s each on 2026.9) every ten minutes
+ * (HB-0058). Prints `cli` for anything the file alone cannot settle — an
+ * `$include`, a `${VAR}`, JSON5 syntax, no `tools` block — which the CLI is
+ * then asked, as before: it resolves them as the gateway does.
+ */
+export const LOCKDOWN_READ = `node -e '
+  let t = ""; try { t = require("fs").readFileSync(process.env.OPENCLAW_CONFIG_PATH || "/home/node/.openclaw/openclaw.json", "utf8"); } catch { process.stdout.write("cli"); process.exit(0); }
+  if (t.includes("$include") || t.includes("\${")) { process.stdout.write("cli"); process.exit(0); }
+  let c; try { c = JSON.parse(t); } catch { process.stdout.write("cli"); process.exit(0); }
+  if (!c || typeof c !== "object" || !c.tools) { process.stdout.write("cli"); process.exit(0); }
+  process.stdout.write(JSON.stringify({ tools: c.tools, mcp: (c.mcp && c.mcp.servers) || {} }));'`;
+
 export async function checkOpsDrift(
   deps: { store: Store; providerFor: (hostId: string) => RuntimeProvider; log?: (event: string, detail: Record<string, unknown>) => void },
 ): Promise<void> {
@@ -38,13 +52,22 @@ export async function checkOpsDrift(
     if (agent.state !== 'RUNNING' || !agent.runtimeRef) continue;
     try {
       const provider = deps.providerFor(agent.hostId);
-      const [tools, mcp] = await Promise.all([
-        provider.exec(agent.runtimeRef, ['config', 'get', 'tools'], { timeoutMs: 20_000 }),
-        provider.exec(agent.runtimeRef, ['config', 'get', 'mcp.servers'], { timeoutMs: 20_000 }),
-      ]);
-      if (tools.code !== 0) continue; // can't tell; never suspend on a hiccup
       const parse = (s: string) => { try { return JSON.parse(s.slice(s.indexOf('{'))); } catch { return undefined; } };
-      const problem = lockdownProblem(parse(tools.stdout), mcp.code === 0 ? parse(mcp.stdout) : {});
+      let read: { tools: unknown; mcp: unknown } | undefined;
+      try {
+        const file = await provider.execShell(agent.runtimeRef, LOCKDOWN_READ, { timeoutMs: 20_000 });
+        const j = file.code === 0 && file.stdout.trim() !== 'cli' ? parse(file.stdout) : undefined;
+        if (j && typeof j === 'object' && 'tools' in j) read = j;
+      } catch { /* the CLI below */ }
+      if (!read) {
+        const [tools, mcp] = await Promise.all([
+          provider.exec(agent.runtimeRef, ['config', 'get', 'tools'], { timeoutMs: 20_000 }),
+          provider.exec(agent.runtimeRef, ['config', 'get', 'mcp.servers'], { timeoutMs: 20_000 }),
+        ]);
+        if (tools.code !== 0) continue; // can't tell; never suspend on a hiccup
+        read = { tools: parse(tools.stdout), mcp: mcp.code === 0 ? parse(mcp.stdout) : {} };
+      }
+      const problem = lockdownProblem(read.tools, read.mcp);
       if (problem && !drifted.has(agent.id)) {
         drifted.set(agent.id, problem);
         deps.store.deleteOpsToken(agent.id);

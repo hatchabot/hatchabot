@@ -79,13 +79,39 @@ describe('agent classes', () => {
   it('a class whose model the target source cannot run leaves the agent UNTOUCHED (no half-switch)', async () => {
     const { store, f } = await world();
     store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Local', vendor: 'local', kind: 'api_key', model: 'gpt-oss', secretRef: 'ai/p2', createdAt: 'now' });
-    const classId = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Bad', model: 'claude-sonnet-5', aiProfileId: 'p2' } })).json().class.id;
+    // Refused when it is saved now (HB-0060); one saved before is still refused when given.
+    const create = await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Bad', model: 'claude-sonnet-5', aiProfileId: 'p2' } });
+    expect(create.statusCode).toBe(400);
+    const classId = 'c-bad';
+    store.upsertAgentClass({ id: classId, ownerId: OWNER, name: 'Bad', model: 'claude-sonnet-5', aiProfileId: 'p2' });
     const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/class', headers: H, payload: { classId } });
     expect(res.statusCode).toBe(400);
     const a = store.getAgent('a1')!;
     expect(a.aiProfileId).toBe('p1');      // source NOT switched
     expect(a.model).toBeUndefined();       // override NOT written
     expect(a.classId).toBeUndefined();
+  });
+
+  it('a class\'s model is checked against its own source when it is saved (HB-0060)', async () => {
+    const { store, f } = await world();
+    store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Local', vendor: 'local', kind: 'api_key', model: 'gpt-oss', secretRef: 'ai/p2', createdAt: 'now' });
+    const offMenu = await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Typo', model: 'claude-opus-4.8', aiProfileId: 'p1' } });
+    expect(offMenu.statusCode).toBe(400);
+    expect(offMenu.json().error).toMatch(/isn’t one of this source’s models/);
+    const local = await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Local', model: 'gpt-oss', aiProfileId: 'p2' } });
+    expect(local.statusCode).toBe(400);
+    // No source of its own: each agent's source judges it when the class is given.
+    expect((await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Any', model: 'claude-opus-4.8' } })).statusCode).toBe(200);
+    const ok = await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Light', model: 'claude-sonnet-5', aiProfileId: 'p1' } });
+    expect(ok.statusCode).toBe(200);
+    const id = ok.json().class.id;
+    // An edit naming the model, or a source that lacks it, is refused and changes nothing.
+    expect((await f.inject({ method: 'PUT', url: `/v1/agent-classes/${id}`, headers: H, payload: { model: 'claude-opus-4.8' } })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'PUT', url: `/v1/agent-classes/${id}`, headers: H, payload: { aiProfileId: 'p2' } })).statusCode).toBe(400);
+    expect(store.getAgentClass(id)).toMatchObject({ model: 'claude-sonnet-5', aiProfileId: 'p1' });
+    // A rename alone is not judged on what was stored before.
+    store.upsertAgentClass({ id, ownerId: OWNER, name: 'Light', model: 'claude-retired-1', aiProfileId: 'p1' });
+    expect((await f.inject({ method: 'PUT', url: `/v1/agent-classes/${id}`, headers: H, payload: { name: 'Lighter' } })).statusCode).toBe(200);
   });
 
   it('refuses a class that would put the agent on another account\'s machine-login source', async () => {

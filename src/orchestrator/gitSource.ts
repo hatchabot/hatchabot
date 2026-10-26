@@ -53,6 +53,17 @@ export function normalizeGitUrl(input: string): NormalizedGit | null {
   return { sshUrl: `git@${host}:${path}.git`, httpsUrl: `https://${host}/${path}.git`, host, repoName };
 }
 
+/**
+ * The shape a git source's mount (clone folder) name may have: what the add
+ * route can produce (a repo name, no leading dot). The sync scripts paste it
+ * into shell lines, so an imported bundle's name is held to it too (HB-0237).
+ */
+export const GIT_MOUNT_NAME_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
+
+function assertMountName(name: string): void {
+  if (!GIT_MOUNT_NAME_RE.test(name)) throw new Error('This repo source has a folder name that is not allowed. Remove it and add it again.');
+}
+
 /** A git source stored as an https URL is a public, credential-less, read-only clone. */
 export function isPublicGitUrl(repoUrl: string | undefined): boolean {
   return !!repoUrl && /^https:\/\//.test(repoUrl);
@@ -152,6 +163,7 @@ export function buildPublicGitSyncScript(
   src: { mountName: string; httpsUrl: string },
   commit: { name: string; email: string },
 ): string {
+  assertMountName(src.mountName);
   const clone = `/home/node/.openclaw/${src.mountName}`;
   const q = (v: string) => `'${v.replace(/'/g, "'\\''")}'`;
   return [
@@ -189,6 +201,7 @@ export function buildGitSyncScript(
   privKeyB64: string,
   commit: { name: string; email: string },
 ): string {
+  assertMountName(src.mountName);
   const base = '/home/node/.openclaw';
   const sshDir = `${base}/.ssh`;
   const key = `${sshDir}/${src.mountName}_deploy`;

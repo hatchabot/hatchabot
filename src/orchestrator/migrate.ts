@@ -520,13 +520,13 @@ async function settleArrived(deps: MigrateDeps, agentId: string, peerName: strin
   // leak) NOR be freed for re-lease (which would hand the same token to a new
   // local agent — two pollers). Removing scrubs the local copy and frees the
   // count. Best-effort: the migrate already succeeded; never fail it over this.
-  const pool = (deps.channel as { pool?: { owns(u: string): boolean; release(u: string, o?: { reason?: 'moved' }): Promise<void>; removeFromPool(u: string): Promise<void> } } | undefined)?.pool;
+  const pool = (deps.channel as { pool?: { owns(u: string): boolean; removeFromPool(u: string, o?: { leasedTo?: string }): Promise<void> } } | undefined)?.pool;
   if (pool?.owns(accountId)) {
     try {
-      // Clear the lease so remove is allowed — quietly: `moved` sends no
-      // "this agent has been removed" through a bot now answering on the peer.
-      await pool.release(accountId, { reason: 'moved' });
-      await pool.removeFromPool(accountId);
+      // Quietly (no "this agent has been removed" through a bot now answering
+      // on the peer), and in one statement while it is still this agent's: a
+      // release first freed it for a lease to take before the remove (HB-0065).
+      await pool.removeFromPool(accountId, { leasedTo: agentId });
     } catch (err) {
       log('migrate.pool_retire_failed', { agentId, accountId, error: String(err) });
     }
