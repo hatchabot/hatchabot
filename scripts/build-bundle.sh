@@ -36,8 +36,10 @@ npm ci --omit=dev --no-audit --no-fund
 # Compiled here, on the old base, so it loads on any glibc from this one up —
 # the driver's own Linux binaries need 2.38 (sqlite-driver.sh).
 HATCHABOT_APP_DIR="$STAGE" "$ROOT/scripts/sqlite-driver.sh" --compile
-# The stamp ensure-deps.sh compares: the bundle's dependencies ARE this lockfile's.
+# The stamp ensure-deps.sh compares: the bundle's dependencies ARE this lockfile's,
+# and the driver is compiled for this Node (the private one below).
 cksum package-lock.json | cut -d' ' -f1 > node_modules/.hatchabot-lock-stamp
+node -p process.versions.modules > node_modules/.hatchabot-node-abi
 
 echo "== private Node"
 mkdir -p .node/bin

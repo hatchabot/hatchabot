@@ -131,3 +131,40 @@ describe('agent classes', () => {
     expect(assign.statusCode).toBe(400); // modelOverrideProblem: not on this source's menu
   });
 });
+
+describe('a set_class card from the Hatchabot agent (audit #097)', () => {
+  const WHO = { ownerId: OWNER, chatId: 123, fromUserId: 456 };
+  async function brokerFor(f: Awaited<ReturnType<typeof world>>['f']) {
+    const { Broker } = await import('../src/mgmt/broker.js');
+    const { HttpApiClient } = await import('../src/mgmt/apiClient.js');
+    const { PendingStore } = await import('../src/mgmt/pendingStore.js');
+    const broker = new Broker(new HttpApiClient(async (method, path, body) => {
+      const res = await f.inject({ method: method as any, url: path, headers: H, payload: body as any });
+      if (res.statusCode >= 400) throw new Error(res.json().error ?? String(res.statusCode));
+      return res.json();
+    }), new PendingStore());
+    broker.setMode(true);
+    return broker;
+  }
+
+  it('confirmed after the class changed, it applies nothing and says what changed; a fresh card applies the class as it is', async () => {
+    const { store, f } = await world();
+    const classId = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Light', model: 'claude-sonnet-5' } })).json().class.id;
+    const broker = await brokerFor(f);
+    const card = await broker.handleTool('set_class', { agent: 'a1', class: 'Light' }, WHO) as any;
+    expect(card.pending.summary).toContain('model claude-sonnet-5');
+    // Edited from another tab before Confirm.
+    expect((await f.inject({ method: 'PUT', url: `/v1/agent-classes/${classId}`, headers: H, payload: { model: 'claude-fable-5' } })).statusCode).toBe(200);
+    const stale = await broker.confirm(card.pending.confirmId, 'confirm', WHO);
+    expect(stale.ok && stale.text).toMatch(/^⚠ Failed/);
+    expect(stale.ok && stale.text).toMatch(/changed after this was shown: it now has model claude-fable-5\. Nothing was changed/);
+    expect(store.getAgent('a1')!.classId).toBeFalsy();
+    expect(store.getAgent('a1')!.model).toBeUndefined();
+    // Asked again, the card shows the class as it is, and that is what is applied.
+    const fresh = await broker.handleTool('set_class', { agent: 'a1', class: 'Light' }, WHO) as any;
+    expect(fresh.pending.summary).toContain('model claude-fable-5');
+    const done = await broker.confirm(fresh.pending.confirmId, 'confirm', WHO);
+    expect(done.ok && done.text).toMatch(/^✅/);
+    expect(store.getAgent('a1')).toMatchObject({ classId, model: 'claude-fable-5' });
+  });
+});

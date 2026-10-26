@@ -88,6 +88,19 @@ describe('POST /v1/ai-profiles/:id/apply-default-model', () => {
     expect(a2.pendingModel).toBeUndefined();          // it will NOT switch
   });
 
+  it('a follower left unticked is held on the model it was built with, not a default saved but not yet applied to it (audit #098)', async () => {
+    const { store, f } = await world();
+    store.setAgentApplied('a2', 'p1', 'claude-sonnet-5'); // what its container runs
+    // The default changed without applying it to a2: a2 still runs sonnet-5.
+    expect((await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/p1', headers: as, payload: { model: 'claude-haiku-4-5' } })).statusCode).toBe(200);
+    expect(store.getAgent('a2')!.appliedModel).toBe('claude-sonnet-5');
+    const res = await apply(f, 'p1', { model: 'claude-opus-5', apply: [] });
+    expect(res.json()).toMatchObject({ applied: 0, live: 0 });
+    expect(store.getAgent('a2')).toMatchObject({ model: 'claude-sonnet-5', appliedModel: 'claude-sonnet-5' });
+    // Its next build keeps it there: the pin is on the menu.
+    expect(effectiveModel(store.getAgent('a2')!, store.getAIProfile('p1')!)).toBe('claude-sonnet-5');
+  });
+
   it('ticking an override agent adopts the new default for it', async () => {
     const { store, f } = await world();
     await apply(f, 'p1', { model: 'claude-opus-5', apply: ['a3'], rebuild: false });

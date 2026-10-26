@@ -36,14 +36,16 @@ if [ "${1:-}" = --install ]; then
   command -v systemctl >/dev/null 2>&1 || { echo "This needs systemd (Linux). On a Mac, run 'node scripts/privacy-check.mjs --sync-ci' after adding an agent, and before each release."; exit 1; }
   command -v gh >/dev/null 2>&1 || { echo "This needs the GitHub CLI (gh), signed in: it sets the repository's PRIVACY_FINGERPRINTS secret."; exit 1; }
   mkdir -p "$UNITS"
+  # The user manager's PATH does not include a node installed by nvm or Homebrew, nor always gh.
+  # Quoted whole, as install-service.sh writes it: unquoted, a space in a path split it (audit #044).
+  UNIT_PATH="$(dirname "$(command -v node)"):$(dirname "$(command -v gh)"):/usr/local/bin:/usr/bin:/bin"
   cat > "$UNITS/$NAME.service" <<UNIT
 [Unit]
 Description=Hatchabot: send GitHub the privacy check's keyed fingerprints
 
 [Service]
 Type=oneshot
-# The user manager's PATH does not include a node installed by nvm or Homebrew, nor always gh.
-Environment=PATH=$(dirname "$(command -v node)"):$(dirname "$(command -v gh)"):/usr/local/bin:/usr/bin:/bin
+Environment="PATH=$(printf '%s' "$UNIT_PATH" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g')"
 ExecStart=/usr/bin/env node "$DIR/scripts/privacy-check.mjs" --sync-ci
 $(for r in ${ALSO[@]+"${ALSO[@]}"}; do echo "ExecStart=/usr/bin/env node \"$DIR/scripts/privacy-check.mjs\" --sync-ci --repo $r"; done)
 UNIT

@@ -335,6 +335,13 @@ export class Store {
       -- calls slower than 1 s): the newest slot each agent's count was written
       -- through. No row = its log-derived counts not yet replaced (v2.104.0).
       CREATE TABLE IF NOT EXISTS usage_calls_through (agent_id TEXT PRIMARY KEY, slot TEXT NOT NULL);
+      -- Every change of the source an agent's container runs (setAgentApplied):
+      -- a rewritten hour of calls is filed under the source that made each
+      -- one, however many changes it holds (audit #056). Pruned with the usage.
+      CREATE TABLE IF NOT EXISTS applied_source_changes (
+        agent_id TEXT NOT NULL, at TEXT NOT NULL, from_profile TEXT NOT NULL, to_profile TEXT NOT NULL,
+        PRIMARY KEY (agent_id, at)
+      );
       -- One-time data cleanups that have run (name = the cleanup), so each
       -- runs once per database rather than on every start.
       CREATE TABLE IF NOT EXISTS store_migrations (name TEXT PRIMARY KEY, at TEXT NOT NULL);
@@ -992,6 +999,8 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN woken_at TEXT`,
       // A copy of the agent was downloaded while it stood stopped (transfer.ts): cleared when it runs again.
       `ALTER TABLE agents ADD COLUMN exported_at TEXT`,
+      // Moved while stopped: its rebuild hook runs at its next start (moveHost.ts), set when that became due.
+      `ALTER TABLE agents ADD COLUMN rebuild_hook_due TEXT`,
       `ALTER TABLE agents ADD COLUMN hibernate_mark INTEGER`,
       `ALTER TABLE agent_classes ADD COLUMN memory_cap TEXT`,
       // Compressed swap (swap.ts): an agent's or a class's allowance on top of its memory cap; "off" or a size, NULL = inherit.
@@ -1169,6 +1178,13 @@ export class Store {
           AND EXISTS (SELECT 1 FROM agents a WHERE a.id = budget_pauses.agent_id AND a.state NOT IN ('DELETED', 'DELETING') AND a.model = budget_pauses.to_model)
           AND NOT EXISTS (SELECT 1 FROM model_changes mc WHERE mc.agent_id = budget_pauses.agent_id AND mc.at > budget_pauses.resumed_at)`);
     });
+    // The one change each agent's record kept before every change was (audit #056).
+    this.runOnce('2026-10-25-applied-source-changes', () => {
+      this.db.exec(`INSERT OR IGNORE INTO applied_source_changes (agent_id, at, from_profile, to_profile)
+        SELECT id, applied_profile_at, applied_profile_prev, applied_profile_id FROM agents
+         WHERE applied_profile_prev IS NOT NULL AND applied_profile_at IS NOT NULL AND applied_profile_id IS NOT NULL
+           AND applied_profile_prev != applied_profile_id`);
+    });
     this.runOnce('2026-09-29-dm-policy-unchanged', () => {
       this.db.exec(`DELETE FROM agent_events WHERE event = 'channel.dm_policy' AND CASE WHEN json_valid(detail) THEN json_extract(detail, '$.result') END = 'unchanged'`);
     });
@@ -1329,7 +1345,7 @@ export class Store {
     // kept counting a deleted agent for days), claim windows (they carry an
     // invitee's @handle) and the lost-context note. Tables that may not exist
     // yet on an old database are skipped.
-    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset', 'connection_removals', 'access_checks', 'data_source_removals'] as const) {
+    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset', 'connection_removals', 'access_checks', 'data_source_removals', 'applied_source_changes'] as const) {
       try { this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId); }
       catch (err) { if (!/no such table/.test(String(err))) throw err; }
     }
@@ -1766,6 +1782,10 @@ export class Store {
   clearMemoryPeaks(agentId: string, capHitsNow: number): void {
     this.db.prepare(`UPDATE agents SET memory_cap_baseline = ?, memory_peak_since = 0, memory_peak_cleared_at = ?, updated_at = ? WHERE id = ?`)
       .run(capHitsNow, new Date().toISOString(), new Date().toISOString(), agentId);
+  }
+  /** The cap-hit counter restarted below the baseline (a new container): count from zero, unless a newer baseline was set meanwhile. */
+  rebaseMemoryCapHits(agentId: string, from: number): void {
+    this.db.prepare(`UPDATE agents SET memory_cap_baseline = NULL WHERE id = ? AND memory_cap_baseline = ?`).run(agentId, from);
   }
   /** A reading above the high-water mark kept since the last clear raises it; returns the mark. */
   bumpMemoryPeak(agentId: string, bytes: number): number {
@@ -2983,13 +3003,13 @@ export class Store {
 
   // ---- Moves another Hatchabot announced (migrate.ts receiveMove) ---------
 
-  /** The first moment of a restore that carried a move id; kept 90 days. A repeat keeps the first. */
-  insertMoveReceipt(r: { id: string; ownerId: string; bootId: string }, now = Date.now()): void {
+  /** The first moment of a restore that carried a move id; kept 90 days. A repeat keeps the first: false when the id was taken. */
+  insertMoveReceipt(r: { id: string; ownerId: string; bootId: string }, now = Date.now()): boolean {
     const at = new Date(now).toISOString();
     this.db.prepare(`DELETE FROM move_receipts WHERE created_at < ?`).run(new Date(now - 90 * 86_400_000).toISOString());
-    this.db
+    return this.db
       .prepare(`INSERT OR IGNORE INTO move_receipts (id, owner_id, op_id, outcome, boot_id, created_at, updated_at) VALUES (?, ?, NULL, NULL, ?, ?, ?)`)
-      .run(r.id, r.ownerId, r.bootId, at, at);
+      .run(r.id, r.ownerId, r.bootId, at, at).changes === 1;
   }
 
   updateMoveReceipt(id: string, patch: { opId?: string; outcome?: 'landed' | 'failed' }): void {
@@ -3761,11 +3781,13 @@ export class Store {
   }
   /**
    * The agent's newest success ON this source: one from before a switch is
-   * not (#114). A success recorded before the source was kept counts (legacy).
+   * not (#114). A success recorded before the source was kept counts (legacy),
+   * unless `strict`: asked of a source the agent is no longer on, it could
+   * have been any source's.
    */
-  lastOkOn(agentId: string, profileId: string): string | undefined {
+  lastOkOn(agentId: string, profileId: string, strict = false): string | undefined {
     const c = this.usageCursor(agentId);
-    return c?.lastOk && (!c.lastOkProfile || c.lastOkProfile === profileId) ? c.lastOk : undefined;
+    return c?.lastOk && (c.lastOkProfile ? c.lastOkProfile === profileId : !strict) ? c.lastOk : undefined;
   }
   setUsageCursor(agentId: string, lastTs: string, lastOk?: string, lastLimited?: string, profileId?: string): void {
     this.db.prepare(
@@ -4379,6 +4401,7 @@ export class Store {
       this.db.prepare(`DELETE FROM model_call_slots WHERE slot < ?`).run(beforeIso.slice(0, 16));
       this.db.prepare(`DELETE FROM limit_hits WHERE at < ?`).run(beforeIso);
       this.db.prepare(`DELETE FROM token_samples WHERE at < ?`).run(beforeIso);
+      this.db.prepare(`DELETE FROM applied_source_changes WHERE at < ?`).run(beforeIso);
     })();
   }
 
@@ -4579,10 +4602,11 @@ export class Store {
 
   /** Record that an agent just pulled a connection's token into its container.
    *  Compared against the connection's created_at to detect stale tokens. */
-  markConnectionMaterialized(agentId: string, connectionId: string): void {
+  /** `at`: when the token it imported was read — what "stale" is measured by. */
+  markConnectionMaterialized(agentId: string, connectionId: string, at = new Date().toISOString()): void {
     this.db
       .prepare(`UPDATE agent_connections SET materialized_at = ? WHERE agent_id = ? AND connection_id = ?`)
-      .run(new Date().toISOString(), agentId, connectionId);
+      .run(at, agentId, connectionId);
   }
 
   detachConnection(agentId: string, connectionId: string): void {
@@ -4802,12 +4826,25 @@ export class Store {
   setMgmtProposalOutcome(id: string, outcome: string): void {
     this.db.prepare(`UPDATE mgmt_proposals SET outcome = ? WHERE id = ?`).run(outcome.slice(0, 2000), id);
   }
+  /**
+   * Every card still waiting (unexpired), and the last day's resolved ones —
+   * at most 50 of those, newest first. One limit over both let a busy day's
+   * resolved cards push a waiting one out, and with it its confirm and cancel
+   * and its place in the open-card count (audit #080).
+   */
   listMgmtProposals<T>(ownerId: string, nowMs: number): Array<T & { status: string; outcome?: string; resolvedAtMs?: number }> {
-    const rows = this.db.prepare(
-      `SELECT record, status, outcome, resolved_at_ms FROM mgmt_proposals
-       WHERE owner_id = ? AND ((status = 'pending' AND expires_at_ms > ?) OR resolved_at_ms > ?)
+    type Row = { record: string; status: string; outcome: string | null; resolved_at_ms: number | null; created_at_ms: number };
+    const pending = this.db.prepare(
+      `SELECT record, status, outcome, resolved_at_ms, created_at_ms FROM mgmt_proposals
+       WHERE owner_id = ? AND status = 'pending' AND expires_at_ms > ?
+       ORDER BY created_at_ms DESC LIMIT 500`,
+    ).all(ownerId, nowMs) as Row[];
+    const resolved = this.db.prepare(
+      `SELECT record, status, outcome, resolved_at_ms, created_at_ms FROM mgmt_proposals
+       WHERE owner_id = ? AND status != 'pending' AND resolved_at_ms > ?
        ORDER BY created_at_ms DESC LIMIT 50`,
-    ).all(ownerId, nowMs, nowMs - 24 * 3600_000) as Array<{ record: string; status: string; outcome: string | null; resolved_at_ms: number | null }>;
+    ).all(ownerId, nowMs - 24 * 3600_000) as Row[];
+    const rows = [...pending, ...resolved].sort((a, b) => b.created_at_ms - a.created_at_ms);
     return rows.flatMap((r) => {
       const rec = safeJson<T | undefined>(r.record, undefined);
       return rec ? [{ ...rec, status: r.status, outcome: r.outcome ?? undefined, resolvedAtMs: r.resolved_at_ms ?? undefined }] : [];
@@ -4996,13 +5033,35 @@ export class Store {
   setAgentApplied(id: string, aiProfileId: string, model: string, at = new Date().toISOString()): void {
     // A change of source also records when, and from which: the usage sampler
     // files calls before that instant under the old source, so the transcript
-    // rewrite of the last hour doesn't count it under both.
+    // rewrite of the last hour doesn't count it under both. Every change is
+    // kept (applied_source_changes): two within that hour filed the oldest
+    // source's calls under the middle one as well (audit #056).
+    this.db.transaction(() => {
+      const was = (this.db.prepare(`SELECT applied_profile_id AS p FROM agents WHERE id = ?`).get(id) as { p: string | null } | undefined)?.p;
+      this.db
+        .prepare(`UPDATE agents SET
+           applied_profile_prev = CASE WHEN applied_profile_id IS NOT NULL AND applied_profile_id != @p THEN applied_profile_id ELSE applied_profile_prev END,
+           applied_profile_at = CASE WHEN applied_profile_id IS NOT NULL AND applied_profile_id != @p THEN @at ELSE applied_profile_at END,
+           applied_profile_id = @p, applied_model = @m WHERE id = @id`)
+        .run({ p: aiProfileId, m: model, at, id });
+      if (was && was !== aiProfileId) {
+        this.db.prepare(`INSERT OR REPLACE INTO applied_source_changes (agent_id, at, from_profile, to_profile) VALUES (?, ?, ?, ?)`).run(id, at, was, aiProfileId);
+      }
+    })();
+  }
+
+  /** The agent's changes of applied source the usage history still covers, oldest first. */
+  appliedSourceChanges(agentId: string): Array<{ at: string; from: string; to: string }> {
+    return (this.db.prepare(`SELECT at, from_profile, to_profile FROM applied_source_changes WHERE agent_id = ? ORDER BY at`).all(agentId) as Array<{ at: string; from_profile: string; to_profile: string }>)
+      .map((r) => ({ at: r.at, from: r.from_profile, to: r.to_profile }));
+  }
+
+  /** What the runtime ran, exactly as it was recorded: a move put back to the runtime it left (moveHost.ts). */
+  restoreAgentApplied(id: string, a: { profileId?: string; model?: string; prevId?: string; at?: string; embedMode?: 'baked' | 'shared' }): void {
     this.db
-      .prepare(`UPDATE agents SET
-         applied_profile_prev = CASE WHEN applied_profile_id IS NOT NULL AND applied_profile_id != @p THEN applied_profile_id ELSE applied_profile_prev END,
-         applied_profile_at = CASE WHEN applied_profile_id IS NOT NULL AND applied_profile_id != @p THEN @at ELSE applied_profile_at END,
-         applied_profile_id = @p, applied_model = @m WHERE id = @id`)
-      .run({ p: aiProfileId, m: model, at, id });
+      .prepare(`UPDATE agents SET applied_profile_id = @p, applied_model = @m, applied_profile_prev = @prev,
+         applied_profile_at = @at, applied_embed_mode = @embed WHERE id = @id`)
+      .run({ p: a.profileId ?? null, m: a.model ?? null, prev: a.prevId ?? null, at: a.at ?? null, embed: a.embedMode ?? null, id });
   }
 
   /** Record the current peer grant as installed. ONLY a provision/rebuild may
@@ -5395,6 +5454,10 @@ export class Store {
   /** A copy of the agent was downloaded (or moved by file) at `at`; null once it runs here again. */
   setAgentExportedAt(agentId: string, at: string | null): void {
     this.db.prepare(`UPDATE agents SET exported_at = ? WHERE id = ?`).run(at, agentId);
+  }
+  /** Its container is new and its rebuild hook has not run in it yet (since `at`); null once it has. */
+  setRebuildHookDue(agentId: string, at: string | null): void {
+    this.db.prepare(`UPDATE agents SET rebuild_hook_due = ? WHERE id = ?`).run(at, agentId);
   }
 
   setHibernated(agentId: string, at: string | null, mark?: number): void {
@@ -6046,6 +6109,7 @@ function rowToAgent(r: any): Agent {
     memoryPeakClearedAt: r.memory_peak_cleared_at ?? undefined,
     hibernatedAt: r.hibernated_at ?? undefined,
     exportedAt: r.exported_at ?? undefined,
+    rebuildHookDue: r.rebuild_hook_due ?? undefined,
     hibernate: r.hibernate === 'never' ? 'never' : undefined,
     wokenAt: r.woken_at ?? undefined,
     hibernateMark: typeof r.hibernate_mark === 'number' ? r.hibernate_mark : undefined,

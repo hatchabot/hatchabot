@@ -69,7 +69,14 @@ vernewer() { printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | se
 # else = it could not find out (no network, an answer that is not a channels
 # file). Neither is the release failing: `|| exit 1` here once got releases
 # that were never tried blacklisted by the channel timer (review, 2026-10-09).
+# The channel timer (follow-channel.sh) resolved the channel already and
+# remembers a failure by that release: it passes it, so the release tried is
+# the one it records (audit #042).
+if [ -n "${HATCHABOT_UPGRADE_TARGET:-}" ]; then
+  case "$HATCHABOT_UPGRADE_TARGET" in v[0-9]*) TARGET="$HATCHABOT_UPGRADE_TARGET" ;; *) echo "Not a release: $HATCHABOT_UPGRADE_TARGET"; exit 2 ;; esac
+else
 TARGET="$("$DIR/scripts/release-target.sh" "$CHANNEL")" || { [ "$?" = 1 ] && exit 2; echo "Could not find which release $CHANNEL names now — try again later."; exit 3; }
+fi
 [ -n "$TARGET" ] || { echo "Could not find which release $CHANNEL names (no network to github.com?)."; exit 3; }
 
 # A channel asked for by name is remembered, so the next plain upgrade follows it
@@ -83,19 +90,6 @@ case "$ARG" in stable|beta|latest) mkdir -p "$(dirname "$CHANNEL_FILE")"; echo "
 # ten minutes; use-case audit, 2026-09-27).
 case "$ARG" in v[0-9]*) mkdir -p "$(dirname "$CHANNEL_FILE")"; echo "$ARG" > "$CHANNEL_FILE"
   echo "Pinned to $ARG — automatic upgrades pause here. Follow a channel again with: hatchabot upgrade stable" ;; esac
-fi
-
-if [ "$BUNDLED" = 1 ]; then CUR="$(sed -nE 's/.*"tag":"([^"]+)".*/\1/p' BUNDLE.json)"
-else CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"; fi
-if [ "$CUR" = "$TARGET" ]; then echo "Already on $TARGET ($CHANNEL)."; exit 0; fi
-case "$CHANNEL" in v[0-9]*) ;; *)
-  # A channel never takes a machine backwards (this one may run ahead of it).
-  if [[ "$CUR" == v* ]] && [ "$(vernewer "$CUR" "$TARGET")" = "$CUR" ]; then
-    echo "On $CUR, which is newer than $CHANNEL ($TARGET). Nothing to do — name a version to go back."; exit 0
-  fi ;;
-esac
-if [ "$BUNDLED" = 0 ] && [ -n "$(git status --porcelain)" ]; then
-  echo "$DIR has local changes — an upgrade would overwrite them. Refusing:"; git status --porcelain | sed 's/^/    /'; exit 2
 fi
 
 # One upgrade at a time: the channel timer and a hand-run upgrade used to race
@@ -138,6 +132,23 @@ if ! take_lock; then
     rmdir "$LOCK_PATH.clearing" 2>/dev/null || true
   fi
   take_lock || { echo "Another upgrade of $DIR is running (lock $LOCK_PATH)."; exit 4; }
+fi
+
+# What is installed, read only once the lock is held: read before it, a run
+# that waited there while another upgrade moved this machine on judged by the
+# release it no longer had, and a channel upgrade took the machine backwards
+# (audit #035).
+if [ "$BUNDLED" = 1 ]; then CUR="$(sed -nE 's/.*"tag":"([^"]+)".*/\1/p' BUNDLE.json)"
+else CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"; fi
+if [ "$CUR" = "$TARGET" ]; then echo "Already on $TARGET ($CHANNEL)."; exit 0; fi
+case "$CHANNEL" in v[0-9]*) ;; *)
+  # A channel never takes a machine backwards (this one may run ahead of it).
+  if [[ "$CUR" == v* ]] && [ "$(vernewer "$CUR" "$TARGET")" = "$CUR" ]; then
+    echo "On $CUR, which is newer than $CHANNEL ($TARGET). Nothing to do — name a version to go back."; exit 0
+  fi ;;
+esac
+if [ "$BUNDLED" = 0 ] && [ -n "$(git status --porcelain)" ]; then
+  echo "$DIR has local changes — an upgrade would overwrite them. Refusing:"; git status --porcelain | sed 's/^/    /'; exit 2
 fi
 RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tests only
 # ensure-deps writes the stamp restart.sh checks: a bare `npm ci` left none,
@@ -228,6 +239,10 @@ rollback() {
   if [ "$RESTARTED" = 1 ]; then $RESTART; fi
 }
 undo() { rollback; }
+# An upgrade killed (or a power cut) right after moving node_modules aside
+# left node_modules.prev as the only working copy. Put back first: deleted as
+# a leftover, a failed install then had nothing to roll back to (audit #033).
+[ -d node_modules ] || [ ! -d node_modules.prev ] || mv node_modules.prev node_modules
 CHANGING=1
 rm -rf node_modules.prev; [ -d node_modules ] && mv node_modules node_modules.prev
 git checkout --quiet "$TARGET"

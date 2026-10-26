@@ -21,8 +21,20 @@ command -v npm >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 STAMP="node_modules/.hatchabot-lock-stamp"
 LOCK_HASH="$(cksum package-lock.json 2>/dev/null | cut -d' ' -f1 || true)"
 [ -n "$LOCK_HASH" ] || exit 0  # no lockfile: nothing to reason about
+# The Node the database driver was last checked under, by its native-module
+# ABI: the same lockfile under a new Node major (brew, nvm, NodeSource) kept a
+# driver compiled for the old one, which Node refuses (NODE_MODULE_VERSION),
+# while this said "up to date" (audit #045). Its own file beside the stamp, so
+# an older release reading the stamp still finds just the lockfile's sum.
+ABI_STAMP="node_modules/.hatchabot-node-abi"
+ABI="$(node -p process.versions.modules 2>/dev/null || true)"
 
 if [ "$(cat "$STAMP" 2>/dev/null || true)" = "$LOCK_HASH" ] && [ -d node_modules ]; then
+  if [ -n "$ABI" ] && [ "$(cat "$ABI_STAMP" 2>/dev/null || true)" != "$ABI" ]; then
+    # Checks it loads; compiles it for this Node only when it does not.
+    ./scripts/sqlite-driver.sh
+    echo "$ABI" > "$ABI_STAMP"
+  fi
   [ "${1:-}" = "--quiet" ] || echo "Dependencies are up to date."
   exit 0
 fi
@@ -32,3 +44,4 @@ npm ci --no-audit --no-fund
 # The driver's prebuilt binary needs glibc 2.38: compile it here when it does not load.
 ./scripts/sqlite-driver.sh
 echo "$LOCK_HASH" > "$STAMP"
+[ -z "$ABI" ] || echo "$ABI" > "$ABI_STAMP"

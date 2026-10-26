@@ -109,13 +109,13 @@ class FakeAgent extends MockProvider {
     this.calls.push({ kind: 'exec', what: JSON.stringify(argv) });
     const lost = { code: 1, stdout: '', stderr: 'fixture response lost', timedOut: true };
     if (argv[0] === 'cron' && argv[1] === 'list' && ++this.lists > this.failListAfter) return { code: 1, stdout: '', stderr: 'gateway closed' };
-    if (argv[0] === 'cron' && argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs: this.jobs.filter((j) => argv.includes('--all') || !j.disabled).map(({ id, name }) => ({ id, name })) }), stderr: '' };
+    if (argv[0] === 'cron' && argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs: this.jobs.filter((j) => argv.includes('--all') || !j.disabled).map(({ id, name, disabled }) => ({ id, name, enabled: !disabled })) }), stderr: '' };
     if (argv[0] === 'cron' && argv[1] === 'add') {
       const name = argv[argv.indexOf('--name') + 1]!;
       if (this.throwAdd(name)) throw new Error('provider unavailable');
       if (this.failAdd(name)) return { code: 1, stdout: '', stderr: 'gateway refused the job' };
       const id = `j${this.#next++}`;
-      this.jobs.push({ id, name, argv });
+      this.jobs.push({ id, name, argv, ...(argv.includes('--disabled') ? { disabled: true } : {}) });
       if (this.lostAdd(name)) return lost;
       return { code: 0, stdout: JSON.stringify({ id }), stderr: '' };
     }
@@ -401,6 +401,27 @@ describe('a failed update leaves the running app as it was', () => {
     expect(agent.live().current).toBe(`releases/${v2.sha.slice(0, 12)}`);
     expect(agent.every('demoapp-tick')).toEqual(['5m']);
   });
+
+  it('a failed update puts a task the owner had turned off back turned off, and says so when it cannot (audit #016)', async () => {
+    const changed = { ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['python3', '-m', 'demo', 'tick'] }] };
+    const { agent, d, v2 } = await installed(changed);
+    const oldTick = agent.jobs.find((j) => j.name === 'demoapp-tick')!;
+    oldTick.disabled = true;
+    agent.lostRm = (id) => id === oldTick.id; // taken off, its reply lost: the put-back re-adds it
+    await expect(installRelease(d, v2, {})).rejects.toThrow(/Its tasks are as they were\./);
+    expect(agent.jobs.filter((j) => j.name === 'demoapp-tick').map((j) => ({ every: j.argv?.[j.argv.indexOf('--every') + 1], disabled: j.disabled === true })))
+      .toEqual([{ every: '1m', disabled: true }]);
+    // An agent that re-adds it switched on all the same is never "as they were".
+    const again = await installed(changed);
+    const tick = again.agent.jobs.find((j) => j.name === 'demoapp-tick')!;
+    tick.disabled = true;
+    again.agent.lostRm = (id) => id === tick.id;
+    const exec = again.agent.exec.bind(again.agent);
+    again.agent.exec = (ref: string, argv: string[]) => exec(ref, argv.filter((a) => a !== '--disabled'));
+    const err = await installRelease(again.d, v2, {}).catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/switched on, though you had turned it off: demoapp-tick/);
+    expect((err as Error).message).not.toMatch(/as they were/);
+  });
 });
 
 describe('the app routes', () => {
@@ -443,6 +464,28 @@ describe('the app routes', () => {
     expect(gone.json()).toMatchObject({ removed: true });
     expect(store.getAgentApp('a1')).toBeUndefined();
     expect(provider.calls.some((c) => c.what.startsWith('["cron","rm"'))).toBe(true);
+  });
+
+  it('an update whose source now names another app is refused; the old app, its record and its tasks stay (audit #012)', async () => {
+    const { f, store, provider } = await app();
+    provider.jobs = [];
+    const dir = repo();
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } })).statusCode).toBe(200);
+    const before = store.getAgentApp('a1')!;
+    commit(dir, { ...MANIFEST, app: 'otherapp', name: 'Other App' });
+    const upd = await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} });
+    expect(upd.statusCode).toBe(409);
+    expect(upd.json()).toMatchObject({ unchanged: true });
+    expect(upd.json().error).toMatch(/another app \(otherapp, not demoapp\).*install it again/);
+    expect(store.getAgentApp('a1')).toEqual(before);
+    expect(provider.jobs.map((j) => j.name)).toEqual(['demoapp-tick']);
+    // Installed from the same source instead, it replaces demoapp: one app's tasks, one record.
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } })).statusCode).toBe(200);
+    expect(store.getAgentApp('a1')).toMatchObject({ app: 'otherapp', manifest: { app: 'otherapp' } });
+    expect(provider.jobs.map((j) => j.name)).toEqual(['otherapp-tick']);
+    // Stopping it takes its tasks off; nothing of demoapp is left running.
+    expect((await f.inject({ method: 'DELETE', url: '/v1/agents/a1/app', headers: as })).statusCode).toBe(200);
+    expect(provider.jobs).toEqual([]);
   });
 
   /** The record and the agent agree: `current` is the recorded commit, the tasks are the recorded manifest's. */
@@ -1199,6 +1242,8 @@ describe('apps: what the 2026-10-10 workflow audit found', () => {
     agent.jobs.find((j) => j.name === 'demoapp-tick')!.disabled = true;
     await installRelease(d(agent), v2, {});
     expect(agent.every('demoapp-tick')).toEqual(['5m']); // not the old one beside it
+    // …and still turned off, as the owner left it (HB-0229).
+    expect(agent.jobs.filter((j) => j.name === 'demoapp-tick').map((j) => j.disabled === true)).toEqual([true]);
     agent.jobs.find((j) => j.name === 'demoapp-tick')!.disabled = true;
     expect(await removeTasks(d(agent), 'demoapp', v2.manifest)).toBe(1);
     expect(agent.jobs.filter((j) => j.name.startsWith('demoapp-'))).toEqual([]);

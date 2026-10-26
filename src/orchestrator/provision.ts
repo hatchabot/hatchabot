@@ -351,15 +351,31 @@ async function runProvisionStepsInner(
 
     // Step 4: runtime + persistent volume.
     log('runtime.seeding', { agentId, migrating: needsPortHeal(spec.workspace.configPatch.openclawVersion) });
-    const { runtimeRef } = await provider.provision(spec);
-    forgetDmPolicy(agentId); // the seed wrote the channel config afresh
-    recordApplied(store, agentId);
-    store.recordAppliedPeers(agentId); // the sync below installs the tool for this grant
     // Purge ONLY storage this run created. On a retry, spec.previousRef makes
     // provision() reuse the existing volume — purging it there destroys the
     // agent's memory permanently, turning a transient failure (slow boot,
     // port clash, image missing) into irreversible loss.
     const createdStorage = !spec.previousRef;
+    let runtimeRef: string;
+    try {
+      ({ runtimeRef } = await provider.provision(spec));
+    } catch (err) {
+      // provision() makes the volume before its seed or its container can
+      // fail: with no ref, nothing purged it and Delete, finding none, left it
+      // behind (audit #101). Its name is known; one that cannot be removed now
+      // is kept on the agent, so Delete finishes the job.
+      const made = createdStorage ? provider.runtimeRefFor?.({ agentId, slug: agent.slug }) : undefined;
+      if (made) {
+        rollback.push(Object.assign(async () => {
+          try { await provider.destroy(made, { purge: true }); }
+          catch (cleanupErr) { store.setAgentRuntimeRef(agentId, made); throw cleanupErr; }
+        }, { holdsBot: true }));
+      }
+      throw err;
+    }
+    forgetDmPolicy(agentId); // the seed wrote the channel config afresh
+    recordApplied(store, agentId, spec);
+    store.recordAppliedPeers(agentId); // the sync below installs the tool for this grant
     rollback.push(Object.assign(() => provider.destroy(runtimeRef, { purge: createdStorage }), { holdsBot: true }));
     store.setAgentRuntimeRef(agentId, runtimeRef);
     log('runtime.provisioned', { agentId, runtimeRef });
@@ -401,45 +417,8 @@ async function runProvisionStepsInner(
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
     await reindexMemoryIfSwitched(deps, agentId, runtimeRef, log);
 
-    // Step 7.95: template-carried schedules — declarations parked at import
-    // become real gateway crons now that the gateway exists. Best-effort per
-    // job; the batch clears only on a pass with zero failures, so a flaky
-    // gateway retries on the next provision instead of dropping tasks.
-    const pendingSchedules = store.getPendingSchedules(agentId);
-    if (pendingSchedules.length) {
-      // Idempotent by NAME: crons live on the durable volume, so a retry after
-      // a partial failure must skip the ones that already landed — a bare
-      // re-add duplicated every success on each subsequent provision, and the
-      // duplicates fired forever (10th audit). Instead of the all-or-keep
-      // batch, each applied (or already-present) entry is dropped from the
-      // parked list individually; only genuine failures stay parked.
-      // A listing that fails is not an empty list: adding then duplicated a
-      // task whose earlier add landed but whose answer was lost. They stay
-      // parked for the next provision instead (A50, 2026-10-22).
-      const listed = await listCrons(provider, runtimeRef, agent.slug).catch((err) => {
-        log('schedule.list_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) });
-        return undefined;
-      });
-      const existing = new Set((listed ?? []).map((c) => c.name).filter((n): n is string => !!n));
-      const stillPending: typeof pendingSchedules = listed ? [] : [...pendingSchedules];
-      for (const sch of listed ? pendingSchedules : []) {
-        if (existing.has(sch.name)) { log('schedule.already_present', { agentId, name: sch.name }); continue; }
-        const out = await addCron(provider, runtimeRef, agent.slug, {
-          name: sch.name, message: sch.message, cron: sch.cron, everyMs: sch.everyMs, tz: sch.tz,
-          // Quiet in the template, quiet here; unsaid (older templates) announces.
-          announce: sch.announce !== false,
-          deliverTo: cronTargetFor(store, agent),
-        }).catch(() => ({ ok: false as const, error: 'exec failed' }));
-        if (!out.ok) {
-          stillPending.push(sch);
-          log('schedule.apply_failed', { agentId, name: sch.name, error: (out as any).error });
-        } else {
-          if (out.quieted && out.id) store.addQuietedCron(agentId, out.id, new Date().toISOString());
-          log('schedule.applied', { agentId, name: sch.name });
-        }
-      }
-      store.setPendingSchedules(agentId, stillPending.length ? stillPending : null);
-    }
+    // Step 7.95: template-carried schedules (applyPendingSchedules).
+    await applyPendingSchedules(deps, store.getAgent(agentId) ?? agent, runtimeRef, log);
     // The management agent's weekly model review: made once, removed when
     // HATCHABOT_MODEL_REVIEW=off (modelReview.ts). Best-effort.
     if (agent.ops) {
@@ -783,7 +762,7 @@ export async function buildRuntimeSpec(
   }
   const seedFiles = store.getAgentSeed(agentId);
   const limits = agentMemoryLimits(store, agent);
-  return {
+  const spec: RuntimeSpec = {
     agentId,
     slug: agent.slug,
     isolated: agent.ops || undefined,
@@ -937,6 +916,8 @@ export async function buildRuntimeSpec(
         })),
     ],
   };
+  renderedFrom.set(spec, { profileId: profile.id, model: effectiveModel(agent, profile) });
+  return spec;
 }
 
 /**
@@ -1028,6 +1009,66 @@ export function renderRefusedRecently(agentId: string, withinMs = 6 * 3_600_000)
   const r = renderRefused.get(agentId);
   return !!r && Date.now() - r.at < withinMs;
 }
+/**
+ * Why the agent's last rebuild was refused at render time, if it was (each
+ * rebuild clears it first). That rebuild returns the agent RUNNING as it was:
+ * its operation is a failure all the same, not "Rebuilt" (audit #092).
+ */
+export function renderRefusalOf(agentId: string): string | undefined {
+  return renderRefused.get(agentId)?.reason;
+}
+
+/**
+ * Template-carried schedules: declarations parked at import (or for the
+ * manager's morning check) become real gateway crons once the gateway exists.
+ * Best-effort per job; only the ones that failed stay parked, for the next
+ * provision or rebuild. A rebuild retries them too: setup had already moved
+ * the agent to RUNNING, so a task one gateway hiccup refused at setup stayed
+ * parked for good (audit #017).
+ */
+async function applyPendingSchedules(
+  deps: ProvisionDeps,
+  agent: Agent,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  const { store, provider } = deps;
+  const agentId = agent.id;
+  const pendingSchedules = store.getPendingSchedules(agentId);
+  if (!pendingSchedules.length) return;
+  // Idempotent by NAME: crons live on the durable volume, so a retry after
+  // a partial failure must skip the ones that already landed — a bare
+  // re-add duplicated every success on each subsequent provision, and the
+  // duplicates fired forever (10th audit). Instead of the all-or-keep
+  // batch, each applied (or already-present) entry is dropped from the
+  // parked list individually; only genuine failures stay parked.
+  // A listing that fails is not an empty list: adding then duplicated a
+  // task whose earlier add landed but whose answer was lost. They stay
+  // parked for the next provision instead (A50, 2026-10-22).
+  const listed = await listCrons(provider, runtimeRef, agent.slug).catch((err) => {
+    log('schedule.list_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) });
+    return undefined;
+  });
+  const existing = new Set((listed ?? []).map((c) => c.name).filter((n): n is string => !!n));
+  const stillPending: typeof pendingSchedules = listed ? [] : [...pendingSchedules];
+  for (const sch of listed ? pendingSchedules : []) {
+    if (existing.has(sch.name)) { log('schedule.already_present', { agentId, name: sch.name }); continue; }
+    const out = await addCron(provider, runtimeRef, agent.slug, {
+      name: sch.name, message: sch.message, cron: sch.cron, everyMs: sch.everyMs, tz: sch.tz,
+      // Quiet in the template, quiet here; unsaid (older templates) announces.
+      announce: sch.announce !== false,
+      deliverTo: cronTargetFor(store, agent),
+    }).catch(() => ({ ok: false as const, error: 'exec failed' }));
+    if (!out.ok) {
+      stillPending.push(sch);
+      log('schedule.apply_failed', { agentId, name: sch.name, error: (out as any).error });
+    } else {
+      if (out.quieted && out.id) store.addQuietedCron(agentId, out.id, new Date().toISOString());
+      log('schedule.applied', { agentId, name: sch.name });
+    }
+  }
+  store.setPendingSchedules(agentId, stillPending.length ? stillPending : null);
+}
 
 export async function rebuildAgent(deps: ProvisionDeps, agentId: string): Promise<Agent> {
   return whileBusy(agentId, () => rebuildAgentInner(deps, agentId));
@@ -1115,7 +1156,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     const { runtimeRef } = await provider.provision(spec);
     forgetDmPolicy(agentId); // the seed wrote the channel config afresh
     log('runtime.provisioned', { agentId, runtimeRef });
-    recordApplied(store, agentId);
+    recordApplied(store, agentId, spec);
     store.recordAppliedPeers(agentId); // the sync below installs the tool for this grant
     await provider.start(runtimeRef);
     log('runtime.started', { agentId, runtimeRef });
@@ -1148,6 +1189,8 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     log('runtime.settling', { agentId });
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
     await reindexMemoryIfSwitched(deps, agentId, runtimeRef, log);
+    // Template tasks a setup could not schedule: retried here (audit #017).
+    await applyPendingSchedules(deps, store.getAgent(agentId) ?? agent, runtimeRef, log);
     // The weekly model review rides on rebuilds too: a management agent made
     // before it existed is never provisioned again, only rebuilt (2026-10-03).
     if (agent.ops) {
@@ -1174,15 +1217,23 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
   }
 }
 
+/** The source and model each spec was rendered with: what recordApplied stamps (audit #094). */
+const renderedFrom = new WeakMap<RuntimeSpec, { profileId: string; model: string }>();
+
 /**
  * Record what the runtime is actually running. Called only after a provider
  * accepted the rendered spec — recording at render time made a failed rebuild
  * claim the new model while the old container kept running the old one.
+ * `spec`: the one it accepted. Its source and model are recorded, not the
+ * record as it is by then — a source edited during a slow build was stamped
+ * as applied to a container seeded with the old one (audit #094).
  */
-export function recordApplied(store: Store, agentId: string): void {
+export function recordApplied(store: Store, agentId: string, spec?: RuntimeSpec): void {
   const agent = store.getAgent(agentId);
+  const rendered = spec && renderedFrom.get(spec);
   const profile = agent && store.getAIProfile(agent.aiProfileId);
-  if (agent && profile) store.setAgentApplied(agentId, profile.id, effectiveModel(agent, profile));
+  if (agent && rendered) store.setAgentApplied(agentId, rendered.profileId, rendered.model);
+  else if (agent && profile) store.setAgentApplied(agentId, profile.id, effectiveModel(agent, profile));
   const d = embedDecision.get(agentId);
   if (d) {
     store.setAgentEmbedApplied(agentId, d.used);
@@ -1200,9 +1251,10 @@ export function recordApplied(store: Store, agentId: string): void {
 export async function reapplyCurrentSettings(deps: ProvisionDeps, agentId: string): Promise<void> {
   // A build that was never accepted: its memory-search decision must not be
   // stamped by a later model change (2026-10-09).
-  try { await deps.provider.provision(await buildRuntimeSpec(deps, agentId)); }
+  let spec: RuntimeSpec;
+  try { spec = await buildRuntimeSpec(deps, agentId); await deps.provider.provision(spec); }
   catch (err) { forgetEmbedDecision(agentId); throw err; }
-  recordApplied(deps.store, agentId);
+  recordApplied(deps.store, agentId, spec);
 }
 
 /** A build that never got accepted: its decision must not be applied later (27th audit). */
@@ -1624,16 +1676,41 @@ export async function runRebuildHook(
   const { provider } = deps;
   const hook = '/home/node/.openclaw/on-rebuild.sh';
   try {
+    // pipefail: the hook's own exit status (or timeout's 124), not tail's 0 —
+    // a failed hook was logged as having run (audit #088).
     const res = await provider.execShell(
       runtimeRef,
-      `[ -x ${JSON.stringify(hook)} ] || exit 0; timeout 300 bash ${JSON.stringify(hook)} 2>&1 | tail -c 2000`,
+      `[ -x ${JSON.stringify(hook)} ] || exit 0; set -o pipefail; timeout 300 bash ${JSON.stringify(hook)} 2>&1 | tail -c 2000`,
     );
+    // It ran in this container: nothing is owed to its next start (runOwedRebuildHook).
+    if (deps.store?.getAgent(agentId)?.rebuildHookDue) deps.store.setRebuildHookDue(agentId, null);
     if (res.code === 0 && !res.stdout.trim()) return; // absent, or silent success
     if (res.code === 0) log('rebuild_hook.ran', { agentId, output: res.stdout.slice(-500) });
     else log('rebuild_hook.failed', { agentId, code: res.code, output: (res.stdout || res.stderr).slice(-500) });
   } catch (e) {
     log('rebuild_hook.error', { agentId, error: String((e as Error).message ?? e) });
   }
+}
+
+/**
+ * The rebuild hook a container came up without — moved while stopped, it was
+ * not started to run it (audit #087) — run once its gateway answers after a
+ * start, as a rebuild runs it. Best-effort: still owed if it never answers.
+ */
+export async function runOwedRebuildHook(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  if (!deps.store.getAgent(agentId)?.rebuildHookDue) return;
+  try {
+    await waitForHealthy(deps.provider, runtimeRef, deps.sleep ?? defaultSleep, 120);
+  } catch (err) {
+    log('rebuild_hook.error', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) });
+    return;
+  }
+  await runRebuildHook(deps, agentId, runtimeRef, log);
 }
 
 /** Create + provision in one call — the shape scripts and tests want. */

@@ -13,13 +13,15 @@
 # A failed check (or a pull request closed meanwhile) turns auto-merge off,
 # closes the pull request and deletes its branch: nothing merges later
 # behind your back; the commits stay on local main to fix and land again.
+# When GitHub does not confirm it closed, that is said, with its address.
 #
 #   scripts/land.sh [--no-wait] [--timeout <minutes>] [--footer <text>]
 #
-# Exit: 0 landed (or nothing to land); 1 a check failed, the pull request
-# was closed, or a push / merge failed; 2 refused before anything was
-# pushed; 3 still waiting at the timeout (the pull request stays open; with
-# auto-merge it merges by itself, else the message says how to merge it).
+# Exit: 0 landed (or nothing to land); 1 a check failed and the pull request
+# is closed, the pull request was closed, or a push / merge failed; 2 refused
+# before anything was pushed; 3 the pull request is still open: still waiting
+# at the timeout (with auto-merge it merges by itself, else the message says
+# how to merge it), or a check failed and it could not be closed.
 # HATCHABOT_LAND_DIRECT=1 pushes straight to main instead — only for a
 # remote with no such rule (the script tests' throwaway remote).
 set -euo pipefail
@@ -85,9 +87,21 @@ fi
 [ "$WAIT" = 1 ] || exit 0
 
 fail() {   # fail MESSAGE — nothing may merge later behind the caller's back
+  local now
   [ "$AUTO" = 0 ] || gh pr merge "$URL" --repo "$SLUG" --disable-auto >/dev/null 2>&1 || true
   gh pr close "$URL" --repo "$SLUG" --delete-branch >/dev/null 2>&1 || true
-  die "$1 — the pull request is closed and its branch deleted; the commits stay on local main: fix, commit, and land again." 1
+  # Closed only when GitHub says so: with both requests refused (an outage, a
+  # token without the right) this said "closed" of a pull request still open
+  # with auto-merge on, which GitHub could merge later (audit #046).
+  now="$(gh pr view "$URL" --repo "$SLUG" --json state,autoMergeRequest -q '.state + " " + (if .autoMergeRequest then "auto" else "noauto" end)' 2>/dev/null || echo UNKNOWN)"
+  case "$now" in
+    CLOSED*) die "$1 — the pull request is closed and its branch deleted; the commits stay on local main: fix, commit, and land again." 1 ;;
+    MERGED*) die "$1 — but GitHub merged the pull request meanwhile ($URL): git pull --rebase, then fix it on main." 3 ;;
+    "OPEN auto") now="still open, with auto-merge on: it can still merge by itself" ;;
+    OPEN*) now="still open" ;;
+    *) now="not confirmed closed (GitHub did not say)" ;;
+  esac
+  die "$1 — and closing the pull request failed: $URL is $now. Close it: gh pr close $URL --repo $SLUG --delete-branch (the commits stay on local main)." 3
 }
 # Every check of the pushed commit, one "name<TAB>pass|fail|cancel|skipping|pending" line each:
 # the jobs of its Actions runs on this branch, and its commit statuses. Not `gh pr checks`: the

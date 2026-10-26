@@ -207,8 +207,11 @@ Any other install can follow a channel on its own — a hosted tenant on
 ./scripts/follow-channel.sh --uninstall
 ```
 
-It upgrades through `upgrade.sh` (forward only; the previous release restored if
-the new one does not start). A release that failed is not retried until the
+Each tick follows the channel chosen last (`~/.config/hatchabot/channel`:
+`hatchabot upgrade beta` switches it, and `--install` writes it), so the
+channel in the unit is only the default. It upgrades through `upgrade.sh`
+(forward only; the previous release restored if the new one does not start),
+handing it the release it resolved, so a release set aside is the one tried. A release that failed is not retried until the
 channel names a newer one. One whose install keeps failing (no network, a
 lockfile npm refuses) is retried less and less often — 10 minutes, 20, 40 … —
 and set aside after eight failures in a row; the service is never restarted

@@ -83,6 +83,16 @@ fi
 # its default (src/config/envFile.ts). Hatchabot does this again at each start.
 ./node_modules/.bin/tsx scripts/env-sync.ts .env >/dev/null || say "Couldn't list every setting in .env yet; Hatchabot will when it starts."
 
+# The Docker daemon the service will use is the one .env names (a tenant's
+# rootless daemon on a shared host, from HATCHABOT_SETUP_ENV): the runtime
+# image is looked for and fetched there. Looked for on this shell's daemon, an
+# image there read as "already present" while the tenant's daemon had none
+# (audit #040). The last line wins, as systemd's EnvironmentFile reads it.
+if grep -q '^DOCKER_HOST=' .env; then
+  DH="$(sed -n 's/^DOCKER_HOST=//p' .env | tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//")"
+  if [ -n "$DH" ]; then export DOCKER_HOST="$DH"; else unset DOCKER_HOST; fi
+  docker info >/dev/null 2>&1 || { echo "The Docker daemon .env names (DOCKER_HOST=$DH) is not reachable — start it, or correct DOCKER_HOST in .env, then re-run."; exit 1; }
+fi
 
 if docker image inspect hatchabot-runtime:latest >/dev/null 2>&1; then
   # An existing install may have promoted a NEWER image to :latest — a default

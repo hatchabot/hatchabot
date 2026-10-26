@@ -50,6 +50,8 @@ export interface MoveDeps extends Omit<ProvisionDeps, 'provider'> {
   requestedBy?: string;
   /** Told the operation's id as soon as it exists (the route returns it). */
   onOperation?: (id: string) => void;
+  /** Move it onto the target's default image: its pin is dropped with the move, and put back if the move is undone. */
+  dropPin?: boolean;
 }
 
 export async function moveAgentToHost(
@@ -118,12 +120,25 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
   const p: MoveParams = {
     from: sourceHost.id, to: targetHost.id, fromName: sourceHost.name, toName: targetHost.name,
     wasRunning, oldRef, keyBefore,
+    appliedBefore: {
+      profileId: agent.appliedProfileId, model: agent.appliedModel, prevId: agent.appliedProfilePrevId,
+      at: agent.appliedProfileAt, embedMode: agent.appliedEmbedMode,
+    },
+    ...(deps.dropPin && agent.image ? { droppedImage: agent.image } : {}),
   };
   // On disk from here: a restart in the middle is finished or undone on
   // purpose (resumeMoveHost), never left for reconcile to guess at.
   const op = beginOperation(store, 'move-host', agentId, { ...p }, { hostId: targetHost.id, requestedBy: deps.requestedBy });
   deps.onOperation?.(op.id);
   op.step('checked');
+  // The pin goes with the move, on its record: undone — by a restart too —
+  // it comes back. Dropped by the route before the move began, a reboot's
+  // rollback left the agent unpinned on its source, and its next rebuild
+  // lost the image's packages (audit #086).
+  if (p.droppedImage) {
+    store.setAgentImage(agentId, null);
+    log('image.unpinned', { reason: 'move-host', was: p.droppedImage, to: targetHost.id });
+  }
 
   // 1. Quiesce. One bot, one poller: the source must stop before the copy on
   //    the target ever starts, and the volume must be still for the snapshot.
@@ -132,6 +147,7 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
     if (wasRunning) store.setAgentState(agentId, 'STOPPED');
   } catch (err) {
     rethrowIfCrash(err);
+    keepPin(store, agentId, p, log);
     op.fail(err);
     throw err;
   }
@@ -157,6 +173,7 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
         err instanceof Error ? err.message : err,
       ).slice(0, 300)})`,
     );
+    keepPin(store, agentId, p, log);
     op.rolledBack(e.userMessage);
     throw e;
   }
@@ -225,6 +242,22 @@ export interface MoveParams {
   /** Container/volume names derive from the agent id: the target's ref equals the source's. */
   newRef?: string;
   keyBefore: ReturnType<Store['embedTokenRow']> | null;
+  /**
+   * What the record said the source runtime runs (its AI source and model,
+   * memory search engine). The target's build records its own; undone, the
+   * source runs on as before and the record says so again (audit #081).
+   * Absent from a move recorded by an older release.
+   */
+  appliedBefore?: { profileId?: string; model?: string; prevId?: string; at?: string; embedMode?: 'baked' | 'shared' };
+  /** The image pin dropped for this move (dropPin): put back if it is undone (audit #086). */
+  droppedImage?: string;
+}
+
+/** A move undone keeps the image it was pinned to (audit #086). */
+function keepPin(store: Store, agentId: string, p: MoveParams, log: (event: string, detail: Record<string, unknown>) => void): void {
+  if (!p.droppedImage || store.getAgent(agentId)?.image) return;
+  store.setAgentImage(agentId, p.droppedImage);
+  log('image.repinned', { reason: 'move-host undone', image: p.droppedImage });
 }
 
 /**
@@ -248,8 +281,12 @@ async function completeOnTarget(
   const respec = await buildRuntimeSpec(tdeps, agentId);
   await target.provision(respec);
   store.setAgentRuntimeRef(agentId, newRef);
-  recordApplied(store, agentId);
+  recordApplied(store, agentId, respec);
   op.step('target-configured');
+  // Left stopped, it is not started to run its rebuild hook: the hook is
+  // owed to this new container's first start instead. It ran only for a
+  // running agent, and a stopped one lost the tools it puts back (audit #087).
+  if (!p.wasRunning) store.setRebuildHookDue(agentId, new Date().toISOString());
   if (p.wasRunning) {
     progress.targetMayRun = true;
     await target.start(newRef);
@@ -348,6 +385,9 @@ async function putBack(
     store.setAgentHost(agentId, p.from);
     store.setAgentRuntimeRef(agentId, p.oldRef);
   }
+  // The source's runtime is the one that runs: its record, as it was before.
+  if (p.appliedBefore) store.restoreAgentApplied(agentId, p.appliedBefore);
+  keepPin(store, agentId, p, log);
   const before = p.keyBefore ?? undefined;
   if (deps.embedder && JSON.stringify(store.embedTokenRow(agentId) ?? null) !== JSON.stringify(before ?? null)) {
     store.restoreEmbedToken(agentId, before);

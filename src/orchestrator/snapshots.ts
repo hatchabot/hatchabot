@@ -194,6 +194,19 @@ function filesHash(files: Record<string, string>): string {
   return h.digest('hex');
 }
 
+/**
+ * The snapshots the agent's unfinished operation still needs: a restore's
+ * target and the safety copy taken before it. Pruning spares them, and the
+ * delete route refuses them — deleted by hand, a held restore had neither
+ * Finish nor Revert left, and nothing could clear it (audit #020).
+ */
+export function snapshotsInUse(store: Store, agentId: string): string[] {
+  const active = store.activeOperationFor(agentId);
+  return Object.entries(active?.params ?? {})
+    .filter(([k, v]) => /snapshotId$/i.test(k) && typeof v === 'string')
+    .map(([, v]) => v as string);
+}
+
 export async function captureSnapshot(
   deps: SnapshotDeps,
   agentId: string,
@@ -243,11 +256,7 @@ export async function captureSnapshot(
   // Not one the agent's operation still needs: a restore's safety copy, taken
   // at the limit, pruned the very snapshot it was restoring, and a restart
   // part-way then had nothing to finish with (A40, 2026-10-22).
-  const active = store.activeOperationFor(agentId);
-  const spare = Object.entries(active?.params ?? {})
-    .filter(([k, v]) => /snapshotId$/i.test(k) && typeof v === 'string')
-    .map(([, v]) => v as string);
-  const pruned = store.pruneAutoSnapshots(agentId, AUTO_KEEP, spare);
+  const pruned = store.pruneAutoSnapshots(agentId, AUTO_KEEP, snapshotsInUse(store, agentId));
   log('snapshot.captured', { agentId, id: snapshot.id, reason, pruned });
   return {
     id: snapshot.id,

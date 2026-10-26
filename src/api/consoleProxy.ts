@@ -311,6 +311,16 @@ function scrubHealth(h: unknown): unknown {
 
 /** Replies the proxy rewrites for a guest, by the method asked: their request ids are remembered on the way out. */
 export const GUEST_REWRITTEN_REPLIES: ReadonlySet<string> = new Set(['health', 'agents.list']);
+/** How many of those a guest may have waiting for their answer at once. */
+export const MAX_GUEST_PENDING = 1000;
+
+/** What a guest request the proxy could not follow to its reply is answered with (it is not sent on). */
+export function guestUntracked(id: string | undefined, method: string | undefined): string {
+  return JSON.stringify({
+    type: 'res', id: id ?? null, ok: false,
+    error: { code: 'UNAVAILABLE', message: `${method ? `"${method}"` : 'That request'} was not sent: too many requests are waiting for an answer, or its id is already in use. Try again in a moment.` },
+  });
+}
 
 /**
  * A gateway→guest message, with other people taken out: the hello's presence
@@ -510,7 +520,17 @@ export function spliceGuest(client: Duplex, upstream: Duplex, opts: GuestSpliceO
           client.write(encodeFrame(0x1, Buffer.from(guestRefusal(v.id, v.method), 'utf8'), false));
           continue;
         }
-        if (v.method && GUEST_REWRITTEN_REPLIES.has(v.method) && v.id !== undefined && pending.size < 1000) pending.set(v.id, v.method);
+        // A reply that must be rewritten is found by its request's id. One that
+        // could not be found passed as it came, other people's sessions and
+        // all: past the cap, without an id, or under an id another request
+        // still waiting already used (its reply took the entry). Such a
+        // request is answered here and never sent (audit #009).
+        const rewritten = !!v.method && GUEST_REWRITTEN_REPLIES.has(v.method);
+        if ((v.id !== undefined && pending.has(v.id)) || (rewritten && (v.id === undefined || pending.size >= MAX_GUEST_PENDING))) {
+          client.write(encodeFrame(0x1, Buffer.from(guestUntracked(v.id, v.method), 'utf8'), false));
+          continue;
+        }
+        if (rewritten) pending.set(v.id!, v.method!);
         for (const fr of msg.frames) upstream.write(fr.raw);
       }
     } catch (e) {

@@ -4,7 +4,7 @@ import { validIcon, validIconColor } from './agentIcons.js';
 import { randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
-import type { Agent, MemberRole } from '../domain/types.js';
+import type { Agent, AIProfile, GroupAccess, MemberRole, TemplateParam } from '../domain/types.js';
 import {
   buildRuntimeSpec,
   forgetEmbedDecision,
@@ -18,6 +18,7 @@ import {
   sharePathProblem,
 } from './provision.js';
 import { clearBusy, markBusy } from './busy.js';
+import { clearStaleRuntimePins } from './runtimePins.js';
 import { beginOperation, handleFor, rethrowIfCrash } from './operations.js';
 import { ENV_NAME_RE, envValueProblem, MAX_IMPORTED_ENV_VARS, reservedEnvProblem } from './envPolicy.js';
 import { buildRecipeOn, derivedByTag, recipeFor, recipeProblem, type ImageRecipe } from './imageRecipe.js';
@@ -25,6 +26,10 @@ import { DERIVED_TAG_PREFIX } from './derivedImage.js';
 import { defaultMemoryCap, formatMemoryCap, memberMemoryMax, parseMemoryCap } from './memoryCap.js';
 import { formatSwapAllowance, parseSwapAllowance } from './swap.js';
 import { existsSync } from 'node:fs';
+import { MAX_FILE_BYTES } from './snapshots.js';
+import { MAX_TEMPLATE_PARAMS, PARAM_KEY_RE, TemplateParamSchema } from './template.js';
+import { MAX_DATA_SOURCES } from './dataSourceLimits.js';
+import { manifestSchema as appManifestSchema } from './apps.js';
 
 /**
  * Export/import: an agent as a single portable file, so "move it to another
@@ -99,6 +104,18 @@ export interface ExportManifest {
      *  within the destination's rules (importedLimits); absent = its default. */
     memoryCap?: string;
     swapAllowance?: string;
+    /** Its setup fields, the values in force and the raw {{placeholder}} layer
+     *  they render into (Agent.parameters/paramValues/paramFiles): without them a
+     *  restored copy could not be re-configured or re-shared (audit #005). */
+    setup?: { parameters: TemplateParam[]; values?: Record<string, string>; files?: { soul?: string; agents?: string; persona?: string } };
+    /** The switches provisioning writes into its runtime config. Left behind,
+     *  the second provision of an import wrote them off over the restored
+     *  config: its browser and trigger scripts stopped (audit #007). */
+    switches?: { browser?: boolean; cronTriggers?: boolean; richMessages?: boolean; groupAccess?: GroupAccess; filesMaxMb?: number };
+    /** Its installed app's record (agent_apps): the code, config and tasks ride
+     *  the volume, and this is what Update, Roll back and Stop app manage them
+     *  by (audit #006). Who may use those is judged where they are asked. */
+    app?: { app: string; source: string; ref: string; sha: string; manifest: unknown; previousSha?: string; previousManifest?: unknown; installedAt: string; testOk?: boolean };
   };
   ai: { vendor: string; model: string; models?: string[] };
   /** Absent when the agent is web-only (no Telegram bot). */
@@ -193,13 +210,47 @@ const ManifestSchema = z.object({
       repoUrl: z.string().max(512).optional(),
       pubKey: z.string().max(4000).optional(),
       deployKey: z.string().max(16000).optional(),
-    })).max(32).optional(),
+    })).max(MAX_DATA_SOURCES).optional(),
     model: z.string().max(64).optional(),
     // Its home-screen icon travels with it; a bad value is dropped, not fatal.
     icon: z.string().max(16).optional().catch(undefined),
     iconColor: z.string().max(7).optional().catch(undefined),
     memoryCap: z.string().max(16).optional().catch(undefined),
     swapAllowance: z.string().max(16).optional().catch(undefined),
+    // The setup layer, the switches and the app record: each held to the rules
+    // its own route holds them to, and dropped whole (not fatal) when it fails
+    // them — the agent itself still comes back, as it always did. Lazy: the
+    // template's schema lives in a module that imports this one.
+    setup: z.lazy(() => z.object({
+      parameters: z.array(TemplateParamSchema).min(1).max(MAX_TEMPLATE_PARAMS)
+        .refine((a) => new Set(a.map((p) => p.key)).size === a.length),
+      values: z.record(z.string().regex(PARAM_KEY_RE), z.string().max(2000)).refine((r) => Object.keys(r).length <= MAX_TEMPLATE_PARAMS).optional(),
+      files: z.object({
+        soul: z.string().max(MAX_FILE_BYTES).optional(),
+        agents: z.string().max(MAX_FILE_BYTES).optional(),
+        persona: z.string().max(8000).optional(),
+      }).optional(),
+    })).optional().catch(undefined),
+    switches: z.object({
+      browser: z.boolean().optional().catch(undefined),
+      cronTriggers: z.boolean().optional().catch(undefined),
+      richMessages: z.boolean().optional().catch(undefined),
+      groupAccess: z.object({ mode: z.enum(['off', 'members', 'room']), roomId: z.string().regex(/^-?\d{1,20}$/).optional() })
+        .refine((g) => g.mode !== 'room' || !!g.roomId).optional().catch(undefined),
+      filesMaxMb: z.number().int().min(1).max(1000).optional().catch(undefined),
+    }).optional().catch(undefined),
+    app: z.lazy(() => z.object({
+      app: z.string().max(40),
+      source: z.string().min(1).max(1000),
+      ref: z.string().min(1).max(256),
+      sha: z.string().regex(/^[0-9a-f]{12,64}$/),
+      manifest: appManifestSchema,
+      previousSha: z.string().regex(/^[0-9a-f]{12,64}$/).optional(),
+      previousManifest: appManifestSchema.optional(),
+      installedAt: z.string().max(64),
+      testOk: z.boolean().optional(),
+    }).refine((r) => r.manifest.app === r.app && (!r.previousManifest || r.previousManifest.app === r.app) && !r.previousSha === !r.previousManifest))
+      .optional().catch(undefined),
   }),
   // A hint only (the destination picks its own source by vendor): an AI
   // source may name models longer than 64 characters, and refusing those
@@ -394,6 +445,12 @@ export async function exportAgent(
       ? { tag: agent.image, problem: r.problem }
       : { tag: agent.image, recipe: { base: r.base, packages: r.packages, lines: r.lines, channels: r.channels } };
   }
+  const appRow = store.getAgentApp(agentId);
+  const installedApp: ExportManifest['agent']['app'] = appRow && {
+    app: appRow.app, source: appRow.source, ref: appRow.ref, sha: appRow.sha, manifest: appRow.manifest,
+    ...(appRow.previousSha ? { previousSha: appRow.previousSha, previousManifest: appRow.previousManifest } : {}),
+    installedAt: appRow.installedAt, ...(appRow.testOk !== undefined ? { testOk: appRow.testOk } : {}),
+  };
   // Its data sources: a repo with its key (the clone on the volume needs it to
   // pull and push), a folder as a declaration (audit, 2026-10-23).
   const dataSources: ExportedDataSource[] = [];
@@ -424,6 +481,19 @@ export async function exportAgent(
       iconColor: agent.iconColor,
       ...(agent.memoryCap ? { memoryCap: agent.memoryCap } : {}),
       ...(agent.swapAllowance ? { swapAllowance: agent.swapAllowance } : {}),
+      ...(agent.parameters?.length ? { setup: {
+        parameters: agent.parameters,
+        ...(agent.paramValues ? { values: agent.paramValues } : {}),
+        ...(agent.paramFiles ? { files: agent.paramFiles } : {}),
+      } } : {}),
+      switches: {
+        ...(agent.browser ? { browser: true } : {}),
+        ...(agent.cronTriggers ? { cronTriggers: true } : {}),
+        ...(agent.richMessages !== undefined ? { richMessages: agent.richMessages } : {}),
+        ...(agent.groupAccess ? { groupAccess: agent.groupAccess } : {}),
+        ...(agent.filesMaxMb ? { filesMaxMb: agent.filesMaxMb } : {}),
+      },
+      ...(installedApp ? { app: installedApp } : {}),
     },
     ai: {
       vendor: profile?.vendor ?? 'anthropic',
@@ -565,6 +635,29 @@ async function buildPinned(deps: ProvisionDeps, recipe: ImageRecipe, ownerId: st
   if (derivedName) store.setDerivedImageStatus(derivedName, 'READY', null);
 }
 
+/**
+ * The AI source an import without an explicit choice lands on. One rule for
+ * the import and for a move's preflight, which promised the vendor-matching
+ * source while the import took the ⭐ Default (audit #001).
+ *
+ * The installation's ⭐ Default, when this importer can see it, wins the
+ * silent pick — "preselect this source whenever anyone creates or imports
+ * an agent", as template.ts already did; a restore used to take the
+ * importer's own first (2026-09-30). Otherwise prefer the importer's OWN
+ * profile over one merely shared with the installation — defaulting onto
+ * someone else's shared subscription would silently bill them.
+ * Default → own+vendor-match → own → any vendor-match → anything.
+ */
+export function importProfile(store: ProvisionDeps['store'], ownerId: string, vendor: string | undefined): AIProfile | undefined {
+  const profiles = store.listAIProfiles(ownerId);
+  const mine = profiles.filter((p) => p.ownerId === ownerId);
+  return (profiles.find((p) => p.defaultSource) ??
+    mine.find((p) => p.vendor === vendor) ??
+    mine[0] ??
+    profiles.find((p) => p.vendor === vendor) ??
+    profiles[0]);
+}
+
 export async function importAgent(
   deps: ProvisionDeps,
   data: Buffer,
@@ -636,22 +729,9 @@ async function importAgentInner(
     );
   }
 
-  // The installation's ⭐ Default, when this importer can see it, wins the
-  // silent pick — "preselect this source whenever anyone creates or imports
-  // an agent", as template.ts already did; a restore used to take the
-  // importer's own first (2026-09-30). Otherwise prefer the importer's OWN
-  // profile over one merely shared with the installation — defaulting onto
-  // someone else's shared subscription would silently bill them.
-  // Own+vendor-match → own → any vendor-match → anything.
-  const profiles = store.listAIProfiles(opts.ownerId);
-  const mine = profiles.filter((p) => p.ownerId === opts.ownerId);
   const profile = opts.aiProfileId
     ? store.getAIProfile(opts.aiProfileId)
-    : (profiles.find((p) => p.defaultSource) ??
-      mine.find((p) => p.vendor === manifest.ai.vendor) ??
-      mine[0] ??
-      profiles.find((p) => p.vendor === manifest.ai.vendor) ??
-      profiles[0]);
+    : importProfile(store, opts.ownerId, manifest.ai.vendor);
   if (!profile) throw new TransferError('Set up an AI source before importing.');
   const host = opts.hostId
     ? store.getHost(opts.hostId)
@@ -733,6 +813,22 @@ async function importAgentInner(
   const limits = importedLimits(manifest.agent, !!opts.mayBuild);
   if (limits.memoryCap) store.setAgentMemoryCap(agent.id, limits.memoryCap);
   if (limits.swapAllowance) store.setAgentSwapAllowance(agent.id, limits.swapAllowance);
+  // Before provisioning reads them too: the switches go into the runtime
+  // config it writes over the restored one (audit #007), and the setup layer
+  // keeps the copy re-configurable (audit #005).
+  const sw = manifest.agent.switches ?? {};
+  if (sw.browser) store.setAgentBrowser(agent.id, true);
+  if (sw.cronTriggers) store.setAgentCronTriggers(agent.id, true);
+  if (sw.richMessages !== undefined) store.setAgentRichMessages(agent.id, sw.richMessages);
+  if (sw.groupAccess) store.setAgentGroupAccess(agent.id, sw.groupAccess);
+  if (sw.filesMaxMb) store.setAgentFilesMaxMb(agent.id, sw.filesMaxMb);
+  const setup = manifest.agent.setup;
+  if (setup) {
+    store.setAgentParameters(agent.id, setup.parameters);
+    store.setAgentParamState(agent.id, setup.values ?? null, setup.files ?? null);
+  }
+  const dropped = (['setup', 'switches', 'app'] as const).filter((k) => (raw as { agent?: Record<string, unknown> }).agent?.[k] !== undefined && manifest.agent[k] === undefined);
+  if (dropped.length) log('import.parts_dropped', { agentId: agent.id, parts: dropped });
   // From here the agent exists but is mid-build: reconcile must not judge it.
   markBusy(agent.id);
   // On disk too: a restart before RUNNING undoes the whole import
@@ -859,7 +955,7 @@ async function importAgentInner(
     op.step('state-copied');
     const respec = await buildRuntimeSpec(deps, agent.id);
     await provider.provision(respec);
-    recordApplied(store, agent.id);
+    recordApplied(store, agent.id, respec);
     op.step('configured');
     await provider.start(runtimeRef);
     op.step('started');
@@ -871,6 +967,12 @@ async function importAgentInner(
       deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
       120,
     );
+    // Its conversations came pinned to the runtime they ran on there: one this
+    // machine's source does not name (a machine login's claude-cli, here a
+    // token) answered "Not logged in" until a start or rebuild cleared it, as
+    // they do (audit #100). Best-effort, as there.
+    await clearStaleRuntimePins(provider, runtimeRef, agent.slug, (e, d) => log(e, { agentId: agent.id, ...d }))
+      .catch((err) => log('runtime.pin_failed', { agentId: agent.id, error: String(err).slice(0, 200) }));
     // $HOME rode the archive, but tools installed OUTSIDE it (apt, /usr/local)
     // come from the image — re-run the on-rebuild hook so an imported agent's
     // system tools are reconstituted, as rebuild does (audit 2026-09-08).
@@ -881,6 +983,14 @@ async function importAgentInner(
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))), log);
     await reindexMemoryIfSwitched(deps, agent.id, runtimeRef, log);
     op.step('settled');
+    // Its app's record last, once nothing can roll the import back: the app's
+    // files and tasks came with the volume, and this is what manages them (audit #006).
+    const app = manifest.agent.app;
+    if (app) {
+      store.setAgentApp({ agentId: agent.id, app: app.app, source: app.source, ref: app.ref, sha: app.sha, manifest: app.manifest,
+        ...(app.previousSha ? { previousSha: app.previousSha, previousManifest: app.previousManifest } : {}),
+        installedAt: app.installedAt, ...(app.testOk !== undefined ? { testOk: app.testOk } : {}) });
+    }
     log('agent.imported', { agentId: agent.id, slug: agent.slug, from: manifest.exportedAt });
     const done = store.setAgentState(agent.id, 'RUNNING');
     op.done('Imported.');
@@ -954,6 +1064,7 @@ async function rollbackImport(
   step(() => store.deleteChannelForAgent(agentId, 'all'));
   step(() => store.deleteMemberships(agentId));
   step(() => { for (const d of store.listDataSources(agentId)) store.deleteDataSource(agentId, d.id); });
+  step(() => store.deleteAgentApp(agentId));
   // Env rows too — their secrets are already deleted above; a tombstone
   // keeping references to swept secrets is the residue class the v0.90
   // audit scrubbed.
@@ -979,8 +1090,19 @@ export async function resumeImport(deps: ProvisionDeps, opId: string): Promise<v
   const agent = row.agentId ? store.getAgent(row.agentId) : undefined;
   if (!agent || agent.state === 'DELETED') { op.rolledBack('Import interrupted — import the file again.'); return; }
   if (agent.state === 'RUNNING') { op.done('Imported.'); return; }
-  const envRefs = store.listAgentEnv(agent.id).map((e) => e.secretRef);
-  const ok = await rollbackImport(deps, agent.id, agent.runtimeRef, envRefs);
+  // Every secret the import made: env values AND imported deploy keys. The
+  // keys' rows are deleted by the rollback, and with them the only record of
+  // where the keys were kept (audit #004).
+  const secretRefs = [
+    ...store.listAgentEnv(agent.id).map((e) => e.secretRef),
+    ...store.listDataSources(agent.id).flatMap((d) => (d.secretRef ? [d.secretRef] : [])),
+  ];
+  // A restart inside the first provision comes before its ref is saved, but
+  // the volume may already exist: the ref provision() would answer names it,
+  // as the import's own failure path does (audit #003). Destroying one that
+  // was never made is a no-op.
+  const runtimeRef = agent.runtimeRef ?? deps.provider.runtimeRefFor?.({ agentId: agent.id, slug: agent.slug });
+  const ok = await rollbackImport(deps, agent.id, runtimeRef, secretRefs);
   if (!ok) {
     op.hold(
       'Import interrupted by a restart, and its half-made copy could not be removed yet (its machine is not answering). It will not start.',

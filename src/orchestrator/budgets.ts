@@ -311,8 +311,14 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     const fresh100 = level === 100 && store.addBudgetMark(b.scope, month, 100, b.usd, nowIso);
     const reachedAt = level === 100 ? Date.parse(store.budgetMark(b.scope, month, 100, b.usd)?.at ?? '') || now : now;
     const waitedOut = now - reachedAt >= PAUSE_WAIT_MS;
+    // Each agent as it is NOW: an earlier budget in this pass may have moved it
+    // to a cheaper model. Judged on the list read before, a pause did not see
+    // that model, did not put its own back, and its record replaced the one
+    // that remembered it — the agent came back on the cheaper model for good
+    // (audit #010).
+    const current = (a: Agent): Agent => store.getAgent(a.id) ?? a;
     if (level === 100 && b.atLimit === 'pause') {
-      for (const a of pool.filter(pausable)) {
+      for (const a of pool.filter(pausable).map(current)) {
         const prior = store.getBudgetPause(a.id, month);
         if (prior?.resumedBy === 'owner' && prior.kind === 'pause') continue; // started by hand after a pause: runs on until the 1st
         // Already paused (running again: a rebuild started it). A cheaper model another
@@ -355,7 +361,7 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     if (level === 100 && b.atLimit === 'cheaper' && deps.downgrade) {
       const tries = refusalsOf(store);
       const told100 = !!store.budgetMark(b.scope, month, 100, b.usd)?.toldAt;
-      for (const a of pool.filter(switchable)) {
+      for (const a of pool.filter(switchable).map(current)) {
         const prior = store.getBudgetPause(a.id, month);
         if (prior?.resumedBy === 'owner' || (prior && !prior.resumedAt)) continue;
         if (deps.isBusy(a.id)) { deferred++; continue; }

@@ -210,7 +210,10 @@ again. `--purge` is the clean slate
 backup sets too (only Hatchabot's dated sets — the folder itself stays if
 anything else is in it), and both ask you to type `purge` first. It acts on
 the install it is run from; when the service runs from another checkout it
-refuses and names both (`--installed` acts on the service's install instead). Telegram bots can only
+refuses and names both (`--installed` acts on the service's install instead).
+Agents on a runner (another machine's Docker) are not reached from here:
+`--purge` refuses while there are any, naming them, so delete or move them in
+the app first (`--forget-runners` leaves them running there). Telegram bots can only
 be deleted at @BotFather → `/mybots` → `/deletebot`.
 
 Then open **http://localhost:8080** on that machine — with accounts you create your own there and become its owner; with a shared password you unlock with it — and:

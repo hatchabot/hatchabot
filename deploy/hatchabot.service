@@ -18,7 +18,8 @@ OOMScoreAdjust=-500
 EnvironmentFile=__HATCHABOT_DIR__/.env
 # systemd user managers start with a minimal PATH; node (nvm) and docker can
 # live outside it, so install-service.sh bakes their real locations in here.
-Environment=PATH=__HATCHABOT_PATH__
+# Quoted whole: unquoted, a space in a path split it (audit #044).
+Environment="PATH=__HATCHABOT_PATH__"
 # Quoted: systemd splits ExecStart on spaces, so a clone path with one broke it.
 # with-docker.sh: right after the installer added you to the docker group this
 # user manager does not have it yet — the wrapper starts it through `sg docker`

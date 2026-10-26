@@ -740,6 +740,34 @@ const SCENARIOS = String.raw`(() => {
       ok('it says where it went', document.getElementById('toast').textContent.includes('Moved to Laptop Hatchabot'));
       window.__promptAnswer = null; window.__answer = {}; delete window.__override['/v1/peers'];
     },
+    // HB-0228: that server's ⭐ Default is another vendor's, and it has one of
+    // the agent's own: the refusal offers it, and a yes moves onto it.
+    moveOntoOfferedSource: async () => {
+      window.__override['/v1/peers'] = [{ id: 'p1', name: 'Laptop Hatchabot', url: 'https://laptop.example' }];
+      window.__promptAnswer = '1';
+      const choice = { id: 'src-claude', name: 'Household Claude', vendor: 'anthropic', model: 'claude-sonnet-5' };
+      window.__answer = { 'POST /v1/agents/a1/rehost': [
+        { status: 400, body: { error: 'Laptop Hatchabot can\'t accept this agent: No matching AI source: it goes on the ⭐ Default source, not Household Claude.', code: 'source_choice', sourceChoice: choice } },
+        { status: 200, body: { movedTo: 'Laptop Hatchabot', sourceState: 'STOPPED' } } ] };
+      const before = calls('POST', /\/v1\/agents\/a1\/rehost$/).length;
+      await rehostAgent('a1', 'Homework Helper');
+      const posts = calls('POST', /\/v1\/agents\/a1\/rehost$/).slice(before);
+      eq('first the plain move, then onto the offered source', posts.map((c) => c.body), [{ peerId: 'p1' }, { peerId: 'p1', aiProfileId: 'src-claude' }]);
+      ok('it asked, naming the source', /Move "Homework Helper" onto Household Claude \(anthropic\/claude-sonnet-5\) on Laptop Hatchabot instead\?/.test(window.__confirms.at(-1)));
+      ok('it says where it went', document.getElementById('toast').textContent.includes('Moved to Laptop Hatchabot'));
+      // A no leaves it here, and asks nothing more.
+      window.__answer = { 'POST /v1/agents/a1/rehost': [{ status: 400, body: { error: 'refused', code: 'source_choice', sourceChoice: choice } }] };
+      const confirms = window.__confirms.length;
+      window.__confirmAnswer = true;
+      const realConfirm = window.confirm;
+      let n = 0;
+      window.confirm = (text) => { window.__confirms.push(text); return ++n === 1; };
+      try { await rehostAgent('a1', 'Homework Helper'); } finally { window.confirm = realConfirm; }
+      eq('no second move', calls('POST', /\/v1\/agents\/a1\/rehost$/).length, before + 3);
+      eq('two questions: the move, then the source', window.__confirms.length, confirms + 2);
+      ok('it says so', document.getElementById('toast').textContent.includes('Not moved'));
+      window.__promptAnswer = null; window.__answer = {}; delete window.__override['/v1/peers'];
+    },
     // v2.157.0: other servers and image building sit in Settings → Advanced, folded; runners stay on Hosts.
     settingsAdvanced: async () => {
       const el = (id) => document.getElementById(id);
@@ -4303,6 +4331,25 @@ const SCENARIOS = String.raw`(() => {
         await until(() => document.getElementById('toast').textContent.includes('memory limits not changed for Homework Helper'));
       } finally { delete window.__override['/v1/agent-classes']; window.__answer = {}; if (v2AgentDlg.open) v2Close(); }
     },
+    classModelPending: async () => {
+      // A runtime that refused the class's model is said to be on its old one, not "model applied" (audit #068).
+      window.__override['/v1/agent-classes'] = { classes: [{ id: 'c1', name: 'Light', model: 'claude-haiku-4-5' }] };
+      window.__answer = {
+        'POST /v1/agents/a1/class': [{ body: { classId: 'c1', rebuild: false, modelPending: 'It joined the class, but its runtime did not take claude-haiku-4-5, so it still answers on its old model.' } }],
+        'PUT /v1/agent-classes/c1': [{ body: { class: { id: 'c1', name: 'Light', model: 'claude-haiku-4-5' }, applied: 0, needRebuild: 0, skipped: [], modelPending: ['Homework Helper: its runtime did not take claude-haiku-4-5'] } }],
+      };
+      try {
+        openV2Agent('a1', 'overview');
+        const sel = await until(() => { const s = document.getElementById('editClass'); return s && s.querySelector('option[value="c1"]') ? s : null; });
+        sel.value = 'c1'; sel.dispatchEvent(new Event('change'));
+        await until(() => document.getElementById('toast').textContent.includes('still answers on its old model'));
+        ok('it does not say the model was applied', !document.getElementById('toast').textContent.includes('model applied'));
+        v2Close();
+        await updateClass('c1', 'model', 'claude-haiku-4-5');
+        await until(() => document.getElementById('toast').textContent.includes('1 still on the old model'));
+        ok('it names the agent', document.getElementById('toast').textContent.includes('Homework Helper'));
+      } finally { delete window.__override['/v1/agent-classes']; window.__answer = {}; if (v2AgentDlg.open) v2Close(); }
+    },
     homeKeyboard: async () => {
       const key = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
       try {
@@ -5153,6 +5200,201 @@ const SCENARIOS = String.raw`(() => {
       ok('a slow event loop still says slow', slow.some((x) => x.includes('slow to respond (lag)')) && slow.includes('Slack is not connected'));
       const bare = v2HealthProblems({ reachable: true, status: 'degraded' });
       ok('degraded with no other cause still says something', bare.some((x) => x.includes('slow to respond')));
+    },
+  });
+  // Deep audit of v2.166.2 (made-up data): one press acts on what was open when it was pressed;
+  // a slow answer for what was open before lands nowhere; the spend chart and the setup form say what is so.
+  // auditHold().once(re, method) holds the next request that matches until free().
+  const auditHold = () => {
+    const real = window.fetch, held = [];
+    return {
+      held,
+      once: (re, method = 'GET') => { let armed = true; window.fetch = (input, init = {}) => {
+        const url = String(typeof input === 'string' ? input : input.url);
+        if (armed && (init.method || 'GET').toUpperCase() === method && re.test(url.split('?')[0])) { armed = false; return new Promise((res) => held.push(() => res(real(input, init)))); }
+        return real(input, init);
+      }; },
+      free: async () => { window.fetch = real; while (held.length) held.shift()(); await sleep(150); },
+      real,
+    };
+  };
+  Object.assign(T, {
+    auditAiTabActsOnItsAgent: async () => {
+      // #047: Use this for A, B's sheet opened while it saved: A is rebuilt, with A's box. #050: B's model button is on.
+      const h = auditHold();
+      const second = { id: 'p-two', name: 'Second source', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-5-5', models: [] };
+      profiles.push(second);
+      try {
+        prepareEdit('a1', 'Homework Helper');
+        $('editProfile').value = 'p-two'; onEditProfileChange();
+        ok('A: the model button waits on Use this', $('modelBtn').disabled);
+        prepareEdit('a2', 'Soccer Schedule');
+        ok("B's own source is shown and its model button is on: " + $('modelBtn').title, $('editProfile').value === 'p1' && !$('modelBtn').disabled && !$('modelBtn').title);
+        prepareEdit('a1', 'Homework Helper');
+        $('editProfile').value = 'p-two'; $('editCheckpoint').checked = true;
+        window.__confirmAnswer = true; window.__confirms = [];
+        const before = calls('POST', /\/rebuild$/).length;
+        h.once(/^\/v1\/agents\/a1$/, 'PATCH');
+        const saving = switchProfile();
+        await until(() => h.held.length === 1);
+        prepareEdit('a2', 'Soccer Schedule'); $('editCheckpoint').checked = false;
+        await h.free(); await saving;
+        const rebuilt = calls('POST', /\/rebuild$/).slice(before);
+        eq('A is rebuilt, with its box as it was', rebuilt.map((x) => [x.path, x.body]), [['/v1/agents/a1/rebuild', { checkpoint: true }]]);
+        ok('the question names A: ' + window.__confirms.at(-1), window.__confirms.at(-1).includes('Homework Helper'));
+        eq("B's sheet is still B's", editAgentId, 'a2');
+      } finally {
+        await h.free(); profiles.splice(profiles.indexOf(second), 1);
+        window.__confirms = []; $('editCheckpoint').checked = true;
+      }
+    },
+    auditEditorKeepsNewerRead: async () => {
+      // #048: SOUL.md, MEMORY.md, SOUL.md again; the first read answers last and leaves the edit alone.
+      const h = auditHold();
+      try {
+        window.__override['/v1/agents/a1/files/SOUL.md'] = { content: 'older soul' };
+        window.__override['/v1/agents/a1/files/MEMORY.md'] = { content: 'memory' };
+        editAgentId = 'a1'; $('editFile').value = 'SOUL.md';
+        h.once(/\/v1\/agents\/a1\/files\/SOUL\.md$/);
+        const first = loadEditFile();
+        await until(() => h.held.length === 1);
+        $('editFile').value = 'MEMORY.md'; await loadEditFile();
+        window.__override['/v1/agents/a1/files/SOUL.md'] = { content: 'current soul' };
+        $('editFile').value = 'SOUL.md'; await loadEditFile();
+        $('editContent').value = 'current soul, edited';
+        window.__override['/v1/agents/a1/files/SOUL.md'] = { content: 'older soul' };
+        await h.free(); await first;
+        eq('the edit stays', $('editContent').value, 'current soul, edited');
+        ok('and Save is on, for SOUL.md', !$('editSaveBtn').disabled && editLoaded?.file === 'SOUL.md');
+      } finally {
+        await h.free();
+        for (const k of ['/v1/agents/a1/files/SOUL.md', '/v1/agents/a1/files/MEMORY.md']) delete window.__override[k];
+        $('editFile').value = 'SOUL.md'; editLoaded = null;
+      }
+    },
+    auditBulkClassReadOnce: async () => {
+      // #049: the class menu changed while Apply works through the agents; every one gets the class applied.
+      const h = auditHold();
+      window.__override['/v1/agent-classes'] = { classes: [{ id: 'class-school', name: 'School' }, { id: 'class-sport', name: 'Sport' }] };
+      try {
+        await openFleetActions();
+        await until(() => document.querySelectorAll('.faCb').length);
+        document.querySelectorAll('.faCb').forEach((cb) => { cb.checked = cb.dataset.id === 'a1' || cb.dataset.id === 'a2'; });
+        $('faAction').value = 'class'; faRenderAction();
+        $('faClass').value = 'class-school';
+        const mark = calls('POST', /\/class$/).length;
+        h.once(/\/class$/, 'POST');
+        const applying = faApply();
+        await until(() => h.held.length === 1);
+        $('faClass').value = 'class-sport';
+        await h.free(); await applying;
+        eq('every agent gets the class applied', calls('POST', /\/class$/).slice(mark).map((x) => x.body.classId), ['class-school', 'class-school']);
+      } finally {
+        await h.free(); delete window.__override['/v1/agent-classes'];
+        if (fleetActionsDlg.open) fleetActionsDlg.close();
+      }
+    },
+    auditSpendUnpriced: async () => {
+      // #062: tokens on a model with no known price are never $0 in Spend over time.
+      const box = document.createElement('div');
+      const chart = (cost) => ({ range: 'day', bucketHours: 1, planShare: 0, monthly: cost * 30, models: cost ? [{ model: 'claude-sonnet-5', cost }] : [], choices: [],
+        buckets: [{ at: new Date(Date.now() - 3600e3).toISOString(), input: cost, output: 0, cacheRead: 0, cacheWrite: 0, tokens: 2e6 }],
+        totals: { input: cost, output: 0, cacheRead: 0, cacheWrite: 0, cost, tokens: 2e6 }, unpriced: { tokens: 1e6, models: ['made-up-cloud-model'] } });
+      try {
+        window.__override['/v1/usage/spend'] = chart(0);
+        box.innerHTML = spendChartBox(''); document.body.append(box);
+        await loadSpendCharts(box);
+        const pie = await until(() => box.querySelector('svg[aria-label="What it went on"]'));
+        ok('nothing priced: "No price", not $0.00 — ' + pie.textContent.trim(), pie.textContent.includes('No price') && !pie.textContent.includes('$0.00'));
+        ok('it names the model and the amount is unknown', box.textContent.includes('made-up-cloud-model') && box.textContent.includes('no price known') && box.textContent.includes('the amount is unknown'));
+        window.__override['/v1/usage/spend'] = chart(4.2);
+        await loadSpendCharts(box);
+        await until(() => box.querySelector('svg[aria-label="What it went on"]')?.textContent.includes('$4.20+'));
+        ok('part priced: only part of it', box.textContent.includes('only part of it') && box.textContent.includes('+ a month at this pace'));
+      } finally { box.remove(); delete window.__override['/v1/usage/spend']; }
+    },
+    auditSlowAnswersLandNowhere: async () => {
+      // #063 a web-chat link, #064 a master's proposals, #065 a spend range: an answer that comes
+      // after a newer one for the same place is dropped.
+      const h = auditHold();
+      const piano = agents.find((x) => x.name === 'Piano Practice'), garden = agents.find((x) => x.name === 'Garden Notes');
+      const prevRange = spendRange;
+      const box = document.createElement('div');
+      try {
+        // Invite: a web-chat link made for one agent, while another agent's invite was opened.
+        await invite(piano.id, piano.name);
+        window.__answer = { ['POST /v1/agents/' + piano.id + '/invites']: [{ body: { url: 'https://hatchabot.example/join?code=made-up-piano' } }] };
+        h.once(new RegExp('/v1/agents/' + piano.id + '/invites$'), 'POST');
+        const making = makeWebChatInvite();
+        await until(() => h.held.length === 1);
+        inviteDlg.close(); await invite(garden.id, garden.name);
+        await h.free(); await making;
+        eq("the open invite is the second agent's", $('invAgent').textContent, garden.name);
+        ok("the first agent's link is not in it", $('invWebLink').hidden && !$('invWebLink').textContent.includes('made-up-piano'));
+        ok('and its own Make link stays', !$('invWebBtn').hidden && !$('invWebBtn').disabled && $('invWebCopy').hidden);
+        inviteDlg.close();
+        // Proposals: master A's list answers after master B's opened.
+        window.__override['/v1/agents/a1/proposals'] = { proposals: [{ id: 'pr-a', childName: 'Math', text: 'Show the working', createdAt: new Date().toISOString() }] };
+        window.__override['/v1/agents/a2/proposals'] = { proposals: [{ id: 'pr-b', childName: 'Soccer U10', text: 'Practice moves to Thursday', createdAt: new Date().toISOString() }] };
+        h.once(/\/v1\/agents\/a1\/proposals$/);
+        const pa = openProposals('a1', 'Homework Helper');
+        await until(() => h.held.length === 1);
+        proposalsDlg.close(); await openProposals('a2', 'Soccer Schedule');
+        await h.free(); await pa;
+        ok("B's proposals stay listed: " + $('proposalsList').textContent.slice(0, 80), $('proposalsList').textContent.includes('Practice moves to Thursday') && !$('proposalsList').textContent.includes('Show the working'));
+        proposalsDlg.close();
+        // The spend chart: a week asked first, a day after; the week answers last.
+        const series = (range) => ({ range, bucketHours: 1, planShare: 0, monthly: 0, models: [], choices: [], buckets: [], totals: { cost: range === 'week' ? 70 : 1, tokens: 1 } });
+        let releaseWeek; const weekHeld = new Promise((r) => { releaseWeek = r; });
+        window.fetch = async (input, init = {}) => {
+          const url = String(typeof input === 'string' ? input : input.url);
+          if (url.split('?')[0].endsWith('/v1/usage/spend')) {
+            const range = new URLSearchParams(url.split('?')[1] || '').get('range');
+            if (range === 'week') await weekHeld;
+            return new Response(JSON.stringify(series(range)), { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          return h.real(input, init);
+        };
+        box.innerHTML = spendChartBox(''); document.body.append(box);
+        const el = box.firstElementChild;
+        spendRange = 'week'; const week = loadSpendChart(el);
+        spendRange = 'day'; await loadSpendChart(el);
+        ok('the day is drawn', el.querySelector('.su-period.on')?.textContent === '1 day');
+        releaseWeek(); await week;
+        ok("the week's late answer leaves the day's chart: " + el.querySelector('.su-period.on')?.textContent, el.querySelector('.su-period.on')?.textContent === '1 day');
+      } finally {
+        await h.free(); window.__answer = {}; spendRange = prevRange; box.remove();
+        for (const k of ['/v1/agents/a1/proposals', '/v1/agents/a2/proposals']) delete window.__override[k];
+        if (inviteDlg.open) inviteDlg.close(); if (proposalsDlg.open) proposalsDlg.close();
+      }
+    },
+    auditSetupFormAnswers: async () => {
+      // #066 #067: New child's setup form sends a cleared default as empty, and ticks a "yes" default.
+      const a = agents.find((x) => x.id === 'a1'), was = a.parameters;
+      try {
+        a.parameters = [
+          { key: 'style', label: 'Style', type: 'text', target: 'soul', required: false, default: 'Short answers' },
+          { key: 'reminders', label: 'Reminders', type: 'boolean', target: 'soul', required: false, default: 'yes' },
+          { key: 'topics', label: 'Topics', type: 'multichoice', target: 'soul', required: false, options: ['Math', 'Reading'], default: 'Math' },
+        ];
+        window.__promptAnswer = 'Homework Helper Jr';
+        await until(() => !paramFormDlg.open && paramFormResolve === null); await sleep(0);
+        const before = calls('POST', /\/v1\/agents\/a1\/derive$/).length;
+        const deriving = deriveChild('a1', 'Homework Helper');
+        await formOpened();
+        ok('the "yes" default is ticked', document.getElementById('pfv-1').checked);
+        eq('the text default is shown', document.getElementById('pfv-0').value, 'Short answers');
+        document.getElementById('pfv-0').value = '';
+        document.querySelectorAll('#pfv-2 input:checked').forEach((cb) => { cb.checked = false; });
+        submitParamForm();
+        await deriving;
+        const sent = calls('POST', /\/v1\/agents\/a1\/derive$/).slice(before);
+        eq('one child asked for', sent.length, 1);
+        eq('the cleared ones sent empty, the yes kept', sent[0].body.values, { style: '', reminders: 'true', topics: '' });
+      } finally {
+        a.parameters = was; window.__promptAnswer = null;
+        if (paramFormDlg.open) paramFormDlg.close();
+      }
     },
   });
   /** The phone run (the page opened 390 px wide): what has to fit a phone screen. The desktop suite is skipped there. */

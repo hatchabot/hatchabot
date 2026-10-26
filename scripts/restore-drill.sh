@@ -184,27 +184,26 @@ elif [ "$db_result" != ok ]; then
   echo "✗ The key could not be tried: the database copy did not pass" >&2
   fail=1
 else
-  # Read the key value safely: it may be a passphrase with spaces or glob
-  # characters (keyFromEnv stretches any passphrase), so an unquoted
-  # `env $(grep …)` would word-split or glob-expand it and test the wrong
-  # string. Strip the KEY= prefix and any shell quoting, pass it as one arg.
-  key_line="$(grep -m1 -E '^(HATCHABOT|AGENTCLAW)_SECRET_KEY=' "$BACKUP/secret-key.env" || true)"   # pre-rename sets use the old key name
-  key_val="${key_line#*=}"
-  case "$key_val" in
-    "'"*"'") key_val="${key_val#\'}"; key_val="${key_val%\'}" ;;   # strip single quotes
-    '"'*'"') key_val="${key_val#\"}"; key_val="${key_val%\"}" ;;   # strip double quotes
-  esac
+  # The key file is read as a .env is (Node's parseEnv), the way a recovered
+  # install will read the line copied from it: stripping one quote pair by
+  # hand read a line parseEnv cuts short as the whole key, so a copy that
+  # could not decrypt anything passed (audit #022). Pre-rename sets use the
+  # old name. Passed by file, never on a command line or through a shell.
   if HATCHABOT_DRILL_DB="$SCRATCH/db.sqlite" HATCHABOT_REPO="$(pwd)" \
-    HATCHABOT_SECRET_KEY="$key_val" \
+    HATCHABOT_DRILL_KEYFILE="$BACKUP/secret-key.env" \
     ./node_modules/.bin/tsx -e '
       import Database from "better-sqlite3";
+      import { readFileSync } from "node:fs";
+      import { parseEnv } from "node:util";
       async function main() {
         // Absolute dynamic import: tsx -e cannot resolve repo-relative paths.
         const { LocalSecretStore } = await import(`${process.env.HATCHABOT_REPO}/src/secrets/localSecretStore.js`);
+        const saved = parseEnv(readFileSync(process.env.HATCHABOT_DRILL_KEYFILE!, "utf8"));
+        const key = LocalSecretStore.keyFromEnv({ HATCHABOT_SECRET_KEY: saved.HATCHABOT_SECRET_KEY ?? saved.AGENTCLAW_SECRET_KEY });
         const db = new Database(process.env.HATCHABOT_DRILL_DB!, { readonly: true });
         const row = db.prepare("SELECT ref FROM secrets LIMIT 1").get() as { ref: string } | undefined;
         if (!row) { console.log("  ✓ key parses (no secrets in store to decrypt)"); return; }
-        const store = new LocalSecretStore(db, LocalSecretStore.keyFromEnv());
+        const store = new LocalSecretStore(db, key);
         const value = await store.get(row.ref);
         if (!value) throw new Error("empty secret");
         console.log(`  ✓ backed-up key decrypts ${row.ref} (${value.length} chars — not shown)`);

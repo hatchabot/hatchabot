@@ -1,5 +1,6 @@
 import { stopAndConfirm } from './quiesce.js';
 import type { Store } from '../store/store.js';
+import type { Agent } from '../domain/types.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
@@ -34,6 +35,13 @@ export interface ArchiveDeps {
   log: (event: string, detail: Record<string, unknown>) => void;
   /** Who asked, for the operation's record. */
   requestedBy?: string;
+  /**
+   * Its Discord and Slack bots: parked and their people told (the routes'
+   * parkArchivedChannels). Part of the archive's finish, so a restart that
+   * cut it off parks them too — done by the route alone, they stayed on the
+   * agent for good (audit #093). Safe to run twice.
+   */
+  parkOtherChannels?: (agent: Agent) => Promise<void>;
 }
 
 export class ArchiveError extends Error {
@@ -42,6 +50,26 @@ export class ArchiveError extends Error {
     this.name = 'ArchiveError';
   }
 }
+
+/**
+ * A copy downloaded while it stood stopped (exportedAt) may be answering on
+ * this bot somewhere else. Giving the bot up here must not make it the next
+ * agent's: a pool bot leaves this pool, quietly (no goodbye through a bot the
+ * copy may be using, no idle name over the copy's), and a pasted one is not
+ * parked — only this machine's copy of its token goes. Delete and archive
+ * both freed a pool bot, and archive parked a pasted one, so the next agent
+ * here polled the same bot as the copy (audit #099).
+ */
+export async function leaveBotToCopy(channel: ArchiveDeps['channel'], accountId: string, agentId: string, log: (event: string, detail: Record<string, unknown>) => void): Promise<void> {
+  await channel.release(accountId, { reason: 'moved', agentId });
+  if (!channel.pool.owns(accountId)) return;
+  // Released, so it may be removed; left leased (a slot used up) rather than freed when it cannot be.
+  try { await channel.pool.removeFromPool(accountId); }
+  catch (err) { log('bot.retire_failed', { agentId, accountId, error: String(err instanceof Error ? err.message : err).slice(0, 200) }); }
+}
+
+/** A copy was downloaded while it stood stopped: its bot may be answering there. */
+export const copyElsewhere = (agent: { exportedAt?: string; state: string }): boolean => !!agent.exportedAt && agent.state !== 'RUNNING';
 
 export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<void> {
   return whileBusy(agentId, async () => {
@@ -77,7 +105,10 @@ export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<
       }
       op.step('stopped');
 
-      if (row && !agent.migratedTo) {
+      if (row && !agent.migratedTo && copyElsewhere(agent)) {
+        log('bot.not_parked', { agentId, why: 'a copy was downloaded', exportedAt: agent.exportedAt });
+        await leaveBotToCopy(channel, row.accountId, agentId, log);
+      } else if (row && !agent.migratedTo) {
         // A PASTED bot is parked in the pool first, exactly as delete does it —
         // the token stays usable, which is the entire point of archiving. Under
         // the agent's OWNER: their token, their pool slot, never another user's
@@ -125,6 +156,8 @@ async function finishArchive(deps: ArchiveDeps, op: OpHandle, agentId: string): 
     if (row.secretRef.startsWith('channel/')) await secrets.delete(row.secretRef).catch(() => {});
     store.deleteChannelForAgent(agentId);
   }
+
+  if (!agent.migratedTo) await deps.parkOtherChannels?.(agent);
 
   // Any outstanding invite points at a bot this agent no longer has. Let them
   // go rather than mint a membership with nowhere to talk.

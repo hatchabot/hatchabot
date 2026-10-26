@@ -134,7 +134,7 @@ keeps the data), or both will fight over the same Telegram bots.
 
 ```sh
 hatchabot upgrade              # the newest release on your channel (stable unless you chose another)
-hatchabot upgrade beta         # switch channel: stable | beta | latest — remembered
+hatchabot upgrade beta         # switch channel: stable | beta | latest — remembered (the channel timer follows it too)
 hatchabot upgrade v2.31.3      # exactly that release — also how you roll back
 ```
 

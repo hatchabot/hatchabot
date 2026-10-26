@@ -234,6 +234,10 @@ export async function materializeConnection(
     deps.log?.('connection.materialize_failed', { agentId: agent.id, email: conn.email, error: 'issued by a different OAuth client' });
     return { ok: false, error: `${conn.email} was connected with a different Google OAuth client — connect it again (⚙ Settings → Connections)` };
   }
+  // When the token was read, not when the import ended: a reconnect while a
+  // slow import ran left the agent on the old token, stamped as newer than
+  // the new consent and so never shown as stale (audit #074).
+  const readAt = new Date().toISOString();
   const refreshToken = await secrets.get(conn.secretRef).catch(() => null);
   if (!refreshToken) return { ok: false, error: 'connection token missing from the vault' };
 
@@ -279,7 +283,7 @@ export async function materializeConnection(
     deps.log?.('connection.materialize_failed', { agentId: agent.id, email: conn.email, error });
     return { ok: false, error };
   }
-  store.markConnectionMaterialized(agent.id, connectionId);
+  store.markConnectionMaterialized(agent.id, connectionId, readAt);
   // The import exited 0: gog holds it now (the access overview's last check).
   store.recordAccessCheck(agent.id, 'google', conn.email.toLowerCase(), true);
   deps.log?.('connection.materialized', { agentId: agent.id, email: conn.email });

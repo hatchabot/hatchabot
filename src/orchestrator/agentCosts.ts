@@ -275,6 +275,15 @@ export const SPEND_RANGES: Record<SpendRange, { hours: number; bucketHours: numb
   week: { hours: 168, bucketHours: 3 },
   month: { hours: 720, bucketHours: 24 },
 };
+/**
+ * One of the chart's ranges, by its own name only. `range in SPEND_RANGES` let
+ * ?range=constructor (or __proto__, toString) through to Object's members:
+ * NaN slice boundaries, and a loop that held the event loop until the service
+ * was restarted (audit #061).
+ */
+export const isSpendRange = (x: unknown): x is SpendRange => typeof x === 'string' && Object.hasOwn(SPEND_RANGES, x);
+/** One of View by → Cost's windows, by its own name only (as isSpendRange; audit #061). */
+export const isCostPeriod = (x: unknown): x is string => typeof x === 'string' && Object.hasOwn(COST_PERIODS, x);
 export interface SpendBucket extends CostParts { at: string; tokens: number; /** A source's chart: calls it refused in this slice (rate limit), everyone's. */ refused?: number }
 export interface SpendSeries {
   range: SpendRange;
@@ -291,6 +300,12 @@ export interface SpendSeries {
   models: Array<{ model: string; cost: number }>;
   /** Every agent that could be picked (the owner's, not local), with its cost in the range: the chart's agent picker. */
   choices: Array<{ id: string; name: string; cost: number }>;
+  /**
+   * Tokens charted on models with no known price, and those models: in the
+   * tokens, at no cost — the dollars leave them out, so the page says the
+   * amount is unknown or partial, never $0 (audit #062). Absent when none.
+   */
+  unpriced?: { tokens: number; models: string[] };
 }
 
 /** How far the zone's wall clock is ahead of UTC at `t`, ms (0 for a zone this machine does not know). */
@@ -308,6 +323,10 @@ export function zoneOffset(t: number, tz: string): number {
  * local day, as budgets count them, not 20:00 to 20:00 west of UTC (audit, 2026-10-20).
  */
 function sliceStarts(from: number, now: number, size: number, tz: string): number[] {
+  // A window that is not one (NaN from a range that is not a range) never
+  // reaches `now`: refused, and the loop below is bounded anyway (audit #061).
+  if (!Number.isFinite(from) || !Number.isFinite(now) || !(size > 0) || from > now) throw new RangeError('The spend window is not a time range.');
+  const most = Math.ceil((now - from) / size) + 4; // a zone's clock change moves a start by an hour or two, never a slice
   const off = size > HOUR ? (t: number) => zoneOffset(t, tz) : () => 0;
   // A wall time the clock skips (DST starting at midnight, as in Chile) starts at its
   // first moment that exists, not the hour before it (regression audit, 2026-10-22).
@@ -318,7 +337,7 @@ function sliceStarts(from: number, now: number, size: number, tz: string): numbe
   };
   const wall0 = Math.floor((from + off(from)) / size) * size;
   const starts: number[] = [];
-  for (let i = 0; ; i++) {
+  for (let i = 0; i <= most; i++) {
     const t = toUtc(wall0 + i * size);
     if (starts.length && t >= now) break;
     if (!starts.length || t > starts.at(-1)!) starts.push(t);
@@ -337,6 +356,7 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
   // The window is exact — the last `hours` to the minute; an hour bucket it
   // only partly covers counts for that part — and the bars are cut on clock
   // boundaries, so the first and last slices may be partial.
+  if (!isSpendRange(range)) throw new RangeError(`range is one of ${Object.keys(SPEND_RANGES).join(', ')}.`);
   const { hours, bucketHours } = SPEND_RANGES[range];
   const size = bucketHours * HOUR;
   const from = now - hours * HOUR;
@@ -355,8 +375,8 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
   // so an agent that switched sources brings its earlier spend with it (rare; the panel says "agents on it now").
   const onSource = (a: { aiProfileId: string }) => !opts.sourceId || a.aiProfileId === opts.sourceId;
   const profiles = store.modelProfiles(mine.map((a) => a.id)) as Map<string, { profile: StoredProfile; at: string }>;
-  let plan = 0, all = 0;
-  const byModel = new Map<string, number>(), perAgent = new Map<string, number>();
+  let plan = 0, all = 0, unpricedTokens = 0;
+  const byModel = new Map<string, number>(), perAgent = new Map<string, number>(), unpricedModels = new Set<string>();
   for (const a of mine) {
     const src = store.getAIProfile(a.aiProfileId);
     const into = onSource(a) && (!picked || picked.has(a.id));
@@ -373,8 +393,12 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
         const c = pp ? pp.input + pp.cacheWrite + pp.cacheRead + pp.output : 0;
         perAgent.set(a.id, (perAgent.get(a.id) ?? 0) + c);
         if (!into) continue;
-        b.tokens += mix.input + mix.output + mix.cacheRead + mix.cacheWrite;
-        if (!pp) continue;
+        const tokens = mix.input + mix.output + mix.cacheRead + mix.cacheWrite;
+        b.tokens += tokens;
+        if (!pp) {
+          if (tokens > 0 && !LOCAL_MODEL.test(model)) { unpricedTokens += tokens; unpricedModels.add(model.replace(/^.*\//, '')); }
+          continue;
+        }
         (Object.keys(pp) as Array<keyof CostParts>).forEach((k) => { b[k] += pp[k]; });
         const bare = model.replace(/^.*\//, '');
         byModel.set(bare, (byModel.get(bare) ?? 0) + c);
@@ -414,5 +438,6 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
     monthly: r2((totals.cost * 720) / hours),
     models: [...byModel].map(([model, cost]) => ({ model, cost: r2(cost) })).filter((m) => m.cost > 0).sort((x, y) => y.cost - x.cost),
     choices: (opts.agentId ? [] : mine.filter(onSource).map((a) => ({ id: a.id, name: a.name, cost: r2(perAgent.get(a.id) ?? 0) })).sort((x, y) => y.cost - x.cost || x.name.localeCompare(y.name))),
+    ...(Math.round(unpricedTokens) > 0 ? { unpriced: { tokens: Math.round(unpricedTokens), models: [...unpricedModels].sort() } } : {}),
   };
 }

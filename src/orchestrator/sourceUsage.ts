@@ -103,9 +103,12 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
   // calls the old one, and its calls are that one's (#107).
   const source = a.appliedProfileId ?? a.aiProfileId;
   // …and calls from before the rebuild that switched it are the old source's:
-  // the transcript rewrite of the last hour counted them under both.
-  const switchedAt = a.appliedProfilePrevId && a.appliedProfilePrevId !== source ? a.appliedProfileAt : undefined;
-  const sourceAt = (iso: string): string => switchedAt && iso < switchedAt ? a.appliedProfilePrevId! : source;
+  // the transcript rewrite of the last hour counted them under both. Each
+  // change is kept, oldest first: the source at an instant is the one the
+  // next change after it left — two in the rewritten hour filed the oldest
+  // source's calls under the middle one too (audit #056).
+  const changes = store.appliedSourceChanges(a.id);
+  const sourceAt = (iso: string): string => changes.find((c) => iso < c.at)?.from ?? source;
   const nowIso = new Date(now).toISOString();
   let calls = 0, limited = 0;
   const runtimeRef = a.runtimeRef;
@@ -196,15 +199,21 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
       const through = store.callsThrough(a.id);
       const from = through ? slotOf(new Date(Date.parse(`${through}:00Z`) - 3_600_000).toISOString()) : '';
       // A slot is filed whole under the source that ran when it began. While
-      // the switch is inside the rewritten range, the old source's slots are
-      // rewritten too (set, not added), and the new one gets only its own.
-      if (switchedAt && switchedAt >= from.slice(0, 13)) { // the rewrite starts at from's hour
-        const prev = new Map<string, number>(), cur = new Map<string, number>();
-        for (const [sl, n] of ok) (sourceAt(`${sl}:00.000Z`) === source ? cur : prev).set(sl, n);
-        // The last write sets how far the counts go: the new source's, unless it has none yet.
-        const parts: Array<[string, Map<string, number>]> = [[a.appliedProfilePrevId!, prev], [source, cur]];
-        if (!cur.size) parts.reverse();
-        parts.forEach(([p, m], i) => store.setModelCallOk(a.id, p, m, from, !through && i === 0));
+      // switches are inside the rewritten range, every source that ran there
+      // is rewritten (set, not added: its slots with no calls now go to zero),
+      // each with only its own slots.
+      const inRange = changes.filter((c) => c.at >= from.slice(0, 13)); // the rewrite starts at from's hour
+      if (inRange.length) {
+        const bySource = new Map<string, Map<string, number>>([...inRange.map((c) => c.from), source].map((p) => [p, new Map<string, number>()]));
+        for (const [sl, n] of ok) {
+          const p = sourceAt(`${sl}:00.000Z`);
+          if (!bySource.has(p)) bySource.set(p, new Map());
+          bySource.get(p)!.set(sl, n);
+        }
+        // The last write sets how far the counts go: the one holding the newest slot.
+        const newest = (m: Map<string, number>) => [...m.keys()].sort().at(-1) ?? '';
+        [...bySource].sort(([, x], [, y]) => newest(x).localeCompare(newest(y)))
+          .forEach(([p, m], i) => store.setModelCallOk(a.id, p, m, from, !through && i === 0));
       } else store.setModelCallOk(a.id, source, ok, from, !through);
       if (u.lastActive) store.noteUsageOk(a.id, u.lastActive, sourceAt(u.lastActive));
     }
@@ -327,9 +336,17 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
     const mineSlots = slotRows.filter((r) => myIds.has(r.agentId));
     const ws = (fromIso: string, list = mineSlots): Omit<SourceWindow, 'tokens'> => list.filter((r) => r.slot >= slotOf(fromIso))
       .reduce((s, r) => ({ requests: s.requests + r.ok + r.limited + r.failed, limited: s.limited + r.limited, failed: s.failed + r.failed }), { requests: 0, limited: 0, failed: 0 });
-    // Successes ON this source: an agent switched to it brings no success from its old one (#114).
-    const lastOkOf = (agents: Agent[]) => agents.map((a) => store.lastOkOn(a.id, p.id)).filter(Boolean).sort().at(-1) as string | undefined;
-    const lastOkAt = lastOkOf(my);
+    // Successes ON this source, whoever is on it now: an agent switched to it
+    // brings no success from its old one (#114), and one switched away keeps
+    // the success it had here — saving it onto another source brought back a
+    // refusal that success had answered (audit #053). A success recorded
+    // before its source was (legacy) counts only for the agent's own source.
+    const okHere = (a: Agent) => store.lastOkOn(a.id, p.id, a.aiProfileId !== p.id && a.appliedProfileId !== p.id);
+    // An agent keeps only its newest success, which may since be on another
+    // source: this source's newest slot with a success, from its start, too.
+    const okSlot = (list: typeof slotRows) => { const s = list.filter((r) => r.ok > 0).map((r) => r.slot).sort().at(-1); return s ? `${s}:00.000Z` : undefined; };
+    const lastOkOf = (agents: Agent[], list: typeof slotRows) => [...agents.map(okHere), okSlot(list)].filter(Boolean).sort().at(-1) as string | undefined;
+    const lastOkAt = lastOkOf(mine, mineSlots);
     const allHits = store.limitHitsFor(p.id, t7);
     const hits = allHits.filter((h) => myIds.has(h.agentId));
     // The last refusal BY THIS SOURCE, from its own hits: an agent's cursor
@@ -338,7 +355,7 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
     const lastLimitAt = hits.map((h) => h.at).sort().at(-1);
     // Status is the SOURCE's: every account's agents on it, successes and
     // refusals alike (2026-09-30). The history above stays the viewer's own.
-    const lastOkAny = lastOkOf(all.filter((a) => a.aiProfileId === p.id));
+    const lastOkAny = lastOkOf(all, slotRows);
     const lastLimitAny = allHits.map((h) => h.at).sort().at(-1);
     let status: SourceUsage['status'] = lastOkAt || lastLimitAt || lastOkAny || lastLimitAny ? 'ok' : 'idle';
     let limitedSince: string | undefined;

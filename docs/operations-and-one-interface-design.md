@@ -128,8 +128,8 @@ row from an earlier boot it applies the kind's rule for the last step done:
 | import | anything before RUNNING | **Undo, automatically**: delete the half-made agent, its secrets and bot lease; outcome "Import interrupted — import the file again" | A half-imported volume must never start (today's Retry starts one) |
 | restore-backup | the safety copy taken | The safety copy is now **written to `restore-safety/` before** the volume is replaced (today it is in memory); **hold**: "[Finish the restore] [Put back the copy from before]" | Either is correct; only the owner knows which they wanted |
 | restore-snapshot | some files written | **Hold**: "[Finish] [Revert to the copy taken before]" (that snapshot is already saved) | |
-| provision / rebuild | as today's reconcile rules | Reconcile's rules stay; the row records the outcome; a `queued` rebuild is **re-queued** | |
-| archive | the bot released | **Finish, automatically**: mark ARCHIVED, rebuild-free (the container stays stopped) | The bot is already gone; going back would need a new one |
+| provision / rebuild | as today's reconcile rules | Reconcile's rules stay; the row records the outcome; a `queued` rebuild is **re-queued**. A setup whose gateway already answers has its **steps run again** (as Retry runs them): up is not set up (v2.168.0) | Health says the gateway answers, not that its sources, hook and schedules went in |
+| archive | the bot released | **Finish, automatically**: park its Discord and Slack bots, mark ARCHIVED, rebuild-free (the container stays stopped) | The bot is already gone; going back would need a new one |
 | app-install / update / rollback | the switch | Compare the volume's `current` with the record; differ → **hold**: "[Use the new release] [Go back to the previous one]"; clear `staging` | |
 | install-image | anything | `failed`, "[Install again]" | Copying is repeatable |
 

@@ -130,7 +130,10 @@ export function accessProbeScript(input: { paths: string[]; env: string[] }): st
     'out.channels[k]={enabled:on,accounts:a}}',
     'const cd=d+"/credentials";try{for(const f of fs.readdirSync(cd)){const m=/^(telegram|slack|discord)-(.*)-allowFrom\\.json$/.exec(f);if(!m)continue;const o=off[m[1]];if(o&&(o.all||o.a.includes(m[2].toLowerCase())))continue;try{for(const y of (JSON.parse(fs.readFileSync(path.join(cd,f),"utf8")).allowFrom||[]))adm(m[1],y)}catch(e){bad(m[1],"allowFrom file",e)}}}catch(e){if(!gone(e))bad(null,"allowFrom files",e)}',
     `let st=null;try{st=fs.statSync(${JSON.stringify(PAIRING_DB)})}catch(e){if(!gone(e))bad(null,"pairing store",e)}`,
-    `if(st){try{const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync(${JSON.stringify(PAIRING_DB)},{readOnly:true});try{for(const r of db.prepare("select channel_key, entry from channel_pairing_allow_entries").all()){const o=off[String(r.channel_key)];if(o&&o.all)continue;adm(String(r.channel_key),r.entry)}}finally{try{db.close()}catch(e){}}}catch(e){bad(null,"pairing store",e)}}`,
+    // The pairing store's approvals are per account too: one kept under a
+    // turned-off account admits nobody, as its allowFrom file does (audit #102).
+    // Every column, so a store without account_id still reads (nothing excluded by account).
+    `if(st){try{const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync(${JSON.stringify(PAIRING_DB)},{readOnly:true});try{for(const r of db.prepare("select * from channel_pairing_allow_entries").all()){const o=off[String(r.channel_key)];if(o&&(o.all||(r.account_id!=null&&o.a.includes(String(r.account_id).toLowerCase()))))continue;adm(String(r.channel_key),r.entry)}}finally{try{db.close()}catch(e){}}}catch(e){bad(null,"pairing store",e)}}`,
     'for(const n of inp.env)out.env[n]=Object.prototype.hasOwnProperty.call(process.env,n);',
     'for(const p of inp.paths){try{fs.statSync(p);out.paths[p]=true}catch(e){out.paths[p]=gone(e)?false:null}}',
     'process.stdout.write(JSON.stringify(out));',
@@ -272,6 +275,14 @@ async function verifyNow(deps: VerifyDeps, agent: Agent, runtimeRef: string): Pr
         if (present && ch && acct.h) {
           const token = botTokenOf(kind, await secrets.get(ch.secretRef).catch(() => null));
           if (token && tokenHash(token) !== acct.h) detail = 'differs';
+          // Hatchabot's own copy could not be read (or is not there): nothing
+          // was compared, which is no proof the right bot runs. The skip is
+          // said, and a difference found before keeps its finding and its time
+          // — written over, the alert went though the wrong bot still ran (audit #103).
+          if (!token) {
+            skipped.push(`whether the ${kind} bot ${subject} is the one Hatchabot holds (its token here could not be read)`);
+            if (prior.some((c) => c.kind === kind && c.subject === subject && c.present && c.detail)) continue;
+          }
         }
         store.recordAccessCheck(agent.id, kind, subject, present, detail, at);
         checked++;

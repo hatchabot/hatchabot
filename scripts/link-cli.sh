@@ -15,11 +15,19 @@ cd "$(dirname "$0")/.."
 if [ -f BUNDLE.json ] && [ -x .node/bin/node ]; then
   BIN="$HOME/.local/bin"
   mkdir -p "$BIN"
+  # The folder goes inside the launcher's double quotes: a $, `, " or \ in it
+  # escaped, or running the command expanded it a second time (a folder named
+  # bundle$HOME, audit #039). uninstall.sh finds the launchers by the same text.
+  HERE="$(printf '%s' "$PWD" | sed -e 's/[\\$`"]/\\&/g')"
   for name in hatchabot hbt; do
     if [ "$name" = hbt ] && OTHER="$(command -v hbt 2>/dev/null)" && [ "$OTHER" != "$BIN/hbt" ]; then
       echo "note: another program here is already called hbt ($OTHER), so use the full name: hatchabot."; continue
     fi
-    printf '#!/usr/bin/env bash\n# Hatchabot (%s) — written by scripts/link-cli.sh\nexec "%s/.node/bin/node" "%s/bin/hatchabot.mjs" "$@"\n' "$name" "$PWD" "$PWD" > "$BIN/$name"
+    # A link there (an npm-linked native install's) is replaced, not written
+    # through: the redirect followed it and overwrote that install's CLI with
+    # this launcher (audit #038).
+    rm -f "$BIN/$name"
+    printf '#!/usr/bin/env bash\n# Hatchabot (%s) — written by scripts/link-cli.sh\nexec "%s/.node/bin/node" "%s/bin/hatchabot.mjs" "$@"\n' "$name" "$HERE" "$HERE" > "$BIN/$name"
     chmod 755 "$BIN/$name"
   done
   echo "linked: $BIN/hatchabot$([ -x "$BIN/hbt" ] && echo ", $BIN/hbt")"

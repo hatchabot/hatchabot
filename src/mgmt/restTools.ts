@@ -23,11 +23,24 @@ export interface RestCtx {
   get: (path: string) => Promise<unknown>;
 }
 
-/** Find an item by id or (case-insensitive) name, or explain what exists. */
+/**
+ * Find an item by id or (case-insensitive) name, or explain what exists. A
+ * name more than one item has is no answer: the first was taken, and the
+ * card showed only the shared name (audit #076). Agents are resolved the
+ * same way (Broker #resolve).
+ */
 function pick<T extends { id: string; name: string }>(items: T[], ref: string, what: string): T {
-  const hit = items.find((i) => i.id === ref) ?? items.filter((i) => i.name.toLowerCase() === ref.toLowerCase())[0];
-  if (!hit) throw new Error(`No ${what} "${ref}". Options: ${items.map((i) => i.name).join(', ') || '(none)'}.`);
-  return hit;
+  const byId = items.find((i) => i.id === ref);
+  if (byId) return byId;
+  const named = items.filter((i) => i.name.toLowerCase() === ref.toLowerCase());
+  if (named.length > 1) throw new Error(`More than one ${what} is called "${ref}": ${named.map((i) => i.id).join(', ')}. Say which by its id.`);
+  if (!named.length) throw new Error(`No ${what} "${ref}". Options: ${items.map((i) => i.name).join(', ') || '(none)'}.`);
+  return named[0]!;
+}
+
+/** The name a card shows for an item: with its id when another item has the same name. */
+function cardName<T extends { id: string; name: string }>(items: T[], hit: T): string {
+  return items.some((i) => i.id !== hit.id && i.name.toLowerCase() === hit.name.toLowerCase()) ? `${hit.name} (${hit.id})` : hit.name;
 }
 
 export interface RestCall { method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; path: string; body?: unknown }
@@ -41,7 +54,9 @@ export interface RestTool extends ToolDef {
   card?: (c: RestCtx, call?: RestCall) => string;
   /** Rebuild the agent after the call (source/image changes apply on rebuild). */
   rebuildAfter?: boolean;
-  /** Extra line for the "done" message, from the call's JSON result. */
+  /** Extra line for the "done" message, from the call's JSON result. Throws
+   *  when the result says the change did not happen: the card then reads
+   *  "⚠ Failed — …" with that message. */
   done?: (result: unknown) => string | undefined;
 }
 
@@ -197,6 +212,11 @@ export const REST_TOOLS: RestTool[] = [
     input_schema: obj({ agent: agentRef }, ['agent']),
     call: ({ agent }) => ({ method: 'POST', path: `/v1/agents/${agent!.id}/archive`, body: { checkpoint: true } }),
     card: ({ agent }) => `📥 Archive "${agent!.name}". It saves the current chat to memory first, stops, and returns its bot to the pool. Restore brings it back on a new bot.`,
+    // The card promises the save: one that did not happen is said (audit #078).
+    done: (out) => {
+      const warning = (out as { checkpointWarning?: unknown } | null)?.checkpointWarning;
+      return typeof warning === 'string' && warning ? `⚠ ${warning}` : undefined;
+    },
   },
   {
     name: 'restore_agent', tier: 'mutate', agentArg: true,
@@ -231,8 +251,9 @@ export const REST_TOOLS: RestTool[] = [
     description: "Switch which AI source an agent uses (id or name from list_sources). Recorded now, applied at the agent's next rebuild — the same rule as the app and the CLI; to apply at once, call rebuild_agent afterwards.",
     input_schema: obj({ agent: agentRef, source: str(128, 'AI source id or name') }, ['agent', 'source']),
     call: async ({ agent, input, get }) => {
-      const src = pick((await get('/v1/ai-profiles')) as Array<{ id: string; name: string }>, need(input.source, 'source'), 'AI source');
-      input.__sourceName = src.name;
+      const sources = (await get('/v1/ai-profiles')) as Array<{ id: string; name: string }>;
+      const src = pick(sources, need(input.source, 'source'), 'AI source');
+      input.__sourceName = cardName(sources, src);
       return { method: 'PATCH', path: `/v1/agents/${agent!.id}`, body: { aiProfileId: src.id } };
     },
     card: ({ agent, input }) => `🔌 Switch "${agent!.name}" to the AI source "${String(input.__sourceName)}" — it applies at its next rebuild (rebuild_agent applies it now; memory kept).`,
@@ -246,7 +267,7 @@ export const REST_TOOLS: RestTool[] = [
       if (!ref) return { method: 'POST', path: `/v1/agents/${agent!.id}/class`, body: { classId: null } };
       const { classes } = (await get('/v1/agent-classes')) as { classes: Array<{ id: string; name: string; model?: string; aiProfileId?: string; image?: string; memoryCap?: string }> };
       const cls = pick(classes ?? [], ref, 'class');
-      input.__className = cls.name;
+      input.__className = cardName(classes ?? [], cls);
       // What joining changes, on the card: the class's source, model, image
       // and memory cap — the card named only the class (night review).
       let source: string | undefined;
@@ -254,12 +275,16 @@ export const REST_TOOLS: RestTool[] = [
         try {
           const profiles = (await get('/v1/ai-profiles')) as Array<{ id: string; name: string }> | { profiles?: Array<{ id: string; name: string }> };
           const list = Array.isArray(profiles) ? profiles : profiles.profiles ?? [];
-          source = list.find((p) => p.id === cls.aiProfileId)?.name ?? 'another source';
+          const hit = list.find((p) => p.id === cls.aiProfileId);
+          source = hit ? cardName(list, hit) : 'another source';
         } catch { source = 'another source'; }
       }
       const parts = [source && `AI source ${source}`, cls.model && `model ${cls.model}`, cls.image && `image ${cls.image}`, cls.memoryCap && `memory cap ${cls.memoryCap}`].filter(Boolean);
       input.__classDetail = parts.length ? parts.join(', ') : 'nothing beyond the label';
-      return { method: 'POST', path: `/v1/agents/${agent!.id}/class`, body: { classId: cls.id } };
+      // What the card shows goes with the call: a class edited before Confirm
+      // is refused, not applied under the card's old words (audit #097).
+      const reviewed = { aiProfileId: cls.aiProfileId ?? null, model: cls.model ?? null, image: cls.image ?? null, memoryCap: cls.memoryCap ?? null };
+      return { method: 'POST', path: `/v1/agents/${agent!.id}/class`, body: { classId: cls.id, reviewed } };
     },
     card: ({ agent, input }) => input.__className
       ? `🏷 Put "${agent!.name}" in the class "${String(input.__className)}" — it takes the class's ${String(input.__classDetail ?? 'settings')}. A source or image change applies at its next rebuild.`
@@ -280,6 +305,15 @@ export const REST_TOOLS: RestTool[] = [
     input_schema: obj({ agent: agentRef }, ['agent']),
     call: ({ agent }) => ({ method: 'POST', path: `/v1/agents/${agent!.id}/checkpoint`, body: {} }),
     card: ({ agent }) => `📝 Save "${agent!.name}"'s current conversation into its memory`,
+    // The route answers 200 for a save that did not happen ({ ok: false }) or
+    // that it cannot vouch for ({ saved: false, note }); dropped, both read
+    // as ✅ saved before a reset (audit #078).
+    done: (out) => {
+      const r = (out ?? {}) as { ok?: unknown; saved?: unknown; error?: unknown; note?: unknown };
+      if (r.ok === false) throw new Error(typeof r.error === 'string' && r.error ? r.error : 'the summary was not written');
+      if (r.saved === false) return typeof r.note === 'string' && r.note ? r.note : 'Nothing was confirmed saved.';
+      return undefined;
+    },
   },
   {
     name: 'snapshot_agent', tier: 'mutate', agentArg: true,

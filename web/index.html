@@ -5599,7 +5599,10 @@ async function updateClass(id, field, value) {
     if (r.applied) bits.push(`applied to ${r.applied}`);
     if (r.needRebuild) bits.push(`${r.needRebuild} need a rebuild (source or image change)`);
     if ((r.skipped || []).length) bits.push(`${r.skipped.length} skipped`);
-    toast(`Class updated${bits.length ? ' — ' + bits.join(', ') : ''}.`, 7000);
+    // Its runtime refused the model: still on the old one until a retry or a Rebuild (audit #068).
+    const stale = r.modelPending || [];
+    if (stale.length) bits.push(`${stale.length} still on the old model (${stale.join('; ')})`);
+    toast(`Class updated${bits.length ? ' — ' + bits.join(', ') : ''}.`, stale.length ? 12000 : 7000);
     renderClassList();
     await refresh(false);
   } catch (e) { toast(e.message, 9000); loadClasses(); }
@@ -5631,8 +5634,10 @@ async function assignClass() {
   sel.disabled = true;
   try {
     const r = await api(`/v1/agents/${id}/class`, { method: 'POST', body: { classId } });
-    const said = classId ? (r.rebuild ? 'Class set — it changes the AI source or image, so Rebuild to apply.' : 'Class set — model applied.') : 'Class cleared.';
-    toast(r.memoryPending ? `${said} ${r.memoryPending}` : said, r.memoryPending ? 12000 : 7000);
+    const said = !classId ? 'Class cleared.' : r.rebuild ? 'Class set — it changes the AI source or image, so Rebuild to apply.'
+      : r.modelPending ? `Class set. ⚠ ${r.modelPending}` : 'Class set — model applied.';
+    const more = r.memoryPending || r.modelPending;
+    toast(r.memoryPending ? `${said} ${r.memoryPending}` : said, more ? 12000 : 7000);
     await refresh(false);
     renderModelPickerForAgent(agents.find(x => x.id === id));
   } catch (e) { toast(e.message, 9000); }
@@ -6499,6 +6504,10 @@ async function faApply() {
   const ids = faSelected().map(cb => cb.dataset.id);
   if (!ids.length) { toast('Tick at least one agent first.'); return; }
   const model = $('faModel').value;
+  // Read once, as the model and image are: the class menu stays live while Apply
+  // works down the list, and a later agent got whatever it said then (audit #049).
+  const classId = $('faClass').value || null;
+  const cls = classId ? agentClasses.find(c => c.id === classId) : null;
   if (action === 'source') {
     const profileId = $('faSource').value;
     if (!profileId) return;
@@ -6557,8 +6566,6 @@ async function faApply() {
         if (!(a?.profileModels || []).length) { skipped++; continue; } // local: no menu
         await api(`/v1/agents/${id}/model`, { method: 'POST', body: { model } });
       } else if (action === 'class') {
-        const classId = $('faClass').value || null;
-        const cls = classId ? agentClasses.find(c => c.id === classId) : null;
         if (cls?.model && !(a?.profileModels || []).length && !cls.aiProfileId) { skipped++; continue; } // local source: no switchable model
         await api(`/v1/agents/${id}/class`, { method: 'POST', body: { classId } });
       } else if (action === 'checkpoint') {
@@ -6783,8 +6790,19 @@ async function rehostAgent(id, name) {
   if (!confirm(`Move "${name}" to the cluster at ${peer.name}?${channelsLostOnExport(id)}\n\nIt stops here, transfers with its memory and members, and starts there — managed from that server's dashboard from now on. This copy stays STOPPED (not deleted) — never start both, they would fight over the same Telegram bot.`)) return;
   // Waits only for the other server's yes (its preflight); the move then goes on on the server (202).
   toast(`Asking ${peer.name} whether it can take ${name}…`, 60000, 'progress');
+  const body = { peerId: peer.id };
   try {
-    const res = await api(`/v1/agents/${id}/rehost`, { method: 'POST', body: { peerId: peer.id } });
+    let res;
+    try { res = await api(`/v1/agents/${id}/rehost`, { method: 'POST', body }); }
+    catch (e) {
+      // It would land on a source of another vendor while that server has one
+      // of its own vendor: offered as the source to move onto instead.
+      const c = e.code === 'source_choice' && e.data?.sourceChoice;
+      if (!c) throw e;
+      if (!confirm(`${e.message}\n\nMove "${name}" onto ${c.name} (${c.vendor}/${c.model}) on ${peer.name} instead?`)) return toast('Not moved.');
+      toast(`Asking ${peer.name} whether it can take ${name} onto ${c.name}…`, 60000, 'progress');
+      res = await api(`/v1/agents/${id}/rehost`, { method: 'POST', body: { ...body, aiProfileId: c.id } });
+    }
     if (res?.operation?.id) {
       v2FollowOp(res.operation);
       toast(`Moving ${name} to ${peer.name} — its tile shows each step; this page can close. This copy stays stopped once it has gone.`, 10000);
@@ -7560,14 +7578,16 @@ async function savePeers() {
     `run their tools — not just answer questions.\n\nOnly do this for agents you drive on purpose. Anything that can steer ` +
     `THIS agent (an injected email, a message from someone in its chat) can then reach into ${acts.length > 1 ? 'them' : 'it'}.\n\nContinue?`)) return;
   $('peerSaveBtn').disabled = true;
+  const forId = editAgentId; // the agent saved is the one rebuilt (audit #047)
   try {
-    await api(`/v1/agents/${editAgentId}/peers`, { method: 'PUT', body: { peerIds: ids, allowActions: acts } });
+    await api(`/v1/agents/${forId}/peers`, { method: 'PUT', body: { peerIds: ids, allowActions: acts } });
     // The call-agent tool + peer manifest are installed on rebuild, so offer it.
     if (ids.length) {
-      if (confirm(`Saved. Rebuild this agent now so it can consult ${ids.length} peer${ids.length > 1 ? 's' : ''}?\n\nThe call-agent tool is installed on rebuild (memory kept, briefly offline). Without a rebuild the grant is saved but the agent can't call them yet.`)) {
-        await api(`/v1/agents/${editAgentId}/rebuild`, { method: 'POST', body: {} });
+      const name = agents.find(x => x.id === forId)?.name || 'this agent';
+      if (confirm(`Saved. Rebuild "${name}" now so it can consult ${ids.length} peer${ids.length > 1 ? 's' : ''}?\n\nThe call-agent tool is installed on rebuild (memory kept, briefly offline). Without a rebuild the grant is saved but the agent can't call them yet.`)) {
+        await api(`/v1/agents/${forId}/rebuild`, { method: 'POST', body: {} });
         toast('Rebuilding so it can consult its peers…');
-        editDlg.close();
+        if (editAgentId === forId) editDlg.close();
       } else {
         toast('Saved — Rebuild this agent before it can consult them.', 8000);
       }
@@ -7795,6 +7815,10 @@ function prepareEdit(id, name, tab = 'def') {
   $('editProfile').innerHTML = profiles.map(p =>
     `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
   renderModelPickerForAgent(cur);
+  // Its saved source is selected again, so nothing waits on Use this: a source picked and
+  // left unapplied in the sheet before kept the model button off here (audit #050).
+  $('modelBtn').disabled = false;
+  $('modelBtn').title = '';
   void populateImagePicker(cur?.image ?? '');
   if ($('editEmbedMode')) { $('editEmbedMode').value = cur?.embedMode || 'baked'; $('embedModeStatus').textContent = cur ? embedModeText(cur) : ''; }
   editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
@@ -7971,30 +7995,36 @@ async function switchModel() {
 
 async function switchProfile() {
   const id = $('editProfile').value;
+  // The agent and the checkpoint box as they were when Use this was pressed: with
+  // the sheet closed and another agent's opened while it saved, the rebuild went
+  // to that other agent, with its box (audit #047).
+  const forId = editAgentId, checkpoint = $('editCheckpoint').checked;
   const chosen = profiles.find(p => p.id === id);
-  if (!confirm(`Use "${chosen?.name}" (${chosen?.model}) for this agent?\n\nApplies on the next Rebuild — its memory is kept.${localClashWarning(chosen, editAgentId)}`)) return;
+  if (!confirm(`Use "${chosen?.name}" (${chosen?.model}) for this agent?\n\nApplies on the next Rebuild — its memory is kept.${localClashWarning(chosen, forId)}`)) return;
   $('profileBtn').disabled = true;
   try {
-    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { aiProfileId: id } });
-    if (confirm('Saved. Rebuild now to start using it?\n\nThe agent restarts (memory kept) and is briefly offline. Tip: send /new in Telegram afterwards — a fresh conversation suits a new model.')) {
-      await api(`/v1/agents/${editAgentId}/rebuild`, {
-        method: 'POST', body: { checkpoint: $('editCheckpoint').checked },
+    await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { aiProfileId: id } });
+    const name = agents.find(x => x.id === forId)?.name || 'this agent';
+    if (confirm(`Saved. Rebuild "${name}" now to start using it?\n\nThe agent restarts (memory kept) and is briefly offline. Tip: send /new in Telegram afterwards — a fresh conversation suits a new model.`)) {
+      await api(`/v1/agents/${forId}/rebuild`, {
+        method: 'POST', body: { checkpoint },
       });
-      toast($('editCheckpoint').checked
+      toast(checkpoint
         ? 'Saving conversation to memory, then rebuilding…'
         : 'Rebuilding with the new AI source');
-      editDlg.close();
+      if (editAgentId === forId) editDlg.close();
     } else {
       toast('Saved — Rebuild to apply it');
     }
     await refresh(false);
+    if (editAgentId !== forId) return;
     // Dialog stayed open: the agent is now on the new source (and any stranded
     // pin was cleared server-side). Re-render the model picker from the fresh
     // agent so it lists the new source's models, not the old ones.
     renderModelPickerForAgent(agents.find(x => x.id === editAgentId));
     $('modelBtn').disabled = false;
     $('modelBtn').title = '';
-  } catch (e) { $('editErr').textContent = e.message; }
+  } catch (e) { if (editAgentId === forId) $('editErr').textContent = e.message; else toast(e.message, 8000); }
   finally { $('profileBtn').disabled = false; }
 }
 
@@ -8302,7 +8332,7 @@ function renderSetupValues(a) {
           <input type="checkbox" data-opt="${esc(o)}"${picked.includes(o) ? ' checked' : ''} style="width:auto;flex:none"> ${esc(o)}</label>`).join('')}</div>`;
     } else if (p.type === 'boolean') {
       input = `<label style="display:flex;gap:6px;align-items:center;width:auto;font-weight:400;margin:0;cursor:pointer">
-        <input type="checkbox" id="spv-${esc(p.key)}" style="width:auto;flex:none"${cur === 'true' ? ' checked' : ''}> enabled</label>`;
+        <input type="checkbox" id="spv-${esc(p.key)}" style="width:auto;flex:none"${paramYes(cur) ? ' checked' : ''}> enabled</label>`;
     } else if (p.type === 'longtext') {
       input = `<textarea id="spv-${esc(p.key)}" rows="2" style="flex:1;font-size:13px">${esc(cur)}</textarea>`;
     } else {
@@ -8782,15 +8812,21 @@ function setSpendRange(r, btn) {
   if (box) void loadSpendChart(box);
 }
 async function loadSpendCharts(root) { for (const el of (root || document).querySelectorAll('.spendchart:not([data-lazy])')) void loadSpendChart(el); }
+// Each chart's reads numbered: a slow week's answer after the day's replaced
+// it, and a fleet-wide total came back under one picked agent's name (audit #065).
+let spendChartSeq = 0;
 async function loadSpendChart(el) {
   const agent = el.dataset.agent, source = el.dataset.source;
+  const gen = String(++spendChartSeq);
+  el.dataset.gen = gen;
+  const current = () => el.isConnected && el.dataset.gen === gen;
   try {
     const sel = source ? `&source=${encodeURIComponent(source)}` : !agent && spendAgents.length ? `&agents=${encodeURIComponent(spendAgents.join(','))}` : '';
     // The page's zone: day bars start at its midnight, as their labels read (audit, 2026-10-20).
     let tz = ''; try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch {}
     const d = await api(`/v1/usage/spend?range=${spendRange}${agent ? `&agent=${encodeURIComponent(agent)}` : sel}${tz ? `&tz=${encodeURIComponent(tz)}` : ''}`);
-    if (el.isConnected) el.innerHTML = spendChartHTML(d, { fleet: !agent && !source, byAgent: !!source }) + ((agent || source) && d.planShare > 0 ? '<div class="sub" style="margin-top:2px">* Claude plan use priced at API rates — not money you pay.</div>' : '');
-  } catch (e) { if (el.isConnected) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+    if (current()) el.innerHTML = spendChartHTML(d, { fleet: !agent && !source, byAgent: !!source }) + ((agent || source) && d.planShare > 0 ? '<div class="sub" style="margin-top:2px">* Claude plan use priced at API rates — not money you pay.</div>' : '');
+  } catch (e) { if (current()) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 /** A round axis top at or above x: 1, 2, 2.5 or 5 × a power of ten. */
 function niceTop(x) {
@@ -8822,14 +8858,19 @@ function spendChartHTML(d, opts = {}) {
   const range = SPEND_RANGE_WORDS[d.range]?.[1] || '';
   const partSlices = SPEND_PARTS.map(([k, l, c]) => ({ label: l, value: t[k] || 0, color: c }));
   const modelSlices = modelPieSlices(d.models || []);
+  // Tokens on a model with no known price are in the tokens, not the dollars: the
+  // amount is partial ($4.20+) or, with nothing priced, unknown — never $0 (audit #062).
+  const unpriced = d.unpriced?.tokens > 0 ? d.unpriced : null;
+  const big = unpriced && !(total > 0) ? 'No price' : `${v2Money(total)}${unpriced ? '+' : ''}${star}`;
   const block = (title, slices) => `<div style="display:flex;flex-direction:column;gap:4px;min-width:0">
       <div class="sub" style="font-size:12px">${title}</div>
-      <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">${donutHTML(slices, total, `${v2Money(total)}${star}`, range, title)}${pieLegend(slices, total)}</div></div>`;
+      <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">${donutHTML(slices, total, big, range, title)}${pieLegend(slices, total)}</div></div>`;
   // A source with nothing spent in the range: say so, no empty pies (2026-10-07).
   if (opts.byAgent && !(t.cost > 0) && !(t.tokens > 0)) return head + `<div class="sub">Nothing spent at API prices in ${esc(rangeName || 'this range')}.</div>`;
   // By agent (an AI source's chart): who spends on this source, the biggest seven and the rest.
   const agentSlices = opts.byAgent ? agentPieSlices(d.choices || []) : [];
-  const summary = `<div class="ucard" style="display:flex;gap:18px 34px;flex-wrap:wrap">${block('What it went on', partSlices)}${modelSlices.length ? block('By model', modelSlices) : ''}${agentSlices.length ? block('By agent', agentSlices) : ''}</div>`;
+  const unpricedNote = unpriced ? `<div class="sub spend-unpriced" style="flex-basis:100%">⚠ ${fmtTokens(unpriced.tokens)} tokens on ${(unpriced.models || []).map((m) => `<code>${esc(m)}</code>`).join(', ') || 'a model'} with no price known: not in the dollars here, so ${total > 0 ? 'the amount is only part of it' : 'the amount is unknown'} — never $0.</div>` : '';
+  const summary = `<div class="ucard" style="display:flex;gap:18px 34px;flex-wrap:wrap">${block('What it went on', partSlices)}${modelSlices.length ? block('By model', modelSlices) : ''}${agentSlices.length ? block('By agent', agentSlices) : ''}${unpricedNote}</div>`;
   // Over time: stacked bars (left axis, dollars), tokens as a line (right axis).
   const W = 640, H = 224, L = 46, R2 = 50, T = 24, B = 24, iw = W - L - R2, ih = H - T - B;
   const topC = niceTop(Math.max(0, ...b.map(cost))), topT = niceTop(Math.max(0, ...b.map((x) => x.tokens)));
@@ -8858,7 +8899,7 @@ function spendChartHTML(d, opts = {}) {
   const tokTotal = `<text x="${W - R2}" y="12" text-anchor="end" font-size="12" style="fill:var(--text)"><tspan font-weight="700">${fmtTokens(t.tokens || 0)}</tspan> tokens in ${esc(rangeName)}</text>`;
   const slice = d.bucketHours === 24 ? 'day' : d.bucketHours === 1 ? 'hour' : `${d.bucketHours} hours`;
   const chart = `<div class="ucard"><div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;display:block" role="img" aria-label="Spend at API prices per ${slice}, by part, with tokens as a line">${tokTotal}${grid}${bars}${line}${xl}</svg></div>
-    <div class="sub" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:2px 0 4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis); bars are what each ${slice} cost (left axis)${d.range !== 'month' && d.monthly ? ` · ≈ ${v2Money(d.monthly)}${star} a month at this pace` : ''}${d.refused ? ` · <span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:var(--dim);opacity:.35;vertical-align:middle"></span> shaded: <b>${fmtN(d.refused)}</b> call${d.refused === 1 ? '' : 's'} refused (rate limit)` : ''}</div></div>`;
+    <div class="sub" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:2px 0 4px"><span style="width:14px;height:0;border-top:2px solid var(--text);opacity:.75;display:inline-block"></span>Tokens (right axis); bars are what each ${slice} cost (left axis)${d.range !== 'month' && d.monthly ? ` · ≈ ${v2Money(d.monthly)}${unpriced ? '+' : ''}${star} a month at this pace` : ''}${d.refused ? ` · <span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:var(--dim);opacity:.35;vertical-align:middle"></span> shaded: <b>${fmtN(d.refused)}</b> call${d.refused === 1 ? '' : 's'} refused (rate limit)` : ''}</div></div>`;
   return head + summary + chart;
 }
 /** A donut of slices ({ label, value, color }), the total in the middle; a hover tip per slice. `fmt` says a value (dollars unless given). */
@@ -9577,22 +9618,27 @@ async function saveDescription() {
  * one's editor and be saved into it (night review, 2026-09-27).
  */
 let editLoaded = null;
+// Each read numbered: SOUL.md, then MEMORY.md, then SOUL.md again matched the
+// first read's agent and file once more, and its late answer replaced what was
+// typed since — and Save wrote that older text (audit #048).
+let editLoadGen = 0;
 async function loadEditFile() {
   if (!editAgentId) return;
-  const forId = editAgentId, file = $('editFile').value;
+  const forId = editAgentId, file = $('editFile').value, gen = ++editLoadGen;
+  const stale = () => gen !== editLoadGen || editAgentId !== forId || $('editFile').value !== file;
   editLoaded = null;
   $('editErr').textContent = '';
   $('editSaveBtn').disabled = true;
   $('editContent').value = 'Loading…';
   try {
     const f = await api(`/v1/agents/${forId}/files/${file}`);
-    if (editAgentId !== forId || $('editFile').value !== file) return;
+    if (stale()) return;
     $('editContent').value = f.content;
     if (editReverting.has(forId)) { $('editErr').textContent = EDIT_REVERTING; return; }
     editLoaded = { agentId: forId, file };
     $('editSaveBtn').disabled = false;
   } catch (e) {
-    if (editAgentId !== forId || $('editFile').value !== file) return;
+    if (stale()) return;
     $('editContent').value = '';
     $('editErr').textContent = `${e.message} — nothing to save until it loads.`;
   }
@@ -9889,7 +9935,9 @@ async function invite(id, name) {
   const web = appConfig.authMode !== 'password' && !a?.ops;
   // In no chat app yet: the web is the only way in, so no Telegram question and no chat-app link.
   const webOnly = web && !!a && !v2ChannelKinds(a).length;
-  invWebFor = { id, name };
+  // A new object per opening: an answer for an invite opened before (another
+  // agent's, or this one's last time) finds it gone and fills nothing (audit #063).
+  const mine = invWebFor = { id, name };
   $('invWeb').hidden = !web;
   $('invWebLink').hidden = true; $('invWebLink').textContent = '';
   $('invWebCopy').hidden = true; $('invWebBtn').hidden = false; $('invWebBtn').disabled = false;
@@ -9903,6 +9951,7 @@ async function invite(id, name) {
     );
     if (who === null) return; // cancelled
     const inv = await api(`/v1/agents/${id}/invites`, { method: 'POST', body: { for: who.trim() || undefined } });
+    if (invWebFor !== mine) return; // another invite was opened meanwhile
     $('invAgent').textContent = name;
     $('invLink').textContent = inv.url ?? (location.origin + inv.path);
     const link = a?.deepLink ?? '';
@@ -9930,14 +9979,18 @@ async function invite(id, name) {
 let invWebFor = null;
 async function makeWebChatInvite() {
   if (!invWebFor) return;
+  // The invite this link is for: closed, and another agent's opened while it was
+  // made, A's link landed in B's invite, ready to copy as B's (audit #063).
+  const forInv = invWebFor;
   $('invWebBtn').disabled = true;
   try {
-    const inv = await api(`/v1/agents/${invWebFor.id}/invites`, { method: 'POST', body: { webChat: true } });
+    const inv = await api(`/v1/agents/${forInv.id}/invites`, { method: 'POST', body: { webChat: true } });
+    if (invWebFor !== forInv) return;
     $('invWebLink').textContent = inv.url ?? (location.origin + inv.path);
     $('invWebLink').hidden = false;
     $('invWebBtn').hidden = true;
     $('invWebCopy').hidden = false;
-  } catch (e) { toast(e.message, 8000); $('invWebBtn').disabled = false; }
+  } catch (e) { toast(e.message, 8000); if (invWebFor === forInv) $('invWebBtn').disabled = false; }
 }
 async function copyWebChatInvite() {
   const ok = await copyText($('invWebLink').textContent);
@@ -10552,6 +10605,14 @@ async function downloadAgent(id, name) {
 
 let paramFormFields = [], paramFormResolve = null;
 
+/**
+ * A yes/no setup value read as the server reads it (template.ts
+ * resolveParamValues): true, yes, 1 or on, in any case. A default of "yes"
+ * showed unticked, and Continue sent "false" (audit #067).
+ */
+function paramYes(v) {
+  return /^(true|yes|1|on)$/i.test(String(v ?? '').trim());
+}
 function collectParamValues(parameters, title) {
   paramFormFields = parameters;
   $('paramFormName').textContent = title || 'this agent';
@@ -10583,7 +10644,7 @@ function collectParamValues(parameters, title) {
           <input type="checkbox" data-opt="${esc(o)}"${defaults.includes(o) ? ' checked' : ''} style="width:auto;flex:none"> ${esc(o)}</label>`).join('')}</div>`;
     } else if (p.type === 'boolean') {
       input = `<label style="display:flex;gap:8px;align-items:center;font-weight:400;cursor:pointer">
-        <input type="checkbox" id="${id}"${p.default === true || p.default === 'true' ? ' checked' : ''} style="width:auto;flex:none"> Yes</label>`;
+        <input type="checkbox" id="${id}"${paramYes(p.default) ? ' checked' : ''} style="width:auto;flex:none"> Yes</label>`;
     } else {
       input = `<input type="text" id="${id}" value="${esc(p.default ?? '')}">`;
     }
@@ -10608,16 +10669,21 @@ function submitParamForm() {
   for (let i = 0; i < paramFormFields.length; i++) {
     const p = paramFormFields[i], el = $(`pfv-${i}`);
     if (p.type === 'boolean') { values[p.key] = el.checked ? 'true' : 'false'; continue; }
+    // A default the form showed and the owner cleared is sent as '' — left out,
+    // the server put the default back (audit #066), as collectSetupValues says.
+    // Credentials and repo fields show no default, so blank there is left out.
+    const cleared = String(p.default ?? '').trim() !== '' && p.target !== 'env' && p.target !== 'datasource';
     if (p.type === 'multichoice') {
       const picks = [...el.querySelectorAll('input:checked')].map(c => c.dataset.opt);
       if (!picks.length && p.required) { $('paramFormErr').textContent = `“${p.label || p.key}” needs at least one pick.`; return; }
-      if (picks.length) values[p.key] = picks.join(', ');
+      if (picks.length || cleared) values[p.key] = picks.join(', ');
       continue;
     }
     const v = el.value.trim();
     if (!v) {
       if (p.required) { $('paramFormErr').textContent = `“${p.label || p.key}” is required.`; el.focus(); return; }
-      continue; // empty optional — let the template's own default/blank stand
+      if (cleared) values[p.key] = '';
+      continue; // empty optional with no default — let the template's own blank stand
     }
     values[p.key] = v;
   }
@@ -11280,9 +11346,15 @@ async function openProposals(id, name) {
   proposalsDlg.showModal();
   await loadMasterProposals();
 }
+// Each read numbered: master A's slow answer listed A's proposals under master B,
+// whose Dismiss and Merge then went to B with A's ids (audit #064).
+let proposalsGen = 0;
 async function loadMasterProposals() {
+  const forId = proposalsMasterId, gen = ++proposalsGen;
+  const stale = () => gen !== proposalsGen || proposalsMasterId !== forId;
   try {
-    const { proposals } = await api(`/v1/agents/${proposalsMasterId}/proposals`);
+    const { proposals } = await api(`/v1/agents/${forId}/proposals`);
+    if (stale()) return;
     $('proposalsList').innerHTML = proposals.length ? proposals.map(p => `
       <div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px">
         <div class="sub">from <b>${esc(p.childName)}</b> · ${ago(p.createdAt)}</div>
@@ -11293,16 +11365,17 @@ async function loadMasterProposals() {
           <button class="primary" onclick="resolveProposal('${jsq(p.id)}','merge',true)">Merge + Push to children</button>
         </div>
       </div>`).join('') : '<div class="sub">No pending proposals. On a child agent, Sharing → Copy or share → 💡 Propose to master creates one.</div>';
-  } catch (e) { $('proposalsList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+  } catch (e) { if (!stale()) $('proposalsList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 async function resolveProposal(pid, action, push) {
+  const forId = proposalsMasterId;
   if (push) {
     // The same confirmation as Push: this rewrites every child's definition in one go.
-    const kids = agents.filter(k => k.parentAgentId === proposalsMasterId).map(k => k.name);
+    const kids = agents.filter(k => k.parentAgentId === forId).map(k => k.name);
     if (!confirm(`Merge this into the master's AGENTS.md and push it to ${kids.length} child agent${kids.length === 1 ? '' : 's'}?\n\n${kids.join(', ')}\n\nEach child's definition is replaced; there is no undo.`)) return;
   }
   try {
-    const r = await api(`/v1/agents/${proposalsMasterId}/proposals/${encodeURIComponent(pid)}/resolve`, { method: 'POST', body: { action, push } });
+    const r = await api(`/v1/agents/${forId}/proposals/${encodeURIComponent(pid)}/resolve`, { method: 'POST', body: { action, push } });
     toast(action === 'dismiss' ? 'Dismissed.' : `Merged into the master's AGENTS.md${push ? ` — pushed to ${r.pushed} child(ren)` : ''}.`, 8000);
     await loadMasterProposals();
   } catch (e) { toast(e.message, 10000); }
@@ -11437,13 +11510,15 @@ function embedModeText(a) {
  *  (Chris, 2026-09-24). A stopped agent picks it up when it starts. */
 async function saveImagePin() {
   const v = $('editImage').value.trim();
-  const a = agents.find(x => x.id === editAgentId);
+  // The agent pinned is the one rebuilt, even when another agent's sheet opened meanwhile (audit #047).
+  const forId = editAgentId;
+  const a = agents.find(x => x.id === forId);
   try {
-    const r = await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { image: v || null } });
+    const r = await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { image: v || null } });
     if (r.sameImage) toast(v ? `Pinned to ${v} — it already runs that image, so no rebuild.` : 'Back on the fleet default — it already runs that image, so no rebuild.');
     else if (a?.state === 'RUNNING' && a.runtimeRef) {
-      if (!confirmRebuild(editAgentId, v ? `Moving onto ${v}` : 'Returning to the fleet default image')) { toast('Pinned — it moves onto that image at its next rebuild.', 6000); await refresh(false); return; }
-      await api(`/v1/agents/${editAgentId}/rebuild`, { method: 'POST', body: {} });
+      if (!confirmRebuild(forId, v ? `Moving onto ${v}` : 'Returning to the fleet default image')) { toast('Pinned — it moves onto that image at its next rebuild.', 6000); await refresh(false); return; }
+      await api(`/v1/agents/${forId}/rebuild`, { method: 'POST', body: {} });
       toast(v ? `Pinned to ${v} — rebuilding onto it now, memory kept (about a minute).` : 'Back on the fleet default — rebuilding, memory kept.');
     } else {
       toast(v ? `Pinned to ${v} — it moves onto it at its next rebuild.` : 'Back on the fleet default image — applies at its next rebuild.');

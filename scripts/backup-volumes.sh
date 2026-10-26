@@ -33,6 +33,21 @@ set -euo pipefail
 [ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
 
+# A run by hand (the README's ./scripts/backup-volumes.sh) gets the settings
+# the service and the nightly timer run with: .env, their EnvironmentFile.
+# Without it a moved registry (HATCHABOT_DB), another destination or prefix
+# was ignored: the stale default database was backed up as complete and the
+# real agents' volumes skipped as orphans (audit #023). What the environment
+# already has wins — a timed run has .env already, and HATCHABOT_BACKUP_DIR=…
+# on the command line still overrides. Read by Node's dotenv parser, never run
+# as shell code.
+if [ -f .env ]; then
+  while IFS= read -r -d '' kv; do export "$kv"; done < <(node -e '
+    const { parseEnv } = require("node:util");
+    for (const [k, v] of Object.entries(parseEnv(require("node:fs").readFileSync(".env", "utf8"))))
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && process.env[k] === undefined) process.stdout.write(k + "=" + v + "\0");')
+fi
+
 # The server namespaces its volumes under HATCHABOT_PREFIX — back up whatever
 # namespace this installation actually uses, not a hardcoded one.
 # Pre-rename .env files: alias AGENTCLAW_* → HATCHABOT_* (existing HATCHABOT_* wins).
@@ -163,8 +178,20 @@ const file = fs.existsSync('.env') ? parseEnv(fs.readFileSync('.env', 'utf8')) :
 const key = process.env.HATCHABOT_SECRET_KEY ?? process.env.AGENTCLAW_SECRET_KEY
   ?? file.HATCHABOT_SECRET_KEY ?? file.AGENTCLAW_SECRET_KEY;
 if (!key || /[\r\n]/.test(key)) process.exit(1);
-// restore-drill strips one surrounding quote pair; preserve the exact bytes.
-fs.writeFileSync(process.argv[2], `HATCHABOT_SECRET_KEY="${key}"\n`, { mode: 0o600 });
+// The line is copied into a recovered .env (README), which Node (parseEnv),
+// systemd's EnvironmentFile and the macOS launcher's shell all read: quotes
+// none of them escapes inside, so each reads the exact bytes. Double quotes
+// for a key without " \ $ or a backtick (every key so far), else single
+// quotes for one without '. Written bare in double quotes, a key holding a "
+// came back cut short, and the backed-up credentials with it (audit #022).
+// A key that fits neither, or does not read back whole, is no usable copy.
+const q = !/["\\$`]/.test(key) ? '"' : !key.includes("'") ? "'" : undefined;
+const line = q && `HATCHABOT_SECRET_KEY=${q}${key}${q}\n`;
+if (!line || parseEnv(line).HATCHABOT_SECRET_KEY !== key) {
+  console.error("✗ HATCHABOT_SECRET_KEY has a ' and one of \" \\ $ ` in it: no .env line reads back as that key everywhere, so no copy of it was saved. Keep your own copy of .env.");
+  process.exit(1);
+}
+fs.writeFileSync(process.argv[2], line, { mode: 0o600 });
 KEY
 then
   echo "✗ No usable HATCHABOT_SECRET_KEY — backup incomplete; older backups were kept." >&2
@@ -190,8 +217,10 @@ fi
 vols="$(printf '%s\n' "$all_vols" | grep -E "^(${PREFIX}|agentclaw)-" || true)"
 
 # What the registry (the DB copy just made) says should be backed up, one
-# line per agent that has a runtime (`<runtime ref name>-vol`, the same rule
-# agentArchiveName follows):
+# line per agent that has a runtime (its volume by the provider's own rule,
+# src/providers/dockerNames.ts — `<runtime ref name>-vol`, or for a legacy
+# pre-slug ref `agentclaw-vol-<short>`; a rule of its own took that volume for
+# an orphan and missed it every night, audit #021):
 #   known  <vol>          every such agent — a volume no agent uses is an orphan
 #   local  <vol>          an agent on THIS machine: its volume must be in the set
 #   failed <vol>          one on this machine that never came up (FAILED): its
@@ -205,7 +234,15 @@ vols="$(printf '%s\n' "$all_vols" | grep -E "^(${PREFIX}|agentclaw)-" || true)"
 # runners (no hosts table) has local agents only.
 registry="$(node -e '
   const D = require("better-sqlite3"); const db = new D(process.argv[1], { readonly: true });
-  const vol = (ref) => String(ref).replace(/^\w+:\/\//, "") + "-vol";
+  // dockerNames (src/providers/dockerNames.ts), kept the same by test/dockerNames.test.ts.
+  const P = process.argv[2];
+  const vol = (ref) => {
+    const s = String(ref);
+    if (!s.startsWith("docker://")) return s.replace(/^\w+:\/\//, "") + "-vol";
+    const n = s.slice("docker://".length);
+    if (n.startsWith(P + "-") || n.startsWith("agentclaw-")) return n + "-vol";
+    return (P === "hatchabot" ? "agentclaw" : P) + "-vol-" + n.slice(0, 12);
+  };
   const runners = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?").get("table", "hosts")
     && db.prepare("PRAGMA table_info(agents)").all().some((c) => c.name === "host_id");
   const q = runners
@@ -221,7 +258,7 @@ registry="$(node -e '
     let host; try { host = JSON.parse(r.s || "{}").dockerHost; } catch {}
     if (host) console.log("remote\t" + v + "\t" + host + "\t" + r.st);
   }
-  console.log("ok");' "$DEST/hatchabot.sqlite" 2>/dev/null || true)"
+  console.log("ok");' "$DEST/hatchabot.sqlite" "$PREFIX" 2>/dev/null || true)"
 registry_read=""
 known=""
 expected=""

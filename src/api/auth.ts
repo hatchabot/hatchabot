@@ -840,6 +840,14 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
  */
 /** What a rehost-scoped token may call: the other server's move, and nothing else. */
 const REHOST_PATHS = new Set(['/v1/agents/preflight', '/v1/agents/restore', '/v1/agents']);
+/**
+ * …and the receipt of a move it announced (GET /v1/moves/:id, migrate.ts
+ * askAboutMove): left out, the mover's question after a lost answer was a 401,
+ * read as "no answer", and a move the destination knew had failed stayed held
+ * (audit #008). Answered for the token's owner only (moveState). The id's shape
+ * is moveIdFrom's, so nothing else under /v1/moves/ matches.
+ */
+const REHOST_MOVE_RECEIPT = /^\/v1\/moves\/[A-Za-z0-9_-]{8,80}$/;
 function cliBearer(req: FastifyRequest, opts: AuthOptions): string | undefined {
   // Command-line and peer tokens are long-lived bearers with no second
   // factor: they are for the private address. At the public one they are not
@@ -853,11 +861,12 @@ function cliBearer(req: FastifyRequest, opts: AuthOptions): string | undefined {
   if (!owner) return undefined;
   // The token a peer server holds for moving agents here used to be a full
   // owner token: a hostile peer could read bot tokens and credentials, delete
-  // agents, mint more tokens (26th audit). A scoped one opens three routes.
+  // agents, mint more tokens (26th audit). A scoped one opens the move's routes.
   const scope = opts.cliTokenScope?.(token);
   if (scope === 'rehost') {
     const path = routedPath(req.url);
-    const ok = REHOST_PATHS.has(path) && (path === '/v1/agents' ? req.method === 'GET' : req.method === 'POST');
+    const ok = (REHOST_PATHS.has(path) && (path === '/v1/agents' ? req.method === 'GET' : req.method === 'POST')) ||
+      (REHOST_MOVE_RECEIPT.test(path) && req.method === 'GET');
     if (!ok) return undefined;
   }
   return owner;

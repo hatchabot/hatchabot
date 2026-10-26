@@ -105,7 +105,8 @@ export interface ApiClient {
   stopAgent(id: string): Promise<void>;
   /** Accepted, not done: the answer may carry the rebuild's operation (followed by #rebuild). */
   rebuildAgent(id: string): Promise<unknown>;
-  setModel(id: string, model: string): Promise<void>;
+  /** What became of the change, for the done message (live, staged, waiting); throws when the runtime refused it. */
+  setModel(id: string, model: string): Promise<string | void>;
   /** What the card for "this agent → that model" should say (GET /v1/agents/:id/model-check). Optional: older fakes. */
   modelCheck?(id: string, model: string): Promise<{ from: string; evidence: string; warnings: string[]; downgrade: boolean }>;
   approvePairing(id: string, code: string): Promise<void>;
@@ -821,22 +822,32 @@ const OP_ACTIVE = new Set(['queued', 'running', 'interrupted']);
 const OP_FAILED = new Set(['failed', 'rolled_back']);
 
 /**
- * A call that answered 202 { operation }: follow GET /v1/operations/:id until
- * it is over (up to `limitMs`), and say how it ended, step and all. Undefined
- * when the answer is not an operation under way (the old synchronous shape).
- * One that failed or was rolled back throws, with its outcome as the message.
+ * A call that answered { operation }: an operation under way (a 202) is
+ * followed by GET /v1/operations/:id until it is over (up to `limitMs`); one
+ * the answer already settled (a recovery that ran, held again or ended) is
+ * read as it is. Either way it says how it ended, step and all. Undefined
+ * when the answer is no operation (the old synchronous shape). One that
+ * failed or was rolled back throws, with its outcome as the message.
+ *
+ * Only an active one was read: a held or failed answer was dropped, and the
+ * card said ✅ with neither its outcome nor its choices (audit #079). An
+ * agent's record also carries its own operation (publicAgent), a held one
+ * included: that is the agent's state, not this call's answer, so it is
+ * followed only while under way, as before.
  */
 export async function followOperation(
   out: unknown,
   get: (path: string) => Promise<unknown>,
   opts: { limitMs?: number; everyMs?: number; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<string | undefined> {
-  const op = (out as { operation?: unknown } | null)?.operation as { id?: unknown; status?: unknown } | undefined;
-  if (!op || typeof op !== 'object' || typeof op.id !== 'string' || !OP_ACTIVE.has(String(op.status))) return undefined;
+  const answer = out as { operation?: unknown; slug?: unknown } | null;
+  const op = answer?.operation as { id?: unknown; status?: unknown } | undefined;
+  if (!op || typeof op !== 'object' || typeof op.id !== 'string' || typeof op.status !== 'string') return undefined;
+  if (!OP_ACTIVE.has(op.status) && typeof answer?.slug === 'string') return undefined;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const deadline = Date.now() + (opts.limitMs ?? 180_000);
   let now = op as Record<string, unknown>;
-  for (;;) {
+  while (OP_ACTIVE.has(String(now.status))) {
     now = (await get(`/v1/operations/${encodeURIComponent(op.id)}`)) as Record<string, unknown>;
     if (!OP_ACTIVE.has(String(now.status))) break;
     if (Date.now() > deadline) {

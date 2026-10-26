@@ -87,8 +87,8 @@ async function idleBlocker(deps: HibernateDeps, a: Agent, now: number, afterMs: 
   return { seen: read };
 }
 
-/** The sweep's choice no longer holds once the lock is taken: it stays up, and there is nothing to report. */
-class NoLongerSleepy extends Error {}
+/** The choice to sleep no longer holds once the lock is taken: it stays up. The sweep has nothing to report; by hand, the reason is the answer. */
+export class NoLongerSleepy extends Error {}
 
 /** Agents whose bedtime mark this process is still reading: the wake poll leaves their placeholder alone. */
 const markPending = new Set<string>();
@@ -121,6 +121,12 @@ export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string,
     // meanwhile used to lose to it and the agent was stopped anyway (#219).
     const blocker = opts.idle ? settledBlocker(deps, deps.store.getAgent(a.id) ?? now, true) : undefined;
     if (blocker) throw new NoLongerSleepy(blocker);
+    // Its scheduled tasks, by hand too, read under the lock the stop holds: a
+    // task added while the route or the sweep read them was put to sleep with
+    // the agent and never ran (audit #055). Adding one takes this lock.
+    const tasks = await deps.ownCrons(deps.store.getAgent(a.id) ?? now).catch(() => undefined);
+    if (tasks === undefined) throw new NoLongerSleepy('its scheduled tasks could not be read');
+    if (tasks.some((c) => c.enabled && !c.system)) throw new NoLongerSleepy('has scheduled tasks');
     // A turn that finished during the sweep's task read (its busy flag clear
     // again) is newer activity than the sweep saw: it stays up (review, 2026-10-22).
     if (opts.idle) {

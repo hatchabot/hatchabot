@@ -138,6 +138,25 @@ describe('runProvisionSteps', () => {
     expect(w.store.getPendingSchedules(first.agent.id)).toEqual(parked);
   });
 
+  it('a template task the gateway refused at setup is added by the next rebuild, once (audit #017)', async () => {
+    const w = await world({ parkFirst: true });
+    const first = await provisionAgent(w.deps, INPUT);
+    const parked = [{ name: 'Morning brief', message: 'Post the brief.', everyMs: 3_600_000 }];
+    w.store.setPendingSchedules(first.agent.id, parked);
+    w.provider.execResponses.set('cron add', { code: 1, stdout: '', stderr: 'gateway busy' });
+    expect((await runProvisionSteps(w.deps, first.agent.id)).agent.state).toBe('RUNNING');
+    expect(w.store.getPendingSchedules(first.agent.id)).toEqual(parked);
+    const adds = () => w.provider.execLog.filter((c) => c[0] === 'cron' && c[1] === 'add' && c.includes('Morning brief')).length;
+    expect(adds()).toBe(1);
+    w.provider.execResponses.set('cron add', { code: 0, stdout: '{"id":"brief-1"}', stderr: '' });
+    expect((await rebuildAgent(w.deps, first.agent.id)).state).toBe('RUNNING');
+    expect(adds()).toBe(2);
+    expect(w.store.getPendingSchedules(first.agent.id)).toEqual([]);
+    // Nothing parked any more: a later rebuild adds nothing.
+    expect((await rebuildAgent(w.deps, first.agent.id)).state).toBe('RUNNING');
+    expect(adds()).toBe(2);
+  });
+
   it('retries from FAILED reusing the already-created channel row', async () => {
     const w = await world({ failOn: 'start' });
     const { agent } = await provisionAgent(w.deps, INPUT);

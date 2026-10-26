@@ -70,9 +70,8 @@ export interface LocalDockerOptions {
  * Shells out to the docker CLI rather than a client library: fewer deps, and
  * every operation here is coarse enough that process spawn cost is noise.
  */
-/** Docker object prefix for new agents; `agentclaw` is what installs from before the rename used. */
-export const DEFAULT_PREFIX = 'hatchabot';
-export const LEGACY_PREFIXES = ['agentclaw'] as const;
+import { DEFAULT_PREFIX, dockerNames, LEGACY_PREFIXES } from './dockerNames.js';
+export { DEFAULT_PREFIX, LEGACY_PREFIXES };
 /** Docker image reference: repo[:tag] — no leading dash, so it can't parse as a flag. */
 /** basename() for a model path — the container sees the file under /models. */
 const EMBED_MODEL_BASENAME = (p: string): string => p.split('/').pop() ?? p;
@@ -216,20 +215,12 @@ export class LocalDockerProvider implements RuntimeProvider {
   }
 
   /**
-   * Resolve a stored ref to docker object names. Legacy refs (pre-slug, a bare
-   * uuid fragment) map to the old naming scheme so existing agents keep
-   * working without a migration.
+   * Resolve a stored ref to docker object names (dockerNames, the one rule the
+   * backups share). Legacy refs (pre-slug, a bare uuid fragment) map to the
+   * old naming scheme so existing agents keep working without a migration.
    */
   #names(runtimeRef: string) {
-    const name = runtimeRef.replace(/^docker:\/\//, '');
-    if (name.startsWith(`${this.prefix}-`) || LEGACY_PREFIXES.some((p) => name.startsWith(`${p}-`))) {
-      return { container: name, volume: `${name}-vol` };
-    }
-    // legacy: docker://<uuid-fragment> — these predate the rename, so under the
-    // default prefix they live under the old one.
-    const short = name.slice(0, 12);
-    const p = this.prefix === DEFAULT_PREFIX ? LEGACY_PREFIXES[0] : this.prefix;
-    return { container: `${p}-${short}`, volume: `${p}-vol-${short}` };
+    return dockerNames(runtimeRef, this.prefix);
   }
 
   /**
@@ -648,7 +639,11 @@ export class LocalDockerProvider implements RuntimeProvider {
     const [addrs = '', publishedSelf = '', viaDoorman = ''] = res.stdout.trim().split('|');
     const published = publishedSelf.trim() || viaDoorman.trim();
     const [state = '', ip] = addrs.trim().split(/\s+/);
-    if (state === 'exited' || state === 'created' || state === 'paused') {
+    // Not paused: a paused process is frozen, not stopped — `docker stop`
+    // refuses it, and unpaused it polls its bot again. Called stopped, an
+    // archive gave that bot back to the pool (audit #084). It falls to the
+    // error below, which nothing takes for stopped.
+    if (state === 'exited' || state === 'created') {
       return { phase: 'stopped' };
     }
     if (state === 'running') {

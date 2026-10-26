@@ -497,6 +497,15 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       .prepare(`SELECT secret_ref, leased_to FROM telegram_pool WHERE username = ? COLLATE NOCASE`)
       .get(accountId) as { secret_ref?: string; leased_to?: string } | undefined;
 
+    // Another agent's lease is not the departing one's to end. A pasted bot
+    // parked a moment before is free, and a create may lease it before this
+    // release runs: clearing that lease listed a live agent's bot as spare,
+    // and Remove then deleted the token it runs on (audit #089).
+    if (opts.agentId && row?.leased_to && row.leased_to !== opts.agentId) {
+      this.opts.log?.('pool.release_skipped', { accountId, leasedTo: row.leased_to, departing: opts.agentId });
+      return;
+    }
+
     // Whose members to say goodbye to. Usually the lease, but a PASTED bot is
     // parked in the pool just before release (delete and archive both do this,
     // so the token stays reusable) and has no lease to read — the caller names

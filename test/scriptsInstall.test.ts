@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
 
 // Every test here runs real shell scripts (git, bash, a fake gh) in a sandbox. On the
@@ -79,16 +79,140 @@ describe('install.sh picks the release, and says so when it cannot (review, 2026
   });
 });
 
+/** The service unit setup-host.sh installs, running from dir: a finished setup. */
+const serviceUnit = (home: string, dir: string) => {
+  mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true });
+  writeFileSync(join(home, '.config', 'systemd', 'user', 'hatchabot.service'), `[Service]\nWorkingDirectory=${dir}\nEnvironmentFile=${dir}/.env\n`);
+};
+
 describe('install.sh re-run on a clone install (review, 2026-10-09)', () => {
   it('upgrades through upgrade.sh (its lock and rollback) instead of checking out and installing in place', () => {
     const w = world(CHANNELS);
     mkdirSync(join(w.dir, '.git'), { recursive: true }); mkdirSync(join(w.dir, 'scripts'));
     writeFileSync(join(w.dir, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
+    serviceUnit(w.home, w.dir);
     shim(join(w.dir, 'scripts'), 'with-docker.sh', `echo "with-docker $*" >> ${JSON.stringify(w.log)}`);
     const r = w.run(['stable']);
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(readFileSync(w.log, 'utf8')).toBe('with-docker ./scripts/upgrade.sh stable\n');
     expect(readFileSync(join(w.home, '.config', 'hatchabot', 'channel'), 'utf8')).toBe('stable\n');
+  });
+});
+
+describe('install.sh re-run after a first setup that stopped part-way finishes the setup (audit #041)', () => {
+  it('a bundle unpacked but never set up (no .env, no service): setup-host.sh, not "Already on"', () => {
+    const w = world(CHANNELS);
+    mkdirSync(join(w.dir, 'scripts'), { recursive: true });
+    writeFileSync(join(w.dir, 'BUNDLE.json'), '{"tag":"v2.0.0","platform":"linux-x64"}\n');
+    shim(join(w.dir, 'scripts'), 'with-docker.sh', `echo "with-docker $*" >> ${JSON.stringify(w.log)}`);
+    const r = w.run(['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('did not finish — finishing it now');
+    expect(readFileSync(w.log, 'utf8')).toBe('with-docker ./scripts/setup-host.sh\n');
+  });
+
+  it('one unpacked at an older release: set up on that one, and the upgrade named for later', () => {
+    const w = world(CHANNELS);
+    mkdirSync(join(w.dir, 'scripts'), { recursive: true });
+    writeFileSync(join(w.dir, 'BUNDLE.json'), '{"tag":"v1.9.0","platform":"linux-x64"}\n');
+    writeFileSync(join(w.dir, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n'); // setup got as far as .env
+    shim(join(w.dir, 'scripts'), 'with-docker.sh', `echo "with-docker $*" >> ${JSON.stringify(w.log)}`);
+    const r = w.run(['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('on v1.9.0, the release unpacked then; once it is set up, hatchabot upgrade takes it to v2.0.0');
+    expect(readFileSync(w.log, 'utf8')).toBe('with-docker ./scripts/setup-host.sh\n');
+    expect(readFileSync(join(w.dir, '.env'), 'utf8')).toBe('HATCHABOT_SECRET_KEY=made-up\n');
+  });
+
+  it('a set-up bundle install (its service runs from it) is upgraded, as before', () => {
+    const w = world(CHANNELS);
+    mkdirSync(join(w.dir, 'scripts'), { recursive: true });
+    writeFileSync(join(w.dir, 'BUNDLE.json'), '{"tag":"v2.0.0","platform":"linux-x64"}\n');
+    writeFileSync(join(w.dir, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
+    serviceUnit(w.home, w.dir);
+    shim(join(w.dir, 'scripts'), 'with-docker.sh', `echo "with-docker $*" >> ${JSON.stringify(w.log)}`);
+    const r = w.run(['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readFileSync(w.log, 'utf8')).toBe('with-docker ./scripts/upgrade.sh stable\n');
+  });
+
+  it('a clone whose setup wrote .env and then stopped: checked out at the release and set up, its .env kept', () => {
+    const w = world(CHANNELS);
+    symlinkSync(process.execPath, join(w.bin, 'node'));
+    for (const t of ['make', 'g++', 'python3']) shim(w.bin, t, 'exit 0'); // the build tools the native install asks for, never run here
+    const git = (cwd: string, ...args: string[]) => {
+      const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: scriptEnv(w.home, `${w.bin}:/usr/bin:/bin`) });
+      if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+    };
+    const src = join(w.root, 'src'); mkdirSync(join(src, 'scripts'), { recursive: true });
+    git(src, 'init', '-q', '-b', 'main');
+    writeFileSync(join(src, '.gitignore'), '.env\n');
+    shim(join(src, 'scripts'), 'with-docker.sh', `echo "with-docker $* at $(git describe --tags --exact-match)" >> ${JSON.stringify(w.log)}`);
+    git(src, 'add', '-A'); git(src, 'commit', '-q', '-m', 'v1.9'); git(src, 'tag', 'v1.9.0');
+    git(src, 'commit', '-q', '--allow-empty', '-m', 'v2'); git(src, 'tag', 'v2.0.0');
+    git(w.root, 'clone', '-q', src, w.dir); git(w.dir, 'checkout', '-q', 'v1.9.0');
+    writeFileSync(join(w.dir, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
+    const r = w.run(['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readFileSync(w.log, 'utf8')).toBe('with-docker ./scripts/setup-host.sh at v2.0.0\n');
+    expect(readFileSync(join(w.dir, '.env'), 'utf8')).toBe('HATCHABOT_SECRET_KEY=made-up\n');
+  });
+});
+
+describe('the units\' PATH holds a folder with a space in its name (audit #044)', () => {
+  const ANALYZE = '/usr/bin/systemd-analyze';
+  /** systemd's own reading of a generated unit, offline: only the unit's folder searched, no generators, nothing started. */
+  const verify = (home: string, unit: string) => spawnSync(ANALYZE, ['verify', '--man=no', '--generators=no', '--recursive-errors=no', unit], {
+    encoding: 'utf8', env: scriptEnv(home, '/usr/bin:/bin', { SYSTEMD_UNIT_PATH: dirname(unit), SYSTEMD_ENVIRONMENT_GENERATOR_PATH: '/dev/null', SYSTEMD_LOG_COLOR: '0' }),
+  });
+  function units() {
+    const root = mkdtempSync(join(tmpdir(), 'hb-unit-path-')); dirs.push(root);
+    const home = join(root, 'home'); mkdirSync(home);
+    const bin = join(root, 'bin'); mkdirSync(bin);
+    // Node where a bundle install in such a folder keeps it (made-up names; a quote and a % too).
+    const nodeDir = join(root, 'node "binaries" 100%'); mkdirSync(nodeDir);
+    shim(nodeDir, 'node', 'exit 0');
+    for (const t of ['systemctl', 'docker']) shim(bin, t, 'exit 0');
+    for (const t of ['getent', 'pgrep']) shim(bin, t, 'exit 1');
+    shim(bin, 'loginctl', 'echo Linger=yes');
+    const app = join(root, 'app'); mkdirSync(join(app, 'scripts'), { recursive: true }); mkdirSync(join(app, 'deploy')); mkdirSync(join(app, 'node_modules', '.bin'), { recursive: true });
+    for (const f of ['install-service.sh', 'follow-channel.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    for (const u of ['hatchabot.service', 'hatchabot-backup.service', 'hatchabot-backup.timer']) writeFileSync(join(app, 'deploy', u), readFileSync(join('deploy', u)));
+    for (const f of ['scripts/with-docker.sh', 'scripts/backup-volumes.sh', 'node_modules/.bin/tsx']) shim(app, f, 'exit 0');
+    writeFileSync(join(app, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
+    const env = scriptEnv(home, `${nodeDir}:${bin}:/usr/bin:/bin`);
+    const run = (script: string, ...args: string[]) => spawnSync('bash', [join(app, 'scripts', script), ...args], { encoding: 'utf8', input: '', env });
+    return { home, nodeDir, run, unit: (name: string) => join(home, '.config', 'systemd', 'user', name) };
+  }
+
+  it('is written quoted whole, the quote and the % escaped for systemd', () => {
+    const w = units();
+    const a = w.run('install-service.sh');
+    expect(a.status, a.stdout + a.stderr).toBe(0);
+    const b = w.run('follow-channel.sh', '--install', 'stable');
+    expect(b.status, b.stdout + b.stderr).toBe(0);
+    const want = `Environment="PATH=${w.nodeDir.replace(/"/g, '\\"').replace(/%/g, '%%')}:`;
+    for (const u of ['hatchabot.service', 'hatchabot-backup.service', 'hatchabot-follow-channel.service']) {
+      const text = readFileSync(w.unit(u), 'utf8');
+      expect(text, u).toContain(want);
+      expect(text, u).toMatch(/^Environment="PATH=.*:\/usr\/bin:\/bin"$/m);
+    }
+  });
+
+  it.skipIf(!existsSync(ANALYZE))('systemd reads it as one assignment (systemd-analyze verify)', () => {
+    const w = units();
+    expect(w.run('install-service.sh').status).toBe(0);
+    expect(w.run('follow-channel.sh', '--install', 'stable').status).toBe(0);
+    for (const u of ['hatchabot.service', 'hatchabot-backup.service', 'hatchabot-follow-channel.service']) {
+      const r = verify(w.home, w.unit(u));
+      expect(r.stderr, u).not.toContain('Invalid environment assignment');
+      expect(r.status, `${u}: ${r.stderr}`).toBe(0);
+    }
+  });
+
+  it('every unit a script writes quotes its PATH (the templates, the timers)', () => {
+    const files = ['deploy/hatchabot.service', 'deploy/hatchabot-backup.service', 'scripts/install-service.sh', 'scripts/follow-channel.sh', 'scripts/follow-latest.sh', 'scripts/privacy-sync.sh'];
+    for (const f of files) expect(readFileSync(f, 'utf8'), f).not.toMatch(/^Environment=PATH=/m);
   });
 });
 

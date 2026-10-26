@@ -21,12 +21,13 @@ vi.setConfig({ testTimeout: 30_000 });
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-function world(prState: 'merge' | 'fail' | 'kitfail' | 'close' | 'noauto' | 'green' | 'queued' | 'runsdown' | 'statusdown' | 'statusonly' = 'merge', required = true) {
+function world(prState: 'merge' | 'fail' | 'kitfail' | 'close' | 'noauto' | 'green' | 'queued' | 'runsdown' | 'statusdown' | 'statusonly' | 'stuck' = 'merge', required = true) {
   const root = mkdtempSync(join(tmpdir(), 'hb-land-')); dirs.push(root);
   const bin = join(root, 'bin'); mkdirSync(bin);
   const origin = join(root, 'origin.git');
   const log = join(root, 'gh.log');
   const merged = join(root, 'merged');
+  const closed = join(root, 'closed');
   writeFileSync(join(bin, 'gh'), `#!/bin/sh
 echo "$*" >> "${log}"
 land() { b=$(git --git-dir="${origin}" for-each-ref --format='%(refname:short)' 'refs/heads/land/*' | head -1)
@@ -36,7 +37,7 @@ case "$1 $2" in
   # The Actions API, already through --jq: runs as "id<TAB>status<TAB>name", jobs as "name<TAB>state".
   "api "*/actions/runs/11/jobs*) case "${prState}" in
       noauto|green|statusdown) printf 'test\tpass\nprivacy\tskipping\nkit-checks\tpass\n' ;;
-      fail) printf 'test\tpass\nprivacy\tfail\n' ;;
+      fail|stuck) printf 'test\tpass\nprivacy\tfail\n' ;;
       kitfail) printf 'test\tpass\nkit-checks\tfail\n' ;;
       *) printf 'test\tpending\n' ;;
     esac ;;
@@ -53,10 +54,12 @@ case "$1 $2" in
       *) echo "11	completed	CI" ;;
     esac ;;
   "pr create") echo "https://github.com/example-owner/example/pull/7" ;;
-  "pr merge") case "$*" in *--auto*) ${required ? ':' : 'exit 1'} ;; *--disable-auto*) ;; *) land ;; esac ;;
-  "pr close") ;;
+  # stuck: a failed check, and GitHub refuses both turning auto-merge off and closing (an outage).
+  "pr merge") case "$*" in *--auto*) ${required ? ':' : 'exit 1'} ;; *--disable-auto*) [ "${prState}" != stuck ] || exit 1 ;; *) land ;; esac ;;
+  "pr close") [ "${prState}" != stuck ] || exit 1; touch "${closed}" ;;
   "pr view")
     if [ -f "${merged}" ]; then echo 'MERGED noauto'; exit 0; fi
+    if [ -f "${closed}" ]; then echo 'CLOSED noauto'; exit 0; fi
     case "${prState}" in
       merge) land; echo 'MERGED auto' ;;
       close) echo 'CLOSED noauto' ;;
@@ -115,7 +118,20 @@ describe('scripts/land.sh lands commits on main through a pull request', () => {
     const r = w.land();
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('Check(s) failed: privacy');
+    expect(r.stderr).toContain('the pull request is closed'); // GitHub said so
     expect(w.ghLog()).toMatch(/pr merge \S+ --repo \S+ --disable-auto/);
+    expect(w.ghLog()).toMatch(/pr close \S+ --repo \S+ --delete-branch/);
+  });
+
+  it('a failed check whose pull request GitHub does not close is said as still open, exit 3 (audit #046)', () => {
+    const w = world('stuck');
+    writeFileSync(join(w.work, 'b.txt'), 'two\n'); w.git(w.work, 'add', 'b.txt'); w.git(w.work, 'commit', '-q', '-m', 'Add b');
+    const r = w.land();
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(r.stderr).toContain('Check(s) failed: privacy');
+    expect(r.stderr).not.toContain('the pull request is closed');
+    expect(r.stderr).toContain('closing the pull request failed: https://github.com/example-owner/example/pull/7 is still open, with auto-merge on');
+    expect(r.stderr).toContain('gh pr close https://github.com/example-owner/example/pull/7');
     expect(w.ghLog()).toMatch(/pr close \S+ --repo \S+ --delete-branch/);
   });
 

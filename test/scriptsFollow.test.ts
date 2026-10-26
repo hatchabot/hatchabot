@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
@@ -27,27 +27,53 @@ afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, f
 const lines = (p: string) => (existsSync(p) ? readFileSync(p, 'utf8').split('\n').filter(Boolean) : []);
 
 describe('scripts/follow-channel.sh', () => {
-  /** An install whose release-target.sh says v1.1.0 and whose upgrade.sh exits with what rc.txt says. */
-  function world() {
-    const root = mkdtempSync(join(tmpdir(), 'hb-follow-channel-')); dirs.push(root);
-    const home = join(root, 'home'); mkdirSync(home);
-    const app = join(root, 'app'); mkdirSync(join(app, 'scripts'), { recursive: true });
+  /**
+   * An install whose release-target.sh says v1.1.0 and whose upgrade.sh exits with what rc.txt says.
+   * `beside`: another install of the same user (same HOME), in the same root.
+   */
+  function world(beside?: { root: string; home: string }, name = 'app') {
+    const root = beside?.root ?? mkdtempSync(join(tmpdir(), 'hb-follow-channel-')); if (!beside) dirs.push(root);
+    const home = beside?.home ?? join(root, 'home'); mkdirSync(home, { recursive: true });
+    const bin = join(root, 'bin'); mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'systemctl'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    const app = join(root, name); mkdirSync(join(app, 'scripts'), { recursive: true });
     writeFileSync(join(app, 'scripts', 'follow-channel.sh'), readFileSync('scripts/follow-channel.sh'), { mode: 0o755 });
-    writeFileSync(join(app, 'scripts', 'release-target.sh'), '#!/usr/bin/env bash\necho v1.1.0\n', { mode: 0o755 });
-    const log = join(root, 'upgrades.log'), rc = join(root, 'rc.txt');
-    writeFileSync(join(app, 'scripts', 'upgrade.sh'), `#!/usr/bin/env bash\necho "upgrade $* timer=\${HATCHABOT_UPGRADE_BY_TIMER:-}" >> ${JSON.stringify(log)}\nexit "$(cat ${JSON.stringify(rc)})"\n`, { mode: 0o755 });
+    const asked = join(root, `${name}-asked.log`);
+    writeFileSync(join(app, 'scripts', 'release-target.sh'), `#!/usr/bin/env bash\necho "$1" >> ${JSON.stringify(asked)}\necho v1.1.0\n`, { mode: 0o755 });
+    const log = join(root, `${name}-upgrades.log`), rc = join(root, `${name}-rc.txt`);
+    writeFileSync(join(app, 'scripts', 'upgrade.sh'), `#!/usr/bin/env bash\necho "upgrade $* timer=\${HATCHABOT_UPGRADE_BY_TIMER:-} target=\${HATCHABOT_UPGRADE_TARGET:-}" >> ${JSON.stringify(log)}\nexit "$(cat ${JSON.stringify(rc)})"\n`, { mode: 0o755 });
     const state = join(home, '.local', 'state', 'hatchabot');
+    const follow = (...args: string[]) => spawnSync('bash', [join(app, 'scripts', 'follow-channel.sh'), ...args], { encoding: 'utf8', env: scriptEnv(home, `${bin}:/usr/bin:/bin`) });
     const run = (code: number) => {
       writeFileSync(rc, String(code));
-      return spawnSync('bash', [join(app, 'scripts', 'follow-channel.sh'), 'stable'], { encoding: 'utf8', env: scriptEnv(home, '/usr/bin:/bin') });
+      return follow('stable');
     };
-    return { run, log, state, tries: join(state, 'follow-channel-tries'), failed: join(state, 'follow-channel-failed') };
+    // Its records are its own, keyed on its path as the upgrade lock is (audit #034).
+    const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', app], { encoding: 'utf8' }).trim();
+    return { root, home, run, follow, log, asked, state, tries: join(state, `follow-channel-tries-${key}`), failed: join(state, `follow-channel-failed-${key}`), channelFile: join(home, '.config', 'hatchabot', 'channel') };
   }
 
-  it('asks upgrade.sh as the timer (so it leaves the chosen channel alone)', () => {
+  it('asks upgrade.sh as the timer (so it leaves the chosen channel alone), for the release it resolved', () => {
     const w = world();
     expect(w.run(0).status).toBe(0);
-    expect(lines(w.log)).toEqual(['upgrade stable timer=1']);
+    expect(lines(w.log)).toEqual(['upgrade stable timer=1 target=v1.1.0']);
+  });
+
+  it('follows the channel chosen last, not the one the timer was installed with (audit #043)', () => {
+    const w = world();
+    const installed = w.follow('--install', 'stable');
+    expect(installed.status, installed.stdout + installed.stderr).toBe(0);
+    expect(readFileSync(w.channelFile, 'utf8').trim()).toBe('stable'); // --install remembers it, as `hatchabot upgrade stable` does
+    // `hatchabot upgrade beta` remembers beta (scripts/upgrade.sh); the timer still says stable.
+    writeFileSync(w.channelFile, 'beta\n');
+    expect(w.run(0).status).toBe(0);
+    expect(lines(w.asked)).toEqual(['beta']);
+    expect(lines(w.log)).toEqual(['upgrade beta timer=1 target=v1.1.0']);
+    // A version there is a pin: the timer leaves the machine alone, and asks nothing.
+    writeFileSync(w.channelFile, 'v1.0.0\n');
+    expect(w.run(0).status).toBe(0);
+    expect(lines(w.asked)).toEqual(['beta']);
+    expect(lines(w.log)).toHaveLength(1);
   });
 
   it('a release that keeps failing to install is retried less and less often, then set aside', () => {
@@ -86,6 +112,68 @@ describe('scripts/follow-channel.sh', () => {
     const w = world();
     w.run(1);
     expect(readFileSync(w.failed, 'utf8').trim()).toBe('v1.1.0');
+  });
+
+  it('a release that failed on one install of the user\'s is still tried on another, and their retries are counted apart (audit #034)', () => {
+    const first = world();
+    const second = world(first, 'second-app');
+    expect(first.run(1).status).toBe(1);
+    expect(readFileSync(first.failed, 'utf8').trim()).toBe('v1.1.0');
+    expect(second.run(0).status).toBe(0);
+    expect(lines(second.log)).toEqual(['upgrade stable timer=1 target=v1.1.0']);
+    // A failing install on the second does not make the first wait, or count towards its MAX_TRIES.
+    const third = world(first, 'third-app');
+    expect(second.run(3).status).toBe(1);
+    expect(third.run(3).stdout).toContain('(1 of 8)');
+    expect(lines(third.log)).toHaveLength(1);
+  });
+
+  it('a record from before, not yet keyed on an install, is taken over: the release stays set aside', () => {
+    const w = world();
+    mkdirSync(w.state, { recursive: true });
+    writeFileSync(join(w.state, 'follow-channel-failed'), 'v1.1.0\n');
+    expect(w.run(0).status).toBe(0);
+    expect(lines(w.log)).toEqual([]);
+    expect(readFileSync(w.failed, 'utf8').trim()).toBe('v1.1.0');
+    expect(existsSync(join(w.state, 'follow-channel-failed'))).toBe(false);
+  });
+});
+
+describe('scripts/follow-channel.sh with the real upgrade.sh (audit #042)', () => {
+  it('the release it sets aside is the one upgrade.sh tried, though the channel moved between the two', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-follow-target-')); dirs.push(root);
+    const app = join(root, 'app'), home = join(root, 'home'), bin = join(root, 'bin');
+    for (const d of [join(app, 'scripts'), home, bin]) mkdirSync(d, { recursive: true });
+    const asked = join(root, 'asked'), restarts = join(root, 'restarts');
+    const env = scriptEnv(home, `${bin}:/usr/bin:/bin`, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_RESTART_CMD: join(app, 'scripts', 'restart.sh'), HATCHABOT_UPGRADE_IMAGE: '0' });
+    const git = (...args: string[]) => execFileSync(REAL_GIT, args, { cwd: app, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    git('init', '-q', '-b', 'main');
+    for (const f of ['follow-channel.sh', 'upgrade.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    // stable names v1.1.0 when asked first, and v1.2.0 from the next question on (promoted meanwhile).
+    writeFileSync(join(app, 'scripts', 'release-target.sh'), `#!/usr/bin/env bash\necho "$1" >> ${JSON.stringify(asked)}\nif [ "$(wc -l < ${JSON.stringify(asked)})" -le 1 ]; then echo v1.1.0; else echo v1.2.0; fi\n`, { mode: 0o755 });
+    // v1.2.0 does not come up; the others do.
+    writeFileSync(join(app, 'scripts', 'restart.sh'), `#!/usr/bin/env bash\ntag="$(git describe --tags --exact-match)"\necho "$tag" >> ${JSON.stringify(restarts)}\n[ "$tag" != v1.2.0 ]\n`, { mode: 0o755 });
+    writeFileSync(join(app, '.gitignore'), 'node_modules/\nnode_modules.prev/\n');
+    for (const v of ['1.0.0', '1.1.0', '1.2.0']) {
+      writeFileSync(join(app, 'package.json'), JSON.stringify({ version: v }));
+      git('add', '-A'); git('commit', '-qm', `v${v}`); git('tag', `v${v}`);
+    }
+    git('checkout', '-q', 'v1.0.0');
+    const tick = () => spawnSync('bash', [join(app, 'scripts', 'follow-channel.sh'), 'stable'], { env, encoding: 'utf8' });
+    // This install's own record, keyed on its path (audit #034).
+    const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', app], { encoding: 'utf8' }).trim();
+    const failed = join(home, '.local', 'state', 'hatchabot', `follow-channel-failed-${key}`);
+    const first = tick();
+    expect(first.status, first.stdout + first.stderr).toBe(0);
+    expect(first.stdout).toContain('Upgrading v1.0.0 → v1.1.0'); // what the timer resolved, not a second answer
+    expect(lines(asked)).toEqual(['stable']);
+    const second = tick();
+    expect(second.status, second.stdout + second.stderr).toBe(1);
+    expect(readFileSync(failed, 'utf8').trim()).toBe('v1.2.0'); // the release that failed, by its own name
+    const third = tick();
+    expect(third.status, third.stdout + third.stderr).toBe(0);
+    expect(lines(restarts)).toEqual(['v1.1.0', 'v1.2.0', 'v1.1.0']); // tried once, rolled back, not tried again
+    expect(git('describe', '--tags', '--exact-match')).toBe('v1.1.0');
   });
 });
 
@@ -144,6 +232,16 @@ describe('scripts/deploy-release.sh (review, 2026-10-09)', () => {
     expect(lines(w.log).filter((l) => l.startsWith('systemctl'))).toEqual([]);
   });
 
+  it('after a deploy killed right after moving node_modules aside, a failed install still rolls back to those dependencies (audit #033)', () => {
+    const w = prodWorld();
+    renameSync(join(w.prod, 'node_modules'), join(w.prod, 'node_modules.prev')); // the only working copy
+    const r = w.deploy({ FAKE_DEPS_RC: '1' });
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(w.at()).toBe('v1.0.0');
+    expect(readFileSync(join(w.prod, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+    expect(existsSync(join(w.prod, 'node_modules.prev'))).toBe(false);
+  });
+
   it('a release whose service does not restart: rolled back, the old one restarted, exit 1', () => {
     const w = prodWorld();
     const r = w.deploy({ FAKE_SYSTEMCTL_RC: '1' });
@@ -160,6 +258,50 @@ describe('scripts/deploy-release.sh (review, 2026-10-09)', () => {
     expect(r.status, r.stdout + r.stderr).toBe(3);
     expect(existsSync(join(w.prod, 'node_modules', 'marker'))).toBe(true);
     expect(existsSync(join(w.prod, 'node_modules.prev'))).toBe(false);
+  });
+
+  describe('asks the listener the service is configured with (audit #030, #031)', () => {
+    /** Production's .env (kept out of git status), and a service that answers only at `url`. */
+    function serving(env: string, url: string) {
+      const w = prodWorld();
+      writeFileSync(join(w.prod, '.git', 'info', 'exclude'), '.env\n');
+      writeFileSync(join(w.prod, '.env'), env);
+      const asked = join(w.root, 'asked.log');
+      writeFileSync(join(w.bin, 'curl'), `#!/usr/bin/env bash\necho "\${@: -1}" >> ${JSON.stringify(asked)}\n[ "\${@: -1}" = ${JSON.stringify(url)} ] || exit 7\necho '<script>window.HATCHABOT_VERSION="1.1.0"</script>'\n`, { mode: 0o755 });
+      writeFileSync(join(w.bin, 'sleep'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+      return { ...w, r: w.deploy(), asked: () => lines(asked) };
+    }
+
+    it('a service bound to one LAN or IPv6 address is asked there, and the healthy release stays', () => {
+      for (const [bind, url] of [['192.0.2.10', 'http://192.0.2.10:9090/'], ['2001:db8::10', 'http://[2001:db8::10]:9090/']] as const) {
+        const w = serving(`HATCHABOT_BIND=${bind}\nPORT=9090\n`, url);
+        expect(w.r.status, w.r.stdout + w.r.stderr).toBe(0);
+        expect(w.r.stdout).toContain('Serving 1.1.0.');
+        expect(w.at()).toBe('v1.1.0');
+        expect(w.asked()).toEqual([url]);
+      }
+    });
+
+    it('a name set twice in .env is read as the service reads it: the last one, without its comment', () => {
+      const w = serving('PORT=8080\nHATCHABOT_TLS_CERT=\nPORT=9090   # moved off 8080\n', 'http://127.0.0.1:9090/');
+      expect(w.r.status, w.r.stdout + w.r.stderr).toBe(0);
+      expect(w.asked()).toEqual(['http://127.0.0.1:9090/']);
+    });
+  });
+
+  it('a fetch that fails before anything changed (another fetch\'s ref lock) says 3, try again — not 1, set aside (audit #032)', () => {
+    const w = prodWorld();
+    // What a concurrent fetch leaves while it runs: its lock on the remote-tracking ref.
+    w.git(w.prod, 'update-ref', '-d', 'refs/remotes/origin/main');
+    mkdirSync(join(w.prod, '.git', 'refs', 'remotes', 'origin'), { recursive: true });
+    writeFileSync(join(w.prod, '.git', 'refs', 'remotes', 'origin', 'main.lock'), 'held by another fetch');
+    const r = w.deploy();
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(r.stderr).toContain('cannot lock ref');
+    expect(r.stdout).toContain('nothing was changed');
+    expect(w.at()).toBe('v1.0.0');
+    expect(existsSync(join(w.prod, 'node_modules', 'marker'))).toBe(true);
+    expect(lines(w.log)).toEqual([]); // nothing installed, nothing restarted
   });
 
   it('takes its lock in the user\'s state folder, not /tmp', () => {

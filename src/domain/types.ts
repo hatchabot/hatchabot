@@ -151,6 +151,8 @@ export interface Agent {
   hibernatedAt?: string;
   /** A copy was downloaded (or moved by file) while it stood stopped; its bot is not parked on delete (transfer.ts). Cleared when it runs again. */
   exportedAt?: string;
+  /** Moved while stopped, so its new container has not run its rebuild hook yet: run at its next start (moveHost.ts). */
+  rebuildHookDue?: string;
   /** `never`: this agent stays awake whatever the machine's idle rule says. */
   hibernate?: 'never';
   /** When it was last woken: the idle clock restarts here, so a woken agent is not put straight back. */

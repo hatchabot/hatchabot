@@ -5,6 +5,7 @@
 #   ./scripts/uninstall.sh --purge      # …and the data: volumes, database, images, network
 #   ./scripts/uninstall.sh --purge --backups --yes
 #   ./scripts/uninstall.sh --installed  # the install the service runs, from another clone
+#   ./scripts/uninstall.sh --purge --forget-runners  # …though agents on a runner keep running there
 #
 # Without --purge NOTHING you would miss is deleted: agent volumes (memory,
 # files, members), the database, the backups and the runtime image all stay,
@@ -19,14 +20,15 @@ cd "$(dirname "$0")/.."
 [ -x .node/bin/node ] && PATH="$PWD/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 REPO="$(pwd)"
 
-PURGE=0; BACKUPS=0; ASSUME_YES=0; INSTALLED=0
+PURGE=0; BACKUPS=0; ASSUME_YES=0; INSTALLED=0; FORGET_RUNNERS=0
 for arg in "$@"; do
   case "$arg" in
     --purge) PURGE=1 ;;
     --backups) BACKUPS=1 ;;
     --installed) INSTALLED=1 ;;
     -y|--yes) ASSUME_YES=1 ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    --forget-runners) FORGET_RUNNERS=1 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg (try --help)"; exit 2 ;;
   esac
 done
@@ -80,9 +82,20 @@ ENV_DIR="$REPO"
 
 # Where the data lives, read the same way the server reads it.
 [ -f "$ENV_DIR/.env" ] && set -a && . "$ENV_DIR/.env" 2>/dev/null; set +a
+# A pre-rename .env says AGENTCLAW_*: the server takes each for its HATCHABOT_*
+# name unless that is set (src/envCompat.ts), and so does this. Without it an
+# AGENTCLAW_DB went unread, and --purge left that database and its agents
+# behind but deleted the .env that named them (audit #026).
+for v in $(compgen -A variable AGENTCLAW_ 2>/dev/null); do n="HATCHABOT_${v#AGENTCLAW_}"; [ -n "${!n+x}" ] || export "$n=${!v}"; done
 BACKUP_DIR="${HATCHABOT_BACKUP_DIR:-$HOME/hatchabot-backups}"
+[ -d "$BACKUP_DIR" ] || [ -n "${HATCHABOT_BACKUP_DIR:-}" ] || { [ -d "$HOME/agentclaw-backups" ] && BACKUP_DIR="$HOME/agentclaw-backups"; }   # pre-rename hosts (defaultBackupsDir)
 DB_PATH="${HATCHABOT_DB:-$ENV_DIR/data/hatchabot.sqlite}"
-case "$DB_PATH" in /*) ;; *) DB_PATH="$ENV_DIR/$DB_PATH" ;; esac   # relative to the install, as the server reads it
+[ -f "$DB_PATH" ] || [ -n "${HATCHABOT_DB:-}" ] || { [ -f "$ENV_DIR/data/agentclaw.sqlite" ] && DB_PATH="$ENV_DIR/data/agentclaw.sqlite"; }   # pre-rename default (defaultDbPath)
+# Both relative to the install, as the server (run from it) reads them — not
+# to wherever this was started: with --installed a relative backup folder was
+# the invoking clone's, and --backups deleted that clone's sets (audit #028).
+case "$DB_PATH" in /*) ;; *) DB_PATH="$ENV_DIR/$DB_PATH" ;; esac
+case "$BACKUP_DIR" in /*) ;; *) BACKUP_DIR="$ENV_DIR/$BACKUP_DIR" ;; esac
 DATA_DIR="$(dirname "$DB_PATH")"
 
 # Containers and volumes belong to Hatchabot by name: agentclaw- is the old
@@ -112,6 +125,51 @@ fi
 if [ "$PURGE" = 1 ] && [ -f "$DB_PATH" ] && [ ! -d "$REPO/node_modules/better-sqlite3" ]; then
   echo "Cannot read the database at $DB_PATH (dependencies are not installed: run npm ci in $REPO first), so --purge would orphan every agent's volume. Refusing."; exit 2
 fi
+# Agents on a runner (a host with a Docker endpoint of its own, its
+# settings.dockerHost) live on another machine's daemon, and every docker
+# command here asks this one: --purge deleted the only record of them and the
+# key to their data, said they were gone, and left them running there (audit
+# #037). They are named; --purge refuses while there are any, unless
+# --forget-runners says to leave them where they are.
+runner_agents() {
+  [ -f "$DB_PATH" ] && [ -d "$REPO/node_modules/better-sqlite3" ] || return 0
+  (cd "$REPO" && node -e '
+    const db = require("better-sqlite3")(process.argv[1], { readonly: true });
+    const has = (t, c) => !!db.prepare("SELECT 1 FROM pragma_table_info(?) WHERE name = ?").get(t, c);
+    if (!has("agents", "host_id") || !has("hosts", "settings")) process.exit(0);
+    for (const r of db.prepare("SELECT a.name AS agent, h.name AS host, h.settings AS settings FROM agents a JOIN hosts h ON h.id = a.host_id").all()) {
+      let s = {}; try { s = JSON.parse(r.settings) || {}; } catch {}
+      const at = typeof s.dockerHost === "string" ? s.dockerHost.trim() : "";
+      if (at) console.log(`${r.agent} (on ${r.host}: ${at})`);
+    }' "$DB_PATH" 2>/dev/null)
+}
+if RUNNERS="$(runner_agents)"; then :; else
+  RUNNERS=""
+  if [ "$PURGE" = 1 ]; then echo "Cannot read which machines this install's agents run on ($DB_PATH), so --purge could forget agents running on another machine. Refusing."; exit 2; fi
+fi
+if [ -n "$RUNNERS" ] && [ "$PURGE" = 1 ] && [ "$FORGET_RUNNERS" != 1 ]; then
+  echo "These agents run on another machine (a runner), which this script does not reach:"
+  printf '%s\n' "$RUNNERS" | sed 's/^/  · /'
+  echo "--purge would delete the only record of them, and the key to their data, and leave them running there."
+  echo "  Delete them in the app first (or move them to this machine), then purge again."
+  echo "  To purge anyway and leave them running where they are: add --forget-runners."
+  exit 2
+fi
+# Docker must answer before anything is taken away. A daemon that was down (or
+# a docker group this session does not have yet) answered every lookup with
+# nothing, read as "no agents, no volumes": --purge then deleted the database
+# and .env — the only map from the agents to their containers and volumes, and
+# the key — said they were all gone, and left them running (audit #024).
+DOCKER_OK=0; DOCKER_LOST=0
+have docker && docker info >/dev/null 2>&1 && DOCKER_OK=1
+if [ "$PURGE" = 1 ] && [ -n "$NAMES" ] && [ "$DOCKER_OK" != 1 ]; then
+  if have docker; then echo "Docker is not answering (is it running, and is $(id -un) in the docker group?), so this install's"
+  else echo "There is no docker command here, so this install's"; fi
+  echo "$(wc -w <<<"$NAMES" | tr -d ' ') agents can be neither stopped nor removed. Refusing to --purge: the database and .env"
+  echo "are the only record of which containers and volumes are theirs. Start Docker and run this again."
+  echo "(If Docker and its volumes are gone from this machine for good, delete $DB_PATH and $ENV_DIR/.env by hand.)"
+  exit 2
+fi
 agent_ids() {
   [ -f "$DB_PATH" ] && [ -d "$REPO/node_modules/better-sqlite3" ] || return 0
   (cd "$REPO" && node -e '
@@ -119,9 +177,11 @@ agent_ids() {
     for (const r of db.prepare("SELECT id FROM agents").all()) console.log(r.id);' "$DB_PATH" 2>/dev/null)
 }
 PREFIX="${HATCHABOT_PREFIX:-hatchabot}"
+# A lookup that fails is not "none": it returns 1, and the caller says so.
 containers() {
   [ -n "$NAMES" ] || return 0
-  for n in $NAMES; do docker ps -aq --filter "name=^/$n$" 2>/dev/null; done
+  local n
+  for n in $NAMES; do docker ps -aq --filter "name=^/$n$" 2>/dev/null || return 1; done
 }
 # The service containers of THIS install: its agents' doormen (by the agent
 # label), and the memory search service pair under this install's prefix.
@@ -137,7 +197,8 @@ service_networks() {
 }
 volumes() {
   [ -n "$NAMES" ] || return 0
-  for n in $NAMES; do docker volume ls -q --filter "name=^$n-vol$" 2>/dev/null; done
+  local n
+  for n in $NAMES; do docker volume ls -q --filter "name=^$n-vol$" 2>/dev/null || return 1; done
 }
 # Containers on this daemon that belong to ANOTHER Hatchabot install: an
 # agent (hatchabot.gen), a service container (hatchabot.role) or the name
@@ -196,6 +257,7 @@ if have docker; then
   echo "  agents:    $(containers | wc -l | tr -d ' ') containers, $(volumes | wc -l | tr -d ' ') volumes"
   echo "  images:    $(images | wc -l | tr -d ' ') runtime images"
 fi
+[ -z "$RUNNERS" ] || echo "  runners:   $(printf '%s\n' "$RUNNERS" | wc -l | tr -d ' ') agents on other machines — not reached from here, they keep running there"
 echo
 if [ "$PURGE" = 1 ]; then
   echo "  MODE: --purge — agent volumes, the database$([ "$BACKUPS" = 1 ] && echo ", the backups"), the runtime images"
@@ -217,6 +279,11 @@ if [ "$ASSUME_YES" != 1 ]; then
 fi
 
 say "Stopping the service…"
+# A stop that failed is not a stop. It was ignored: the unit went, the
+# database and .env were deleted under the running service, and the last line
+# said Hatchabot was no longer running (audit #027). Now a unit or job that
+# cannot be seen stopped stays, and nothing else is touched.
+STILL_RUNNING=""
 if [ "$(uname -s)" = "Darwin" ]; then
   # Both spellings: a host set up before the 2026-09 rename still runs
   # com.agentclaw.* jobs, and looking only for the new names uninstalled
@@ -225,10 +292,15 @@ if [ "$(uname -s)" = "Darwin" ]; then
   for p in com.hatchabot.control-plane com.hatchabot.backup com.agentclaw.control-plane com.agentclaw.backup; do
     PLIST="$HOME/Library/LaunchAgents/$p.plist"
     [ -f "$PLIST" ] || continue
+    found=1
     launchctl unload -w "$PLIST" 2>/dev/null || true
+    # The job's label is its file's name; launchd still lists a loaded one.
+    if launchctl list "$p" >/dev/null 2>&1; then
+      echo "  could NOT stop $p (launchctl still lists it) — kept"
+      STILL_RUNNING="$STILL_RUNNING $p"; continue
+    fi
     rm -f "$PLIST"
     echo "  removed $p"
-    found=1
   done
   [ "$found" = 1 ] || echo "  no launchd jobs found (nothing was installed, or it runs under a different user)"
 else
@@ -237,7 +309,15 @@ else
               hatchabot-privacy-sync.timer hatchabot-privacy-sync.service \
               agentclaw.service agentclaw-backup.timer agentclaw-backup.service; do
     if systemctl --user list-unit-files "$unit" >/dev/null 2>&1 && [ -f "$HOME/.config/systemd/user/$unit" ]; then
-      systemctl --user disable --now "$unit" >/dev/null 2>&1
+      if ! systemctl --user disable --now "$unit" >/dev/null 2>&1; then
+        # Stopped after all (only the disable failed), or not: only inactive
+        # or failed counts, not a systemd that could not be asked.
+        state="$(systemctl --user is-active "$unit" 2>/dev/null)"
+        case "$state" in inactive|failed) ;; *)
+          echo "  could NOT stop $unit (systemd says ${state:-nothing}) — kept"
+          STILL_RUNNING="$STILL_RUNNING $unit"; continue ;;
+        esac
+      fi
       rm -f "$HOME/.config/systemd/user/$unit"
       echo "  removed $unit"
     fi
@@ -246,20 +326,49 @@ else
   [ -n "$(ls -1 "$HOME/.config/systemd/user" 2>/dev/null | grep -E '^(hatchabot|agentclaw)')" ] \
     && echo "  note: other units remain: $(ls -1 "$HOME/.config/systemd/user" | grep -E '^(hatchabot|agentclaw)' | tr '\n' ' ')"
 fi
+if [ -n "$STILL_RUNNING" ]; then
+  echo
+  echo "Stopping$STILL_RUNNING failed, so nothing else was touched: the CLI, the agents, the database and .env are as they were."
+  echo "See why (journalctl --user -u <unit>; on a Mac, the job's log), stop it, and run this again."
+  exit 1
+fi
 
 say "Unlinking the hatchabot CLI…"
-# The short name first, and only if it is ours (it points at the hatchabot CLI).
+# Only THIS install's commands. Any link to a hatchabot CLI used to count as
+# ours, and uninstalling a test clone took the production install's hbt with
+# it (audit #029).
+# The short name first: a link that ends at this install's CLI (npm link's
+# chain), or at a link-cli.sh launcher that runs it.
 HBT="$(command -v hbt 2>/dev/null || true)"
-if [ -n "$HBT" ] && [ -L "$HBT" ] && readlink -f "$HBT" | grep -qE '/bin/hatchabot(\.mjs)?$|/hatchabot$'; then rm -f "$HBT" && echo "  removed hbt"; fi
+if [ -n "$HBT" ] && [ -L "$HBT" ]; then
+  T="$(readlink -f "$HBT" 2>/dev/null || true)"
+  if [ -n "$T" ] && { [ "$T" = "$(readlink -f "$REPO/bin/hatchabot.mjs" 2>/dev/null)" ] || grep -qF "\"$REPO/bin/hatchabot.mjs\"" "$T" 2>/dev/null; }; then
+    rm -f "$HBT" && echo "  removed hbt"
+  fi
+fi
 # A bundle install's commands are two launchers link-cli.sh wrote into
 # ~/.local/bin (it has no npm to link with); they outlived the uninstall
 # (review, 2026-10-09). Only the ones that run THIS install.
+# (The folder as link-cli.sh writes it inside the launcher's quotes: a $, `, "
+# or \ escaped.)
+REPO_IN_LAUNCHER="$(printf '%s' "$REPO" | sed -e 's/[\\$`"]/\\&/g')"
 for name in hatchabot hbt; do
   L="$HOME/.local/bin/$name"
-  [ -f "$L" ] && [ ! -L "$L" ] && grep -q 'written by scripts/link-cli.sh' "$L" 2>/dev/null && grep -qF "\"$REPO/bin/hatchabot.mjs\"" "$L" 2>/dev/null \
+  [ -f "$L" ] && [ ! -L "$L" ] && grep -q 'written by scripts/link-cli.sh' "$L" 2>/dev/null && grep -qF "\"$REPO_IN_LAUNCHER/bin/hatchabot.mjs\"" "$L" 2>/dev/null \
     && rm -f "$L" && echo "  removed ~/.local/bin/$name"
 done
-npm unlink -g hatchabot >/dev/null 2>&1 && echo "  unlinked" || echo "  (was not linked)"
+# The global `hatchabot` npm link: npm link made it a link to the install
+# folder, so it is this one's only when it leads here.
+G="$(npm root -g 2>/dev/null || true)"
+if [ -n "$G" ] && [ -L "$G/hatchabot" ]; then
+  if [ "$(readlink -f "$G/hatchabot")" = "$(cd "$REPO" && pwd -P)" ]; then
+    npm unlink -g hatchabot >/dev/null 2>&1 && echo "  unlinked" || echo "  could not unlink it: run  npm unlink -g hatchabot"
+  else
+    echo "  kept the global hatchabot command: it runs another install ($(readlink -f "$G/hatchabot"))"
+  fi
+else
+  echo "  (was not linked)"
+fi
 # The CLI's token and channel pin belong to the USER, not this install (a
 # production checkout beside a test one shares them): only --purge takes them.
 if [ "$PURGE" = 1 ]; then
@@ -273,8 +382,10 @@ if have docker; then
   # agent needing a Rebuild after a reinstall, which is not "nothing you would
   # miss is deleted". --purge removes them below.
   say "Stopping agents…"
-  CIDS="$(containers)"
-  if [ -n "$CIDS" ]; then
+  if ! CIDS="$(containers)"; then
+    DOCKER_LOST=1
+    echo "  could NOT ask Docker for this install's agents, so none was stopped (docker ps -a lists them)"
+  elif [ -n "$CIDS" ]; then
     # shellcheck disable=SC2086
     docker stop $CIDS >/dev/null 2>&1
     echo "  stopped $(echo "$CIDS" | wc -l | tr -d ' ') containers (kept, with their volumes)"
@@ -294,13 +405,13 @@ fi
 if [ "$PURGE" = 1 ]; then
   if have docker; then
     say "Removing agent containers…"
-    CIDS="$(containers)"
+    CIDS="$(containers)" || { DOCKER_LOST=1; echo "  could NOT ask Docker for them"; }
     if [ -n "$CIDS" ]; then
       # shellcheck disable=SC2086
       docker rm -f $CIDS >/dev/null 2>&1 && echo "  removed $(echo "$CIDS" | wc -l | tr -d ' ') containers"
     fi
     say "Deleting agent volumes…"
-    VOLS="$(volumes)"
+    VOLS="$(volumes)" || { DOCKER_LOST=1; echo "  could NOT ask Docker for them"; }
     if [ -n "$VOLS" ]; then
       VOLS_GONE=0
       for v in $VOLS; do
@@ -345,6 +456,14 @@ if [ "$PURGE" = 1 ]; then
     # shellcheck disable=SC2086
     [ -n "$NIDS" ] && docker network rm $NIDS >/dev/null 2>&1 && echo "  removed $(echo "$NIDS" | wc -l | tr -d ' ') service networks"
   fi
+  # Docker stopped answering part-way: what it did not list may still be
+  # there, and the database and .env are the map to it (audit #024).
+  if [ "$DOCKER_LOST" = 1 ]; then
+    echo
+    echo "Docker stopped answering part-way, so some of this install's containers or volumes may still be there."
+    echo "Kept the database ($DB_PATH) and $ENV_DIR/.env: they are the map to them. Start Docker and run this again."
+    exit 1
+  fi
   say "Deleting local state…"
   # The backups first, and only Hatchabot's own sets: the folder may be a NAS
   # mount other machines back up into (backup-volumes.sh prunes only its dated
@@ -369,10 +488,13 @@ if [ "$PURGE" = 1 ]; then
     case "$B" in "$D/"*) KEEP_TOP="${B#"$D/"}"; KEEP_TOP="${KEEP_TOP%%/*}" ;; esac   # the backups are inside the data folder
   fi
   # The whole directory only when it is Hatchabot's own (the install's data/
-  # or a *hatchabot-data* folder); a database placed elsewhere (a home
-  # directory, a NAS folder) loses only its own files (26th audit).
+  # or a folder named hatchabot-data, as docs/releasing.md sets one up); a
+  # database placed elsewhere (a home directory, a NAS folder) loses only its
+  # own files (26th audit). By the folder's own name, not anywhere in its
+  # path: a database in .../hatchabot-data-old/shared/ took the whole shared
+  # folder with it (audit #025).
   case "$DATA_DIR" in
-    "$ENV_DIR/data"|*hatchabot-data*|*agentclaw-data*)
+    "$ENV_DIR/data"|*/hatchabot-data|*/agentclaw-data)
       if [ "$DB_ONLY" = 1 ]; then
         rm -f "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" && echo "  removed the database in $DATA_DIR (it is the backup folder too, so the folder stays)"
       elif [ -n "$KEEP_TOP" ]; then
@@ -393,10 +515,15 @@ fi
 
 say "Done."
 echo "Hatchabot is no longer running or installed on this machine."
+[ "$DOCKER_LOST" = 0 ] || echo "But Docker did not answer, so this install's agents were not stopped: see docker ps."
 if [ "$PURGE" = 1 ] && [ -n "${VOLS_LEFT:-}" ]; then
   echo "Its agents and database are gone, but these agent volumes are NOT — their data is still on this machine:"
   for v in $VOLS_LEFT; do echo "  · $v"; done
   echo "See what holds one:  docker ps -a --filter volume=<name>   then:  docker volume rm <name>"
+elif [ "$PURGE" = 1 ] && [ -n "$RUNNERS" ]; then
+  echo "Its agents on this machine, their volumes and the database are gone. These still run on their runners (--forget-runners), no longer managed from anywhere:"
+  printf '%s\n' "$RUNNERS" | sed 's/^/  · /'
+  echo "On each runner: docker ps -a, then docker rm -f <container> and docker volume rm <container>-vol."
 elif [ "$PURGE" = 1 ]; then
   echo "Its agents, volumes and database are gone."
   if [ "$BACKUPS" != 1 ] && [ -d "$BACKUP_DIR" ]; then echo "Backups remain in $BACKUP_DIR (--backups removes them)."; fi
@@ -414,9 +541,11 @@ else
   [ -f "$DB_PATH" ] && echo "  · the database at $DB_PATH — every agent, member and setting"
   [ -d "$BACKUP_DIR" ] && echo "  · $(ls -1 "$BACKUP_DIR" 2>/dev/null | wc -l | tr -d " ") backup sets in $BACKUP_DIR"
   echo
+  [ -z "$RUNNERS" ] || { echo "NOT STOPPED — these run on other machines (runners), which this script does not reach:"; printf '%s\n' "$RUNNERS" | sed 's/^/  · /'; echo; }
   echo "For a clean slate instead:  ./scripts/uninstall.sh --purge --backups"
 fi
 echo "The clone itself is untouched. To remove it:  rm -rf \"$REPO\""
 echo "Telegram bots are not deletable from here: @BotFather → /mybots → /deletebot."
-# A purge that left volumes behind did not finish its job: say so to a caller too.
-[ -z "${VOLS_LEFT:-}" ] || exit 1
+# A purge that left volumes behind did not finish its job, nor did a stop
+# Docker did not answer: say so to a caller too.
+[ -z "${VOLS_LEFT:-}" ] && [ "$DOCKER_LOST" = 0 ] || exit 1

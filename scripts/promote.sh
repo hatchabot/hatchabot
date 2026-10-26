@@ -213,7 +213,7 @@ ci_gate() {
   if [ "${HATCHABOT_PROMOTE_IGNORE_CI:-}" = 1 ]; then echo "⚠ CI not checked (HATCHABOT_PROMOTE_IGNORE_CI=1)."; return 0; fi
   local how="HATCHABOT_PROMOTE_IGNORE_CI=1 promotes without the check"
   command -v gh >/dev/null 2>&1 || die "Can't check CI: the gh command is not installed ($how)."
-  local slug sha runs id st
+  local slug sha runs id st end
   slug="$(git remote get-url origin | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')"
   echo "$slug" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || slug="${HATCHABOT_DEV_SLUG:-cksci/hatchabot-dev}"
   sha="$(git rev-list -n 1 "$TAG")"
@@ -232,10 +232,19 @@ ci_gate() {
   id="${runs%% *}"; st="${runs#* }"
   if [ "${st%% *}" != completed ]; then
     echo "CI for $TAG is still running — waiting for it…"
-    gh run watch "$id" --repo "$slug" --exit-status >/dev/null 2>&1 || die "CI failed on $TAG: https://github.com/$slug/actions/runs/$id — nothing changed."
-  elif [ "$st" != "completed success" ]; then
-    die "CI failed on $TAG (${st#completed }): https://github.com/$slug/actions/runs/$id — nothing changed."
+    # Polled through the same listing, as release-check.sh does, not `gh run
+    # watch`: that reads the check-run annotations, which a fine-grained token
+    # cannot (HTTP 403), so every run still going read as "CI failed" (audit #036).
+    end=$(( $(date +%s) + ${HATCHABOT_CI_WAIT_SECS:-2700} ))
+    while [ "${st%% *}" != completed ]; do
+      [ "$(date +%s)" -lt "$end" ] || die "CI for $TAG is still running after $(( ${HATCHABOT_CI_WAIT_SECS:-2700} / 60 )) min: https://github.com/$slug/actions/runs/$id — promote once it has passed. Nothing changed."
+      sleep "${HATCHABOT_DISPATCH_POLL:-20}"
+      runs="$(ci_runs "$slug")" || die "Could not ask GitHub about CI for $TAG ($how)."
+      [ -n "$runs" ] || die "CI run $id for $TAG is no longer listed: https://github.com/$slug/actions/runs/$id — nothing changed."
+      id="${runs%% *}"; st="${runs#* }"
+    done
   fi
+  [ "$st" = "completed success" ] || die "CI failed on $TAG (${st#completed }): https://github.com/$slug/actions/runs/$id — nothing changed."
   echo "✓ CI passed on $TAG"
 }
 # The live tests (docs/live-tests.md): the unit suite and CI fake Docker,

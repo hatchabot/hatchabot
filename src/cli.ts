@@ -256,12 +256,14 @@ Commands:
                                (this machine ⇄ a runner): same bot, same members.
                                A pinned image the machine lacks is rebuilt there;
                                --drop-pin runs its default image instead
-  rehost <agent> <server> [--drop-pin] [--no-wait]
+  rehost <agent> <server> [--drop-pin] [--profile <id>] [--no-wait]
                                Move an agent there: preflight, transfer, verify.
                                The source is left STOPPED, never deleted.
                                A pinned image is rebuilt there from its recipe
                                (if your token is that server's owner's);
-                               --drop-pin runs its default image instead
+                               --drop-pin runs its default image instead;
+                               --profile runs it on that AI source there
+                               (offered when it would land on another vendor's)
   invite <agent>               Mint a join link for the web flow
   pairing [<agent>]            Pending "wants to talk" requests
   approve <agent> <code> [--kind discord|slack]   Let a pending requester in (creates a member)
@@ -497,6 +499,30 @@ function repoDir(): string {
  * install directory (2026-09-24).
  */
 const userPath = (p: string): string => resolve(process.env.HATCHABOT_CWD || process.cwd(), p);
+
+/**
+ * An app's `<dir|url>`: a git address (https://…, ssh://…, git@host:…) goes
+ * as typed, for the server to check; anything else is a folder here, from
+ * where the command was typed. Every address was made a local path, which
+ * no folder matched (audit #057).
+ */
+export function appSourceArg(src: string, cwd = process.env.HATCHABOT_CWD || process.cwd(), home = homedir()): string {
+  const t = src.trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^[\w.-]+@[\w.-]+:/.test(t)) return t;
+  return resolve(cwd, t.replace(/^~(?=\/|$)/, home));
+}
+
+/** `--agents a,b`: the names in it, or undefined when it was not given. Given and empty is an error, not "all of them" (audit #059). */
+export function agentsFilter(flags: Map<string, string>): { names?: string[]; problem?: string } {
+  if (!flags.has('agents')) return {};
+  const names = flags.get('agents')!.split(',').map((x) => x.trim()).filter(Boolean);
+  return names.length ? { names } : { problem: '--agents names no agent — leave it out to include all of yours' };
+}
+
+/** The agents a bare `hatchabot pairing` asks: running ones of yours on a chat app (a web-only agent has no pairing requests, audit #058). */
+export function pairingTargets<T extends { state?: string; role?: string; botUsername?: string; otherChannels?: unknown[] }>(list: T[]): T[] {
+  return list.filter((a) => a.state === 'RUNNING' && (!a.role || a.role === 'owner') && (!!a.botUsername || !!a.otherChannels?.length));
+}
 
 const BOOL_FLAGS = new Set(['private', 'no-wait', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet', 'draft-only', 'invited-only']);
 const VALUE_FLAGS = new Set(['ref', 'kind', 'at-once', 'agents', 'base', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
@@ -1479,7 +1505,9 @@ async function main() {
       const want = flags.get('to') ?? fail('usage: hatchabot switch-source --to <source id or name> [--agents a,b] [--rebuild]');
       const target = profiles.find((p) => p.id === want || p.name.toLowerCase() === want.toLowerCase())
         ?? fail(`no AI source matches "${want}". Have: ${profiles.map((p) => p.name).join(', ') || '(none)'}`);
-      const apply = flags.get('agents')?.split(',').map((x) => x.trim()).filter(Boolean);
+      const filter = agentsFilter(flags);
+      if (filter.problem) fail(filter.problem);
+      const apply = filter.names;
       let ids: string[] | undefined;
       if (apply) {
         // Resolve names/slugs to ids so a human can pass either.
@@ -1639,7 +1667,9 @@ async function main() {
 
       const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];
       const hosts: any[] = await (await api(ctx, '/v1/hosts')).json() as any[];
-      const profile = flags.get('profile') ?? profiles[0]?.id ?? fail('no AI source configured');
+      // The ⭐ default, as create picks it: the first in the list may be any source (audit #060).
+      const picked = pickProfile(profiles, flags.get('profile'));
+      const profile = picked.hit?.id ?? fail(picked.problem!);
       const host = (hosts.find((h) => h.kind === 'local') ?? hosts[0])?.id ?? fail('no host configured');
 
       console.log(`creating "${name}"…`);
@@ -1731,7 +1761,7 @@ async function main() {
       };
       if (sub === 'inspect') {
         const src = rest[1] ?? fail('usage: hatchabot app inspect <dir|url> [--ref <ref>]');
-        const r: any = await (await jsonPost('/v1/apps/inspect', { source: userPath(src.replace(/^~(?=\/|$)/, homedir())), ref: flags.get('ref') })).json();
+        const r: any = await (await jsonPost('/v1/apps/inspect', { source: appSourceArg(src), ref: flags.get('ref') })).json();
         console.log(`${r.manifest.name} (${r.manifest.app}) at ${String(r.sha).slice(0, 12)}`);
         if (r.manifest.description) console.log(r.manifest.description);
         console.log(`tasks: ${(r.manifest.tasks ?? []).map((t: any) => `${t.name} (${t.every ?? t.cron})`).join(', ') || 'none'}`);
@@ -1743,13 +1773,13 @@ async function main() {
         const [ref, src] = plain(rest.slice(1));
         if (!ref || !src) fail('usage: hatchabot app install <agent> <dir|url> [--ref <ref>] [key=value …]');
         const a = await resolveAgent(ctx, ref!);
-        await install(a.id, userPath(src!.replace(/^~(?=\/|$)/, homedir())), kv(rest.slice(1)));
+        await install(a.id, appSourceArg(src!), kv(rest.slice(1)));
         return;
       }
       if (sub === 'create') {
         const [name, src] = plain(rest.slice(1));
         if (!name || !src) fail('usage: hatchabot app create <name> <dir|url> [--profile <source>] [--no-telegram] [key=value …]');
-        const source = userPath(src!.replace(/^~(?=\/|$)/, homedir()));
+        const source = appSourceArg(src!);
         const look: any = await (await jsonPost('/v1/apps/inspect', { source, ref: flags.get('ref') })).json();
         const missing = look.ask.filter((f: any) => f.required && !(f.key in kv(rest.slice(1)))).map((f: any) => f.key);
         if (missing.length) fail(`${look.manifest.name} needs: ${missing.map((k: string) => `${k}=…`).join(' ')}`);
@@ -2011,8 +2041,14 @@ async function main() {
       if (!peer) fail(`no server matches "${ref}"`);
       console.log(`rehosting "${a.name}" to ${peer.name}…`);
       // A pinned image is rebuilt there from its recipe; --drop-pin opts out.
+      // --profile <id>: run on that AI source there (the one a refusal offers).
+      const source = flags.get('profile');
       let res: any = await (await jsonPost(`/v1/agents/${a.id}/rehost`, {
-        peerId: peer.id, ...(flags.has('drop-pin') ? { allowDroppedPin: true } : {}),
+        peerId: peer.id, ...(flags.has('drop-pin') ? { allowDroppedPin: true } : {}), ...(source ? { aiProfileId: source } : {}),
+      }).catch((e) => {
+        const c = e.data?.code === 'source_choice' && e.data.sourceChoice;
+        if (c) fail(`${e.message}\n  to move it onto ${c.name} (${c.vendor}/${c.model}): hatchabot rehost ${rest[0]} ${ref} --profile ${c.id}`);
+        throw e;
       })).json();
       // Since v2.156.0 the move goes on in the background: follow it.
       const started = startedOperation(res);
@@ -2126,10 +2162,16 @@ async function main() {
     case 'pairing': {
       const targets = rest[0]
         ? [await resolveAgent(ctx, rest[0])]
-        : ((await agents(ctx)).filter((a) => a.state === 'RUNNING') as any[]);
+        : pairingTargets(await agents(ctx));
       let any = false;
       for (const a of targets) {
-        const reqs: any[] = await (await api(ctx, `/v1/agents/${a.id}/pairing`)).json() as any[];
+        let reqs: any[];
+        try { reqs = await (await api(ctx, `/v1/agents/${a.id}/pairing`)).json() as any[]; }
+        catch (e) {
+          // Its chat app went since the list was read: the rest are still asked.
+          if (!rest[0] && (e as Error).message === 'Not found') continue;
+          throw e;
+        }
         for (const r of reqs) {
           any = true;
           console.log(`${a.name}: ${r.meta?.firstName ?? r.meta?.username ?? r.id} wants to talk — approve with: hatchabot approve "${a.name}" ${r.code}`);
@@ -2511,13 +2553,20 @@ async function main() {
         const parked = outdated.length - all.length;
         if (parked) console.log(`(${parked} stopped agent${parked > 1 ? 's' : ''} left alone — rebuilt when started)`);
         if (!all.length) { console.log(`No running agent needs a${flags.has('required') ? ' required' : ''} rebuild.`); return; }
+        // Counted as the server answered: every one refused (busy, held) still
+        // said "2 rebuild(s) queued" and exited 0, so a script went on as if the
+        // fleet was rebuilt (audit #051).
+        let queued = 0;
         for (const x of all) {
           console.log(`${x.rebuild.level === 'required' ? '!' : '-'} ${x.name}: ${x.rebuild.reasons.join('; ')}`);
           if (flags.has('dry-run')) continue;
           await api(ctx, `/v1/agents/${x.id}/rebuild`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
-            .catch((e: Error) => console.log(`  not started: ${e.message}`));
+            .then(() => { queued++; }, (e: Error) => console.log(`  not started: ${e.message}`));
         }
-        console.log(flags.has('dry-run') ? `${all.length} would be rebuilt.` : `${all.length} rebuild(s) queued; they run a few at a time.`);
+        if (flags.has('dry-run')) { console.log(`${all.length} would be rebuilt.`); return; }
+        const refused = all.length - queued;
+        console.log(`${queued} rebuild(s) queued${queued ? '; they run a few at a time' : ''}.${refused ? ` ${refused} not started — see above; run it again to retry them.` : ''}`);
+        if (refused) process.exitCode = 1;
         return;
       }
       const a = await resolveAgent(ctx, rest[0] ?? fail(`usage: hatchabot ${cmd} <agent>`));

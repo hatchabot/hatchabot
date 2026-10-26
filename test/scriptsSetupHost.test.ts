@@ -1,0 +1,79 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { scriptEnv } from './helpers/scriptEnv.js';
+
+// Every test here runs real shell scripts in a sandbox; vitest's 5 s was not
+// enough under load on the self-hosted runner (2026-10-23).
+vi.setConfig({ testTimeout: 30_000 });
+
+/**
+ * scripts/setup-host.sh, unattended, in a sandbox: a temp HOME, a docker that
+ * only records which daemon it was asked (DOCKER_HOST) and what, and the
+ * steps around the image (dependencies, the service, the CLI link) as shims
+ * that record the same. Nothing reaches a real daemon or service.
+ */
+const dirs: string[] = [];
+afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+const shim = (dir: string, name: string, body: string) => writeFileSync(join(dir, name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
+const TENANT = 'unix:///run/made-up-tenant/docker.sock';
+
+function host() {
+  const root = mkdtempSync(join(tmpdir(), 'hb-setup-host-')); dirs.push(root);
+  const app = join(root, 'app'), bin = join(root, 'bin'), home = join(root, 'home'), log = join(root, 'calls.log');
+  for (const d of [join(app, 'scripts'), join(app, 'docker'), join(app, 'node_modules', '.bin'), bin, home]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(app, 'scripts', 'setup-host.sh'), readFileSync('scripts/setup-host.sh'), { mode: 0o755 });
+  writeFileSync(join(app, 'docker', 'Dockerfile.runtime'), 'ARG OPENCLAW_VERSION=2026.9.8\n');
+  for (const s of ['ensure-deps.sh', 'link-cli.sh', 'first-run-link.sh']) shim(join(app, 'scripts'), s, 'exit 0');
+  shim(join(app, 'node_modules', '.bin'), 'tsx', 'exit 0');
+  shim(join(app, 'scripts'), 'build-runtime-image.sh', `echo "build on \${DOCKER_HOST:-default}" >> '${log}'`);
+  shim(join(app, 'scripts'), 'install-service.sh', `echo "service" >> '${log}'`);
+  // The machine's default daemon has the image; the tenant's daemon has none.
+  shim(bin, 'docker', `echo "docker on \${DOCKER_HOST:-default}: $*" >> '${log}'
+case "$1 $2" in
+  "image inspect") [ "\${DOCKER_HOST:-}" != '${TENANT}' ] || exit 1; case "$*" in *--format*) echo 2026.9.8 ;; esac ;;
+esac
+exit 0`);
+  shim(bin, 'uname', 'echo Linux');
+  symlinkSync(process.execPath, join(bin, 'node'));
+  const run = (extra: Record<string, string> = {}) => spawnSync('bash', [join(app, 'scripts', 'setup-host.sh')], {
+    encoding: 'utf8', input: '', env: scriptEnv(home, `${bin}:/usr/bin:/bin`, { HATCHABOT_SETUP_SIGNIN: 'accounts', ...extra }),
+  });
+  const calls = () => readFileSync(log, 'utf8').split('\n').filter(Boolean);
+  return { app, run, calls };
+}
+
+describe('scripts/setup-host.sh prepares the runtime image on the daemon the service will use (audit #040)', () => {
+  it('a DOCKER_HOST given for the new .env (HATCHABOT_SETUP_ENV): the image is looked for and fetched there', () => {
+    const h = host();
+    const r = h.run({ HATCHABOT_SETUP_ENV: `DOCKER_HOST=${TENANT}\nHATCHABOT_PREFIX=t1` });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readFileSync(join(h.app, '.env'), 'utf8')).toContain(`DOCKER_HOST=${TENANT}`);
+    expect(r.stdout).toContain('Building the agent runtime image');
+    expect(r.stdout).not.toContain('Runtime image already present');
+    const calls = h.calls();
+    expect(calls).toContain(`build on ${TENANT}`);
+    expect(calls).toContain(`docker on ${TENANT}: image inspect hatchabot-runtime:latest`);
+    // Once .env is written, nothing asks the default daemon about the image.
+    const after = calls.slice(calls.findIndex((c) => c.startsWith(`docker on ${TENANT}`)));
+    expect(after.filter((c) => c.startsWith('docker on default') || c === 'build on default')).toEqual([]);
+  });
+
+  it('an .env kept from before names it too (the last line, quoted or not)', () => {
+    const h = host();
+    writeFileSync(join(h.app, '.env'), `HATCHABOT_SECRET_KEY=made-up\nDOCKER_HOST=unix:///run/old.sock\nDOCKER_HOST="${TENANT}"\n`, { mode: 0o600 });
+    const r = h.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(h.calls()).toContain(`build on ${TENANT}`);
+  });
+
+  it('no DOCKER_HOST in .env: the default daemon, as before', () => {
+    const h = host();
+    const r = h.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('Runtime image already present');
+    expect(h.calls().some((c) => c.includes(TENANT))).toBe(false);
+  });
+});

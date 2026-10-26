@@ -163,13 +163,17 @@ export interface AiSourceHealth {
 }
 
 export function aiSourceHealth(store: Store, agent: Agent): AiSourceHealth {
-  const profile = store.getAIProfile(agent.aiProfileId);
-  const lastAnsweredAt = store.lastOkOn(agent.id, agent.aiProfileId);
+  // The source the container runs: a switch saved but not rebuilt yet still
+  // calls the old one, and its refusals are why the agent cannot answer
+  // (audit #052). The usage sampler files its calls there too.
+  const source = agent.appliedProfileId ?? agent.aiProfileId;
+  const profile = store.getAIProfile(source);
+  const lastAnsweredAt = store.lastOkOn(agent.id, source);
   const since = lastAnsweredAt ?? '';
-  const refused = store.limitHitsForAgent(agent.id, agent.aiProfileId, since)[0];
+  const refused = store.limitHitsForAgent(agent.id, source, since)[0];
   // A slot is a five-minute bucket ("2026-09-25T01:25"): a failure in the
   // success's own slot cannot be ordered against it, so it is not counted.
-  const failed = store.failedSlotsForAgent(agent.id, agent.aiProfileId, since.slice(0, 16))[0];
+  const failed = store.failedSlotsForAgent(agent.id, source, since.slice(0, 16))[0];
   const first = [refused, failed].filter((x): x is string => !!x).sort()[0];
   return {
     name: profile?.name,

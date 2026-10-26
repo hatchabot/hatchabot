@@ -25,8 +25,10 @@ function world() {
   const root = mkdtempSync(join(tmpdir(), 'hb-promote-')); dirs.push(root);
   const home = join(root, 'home'); mkdirSync(home);
   // A fake gh ahead of the real one (/usr/bin/gh): CI's answer comes from
-  // HB_CI — "success" (default), "failure", "running:success", "running:failure", "none",
+  // HB_CI — "success" (default), "failure", "running:success", "running:failure" (listed as
+  // in progress the first time, then finished so), "running" (never finishes), "none",
   // "pr-only" (a passing pull-request run on the commit, and no run for the push to main).
+  // `gh run watch` answers as it does for a fine-grained token: HTTP 403 (audit #036).
   // HB_DEV_NONE: the dev repo has no run (a release from before it), the public repo answers.
   // The tag's GitHub release from HB_RELEASE — "ok" (default; published, with the
   // manifest), "none" (gh fails: no release), "draft", "nomanifest".
@@ -39,8 +41,11 @@ case "$1 $2" in
     case "\${HB_RELEASE:-ok}" in ok) echo "false true" ;; draft) echo "true true" ;; nomanifest) echo "false false" ;; *) echo "release not found" >&2; exit 1 ;; esac ;;
   "run list")
     case "$*" in *"--repo cksci/hatchabot-dev "*) [ -z "\${HB_DEV_NONE:-}" ] || exit 0 ;; esac
-    case "$ci" in none) ;; pr-only) case "$*" in *"--event push"*) ;; *) echo "4243 completed success" ;; esac ;; running:*) echo "4242 in_progress " ;; *) echo "4242 completed $ci" ;; esac ;;
-  "run watch") [ "\${ci#running:}" = success ] ;;
+    case "$ci" in none) ;; pr-only) case "$*" in *"--event push"*) ;; *) echo "4243 completed success" ;; esac ;;
+      running) echo "4242 in_progress " ;;
+      running:*) if [ -f ${JSON.stringify(join(root, 'listed'))} ]; then echo "4242 completed \${ci#running:}"; else touch ${JSON.stringify(join(root, 'listed'))}; echo "4242 in_progress "; fi ;;
+      *) echo "4242 completed $ci" ;; esac ;;
+  "run watch") echo "HTTP 403: Resource not accessible by personal access token" >&2; exit 1 ;;
   *) exit 1 ;;
 esac
 `, { mode: 0o755 });
@@ -77,7 +82,7 @@ esac
   git(work, 'push', '-q', pub, 'main');
   publish('v1.1.0');
   const promote = (extra: Record<string, string> = {}, ...args: string[]) =>
-    spawnSync('bash', [join(work, 'scripts', 'promote.sh'), ...args], { cwd: work, env: { ...env, HATCHABOT_LAND_DIRECT: '1', ...extra }, encoding: 'utf8' });
+    spawnSync('bash', [join(work, 'scripts', 'promote.sh'), ...args], { cwd: work, env: { ...env, HATCHABOT_LAND_DIRECT: '1', HATCHABOT_DISPATCH_POLL: '0', ...extra }, encoding: 'utf8' });
   const channels = () => readFileSync(join(work, 'channels.json'), 'utf8');
   /** The fast-lane tags on origin: "name commit subject". */
   const fastLane = () => git(origin, 'for-each-ref', '--format=%(refname:short) %(*objectname) %(contents:subject)', 'refs/tags/channels-*').trim();
@@ -141,7 +146,25 @@ describe('scripts/promote.sh asks CI first (it was red for eight days unseen, 20
     const bad = world();
     const b = bad.promote({ HB_CI: 'running:failure' }, 'v1.1.0');
     expect(b.status).toBe(1);
+    expect(b.stderr).toContain('CI failed on v1.1.0 (failure)');
     expect(bad.channels()).toContain('"stable": "v1.0.0"');
+  });
+
+  it('a run still going is polled through the run listing, not `gh run watch` (a fine-grained token cannot read its annotations; audit #036)', () => {
+    const w = world();
+    const r = w.promote({ HB_CI: 'running:success' }, 'v1.1.0');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    const log = readFileSync(join(w.root, 'gh.log'), 'utf8');
+    expect(log).not.toContain('run watch');
+    expect(log.match(/gh run list/g)).toHaveLength(2);
+    expect(w.channels()).toContain('"stable": "v1.1.0"');
+    // One that never finishes: refused at the wait's end, said as still running, nothing changed.
+    const slow = world();
+    const s = slow.promote({ HB_CI: 'running', HATCHABOT_CI_WAIT_SECS: '0' }, 'v1.1.0');
+    expect(s.status).toBe(1);
+    expect(s.stderr).toContain('CI for v1.1.0 is still running after 0 min');
+    expect(s.stderr).not.toContain('CI failed');
+    expect(slow.channels()).toContain('"stable": "v1.0.0"');
   });
 
   it('no run for the commit: refuses, and says how to go on without the check', () => {

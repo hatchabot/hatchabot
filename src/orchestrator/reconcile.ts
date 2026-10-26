@@ -218,6 +218,11 @@ export function applyReconcileRule(
   } else if (status.phase === 'error' && s === 'RUNNING') {
     store.setAgentState(agent.id, 'FAILED', `The runtime reported an error: ${status.message}`);
     log('reconcile.runtime_error', { agentId: agent.id, message: status.message });
+  } else if (status.phase === 'error' && (s === 'REBUILDING' || (s === 'PROVISIONING' && !agent.pendingAction))) {
+    // A setup or rebuild cut off with its container dead: left busy, it sat
+    // there for good — every sweep judged nothing (audit #083).
+    store.setAgentState(agent.id, 'FAILED', `${s === 'REBUILDING' ? 'The rebuild' : 'Setup'} was interrupted and its runtime reported an error (${status.message}) — tap Retry.`);
+    log('reconcile.interrupted', { agentId: agent.id, was: s, message: status.message });
   }
   return 'judged';
 }

@@ -5,7 +5,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { registerAuth } from '../src/api/auth.js';
-import { migrateAgent, versionBehind } from '../src/orchestrator/migrate.js';
+import { MigrateError, migrateAgent, versionBehind } from '../src/orchestrator/migrate.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
 
@@ -125,6 +125,43 @@ describe('rehost over real HTTP', () => {
     src.store.setDerivedImageStatus('media', 'READY');
     src.store.setAgentImage('a1', 'hatchabot-runtime:derived-media');
   };
+
+  // The destination's ⭐ Default is another vendor's while it has one of the
+  // agent's own (audit #001, HB-0228): refused, offering that source, and a
+  // move that names it lands there.
+  const otherVendorDefault = (dest: Awaited<ReturnType<typeof destination>>) => {
+    dest.store.insertAIProfile({ id: 'pD', ownerId: 'owner-b', name: 'House API', vendor: 'openai', kind: 'api_key', model: 'gpt-4o', secretRef: 'ai/pD', createdAt: 'now' });
+    dest.store.setAIProfileDefault('pD');
+  };
+
+  it('a Default of another vendor is refused with the matching source offered; the source keeps RUNNING', async () => {
+    const dest = await destination();
+    otherVendorDefault(dest);
+    const src = await source(dest);
+    const err = await migrateAgent(src.deps as never, 'a1', src.peer as never).catch((e) => e);
+    expect(err).toBeInstanceOf(MigrateError);
+    expect(err.userMessage).toMatch(/⭐ Default source, House API \(openai\/gpt-4o\), not B-AI\. Move it onto B-AI instead/);
+    expect(err.sourceChoice).toEqual({ id: 'pB', name: 'B-AI', vendor: 'anthropic', model: 'claude-opus-4-8' });
+    expect(src.store.getAgent('a1')!.state).toBe('RUNNING');
+    expect(dest.store.listAgents('owner-b')).toEqual([]);
+  });
+
+  it('a move onto the offered source lands on it, not on the Default', async () => {
+    const dest = await destination();
+    otherVendorDefault(dest);
+    const src = await source(dest);
+    const res = await migrateAgent(src.deps as never, 'a1', src.peer as never, { aiProfileId: 'pB' });
+    expect(res.sourceState).toBe('STOPPED');
+    expect(dest.store.listAgents('owner-b').find((a) => a.slug === 'kitchen')?.aiProfileId).toBe('pB');
+  });
+
+  it('a chosen source that is not there (any more) is refused before anything stops', async () => {
+    const dest = await destination();
+    const src = await source(dest);
+    await expect(migrateAgent(src.deps as never, 'a1', src.peer as never, { aiProfileId: 'gone-source' }))
+      .rejects.toThrow(/AI source chosen for it is not on this server any more/);
+    expect(src.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
 
   it('a pinned image is rebuilt on the destination from its recipe', async () => {
     const dest = await destination();

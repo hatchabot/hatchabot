@@ -1,4 +1,5 @@
 import { validIcon, validIconColor } from './agentIcons.js';
+import { MAX_DATA_SOURCES } from './dataSourceLimits.js';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
 import type { Agent, TemplateParam } from '../domain/types.js';
@@ -156,7 +157,7 @@ const TemplateSchema = z.object({
         repoUrl: z.string().max(512).optional(),
       }),
     )
-    .max(32)
+    .max(MAX_DATA_SOURCES)
     .default([]),
   envNeeds: z.array(z.string().max(128)).max(64).default([]),
   // Optional + defaulted: templates from before Phase 2a parse as having none,

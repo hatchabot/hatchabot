@@ -11,6 +11,10 @@
 # one does not come up. A release that failed is remembered and not retried;
 # the channel naming a newer one clears it.
 #
+# The channel it follows is the one chosen last, in ~/.config/hatchabot/channel
+# (`hatchabot upgrade beta`, the installer, --install here); the timer's own
+# argument only when none is (a version there is a pin: the timer waits).
+#
 # For installs that follow a channel unattended — a hosted tenant on stable,
 # a canary on beta. (The development machine, which serves from a separate
 # checkout, has follow-latest.sh.)
@@ -21,6 +25,7 @@ DIR="$PWD"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/hatchabot"
 UNITS="$HOME/.config/systemd/user"
 NAME=hatchabot-follow-channel
+CHANNEL_FILE="$HOME/.config/hatchabot/channel"
 
 valid() { case "${1:-}" in stable|beta|latest) return 0 ;; *) return 1 ;; esac; }
 
@@ -28,19 +33,21 @@ if [ "${1:-}" = --install ]; then
   valid "${2:-}" || { echo "Usage: $0 --install stable|beta|latest"; exit 1; }
   command -v systemctl >/dev/null 2>&1 || { echo "This needs systemd (Linux). On a Mac, run 'hatchabot upgrade' from time to time."; exit 1; }
   mkdir -p "$UNITS"
+  # The user manager's PATH does not include a node installed by nvm or
+  # Homebrew. Quoted whole, as install-service.sh writes it (audit #044).
+  UNIT_PATH="$(dirname "$(command -v node)"):$(dirname "$(command -v docker || echo /usr/bin/docker)"):/usr/local/bin:/usr/bin:/bin"
   cat > "$UNITS/$NAME.service" <<UNIT
 [Unit]
-Description=Hatchabot: follow the $2 release channel
+Description=Hatchabot: follow the release channel chosen last (installed for $2)
 
 [Service]
 Type=oneshot
-# The user manager's PATH does not include a node installed by nvm or Homebrew.
-Environment=PATH=$(dirname "$(command -v node)"):$(dirname "$(command -v docker || echo /usr/bin/docker)"):/usr/local/bin:/usr/bin:/bin
+Environment="PATH=$(printf '%s' "$UNIT_PATH" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g')"
 ExecStart=/usr/bin/env bash "$DIR/scripts/follow-channel.sh" $2
 UNIT
   cat > "$UNITS/$NAME.timer" <<UNIT
 [Unit]
-Description=Hatchabot: check the $2 channel every 10 minutes
+Description=Hatchabot: check the release channel every 10 minutes
 
 [Timer]
 OnBootSec=5min
@@ -53,6 +60,8 @@ WantedBy=timers.target
 UNIT
   systemctl --user daemon-reload
   systemctl --user enable --now "$NAME.timer"
+  # Remembered, as `hatchabot upgrade $2` would: each tick follows the channel chosen last.
+  mkdir -p "$(dirname "$CHANNEL_FILE")"; echo "$2" > "$CHANNEL_FILE"
   echo "This install now follows $2. Logs: journalctl --user -u $NAME"
   echo "Stop with: $0 --uninstall"
   exit 0
@@ -67,26 +76,40 @@ fi
 
 CHANNEL="${1:-}"
 valid "$CHANNEL" || { echo "Usage: $0 stable|beta|latest   (or --install <channel>, --uninstall)"; exit 1; }
+# The channel chosen last wins over the one this timer was installed with:
+# `hatchabot upgrade beta` said it switched, while every tick went on
+# following stable (audit #043).
+REMEMBERED=""
+if [ -f "$CHANNEL_FILE" ]; then REMEMBERED="$(tr -d '[:space:]' < "$CHANNEL_FILE")"; fi
+# Pinned by hand to a version (hatchabot upgrade vX.Y.Z): leave it there.
+case "$REMEMBERED" in v[0-9]*) exit 0 ;; esac
+if valid "$REMEMBERED"; then CHANNEL="$REMEMBERED"; fi
 
 # What the channel names now — the same resolution as upgrade.sh, needed here
 # only to remember a failure and not retry it every ten minutes.
 # (A bundle install has no clone: release-target.sh asks GitHub instead.)
 TARGET="$("$DIR/scripts/release-target.sh" "$CHANNEL" 2>/dev/null)" || exit 0
 [ -n "$TARGET" ] || exit 0
-# Pinned by hand to a version (hatchabot upgrade vX.Y.Z): leave it there.
-case "$(tr -d '[:space:]' < "$HOME/.config/hatchabot/channel" 2>/dev/null)" in v[0-9]*) exit 0 ;; esac
 if [ -f BUNDLE.json ] && [ ! -d .git ]; then CUR="$(sed -nE 's/.*"tag":"([^"]+)".*/\1/p' BUNDLE.json)"
 else CUR="$(git describe --tags --exact-match 2>/dev/null || true)"; fi
 [ "$CUR" = "$TARGET" ] && exit 0
 mkdir -p "$STATE"
-FAILED="$STATE/follow-channel-failed"
+# This install's own records, keyed on its path as the upgrade lock is: one
+# file for every install of the user's let a release that failed on one set
+# it aside on another, which then stayed behind (audit #034). The records
+# from before (unkeyed) are taken over by the first install that looks.
+KEY="$(printf %s "$DIR" | cksum | cut -d' ' -f1)"
+FAILED="$STATE/follow-channel-failed-$KEY"
+TRIES="$STATE/follow-channel-tries-$KEY"; MAX_TRIES=8
+for r in failed tries; do
+  [ ! -f "$STATE/follow-channel-$r" ] || [ -e "$STATE/follow-channel-$r-$KEY" ] || mv -f "$STATE/follow-channel-$r" "$STATE/follow-channel-$r-$KEY" || true
+done
 if [ "$(cat "$FAILED" 2>/dev/null)" = "$TARGET" ]; then exit 0; fi
 # A release whose install keeps failing (exit 3: npm ci against a lockfile
 # that does not match, a driver that will not compile) is not tried every ten
 # minutes for ever: after each failure in a row the wait doubles (10 min,
 # 20, 40 … a day at most), and after MAX_TRIES it is set aside like a
 # release that did not start (review, 2026-10-09). "<release> <failures> <epoch>".
-TRIES="$STATE/follow-channel-tries"; MAX_TRIES=8
 T_TARGET=""; T_COUNT=0; T_LAST=0
 { read -r T_TARGET T_COUNT T_LAST < "$TRIES"; } 2>/dev/null || true
 case "${T_COUNT:-}${T_LAST:-}" in ''|*[!0-9]*) T_COUNT=0; T_LAST=0 ;; esac
@@ -101,7 +124,10 @@ fi
 # upgrade.sh runs from its own copy (it checks out a different release of
 # itself), so calling it from here is safe. HATCHABOT_UPGRADE_BY_TIMER: it
 # leaves the remembered channel alone — someone may have switched it by hand.
-if HATCHABOT_UPGRADE_BY_TIMER=1 bash "$DIR/scripts/upgrade.sh" "$CHANNEL"; then
+# HATCHABOT_UPGRADE_TARGET: the release resolved above, not the channel again —
+# a channel that moved in between had the release upgrade.sh tried fail, this
+# one set aside, and the next tick try the failed one again (audit #042).
+if HATCHABOT_UPGRADE_BY_TIMER=1 HATCHABOT_UPGRADE_TARGET="$TARGET" bash "$DIR/scripts/upgrade.sh" "$CHANNEL"; then
   rm -f "$FAILED" "$TRIES"
 else
   rc=$?

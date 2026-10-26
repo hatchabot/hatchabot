@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
@@ -49,7 +49,7 @@ function world() {
   // The restart the script asks for, recorded rather than done.
   const restarts = join(root, 'restarts.log');
   writeFileSync(join(bin, 'fake-restart'), `#!/usr/bin/env bash\necho restart >> ${JSON.stringify(restarts)}\nexit "\${FAKE_RESTART_RC:-0}"\n`, { mode: 0o755 });
-  return { root, home, install, bin, env, git, restarts };
+  return { root, home, src, origin, install, bin, env, git, restarts };
 }
 type World = ReturnType<typeof world>;
 const run = (w: World, extra: Record<string, string>, args: string[] = []) =>
@@ -93,6 +93,16 @@ describe('scripts/upgrade.sh', () => {
     expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.1.0');
     expect(existsSync(join(w.install, 'node_modules.prev'))).toBe(false);
     expect(readFileSync(join(w.home, '.config', 'hatchabot', 'channel'), 'utf8').trim()).toBe('stable');
+  });
+
+  it('after a run killed right after moving node_modules aside, a failed install still rolls back to those dependencies (audit #033)', () => {
+    const w = world();
+    renameSync(join(w.install, 'node_modules'), join(w.install, 'node_modules.prev')); // the only working copy
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'false' }, ['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
+    expect(readFileSync(join(w.install, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+    expect(existsSync(join(w.install, 'node_modules.prev'))).toBe(false);
   });
 
   it('two upgrades of one install at once: the second is refused (the lock is in the user\'s state folder, not /tmp)', () => {
@@ -142,6 +152,28 @@ describe('the upgrade lock knows its holder (#226)', () => {
       expect(existsSync(`${lock}.clearing`)).toBe(false);
     }
   }, 20_000);
+
+  it('what is installed is read once the lock is held: an upgrade that finished meanwhile is not taken backwards (audit #035)', () => {
+    const w = world();
+    // A newer release (not what stable names): another upgrade puts the machine on it.
+    writeFileSync(join(w.src, 'package.json'), '{"name":"x","version":"1.2.0"}\n');
+    w.git(w.src, 'commit', '-q', '-am', 'v3'); w.git(w.src, 'tag', 'v1.2.0');
+    w.git(w.src, 'push', '-q', w.origin, 'refs/tags/v1.2.0');
+    // That other upgrade finishes in the moment between this one resolving
+    // stable (v1.1.0) and taking the lock: the lock's mkdir moves the tree first.
+    const realMkdir = spawnSync('sh', ['-c', 'command -v mkdir'], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } }).stdout.trim();
+    const once = join(w.root, 'other-upgrade-pending'); writeFileSync(once, '');
+    writeFileSync(join(w.bin, 'mkdir'), `#!/usr/bin/env bash
+case "$*" in *.lock.d) [ -f ${JSON.stringify(once)} ] && rm -f ${JSON.stringify(once)} && ${JSON.stringify(REAL_GIT)} -C ${JSON.stringify(w.install)} checkout -q v1.2.0 ;; esac
+exec ${JSON.stringify(realMkdir)} "$@"
+`, { mode: 0o755 });
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_UPGRADE_BY_TIMER: '1' }, ['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(existsSync(once)).toBe(false); // the other upgrade did run
+    expect(r.stdout).toContain('On v1.2.0, which is newer than stable (v1.1.0)');
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.2.0');
+    expect(restarted(w)).toBe(0);
+  });
 
   it('only its holder lets the lock go: one another run took over is left in place', () => {
     const w = world();

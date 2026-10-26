@@ -92,6 +92,12 @@ describe('automatic upgrades: what counts as on', () => {
     expect((await autoUpgradeStatus(probes({ pin: 'v2.100.0\n' }))).why).toContain('pinned to v2.100.0');
     expect((await autoUpgradeStatus(probes({ platform: 'darwin' }))).ok).toBe(false);
   });
+  it('the channel chosen last is the one the timer follows (audit #043)', async () => {
+    expect(await autoUpgradeStatus(probes({ pin: 'beta\n' }))).toMatchObject({ ok: false, channel: 'beta' });
+    const beta = `ExecStart=/usr/bin/env bash "/x/scripts/follow-channel.sh" beta\n`;
+    expect(await autoUpgradeStatus(probes({ unit: beta, pin: 'stable\n' }))).toEqual({ ok: true, channel: 'stable' });
+    expect((await autoUpgradeStatus(probes({ unit: beta, pin: 'v2.100.0\n' }))).ok).toBe(false);
+  });
 });
 
 describe('who has owner rights, and their factors, straight from the database', () => {

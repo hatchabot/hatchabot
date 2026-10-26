@@ -1,6 +1,6 @@
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
-import { exportAgent, TransferError } from './transfer.js';
+import { exportAgent, importProfile, TransferError } from './transfer.js';
 import { existsSync } from 'node:fs';
 import type { ProvisionDeps } from './provision.js';
 import { whileBusy } from './busy.js';
@@ -44,10 +44,22 @@ export interface MigrateDeps extends ProvisionDeps {
 }
 
 export class MigrateError extends Error {
-  constructor(readonly userMessage: string) {
+  constructor(
+    readonly userMessage: string,
+    /** The destination's source of the agent's vendor, when it would pass one over: the owner may move onto it. */
+    readonly sourceChoice?: SourceChoice,
+  ) {
     super(userMessage);
     this.name = 'MigrateError';
   }
+}
+
+/** A source on the destination a move may name instead of the one it would get. */
+export interface SourceChoice {
+  id: string;
+  name: string;
+  vendor: string;
+  model: string;
 }
 
 export interface PreflightAnswer {
@@ -60,6 +72,12 @@ export interface PreflightAnswer {
   hostName?: string;
   aiProfileName?: string;
   aiModel?: string;
+  /**
+   * When the agent would land on a source of another vendor while this server
+   * has one of its own vendor: that one, so the owner can move it onto it
+   * (the move names it as `aiProfileId`, the restore as `?aiProfileId=`).
+   */
+  sourceChoice?: SourceChoice;
 }
 
 /**
@@ -115,6 +133,8 @@ export function preflight(
     sharedPaths?: string[];
     /** The SOURCE's runtime-image OpenClaw version, for skew detection. */
     openclawVersion?: string;
+    /** A source here the owner chose for the agent (SourceChoice), instead of the one the import would pick. */
+    aiProfileId?: string;
   },
   /** Facts about THIS box the route supplies (async to gather, so not read here). */
   local: { openclawVersion?: string } = {},
@@ -150,22 +170,35 @@ export function preflight(
   const host = hosts.find((h) => h.kind === 'local') ?? hosts[0];
   if (!host) reasons.push('No host is configured here to run it.');
 
-  // Prefer the receiver's OWN source over one merely shared with the box, so
-  // the preview reflects what the agent would actually run on (and bill).
-  const profiles = store.listAIProfiles(ownerId);
-  const mine = profiles.filter((p) => p.ownerId === ownerId);
-  const match = mine.find((p) => p.vendor === req.vendor) ?? profiles.find((p) => p.vendor === req.vendor);
-  const profile = match ?? mine[0] ?? profiles[0];
-  if (!profile) reasons.push('No AI source is configured here.');
+  // The source the import itself will pick (importProfile), so the preview
+  // names what the agent would actually run on (and bill). This used to pick
+  // its own way — a vendor match first — and promised a source the import
+  // then passed over for the ⭐ Default (audit #001). A source the owner chose
+  // (the move's "Move onto …") is the one the restore is told to use.
+  const visible = store.listAIProfiles(ownerId);
+  const chosen = req.aiProfileId ? visible.find((p) => p.id === req.aiProfileId) : undefined;
+  if (req.aiProfileId && !chosen) reasons.push('The AI source chosen for it is not on this server any more.');
+  const profile = req.aiProfileId ? chosen : importProfile(store, ownerId, req.vendor);
+  if (!profile && !req.aiProfileId) reasons.push('No AI source is configured here.');
 
   // A vendor mismatch is not a collision, but it IS a surprise: an agent
   // running on a local model would silently start billing an API, and one on
   // a subscription would need a credential this machine may not have. Refuse,
   // and let the owner set up a matching source or accept the change knowingly.
+  // Judged on the source the import would use, not on whether one exists.
   const warnings: string[] = [];
-  if (profile && req.vendor && !match) {
-    const detail =
-      req.vendor === 'local'
+  let sourceChoice: SourceChoice | undefined;
+  if (profile && req.vendor && profile.vendor !== req.vendor) {
+    const passedOver = chosen ? undefined : visible.find((p) => p.vendor === req.vendor);
+    if (passedOver) sourceChoice = { id: passedOver.id, name: passedOver.name, vendor: passedOver.vendor, model: passedOver.model };
+    const detail = chosen
+      ? `it runs on "${req.vendor}", and the source chosen for it here, ${chosen.name}, is ` +
+        `${chosen.vendor}/${chosen.model}.`
+      : passedOver
+      ? `it runs on "${req.vendor}", and an agent arriving here goes on ` +
+        `${profile.defaultSource ? 'the ⭐ Default source' : 'your own source'}, ${profile.name} ` +
+        `(${profile.vendor}/${profile.model}), not ${passedOver.name}. Move it onto ${passedOver.name} instead.`
+      : req.vendor === 'local'
         ? `it runs on a local model, and this machine has no local model server configured — ` +
           `it would fall back to ${profile.name} (${profile.model}).`
         : `it runs on "${req.vendor}", and this machine only offers ${profile.name} ` +
@@ -193,7 +226,17 @@ export function preflight(
     hostName: host?.name,
     aiProfileName: profile?.name,
     aiModel: profile?.model,
+    ...(sourceChoice ? { sourceChoice } : {}),
   };
+}
+
+/** The other server's sourceChoice, as far as it is one: shown to the owner and sent back, so bounded. */
+function sourceChoiceFrom(v: unknown): SourceChoice | undefined {
+  const c = v as Partial<SourceChoice> | undefined;
+  const ok = (x: unknown, max: number) => typeof x === 'string' && x.length > 0 && x.length <= max;
+  return c && ok(c.id, 64) && ok(c.name, 120) && ok(c.vendor, 32) && ok(c.model, 120)
+    ? { id: c.id!, name: c.name!, vendor: c.vendor!, model: c.model! }
+    : undefined;
 }
 
 async function peerFetch(
@@ -232,13 +275,27 @@ export type MoveState = 'running' | 'landed' | 'failed' | 'unknown';
  * Destination side: record an announced move before the import awaits
  * anything (a store write is synchronous), then follow the import to its end.
  * Without an id (an older Hatchabot sending) it records nothing.
+ *
+ * The receipt is its first request's account's, and bound to it (audit #002):
+ * a request from another account naming the same id writes nothing — its
+ * failure used to read as the first one's. A repeat from the same account (a
+ * proxy resending the POST) is not refused, since its mover would take a
+ * refusal as "undo" while the first import runs on. It may attach its
+ * operation when none is attached yet (the one that lands is then found), but
+ * an outcome it reaches without one is not written over the first request's.
  */
 export function receiveMove(store: Store, moveId: string | undefined, ownerId: string) {
-  if (moveId) store.insertMoveReceipt({ id: moveId, ownerId, bootId: currentBootId() });
+  const reserved = !!moveId && store.insertMoveReceipt({ id: moveId, ownerId, bootId: currentBootId() });
+  const sameOwner = reserved || (!!moveId && store.getMoveReceipt(moveId)?.ownerId === ownerId);
+  let attached = false;
   return {
     /** The import's operation, once its agent row exists. */
-    operation: (opId: string) => { if (moveId) store.updateMoveReceipt(moveId, { opId }); },
-    finished: (outcome: 'landed' | 'failed') => { if (moveId) store.updateMoveReceipt(moveId, { outcome }); },
+    operation: (opId: string) => {
+      if (!sameOwner || (!reserved && store.getMoveReceipt(moveId!)?.opId)) return;
+      store.updateMoveReceipt(moveId!, { opId });
+      attached = true;
+    },
+    finished: (outcome: 'landed' | 'failed') => { if (reserved || attached) store.updateMoveReceipt(moveId!, { outcome }); },
   };
 }
 
@@ -316,7 +373,11 @@ export async function destinationHasAgent(
     const told = moveId ? await askAboutMove(deps, peer, moveId) : 'unsupported';
     if (told === 'landed') return 'yes';
     if (told === 'failed') return 'no';
-    // Otherwise its list too: a slug RUNNING there is an answer whatever else is.
+    // Its import still under way: the receipt decides, not the list. A slug
+    // RUNNING there may be another agent made meanwhile, and was taken for
+    // this one's arrival (audit #091).
+    if (told === 'running') continue;
+    // Otherwise its list too (an older Hatchabot, an id it never got, no answer).
     let agents: Array<{ slug?: string; state?: string }>;
     try {
       // Bounded: a server that is down must not hold the question (or a
@@ -382,11 +443,19 @@ export interface MigrateResult {
   operation?: string;
 }
 
+export interface MigrateOptions {
+  allowDroppedPin?: boolean;
+  /** A source on the destination to run on (its preflight's sourceChoice), instead of the one its import picks. */
+  aiProfileId?: string;
+  requestedBy?: string;
+  onOperation?: (id: string) => void;
+}
+
 export async function migrateAgent(
   deps: MigrateDeps,
   agentId: string,
   peer: Peer,
-  opts: { allowDroppedPin?: boolean; requestedBy?: string; onOperation?: (id: string) => void } = {},
+  opts: MigrateOptions = {},
 ): Promise<MigrateResult> {
   // Busy for the whole move: between export stopping the source and the
   // tombstone landing, the agent looks like an ordinary STOPPED agent — a
@@ -477,7 +546,7 @@ async function migrateAgentInner(
   deps: MigrateDeps,
   agentId: string,
   peer: Peer,
-  opts: { allowDroppedPin?: boolean; requestedBy?: string; onOperation?: (id: string) => void } = {},
+  opts: MigrateOptions = {},
 ): Promise<MigrateResult> {
   const { store } = deps;
   const agent = store.getAgent(agentId);
@@ -509,7 +578,7 @@ async function migrateAgentInner(
   const op = beginOperation(store, 'migrate', agentId, { ...p }, { requestedBy: opts.requestedBy });
   opts.onOperation?.(op.id);
   try {
-    return await migrateSteps(deps, op, agent, peer, p, channel.accountId, profile?.vendor, imageChoice);
+    return await migrateSteps(deps, op, agent, peer, p, channel.accountId, profile?.vendor, imageChoice, opts.aiProfileId);
   } catch (err) {
     rethrowIfCrash(err);
     if (op.get().status === 'running') op.fail(err);
@@ -526,18 +595,21 @@ async function migrateSteps(
   accountId: string,
   vendor: string | undefined,
   imageChoice: 'drop' | 'build' | undefined,
+  aiProfileId: string | undefined,
 ): Promise<MigrateResult> {
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
   const agentId = agent.id;
 
-  // Our runtime-image version rides along so the destination can refuse a
-  // DOWNGRADE (its image older than ours — the config-schema hazard).
+  // The OpenClaw version the agent runs rides along so the destination can
+  // refuse a DOWNGRADE (its image older than that — the config-schema
+  // hazard). The agent's own container, as the export's manifest and Move
+  // read it: this machine's default image may be newer than an agent not
+  // rebuilt since, and was refused as a downgrade it is not (audit #090).
   // Best-effort: an unknown version must not block the move.
-  const sourceVersion = await provider
-    .currentImageInfo()
-    .then((i) => i.openclawVersion)
-    .catch(() => undefined);
+  const sourceVersion = agent.runtimeRef
+    ? await provider.info(agent.runtimeRef).then((i) => i.openclawVersion, () => undefined)
+    : undefined;
 
   // 1. Preflight — nothing has changed yet, so a refusal is free.
   let answer: PreflightAnswer;
@@ -554,6 +626,7 @@ async function migrateSteps(
         // blind") was dead for every folder added since Slice A (audit, 2026-10-23).
         sharedPaths: [...new Set([...(agent.sharedPaths ?? []), ...deps.store.listDataSources(agent.id).filter((d) => d.kind === 'folder' && d.hostPath).map((d) => d.hostPath!)])],
         openclawVersion: sourceVersion,
+        ...(aiProfileId ? { aiProfileId } : {}),
       }),
     });
     if (res.status === 401) throw new MigrateError(`${peer.name} rejected our access token.`);
@@ -565,7 +638,7 @@ async function migrateSteps(
     throw new MigrateError(`Couldn't reach ${peer.name} at ${peer.url}.`);
   }
   if (!answer.ok) {
-    throw new MigrateError(`${peer.name} can't accept this agent: ${answer.reasons.join(' ')}`);
+    throw new MigrateError(`${peer.name} can't accept this agent: ${answer.reasons.join(' ')}`, sourceChoiceFrom(answer.sourceChoice));
   }
   log('migrate.preflight_ok', { agentId, peer: peer.name });
   op.step('preflight-ok');
@@ -631,7 +704,8 @@ async function migrateSteps(
   //    nothing behind when it REFUSES, so then we only have to undo our side.
   let res: Response;
   try {
-    res = await peerFetch(deps, peer, `/v1/agents/restore${imageChoice ? `?image=${imageChoice}` : ''}`, {
+    const query = new URLSearchParams({ ...(imageChoice ? { image: imageChoice } : {}), ...(aiProfileId ? { aiProfileId } : {}) }).toString();
+    res = await peerFetch(deps, peer, `/v1/agents/restore${query ? `?${query}` : ''}`, {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream', ...(p.moveId ? { [MOVE_HEADER]: p.moveId } : {}) },
       body: new Uint8Array(data),

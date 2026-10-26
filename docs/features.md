@@ -1187,6 +1187,10 @@ Five distinct verbs, for five intents:
   It transfers with memory, members, and Telegram identity, and is managed
   from that server's dashboard afterwards. The local copy stays STOPPED —
   never start both, they'd fight over the same bot. CLI: `hatchabot rehost`.
+  It runs there on that server's ⭐ Default AI source. When that one is of
+  another vendor (an API agent landing on a local model, say) and the server
+  has a source of the agent's own vendor, the move stops first and offers
+  **Move onto** that source instead (CLI: `--profile <id>`).
 
 **📨 Send** (card) skips the file when the recipient is on this server: pick
 them by email and the same secret-free template lands in their **📥 Inbox**
@@ -2339,8 +2343,9 @@ What the machine does on its own is its owner's choice (⚙ Settings → Hosts �
 - *Only when I press Rebuild*: nothing happens on its own.
 
 `hatchabot rebuild --outdated [--required] [--dry-run]` rebuilds every running
-agent that needs it and prints why; `hatchabot doctor` warns about containers
-still on the shared network.
+agent that needs it and prints why; it exits non-zero when the server refused
+any of them (busy, or held by another change), naming each, so a script can
+retry; `hatchabot doctor` warns about containers still on the shared network.
 
 **Per-agent image pin** (an agent's ⚙ Advanced → Runtime, host owner only): pin one agent
 to a specific image — a candidate build under test, or a derived image with

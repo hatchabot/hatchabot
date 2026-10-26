@@ -294,12 +294,18 @@ describe('agent connections (gog accounts)', () => {
     expect(provider.execLog.some((c) => c[0] === 'sh' && c[1] === 'gog auth remove --force -- "board@example.com"')).toBe(true);
   });
 
-  it('gog absent or unparsable output → empty list, not a 500', async () => {
+  it('gog absent → empty list; output that is not its list → a 502 that says so, not "none" (audit #075)', async () => {
     const { f, provider } = await liveWorld();
-    provider.execResponses.set('sh', { code: 0, stdout: 'bash: gog: command not found', stderr: '' });
+    provider.execResponses.set('sh', { code: 127, stdout: '', stderr: 'bash: gog: command not found' });
     const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/connections', headers: H });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ accounts: [] });
+    for (const out of [{ code: 0, stdout: 'not json', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 1, stdout: '', stderr: 'exec failed' }]) {
+      provider.execResponses.set('sh', out);
+      const unread = await f.inject({ method: 'GET', url: '/v1/agents/a1/connections', headers: H });
+      expect(unread.statusCode).toBe(502);
+      expect(unread.json().error).toMatch(/Couldn't read which Google accounts/);
+    }
   });
 
   it('shell-metacharacter emails are refused before any exec; foreign agents 404', async () => {

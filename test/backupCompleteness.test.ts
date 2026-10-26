@@ -517,6 +517,44 @@ exec /bin/cat "$@"
   });
 });
 
+describe('scripts/backup-volumes.sh run by hand reads the install\'s .env, as the service does (audit #023)', () => {
+  /** A registry somewhere else, naming one agent, as a moved HATCHABOT_DB would. */
+  const movedRegistry = (root: string, ref: string) => {
+    const path = join(root, 'moved', 'registry.sqlite'); mkdirSync(dirname(path), { recursive: true });
+    const db = new Database(path);
+    db.exec(`CREATE TABLE agents (id TEXT, state TEXT, runtime_ref TEXT)`);
+    db.prepare(`INSERT INTO agents VALUES ('a-moved', 'RUNNING', ?)`).run(ref);
+    db.close();
+    return path;
+  };
+
+  it('backs up the registry .env names, not a stale default one beside it; the environment still wins over .env', () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol', 'hatchabot-garden-2-vol'], ['docker://hatchabot-kitchen-1']);
+    const moved = movedRegistry(w.root, 'docker://hatchabot-garden-2');
+    const elsewhere = join(w.root, 'not-these-backups');
+    writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=not-a-real-key\nHATCHABOT_DB=${moved}\nHATCHABOT_BACKUP_DIR=${elsewhere}\n`);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    const copy = new Database(join(w.setDir(), 'hatchabot.sqlite'), { readonly: true });
+    expect(copy.prepare('SELECT id FROM agents').all()).toEqual([{ id: 'a-moved' }]);
+    copy.close();
+    expect(existsSync(join(w.setDir(), 'hatchabot-garden-2-vol.tgz'))).toBe(true);
+    expect(w.record()).toMatchObject({ state: 'complete', orphans: ['hatchabot-kitchen-1-vol'] });
+    expect(existsSync(elsewhere)).toBe(false); // HATCHABOT_BACKUP_DIR from the command line beat the .env's
+  });
+
+  it('a pre-rename AGENTCLAW_DB in .env is the registry when the default one is not there', () => {
+    const w = scriptWorld(['hatchabot-garden-2-vol'], []);
+    rmSync(join(w.repo, 'data', 'hatchabot.sqlite'));
+    const moved = movedRegistry(w.root, 'docker://hatchabot-garden-2');
+    writeFileSync(join(w.repo, '.env'), `AGENTCLAW_SECRET_KEY=not-a-real-key\nAGENTCLAW_DB=${moved}\n`);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(existsSync(join(w.setDir(), 'hatchabot-garden-2-vol.tgz'))).toBe(true);
+    expect(w.record()).toMatchObject({ state: 'complete', captured: ['hatchabot-garden-2-vol'] });
+  });
+});
+
 describe('scripts/restore-drill.sh picks a set worth drilling (2026-10-09)', () => {
   /** The drill in a sandbox: it stops at the database check (no hatchabot.sqlite), before any docker. */
   function drill(base: string, args: string[] = []) {

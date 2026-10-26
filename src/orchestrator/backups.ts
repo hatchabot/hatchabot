@@ -12,6 +12,7 @@ import { dirname, join, resolve } from 'node:path';
 import { defaultBackupsDir } from '../envCompat.js';
 import { fileURLToPath } from 'node:url';
 import type { RuntimeProvider } from '../providers/provider.js';
+import { DEFAULT_PREFIX, dockerNames } from '../providers/dockerNames.js';
 import type { Store } from '../store/store.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
 import { allowlistScrubScript, DROP_CHAT_ACCOUNTS_SCRIPT, keepOnlyTelegramAccountScript, RESTORED_ACCESS_SCRIPT, revokedScrubTargets } from './members.js';
@@ -329,12 +330,15 @@ export class RestoreError extends Error {
 /**
  * The tarball basename the nightly script wrote for a runtime's volume. The
  * backup archives each `${PREFIX}-*` docker volume as `<volume>.tgz`, and the
- * docker provider's volume for `<scheme>://<name>` is `<name>-vol`. This is the
- * one place that convention is re-derived; it's docker-specific by design, like
- * the rest of the backup subsystem (the script, exportState, importState).
+ * volume is the docker provider's for the ref (dockerNames: `<name>-vol`, or
+ * `agentclaw-vol-<short>` for a legacy pre-slug ref, which this used to name
+ * `<short>-vol` — no restore found its archive, audit #021). Docker-specific
+ * by design, like the rest of the backup subsystem (the script, exportState,
+ * importState); another kind of ref (a test's mock) is `<name>-vol`.
  */
-export function agentArchiveName(runtimeRef: string): string {
-  return `${runtimeRef.replace(/^\w+:\/\//, '')}-vol.tgz`;
+export function agentArchiveName(runtimeRef: string, prefix = process.env.HATCHABOT_PREFIX ?? DEFAULT_PREFIX): string {
+  const volume = runtimeRef.startsWith('docker://') ? dockerNames(runtimeRef, prefix).volume : `${runtimeRef.replace(/^\w+:\/\//, '')}-vol`;
+  return `${volume}.tgz`;
 }
 
 /**

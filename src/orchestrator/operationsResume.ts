@@ -4,13 +4,13 @@ import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
 import type { InstallDeps } from './apps.js';
 import { recoverAppOperation, resumeAppOperation } from './appOperations.js';
-import { resumeArchive } from './archive.js';
+import { resumeArchive, type ArchiveDeps } from './archive.js';
 import { recoverBackupRestore, resumeBackupRestore } from './backups.js';
 import { AgentBusyError, whileBusy } from './busy.js';
 import { recoverMigrate, resumeMigrate, type MigrateDeps } from './migrate.js';
 import { recoverMoveHost, resumeMoveHost } from './moveHost.js';
 import { BACKGROUND_KINDS, currentBootId, handleFor, markInterrupted, rethrowIfCrash, type Operation } from './operations.js';
-import { reapplyCurrentSettings, type ProvisionDeps } from './provision.js';
+import { reapplyCurrentSettings, runProvisionSteps, type ProvisionDeps } from './provision.js';
 import { applyReconcileRule } from './reconcile.js';
 import { recoverSnapshotRestore, resumeSnapshotRestore } from './snapshots.js';
 import { resumeImport } from './transfer.js';
@@ -46,6 +46,8 @@ export interface ResumeContext {
   appDeps?: (agentId: string) => InstallDeps | undefined;
   /** What a Start runs once it is up (the routes' clearPinsWhenUp), for an agent a recovery started. */
   afterStart?: (agentId: string) => void;
+  /** An archive's Discord and Slack bots, parked as it finishes (the routes' parkArchivedChannels). */
+  parkOtherChannels?: ArchiveDeps['parkOtherChannels'];
 }
 
 export class RecoverError extends Error {
@@ -106,7 +108,10 @@ async function runKind(ctx: ResumeContext, op: Operation, action: string | undef
     case 'archive': {
       const deps = depsFor(ctx, op);
       if (!deps) throw new Error('the machine it is on is not known here any more');
-      return resumeArchive({ store: ctx.store, secrets: ctx.secrets, provider: deps.provider, channel: ctx.channel as never, log: log ?? (() => {}) }, op.id);
+      return resumeArchive({
+        store: ctx.store, secrets: ctx.secrets, provider: deps.provider, channel: ctx.channel as never, log: log ?? (() => {}),
+        parkOtherChannels: ctx.parkOtherChannels,
+      }, op.id);
     }
     case 'app-install':
     case 'app-update':
@@ -175,6 +180,22 @@ async function resumeBackground(ctx: ResumeContext, op: Operation): Promise<void
   const base = ctx.logFor?.(agent.id) ?? (() => {});
   // "Not answering" is said by reconcile's own sweep; asked again every 10 minutes, it would repeat.
   const log = (e: string, d: Record<string, unknown>) => { if (e !== 'reconcile.host_unreachable') base(e, d); };
+  // Up is not set up: a gateway that answers says nothing of the steps after
+  // it — its git sources, connections, rebuild hook, schedules. Marked
+  // running on health alone, a repo source was never cloned (audit #082).
+  // Its steps run again, as Retry runs them: the volume is kept, and each
+  // step leaves what is done as it is.
+  if (op.kind === 'provision' && !agent.pendingAction && status?.phase === 'running' && status.healthy) {
+    const r = await runProvisionSteps({
+      store: ctx.store, secrets: ctx.secrets, provider, channel: ctx.channel, embedder: ctx.embedder, log: base,
+      ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
+    }, agent.id);
+    if (r.agent.state === 'RUNNING') h.done('Interrupted by a restart after it came up; the rest of its setup ran again, and it is running.');
+    else if (r.agent.state === 'FAILED') h.fail(r.agent.stateReason ?? 'Setup was interrupted by a restart — tap Retry.');
+    else if (r.agent.pendingAction) h.fail('Setup was interrupted by a restart while it waited for a step from you — finish that step on its page.');
+    else h.fail('Setup was interrupted by a restart.');
+    return;
+  }
   if (applyReconcileRule(ctx.store, agent, status, log) === 'unknown') return; // still interrupted: the next pass asks again
   const after = ctx.store.getAgent(agent.id)!;
   if (after.state === 'RUNNING') h.done(`Interrupted by a restart; it was running again, so it is marked running.`);

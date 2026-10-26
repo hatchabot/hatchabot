@@ -13,8 +13,9 @@
 # and build tools. HATCHABOT_NATIVE=1 forces that. Then scripts/setup-host.sh
 # writes .env, pulls the agent runtime image, installs the background service,
 # links the `hatchabot` command, and prints the link (and a QR code) to open.
-# Re-running is safe: it upgrades along the same channel. HATCHABOT_DIR installs
-# elsewhere (default ~/hatchabot).
+# Re-running is safe: it upgrades along the same channel, or finishes a first
+# setup that stopped part-way. HATCHABOT_DIR installs elsewhere (default
+# ~/hatchabot).
 set -euo pipefail
 # Everything is inside main(), called on the last line: run as `curl … | bash`,
 # bash reads this script from the pipe as it goes, and the `exec </dev/tty`
@@ -383,18 +384,31 @@ Then re-run this installer. (Your .env, data/ and backups are untouched either w
   fi
 }
 
+# Set up already: it has its .env, and the service runs from here (INSTALLED,
+# read above). A first install whose setup stopped part-way (a runtime image
+# pull that failed) has no service yet, and re-running the installer, as it
+# says to, only upgraded it: "Already on", and the setup was never finished
+# (audit #041). Such an install goes on to the setup below instead.
+set_up() { [ -f "$DIR/.env" ] && [ "$INSTALLED" = "$DIR" ]; }
 case "$MODE" in
   bundle-existing)
-    # A bundle install already here: an upgrade, with its own rollback.
-    mkdir -p "$(dirname "$CHANNEL_FILE")"; printf '%s\n' "$CHANNEL" > "$CHANNEL_FILE"
-    cd "$DIR"
-    exec ./scripts/with-docker.sh ./scripts/upgrade.sh "$CHANNEL" ;;
+    if set_up; then
+      # A bundle install already here: an upgrade, with its own rollback.
+      mkdir -p "$(dirname "$CHANNEL_FILE")"; printf '%s\n' "$CHANNEL" > "$CHANNEL_FILE"
+      cd "$DIR"
+      exec ./scripts/with-docker.sh ./scripts/upgrade.sh "$CHANNEL"
+    fi
+    # Its setup is finished on the release unpacked then; the upgrade after.
+    BTAG="$(sed -nE 's/.*"tag":"([^"]+)".*/\1/p' "$DIR/BUNDLE.json")"
+    echo "   the setup of the install in $DIR did not finish — finishing it now"
+    if [ -n "$BTAG" ] && [ "$BTAG" != "$TAG" ]; then echo "   (on $BTAG, the release unpacked then; once it is set up, hatchabot upgrade takes it to $TAG)"; TAG="$BTAG"; fi ;;
   native-existing)
-    # A clone that is already set up (it has its .env): an upgrade, with
-    # upgrade.sh's lock and rollback. Checking out the release and installing
-    # in place had neither — a failed npm ci left the install on a release it
-    # could not run (review, 2026-10-09). A clone never set up is a first install.
-    if [ -f "$DIR/.env" ]; then
+    # A clone that is already set up: an upgrade, with upgrade.sh's lock and
+    # rollback. Checking out the release and installing in place had neither —
+    # a failed npm ci left the install on a release it could not run (review,
+    # 2026-10-09). A clone never set up, or whose setup did not finish, is a
+    # first install (its .env is kept).
+    if set_up; then
       mkdir -p "$(dirname "$CHANNEL_FILE")"; printf '%s\n' "$CHANNEL" > "$CHANNEL_FILE"
       cd "$DIR"
       [ -x scripts/with-docker.sh ] && exec ./scripts/with-docker.sh ./scripts/upgrade.sh "$CHANNEL"

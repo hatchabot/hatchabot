@@ -9,6 +9,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import { scrubRemovedDataSources } from '../src/orchestrator/provision.js';
+import { isBusy } from '../src/orchestrator/busy.js';
 
 /**
  * Adding/removing data sources (Slice A: folders, ro/rw). Host-folder mounts are
@@ -395,5 +396,48 @@ describe('removing a repo takes its clone off the agent too (HB-0002)', () => {
     const [script] = removals(w.provider, mark);
     expect(script).toContain('rm -f /home/node/.openclaw/.ssh/recipes_deploy');
     expect(script).not.toContain('rm -rf');
+  });
+});
+
+describe('a public repo added to a running agent (audit #096)', () => {
+  it("holds the agent while its clone and AGENTS.md sync run: a save meanwhile is refused, not written over", async () => {
+    const w = await world();
+    const provider = new MockProvider();
+    const f = Fastify();
+    await registerRoutes(f, { store: w.store, secrets: w.secrets, providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'kitchen', workspace: { files: {}, configPatch: { agentId: 'kitchen', authMode: 'api-key' } }, env: {} } as any);
+    w.store.setAgentRuntimeRef('a1', runtimeRef);
+    w.store.setAgentWebOnly('a1', true);
+    let text = '# Playbook\nOriginal instructions.\n';
+    const changed = '# Playbook\nNew instructions saved by the owner.\n';
+    // The sync pauses once it has read AGENTS.md (it asks the runtime's version next).
+    let enter!: () => void, release!: () => void, synced!: () => void;
+    const entered = new Promise<void>((r) => { enter = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const done = new Promise<void>((r) => { synced = r; });
+    const info = provider.info.bind(provider);
+    provider.info = async (ref) => { enter(); await gate; return info(ref); };
+    provider.execShell = async (_ref, script) => {
+      const write = /^set -e; echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
+      if (write && write[2]!.endsWith('AGENTS.md')) {
+        text = Buffer.from(write[1]!, 'base64').toString('utf8');
+        if (text.includes('## Data sources')) synced();
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      return { code: 0, stdout: script.includes('/agent/AGENTS.md') ? text : '', stderr: '' };
+    };
+    const save = () => f.inject({ method: 'PUT', url: '/v1/agents/a1/files/AGENTS.md', headers: as, payload: { content: changed } });
+    expect((await addSource(f, { kind: 'git', access: 'ro', repoUrl: 'https://example.org/example-owner/notes.git', public: true })).statusCode).toBe(200);
+    await entered;
+    const meanwhile = await save();
+    expect(meanwhile.statusCode).toBe(409);
+    expect(meanwhile.json().error).toMatch(/Another operation/);
+    release();
+    await done;
+    expect(text).toContain('Original instructions.');
+    // Once it is over, the save goes through and stays.
+    for (let i = 0; i < 50 && isBusy('a1'); i++) await new Promise((r) => setTimeout(r, 5));
+    expect((await save()).statusCode).toBe(200);
+    expect(text).toBe(changed);
   });
 });

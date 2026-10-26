@@ -7,6 +7,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { beginOperation } from '../src/orchestrator/operations.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
+import { MAX_FILE_BYTES } from '../src/orchestrator/snapshots.js';
 
 /**
  * Sharing Phase 2a over HTTP: declaring setup fields on an agent, and filling
@@ -49,6 +50,30 @@ async function world() {
   });
   return { store, f, provider, secrets };
 }
+
+/**
+ * The agent's core files as a map: a write (tmp + mv, base64) lands in it,
+ * a read answers as readCoreFile's script does (exit 3 for a file that is
+ * there but cannot be read; the empty-file mark for one that is empty).
+ */
+function fakeVolume(provider: MockProvider, files: Map<string, string>, opts: { unreadable?: Set<string>; failWrite?: Set<string> } = {}) {
+  provider.execShell = async (_ref: string, script: string) => {
+    const w = /^set -e; echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
+    const name = /\/agent\/([A-Z]+\.md)/.exec(w ? w[2]! : script)?.[1];
+    if (w && name) {
+      if (opts.failWrite?.has(name)) return { code: 1, stdout: '', stderr: 'No space left on device' };
+      files.set(name, Buffer.from(w[1]!, 'base64').toString('utf8'));
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (script.startsWith('head -c') && name) {
+      if (opts.unreadable?.has(name)) return { code: 3, stdout: '', stderr: '' };
+      const text = files.get(name);
+      return { code: 0, stdout: text ?? '', stderr: text === '' ? 'hatchabot:empty-file\n' : '' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+}
+const STYLE = { key: 'style', label: 'Style', required: true, type: 'text' as const, target: 'soul' as const };
 
 describe('PATCH /v1/agents/:id parameters', () => {
   it('declares, exposes on the agent, and clears with null', async () => {
@@ -457,6 +482,44 @@ describe('PUT /v1/agents/:id/params (edit values later)', () => {
     expect(store.getAgent(id)!.paramValues).toEqual({ style: 'growth' });
   });
 
+
+  it('a second setup file that cannot be written puts the first back, and the stored values stay (audit #013)', async () => {
+    const { store, f, provider } = await world();
+    await runningMaster(store, provider);
+    store.setAgentParameters('a1', [STYLE]);
+    store.setAgentParamState('a1', { style: 'calm' }, { soul: 'Soul {{style}}', agents: 'Rules {{style}}' });
+    const files = new Map([['SOUL.md', 'Soul calm'], ['AGENTS.md', 'Rules calm']]);
+    fakeVolume(provider, files, { failWrite: new Set(['AGENTS.md']) });
+    const res = await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: { style: 'brisk' } } });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toMatch(/Nothing was changed/);
+    expect(Object.fromEntries(files)).toEqual({ 'SOUL.md': 'Soul calm', 'AGENTS.md': 'Rules calm' });
+    expect(store.getAgent('a1')!.paramValues).toEqual({ style: 'calm' });
+    // Once it can be written, both files take the new value together.
+    fakeVolume(provider, files);
+    expect((await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: { style: 'brisk' } } })).statusCode).toBe(200);
+    expect(Object.fromEntries(files)).toEqual({ 'SOUL.md': 'Soul brisk', 'AGENTS.md': 'Rules brisk' });
+  });
+
+  it('a master whose SOUL.md cannot be read is refused on its first edit, not seeded without it (audit #014)', async () => {
+    const { store, f, provider } = await world();
+    await runningMaster(store, provider);
+    store.setAgentParameters('a1', [STYLE]);
+    const files = new Map([['SOUL.md', 'Soul {{style}}'], ['AGENTS.md', 'Rules {{style}}']]);
+    fakeVolume(provider, files, { unreadable: new Set(['SOUL.md']) });
+    const res = await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: { style: 'calm' } } });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toMatch(/SOUL\.md is there but could not be read\. Nothing was changed\./);
+    expect(store.getAgent('a1')!.paramFiles).toBeUndefined();
+    expect(store.getAgent('a1')!.paramValues).toBeUndefined();
+    expect(Object.fromEntries(files)).toEqual({ 'SOUL.md': 'Soul {{style}}', 'AGENTS.md': 'Rules {{style}}' });
+    // Readable again: the layer is seeded from both files, and both are configured.
+    fakeVolume(provider, files);
+    expect((await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: { style: 'brisk' } } })).statusCode).toBe(200);
+    expect(store.getAgent('a1')!.paramFiles).toMatchObject({ soul: 'Soul {{style}}', agents: 'Rules {{style}}' });
+    expect(Object.fromEntries(files)).toEqual({ 'SOUL.md': 'Soul brisk', 'AGENTS.md': 'Rules brisk' });
+  });
+
   it('a master whose files have NO placeholders is refused with a pointer, not silently no-oped', async () => {
     const { store, f, provider } = await world();
     await runningMaster(store, provider);
@@ -600,6 +663,23 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     expect(childWrites.find((x) => x.path.endsWith('SOUL.md'))?.text).toBe('');
     expect(childWrites.find((x) => x.path.endsWith('AGENTS.md'))?.text).toBe('# Rules growth\n');
     expect(store.getAgent(child.id)!.paramFiles).toMatchObject({ soul: '', agents: '# Rules {{style}}\n' });
+  });
+
+  it("a master layer without AGENTS.md keeps the child's own AGENTS.md layer, so its Setup values still reach it (audit #015)", async () => {
+    const { store, f, provider, child } = await withChild();
+    store.setAgentParamState('a1', { style: 'value' }, { soul: 'Master {{style}}' });
+    store.setAgentParamState(child.id, { style: 'growth' }, { soul: 'Child {{style}}', agents: 'Rules {{style}}' });
+    const files = new Map([['SOUL.md', 'Child growth'], ['AGENTS.md', 'Rules growth']]);
+    fakeVolume(provider, files);
+    const push = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(push.json()).toMatchObject({ pushed: 1 });
+    expect(files.get('SOUL.md')).toBe('Master growth');
+    expect(files.get('AGENTS.md')).toMatch(/^Rules growth(\n|$)/);
+    expect(store.getAgent(child.id)!.paramFiles).toEqual({ soul: 'Master {{style}}', agents: 'Rules {{style}}' });
+    const edit = await f.inject({ method: 'PUT', url: `/v1/agents/${child.id}/params`, headers: H, payload: { values: { style: 'value' } } });
+    expect(edit.statusCode).toBe(200);
+    expect(files.get('SOUL.md')).toBe('Master value');
+    expect(files.get('AGENTS.md')).toMatch(/^Rules value(\n|$)/);
   });
 
   it("a master whose files cannot be read is a 502, not a push of nothing", async () => {
@@ -851,6 +931,54 @@ describe('10th audit regressions', () => {
     expect(first.statusCode).toBe(200);
     const second = await f.inject({ method: 'POST', url: '/v1/agents/a1/proposals/pm1/resolve', headers: H, payload: { action: 'merge' } });
     expect(second.statusCode).toBe(404);
+  });
+
+  async function mergeWorld(files: Map<string, string>, opts: Parameters<typeof fakeVolume>[2] = {}) {
+    const w = await world();
+    const { runtimeRef } = await w.provider.provision({
+      agentId: 'a1', slug: 'mine',
+      workspace: { files: {}, configPatch: { agentId: 'mine', authMode: 'api-key' } }, env: {},
+    } as any);
+    w.store.setAgentRuntimeRef('a1', runtimeRef);
+    fakeVolume(w.provider, files, opts);
+    w.store.insertProposal({ id: 'pm1', masterAgentId: 'a1', childAgentId: 'kidX', childName: 'Kid', text: 'A lesson worth keeping around.' });
+    const merge = () => w.f.inject({ method: 'POST', url: '/v1/agents/a1/proposals/pm1/resolve', headers: H, payload: { action: 'merge' } });
+    return { ...w, merge };
+  }
+
+  it("a master playbook that cannot be read refuses the merge and keeps the proposal, never writing the lesson alone (audit #018)", async () => {
+    const files = new Map([['AGENTS.md', '# Playbook\nEvery rule the copies follow.\n']]);
+    const { store, provider, merge } = await mergeWorld(files, { unreadable: new Set(['AGENTS.md']) });
+    const res = await merge();
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toMatch(/AGENTS\.md is there but could not be read\..*still waiting/);
+    expect(files.get('AGENTS.md')).toBe('# Playbook\nEvery rule the copies follow.\n');
+    expect(store.listProposals('a1').map((p) => p.id)).toEqual(['pm1']);
+    // Readable again: the lesson is added under what was there.
+    fakeVolume(provider, files);
+    expect((await merge()).statusCode).toBe(200);
+    expect(files.get('AGENTS.md')).toMatch(/^# Playbook\nEvery rule the copies follow\.\n\n<!-- distilled from Kid, [0-9-]+ -->\nA lesson worth keeping around\.\n$/);
+    expect(store.listProposals('a1')).toEqual([]);
+  });
+
+  it('a merge that would take the playbook (or its setup layer) past the core-file limit is refused, nothing written (audit #019)', async () => {
+    const near = 'x'.repeat(MAX_FILE_BYTES - 10);
+    const files = new Map([['AGENTS.md', near]]);
+    const { store, merge } = await mergeWorld(files);
+    const res = await merge();
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/over 256KB.*Nothing was merged/);
+    expect(files.get('AGENTS.md')).toBe(near);
+    expect(store.listProposals('a1').map((p) => p.id)).toEqual(['pm1']);
+    expect(store.listSnapshots('a1')).toEqual([]);
+    // The live file small, the master's setup layer near the limit: refused all the same.
+    files.set('AGENTS.md', '# Playbook\n');
+    store.setAgentParamState('a1', {}, { agents: near });
+    const layer = await merge();
+    expect(layer.statusCode).toBe(400);
+    expect(layer.json().error).toMatch(/setup layer would be over 256KB/);
+    expect(files.get('AGENTS.md')).toBe('# Playbook\n');
+    expect(store.getAgent('a1')!.paramFiles?.agents).toBe(near);
   });
 
   it('deleting a master scrubs its pending proposals', async () => {

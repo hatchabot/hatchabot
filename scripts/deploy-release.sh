@@ -8,7 +8,7 @@
 # docs/releasing.md). Override the defaults with env vars:
 #   HATCHABOT_PROD_DIR   (default ~/hatchabot-prod)
 #   HATCHABOT_SERVICE    (default hatchabot — a systemd --user unit)
-#   HATCHABOT_HEALTH_URL (default http://127.0.0.1:${PORT:-8080}/)
+#   HATCHABOT_HEALTH_URL (default: the PORT and HATCHABOT_BIND in its .env, or http://127.0.0.1:8080/)
 #
 # Exit codes (follow-latest.sh reads them): 0 serving the tag; 1 it did not
 # come up and the previous release is back — the only code that means "do
@@ -21,7 +21,24 @@ PROD="${HATCHABOT_PROD_DIR:-$HOME/hatchabot-prod}"
 SVC="${HATCHABOT_SERVICE:-hatchabot}"
 [ -d "$PROD/.git" ] || { echo "No production checkout at $PROD — clone the repo there first (docs/releasing.md)."; exit 2; }
 cd "$PROD"
-git fetch --tags --force --quiet origin
+# Whatever ends the script ends here. Something it did not plan for (set -e
+# after node_modules was moved aside) left a half-changed checkout and exit 1,
+# which follow-latest.sh reads as "this tag does not start" and never retries
+# (review, 2026-10-09). Now the previous release is put back, and only an
+# explicit rollback says 1. Set before the first step that can fail: a fetch
+# that met another fetch's ref lock said 1 before anything was changed, and
+# the tag was set aside for good (audit #032).
+ROLLED_BACK=0; CHANGING=0; RESTARTED=0; LOCK=""
+finish() {
+  local rc=$?
+  set +e
+  if [ "$rc" != 0 ] && [ "$CHANGING" = 1 ]; then CHANGING=0; rc=3; echo "The deploy stopped part-way — putting $CUR back."; rollback; fi
+  [ -z "$LOCK" ] || [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$ME" ] || rm -rf "$LOCK"
+  case "$rc" in 0|2|3|4) ;; 1) [ "$ROLLED_BACK" = 1 ] || rc=3 ;; *) rc=3 ;; esac
+  exit "$rc"
+}
+trap finish EXIT
+git fetch --tags --force --quiet origin || { echo "Could not fetch from $PROD's origin (above) — nothing was changed; try again later."; exit 3; }
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "Tag $TAG not found on origin."; exit 2; }
 # Refusing is right; refusing without saying WHAT is not. An untracked stray —
 # a note saved into the wrong directory — reads identically to a hand-edit here,
@@ -48,7 +65,6 @@ fi
 # 2026-10-09).
 LOCKS="${XDG_STATE_HOME:-$HOME/.local/state}/hatchabot"; mkdir -p "$LOCKS"
 LOCK_PATH="$LOCKS/upgrade-$(printf %s "$PWD" | cksum | cut -d' ' -f1).lock.d"
-LOCK=""
 proc_start() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; }
 ME="$$"; MY_START="$(proc_start $$)"; [ -z "$MY_START" ] || ME="$$ $MY_START"
 lock_left_over() {
@@ -73,21 +89,6 @@ if ! take_lock; then
   take_lock || { echo "Another deploy or upgrade of $PROD is running (lock $LOCK_PATH)."; exit 4; }
 fi
 CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
-# Whatever ends the script ends here. Something it did not plan for (set -e
-# after node_modules was moved aside) left a half-changed checkout and exit 1,
-# which follow-latest.sh reads as "this tag does not start" and never retries
-# (review, 2026-10-09). Now the previous release is put back, and only an
-# explicit rollback says 1.
-ROLLED_BACK=0; CHANGING=0; RESTARTED=0
-finish() {
-  local rc=$?
-  set +e
-  if [ "$rc" != 0 ] && [ "$CHANGING" = 1 ]; then CHANGING=0; rc=3; echo "The deploy stopped part-way — putting $CUR back."; rollback; fi
-  [ -z "$LOCK" ] || [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$ME" ] || rm -rf "$LOCK"
-  case "$rc" in 0|2|3|4) ;; 1) [ "$ROLLED_BACK" = 1 ] || rc=3 ;; *) rc=3 ;; esac
-  exit "$rc"
-}
-trap finish EXIT
 echo "Deploying $TAG to $PROD (currently $CUR)…"
 # `npm ci` wipes node_modules first: keep the working one aside until the new
 # one is in, or an npm outage leaves prod with no dependencies (exit 3 = that;
@@ -108,6 +109,10 @@ rollback() {
 # 2026-10-09). A tag from before ensure-deps.sh gets npm ci.
 install_deps() { if [ -x scripts/ensure-deps.sh ]; then ./scripts/ensure-deps.sh --quiet; else npm ci --silent; fi; }
 INSTALL="${HATCHABOT_INSTALL_CMD:-install_deps}"   # overridable for tests only
+# A deploy killed (or a power cut) right after moving node_modules aside left
+# node_modules.prev as the only working copy. Put back first: deleted as a
+# leftover, a failed install then had nothing to roll back to (audit #033).
+[ -d node_modules ] || [ ! -d node_modules.prev ] || mv node_modules.prev node_modules
 CHANGING=1
 rm -rf node_modules.prev; [ -d node_modules ] && mv node_modules node_modules.prev
 git checkout --quiet "$TAG"
@@ -119,12 +124,27 @@ $INSTALL || { CHANGING=0; rollback || true; exit 3; }
 RESTARTED=1
 systemctl --user restart "$SVC" || { CHANGING=0; ROLLED_BACK=1; rollback || true; exit 1; }
 WANT="$(node -e 'console.log(require("./package.json").version)')"
-# Health URL from the production .env, not the caller's shell: PORT and native TLS.
+# Health URL from the production .env, not the caller's shell: PORT, native
+# TLS and the bind address, read as the service reads them (restart.sh does
+# the same) — the bare value, and the LAST line that sets it. The first was
+# taken, so a .env that set PORT twice was probed on the old port (audit #031).
 # (No .env is "not set": under pipefail sed's exit 2 for a missing file ended the deploy.)
-envval() { { sed -n "s/^$1=//p" .env 2>/dev/null || true; } | sed -n 1p | sed -e 's/[[:space:]]*#.*$//' -e "s/^['\"]//" -e "s/['\"]$//"; }
+envval() { { sed -n "s/^$1=//p" .env 2>/dev/null || true; } \
+  | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//" | tail -n1; }
 P="$(envval PORT)"; P="${P:-8080}"
 SCHEME=http; [ -n "$(envval HATCHABOT_TLS_CERT)" ] && SCHEME=https
-URL="${HATCHABOT_HEALTH_URL:-$SCHEME://127.0.0.1:$P/}"
+# At the address it listens on when HATCHABOT_BIND is one host: a listener on
+# a LAN address never answers 127.0.0.1, and a healthy release was rolled
+# back — exit 1, which follow-latest sets aside for good (audit #030).
+BIND="$(envval HATCHABOT_BIND)"
+case "$BIND" in
+  ""|0.0.0.0|127.0.0.1) PROBE_HOST=127.0.0.1 ;;
+  ::|"[::]"|localhost) PROBE_HOST=localhost ;;
+  \[*) PROBE_HOST="$BIND" ;;
+  *:*) PROBE_HOST="[$BIND]" ;;   # an IPv6 address goes in brackets in a URL
+  *) PROBE_HOST="$BIND" ;;
+esac
+URL="${HATCHABOT_HEALTH_URL:-$SCHEME://$PROBE_HOST:$P/}"
 for i in $(seq 1 45); do
   GOT="$(curl -sk "$URL" 2>/dev/null | grep -oE 'HATCHABOT_VERSION="[^"]+"' | sed -n 1p | cut -d'"' -f2 || true)"
   [ "$GOT" = "$WANT" ] && { CHANGING=0; rm -rf node_modules.prev; echo "Serving $GOT."; exit 0; }

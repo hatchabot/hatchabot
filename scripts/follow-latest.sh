@@ -21,6 +21,8 @@ NAME=hatchabot-follow-latest
 
 if [ "${1:-}" = --install ]; then
   mkdir -p "$UNITS"
+  # Quoted whole, as install-service.sh writes it: unquoted, a space in a path split it (audit #044).
+  UNIT_PATH="$(dirname "$(command -v node)"):$(dirname "$(command -v docker || echo /usr/bin/docker)"):/usr/local/bin:/usr/bin:/bin"
   cat > "$UNITS/$NAME.service" <<EOF
 [Unit]
 Description=Hatchabot: deploy the newest release tag to this machine
@@ -28,7 +30,7 @@ Description=Hatchabot: deploy the newest release tag to this machine
 [Service]
 Type=oneshot
 Environment=HATCHABOT_PROD_DIR=$PROD
-Environment=PATH=$(dirname "$(command -v node)"):$(dirname "$(command -v docker || echo /usr/bin/docker)"):/usr/local/bin:/usr/bin:/bin
+Environment="PATH=$(printf '%s' "$UNIT_PATH" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g')"
 ExecStart=/usr/bin/env bash "$PROD/scripts/follow-latest.sh"
 EOF
   cat > "$UNITS/$NAME.timer" <<EOF

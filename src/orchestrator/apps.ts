@@ -306,6 +306,8 @@ export interface InstallDeps {
    * file as it was. Throwing stops the install before anything live changes.
    */
   checkConfig?: (config: Record<string, unknown>, existing: Record<string, unknown>) => void;
+  /** The app record's release (agent_apps): its manifest stands in when the live release's copy cannot be read. */
+  recorded?: { app: string; sha: string; manifest: unknown };
 }
 
 async function sh(d: InstallDeps, script: string, timeoutMs = 60_000) {
@@ -342,6 +344,16 @@ export async function releaseManifest(d: InstallDeps, dir: string): Promise<AppM
   try { return parseManifest(r.stdout); } catch { return undefined; }
 }
 
+/** The live release's manifest: its file on the volume, else the app record's when it is that release. */
+async function liveManifest(d: InstallDeps, app: string, short: string): Promise<AppManifest | undefined> {
+  const onVolume = await releaseManifest(d, `${appPaths(app).releases}/${short}`);
+  if (onVolume?.app === app) return onVolume;
+  const r = d.recorded;
+  if (!r || r.app !== app || !r.sha.startsWith(short)) return undefined;
+  const parsed = manifestSchema.safeParse(r.manifest);
+  return parsed.success && parsed.data.app === app ? parsed.data : undefined;
+}
+
 const errText = (r: { stdout: string; stderr: string }) => (r.stderr || r.stdout).trim().slice(0, 300);
 
 /**
@@ -374,6 +386,15 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
   if (!d.provider.writeToVolume) throw new AppError('This machine cannot copy files into agents (no writeToVolume).');
   const previousLink = await currentLink(d, m.app);
   const previousSha = shaOf(previousLink);
+  // The tasks the live release scheduled come off by its manifest, so it is
+  // read before anything changes. Read as none (unreadable, corrupt), an update
+  // that renamed or dropped a task left the old job running beside the new
+  // release and said it had succeeded (audit #011). The app record's copy
+  // stands in for the one on the volume; with neither, nothing is changed.
+  const before = previousSha ? await liveManifest(d, m.app, previousSha) : undefined;
+  if (previousSha && !before) {
+    throw outcome(new AppError(`Could not read the ${MANIFEST_FILE} of the release running now (${previousSha}), so its scheduled tasks could not be told apart from the new ones. Nothing was changed. Stop the app (its tasks come off) and install it again.`), { unchanged: true });
+  }
   const name = m.config?.file ?? 'config.json';
   const live = `${p.data}/${name}`;
   const staged = `${stage}/${name}`;
@@ -459,7 +480,6 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
     step('switched');
 
     // 5. its scheduled commands (syncTasks leaves the old set in place when it fails)
-    const before = previousSha ? await releaseManifest(d, `${p.releases}/${previousSha}`) : undefined;
     const tasks = await syncTasks(d, m, before);
     step('tasks');
 
@@ -531,7 +551,8 @@ export async function switchTo(d: InstallDeps, m: AppManifest, sha: string, from
   }
 }
 
-type Job = { id: string; name: string };
+/** `enabled` as `cron list` gives it: false for a task the owner turned off. */
+type Job = { id: string; name: string; enabled?: boolean };
 
 /** The job names an app's manifests make: "<app>-<task>", exactly. */
 export function appTaskNames(...ms: Array<AppManifest | undefined>): Set<string> {
@@ -597,24 +618,37 @@ export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppMa
     try { now = await appJobs(d, ours); } catch (e) { return unread(e); }
     const seen = new Set(now.map((j) => j.id));
     for (const j of now.filter((x) => !oldIds.has(x.id))) await run(['cron', 'rm', j.id]);
+    // One the owner had turned off goes back off: re-added switched on, it
+    // ran work they had stopped, and the count below still said "as they
+    // were" (audit #016).
     for (const j of old.filter((x) => !seen.has(x.id))) {
       const t = prev?.tasks.find((x) => `${m.app}-${x.name}` === j.name);
-      if (t) await run(addArgv(d, prev!, t));
+      if (t) await run([...addArgv(d, prev!, t), ...(j.enabled === false ? ['--disabled'] : [])]);
     }
     let after: Job[];
     try { after = await appJobs(d, ours); } catch (e) { return unread(e); }
     // Listed before the put-back and not in the old set: a new job that would not come off.
     // Not listed before: added by the put-back, whatever its add answered.
     const stray = after.filter((j) => seen.has(j.id) && !oldIds.has(j.id)).map((j) => j.name);
+    const off = (j: Job) => j.enabled === false;
     const count = (jobs: Job[]) => jobs.reduce((n, j) => n.set(j.name, (n.get(j.name) ?? 0) + 1), new Map<string, number>());
+    const kept = after.filter((j) => oldIds.has(j.id) || !seen.has(j.id));
     const want = count(old);
-    const have = count(after.filter((j) => oldIds.has(j.id) || !seen.has(j.id)));
+    const have = count(kept);
     const missing = [...want].filter(([name, n]) => (have.get(name) ?? 0) < n).map(([name]) => name);
     const twice = [...have].filter(([name, n]) => n > (want.get(name) ?? 0)).map(([name]) => name);
+    // As many of each turned off as before (those counted above aside).
+    const offWant = count(old.filter(off));
+    const offHave = count(kept.filter(off));
+    const named = new Set([...missing, ...twice]);
+    const switchedOn = [...offWant].filter(([name, n]) => !named.has(name) && (offHave.get(name) ?? 0) < n).map(([name]) => name);
+    const switchedOff = [...offHave].filter(([name, n]) => !named.has(name) && n > (offWant.get(name) ?? 0)).map(([name]) => name);
     return [
       ...(stray.length ? [`still there: ${stray.join(', ')}`] : []),
       ...(missing.length ? [`not re-added: ${missing.join(', ')}`] : []),
       ...(twice.length ? [`more than once: ${twice.join(', ')}`] : []),
+      ...(switchedOn.length ? [`switched on, though you had turned it off: ${switchedOn.join(', ')}`] : []),
+      ...(switchedOff.length ? [`turned off, though it was on: ${switchedOff.join(', ')}`] : []),
     ];
   };
   const fail = async (what: string) => {
@@ -625,8 +659,12 @@ export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppMa
   };
 
   const made: string[] = [];
+  // A task the owner turned off stays off in the new version: re-added
+  // switched on, an Update ran work they had stopped (HB-0229). Off when
+  // every old job of that name was.
+  const offBefore = (name: string) => old.some((j) => j.name === name) && old.filter((j) => j.name === name).every((j) => j.enabled === false);
   for (const t of m.tasks) {
-    const r = await run(addArgv(d, m, t));
+    const r = await run([...addArgv(d, m, t), ...(offBefore(`${m.app}-${t.name}`) ? ['--disabled'] : [])]);
     if (r.code !== 0) throw await fail(`Could not schedule ${m.app}-${t.name}: ${errText(r)}.`);
     made.push(`${m.app}-${t.name}`);
   }

@@ -2,6 +2,135 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.168.0] — 2026-10-26
+
+### Security
+- **Moves:** a request under a move id another account had already used could change that account's record of the move (and with it what the other server was told about it). A move's record is now written only by requests of the account that made it.
+- **Moves:** after a lost answer, a move the other Hatchabot knew had failed stayed "could not be confirmed", because that server refused the question from the move's own peer token. The peer token can now read the receipts of its own moves (and nothing more), so such a move settles on its own.
+- **Web chat:** a guest who had a great many requests waiting at once, or reused a request id, could get the agent's health and agent-list replies without other people's sessions taken out. Such a request is now answered "not sent, try again" instead of being passed on.
+- **Spending:** a crafted `GET /v1/usage/spend?range=constructor` (or `__proto__`, `toString`) passed the range check and locked up the service until it was restarted, and `GET /v1/costs?period=` had the same check. Only the chart's own ranges and the Cost view's own windows are now accepted, and the chart's slice loop is bounded.
+
+### Fixed
+- **Delete and archive:**
+  - Deleting or archiving a stopped agent whose downloaded copy runs elsewhere handed its Telegram pool bot to the next agent here, while the copy still talked on it. A pool bot now leaves the pool without a goodbye message, and a pasted bot is not parked. Deleting with `?recycleBot=1` still parks it.
+  - A container paused outside Hatchabot counted as stopped, so archiving gave its bot back while it could still answer once unpaused. A paused agent is now refused ("Couldn't confirm its runtime stopped") until it is unpaused.
+  - An archive a restart cut off finished without parking the agent's Discord or Slack bot. The archive's finish now parks them, a restart's included.
+  - **Bot pool:** a bot given back by an agent being archived or deleted could have its new lease ended when another agent took it at the same moment, so it showed as spare while in use (and Remove deleted that agent's token). Another agent's lease is now left alone.
+- **Move to another Hatchabot:**
+  - When the import's answer was lost, another agent with the same short name on the other server counted as this one's arrival while its import was still under way. The move now waits for its own receipt.
+  - The check before a move named a source of the agent's own vendor, while the agent then ran on the destination's ⭐ Default, so a local or subscription agent could start billing another source. The check now names the source the agent will really run on, and refuses a Default of another vendor, saying which source to make the Default.
+  - After this machine's image was upgraded, the check before a move sent the new default version instead of the one the agent runs, and refused servers that could take it. It now sends the agent's own version.
+- **Move to another machine:**
+  - A runner could be removed while a move from it was held, and Put back then failed because the agent's copy was on a machine Hatchabot no longer knew. Removing a machine is now refused while a move to or from it is not over.
+  - A move that failed and was undone left the card saying the agent ran the AI source and model its target had been built with, while its old container ran on unchanged. An undone move now puts back the record of what the source runs.
+  - A move to a runner on its default image (`--drop-pin`) that a restart undid left the agent unpinned on its old machine, so its next rebuild lost the image's extra packages. The pin now comes back whenever the move is undone.
+  - An agent moved while stopped never ran its rebuild hook (`~/.openclaw/on-rebuild.sh`) in its new container, so tools it puts back were missing after its first start there. The hook now runs at that start.
+- **Uninstall (`scripts/uninstall.sh`):**
+  - `--purge` while Docker was not answering deleted the database and key and left the agents running. It now refuses, and says how to get out by hand if Docker is gone for good.
+  - `--purge` deleted other files in a shared folder that held a moved database, because `hatchabot-data` appeared somewhere in its path. Only the install's own data folder goes whole now; anywhere else only the database files go.
+  - `--installed --backups` removed the backups of the clone it was run from, not the service install's, when the backup folder was a relative path.
+  - If the service could not be stopped, its database and key were deleted while it still ran. The service is now kept and nothing else is removed.
+  - `--purge` forgot agents running on a runner (another machine's Docker) while they kept running there. It now refuses, naming them; `--forget-runners` purges anyway.
+  - Installs from before the rename (an `AGENTCLAW_DB` setting or `data/agentclaw.sqlite`) are now found and removed properly.
+  - The `hbt` and global `hatchabot` commands of another install on the same machine are no longer removed.
+- **Backups:**
+  - `./scripts/backup-volumes.sh` run by hand ignored `.env`, so with a moved database, another backup folder or prefix it could back up an old database and report the set complete. It now uses the same settings as the nightly backup.
+  - On an install with agents from before runtime names had slugs, every nightly backup was incomplete: such an agent's volume was taken for an orphan and skipped, and a per-agent restore looked for its archive under the wrong name. The backup and the restore now name the volume as its runtime does.
+  - A secret key holding a `"` was saved in `secret-key.env` cut short, so a .env restored from it could not decrypt the backed-up credentials, while the set and the restore drill both said all was well. The line is now quoted so it reads back as the same key, the drill reads it as a .env is read, and a key no quoting can carry makes the set incomplete instead.
+- **Upgrades and deploys:**
+  - A retry after an interrupted upgrade threw away the only copy of the old dependencies, so a failed install could not roll back to a working release. The retry now keeps them.
+  - A channel upgrade that ran alongside another one could take the machine back to an older release. An upgrade now reads the installed release once it holds the upgrade lock.
+  - `deploy-release.sh` checked the service on the loopback address only, so a healthy release on a LAN or IPv6 `HATCHABOT_BIND` was rolled back and set aside. It now checks the address the service listens on, and reads `.env` as the service does (a setting given on two lines, such as `PORT`, uses the last one).
+  - A `git fetch` that failed before anything changed made follow-latest set the release aside for good. It is now tried again later.
+  - After Node was upgraded to a new major version, the service could fail with `NODE_MODULE_VERSION`. The database driver is now checked again (and rebuilt if it must be).
+  - **Service units:** the PATH line is quoted, so Node (or the install) in a folder with a space in its name no longer leaves the service unable to start.
+- **Channel timer:**
+  - `hatchabot upgrade beta` (or any channel switch) left the automatic-upgrade timer on the channel it was installed with. Each tick now follows the channel chosen last.
+  - When an upgrade failed, the release set aside could be a different one from the release tried, if the channel moved during the tick. It is now the one actually tried.
+  - Several installs under one user shared one record of failed releases, so a release that failed on one install was never tried on the others. Each install now keeps its own.
+- **Installer:** re-running it after a first setup that stopped part-way said "Already on" instead of finishing the setup. A bundle install's linking of the commands overwrote an older native install's CLI instead of replacing its links, and the `hatchabot` and `hbt` launchers failed in a folder whose name had `$`, a backtick or a quote. Shared-host setup prepared the runtime image on the setup shell's Docker daemon, not the one `.env` names (`DOCKER_HOST`).
+- **Apps:**
+  - Update installed a release whose `hatchabot.json` names a different app beside the old one: both apps' tasks ran, and Stop app left the old app's running. Update now refuses it and changes nothing; install it again from the same source to replace the app.
+  - An update whose running release had an unreadable `hatchabot.json` said it succeeded while a renamed or removed task kept running beside the new release. The app's record now stands in for that file, and with neither the update is refused with nothing changed.
+  - An app task you had turned off came back on after an Update or Roll back, and a failed one said its tasks were as they were. It now stays off through both, goes back off after a failure, and if the agent switches it on anyway, the message says so.
+- **Proposals:**
+  - Merging a child's proposal while the master's AGENTS.md could not be read replaced the whole playbook with the proposal. The merge is now refused and the proposal stays waiting.
+  - A merge that took the master's AGENTS.md past 256 KB went through, and editing, snapshots, Share and Push definition then all refused the file. Such a merge is now refused before anything is written.
+  - Opening a second master's Proposals before the first one's list had loaded could show the first master's proposals under the second master's name, and Dismiss or Merge then failed with "not found". A late answer for a master that is no longer open is now dropped.
+- **Data sources:**
+  - An AGENTS.md edit saved in the seconds after adding a public repo could be written over by the repo's background sync, and no snapshot kept it. The sync now holds the agent, and a save during it is refused, so save again once it is over.
+  - An agent could be given more than 32 data sources, and its template or downloaded copy then would not import. A 33rd is now refused.
+  - Two data sources with the same name could be added at once (from two tabs). The second is now refused.
+- **Usage:**
+  - **Spend over time** showed use of a model with no known price as $0.00, or showed the priced part as if it were the whole amount. It now says "No price", or adds "+" when only part has a price, and names the models and tokens left out.
+  - **Spend over time:** pressing a range, or ticking agents in the picker, while the chart was loading could let the earlier, slower answer replace the newer one, for example a fleet total labelled with one agent's name. Only the latest answer is now drawn.
+  - Two AI-source switches within an hour (a fallback while rate-limited, say) counted the first source's calls under the second source as well. Each call now stays with the source that made it.
+- **Classes and AI sources:**
+  - A class could give a Claude-subscription agent a model its OpenClaw is too old to run (claude-opus-5-5 before 2026.9.7), also when the class changed its image. It is now refused for that agent, as choosing the model by hand already was.
+  - A class change said it applied a model the agent's runtime refused. It now lists those agents as still on their old model.
+  - Changing a source's default with an agent left unticked could pin that agent to an earlier default that had never been applied to it, so it changed model at its next rebuild. It is now kept on the model it runs.
+  - A model or source change saved while an agent was being rebuilt or set up was recorded as applied although the container had been built with the old one. The record now keeps what the container was built with, and the change shows as still to apply.
+  - Moving an agent to another source brought back a "rate-limited" warning on its old source even when a successful call on that source came after the refusal.
+  - **Health:** an agent whose AI-source switch is saved but not rebuilt yet named the new source in its Checks and hid why the agent could not answer. It now shows the source it actually runs, and that source's refusals.
+- **The Hatchabot agent:**
+  - It said a conversation was saved to memory when the save failed or could not be confirmed. It now says so, and passes on an archive's "couldn't save first" warning.
+  - A class card confirmed after the class was edited applied the class's new model, source or image while the card and its ✅ named the old ones. Such a card is now refused, and a fresh card shows the class as it is.
+  - It reported a model change as done when the agent's runtime refused it. It now says so, and says how each change applies.
+  - With two AI sources of the same name it picked one. It now asks which, by id, and its card names the one chosen.
+  - Its "try again" on a held move answered a bare done. It now says when the move is still held, and why, with the choices.
+  - A change it proposed could disappear from Alerts on a busy day before you confirmed or cancelled it.
+- **Invite:** a web-chat link made for one agent, if you closed that invite and opened another agent's before the link appeared, showed up in the second agent's invite as if it were that agent's, so the recipient was admitted to the wrong agent. A link now appears only in the invite it was made for.
+- **Setup and rebuilds:**
+  - A new agent whose setup a restart cut off after it came up was marked running without its remaining steps, so a repo data source was never cloned and its scheduled tasks never went in. The rest of its setup now runs again after the restart.
+  - An agent whose setup or rebuild a restart cut off with its container dead stayed "Setting up" or "Rebuilding" for good. It is now marked failed, with Retry.
+  - A rebuild refused before it began (a missing key, a source no longer shared) said "Rebuilt" while the agent ran on unchanged. It now fails with the reason and says the agent keeps running as it was.
+  - An agent stopped while the overnight sweep was choosing could be rebuilt anyway, which started it again. The sweep now leaves an agent that is no longer running.
+  - A failed `on-rebuild.sh` (or one stopped by its 5-minute limit) was logged as having run. It is now logged as failed, with its exit code.
+  - A new agent whose first setup failed after its volume was made (a missing image, a Docker error) left that volume behind after Delete.
+  - **Templates:** a scheduled task from a template that the gateway refused while the copy was being set up was never added later, not even by a rebuild. A rebuild now adds it, once.
+- **Setup values and setup forms:**
+  - A change whose second file could not be written (a full disk, a runner going to sleep) left SOUL.md on the new values while AGENTS.md and the stored values kept the old ones. The files already written are now put back, and the error says nothing was changed.
+  - A master's first setup-values edit made while its SOUL.md (or AGENTS.md) could not be read stored the agent's setup layer without that file, and later edits never changed it again. The edit is now refused when a file cannot be read.
+  - **Push definition:** when the master had no AGENTS.md (or SOUL.md) to push, the child's own copy of that file stayed, but the child's later setup values never changed it again. The child now keeps its own setup layer for that file.
+  - **New child, Import and Accept share:** a setup answer whose default you deleted before Continue came back as the template's default in the new agent. A cleared default is now sent as empty and stays empty.
+  - A yes/no setup field whose default is written yes, on, 1 or in capitals started unticked and gave the new agent "no". The forms now read such defaults the way the server does.
+- **Download copy, moves and import:**
+  - A full copy left out an agent's setup fields and their answers, its installed app's record (so the app came back without Update, Roll back or Stop app), and its switches (the browser, event-triggered tasks, rich messages, group access and the file limit went back to their defaults). They now travel with it.
+  - An import cut off by a restart while its agent's runtime was being made left that container and volume, and its repositories' deploy keys, behind after the undo. The undo now removes them.
+  - An agent imported from a machine that used a machine-login Claude source said "Not logged in · Please run /login" on a setup-token or API-key source until it was restarted. It now answers right away.
+- **Agent settings:**
+  - Changing an agent's AI source, image pin or peers, then opening another agent's settings before "Saved. Rebuild now?" came up, rebuilt the agent that was open instead of the one saved (and used that sheet's "save the conversation first" box). The rebuild now goes to the agent saved, and the question names it.
+  - After picking another AI source on one agent without pressing Use this, the model button stayed greyed out ("Apply the source change first") on every agent opened after, until a reload. Each agent's settings now open with it usable.
+  - **Definition editor:** going to another file and back to the first while it loaded could put back older text over what you had typed, and Save then wrote it. Only the latest read now fills the editor.
+  - **Bulk actions → Class:** changing the class menu while Apply was still working gave later agents the other class, or none. The class is now read once, when Apply is pressed.
+- **Snapshots:** deleting a snapshot that a restore cut off by a restart still needed left neither Finish nor Revert working, and the agent could not be started. Those snapshots can now be deleted only after the restore is finished or reverted.
+- **Budgets:** an agent moved to a cheaper model and paused in the same check came back on the cheaper model for good when the month turned or the budget was raised. Its own model is now put back before the pause.
+- **Sleep:** a scheduled task added just as an agent was put to sleep (by hand or after its quiet period) could be left never running. It is now either refused or keeps the agent awake.
+- **Resources:** after the peaks were cleared or a memory cap changed, a rebuilt, started or woken agent's cap hits read 0 until the new container passed the old one's total. They count again at once.
+- **Members:** "Add someone you know" failed with a UNIQUE constraint error for a person who had been removed from that agent before. Joining with an invite through an app the agent has since left is refused without using up the invite; reloading the invite page offers the apps it is on now.
+- **Google:** after reconnecting a Google account, an agent that was importing the old sign-in at that moment showed as up to date; it now shows as needing a re-attach. An agent's Connections panel said no Google accounts were connected when reading them failed; it now says it could not read them.
+- **Access overview:** Verify now said a removed person was still let in when their only approval sat under a turned-off bot account in OpenClaw's pairing store; that approval no longer counts. A "different bot token is running" warning disappeared when a later Verify now could not read Hatchabot's copy of the token; it now stays, and the check says what it skipped.
+- **CLI:**
+  - `hatchabot rebuild --outdated` reported every running outdated agent as queued and exited 0 even when the server refused some or all of them. It now counts only the rebuilds that started and says how many did not.
+  - `hatchabot switch-source --agents` with an empty list switched every agent you own. It is now refused.
+  - `hatchabot app inspect`, `app install` and `app create` turned every git address into a local folder that did not exist. They now accept a git address (https://…, ssh://…, git@…) as documented.
+  - `hatchabot pairing` with no agent named stopped with "Not found" at a web-only agent. It now asks every agent of yours that is on a chat app.
+  - `hatchabot adopt` took the first source in the list. It now puts the new agent on your ⭐ default AI source, as `create` does.
+
+For maintainers:
+- `scripts/promote.sh` reported "CI failed" for a CI run still going when the token could not watch it. It now waits for it by polling.
+- `scripts/land.sh` said a failed pull request was closed without GitHub confirming it. It now says so only when GitHub confirms it; otherwise it names the pull request, says it may still merge, and exits 3.
+- A deep audit of v2.166.2 by parallel reviewers: 103 findings (15 P1, 88 P2), all fixed in this release, with regression tests and entries in `docs/troubleshooting.md`.
+
+### Changed
+- **Moves:** a move to another Hatchabot that would land on the destination's ⭐ Default source of another vendor is refused, and the refusal offers that server's source of the agent's vendor: **Move onto …** (CLI: `hatchabot rehost <agent> <server> --profile <id>`) puts the agent on it. Before, the move was approved for the matching source and then ran on the Default.
+- **Uninstall:** `uninstall.sh` now asks Docker first, so a stopped daemon blocks `--purge` (exit 2), and a plain uninstall exits 1 when it could not stop the agents or the service. `--purge` refuses while agents run on a runner; the new `--forget-runners` purges anyway. `npm unlink -g` runs only when the global link leads to the install being removed.
+- **Channel timer:** it follows the channel in `~/.config/hatchabot/channel` (the one chosen last); `follow-channel.sh --install <channel>` writes it, as `hatchabot upgrade <channel>` does.
+- **CLI:** `hatchabot rebuild --outdated` exits 1 when any rebuild was refused.
+- **Download copy:** the file now carries the agent's setup fields, app record and switches. An older Hatchabot ignores them, and older files still import.
+- **API (additive):** `PUT /v1/agent-classes/:id` (and `POST /v1/agents/:id/class`) return `modelPending`, the agents left on their old model; `POST /v1/agents/:id/model` returns `failed`; `POST /v1/agents/:id/class` takes an optional `reviewed` object; `/v1/usage/spend` may carry `unpriced`. `GET /v1/agents/:id/connections` answers 502 when it cannot read the list (it answered an empty list). `POST /v1/join` answers 409 when the chosen app is gone. `POST /v1/agents/:id/data-sources` answers 409 at 32 sources or for a name being added. An AGENTS.md save while a public repo's first sync runs answers 409 ("Another operation…").
+- **Docker:** a container paused outside Hatchabot now counts as an error: a running agent with one is marked failed, and archive or quiesce refuse it. Hatchabot itself never pauses containers.
+
 ## [2.167.0] — 2026-10-26
 
 ### Added

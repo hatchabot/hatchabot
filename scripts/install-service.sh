@@ -40,8 +40,13 @@ mkdir -p ~/.config/systemd/user
 # metacharacters (& | \) so a clone path containing them can't corrupt the
 # generated unit.
 sed_escape() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
+# The PATH goes inside the units' quoted Environment="PATH=…" (a node in a
+# folder with a space in its name split the unquoted one, and the service
+# could not start, audit #044): a backslash or a quote escaped, and % doubled
+# (systemd reads %h and the like there).
+systemd_quoted() { printf '%s' "$1" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g'; }
 DIR_ESC="$(sed_escape "$(pwd)")"
-PATH_ESC="$(sed_escape "$SERVICE_PATH")"
+PATH_ESC="$(sed_escape "$(systemd_quoted "$SERVICE_PATH")")"
 sed -e "s|__HATCHABOT_DIR__|$DIR_ESC|g" -e "s|__HATCHABOT_PATH__|$PATH_ESC|g" \
   deploy/hatchabot.service > ~/.config/systemd/user/hatchabot.service
 sed -e "s|__HATCHABOT_DIR__|$DIR_ESC|g" -e "s|__HATCHABOT_PATH__|$PATH_ESC|g" \
