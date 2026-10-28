@@ -26,6 +26,8 @@ export interface AppOpParams {
   fromSha?: string | null;
   /** The app the record held before, when another one is being replaced. */
   fromApp?: string | null;
+  /** That app's tasks the owner had turned off (its jobs come off for the new app; they go back on turned off). */
+  fromAppOff?: string[];
   source?: string;
   ref?: string;
 }
@@ -71,17 +73,23 @@ const TASKS_BACK: Recovery = { actions: [{ action: 'put-tasks-back', label: 'Put
 /**
  * Put an app's scheduled tasks back on and check they are there, from a fresh
  * list (as syncTasks' own put-back does): undefined when every task is
- * listed, otherwise what is missing (issue #22, 2026-10-09).
+ * listed, otherwise what is missing (issue #22, 2026-10-09). `off`: those the
+ * owner had turned off, put back turned off and checked so (HB-0253).
  */
-async function putTasksBack(d: InstallDeps, m: AppManifest): Promise<string | undefined> {
+export async function putTasksBack(d: InstallDeps, m: AppManifest, off: readonly string[] = []): Promise<string | undefined> {
   let failed: string | undefined;
-  try { await syncTasks(d, m); } catch (err) { failed = String((err as Error)?.message ?? err).slice(0, 200); }
-  let listed: Set<string>;
-  try { listed = new Set((await appJobs(d, appTaskNames(m))).map((j) => j.name)); }
+  try { await syncTasks(d, m, undefined, off); } catch (err) { failed = String((err as Error)?.message ?? err).slice(0, 200); }
+  let jobs: Awaited<ReturnType<typeof appJobs>>;
+  try { jobs = await appJobs(d, appTaskNames(m)); }
   catch (err) { return `the agent's task list could not be read (${String((err as Error)?.message ?? err).slice(0, 200)})`; }
+  const listed = new Set(jobs.map((j) => j.name));
   const missing = m.tasks.map((t) => `${m.app}-${t.name}`).filter((n) => !listed.has(n));
-  if (!missing.length) return undefined;
-  return `${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not on the agent${failed ? ` (${failed})` : ''}`;
+  const on = off.filter((n) => listed.has(n) && jobs.some((j) => j.name === n && j.enabled !== false));
+  if (!missing.length && !on.length) return undefined;
+  return [
+    ...(missing.length ? [`${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not on the agent`] : []),
+    ...(on.length ? [`${on.join(', ')} ${on.length === 1 ? 'is' : 'are'} switched on, though you had turned ${on.length === 1 ? 'it' : 'them'} off`] : []),
+  ].join('; ') + (failed ? ` (${failed})` : '');
 }
 
 /**
@@ -100,7 +108,7 @@ async function tasksBackAgain(deps: AppOpDeps, op: OpHandle, p: AppOpParams): Pr
   const d = deps.install;
   const rec = deps.store.getAgentApp(op.get().agentId!);
   if (rec && rec.app === p.fromApp && rec.app !== p.app) {
-    const missing = await putTasksBack(d, rec.manifest as AppManifest);
+    const missing = await putTasksBack(d, rec.manifest as AppManifest, p.fromAppOff);
     if (missing) throw new AppRecoverError(`${rec.app}'s scheduled tasks could not be put back: ${missing}. It is still waiting; try again in a moment.`);
   }
   await clearStaging(d, p.app, short(p.toSha)!);
@@ -124,7 +132,7 @@ export async function resumeAppOperation(deps: AppOpDeps, opId: string): Promise
   // Confirmed, or held: "nothing changed" was said over tasks that never went back (issue #22, 2026-10-09).
   const replacedBack = async (): Promise<boolean> => {
     if (!(p.fromApp && p.fromApp !== p.app && rec?.app === p.fromApp)) return true;
-    const missing = await putTasksBack(d, rec.manifest as AppManifest);
+    const missing = await putTasksBack(d, rec.manifest as AppManifest, p.fromAppOff);
     if (!missing) return true;
     op.hold(
       `The ${p.app} install was interrupted by a restart before it switched anything on, but ${rec.app}'s scheduled tasks, ` +
@@ -249,7 +257,7 @@ async function goBack(deps: AppOpDeps, op: OpHandle, kind: string, p: AppOpParam
     await syncTasks(d, rec.manifest as AppManifest, leaving);
   } else {
     await removeTasks(d, p.app, await releaseManifest(d, `${ap.releases}/${to}`));
-    if (rec) await syncTasks(d, rec.manifest as AppManifest);
+    if (rec) await syncTasks(d, rec.manifest as AppManifest, undefined, rec.app === p.fromApp ? p.fromAppOff : undefined);
   }
   await clearStaging(d, p.app, to);
   op.rolledBack(`${rec ? `Back on ${rec.app} ${short(rec.sha)}` : `${p.app} switched off again`}, as Hatchabot's record says.`);

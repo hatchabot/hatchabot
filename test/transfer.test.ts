@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { exportAgent, importAgent, peekFormat, TransferError } from '../src/orchestrator/transfer.js';
@@ -101,6 +102,23 @@ describe('export failure handling', () => {
     src.provider.exportState = async () => ({ length: 200 * 1024 * 1024 } as any);
     await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/too large to move/);
     expect(src.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+});
+
+describe('sharedMemory in a copy (HB-0094)', () => {
+  it('is written as a constant true for older importers, and an old file without it or with false imports shared', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    src.store.setAgentSharedMemory('a1', false); // as an agent was before v2.107.0
+    const { data } = await exportAgent(src.deps, 'a1');
+    const manifest = JSON.parse(gunzipSync(data).toString('utf8'));
+    expect(manifest.agent.sharedMemory).toBe(true);
+    for (const old of [false, undefined]) {
+      const dst = await installation('importer');
+      const edited = gzipSync(Buffer.from(JSON.stringify({ ...manifest, agent: { ...manifest.agent, sharedMemory: old } })));
+      const agent = await importAgent(dst.deps, edited, { ownerId: 'importer' });
+      expect(dst.store.getAgent(agent.id)!.sharedMemory).toBe(true);
+    }
   });
 });
 
@@ -376,6 +394,16 @@ describe('peekFormat — the one-Import router', () => {
     expect(peekFormat(gzipSync(Buffer.from(JSON.stringify({ format: 'hatchabot-template' }))))).toBe(
       'hatchabot-template',
     );
+  });
+
+  it('reads only the head of the archive, not the whole volume a second time (HB-0075)', () => {
+    // A copy with a large volume: the format comes from its first few KB, so a
+    // file cut short after them still routes (the old peek inflated it whole).
+    const big = gzipSync(Buffer.from(JSON.stringify({ format: 'hatchabot-export', version: 1, state: randomBytes(600_000).toString('base64') })));
+    expect(big.length).toBeGreaterThan(64 * 1024);
+    expect(peekFormat(big.subarray(0, 64 * 1024))).toBe('hatchabot-export');
+    // A file whose manifest does not begin with `format` is still read whole.
+    expect(peekFormat(gzipSync(Buffer.from(JSON.stringify({ version: 1, format: 'hatchabot-template' }))))).toBe('hatchabot-template');
   });
 });
 

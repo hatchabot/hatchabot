@@ -9,8 +9,8 @@ It is **off** unless the machine's owner turns it on, and it cannot be turned
 on, or stay on, unless every safeguard on this page holds. The first provider
 is **Tailscale Funnel**; the safeguards are the same for any later one.
 
-Status: built on a branch, not released. Nothing here has run against a real
-tailnet yet; see "Not verified yet" at the end, and "Open" for what is known
+Status: released in v2.114.0, off by default. Nothing here has run against a
+real tailnet yet; see "Not verified yet" at the end, and "Open" for what is known
 and not fixed.
 
 ## What it is, in one picture

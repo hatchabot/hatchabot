@@ -276,13 +276,26 @@ const isText = (b) => !b.subarray(0, 4096).includes(0);
 export { textInside };
 
 /**
- * The history published before the scrub (2026-10-09): it still names real
- * agents, and the maintainer decided to keep it, not rewrite it (docs/
- * releasing.md, "Retained history"). --public checks what came after it, main's
- * files as they are now, and every release note and issue, and says how many
- * commits it leaves out (#40).
+ * The history the maintainer decided to keep, not rewrite (docs/releasing.md,
+ * "Retained history"): up to the scrub (2026-10-09, #40), and since 2026-10-27
+ * up to 9673997 (2026-10-12), whose files name agents split across two lines,
+ * which the check found only from v2.164.3. --public checks what came after
+ * it, main's files as they are now, and every release note and issue, and
+ * says how many commits it leaves out.
  */
-export const ACCEPTED_HISTORY = '4dfbb0fe9f4cef05e0d0653fa02af9f0c05390fe';
+export const ACCEPTED_HISTORY = '967399720cf7bff73717a8063e57af36a135fd1d';
+/**
+ * Pull request branches of the public repo from that same time (2026-10-09 to
+ * 10-11), kept by GitHub for good and not on main, that hold the same split
+ * names: accepted with it (2026-10-27).
+ */
+export const ACCEPTED_PULL_HEADS = [
+  'ec947d01252bfde648e6ec6bfb8ae4e2eadd8a2c', // #36
+  '433d94e3382707d6c60ce868567335b4195ca812', // #186
+  '5a4e25738a2558d440effa0b5bf3fbcf42446f4a', // #187
+  '0d016d23d4b777f10f8b27a12f737e6f1ca74fa0', // #188
+  'ecb8d9983bdd40080a9794161e1580f354eadbfd', // #229
+];
 
 /** v0.* tags, and tags whose commit is not on main: what --tags once leaked. */
 function tagRefusals(cwd, tags, main) {
@@ -445,7 +458,7 @@ function prePush() {
   if (hits.length) {
     console.error(`\n🔒 Privacy check blocked this push: ${hits.length} private value(s) in what it would publish:`);
     report(hits, console.error);
-    console.error('Use a made-up value (the invented household: docs/deck/shot-data.mjs). A generic word that is only by chance an agent\'s name goes in scripts/privacy-ignore.txt.');
+    console.error('Use a made-up value (the invented household: docs/deck/shot-data.mjs). A generic word that is only by chance an agent\'s name can go in scripts/privacy-ignore.txt, but the publisher\'s gate counts it as private until `kit values sync` runs again: reword it if you can.');
     coverage(console.error, loaded, extra);
     console.error('');
     return FOUND;
@@ -484,6 +497,7 @@ function text() {
 function publicScan() {
   const loaded = load();
   const accepted = opt('--accepted-history') || ACCEPTED_HISTORY;
+  const acceptedHeads = opt('--accepted-history') ? [] : ACCEPTED_PULL_HEADS;
   const hook = has('--check-hook') ? hookStatus(ROOT) : null;
   if (!loaded) {
     console.log('✗ privacy: incomplete — no Hatchabot install here to read private values from; nothing was checked');
@@ -516,7 +530,8 @@ function publicScan() {
     const paths = new Map();
     for (const l of git(mirror, 'rev-list', '--all', '--objects').stdout.split('\n')) { const i = l.indexOf(' '); if (i > 0 && !paths.has(l.slice(0, i))) paths.set(l.slice(0, i), l.slice(i + 1)); }
     const haveBase = git(mirror, 'cat-file', '-e', `${accepted}^{commit}`).status === 0;
-    const base = haveBase ? [`^${accepted}`] : [];
+    const heads = haveBase ? acceptedHeads.filter((h) => git(mirror, 'cat-file', '-e', `${h}^{commit}`).status === 0) : [];
+    const base = haveBase ? [`^${accepted}`, ...heads.map((h) => `^${h}`)] : [];
     const newerLines = git(mirror, 'rev-list', '--objects', '--all', ...base).stdout.split('\n').filter(Boolean);
     const newer = newerLines.map((l) => l.split(' ')[0]);
     const nowLines = git(mirror, 'ls-tree', '-r', '-t', '--format=%(objectname) %(path)', 'refs/heads/main').stdout.split('\n').filter(Boolean);
@@ -563,9 +578,9 @@ function publicScan() {
       }
     }
     if (hook && !hook.ok) gaps.push(`this checkout's pre-push hook: ${hook.why}`);
-    const historyCount = haveBase ? Number(git(mirror, 'rev-list', '--count', accepted).stdout.trim()) : 0;
+    const historyCount = haveBase ? Number(git(mirror, 'rev-list', '--count', accepted, ...heads).stdout.trim()) : 0;
     const historyLine = haveBase
-      ? `${historyCount} accepted historical commits not checked (retained by decision, docs/releasing.md): up to ${accepted.slice(0, 7)}`
+      ? `${historyCount} accepted historical commits not checked (retained by decision, docs/releasing.md): up to ${accepted.slice(0, 7)}${heads.length ? `, and ${heads.length} pull request branch(es) of that time` : ''}`
       : `0 accepted historical commits: ${accepted.slice(0, 7)} is not in ${repo ?? url}, so all of its history was checked`;
     console.log(`privacy: ${ms.length} private values; ${files} file versions (main now, and all since ${haveBase ? accepted.slice(0, 7) : 'the start'}), file and ref names, commits, authors and tags of ${repo ?? url}${ghRead.length ? `, ${ghRead.join(', ')}` : ''}`);
     console.log(historyLine);

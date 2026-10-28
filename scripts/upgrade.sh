@@ -52,6 +52,11 @@ finish() {
   exit "$rc"
 }
 trap finish EXIT
+# Stopped by a signal (Ctrl-C, `systemctl stop`, a closed terminal), bash
+# ended without running finish: an upgrade cut off in `npm ci` left the tree
+# on the new release with half its dependencies, and the next run said
+# "Already on" it (HB-0043). Ended through exit, finish puts the old one back.
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
 # The channel chosen last is this install's own, in data/channel (HB-0235):
 # the one file in ~/.config/hatchabot was every install's of the user's, so
@@ -193,6 +198,23 @@ if [ "$BUNDLED" = 1 ] && [ -f "$SWAPPING" ]; then
   if [ "$WAS_RESTARTED" = 1 ]; then PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh" || true; fi
 fi
 
+RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tests only
+# A git install's upgrade in progress, beside the lock (in the tree it would
+# read as a local change): `from <release>`, then `restarted` once the service
+# was restarted onto the new one. Left behind, the run was killed part-way
+# (SIGKILL, a power cut): the checkout may be on the new release with half
+# its dependencies installed, and the old ones in node_modules.prev. The next
+# run puts the old release back first, then upgrades as usual (HB-0043).
+FROM_FILE="${LOCK_PATH%.lock.d}.from"
+if [ "$BUNDLED" = 0 ] && [ -f "$FROM_FILE" ]; then
+  FROM="$(sed -n 's/^from //p' "$FROM_FILE" | sed -n 1p)"
+  echo "An upgrade of $DIR was cut off part-way — putting ${FROM:-the previous release} back first."
+  { [ -n "$FROM" ] && git checkout --quiet "$FROM"; } || { echo "Could not check out ${FROM:-the previous release} (above): node_modules.prev holds its dependencies."; exit 3; }
+  [ ! -d node_modules.prev ] || { rm -rf node_modules; mv node_modules.prev node_modules; }
+  if grep -qx restarted "$FROM_FILE"; then $RESTART || true; fi
+  rm -f "$FROM_FILE"
+fi
+
 # What is installed, read only once the lock is held: read before it, a run
 # that waited there while another upgrade moved this machine on judged by the
 # release it no longer had, and a channel upgrade took the machine backwards
@@ -209,7 +231,6 @@ esac
 if [ "$BUNDLED" = 0 ] && [ -n "$(git status --porcelain)" ]; then
   echo "$DIR has local changes — an upgrade would overwrite them. Refusing:"; git status --porcelain | sed 's/^/    /'; exit 2
 fi
-RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tests only
 # ensure-deps writes the stamp restart.sh checks: a bare `npm ci` left none,
 # so restart.sh installed everything a second time, and a registry blip on
 # that second run failed (and blacklisted) a good release (night review).
@@ -307,20 +328,21 @@ rollback() {
   git checkout --quiet "$CUR" && restore_deps || return 1
   if [ "$RESTARTED" = 1 ]; then $RESTART; fi
 }
-undo() { rollback; }
+undo() { rollback && rm -f "$FROM_FILE"; }
 # An upgrade killed (or a power cut) right after moving node_modules aside
 # left node_modules.prev as the only working copy. Put back first: deleted as
 # a leftover, a failed install then had nothing to roll back to (audit #033).
 [ -d node_modules ] || [ ! -d node_modules.prev ] || mv node_modules.prev node_modules
 CHANGING=1
+printf 'from %s\n' "$CUR" > "$FROM_FILE"
 rm -rf node_modules.prev; [ -d node_modules ] && mv node_modules node_modules.prev
 git checkout --quiet "$TARGET"
 # Exit 3: the install step failed (usually transient) and the old release is back untouched.
-$INSTALL || { CHANGING=0; rollback || true; exit 3; }
-RESTARTED=1
-$RESTART || { CHANGING=0; ROLLED_BACK=1; rollback || true; exit 1; }
+$INSTALL || { CHANGING=0; { rollback && rm -f "$FROM_FILE"; } || true; exit 3; }
+RESTARTED=1; echo restarted >> "$FROM_FILE"
+$RESTART || { CHANGING=0; ROLLED_BACK=1; { rollback && rm -f "$FROM_FILE"; } || true; exit 1; }
 CHANGING=0
-rm -rf node_modules.prev
+rm -rf node_modules.prev; rm -f "$FROM_FILE"
 echo "Now on $TARGET."
 fi
 

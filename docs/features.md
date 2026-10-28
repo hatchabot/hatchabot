@@ -242,7 +242,9 @@ The header holds:
   its name and description (or, with no AI set up, a keyword table does).
   Change any of them with **Change icon** on its Overview: pick an emoji,
   paste any one, or press **✨ Ideas from Hatchabot** for a row of the AI's
-  suggestions, each on a colour (press again for different ones). Nothing
+  suggestions, each on a colour (press again for different ones). Type what
+  it should show in **What should it show?** ("a birthday cake") and the
+  ideas follow that instead of the name. Nothing
   changes until you press Save. Icons travel with
   the agent: backups, shared copies and agents sent to someone else keep
   theirs.
@@ -835,9 +837,9 @@ spending tokens each time — while Telegram showed nothing.
 its model, how big its **main conversation** was at its last call (the
 Telegram DM and the console), the model's context **window** as the agent's
 OpenClaw states it, its **cap**, how **full** it is (against the cap when there
-is one), and how much its calls carried over 30 days: a **typical call** (half
-carried less) and **1 in 10 over** (one call in ten carried more). Every call
-carries the whole conversation so far, so these are what it costs. Over 80%
+is one), and how much its calls carried over 30 days: the **median call** (half
+carried less, half more). Every call carries the whole conversation so far, so
+this is what it costs. Over 80%
 full is marked: the agent is close to compacting. The **Cap** menu sets a cap
 (100K to 500K, below the model's window) or takes it off (None), after saying
 what it does: OpenClaw then compacts at about the cap less 20K, and a
@@ -1152,6 +1154,28 @@ context"* — with **📥 Recover context**, which stages the old conversation i
 its workspace and has it save what matters, and **Dismiss**. A later reset is
 news again even if an earlier one was dismissed.
 
+## About you: the operator profile
+
+**⚙ Settings → You** has a box for what every one of your agents should know
+about you, so you never introduce yourself twice: your name, where you live,
+family, how you like to be addressed, standing preferences ("concise answers,
+metric units"). Up to 8,000 characters, one per account: each person on the
+machine writes their own, and an agent is told its owner's.
+
+It is written into each agent's AGENTS.md as a managed section, **About the
+operator**, with the instruction to treat it as background it already knows.
+**Save & apply to all my agents** pushes it into your running agents at once,
+in the background and without a rebuild (an agent busy with a rebuild, a move
+or a backup gets it from that); a stopped agent gets it when it next starts.
+Headings and code fences in the text are neutralised so it cannot break the
+file's other managed sections. A shared template never carries it. Like
+anything in an agent's instructions, whoever can talk to the agent can ask
+about it, so write what you would tell its members anyway.
+
+API: `GET /v1/operator-profile` returns `{ content }`; `PUT
+/v1/operator-profile` `{ content }` saves it and answers 202 with the number
+of running agents it is being pushed to (`pushing`).
+
 ## Copying & moving
 
 Five distinct verbs, for five intents:
@@ -1273,7 +1297,10 @@ new bot slot.
   by default (kernel-enforced; credential and system paths are refused).
   Writable folders exist but are machine-owner-gated and warned: anyone who
   can message the agent can ask about — and for writable, change — those
-  files.
+  files. A folder shared when an OpenClaw agent was adopted is mounted at
+  its **own path** instead (shown as "(same path)"), so the agent's existing
+  references to it still work; paths the agent itself runs from are refused
+  there ([data-sources.md](data-sources.md)).
 - **Git repos** — first-class: Hatchabot generates a repo-scoped **deploy
   key** (shown above the repo list the moment the repo is added, and again
   from the 🔑 Deploy key button; add it on GitHub), then clones the repo to
@@ -1460,8 +1487,13 @@ under ⚙ Settings → Sharing → **Members**, with Remove.
 
 Members show in the agent's notices (when there's more than one) and always under
 ⚙ Settings → Sharing → **Members** — role, Telegram-link status, Remove,
-and Invite… in one place. CLI: `hatchabot invite`, `approve`, `deny`,
-`members`, `kick`.
+and Invite… in one place. CLI: `hatchabot invite`, `pairing` (the pending
+requests), `approve`, `deny`, `members`, `kick`. **`hatchabot users`** is
+the view across agents: every Telegram user on any of your agents, which
+agents they belong to (with their role and when they joined), and when each
+was last heard from, and on which agent; someone invited who never messaged
+shows as not linked. `--all` (the machine owner) widens it to every
+account's agents.
 
 **Getting a token back out.** Every row of **⚙ Settings → Telegram → Every bot
 this server has a token for** has **🔑 Show** — the second press copies. It is
@@ -2246,6 +2278,26 @@ picker, the Hatchabot agent's card, the CLI) is refused with the reason and
 the way out: a newer runtime image on that agent, or an API-key source.
 Measured on 2026.9.6, only Opus 5.5 is refused. The playbook has the entry.
 
+**From the command line** (`hatchabot help` has every option):
+`hatchabot sources` prints the same picture as text: each source with its
+kind, whether it is shared, how many of your agents use it (and how many of
+other accounts'), its id, and while it is in use its live spend (requests in
+the last 5 hours and 7 days, refusals, the three heaviest agents, and whether
+it is being rate-limited now); then the models in use, and each source's
+agents with their model (pinned, or what it becomes at the next rebuild).
+`hatchabot switch-source --to <source> [--agents a,b,c] [--rebuild]` moves
+your agents, all of them or the ones named, onto one source in a single call;
+each then waits for a rebuild unless `--rebuild` rebuilds them now, and an
+agent it cannot move (busy, or a source that cannot run it) is listed with
+the reason. `hatchabot ai <agent> <source id> [--now]` does the same for one
+agent (`hatchabot ai` alone lists the sources with their ids, and `hatchabot
+ai <agent>` says which one it is on). The machine owner's `hatchabot
+migrate-source <from> --to <shared source>`, the twin of the app's **Migrate
+all off…**, moves **every** agent on a source, other accounts' included, and
+rebuilds them: it lists them with their owners and asks first (`--yes` skips
+the question); `--no-checkpoint` skips Chat → Memory (when the old source is
+already dead), and `--recover` restores lost context afterwards.
+
 A profile's **Shared** toggle lets every account on this server use it for
 their agents. That is a credential hand-off, not a metered proxy — share only
 with people you trust with the underlying key. Full detail:
@@ -2417,7 +2469,8 @@ inside each agent (about 290 MB each). Two hardened containers: the engine
 copied out of it on first start, or downloaded and checksum-verified if the
 image lacks it) on an internal network,
 and a small *door* that checks each agent's own key, rate-limits per agent
-(`HATCHABOT_EMBED_PER_MIN`, 600), caps bodies and inputs, and logs only the
+(`HATCHABOT_EMBED_PER_MIN`, 600 calls, and `HATCHABOT_EMBED_MB_PER_MIN`, 8 MB
+of text a minute), caps bodies and inputs, and logs only the
 agent id, count, bytes and time — never a body. The door is published on the
 address agents reach this machine at (`HATCHABOT_EMBED_BIND`, port
 `HATCHABOT_EMBED_PORT`, 8093). Once on, a health loop restarts it if it falls
@@ -2507,6 +2560,55 @@ snapshots, moves, adopt, backups, health, usage, and more. Run
 `~/.config/hatchabot/env` or mint a token in **⚙ Settings → Security** and
 `hatchabot login`. That tab also lists the tokens this account has minted —
 what each is called, when it was made and last used — with **Revoke**.
+
+**The commands, by job.** `<agent>` is an agent's name or slug (any case),
+or four or more characters of its id; an option the help does not list is
+an error, never a guess; `--yes` skips a destructive command's question.
+
+- **This machine:** `doctor` (checks the install and prints the fix for
+  each problem; `--json` for a program), `upgrade [channel|vX.Y.Z]` (also
+  how you roll back), `reach` (public access, [public-access.md](public-access.md)),
+  `accounts list | create <user> [--host-owner] [--cli-token] |
+  reset-password <user>` (run on the machine itself: the way back in when
+  the owner is locked out), `second-factor reset <user>` (a lost phone:
+  clears that person's passkeys, authenticator app and backup codes; your
+  own asks for your password), `rebuild-policy`, `runtime` (the image's
+  OpenClaw version against the newest), `upgrade-image`, `image …`,
+  `embedder …`, `top`, `bots [--check]`.
+- **Agents:** `list [--all]` (`--all`, the machine owner: every account's
+  agents with their owner, to find another login's leftovers), `create`,
+  `rename`, `start | stop | rebuild [--wait]`, `rebuild --outdated`,
+  `hibernate | wake`, `retry` (a FAILED setup), `skip-telegram` (finish one
+  parked on "paste a bot token" as web-only), `archive | unarchive`,
+  `delete` (asks for the name unless `--yes`), `health`, `logs`, `events`,
+  `console [--check]`, `usage`, `memory`, `swap`, `browser`.
+- **Talking to one:** `ask <agent> <message>` (the console from a terminal;
+  stdin when there is no message; `--json`), `tasks` (its schedule: list,
+  `add`, `run [--wait]`, `runs`, `pause | resume | rm`), `checkpoint` (Chat
+  → Memory now), `snapshot`, `snapshots`, `revert`.
+- **What it can reach:** `folders <agent>` lists its folders and repos;
+  `folders <agent> add <path> [--rw]`, `add-repo <git-url> [--rw |
+  --public]` (prints the deploy key to add), `rm <name>`; `env <agent> [set
+  <NAME> | rm <NAME>]` (names only are shown; a value left off is read from
+  stdin, out of shell history); `files`, `get`, `put`; `app inspect |
+  install | create | update | rollback | status | remove`
+  ([apps-in-agents.md](apps-in-agents.md)).
+- **People and bots:** `invite`, `pairing`, `approve`, `deny`, `members`,
+  `kick`, `users`, `token <agent>` (reveals its bot token), `telegram remove`,
+  `discord add | remove`, `slack add | remove`.
+- **AI sources:** `sources`, `switch-source`, `ai`, `migrate-source` (*AI
+  sources* above).
+- **Copies and moves:** `download` (a full private copy), `restore <file>`,
+  `share [--include-memory]` (a template), `import <file>` (a template as a
+  new agent; asks for its setup fields), `clone`, `adopt`, `move <agent>
+  <machine>` (this machine and its runners), `servers [add]` and `rehost
+  <agent> <server>` (another Hatchabot), `backups [list]` and `backups
+  restore <agent name> <YYYY-MM-DD> --yes` (from a nightly set, machine
+  owner). Moves, imports and restores run on the server: the command follows
+  each step until it ends (exit 1 when it failed, was undone or waits for a
+  choice; `--no-wait` returns at once), and `ops [--all] [--json]` and `ops
+  recover <op-id> <action>` show and settle long operations, as the app's
+  Alerts do.
 
 Managing the fleet from chat is the **Hatchabot agent's** job (see *Your
 Hatchabot agent* above). The separate Telegram management bot that used to do it

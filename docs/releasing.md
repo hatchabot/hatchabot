@@ -77,8 +77,8 @@ fingerprint id; never the value). A blocked tag is final: fix it and
 release the next patch version. A moved dev tag cancels its release.
 
 Never published (`publish.toml` `exclude`): `publish.toml`,
-`.github/dependabot.yml` (Dependabot runs in the dev repo) and the provider
-`scripts/private-values`.
+`.github/dependabot.yml` (Dependabot runs in the dev repo), `backlog.md`
+(the open bugs and tasks) and the provider `scripts/private-values`.
 
 ## Channels — releasing fast without moving new users
 
@@ -533,10 +533,14 @@ an agent's name ("Test") goes in `scripts/privacy-ignore.txt`.
 
 ### Retained history
 
-The history published up to the 2026-10-09 scrub (`ACCEPTED_HISTORY` in
-`scripts/privacy-check.mjs`, commit `4dfbb0f`) still names real agents and
-other household values. Keeping it, not rewriting it, is the maintainer's
-deliberate decision (2026-10-09, issue #40), not an oversight: `--public`
+The history published up to the 2026-10-09 scrub (commit `4dfbb0f`) still
+names real agents and other household values. Keeping it, not rewriting it, is
+the maintainer's deliberate decision (2026-10-09, issue #40), not an
+oversight. On 2026-10-27 the maintainer extended it to commit `9673997`
+(2026-10-12) and five pull request branches of that time (#36, #186, #187,
+#188, #229; `ACCEPTED_HISTORY` and `ACCEPTED_PULL_HEADS` in
+`scripts/privacy-check.mjs`): their files name agents split across two lines,
+which the check could not see before v2.164.3. `--public`
 checks main's files as they are now and everything after that commit, and
 reports the commits before it separately ("N accepted historical commits not
 checked (retained by decision, docs/releasing.md)") instead of calling the

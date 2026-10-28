@@ -18,7 +18,7 @@ import type { ChannelProvisioner, ProvisionedChannel } from '../channels/channel
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { DOORMAN_EMBED_PORT } from '../ops/doorman.js';
 import { agentTimeZone } from './timezone.js';
-import { whileBusy } from './busy.js';
+import { AgentBusyError, whileBusy } from './busy.js';
 import { notifyAgentChat } from '../channels/notify.js';
 import { autoSnapshot, workspacePath, writeFileInAgent } from './snapshots.js';
 import { addCron, conversationDeliverySupported, cronTargetFor, listCrons } from './crons.js';
@@ -1029,13 +1029,14 @@ export function renderRefusalOf(agentId: string): string | undefined {
 /**
  * Template-carried schedules: declarations parked at import (or for the
  * manager's morning check) become real gateway crons once the gateway exists.
- * Best-effort per job; only the ones that failed stay parked, for the next
- * provision or rebuild. A rebuild retries them too: setup had already moved
- * the agent to RUNNING, so a task one gateway hiccup refused at setup stayed
- * parked for good (audit #017).
+ * Best-effort per job; only the ones that failed stay parked, each with why,
+ * for the next provision or rebuild. A rebuild retries them too: setup had
+ * already moved the agent to RUNNING, so a task one gateway hiccup refused at
+ * setup stayed parked for good (audit #017). So do a start, a wake and the
+ * Tasks list's "Try again" (retryPendingSchedules, HB-0231).
  */
 async function applyPendingSchedules(
-  deps: ProvisionDeps,
+  deps: Pick<ProvisionDeps, 'store' | 'provider'>,
   agent: Agent,
   runtimeRef: string,
   log: (event: string, detail: Record<string, unknown>) => void,
@@ -1058,7 +1059,8 @@ async function applyPendingSchedules(
     return undefined;
   });
   const existing = new Set((listed ?? []).map((c) => c.name).filter((n): n is string => !!n));
-  const stillPending: typeof pendingSchedules = listed ? [] : [...pendingSchedules];
+  const stillPending: typeof pendingSchedules = listed ? []
+    : pendingSchedules.map((sch) => ({ ...sch, why: 'its list of tasks could not be read, so it was not added (it may be there already)' }));
   for (const sch of listed ? pendingSchedules : []) {
     if (existing.has(sch.name)) { log('schedule.already_present', { agentId, name: sch.name }); continue; }
     const out = await addCron(provider, runtimeRef, agent.slug, {
@@ -1068,14 +1070,64 @@ async function applyPendingSchedules(
       deliverTo: cronTargetFor(store, agent),
     }).catch(() => ({ ok: false as const, error: 'exec failed' }));
     if (!out.ok) {
-      stillPending.push(sch);
-      log('schedule.apply_failed', { agentId, name: sch.name, error: (out as any).error });
+      const error = String((out as { error?: unknown }).error ?? 'refused');
+      stillPending.push({ ...sch, why: `the agent refused it: ${error.slice(0, 200)}` });
+      log('schedule.apply_failed', { agentId, name: sch.name, error });
     } else {
       if (out.quieted && out.id) store.addQuietedCron(agentId, out.id, new Date().toISOString());
       log('schedule.applied', { agentId, name: sch.name });
     }
   }
   store.setPendingSchedules(agentId, stillPending.length ? stillPending : null);
+}
+
+/**
+ * Parked template tasks, tried again now (HB-0231): the agent must be RUNNING,
+ * and the agent's lock is taken so a rebuild (which tries them itself) is
+ * never doubled. Throws AgentBusyError when something else holds the agent.
+ * Returns the tasks still waiting.
+ */
+export async function retryPendingSchedules(
+  deps: Pick<ProvisionDeps, 'store' | 'provider'>,
+  agentId: string,
+  log: (event: string, detail: Record<string, unknown>) => void = () => {},
+): Promise<ReturnType<Store['getPendingSchedules']>> {
+  const { store } = deps;
+  if (!store.getPendingSchedules(agentId).length) return [];
+  return whileBusy(agentId, async () => {
+    const a = store.getAgent(agentId);
+    if (a?.state === 'RUNNING' && a.runtimeRef) await applyPendingSchedules(deps, a, a.runtimeRef, log);
+    return store.getPendingSchedules(agentId);
+  });
+}
+
+/**
+ * The same once a started or woken agent's gateway answers: until then only
+ * a rebuild retried them, and an agent that is only ever started kept a
+ * task it was given waiting for good (HB-0231). Best-effort: a busy agent
+ * is left to whatever holds it.
+ */
+export async function retryPendingSchedulesWhenUp(
+  deps: Pick<ProvisionDeps, 'store' | 'provider'>,
+  agentId: string,
+  log: (event: string, detail: Record<string, unknown>) => void = () => {},
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+  attempts = 24,
+): Promise<void> {
+  const { store, provider } = deps;
+  for (let i = 0; i < attempts && store.getPendingSchedules(agentId).length; i++) {
+    const a = store.getAgent(agentId);
+    if (a?.state !== 'RUNNING' || !a.runtimeRef) return;
+    const st = await provider.status(a.runtimeRef).catch(() => undefined);
+    if (st?.phase === 'running' && st.healthy) {
+      await retryPendingSchedules(deps, agentId, log).catch((err) => {
+        if (!(err instanceof AgentBusyError)) log('schedule.retry_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) });
+      });
+      return;
+    }
+    if (st?.phase === 'stopped' || st?.phase === 'error') return;
+    await sleep(5000);
+  }
 }
 
 export async function rebuildAgent(deps: ProvisionDeps, agentId: string): Promise<Agent> {

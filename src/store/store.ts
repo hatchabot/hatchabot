@@ -1129,6 +1129,10 @@ export class Store {
       // The removed git source's address (v2.167.0): its clone is deleted only
       // when the folder still holds that repo. NULL (older removals): key only.
       `ALTER TABLE data_source_removals ADD COLUMN repo_url TEXT`,
+      // Which request a waiting app install is (v2.170.0): the run that finishes
+      // drops or marks only the one it ran, never a newer one saved meanwhile
+      // (HB-0256). NULL: saved before it was recorded.
+      `ALTER TABLE agent_app_pending ADD COLUMN gen TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -2774,15 +2778,19 @@ export class Store {
       a.previousManifest ? JSON.stringify(a.previousManifest) : null, a.installedAt, a.testOk === undefined ? null : a.testOk ? 1 : 0);
   }
 
-  getAppPending(agentId: string): { source: string; ref: string; values: Record<string, unknown>; createdAt: string; error?: string } | undefined {
+  /** `gen`: which request it is (a new one each time it is saved; null: saved before v2.170.0). */
+  getAppPending(agentId: string): { source: string; ref: string; values: Record<string, unknown>; createdAt: string; error?: string; gen: string | null } | undefined {
     const r = this.db.prepare(`SELECT * FROM agent_app_pending WHERE agent_id = ?`).get(agentId) as Record<string, any> | undefined;
-    return r ? { source: r.source, ref: r.ref, values: JSON.parse(r.vals), createdAt: r.created_at, error: r.error ?? undefined } : undefined;
+    return r ? { source: r.source, ref: r.ref, values: JSON.parse(r.vals), createdAt: r.created_at, error: r.error ?? undefined, gen: r.gen ?? null } : undefined;
   }
 
-  setAppPending(agentId: string, p: { source: string; ref: string; values: Record<string, unknown> }): void {
-    this.db.prepare(`INSERT INTO agent_app_pending (agent_id, source, ref, vals, created_at, error) VALUES (?, ?, ?, ?, ?, NULL)
-       ON CONFLICT(agent_id) DO UPDATE SET source=excluded.source, ref=excluded.ref, vals=excluded.vals, created_at=excluded.created_at, error=NULL`)
-      .run(agentId, p.source, p.ref, JSON.stringify(p.values), new Date().toISOString());
+  /** Save the waiting install, replacing any before it; its new `gen`. */
+  setAppPending(agentId: string, p: { source: string; ref: string; values: Record<string, unknown> }): string {
+    const gen = randomUUID();
+    this.db.prepare(`INSERT INTO agent_app_pending (agent_id, source, ref, vals, created_at, error, gen) VALUES (?, ?, ?, ?, ?, NULL, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET source=excluded.source, ref=excluded.ref, vals=excluded.vals, created_at=excluded.created_at, error=NULL, gen=excluded.gen`)
+      .run(agentId, p.source, p.ref, JSON.stringify(p.values), new Date().toISOString(), gen);
+    return gen;
   }
 
   /** Agents with an app waiting to go in that has not failed (the boot sweep runs them). */
@@ -2810,12 +2818,18 @@ export class Store {
     this.db.prepare(`INSERT OR IGNORE INTO store_migrations (name, at) VALUES (?, ?)`).run(name, new Date().toISOString());
   }
 
-  setAppPendingError(agentId: string, error: string | null): void {
-    this.db.prepare(`UPDATE agent_app_pending SET error = ? WHERE agent_id = ?`).run(error, agentId);
+  /** With `gen`: only while the row is still that request (a newer one keeps no error of an older run's). */
+  setAppPendingError(agentId: string, error: string | null, gen?: string | null): boolean {
+    return (gen === undefined
+      ? this.db.prepare(`UPDATE agent_app_pending SET error = ? WHERE agent_id = ?`).run(error, agentId)
+      : this.db.prepare(`UPDATE agent_app_pending SET error = ? WHERE agent_id = ? AND gen IS ?`).run(error, agentId, gen)).changes > 0;
   }
 
-  deleteAppPending(agentId: string): void {
-    this.db.prepare(`DELETE FROM agent_app_pending WHERE agent_id = ?`).run(agentId);
+  /** With `gen`: only while the row is still that request. */
+  deleteAppPending(agentId: string, gen?: string | null): boolean {
+    return (gen === undefined
+      ? this.db.prepare(`DELETE FROM agent_app_pending WHERE agent_id = ?`).run(agentId)
+      : this.db.prepare(`DELETE FROM agent_app_pending WHERE agent_id = ? AND gen IS ?`).run(agentId, gen)).changes > 0;
   }
 
   deleteAgentApp(agentId: string): void {
@@ -4767,7 +4781,8 @@ export class Store {
       .run(schedules ? JSON.stringify(schedules) : null, id);
   }
 
-  getPendingSchedules(id: string): Array<{ name: string; message: string; cron?: string; everyMs?: number; tz?: string; announce?: boolean }> {
+  /** Template tasks not yet added to the agent; `why` is the last attempt's reason (none before the first). */
+  getPendingSchedules(id: string): Array<{ name: string; message: string; cron?: string; everyMs?: number; tz?: string; announce?: boolean; why?: string }> {
     const r = this.db.prepare(`SELECT pending_schedules FROM agents WHERE id = ?`).get(id) as any;
     return r?.pending_schedules ? (safeJson(r.pending_schedules, []) as any[]) : [];
   }

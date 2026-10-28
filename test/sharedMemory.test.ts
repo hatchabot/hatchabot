@@ -53,6 +53,17 @@ describe('memory is always shared', () => {
     expect(provider.execLog.length).toBe(before);
   });
 
+  it('sharedMemory: true from an old client changes nothing, the Hatchabot agent\'s own memory included (HB-0094)', async () => {
+    const { store, provider, f } = await world();
+    store.setAgentOps('a1', true);
+    store.setAgentSharedMemory('a1', false);
+    const before = provider.execLog.length;
+    const res = await patch(f, { sharedMemory: true });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(store.getAgent('a1')!.sharedMemory).toBe(false);
+    expect(provider.execLog.length).toBe(before); // no AGENTS.md rewrite
+  });
+
   it('a new agent is shared even when a client still asks for private', async () => {
     const { store, f } = await world();
     const res = await f.inject({ method: 'POST', url: '/v1/agents', headers: as, payload: { name: 'Den', aiProfileId: 'p1', hostId: 'h1', sharedMemory: false, telegram: false } });

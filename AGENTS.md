@@ -43,6 +43,11 @@ key that expired), not a bug. Say which it is.
   reaches the public repo"). Real data — the live install in
   `~/hatchabot-prod` and `~/hatchabot-data`, `.env` files — is looked at in
   a session started there, never from a coding session.
+- **The backlog:** `backlog.md` holds the open bugs and tasks (HB-NNNN). It
+  is in the dev repo only, never published (`publish.toml` `exclude`), and
+  is held to the privacy check like every other file. A report that comes
+  in as a file is copied there first, item by item; a fix sets the item's
+  Status.
 - **Changes reach `main` only through a pull request** whose checks pass:
   `scripts/land.sh` opens it, waits for the checks and merges it.
 - **The gates, chained so one failure stops the rest:**

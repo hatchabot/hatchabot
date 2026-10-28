@@ -67,7 +67,6 @@ export function slackConnector(f: FetchLike = fetch): ChannelConnector {
     kind: 'slack',
     label: 'Slack',
     fields: FIELDS,
-    hosts: ['slack.com', 'wss-primary.slack.com', 'wss-backup.slack.com', 'files.slack.com'],
 
     secretValue(creds) {
       return JSON.stringify({ botToken: cleanField(creds, FIELDS[0]!), appToken: cleanField(creds, FIELDS[1]!) });

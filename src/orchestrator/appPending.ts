@@ -80,16 +80,38 @@ export async function resolvePendingValues(
 }
 
 /**
+ * Changes to one agent's waiting install, one at a time: saving a new request
+ * (its secrets, then its row) and forgetting one (its secrets, then its row).
+ * The secret refs are per agent and key, so a run that finished and forgot its
+ * request while a newer one was being saved deleted the newer one's secrets
+ * (HB-0256).
+ */
+const rowLocks = new Map<string, Promise<unknown>>();
+export function onePendingChange<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+  const run = (rowLocks.get(agentId) ?? Promise.resolve()).then(fn, fn);
+  const tail = run.catch(() => {});
+  rowLocks.set(agentId, tail);
+  void tail.then(() => { if (rowLocks.get(agentId) === tail) rowLocks.delete(agentId); });
+  return run;
+}
+
+/**
  * Forget a waiting install: its secrets first, then its row. A secret that
  * would not delete is not forgotten: no row names it once the row is gone,
  * and sweepOrphanAgentSecrets removes it at the next start (review,
  * 2026-10-22). The row cannot wait for it: kept, the install would run again.
+ *
+ * `gen`: only that request (store.getAppPending's `gen`). An install that
+ * finished forgot the request saved while it ran, and that App never went in
+ * (HB-0256). False when there was nothing of it to forget.
  */
-export async function dropAppPending(store: Store, secrets: SecretStore, agentId: string): Promise<void> {
-  const p = store.getAppPending(agentId);
-  if (!p) return;
-  for (const ref of pendingSecretRefs(agentId, p.values)) await secrets.delete(ref).catch(() => {});
-  store.deleteAppPending(agentId);
+export async function dropAppPending(store: Store, secrets: SecretStore, agentId: string, gen?: string | null): Promise<boolean> {
+  return onePendingChange(agentId, async () => {
+    const p = store.getAppPending(agentId);
+    if (!p || (gen !== undefined && p.gen !== gen)) return false;
+    for (const ref of pendingSecretRefs(agentId, p.values)) await secrets.delete(ref).catch(() => {});
+    return store.deleteAppPending(agentId, p.gen);
+  });
 }
 
 /**

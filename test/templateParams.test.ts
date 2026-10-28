@@ -128,6 +128,45 @@ describe('POST /v1/agents/import with values', () => {
     expect(store.listAgents(OWNER)).toHaveLength(1); // only the pre-existing agent
   });
 
+  it('takes the answers in the body ahead of the file: 24 full-length answers, past what an address holds (HB-0093)', async () => {
+    const { store, f } = await world();
+    const keys = Array.from({ length: 24 }, (_, i) => `field_${i}`);
+    const many = gzipSync(Buffer.from(JSON.stringify({
+      format: 'hatchabot-template', version: 1, exportedAt: 'now',
+      agent: { name: 'Many Answers', persona: 'p', sharedMemory: true },
+      files: { 'SOUL.md': keys.map((k) => `{{${k}}}`).join('\n'), 'AGENTS.md': '# A' },
+      ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [],
+      parameters: keys.map((k) => ({ key: k, label: k, required: true, type: 'text', target: 'soul' })),
+    })));
+    // Spaces and commas: each takes three characters in an address, so this is ~140 KB there.
+    const values = Object.fromEntries(keys.map((k, i) => [k, `Answer ${i}, `.padEnd(2000, ', ')]));
+    const framed = (head: string, file: Buffer) => Buffer.concat([Buffer.from(head + '\n'), file]);
+    const res = await f.inject({
+      method: 'POST', url: '/v1/agents/import',
+      headers: { ...H, 'content-type': 'application/vnd.hatchabot.import' },
+      payload: framed(JSON.stringify({ values }), many),
+    });
+    expect(res.statusCode).toBe(201);
+    expect(store.getAgent(res.json().id)!.paramValues).toEqual(values);
+    expect(store.getAgentSeed(res.json().id)['SOUL.md']).toBe(keys.map((k) => values[k]).join('\n'));
+    // A required answer left out is still named; a line that is not JSON, or no line at all, is refused.
+    const missing = await f.inject({ method: 'POST', url: '/v1/agents/import', headers: { ...H, 'content-type': 'application/vnd.hatchabot.import' }, payload: framed('{"values":{}}', many) });
+    expect(missing.statusCode).toBe(400);
+    expect(missing.json().error).toMatch(/field_0/);
+    for (const payload of [framed('{not json', many), many]) {
+      const bad = await f.inject({ method: 'POST', url: '/v1/agents/import', headers: { ...H, 'content-type': 'application/vnd.hatchabot.import' }, payload });
+      expect(bad.statusCode).toBe(400);
+    }
+    // Answers over the field limits are refused as before.
+    const tooLong = await f.inject({ method: 'POST', url: '/v1/agents/import', headers: { ...H, 'content-type': 'application/vnd.hatchabot.import' }, payload: framed(JSON.stringify({ values: { field_0: 'x'.repeat(2001) } }), many) });
+    expect(tooLong.statusCode).toBe(400);
+    expect(tooLong.json().error).toBe('Malformed setup values.');
+    expect(store.listAgents(OWNER)).toHaveLength(2);
+    // The body type belongs to the import alone.
+    const elsewhere = await f.inject({ method: 'POST', url: '/v1/agents/a1/restore', headers: { ...H, 'content-type': 'application/vnd.hatchabot.import' }, payload: framed('{}', many) });
+    expect(elsewhere.statusCode).toBe(415);
+  });
+
   it('400s on malformed values JSON instead of 500', async () => {
     const { f } = await world();
     const res = await f.inject({

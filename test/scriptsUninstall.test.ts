@@ -466,6 +466,27 @@ describe('scripts/uninstall.sh --purge and what other installs on the daemon use
   });
 });
 
+describe('scripts/uninstall.sh --purge deletes only the runtime images this install names (HB-0043)', () => {
+  it('the tags its agents and classes name and the default tag go; an image of another name stays, and so does one not on the machine', () => {
+    const w = purgeWorld();
+    const db = new Database(join(w.repo, 'data', 'hatchabot.sqlite'));
+    db.prepare("UPDATE agents SET image = 'hatchabot-runtime:derived-notes' WHERE id = '11111111-aaaa'").run();
+    db.prepare("UPDATE agents SET image = 'example.org/someone-else:1' WHERE id = '22222222-bbbb'").run();
+    db.exec("CREATE TABLE agent_classes (id TEXT, image TEXT); INSERT INTO agent_classes VALUES ('c1', 'hatchabot-runtime:class-gone'), ('c2', 'hatchabot-runtime:derived-notes')");
+    db.close();
+    dockerShim(w, `${VOLS}
+  "image inspect --format {{.Id}} hatchabot-runtime:latest") echo sha256:dddd ;;
+  "image inspect --format {{.Id}} hatchabot-runtime:derived-notes") echo sha256:eeee ;;
+  "image inspect --format {{.Id}} example.org/someone-else:1") echo sha256:ffff ;;
+  "image inspect --format {{.Id}} hatchabot-runtime:class-gone") exit 1 ;;`);
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    const rmi = readFileSync(w.log, 'utf8').split('\n').filter((l) => l.startsWith('docker rmi'));
+    expect(rmi).toEqual(['docker rmi -f hatchabot-runtime:derived-notes hatchabot-runtime:latest']);
+    expect(r.stdout).toContain('removed 2 images');
+  });
+});
+
 describe('scripts/uninstall.sh on a bundle install (review, 2026-10-09)', () => {
   it('removes the ~/.local/bin launchers that run this install, and leaves anyone else\'s', () => {
     const w = world();

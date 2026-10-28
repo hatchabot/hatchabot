@@ -71,6 +71,16 @@ describe('exportTemplate', () => {
     }
   });
 
+  it('writes sharedMemory as a constant true for older importers, and imports a file without it (HB-0094)', async () => {
+    const { store, provider } = await world(); // its agent is stored as "private", as before v2.107.0
+    const { data } = await exportTemplate({ store, provider }, 'a1');
+    const m = parseTemplate(data);
+    expect(m.agent.sharedMemory).toBe(true);
+    const { sharedMemory: _, ...agent } = m.agent;
+    const made = importTemplate({ store, provider }, gzipSync(JSON.stringify({ ...m, agent })), { ownerId: 'owner-b' });
+    expect(store.getAgent(made.agent.id)!.sharedMemory).toBe(true);
+  });
+
   it('excludeMemory leaves MEMORY.md out', async () => {
     const { store, provider } = await world();
     const { data } = await exportTemplate({ store, provider }, 'a1', { includeMemory: false });

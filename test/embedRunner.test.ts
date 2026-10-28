@@ -239,7 +239,7 @@ exit 0
     const s = await provider.ensureEmbedder({
       image: 'test-image:latest', modelPath: join(dir, 'model.gguf'), modelAlias: 'embeddinggemma', key: 'k',
       doorImage: 'test-image:latest', doorScript: 'noop', doorPort: 8093, doorBind: '127.0.0.1',
-      keysFile: join(dir, 'keys.json'), serverKeyFile: join(dir, 'server-key'), uid: 1000, gid: 1000, perMin: 600, modelSha256: 'ffff',
+      keysFile: join(dir, 'keys.json'), serverKeyFile: join(dir, 'server-key'), uid: 1000, gid: 1000, perMin: 600, mbPerMin: 8, modelSha256: 'ffff',
     });
     expect(s.doorAddress).toBe('127.0.0.1:8093');
     const lines = argv().map((l) => l.replace(/^-H \S+ /, ''));

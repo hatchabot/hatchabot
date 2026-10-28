@@ -307,3 +307,30 @@ describe('apply-default-model on a Claude plan holds an agent whose runtime is t
     expect(res.json().notSwitched).toBeUndefined();
   });
 });
+
+describe('apply-default-model on a shared Claude plan holds another account\'s follower whose runtime is too old (HB-0245)', () => {
+  it('pins it to what it runs, counts it without naming it, and lets a current one follow', async () => {
+    const { store, f, provider } = await world();
+    store.insertAIProfile({ id: 'p-sub', ownerId: OWNER, name: 'Claude plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', models: [], secretRef: 'ai/sub', shared: true, createdAt: 'now' } as any);
+    const OTHER = 'user-other';
+    async function seedOther(id: string, slug: string, name: string, version: string) {
+      const { runtimeRef } = await provider.provision({ agentId: id, slug, workspace: { files: {}, configPatch: { agentId: slug, authMode: 'api-key' } }, env: {} } as any);
+      store.insertAgent({ id, ownerId: OTHER, name, slug, state: 'RUNNING', aiProfileId: 'p-sub', hostId: 'h1', runtimeRef, persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+      provider.infoOverride.set(runtimeRef, { openclawVersion: version });
+    }
+    await seedOther('b1', 'old-runtime', 'Meal Planner', '2026.9.6');
+    await seedOther('b2', 'new-runtime', 'Budget Tracker', '2026.9.8');
+    const res = await apply(f, 'p-sub', { model: 'claude-opus-5-5', apply: [] });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ othersHeld: 1 });
+    expect(res.body).not.toContain('Meal Planner');
+    expect(res.body).not.toContain('b1');
+    expect(store.getAgent('b1')!.model).toBe('claude-opus-4-8');
+    expect(effectiveModel(store.getAgent('b1')!, store.getAIProfile('p-sub')!)).toBe('claude-opus-4-8');
+    expect(store.getAgent('b2')!.model).toBeUndefined();
+    expect(effectiveModel(store.getAgent('b2')!, store.getAIProfile('p-sub')!)).toBe('claude-opus-5-5');
+    // A model every runtime takes: nobody is held.
+    const again = await apply(f, 'p-sub', { model: 'claude-sonnet-5', apply: [] });
+    expect(again.json().othersHeld).toBeUndefined();
+  });
+});

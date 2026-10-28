@@ -1223,6 +1223,231 @@ describe('an app change cut off by a restart (kill at every step)', () => {
 
 });
 
+// ---- the Apps in agents audit of 2026-10-27: waiting installs, replacement and roll back ----
+describe('apps: what the 2026-10-27 audit found (waiting installs, replacing, rolling back)', () => {
+  const OWNER = 'owner-1';
+  const hdr = { 'x-hatchabot-owner': OWNER };
+  afterEach(() => { setStepHookForTests(undefined); clearBusy('a1'); });
+  /** A fetch that waits at a gate once armed (`only`: just the fetch whose arguments name it). */
+  const gated = () => {
+    let armed: string | undefined;
+    let entered!: () => void;
+    let letGo!: () => void;
+    const inFetch = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { letGo = r; });
+    const run: typeof hostGit = async (args, cwd) => {
+      if (armed !== undefined && (!armed || args.includes(armed))) { armed = undefined; entered(); await gate; }
+      return hostGit(args, cwd);
+    };
+    return { run, arm: (only = '') => { armed = only; }, inFetch, letGo };
+  };
+  async function world(appGit?: typeof hostGit, state = 'RUNNING') {
+    const store = new Store(new Database(':memory:'));
+    const provider = new FakeAgent();
+    provider.jobs = [];
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
+    store.insertAIProfile({ id: 'p', ownerId: OWNER, name: 'Plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-sonnet-5', secretRef: 'ai/p', createdAt: 'now' } as never);
+    store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Demo', slug: 'demo-agent', state, runtimeRef: 'mock://a1', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    const f = Fastify();
+    const routes = await registerRoutes(f, { store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} }, providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0, list: () => [] } }, appGit } as never);
+    const dir = repo();
+    const post = (suffix: string, source?: string) =>
+      f.inject({ method: 'POST', url: `/v1/agents/a1/app${suffix}`, headers: hdr, payload: { ...(source ? { source } : {}), values: { mailbox: 'demo@example.org' } } });
+    return { store, provider, f, routes, dir, post };
+  }
+  const until = async (ok: () => boolean) => {
+    for (let n = 0; n < 300; n++) { if (ok()) return; await new Promise((r) => setTimeout(r, 10)); }
+    throw new Error('did not settle');
+  };
+  const names = (p: FakeAgent) => p.jobs.map((j) => j.name).sort();
+
+  it('a request to install saved while an earlier one runs goes in after it, and is not deleted by it (HB-0256)', async () => {
+    const w = await world();
+    const other = repo({ ...MANIFEST, app: 'otherapp' });
+    let entered!: () => void, letGo!: () => void;
+    const inTests = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { letGo = r; });
+    const shell = w.provider.execShell.bind(w.provider);
+    let first = true;
+    w.provider.execShell = async (ref: string, script: string) => {
+      if (script.includes('unittest') && first) { first = false; entered(); await gate; }
+      return shell(ref, script);
+    };
+    expect((await w.post('/pending', w.dir)).statusCode).toBe(200);
+    await inTests;
+    expect((await w.post('/pending', other)).statusCode).toBe(200);
+    letGo();
+    await until(() => w.store.getAgentApp('a1')?.app === 'otherapp' && !w.store.getAppPending('a1'));
+    expect(names(w.provider)).toEqual(['otherapp-tick']);
+    expect(w.store.listOperations(['a1']).map((o) => o.status)).toEqual(['succeeded', 'succeeded']);
+    await w.f.close();
+  });
+
+  it("an earlier request that fails leaves its error off the newer one, which still goes in (HB-0256)", async () => {
+    const w = await world();
+    const other = repo({ ...MANIFEST, app: 'otherapp' });
+    let entered!: () => void, letGo!: () => void;
+    const inTests = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { letGo = r; });
+    const shell = w.provider.execShell.bind(w.provider);
+    let first = true;
+    w.provider.execShell = async (ref: string, script: string) => {
+      if (script.includes('unittest') && first) { first = false; entered(); await gate; return { code: 1, stdout: 'FAILED (failures=1)', stderr: '' }; }
+      return shell(ref, script);
+    };
+    expect((await w.post('/pending', w.dir)).statusCode).toBe(200);
+    await inTests;
+    expect((await w.post('/pending', other)).statusCode).toBe(200);
+    letGo();
+    await until(() => w.store.getAgentApp('a1')?.app === 'otherapp' && !w.store.getAppPending('a1'));
+    expect(names(w.provider)).toEqual(['otherapp-tick']);
+    await w.f.close();
+  });
+
+  it('a direct install retires the waiting request, and Stop app is not undone at the next start (HB-0252)', async () => {
+    const w = await world();
+    w.store.setAgentState('a1', 'STOPPED');
+    expect((await w.post('/pending', w.dir)).statusCode).toBe(200);
+    w.store.setAgentState('a1', 'RUNNING');
+    expect((await w.post('', w.dir)).statusCode).toBe(200);
+    expect(w.store.getAppPending('a1')).toBeUndefined();
+    // One left by an earlier version goes with Stop app.
+    w.store.setAppPending('a1', { source: w.dir, ref: 'HEAD', values: { mailbox: 'demo@example.org' } });
+    expect((await w.f.inject({ method: 'DELETE', url: '/v1/agents/a1/app', headers: hdr })).statusCode).toBe(200);
+    expect(w.store.getAppPending('a1')).toBeUndefined();
+    await w.routes.resumeOperations();
+    expect(w.store.getAgentApp('a1')).toBeUndefined();
+    expect(w.provider.jobs).toEqual([]);
+    await w.f.close();
+  });
+
+  it('setup that finishes while the request reads its source: the App goes in without a restart (HB-0255)', async () => {
+    const g = gated();
+    const w = await world(g.run, 'PROVISIONING');
+    g.arm();
+    const req = w.post('/pending', w.dir);
+    await g.inFetch;
+    w.store.setAgentState('a1', 'RUNNING');
+    g.letGo();
+    expect((await req).statusCode).toBe(200);
+    await until(() => w.store.getAgentApp('a1')?.app === 'demoapp' && !w.store.getAppPending('a1'));
+    expect(names(w.provider)).toEqual(['demoapp-tick']);
+    await w.f.close();
+  });
+
+  it('an older install slow to read its source is refused once a newer one went in (HB-0264)', async () => {
+    const g = gated();
+    const w = await world(g.run);
+    const older = repo({ ...MANIFEST, app: 'olderapp' });
+    const newer = repo({ ...MANIFEST, app: 'newerapp' });
+    g.arm(older);
+    const old = w.post('', older);
+    await g.inFetch;
+    expect((await w.post('', newer)).statusCode).toBe(200);
+    g.letGo();
+    const res = await old;
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ unchanged: true });
+    expect(res.json().error).toMatch(/app changed meanwhile/);
+    expect(w.store.getAgentApp('a1')!.app).toBe('newerapp');
+    expect(names(w.provider)).toEqual(['newerapp-tick']);
+    await w.f.close();
+  });
+
+  it('a replacement that fails puts back a task the owner had turned off turned off (HB-0253)', async () => {
+    const w = await world();
+    expect((await w.post('', w.dir)).statusCode).toBe(200);
+    w.provider.jobs.find((j) => j.name === 'demoapp-tick')!.disabled = true;
+    w.provider.testCode = 1;
+    const res = await w.post('', repo({ ...MANIFEST, app: 'replacementapp' }));
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ unchanged: true });
+    expect(w.provider.jobs.filter((j) => j.name === 'demoapp-tick').map((j) => j.disabled === true)).toEqual([true]);
+    expect(w.store.listOperations(['a1'])[0]!.params).toMatchObject({ fromApp: 'demoapp', fromAppOff: ['demoapp-tick'] });
+    await w.f.close();
+  });
+
+  it('…and after a restart that cut the replacement off, from what the operation recorded (HB-0253)', async () => {
+    const w = await world();
+    expect((await w.post('', w.dir)).statusCode).toBe(200);
+    w.provider.jobs.find((j) => j.name === 'demoapp-tick')!.disabled = true;
+    setStepHookForTests((_op, k) => { if (k === 'unpacked') throw new SimulatedCrash(); });
+    await w.post('', repo({ ...MANIFEST, app: 'replacementapp' })).catch(() => undefined);
+    expect(w.provider.jobs.filter((j) => j.name === 'demoapp-tick')).toEqual([]);
+    setStepHookForTests(undefined); clearBusy('a1'); newBootForTests();
+    await w.routes.resumeOperations();
+    const op = w.store.listOperations(['a1']).find((o) => o.params.app === 'replacementapp')!;
+    expect(op.status).toBe('rolled_back');
+    expect(w.provider.jobs.filter((j) => j.name === 'demoapp-tick').map((j) => j.disabled === true)).toEqual([true]);
+    await w.f.close();
+  });
+
+  /** Installed, then updated to a second release whose task runs every 5 minutes. */
+  const twoReleases = async () => {
+    const w = await world();
+    expect((await w.post('', w.dir)).statusCode).toBe(200);
+    const first = w.store.getAgentApp('a1')!;
+    commit(w.dir, { ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['python3', '-m', 'demo', 'tick'] }] });
+    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: {} })).statusCode).toBe(200);
+    const newer = w.store.getAgentApp('a1')!;
+    const rollback = () => w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/rollback', headers: hdr });
+    const op = () => w.store.listOperations(['a1']).find((o) => o.kind === 'app-rollback')!;
+    return { ...w, first, newer, rollback, op };
+  };
+
+  it('a roll back whose switch landed but whose reply was lost goes on from what the link says (HB-0254)', async () => {
+    const w = await twoReleases();
+    const shell = w.provider.execShell.bind(w.provider);
+    let lost = false;
+    w.provider.execShell = async (ref: string, script: string) => {
+      const r = await shell(ref, script);
+      if (!lost && script.includes(`test -d releases/${w.first.sha.slice(0, 12)}`)) { lost = true; return { code: 1, stdout: '', stderr: 'reply lost', timedOut: true }; }
+      return r;
+    };
+    expect((await w.rollback()).statusCode).toBe(200);
+    expect(w.provider.live('mock://a1').current).toBe(`releases/${w.first.sha.slice(0, 12)}`);
+    expect(w.provider.every('demoapp-tick')).toEqual(['1m']);
+    expect(w.store.getAgentApp('a1')!.sha).toBe(w.first.sha);
+    expect(w.op().status).toBe('succeeded');
+    await w.f.close();
+  });
+
+  it('a roll back whose switch did not land changes nothing and says so (HB-0254)', async () => {
+    const w = await twoReleases();
+    w.provider.breakScript = (s) => (s.includes(`test -d releases/${w.first.sha.slice(0, 12)}`) ? 'exit 1' : s);
+    const res = await w.rollback();
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ unchanged: true });
+    expect(w.provider.live('mock://a1').current).toBe(`releases/${w.newer.sha.slice(0, 12)}`);
+    expect(w.provider.every('demoapp-tick')).toEqual(['5m']);
+    expect(w.op().status).toBe('failed');
+    await w.f.close();
+  });
+
+  it('a roll back that can neither set its tasks nor point back is held for a choice, and either choice makes it agree (HB-0254)', async () => {
+    for (const action of ['go-back', 'use-new'] as const) {
+      const w = await twoReleases();
+      w.provider.failAdd = () => true;
+      w.provider.breakScript = (s) => (s.includes(`ln -sfn 'releases/${w.newer.sha.slice(0, 12)}'`) ? 'exit 1' : s);
+      const res = await w.rollback();
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ held: true, unchanged: false });
+      expect(w.provider.live('mock://a1').current).toBe(`releases/${w.first.sha.slice(0, 12)}`);
+      expect(w.op()).toMatchObject({ status: 'held' });
+      expect(w.op().recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+      w.provider.failAdd = () => false;
+      w.provider.breakScript = (s) => s;
+      const rec = await w.f.inject({ method: 'POST', url: `/v1/operations/${w.op().id}/recover`, headers: hdr, payload: { action } });
+      expect(rec.statusCode).toBe(200);
+      const want = action === 'go-back' ? w.newer : w.first;
+      expect(w.store.getAgentApp('a1')!.sha).toBe(want.sha);
+      expect(w.provider.live('mock://a1').current).toBe(`releases/${want.sha.slice(0, 12)}`);
+      expect(w.provider.every('demoapp-tick')).toEqual([action === 'go-back' ? '5m' : '1m']);
+      await w.f.close();
+    }
+  });
+});
+
 // ---- the workflow audit of 2026-10-10 (issues #73–#121) ----
 describe('apps: what the 2026-10-10 workflow audit found', () => {
   const d = (agent: FakeAgent) => ({ provider: agent, runtimeRef: 'x', facts: FACTS });

@@ -9,7 +9,7 @@ import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { Agent } from '../src/domain/types.js';
 import type { ExecResult } from '../src/providers/provider.js';
 import { accessAlertOf, accessOverview, accessProbeScript, verifyAgentAccess } from '../src/orchestrator/accessOverview.js';
-import { syncConnections } from '../src/orchestrator/googleConnections.js';
+import { recordGoogleSeen, syncConnections } from '../src/orchestrator/googleConnections.js';
 import { PAIRING_DB } from '../src/orchestrator/claim.js';
 import vm from 'node:vm';
 import nodePath from 'node:path';
@@ -460,6 +460,34 @@ describe('the connection code records what gog shows', () => {
     const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/detach', headers: H, payload: { connectionId: 'c1' } });
     expect(res.json().removed).toBe(true);
     expect(w.row('a1', 'google', 'mail@example.org')).toMatchObject({ intended: false, verified: { status: 'absent' }, note: 'removed — verified gone' });
+  });
+
+  it('an account of the owner\'s that this agent never had is not listed as "removed — verified gone"', async () => {
+    // Before: Verify now recorded every connection of the owner's as absent, and each
+    // showed as a removal for a week (2026-10-27, an agent with no Google account listed six).
+    const w = await world();
+    await verifyAgentAccess(w.deps, 'a1');
+    await verifyAgentAccess(w.deps, 'a1');
+    expect(w.store.listAccessChecks('a1').find((c) => c.subject === 'drive@example.org')!.present).toBe(false);
+    expect(w.row('a1', 'google', 'drive@example.org')).toBeUndefined();
+    // Once it was there and then went, it is a removal.
+    w.inside.gog = ['mail@example.org', 'drive@example.org'];
+    await verifyAgentAccess(w.deps, 'a1');
+    w.inside.gog = ['mail@example.org'];
+    await verifyAgentAccess(w.deps, 'a1');
+    await verifyAgentAccess(w.deps, 'a1'); // and a later look keeps it a removal
+    expect(w.row('a1', 'google', 'drive@example.org')).toMatchObject({ verified: { status: 'absent' }, note: 'removed — verified gone' });
+  });
+
+  it('a removal is shown for a week from when it went, however often it is looked at since', () => {
+    const store = new Store(new Database(':memory:'));
+    const day = 24 * 3600_000, went = Date.parse('2026-10-01T00:00:00Z');
+    store.recordAccessCheck('a1', 'google', 'drive@example.org', true, undefined, new Date(went - day).toISOString());
+    recordGoogleSeen(store, 'a1', [], ['drive@example.org'], new Date(went).toISOString());
+    recordGoogleSeen(store, 'a1', [], ['drive@example.org'], new Date(went + 6 * day).toISOString());
+    expect(store.listAccessChecks('a1')[0]!.detail).toBe(`gone ${new Date(went).toISOString()}`);
+    recordGoogleSeen(store, 'a1', ['drive@example.org'], [], new Date(went + 7 * day).toISOString());
+    expect(store.listAccessChecks('a1')[0]).toMatchObject({ present: true, detail: null }); // back again: no longer a removal
   });
 
   it('a sync (start, wake, rebuild) ends with what gog holds, an extra account included', async () => {

@@ -15,7 +15,7 @@ import { ConnectorError, type ChannelConnector } from '../src/channels/connector
 const OWNER = 'o';
 const H = { 'x-hatchabot-owner': OWNER };
 const connector: ChannelConnector = {
-  kind: 'discord', label: 'Discord', hosts: [],
+  kind: 'discord', label: 'Discord',
   fields: [{ key: 'token', label: 'Token', pattern: /^ok-/, help: '' }],
   secretValue: (c) => String(c.token), credsFromSecret: (s) => ({ token: s }),
   async verify(c) {

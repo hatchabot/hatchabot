@@ -137,6 +137,48 @@ async function world(state = 'RUNNING') {
   return { store, provider, f };
 }
 
+describe('template tasks still waiting (HB-0231)', () => {
+  const PARKED = { name: 'Weekly menu', message: 'Plan next week\'s dinners', cron: '0 9 * * 1', tz: 'UTC' };
+  const until = async (f: () => boolean) => { for (let i = 0; i < 100 && !f(); i++) await new Promise((r) => setTimeout(r, 10)); };
+
+  it('the Tasks list shows them with why, and Try again adds them', async () => {
+    const { store, provider, f } = await world();
+    provider.execResponses.set('cron list', { code: 0, stdout: CRON_JSON, stderr: '' });
+    store.setPendingSchedules('a1', [{ ...PARKED, why: 'the agent refused it: gateway busy' }]);
+    const list = await f.inject({ method: 'GET', url: '/v1/agents/a1/crons', headers: as });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().waiting).toEqual([{ name: 'Weekly menu', message: PARKED.message, cron: '0 9 * * 1', tz: 'UTC', why: 'the agent refused it: gateway busy' }]);
+    provider.execResponses.set('cron add', { code: 1, stdout: '', stderr: 'gateway restarting' });
+    const again = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons/waiting', headers: as, payload: {} });
+    expect(again.statusCode).toBe(200);
+    expect(again.json().waiting[0].why).toMatch(/gateway restarting/);
+    provider.execResponses.set('cron add', { code: 0, stdout: '{"id":"menu-1"}', stderr: '' });
+    const added = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons/waiting', headers: as, payload: {} });
+    expect(added.json()).toEqual({ waiting: [] });
+    expect(provider.execLog.filter((c) => c[0] === 'cron' && c[1] === 'add' && c.includes('Weekly menu'))).toHaveLength(2);
+    expect((await f.inject({ method: 'GET', url: '/v1/agents/a1/crons', headers: as })).json().waiting).toEqual([]);
+  });
+
+  it('Start adds them once the agent answers, with no rebuild', async () => {
+    const { store, provider, f } = await world('STOPPED');
+    provider.execResponses.set('cron list', { code: 0, stdout: CRON_JSON, stderr: '' });
+    provider.execResponses.set('cron add', { code: 0, stdout: '{"id":"menu-1"}', stderr: '' });
+    store.setPendingSchedules('a1', [PARKED]);
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/start', headers: as });
+    expect(res.statusCode, res.body).toBe(200);
+    await until(() => store.getPendingSchedules('a1').length === 0);
+    expect(store.getPendingSchedules('a1')).toEqual([]);
+    expect(provider.execLog.some((c) => c[0] === 'cron' && c[1] === 'add' && c.includes('Weekly menu'))).toBe(true);
+  });
+
+  it('Try again needs the agent running, and is the owner\'s', async () => {
+    const { store, f } = await world('STOPPED');
+    store.setPendingSchedules('a1', [PARKED]);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/crons/waiting', headers: as, payload: {} })).statusCode).toBe(409);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/crons/waiting', headers: { 'x-hatchabot-owner': 'someone-else' }, payload: {} })).statusCode).toBe(404);
+  });
+});
+
 describe('cron routes', () => {
   it('GET lists crons for a RUNNING agent', async () => {
     const { provider, f } = await world();

@@ -2,6 +2,9 @@
 # on some install, and appear in Hatchabot's own text for other reasons.
 # scripts/privacy-check.mjs never treats these as private. One per line, any
 # case. Nothing private belongs here: this file is public.
+# The publisher's gate goes by the values last uploaded with `kit values sync`:
+# a word added here is still private there until the next sync, and a release
+# that uses it is blocked (v2.170.0). Prefer rewording to adding a word here.
 Hatchabot
 Test
 Tester

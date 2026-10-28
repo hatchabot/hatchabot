@@ -110,7 +110,7 @@ exit 0
     const spec = {
       image: 'test-image:latest', modelPath: join(dir, 'model.gguf'), modelAlias: 'embeddinggemma', key: 'the-key',
       doorImage: 'test-image:latest', doorScript: 'noop', doorPort: 8093, doorBind: '127.0.0.1',
-      keysFile: join(dir, 'keys.json'), serverKeyFile: keyFile, uid: process.getuid!(), gid: process.getgid!(), perMin: 600,
+      keysFile: join(dir, 'keys.json'), serverKeyFile: keyFile, uid: process.getuid!(), gid: process.getgid!(), perMin: 600, mbPerMin: 8,
     };
     await provider.ensureEmbedder(spec as never);
     const doorRuns = () => argv().filter((l) => l.startsWith('run -d --name hatchabot-embed-door')).length;
@@ -125,5 +125,10 @@ exit 0
     await provider.ensureEmbedder({ ...spec, perMin: 900 } as never);
     expect(doorRuns()).toBe(2);
     expect(doorRms()).toBe(1);
+    // So is a changed byte budget, and the door is told it (HB-0026).
+    expect(argv().find((l) => l.startsWith('run -d --name hatchabot-embed-door'))).toContain('-e EMBED_MB_PER_MIN=8 ');
+    await provider.ensureEmbedder({ ...spec, perMin: 900, mbPerMin: 2 } as never);
+    expect(doorRuns()).toBe(3);
+    expect(argv().filter((l) => l.startsWith('run -d --name hatchabot-embed-door')).at(-1)).toContain('-e EMBED_MB_PER_MIN=2 ');
   });
 });

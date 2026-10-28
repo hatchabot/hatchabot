@@ -3,7 +3,7 @@ import { GuestConsoleLog } from './guestConsoleLog.js';
 import { deviceLabel } from './publicAccess.js';
 import { hostOf, publicConfig } from './safeguards.js';
 import { stopAndConfirm } from '../orchestrator/quiesce.js';
-import { AppError, fieldsToAsk, hostGit, installRelease, manifestAt, mergeConfig, mirrorDir, outcome, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
+import { appChat, AppError, appJobs, appPaths, appTaskNames, fieldsToAsk, hostGit, installRelease, manifestAt, mergeConfig, mirrorDir, outcome, parseSource, removeTasks, repoFor, resolveRelease, sq, switchTo, type AgentFacts, type AppManifest, type Git as AppsGit, type InstallDeps } from '../orchestrator/apps.js';
 import { agentTimeZone } from '../orchestrator/timezone.js';
 import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
 import { claudePlanAllowed, CLAUDE_PLAN_HOSTED } from '../config/claudePlan.js';
@@ -81,9 +81,9 @@ import { AgentBusyError, clearBusy, isBusy, markBusy, whileBusy } from '../orche
 import { contextStats, exportTranscript, recoverContext } from '../orchestrator/transcript.js';
 import { archiveAgent, ArchiveError, copyElsewhere, leaveBotToCopy } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
-import { commandOwnersFor, reapplyCurrentSettings } from '../orchestrator/provision.js';
+import { commandOwnersFor, reapplyCurrentSettings, retryPendingSchedules, retryPendingSchedulesWhenUp } from '../orchestrator/provision.js';
 import { CronSystemOwnedError, CRON_QUICK_CHECK_MS, addCron, editCron, cronTargetFor, pendingRetarget, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
-import { dropAppPending, pendingSecretRefs, resolvePendingValues, stashOldPendingSecrets, stashPendingSecrets } from '../orchestrator/appPending.js';
+import { dropAppPending, onePendingChange, pendingSecretRefs, resolvePendingValues, stashOldPendingSecrets, stashPendingSecrets } from '../orchestrator/appPending.js';
 import { request as httpRequest } from 'node:http';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
@@ -164,7 +164,7 @@ import { agentHealth, aiSourceHealth, doctorLint } from '../orchestrator/health.
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { forgetDmPolicy } from '../orchestrator/dmPolicyMemo.js';
 import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError, scrubChannelAllowlist, allowlistScrubScript, setDmPolicy } from '../orchestrator/members.js';
-import { memoryPolicySection, replaceMemoryPolicy, replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
+import { replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import {
   DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar, grantedServices, isGoogleService,
   exchangeGoogleCode, googleAuthUrl, materializeConnection, offAgainIfDetached, removeQueuedNow, syncConnections, withConnectionLock,
@@ -181,6 +181,10 @@ import { moveCrossesDown, needsPortHeal } from '../openclaw/configWriter.js';
 
 /** The largest file (or folder as .tar.gz) that moves through an agent's Files tab, either way. */
 const FILE_MAX_BYTES = Math.max(1, Number(process.env.HATCHABOT_FILE_MAX_MB ?? 512)) * 1024 * 1024;
+/** An import whose body carries a template's setup answers ahead of the file (HB-0093). */
+const IMPORT_WITH_VALUES = 'application/vnd.hatchabot.import';
+/** The most the answers' line may take: 24 answers of 2,000 characters, each escaped at worst. */
+const IMPORT_HEAD_MAX_BYTES = 512 * 1024;
 /** Rebuilds at once: 1–12; the default 6 fits an ordinary machine. */
 const MAX_REBUILD_CONCURRENCY = 12;
 /** Route option: never compress this response. For downloads and streams
@@ -199,14 +203,14 @@ function clampConcurrency(raw: string | undefined): number {
   return Number.isFinite(n) && n >= 1 ? Math.min(MAX_REBUILD_CONCURRENCY, n) : 6;
 }
 import { catArgv, cleanFileName, cleanRelPath, downloadName, duShell, inlineType, listShell, parseListing, putArgv, statShell, tarArgv, uploadAllowed } from '../orchestrator/agentFiles.js';
-import { EMBED_MODEL_ALIAS, EmbedderService, embedDefault, embedKeyHash, bootStartEmbedder } from '../embedder/embedder.js';
+import { EMBED_MODEL_ALIAS, EmbedderService, embedDefault, embedKeyHash, scheduleEmbedderBoot } from '../embedder/embedder.js';
 import { doorScript as embedDoorScript } from '../embedder/door.js';
 import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, NoLongerSleepy, wakeAgent, wakeSweep, type HibernateDeps } from '../orchestrator/hibernate.js';
 import { clearStaleRuntimePinsWhenUp } from '../orchestrator/runtimePins.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
 import { migrateAgent, MigrateError, MOVE_HEADER, moveIdFrom, moveState, preflight, receiveMove } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
-import { appChoices, type AppOpParams } from '../orchestrator/appOperations.js';
+import { appChoices, putTasksBack, type AppOpParams } from '../orchestrator/appOperations.js';
 import { BACKGROUND_KINDS, beginOperation, currentBootId, handleFor, KIND_LABEL, operationRefusal, operationSummary, publicOperation, rethrowIfCrash, runInBackground, spanWords, STATUS_EVENT, type OpHandle } from '../orchestrator/operations.js';
 import { recoverOperation, RecoverError, resumeOperations, startOperationRetryLoop, type ResumeContext } from '../orchestrator/operationsResume.js';
 import {
@@ -629,6 +633,17 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     'application/octet-stream',
     { parseAs: 'buffer', bodyLimit: Math.max(272 * 1024 * 1024, FILE_MAX_BYTES) }, // imports, and Files uploads up to their own cap
     (_req, body, done) => done(null, body),
+  );
+  // An import with a template's setup answers (HB-0093): one line of JSON
+  // (`{"values":{…}}`), a newline, then the .hatchabot file's bytes. Only the
+  // import route takes it; the answers in the address passed Node's 16 KB limit.
+  app.addContentTypeParser(
+    IMPORT_WITH_VALUES,
+    { parseAs: 'buffer', bodyLimit: 272 * 1024 * 1024 + IMPORT_HEAD_MAX_BYTES },
+    (req, body, done) => {
+      if (req.routeOptions?.url === '/v1/agents/import') return done(null, body);
+      done(Object.assign(new Error(`Unsupported Media Type: ${IMPORT_WITH_VALUES}`), { statusCode: 415 }), undefined);
+    },
   );
   // Any other body type reaches ONLY the console proxy, as bytes: the Control UI
   // sends attachments as multipart, which Fastify refused with 415 before the
@@ -3223,25 +3238,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // service comes up with Hatchabot instead of waiting for a rebuild to
     // trip over it (Chris, 2026-09-25: the tool comes up by itself). A service
     // the owner stopped stays stopped; an external server needs no start.
-    setTimeout(() => {
-      void bootStartEmbedder({
-        embedder, localHostId: () => store.localHostId(),
-        imageInfo: (host) => providerFor(host).currentImageInfo(),
-        log: (e, d) => trace()(e, d),
-      }).catch((err) => app.log.warn({ err: String(err) }, 'embedder auto-start at boot failed'));
-    }, Number(process.env.HATCHABOT_EMBED_BOOT_MS) || 15_000).unref();
-    // An enabled service that fell over comes back; a fleet event says so.
-    // Every machine's: this one's, and each runner's that was turned on (an
-    // asleep runner is skipped, and its service comes back when it wakes).
-    const healthTicks = () => {
-      for (const svc of [embedder, ...store.listRunnerHostIds().map(embedderFor)]) {
-        if (!svc.enabled) continue;
-        void svc.healthTick().then((r) => { if (r === 'restarted') app.log.warn({ host: svc.hostId ?? 'local' }, 'embedder restarted by the health loop'); })
-          .catch((err) => app.log.warn({ err, host: svc.hostId ?? 'local' }, 'embedder health tick failed'));
-      }
-    };
-    setTimeout(healthTicks, (Number(process.env.HATCHABOT_EMBED_BOOT_MS) || 15_000) + 30_000).unref();
-    setInterval(healthTicks, Number(process.env.HATCHABOT_EMBED_HEALTH_MS) || 5 * 60_000).unref();
+    // Then the health loop over every enabled service (scheduleEmbedderBoot).
+    scheduleEmbedderBoot({
+      embedder, localHostId: () => store.localHostId(),
+      imageInfo: (host) => providerFor(host).currentImageInfo(),
+      log: (e, d) => trace()(e, d),
+      services: () => [embedder, ...store.listRunnerHostIds().map(embedderFor)],
+      warn: (detail, msg) => app.log.warn(detail, msg),
+      bootMs: Number(process.env.HATCHABOT_EMBED_BOOT_MS) || 15_000,
+      healthMs: Number(process.env.HATCHABOT_EMBED_HEALTH_MS) || 5 * 60_000,
+    });
   }
   // ---- each agent's own browser (src/orchestrator/browser.ts) -----------------
   const browsersNow = (only?: string) => browserSweep({
@@ -3276,6 +3282,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Web chat given or taken while it was down: its gateway's list of people
     // follows now, before anyone opens the console (2026-09-30).
     void consoleAccessLater?.syncWhenUp(a.id).catch(() => {});
+    // Template tasks still waiting to be added: tried again once it answers (HB-0231).
+    if (store.getPendingSchedules(a.id).length) {
+      void retryPendingSchedulesWhenUp({ store, provider: providerFor(a.hostId) }, a.id, trace(a.id)).catch(() => {});
+    }
     // Google accounts attached or detached while it was stopped or asleep take
     // effect now, not at its next rebuild: a detached account used to stay
     // usable after Start (night review, 2026-09-28). Only for owners who have any.
@@ -4895,8 +4905,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // and moved that agent onto our new default (A098). Only a pin that was
       // valid before this call — one already stale stays stale.
       const oldMenu = [oldDefault, ...(profile.models ?? [])];
+      // Another account's agent that follows the default moves with it, so it
+      // gets the same runtime check a ticked one of ours does: one whose
+      // OpenClaw is too old for the new default on a subscription is pinned to
+      // what it runs today instead (HB-0245). Counted, never named: they are
+      // not the caller's agents.
+      let othersHeld = 0;
       for (const a of store.listAllActiveAgents()) {
-        if (a.aiProfileId === profile.id && a.ownerId !== ownerIdOf(req) && a.model && oldMenu.includes(a.model)) heldModels.add(a.model);
+        if (a.aiProfileId !== profile.id || a.ownerId === ownerIdOf(req)) continue;
+        if (a.model && oldMenu.includes(a.model)) { heldModels.add(a.model); continue; }
+        if (await subscriptionRuntimeProblem(a, profile, newDefault, a.runtimeRef ? undefined : (a.image ?? null))) {
+          const runsNow = a.appliedProfileId === profile.id && a.appliedModel ? a.appliedModel : oldDefault;
+          store.setAgentModel(a.id, runsNow);
+          heldModels.add(runsNow);
+          othersHeld++;
+        }
       }
 
       // Menu must contain the new default, the owner's extras, AND every held
@@ -4934,7 +4957,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // echoed applyIds.size, which over-reported when the caller passed ids
       // that aren't theirs (a shared profile's other users) — they're filtered
       // out of `mine`, so nothing happened to them.
-      return { profile: safe, applied, held, live, staged, classDetached, ...(notSwitched.length ? { notSwitched } : {}) };
+      return { profile: safe, applied, held, live, staged, classDetached, ...(notSwitched.length ? { notSwitched } : {}), ...(othersHeld ? { othersHeld } : {}) };
     },
   );
 
@@ -6132,10 +6155,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     `/home/node/.openclaw/agents/${slug}/agent/${name}`;
 
   // Owner-editable agent settings. `name` is display-only (the slug, workspace
-  // and bot identity never change). `sharedMemory` flips memory between shared
-  // and private — only while the agent has no other members (the disclosure
-  // people joined under must not change shape beneath them) and only while
-  // RUNNING, because the AGENTS.md policy section is rewritten in place.
+  // and bot identity never change). `sharedMemory` no longer changes anything:
+  // memory is always shared, and `false` is refused with the reason (HB-0094).
   app.patch<{ Params: { id: string }; Body: { name?: string; sharedMemory?: boolean; aiProfileId?: string } }>(
     '/v1/agents/:id',
     async (req, reply) => {
@@ -6402,33 +6423,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return reply.code(409).send({ error: 'The agent is busy (a rebuild, a move or a backup) — switch its AI source when that is done.' });
       }
 
-      // Two live applies can fail (the memory cap's docker update and the
-      // memory-policy rewrite, both 502). Every refusal is above or here; the
-      // cap goes first (it writes its own record only once docker took it),
-      // then the rewrite, and the plain DB writes last — so a 400/409 changes
-      // nothing and a 502 leaves at most the cap, which stands on its own.
+      // One live apply can fail (the memory cap's docker update, 502). Every
+      // refusal is above or here, the cap next (it writes its own record only
+      // once docker took it), and the plain DB writes last — so a 400/409
+      // changes nothing and a 502 leaves at most the cap, which stands alone.
       // Memory is always shared now (2026-09-29): an agent's memory is one,
       // reachable from every conversation, so "private" could not be kept.
+      // `sharedMemory: true` from an old client changes nothing: every agent
+      // but the Hatchabot agent is shared, and that one keeps its own (HB-0094).
       if (shared === false && !agent.ops) {
         return reply.code(400).send({ error: "An agent's memory is always shared with everyone who talks to it. For something private, give that person their own agent." });
       }
-      const flippingMemory = shared !== undefined && shared !== agent.sharedMemory;
-      if (flippingMemory) {
-        const others = store
-          .listMemberships(agent.id)
-          .filter((m) => m.status === 'active' && m.role !== 'owner');
-        if (others.length > 0) {
-          return reply.code(400).send({
-            error: 'This agent has members. Remove them first — what they were told about memory must stay true.',
-          });
-        }
-        if (agent.state !== 'RUNNING' || !agent.runtimeRef) {
-          return reply.code(409).send({ error: 'Start the agent to change its memory policy.' });
-        }
-      }
-      // The policy rewrite runs under the busy flag: refused now, before the
-      // cap is applied, or a 409 would leave the cap changed (regression review).
-      if (flippingMemory && isBusy(agent.id)) return reply.code(409).send({ error: 'The agent is busy — try again in a moment.' });
       if (parsed.data.memoryCap !== undefined) {
         const r = await setMemoryCap(req, agent, parsed.data.memoryCap);
         if (r.error) return reply.code(r.status ?? 400).send({ error: r.error });
@@ -6437,41 +6442,6 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const r = await setSwapAllowance(store.getAgent(agent.id) ?? agent, parsed.data.swapAllowance);
         if (r.error) return reply.code(r.status ?? 400).send({ error: r.error });
       }
-      if (flippingMemory) {
-        // Rewrite AGENTS.md; the flag is persisted below only because we reached
-        // it (the write succeeded). Persisting the flag before the write left the
-        // stored policy and the agent's file permanently disagreeing on failure —
-        // nothing reconciles them (rebuild never overwrites an existing AGENTS.md).
-        const provider = providerFor(agent.hostId);
-        const path = workspacePath(agent.slug, 'AGENTS.md');
-        // Hold the busy guard for the read-modify-write so it can't interleave a
-        // volume tar (export/migrate/restore) mid-rewrite.
-        let write;
-        try {
-          write = await whileBusy(agent.id, async () => {
-            const read = await provider.execShell(
-              agent.runtimeRef!,
-              `cat ${JSON.stringify(path)} 2>/dev/null || true`,
-            );
-            // A failed read is not an empty AGENTS.md: rewriting it then left
-            // only the policy section (night review, 2026-09-28).
-            if (read.code !== 0) return read;
-            const next = replaceMemoryPolicy(read.stdout, memoryPolicySection(shared!));
-            const b64 = Buffer.from(next, 'utf8').toString('base64');
-            return writeFileInAgent(provider, agent.runtimeRef!, path, b64);
-          });
-        } catch (err) {
-          if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
-          throw err;
-        }
-        if (write.code !== 0) {
-          app.log.warn({ agentId: agent.id, stderr: write.stderr }, 'memory policy rewrite failed');
-          return reply.code(502).send({
-            error: "Couldn't update the agent's memory policy — nothing was changed. Try again in a moment.",
-          });
-        }
-      }
-
       // All checks passed and the live applies took: the plain writes.
       if (parsed.data.attentionAck !== undefined) store.setAgentAttentionAck(agent.id, parsed.data.attentionAck);
       if (parsed.data.hibernate !== undefined) store.setHibernatePolicy(agent.id, parsed.data.hibernate);
@@ -6604,10 +6574,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // Drop it so the agent falls back to the new source's default.
         store.setAgentModel(agent.id, null);
       }
-      if (flippingMemory) store.setAgentSharedMemory(agent.id, shared!);
       // A new memory cap: tell the agent its budget (AGENTS.md), off the
-      // request. Last, so the sync reads everything this change stored, and
-      // so it cannot hold the agent while the policy rewrite above needs it.
+      // request. Last, so the sync reads everything this change stored.
       if (parsed.data.memoryCap !== undefined && agent.runtimeRef && agent.state === 'RUNNING') void syncDocsHeld(agent);
       const classDetached = (switchingProfile || model !== undefined) && detachClassIfDrifted(agent.id);
       if (switchingProfile || model !== undefined) recordLedger(req, model !== undefined ? 'model' : 'source-switch', ledgerBefore);
@@ -7658,13 +7626,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
 
   /** What a repo's manifest says, and what it will ask for. */
-  app.post<{ Body: { source?: string; ref?: string } }>('/v1/apps/inspect', async (req, reply) => {
+  app.post<{ Body: { source?: string; ref?: string; name?: string } }>('/v1/apps/inspect', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: "Only this machine's owner can read a repo from it." });
     try {
       const src = parseSource(req.body?.source ?? '');
       const repo = await repoFor(appGit, src, appCacheDir);
       const rel = await resolveRelease(appGit, repo, req.body?.ref || 'HEAD');
-      return { sha: rel.sha, manifest: rel.manifest, ask: fieldsToAsk(rel.manifest), connections: rel.manifest.connections ?? [] };
+      // `name`: a new agent's, so its chat comes with {app_dir}, {agent}… filled in for it (HB-0259).
+      const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name : undefined;
+      return { sha: rel.sha, manifest: rel.manifest, ask: fieldsToAsk(rel.manifest), connections: rel.manifest.connections ?? [],
+        ...(name ? { chat: appChat(rel.manifest, slugify(name)) ?? null } : {}) };
     } catch (e) { return appFail(reply, e); }
   });
 
@@ -7677,8 +7648,31 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   /** Install from a source into a running agent and record it (the route and a pending install share it). */
-  /** Other live agents already running this app on the account the values name (e.g. the same mailbox). */
-  const sharedAppConflicts = (a: Agent, m: AppManifest, values: Record<string, unknown>): string[] => {
+  /**
+   * The accounts another agent's copy of an app runs on: the fields its own
+   * manifest names for them, read from its config file in that agent.
+   * Undefined when that cannot be told (not running, no such field, a file
+   * that cannot be read): counted as a clash, as every attached agent was.
+   */
+  const appAccountsOf = async (other: Agent, theirs: NonNullable<ReturnType<typeof store.getAgentApp>>, kind: string): Promise<Set<string> | undefined> => {
+    const om = theirs.manifest as AppManifest;
+    const keys = (om?.connections ?? []).filter((c) => c.kind === kind && c.field).map((c) => c.field!);
+    if (!keys.length || other.state !== 'RUNNING' || !other.runtimeRef) return undefined;
+    try {
+      const r = await providerFor(other.hostId).execShell(other.runtimeRef, `cat ${sq(`${appPaths(theirs.app).data}/${om.config?.file ?? 'config.json'}`)}`, { timeoutMs: 15_000 });
+      if (r.code !== 0) return undefined;
+      const cfg = JSON.parse(r.stdout) as Record<string, unknown>;
+      return new Set(keys.map((k) => String(cfg?.[k] ?? '').trim().toLowerCase()).filter(Boolean));
+    } catch { return undefined; }
+  };
+  /**
+   * Other live agents already running this app on the account the values name
+   * (e.g. the same mailbox): the account their copy is configured with, not
+   * every account attached to them (one attached for something else blocked
+   * it, HB-0261). `seen`: their accounts, read once per check.
+   */
+  const sharedAppConflicts = async (a: Agent, m: AppManifest, values: Record<string, unknown>,
+    seen = new Map<string, Promise<Set<string> | undefined>>()): Promise<string[]> => {
     const out: string[] = [];
     for (const c of m.connections ?? []) {
       const email = c.field ? String(values[c.field] ?? '').trim().toLowerCase() : '';
@@ -7688,7 +7682,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       for (const at of store.listConnectionAttachments(conn.id)) {
         const other = store.getAgent(at.agentId);
         if (!other || other.id === a.id || other.state === 'ARCHIVED' || other.state === 'DELETED') continue;
-        if (store.getAgentApp(other.id)?.app === m.app) out.push(other.name);
+        const theirs = store.getAgentApp(other.id);
+        if (theirs?.app !== m.app) continue;
+        const key = `${other.id}\n${c.kind}`;
+        if (!seen.has(key)) seen.set(key, appAccountsOf(other, theirs, c.kind));
+        const used = await seen.get(key);
+        if (!used || used.has(email)) out.push(other.name);
       }
     }
     return [...new Set(out)];
@@ -7703,13 +7702,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * `kept`: the app is already this agent's, so a clash its old file already had
    * was accepted then (allowShared) and stays allowed; only a new one is refused.
    */
-  const sharedConfigCheck = (a: Agent, m: AppManifest, allowShared: boolean, kept: boolean) =>
-    (config: Record<string, unknown>, existing: Record<string, unknown>) => {
+  const sharedConfigCheck = (a: Agent, m: AppManifest, allowShared: boolean, kept: boolean) => {
+    const seen = new Map<string, Promise<Set<string> | undefined>>();
+    return async (config: Record<string, unknown>, existing: Record<string, unknown>) => {
       if (allowShared) return;
-      const before = new Set(kept ? sharedAppConflicts(a, m, existing) : []);
-      const clash = sharedAppConflicts(a, m, config).filter((n) => !before.has(n));
+      const before = new Set(kept ? await sharedAppConflicts(a, m, existing, seen) : []);
+      const clash = (await sharedAppConflicts(a, m, config, seen)).filter((n) => !before.has(n));
       if (clash.length) throw sharedRefusal(clash, m);
     };
+  };
   /**
    * Installs and updates of one app on one account, one at a time: each checks
    * the others' records, and two running side by side both found none and both
@@ -7739,25 +7740,37 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
   const withSteps = (d: InstallDeps, op: OpHandle): InstallDeps => ({ ...d, step: (k) => op.step(k) });
   const installFromSource = async (a: Agent, source: string, ref: string, values: Record<string, unknown>, allowShared = false, requestedBy?: string) => {
+    // What it had when asked, before the fetch: taken after it, an older
+    // request slow to fetch went in over the App a newer one installed
+    // meanwhile. Now the later request wins and the older is refused as
+    // stale, as an update is (HB-0264).
+    const had = store.getAgentApp(a.id);
     const src = parseSource(source);
     const label = src.kind === 'dir' ? src.path : src.url;
     const repo = await repoFor(appGit, src, appCacheDir);
     const rel = await resolveRelease(appGit, repo, ref);
     // The values alone first: refused at once, before anything starts. The
     // config the install would write is judged again inside it.
-    const clash = allowShared ? [] : sharedAppConflicts(a, rel.manifest, values);
+    const clash = allowShared ? [] : await sharedAppConflicts(a, rel.manifest, values);
     if (clash.length) throw sharedRefusal(clash, rel.manifest);
     return oneAppAtATime(a.ownerId, rel.manifest.app, async () => {
-      const had = store.getAgentApp(a.id);
       // Another app in its place: its tasks come off first (never two apps on one mailbox),
       // and go back on if this install fails, so the agent still matches the record.
       const replaced = had && had.app !== rel.manifest.app ? had : undefined;
       let op: OpHandle | undefined;
       const done = await whileBusy(a.id, async () => {
         a = appStillAsWas(a, had);
+        // The tasks the owner had turned off go back on turned off, and the
+        // operation records which before any comes off, for a restart too:
+        // put back from the manifest alone, they came back on and the
+        // install said "unchanged" (HB-0253).
+        const fromAppOff = replaced
+          ? (await appJobs(appDeps(a), appTaskNames(replaced.manifest as AppManifest)).catch((e: unknown) => { throw outcome(e, { unchanged: true }); }))
+            .filter((j) => j.enabled === false).map((j) => j.name)
+          : [];
         op = beginOperation(store, 'app-install', a.id, {
           app: rel.manifest.app, toSha: rel.sha, fromSha: had?.app === rel.manifest.app ? had.sha : null,
-          fromApp: had?.app ?? null, source: label, ref,
+          fromApp: had?.app ?? null, source: label, ref, ...(fromAppOff.length ? { fromAppOff } : {}),
         }, { requestedBy: requestedBy ?? a.ownerId });
         if (replaced) await removeTasks(appDeps(a), replaced.app, replaced.manifest as AppManifest);
         try {
@@ -7766,10 +7779,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         } catch (e) {
           rethrowIfCrash(e);
           if (replaced) {
-            await syncTasks(appDeps(a), replaced.manifest as AppManifest).catch((err: unknown) => {
-              if (e instanceof Error) e.message += ` ${replaced.app}'s tasks could not be put back: ${(err as Error)?.message ?? err}`;
+            // Its tasks put back as they were, and confirmed so.
+            const missing = await putTasksBack(appDeps(a), replaced.manifest as AppManifest, fromAppOff);
+            if (missing) {
+              if (e instanceof Error) e.message += ` ${replaced.app}'s tasks could not be put back: ${missing}`;
               outcome(e, { unchanged: false });
-            });
+            }
           }
           throw e;
         }
@@ -7782,32 +7797,60 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return done;
     });
   };
-  /** A new agent "from a repo": install once it runs; a failure stays on the record for its page. */
-  runPendingApp = async (agentId: string) => {
+  /**
+   * A new agent "from a repo": install once it runs; a failure stays on the
+   * record for its page. One run per agent at a time: a call while one runs
+   * (a newer request saved, setup finishing) has it look again when it ends,
+   * so a request saved meanwhile goes in after it rather than being missed
+   * (HB-0255, HB-0256). `retry`: a request that already failed is left for
+   * Try again.
+   */
+  const pendingRuns = new Map<string, { again: boolean }>();
+  const runPendingOnce = async (agentId: string, retry: boolean) => {
     const p = store.getAppPending(agentId);
     const a = store.getAgent(agentId);
-    if (!p || !a || a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id) || store.activeOperationFor(a.id)) return;
+    if (!p || (p.error && !retry) || !a || a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id) || store.activeOperationFor(a.id)) return;
     try {
       const { __allowShared, ...kept } = p.values as Record<string, unknown> & { __allowShared?: boolean };
       const values = await resolvePendingValues(secrets, agentId, kept);
       await installFromSource(a, p.source, p.ref, values, __allowShared === true);
-      // In: its secrets are in the app's config now, and nowhere else.
-      await dropAppPending(store, secrets, agentId);
+      // In: its secrets are in the app's config now, and nowhere else. Only
+      // this request: one saved while it ran is still to go in.
+      await dropAppPending(store, secrets, agentId, p.gen);
     } catch (e) {
       const msg = (e as Error)?.message ?? String(e);
-      store.setAppPendingError(agentId, msg.slice(0, 2000));
+      store.setAppPendingError(agentId, msg.slice(0, 2000), p.gen);
       trace(agentId)('app.install_failed', { error: msg.slice(0, 300) });
     }
+  };
+  runPendingApp = async (agentId: string) => {
+    const running = pendingRuns.get(agentId);
+    if (running) { running.again = true; return; }
+    const run = { again: false };
+    pendingRuns.set(agentId, run);
+    try {
+      await runPendingOnce(agentId, true);
+      while (run.again) { run.again = false; await runPendingOnce(agentId, false); }
+    } finally { pendingRuns.delete(agentId); }
   };
 
   /** Install an app into this agent (or replace the one it has, from a new source). */
   app.post<{ Params: { id: string }; Body: { source?: string; ref?: string; values?: Record<string, unknown>; allowShared?: boolean } }>('/v1/agents/:id/app', async (req, reply) => {
     const a = appTarget(req, reply); if (!a) return reply;
     if (!appValuesOk(req, reply)) return reply;
+    // An install waiting for this agent (a new agent's, failed or not yet
+    // run) is superseded by this one once it is in: kept, the next start
+    // installed it again, over this one or after Stop app (HB-0252).
+    const waiting = store.getAppPending(a.id);
     try {
       const done = await installFromSource(a, req.body?.source ?? '', req.body?.ref || 'HEAD', req.body?.values ?? {}, req.body?.allowShared === true, ownerIdOf(req));
+      if (waiting) await dropAppPending(store, secrets, a.id, waiting.gen);
       return { app: appView(a), test: done.test ?? null };
-    } catch (e) { return appFail(reply, e); }
+    } catch (e) { return appFail(reply, e); } finally {
+      // A request saved while this one ran found the agent busy: it goes in now.
+      const now = store.getAppPending(a.id);
+      if (now && !now.error && now.gen !== waiting?.gen) void runPendingApp(a.id);
+    }
   });
 
   /** Install it when the agent is ready (a new agent from a repo): checked now, run after setup. */
@@ -7832,17 +7875,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // manifest's default (or filled from the owner's address) counts too.
       const values = req.body?.values ?? {};
       const effective = { ...values, ...mergeConfig(rel.manifest, appFacts(a), {}, values).config };
-      const clash = req.body?.allowShared ? [] : sharedAppConflicts(a, rel.manifest, effective);
+      const clash = req.body?.allowShared ? [] : await sharedAppConflicts(a, rel.manifest, effective);
       if (clash.length) throw sharedRefusal(clash, rel.manifest);
       // Secret fields go to the secret store; the row keeps where. One waiting
       // before this is replaced: its secrets go unless this one reuses them.
-      const before = waiting ? pendingSecretRefs(a.id, waiting.values) : [];
-      const kept = await stashPendingSecrets(secrets, a.id, rel.manifest, values);
-      store.setAppPending(a.id, { source: req.body!.source!, ref, values: { ...kept, ...(req.body?.allowShared ? { __allowShared: true } : {}) } });
-      const now = new Set(pendingSecretRefs(a.id, kept));
-      for (const r of before) if (!now.has(r)) await secrets.delete(r).catch(() => {});
+      // One change to the waiting row at a time (appPending.ts): a run that
+      // finished meanwhile forgot its request's secrets, which share these refs.
+      await onePendingChange(a.id, async () => {
+        const was = store.getAppPending(a.id);
+        const before = was ? pendingSecretRefs(a.id, was.values) : [];
+        const kept = await stashPendingSecrets(secrets, a.id, rel.manifest, values);
+        store.setAppPending(a.id, { source: req.body!.source!, ref, values: { ...kept, ...(req.body?.allowShared ? { __allowShared: true } : {}) } });
+        const now = new Set(pendingSecretRefs(a.id, kept));
+        for (const r of before) if (!now.has(r)) await secrets.delete(r).catch(() => {});
+      });
       trace(a.id)('app.pending', { app: rel.manifest.app });
-      if (a.state === 'RUNNING') void runPendingApp(a.id);
+      // Its state now, not as it was before the fetch: setup that finished
+      // during it found no row to install, and this one still saw it setting
+      // up, so nobody started the install (HB-0255).
+      if (store.getAgent(a.id)?.state === 'RUNNING') void runPendingApp(a.id);
       return { pending: true, app: rel.manifest.app, name: rel.manifest.name };
     } catch (e) { return appFail(reply, e); }
   });
@@ -7919,6 +7970,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         appStillAsWas(a, had);
         const removed = await removeTasks(appDeps(a), had.app, had.manifest as AppManifest);
         store.deleteAgentApp(a.id);
+        // An install still waiting for it goes too: kept, the next start
+        // installed the App again and its tasks came back (HB-0252). One
+        // whose source is being read now is refused once it has it (its app
+        // changed meanwhile: appStillAsWas).
+        await dropAppPending(store, secrets, a.id);
         return removed;
       });
       trace(a.id)('app.removed', { app: had.app, tasks: n });
@@ -8285,21 +8341,29 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // handful of different emoji, none of those the dialog has already shown.
   // Nothing is saved: the person picks one, and the dialog's Save sets it.
   const iconIdeaRuns = new Set<string>();
-  app.post<{ Params: { id: string }; Body: { exclude?: string[] } }>('/v1/agents/:id/icons/suggest', async (req, reply) => {
+  app.post<{ Params: { id: string }; Body: { exclude?: string[]; want?: string } }>('/v1/agents/:id/icons/suggest', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
-    const b = (req.body ?? {}) as { exclude?: unknown };
+    const b = (req.body ?? {}) as { exclude?: unknown; want?: unknown };
     if (b.exclude !== undefined && (!Array.isArray(b.exclude) || b.exclude.length > 200 || b.exclude.some((x) => typeof x !== 'string'))) {
       return reply.code(400).send({ error: 'exclude must be a list of emoji.' });
+    }
+    if (b.want !== undefined && (typeof b.want !== 'string' || b.want.length > 500)) {
+      return reply.code(400).send({ error: 'want must be a short text.' });
     }
     const ownerId = ownerIdOf(req);
     if (iconIdeaRuns.has(ownerId)) return reply.code(429).send({ error: 'Already thinking of icons — give it a moment.' });
     iconIdeaRuns.add(ownerId);
     try {
-      return await suggestIcons({ name: agent.name, persona: agent.persona }, {
+      const r = await suggestIcons({ name: agent.name, persona: agent.persona }, {
         exclude: (b.exclude as string[] | undefined) ?? [],
         complete: iconCompleter(ownerId, 1000),
+        want: b.want as string | undefined,
       });
+      // Why the AI gave no ideas goes to the log, not the page: its text can name the account.
+      if (r.error) req.log.warn({ agent: agent.id, error: r.error }, 'icon ideas: the management AI gave none');
+      const { error: _error, ...out } = r;
+      return out;
     } finally {
       iconIdeaRuns.delete(ownerId);
     }
@@ -8420,16 +8484,34 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return agent;
   };
 
+  /** Template tasks not added yet, and why (HB-0231): the Tasks list shows them. */
+  const waitingTasks = (agentId: string) => store.getPendingSchedules(agentId).map((t) => ({
+    name: t.name, message: t.message, cron: t.cron, everyMs: t.everyMs, tz: t.tz, why: t.why ?? null,
+  }));
   app.get<{ Params: { id: string } }>('/v1/agents/:id/crons', async (req, reply) => {
     const agent = runningAgent(req, req.params.id, reply);
     if (!agent) return reply;
     try {
-      return { crons: await listCrons(providerFor(agent.hostId), agent.runtimeRef!, agent.slug) };
+      return { crons: await listCrons(providerFor(agent.hostId), agent.runtimeRef!, agent.slug), waiting: waitingTasks(agent.id) };
     } catch (err) {
       app.log.warn({ agent: agent.id, err: String((err as Error).message ?? err) }, 'cron list failed');
       // Not "none": the tasks may be fine; they just couldn't be read.
       return reply.code(503).send({ error: "Couldn't read its scheduled tasks just now — try again in a moment." });
     }
+  });
+
+  // Template tasks still waiting (a gateway that refused them at setup): try
+  // again now, rather than at the next start, wake or rebuild (HB-0231).
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/crons/waiting', async (req, reply) => {
+    const agent = runningAgent(req, req.params.id, reply, 'add its waiting tasks');
+    if (!agent) return reply;
+    try {
+      await retryPendingSchedules({ store, provider: providerFor(agent.hostId) }, agent.id, trace(agent.id));
+    } catch (err) {
+      if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+      throw err;
+    }
+    return { waiting: waitingTasks(agent.id) };
   });
 
   // The missing verb (audit backlog: "no interface creates a cron"): a
@@ -13191,20 +13273,33 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
       /** A full copy's import operation (operations.ts), returned either way. */
       let operation: string | undefined;
-      const body = req.body;
-      if (!Buffer.isBuffer(body) || body.length === 0) {
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
         return reply.code(400).send({ error: 'Send the .hatchabot file as the request body.' });
       }
-      // Setup-field answers ride a query param (the body is the raw file).
+      let body: Buffer = req.body;
+      // Setup-field answers ride ahead of the file in the body (IMPORT_WITH_VALUES,
+      // HB-0093), or, from older pages and scripts, in `?values=`.
       // Phase 2a values are plain text — never secrets (those are 2b, env-typed).
       let values: Record<string, string> | undefined;
-      if (req.query.values) {
-        let raw: unknown;
+      let raw: unknown;
+      if (String(req.headers['content-type'] ?? '').split(';')[0]!.trim().toLowerCase() === IMPORT_WITH_VALUES) {
+        const nl = body.subarray(0, IMPORT_HEAD_MAX_BYTES).indexOf(0x0a);
+        if (nl < 0) return reply.code(400).send({ error: 'Malformed setup values.' });
+        try {
+          raw = (JSON.parse(body.subarray(0, nl).toString('utf8')) as { values?: unknown } | null)?.values;
+        } catch {
+          return reply.code(400).send({ error: 'Malformed setup values.' });
+        }
+        body = body.subarray(nl + 1);
+        if (body.length === 0) return reply.code(400).send({ error: 'Send the .hatchabot file as the request body.' });
+      } else if (req.query.values) {
         try {
           raw = JSON.parse(req.query.values.slice(0, 16_000));
         } catch {
           return reply.code(400).send({ error: 'Malformed setup values.' });
         }
+      }
+      if (raw !== undefined) {
         const v = z
           .record(z.string().max(64), z.string().max(2000))
           .refine((r) => Object.keys(r).length <= 24)

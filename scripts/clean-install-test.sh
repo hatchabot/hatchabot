@@ -49,9 +49,10 @@ done
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # Several run side by side (one per image, started in the same second by
-# `live.mjs run-due`): the process id keeps their VM names apart.
+# `live.mjs run-due`): the process id keeps their VMs and their logs apart.
+# A shared log folder let one read another's upgrade.log mid-write (2026-10-27).
 VM="hb-clean-$(date +%m%d%H%M%S)-$$"
-OUT="$HOME/hatchabot-clean-install/$(date +%Y-%m-%d-%H%M%S)"
+OUT="$HOME/hatchabot-clean-install/$(date +%Y-%m-%d-%H%M%S)-$$"
 mkdir -p "$OUT"; chmod 700 "$OUT"
 PASS=0; FAIL=0; RESULTS=()
 ok()  { PASS=$((PASS + 1)); RESULTS+=("✓ $1"); echo "✓ $1"; }
@@ -173,9 +174,11 @@ B=http://localhost:8080
 # A bundle install has no system Node: use its own.
 command -v node >/dev/null || PATH="$HOME/hatchabot/.node/bin:$PATH"
 j() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const v=JSON.parse(s);console.log(String(($1)(v)??''))}catch(e){console.log('')}})"; }
+# The owner's session cookie: in the home folder, readable by no one else (HB-0042).
+umask 077; CK="$HOME/.hb-cookies"
 t() { [ "$2" = "$3" ] && echo "PASS $1" || echo "FAIL $1 (got '$2', want '$3')"; }
 t "sign-in defaults to per-person accounts, first account not made yet" "$(curl -s $B/v1/config | j 'v=>v.authMode+"/"+v.needsSetup')" "accounts/true"
-R=$(curl -s -c /tmp/ck -H 'content-type: application/json' -d '{"username":"owner","password":"first-password-here"}' $B/v1/local-accounts/bootstrap)
+R=$(curl -s -c "$CK" -H 'content-type: application/json' -d '{"username":"owner","password":"first-password-here"}' $B/v1/local-accounts/bootstrap)
 CODE=$(echo "$R" | j 'v=>v.recoveryCode')
 t "the first account is the host owner" "$(echo "$R" | j 'v=>v.hostOwner')" "true"
 t "and comes with a recovery code" "$(echo "$CODE" | grep -cE '^[A-Z2-9]{5}(-[A-Z2-9]{5}){3}$')" "1"
@@ -222,11 +225,15 @@ if [ -n "$AI_SOURCE" ]; then
 B=http://localhost:8080
 # The bundle install puts no Node on the system (step 1 checks it): Hatchabot's own.
 NODE="\$HOME/hatchabot/.node/bin/node"; [ -x "\$NODE" ] || NODE=node
-curl -s -c /tmp/ck -o /dev/null -H 'content-type: application/json' -d '{"username":"owner","password":"second-password-here"}' \$B/v1/login
-\$NODE -e 'const fs=require("fs");const c=fs.readFileSync(process.env.HOME+"/.cred","utf8").trim();const sub="$KIND"==="subscription";process.stdout.write(JSON.stringify(Object.assign({kind:sub?"subscription":"api_key",name:"Test source",vendor:"$VENDOR",model:"$MODEL"},sub?{oauthToken:c}:{apiKey:c})))' > /tmp/body.json
-curl -s -b /tmp/ck -H 'content-type: application/json' --data @/tmp/body.json \$B/v1/ai-profiles >/dev/null
-rm -f /tmp/body.json ~/.cred
-T=\$(curl -s -b /tmp/ck -H 'content-type: application/json' -d '{"label":"clean-install-test"}' \$B/v1/cli-tokens | \$NODE -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).token))")
+# The session cookie and the body holding the test credential: in the home
+# folder, readable by no one else, never world-readable /tmp (HB-0042).
+umask 077; CK="\$HOME/.hb-cookies"; BODY="\$HOME/.hb-source.json"
+curl -s -c "\$CK" -o /dev/null -H 'content-type: application/json' -d '{"username":"owner","password":"second-password-here"}' \$B/v1/login
+\$NODE -e 'const fs=require("fs");const c=fs.readFileSync(process.env.HOME+"/.cred","utf8").trim();const sub="$KIND"==="subscription";process.stdout.write(JSON.stringify(Object.assign({kind:sub?"subscription":"api_key",name:"Test source",vendor:"$VENDOR",model:"$MODEL"},sub?{oauthToken:c}:{apiKey:c})))' > "\$BODY"
+curl -s -b "\$CK" -H 'content-type: application/json' --data @"\$BODY" \$B/v1/ai-profiles >/dev/null
+rm -f "\$BODY" ~/.cred
+T=\$(curl -s -b "\$CK" -H 'content-type: application/json' -d '{"label":"clean-install-test"}' \$B/v1/cli-tokens | \$NODE -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).token))")
+rm -f "\$CK"
 [ -n "\$T" ] || { echo "aisetup: no CLI token" >&2; exit 1; }
 bash -ic "hatchabot login --token \$T" >/dev/null 2>&1
 EOF

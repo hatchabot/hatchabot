@@ -2,7 +2,7 @@ import { stopAndConfirm } from './quiesce.js';
 import { moveCrossesDown } from '../openclaw/configWriter.js';
 import { validIcon, validIconColor } from './agentIcons.js';
 import { randomUUID } from 'node:crypto';
-import { gzipSync, gunzipSync } from 'node:zlib';
+import { constants as zlibConstants, gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
 import type { Agent, AIProfile, GroupAccess, MemberRole, TemplateParam } from '../domain/types.js';
 import {
@@ -52,11 +52,30 @@ export const EXPORT_FORMAT = 'hatchabot-export';
 export const LEGACY_EXPORT_FORMAT = 'agentclaw-export';
 export const EXPORT_VERSION = 1;
 
+/** How much of the gzip the peek decompresses first, and the most that may
+ *  come out of it (a bomb's prefix throws, and the full read below decides). */
+const PEEK_IN_BYTES = 4096;
+const PEEK_OUT_BYTES = 8 * 1024 * 1024;
+/** Both exporters write `format` first. */
+const FORMAT_HEAD = /^\s*\{\s*"format"\s*:\s*"([^"\\]{1,64})"/;
+
 /** Best-effort read of an archive's `format` tag (no full validation), so one
  *  Import path can route a Download (full agent) vs a Share (template) file.
  *  Bounded like the real import — a bomb (or anything unreadable) yields
- *  `undefined`, which the caller treats as a full restore that re-validates. */
+ *  `undefined`, which the caller treats as a full restore that re-validates.
+ *  Only the first few KB are decompressed: the whole archive (up to 256 MB of
+ *  inlined volume) was decompressed here and then again by the import
+ *  (HB-0075). A file that does not begin with `format` is read whole. */
 export function peekFormat(data: Buffer): string | undefined {
+  try {
+    const head = gunzipSync(data.subarray(0, PEEK_IN_BYTES), {
+      finishFlush: zlibConstants.Z_SYNC_FLUSH, maxOutputLength: PEEK_OUT_BYTES,
+    }).toString('utf8');
+    const m = FORMAT_HEAD.exec(head);
+    if (m) return m[1];
+  } catch {
+    /* not gzip, or a prefix that inflates past the bound: the full read decides */
+  }
   try {
     const json = gunzipSync(data, { maxOutputLength: MAX_STATE_BYTES }).toString('utf8');
     const o = JSON.parse(json) as { format?: unknown };
@@ -87,7 +106,9 @@ export interface ExportManifest {
     name: string;
     slug: string;
     persona: string;
-    sharedMemory: boolean;
+    /** Always true, and read by nothing here: written only because Hatchabot
+     *  before v2.170.0 refuses a copy without it (HB-0094). */
+    sharedMemory?: true;
     /** Host folders it could read. Paths are machine-specific — carried as a
      *  declaration so the destination can check them, never auto-applied. */
     sharedPaths?: string[];
@@ -201,7 +222,9 @@ const ManifestSchema = z.object({
     name: z.string().min(1).max(64),
     slug: z.string().regex(SLUG_RE),
     persona: z.string().max(8000),
-    sharedMemory: z.boolean(),
+    // `sharedMemory` is accepted and ignored: memory is always shared since
+    // v2.107.0, so an old file's `false` means nothing (HB-0094).
+    sharedMemory: z.boolean().optional(),
     sharedPaths: z.array(z.string().max(512)).max(8).optional(),
     dataSources: z.array(z.object({
       kind: z.enum(['folder', 'git']),
@@ -475,7 +498,7 @@ export async function exportAgent(
       name: agent.name,
       slug: agent.slug,
       persona: agent.persona,
-      sharedMemory: agent.sharedMemory,
+      sharedMemory: true,
       sharedPaths: agent.sharedPaths,
       ...(dataSources.length ? { dataSources } : {}),
       model: agent.model,

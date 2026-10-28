@@ -1035,6 +1035,8 @@
       <input type="text" id="v2IconInput" maxlength="16" placeholder="Pick one below, or paste any emoji" oninput="v2IconPreview()">
     </div>
   </div>
+  <label for="v2IconWant">What should it show? <span class="sub">(optional, for ✨ Ideas)</span></label>
+  <input type="text" id="v2IconWant" maxlength="80" placeholder="e.g. a birthday cake" onkeydown="if (event.key === 'Enter') { event.preventDefault(); $('v2IconAutoBtn').click(); }">
   <div id="v2IconIdeasBox" hidden>
     <label>Ideas from Hatchabot</label>
     <div class="v2emoji v2ideas" id="v2IconIdeas"></div>
@@ -1045,7 +1047,7 @@
   <div class="v2swatches" id="v2Swatches"></div>
   <div class="err" id="v2IconErr"></div>
   <div class="actions">
-    <button id="v2IconAutoBtn" onclick="v2IconIdeas(this)" title="Hatchabot's AI suggests icons from its name and description. Nothing changes until you Save.">✨ Ideas from Hatchabot</button>
+    <button id="v2IconAutoBtn" onclick="v2IconIdeas(this)" title="Hatchabot's AI suggests icons from what you asked for, or else its name and description. Nothing changes until you Save.">✨ Ideas from Hatchabot</button>
     <span class="spacer" style="flex:1"></span>
     <button onclick="v2IconDlg.close()">Cancel</button>
     <button class="primary" id="v2IconSaveBtn" onclick="v2IconSave(this)">Save</button>
@@ -1428,7 +1430,7 @@
     <details style="margin-top:2px">
       <summary class="sub" style="cursor:pointer">Why switching resets the chat</summary>
       <div class="sub" style="margin-top:4px">Changing AI source restarts the agent on a different engine, which
-        ends the current Telegram conversation. With this on, the agent first writes a short summary of what you've
+        ends its current conversation, wherever you talk to it (web chat, console or Telegram). With this on, the agent first writes a short summary of what you've
         been discussing into its memory (~20s), so it doesn't forget the context. Durable notes it already saved are
         kept either way — this is only about the <i>current</i> chat.</div>
     </details>
@@ -2497,7 +2499,7 @@
     <input type="checkbox" id="moveSourceCheckpoint" style="width:auto;margin-top:3px;flex:none">
     <span><b>Save each conversation to memory first</b>
       <div class="sub" style="margin-top:2px">Switching source restarts each agent on a different engine, ending its
-        current Telegram conversation. With this on, each agent writes a short summary of its recent chat into memory
+        current conversation (web chat, console or Telegram). With this on, each agent writes a short summary of its recent chat into memory
         before rebuilding, so the context isn't lost. Adds about <b>20 seconds per agent</b>, and only applies when you
         rebuild now. Durable notes already saved are kept regardless.</div></span>
   </label>
@@ -2930,7 +2932,7 @@ function sfDone() { if (sfDlg.open) sfDlg.close(); sfPending?.resolve(); }
  * once more. Raw fetches used to skip the prompt, so a backup, an import or a
  * Share at the public address just failed (review, 2026-10-09). A cancelled
  * prompt throws, as api() does. The body must be one that can be sent twice
- * (a File or a string).
+ * (a File, a Blob or a string).
  */
 async function sfFetch(url, init) {
   const res = await fetch(url, init);
@@ -6065,9 +6067,11 @@ async function applyModelToSelected() {
     // Ticked, but its runtime is too old for the model on a Claude plan: kept on its own (HB-0232).
     const notSw = r.notSwitched || [];
     if (notSw.length) bits.push(`not switched: ${notSw.map(x => x.name).join(', ')} (${notSw.length > 1 ? 'their runtimes are' : 'its runtime is'} too old for ${model} on a Claude plan — give ${notSw.length > 1 ? 'them' : 'it'} a newer runtime image first)`);
-    toast(apply.length
+    // Other accounts' agents that follow this shared source, held for the same reason: a count, never names (HB-0245).
+    const others = r.othersHeld ? ` ${r.othersHeld} agent${r.othersHeld > 1 ? 's' : ''} of other accounts that follow this source ${r.othersHeld > 1 ? 'were' : 'was'} kept on ${r.othersHeld > 1 ? 'their' : 'its'} model: ${r.othersHeld > 1 ? 'their runtimes are' : 'its runtime is'} too old for ${model} on a Claude plan.` : '';
+    toast((apply.length
       ? `Default is now ${model}${bits.length ? ' — ' + bits.join(', ') : ''}.`
-      : `Default is now ${model} for new agents. Existing agents keep their models.`, 7000);
+      : `Default is now ${model} for new agents. Existing agents keep their models.`) + others, others ? 12000 : 7000);
     applyModelDlg.close();
     await refresh(true); renderAiList();
   } catch (e) { $('applyModelErr').textContent = e.message; }
@@ -7925,7 +7929,7 @@ async function deleteSnapshot(snapId, label) {
 const editReverting = new Set();
 const EDIT_REVERTING = 'Reverting… the editor reloads when it is done.';
 async function revertSnapshot(snapId, label) {
-  if (!confirm(`Revert to "${label}"? The agent's SOUL, AGENTS and MEMORY files go back to that point. Its current files are snapshotted first, so this is undoable. Applies to new conversations (send /new in Telegram).`)) return;
+  if (!confirm(`Revert to "${label}"? The agent's SOUL, AGENTS and MEMORY files go back to that point. Its current files are snapshotted first, so this is undoable. Applies to new conversations (send /new in its chat).`)) return;
   try {
     const forId = editAgentId;
     const res = await api(`/v1/agents/${forId}/snapshots/${snapId}/restore`, { method: 'POST', body: {} });
@@ -8048,7 +8052,7 @@ async function switchProfile() {
   try {
     await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { aiProfileId: id } });
     const name = agents.find(x => x.id === forId)?.name || 'this agent';
-    if (confirm(`Saved. Rebuild "${name}" now to start using it?\n\nThe agent restarts (memory kept) and is briefly offline. Tip: send /new in Telegram afterwards — a fresh conversation suits a new model.`)) {
+    if (confirm(`Saved. Rebuild "${name}" now to start using it?\n\nThe agent restarts (memory kept) and is briefly offline. Tip: send /new in its chat afterwards — a fresh conversation suits a new model.`)) {
       await api(`/v1/agents/${forId}/rebuild`, {
         method: 'POST', body: { checkpoint },
       });
@@ -9090,15 +9094,15 @@ async function loadContextNow() {
         <td style="${num}">${now !== undefined ? `${kTok(now)}` : '<span class="sub">—</span>'}</td><td style="${num}">${c.windowK ? `${kTok(c.windowK)}` : '<span class="sub">—</span>'}</td>
         <td style="${num}">${ctxCapControl(r)}</td>
         <td style="${num};${tone}">${share === null ? '<span class="sub">—</span>' : `${share}%`}</td>
-        <td style="${num}">${c.ctxK ? `${kTok(c.ctxK.p50)}` : '<span class="sub">—</span>'}</td><td style="${num}" class="sub">${c.ctxK ? `${kTok(c.ctxK.p90)}` : '—'}</td>
+        <td style="${num}">${c.ctxK ? `${kTok(c.ctxK.p50)}` : '<span class="sub">—</span>'}</td>
         <td class="sub" style="white-space:nowrap">${when}</td></tr>`;
     };
     const sorted = [...rows].sort((a, b) => (b.conversation?.mainNowK ?? -1) - (a.conversation?.mainNowK ?? -1));
     box.innerHTML = `<div class="mp-wrap"><table class="mp-tbl"><thead><tr><th style="text-align:left">Agent</th><th style="text-align:left">Model</th><th>Main conversation</th><th>Window</th>
         <th title="Where it compacts instead of near the model's window: at about the cap less 20K">Cap</th><th>Full</th>
-        <th title="Half its calls to the model in the last 30 days carried less than this">Typical call</th><th title="One call in ten carried more than this">1 in 10 over</th><th>Last call</th></tr></thead><tbody>${sorted.map(line).join('')}</tbody></table></div>
+        <th title="Half its calls to the model in the last 30 days carried less than this, half more">Median call</th><th>Last call</th></tr></thead><tbody>${sorted.map(line).join('')}</tbody></table></div>
       <div class="sub" style="margin-top:6px"><b>Main conversation</b>: what its last call carried (its Telegram DM and console share one conversation). <b>Window</b>: the model's context window, as the agent's OpenClaw states it. <b>Cap</b>: where Hatchabot has it compact instead: at about the cap less 20K, a summary replaces the older turns. <b>Full</b> counts against the cap when there is one; over 80% it is close to compacting.</div>
-      <div class="sub" style="margin-top:4px"><b>Typical call</b> and <b>1 in 10 over</b>: how much each call to the model carried in the last 30 days (its conversations; scheduled tasks left out). Half its calls carried less than the typical figure, and one in ten carried more than the other. Every call carries the whole conversation so far, so this is what costs, and what a cap keeps down.</div>`;
+      <div class="sub" style="margin-top:4px"><b>Median call</b>: how much a call to the model carried in the last 30 days (its conversations; scheduled tasks left out): half its calls carried less, half more. Every call carries the whole conversation so far, so this is what costs, and what a cap keeps down.</div>`;
   } catch (e) { box.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 /** A size in thousands of tokens: 520K, 1M, 1.5M (fmtN's own "k" made a 1M window "1.0kK"). */
@@ -9738,10 +9742,10 @@ async function loadCrons() {
   $('cronErr').textContent = '';
   const forId = cronAgentId; // an Edit + Save on another agent's list would create its task here
   try {
-    const { crons } = await api(`/v1/agents/${forId}/crons`);
+    const { crons, waiting } = await api(`/v1/agents/${forId}/crons`);
     if (cronAgentId !== forId) return;
     cronCache = crons;
-    renderCrons(crons);
+    renderCrons(crons, waiting || []);
   } catch (e) { if (cronAgentId !== forId) return; $('cronList').innerHTML = ''; $('cronErr').textContent = e.message; }
 }
 let cronEditingId = null, cronCache = [];
@@ -9850,12 +9854,38 @@ function cronRunLine(c) {
   if (!bits.length) return '';
   return `<div class="sub cronRuns">${failing ? '<span class="chip FAILED">failing</span> ' : ''}${bits.join(' · ')}</div>`;
 }
-function renderCrons(crons) {
+// Tasks its template carried that are not on the agent yet (HB-0231): each
+// with why, and one way to try again now (a start, a wake or a rebuild also does).
+function cronWaitingRows(waiting) {
+  if (!waiting.length) return '';
+  return waiting.map((w) => {
+    const msg = (w.message || '').replace(/\s+/g, ' ').trim();
+    return `<div class="pair" style="align-items:flex-start">
+      <span class="grow">
+        <b>${esc(w.name || '(unnamed task)')}</b> <span class="chip" title="From its template; not on the agent yet">waiting to be added</span>
+        <div class="sub">⏱ ${esc(cronScheduleLabel({ scheduleKind: w.cron ? 'cron' : 'every', scheduleExpr: w.cron, scheduleTz: w.tz, everyMs: w.everyMs }))}</div>
+        <div class="sub cron-waiting-why">${esc(w.why ? `Not added yet: ${w.why}.` : 'Not added yet: it is added once the agent has been set up.')} Hatchabot tries again when the agent starts, wakes or is rebuilt.</div>
+        ${msg ? `<div class="sub" style="margin-top:2px;opacity:.85">${esc(msg.slice(0, 160))}${msg.length > 160 ? '…' : ''}</div>` : ''}
+      </span>
+    </div>`;
+  }).join('') + `<div style="margin:4px 0 8px"><button id="cronWaitingRetry" onclick="retryWaitingCrons()">Try adding ${waiting.length === 1 ? 'it' : 'them'} now</button></div>`;
+}
+async function retryWaitingCrons() {
+  const forId = cronAgentId;
+  $('cronErr').textContent = '';
+  try {
+    const { waiting } = await api(`/v1/agents/${forId}/crons/waiting`, { method: 'POST', body: {} });
+    if (cronAgentId !== forId) return;
+    toast(waiting.length ? `${waiting.length === 1 ? 'A task is' : `${waiting.length} tasks are`} still waiting — the reason is under ${waiting.length === 1 ? 'it' : 'each'}.` : 'Added.', 8000);
+    await loadCrons();
+  } catch (e) { if (cronAgentId === forId) $('cronErr').textContent = e.message; }
+}
+function renderCrons(crons, waiting = []) {
   if (!crons.length) {
-    $('cronList').innerHTML = '<div class="sub">No scheduled tasks yet — add one below.</div>';
+    $('cronList').innerHTML = cronWaitingRows(waiting) + (waiting.length ? '' : '<div class="sub">No scheduled tasks yet — add one below.</div>');
     return;
   }
-  $('cronList').innerHTML = crons.map(c => {
+  $('cronList').innerHTML = cronWaitingRows(waiting) + crons.map(c => {
     const msg = (c.message || '').replace(/\s+/g, ' ').trim();
     // OpenClaw's own upkeep (its weekly skill review, memory dreaming): shown so
     // nothing runs unseen, but the gateway refuses to change or remove it.
@@ -10695,10 +10725,10 @@ function submitParamForm() {
 const IMPORT_PEEK_BYTES = 4 * 1024 * 1024;
 /** How a template's manifest begins: the exporter writes `format` first. */
 const TEMPLATE_HEAD = /^\s*\{\s*"format"\s*:\s*"(hatchabot|agentclaw)-template"/;
-/** A template's setup answers travel in the request's address (`?values=`);
- *  Node refuses a request line past 16 KB with a bare 431, so the page
- *  refuses first, in words, well under that. */
-const IMPORT_VALUES_MAX_CHARS = 12 * 1024;
+/** An import whose body carries the template's setup answers: one line of
+ *  JSON, a newline, then the file. In the address (`?values=`, until v2.170.0)
+ *  they passed Node's 16 KB limit and came back as a bare 431 (HB-0093). */
+const IMPORT_WITH_VALUES = 'application/vnd.hatchabot.import';
 
 // Reads a .hatchabot file's gzip only as far as it takes to tell a template
 // from a full copy; a parsed template, or null for anything else. A full copy
@@ -10728,21 +10758,6 @@ async function peekImportTemplate(file, cap = IMPORT_PEEK_BYTES) {
   finally { reader.cancel().catch(() => {}); }
 }
 
-// Interim (v2.166.0): the answers ride the request's address, which Node caps
-// at 16 KB with the headers — about five full-length answers. This says what
-// is over and which answer is longest, in place of the bare "Import failed"
-// the 431 gave. The transport itself is unchanged.
-function importValuesTooLong(values, parameters, max = IMPORT_VALUES_MAX_CHARS) {
-  const encoded = encodeURIComponent(JSON.stringify(values));
-  if (encoded.length <= max) return '';
-  const over = encoded.length - max;
-  const longest = Object.entries(values).sort((a, b) => b[1].length - a[1].length)[0];
-  const label = parameters.find((p) => p.key === longest[0])?.label || longest[0];
-  return `The setup answers are too long to send together: ${over.toLocaleString()} characters over what the import can take ` +
-    `(the longest is “${label}”, ${longest[1].length.toLocaleString()} characters). ` +
-    `Shorten some answers — the rest can be finished in the agent's Overview after the import.`;
-}
-
 // Import = open any .hatchabot file. The server sniffs it: a full backup is
 // restored as the SAME agent (its bot and members ride along); a shared
 // template stands up a FRESH agent that you give your own bot.
@@ -10752,30 +10767,30 @@ async function importAgentFile(file) {
     // Peek inside first: a template that declares setup fields gets its form
     // BEFORE upload. Any peek failure (full backup, not gzip, old browser) is
     // fine — upload as-is and the server's own validation speaks.
-    let query = '';
+    let body = file, type = 'application/octet-stream';
     let tpl = null;
     try { tpl = await peekImportTemplate(file); } catch { /* not a peekable template — the server sorts it out */ }
     if (['hatchabot-template', 'agentclaw-template'].includes(tpl?.format) && tpl.parameters?.length) {
       const values = await collectParamValues(tpl.parameters, tpl.name || file.name);
       if (values === null) return; // cancelled — don't upload
-      const tooLong = importValuesTooLong(values, tpl.parameters);
-      if (tooLong) { toast(tooLong, 30000); return; }
-      query = `?values=${encodeURIComponent(JSON.stringify(values))}`;
+      // The answers go ahead of the file in the body, so any number fits.
+      body = new Blob([JSON.stringify({ values }) + '\n', file]);
+      type = IMPORT_WITH_VALUES;
     }
     const send = async (q) => {
       const res = await sfFetch(`/v1/agents/import${q}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/octet-stream' },
-        body: file,
+        headers: { 'content-type': type },
+        body,
       });
       return [res, await res.json().catch(() => ({}))];
     };
-    let [res, data] = await send(query);
+    let [res, data] = await send('');
     if (res.status === 409 && data.code === 'image_decision') {
       const choice = imageDecision(data);
       if (!choice) return;
       if (choice === 'build') toast(`Building ${data.image}… this takes a few minutes`, 20000);
-      [res, data] = await send(`${query}${query ? '&' : '?'}image=${choice}`);
+      [res, data] = await send(`?image=${choice}`);
     }
     if (!res.ok) throw new Error(data.error || data.message || 'Import failed');
     if (data.kind === 'template') {
@@ -11676,21 +11691,21 @@ async function dismissContextReset(id) {
 async function recoverContext(id, name) {
   // One question with a real Cancel: a second confirm() made Cancel mean "earlier ones only", so Esc still started it (review, 2026-10-09).
   const pick = await askChoice(`Recover "${name}"'s earlier conversations?`,
-    "Conversations from before a reset get written into its workspace, and the agent reads them and saves the important parts to memory. Runs in the background (a few minutes, uses tokens); it confirms in its Telegram chat when done.\n\nInclude the current conversation too if you just switched this agent's AI source: its current chat is about to be reset on the next message.",
+    "Conversations from before a reset get written into its workspace, and the agent reads them and saves the important parts to memory. Runs in the background (a few minutes, uses tokens); it confirms in its chat when done.\n\nInclude the current conversation too if you just switched this agent's AI source: its current chat is about to be reset on the next message.",
     [['live', 'Also the current one'], ['earlier', 'Earlier ones only']]);
   if (!pick) return;
   try {
     const includeLive = pick === 'live';
     const r = await api(`/v1/agents/${id}/recover-context`, { method: 'POST', body: { includeLive } });
     if (!r.started) { toast(r.reason || 'Nothing to recover.', 9000); return; }
-    toast(`Recovering ${r.messages} messages from ${r.conversations} earlier conversation${r.conversations > 1 ? 's' : ''} — "${name}" will confirm in Telegram when it's saved them.`, 10000);
+    toast(`Recovering ${r.messages} messages from ${r.conversations} earlier conversation${r.conversations > 1 ? 's' : ''} — "${name}" will confirm in its chat when it's saved them.`, 10000);
   } catch (e) { toast(e.message, 9000); }
 }
 async function checkpointAgent(id, name) {
   toast(`Saving "${name}"'s conversation to memory… (~20s)`, 6000);
   try {
     const r = await api(`/v1/agents/${id}/checkpoint`, { method: 'POST' });
-    if (r.saved) toast(`Saved "${name}"'s conversation to memory — the agent also confirms in its Telegram chat.`);
+    if (r.saved) toast(`Saved "${name}"'s conversation to memory — the agent also confirms in its chat.`);
     else if (r.ok) toast(`"${name}": ${r.note || 'It found nothing new to save.'}`, 9000); // the turn ran; its memory files did not change
     else toast(r.error || `Couldn't save "${name}" to memory — its AI source didn't respond (out of credits?).`, 12000);
   } catch (e) { toast(e.message); }
@@ -13335,7 +13350,7 @@ async function appRead() {
       ${appConns.length ? '' : '<div class="sub">No Google account is connected yet: add one in ⚙ Settings → Connections, then come back.</div>'}
       <div id="appConnWarn" class="sub" hidden></div>` : '';
     $('appForm').innerHTML = connPicker + (appDlgMode === 'create' ? `<label for="appName">Name</label><input type="text" id="appName" maxlength="64" value="${esc(m.name)}">
-      ${profiles.length > 1 ? `<label for="appProfile">AI source</label><select id="appProfile">${profiles.map(p => `<option value="${p.id}">${sourceOptionLabel(p)}</option>`).join('')}</select>` : ''}
+      ${profiles.length > 1 ? `<label for="appProfile">AI source</label><select id="appProfile">${profiles.map(p => `<option value="${p.id}"${p.defaultSource ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('')}</select>` : ''}
       <label style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="appNoTelegram" style="width:auto"> No Telegram — reach it here in Hatchabot only</label>
       ${local ? '' : '<div class="err">No host is configured.</div>'}` : '') + (r.ask || []).map(field).join('');
     $('appGoBtn').disabled = false;
@@ -13383,6 +13398,17 @@ function appSharedOk() {
   if (!same.length) return { ok: true, allowShared: false };
   return { ok: confirm(`${same.map(x => x.name).join(' and ')} already run${same.length > 1 ? '' : 's'} ${appInspected.manifest.name} on ${c.email}. Both would answer every email. Install it here anyway?`), allowShared: true };
 }
+/**
+ * The Google account attach answered: did it go on (and, for an agent that
+ * runs, work in it)? Its 200 can say it failed; the app was installed and
+ * "running" with no login all the same (HB-0257).
+ */
+function appAttachProblem(r, mustBeLive) {
+  const email = appConns.find(c => c.id === $('appConn')?.value)?.email || 'The Google account';
+  if (r?.attached === false) return `${email} was not attached${r.error ? ` (${r.error})` : ''}, so nothing was installed. Try again.`;
+  if (r?.error || (mustBeLive && !r?.live)) return `${email} is attached, but could not be set up in the agent${r?.error ? ` (${r.error})` : ''}, so the app was not installed: its commands would have no login. Try again; if it fails again, connect the account again in ⚙ Settings → Connections.`;
+  return '';
+}
 function appValues() {
   const out = {};
   for (const f of appInspected?.ask || []) {
@@ -13411,12 +13437,15 @@ async function appGo() {
     if (appDlgMode === 'create') {
       const name = $('appName').value.trim() || m.name;
       const local = hosts.find(h => h.kind === 'local') || hosts[0];
-      const a = created = await api('/v1/agents', { method: 'POST', body: { name, persona: m.chat || m.description || undefined,
+      // Its chat with {app_dir}, {agent}… filled in for this agent, as its tasks are: they reached SOUL.md as written (HB-0259).
+      let chat = m.chat;
+      if (chat && /\{(app_dir|data_dir|agent|name|env)\}/.test(chat)) chat = (await api('/v1/apps/inspect', { method: 'POST', body: { source: appInspected.source, name } })).chat ?? chat;
+      const a = created = await api('/v1/agents', { method: 'POST', body: { name, persona: chat || m.description || undefined,
         aiProfileId: ($('appProfile') && $('appProfile').value) || profiles[0]?.id, hostId: local?.id,
         telegram: $('appNoTelegram').checked ? false : undefined } });
       if (m.model) { try { await api(`/v1/agents/${a.id}/model`, { method: 'POST', body: { model: m.model } }); } catch { /* the source's default stays */ } }
       // Its account goes on before it first runs (it is materialized as the agent comes up).
-      if (connId) await api(`/v1/agents/${a.id}/connections/attach`, { method: 'POST', body: { connectionId: connId } });
+      if (connId) { const problem = appAttachProblem(await api(`/v1/agents/${a.id}/connections/attach`, { method: 'POST', body: { connectionId: connId } }), false); if (problem) throw new Error(problem); }
       await api(`/v1/agents/${a.id}/app/pending`, { method: 'POST', body: { source: appInspected.source, values, ...(shared.allowShared ? { allowShared: true } : {}) } });
       created = null; // made whole: nothing below undoes it
       appDlg.close();
@@ -13424,7 +13453,7 @@ async function appGo() {
       await refresh(false);
     } else {
       toast(`Installing ${m.name}: copying it in, running its tests, scheduling it…`, 120000, 'progress');
-      if (connId) await api(`/v1/agents/${appDlgAgent}/connections/attach`, { method: 'POST', body: { connectionId: connId } });
+      if (connId) { const problem = appAttachProblem(await api(`/v1/agents/${appDlgAgent}/connections/attach`, { method: 'POST', body: { connectionId: connId } }), true); if (problem) throw new Error(problem); }
       await api(`/v1/agents/${appDlgAgent}/app`, { method: 'POST', body: { source: appInspected.source, values, ...(shared.allowShared ? { allowShared: true } : {}) } });
       appDlg.close();
       toast(`${m.name} is installed and running.`);
@@ -14406,6 +14435,7 @@ function openV2Icon(id) {
   $('v2IconName').textContent = a.name;
   $('v2IconInput').value = a.icon || '';
   $('v2IconErr').textContent = '';
+  $('v2IconWant').value = '';
   v2IconIdeasShown = [];
   $('v2IconIdeas').innerHTML = ''; $('v2IconIdeasBox').hidden = true; $('v2IconNote').textContent = '';
   $('v2IconAutoBtn').textContent = '✨ Ideas from Hatchabot';
@@ -14454,7 +14484,8 @@ async function v2IconIdeas(btn) {
   $('v2IconErr').textContent = '';
   try {
     const current = $('v2IconInput').value.trim();
-    const r = await api(`/v1/agents/${id}/icons/suggest`, { method: 'POST', body: { exclude: [...new Set([...v2IconIdeasShown, ...(current ? [current] : [])])] } });
+    const want = $('v2IconWant').value.trim();
+    const r = await api(`/v1/agents/${id}/icons/suggest`, { method: 'POST', body: { exclude: [...new Set([...v2IconIdeasShown, ...(current ? [current] : [])])], ...(want ? { want } : {}) } });
     if (v2IconFor !== id || !v2IconDlg.open) return; // closed, or opened for another agent, while it thought
     const ideas = r.ideas || [];
     v2IconIdeasShown.push(...ideas.map(i => i.icon));
@@ -14462,7 +14493,9 @@ async function v2IconIdeas(btn) {
       `<button type="button" data-emoji="${esc(i.icon)}" data-color="${esc(i.color)}" style="--tint:${esc(i.color)}" aria-label="${esc(i.icon)}" aria-pressed="false">${esc(i.icon)}</button>`).join(''));
     $('v2IconIdeasBox').hidden = !v2IconIdeasShown.length;
     $('v2IconNote').textContent = r.via === 'keywords'
-      ? `The management AI isn’t available (none set up, or it’s busy)${ideas.length ? ', so these come from its name and description' : ''}. Try again later for more.`
+      ? (r.why === 'no-ai' ? 'None of your AI sources can make ideas (that takes a Claude source of your own, in ⚙ Settings)' : 'The management AI didn’t answer (busy, or out of its limit)')
+        + (ideas.length ? `, so these come from ${want ? 'your words and ' : ''}its name. ` : '. ')
+        + 'You can also paste any emoji in the box above.'
       : ideas.length ? 'Pick one, then Save. Press ✨ again for different ones.'
       : 'No new ideas this time. Paste any emoji in the box above, or pick from the row below.';
     v2IconPreview();

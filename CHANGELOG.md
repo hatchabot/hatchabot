@@ -2,6 +2,57 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.170.1] — 2026-10-28
+
+v2.170.0 was tagged but never published: the publisher's privacy gate stopped it. Everything listed under 2.170.0 below ships in this release.
+
+### Fixed
+- **Icons:** the holiday row of the keyword table no longer names one word that is also the name of an agent; it still knows "xmas", "holiday", "navidad" and "santa".
+
+### Changed
+For maintainers:
+- `scripts/privacy-ignore.txt` and the privacy check's advice now say that the publisher's gate counts a word added there as private until `kit values sync` runs again, so rewording beats adding a word.
+
+## [2.170.0] — 2026-10-27
+
+### Changed
+- **Icons:** the icon dialog has a **What should it show?** box: type "a birthday cake" and ✨ Ideas pictures that, not just the agent's name. Without an AI, the keyword table now reads those words too, and knows holidays, gifts, pets and other everyday things ("Holiday list" got only 🤖). The note says whether no source can make ideas or the AI didn't answer, and the server logs why.
+- **Usage:** Context now shows one **Median call** column in place of "Typical call" and "1 in 10 over".
+- **AI source:** the notes about switching source, reverting files and recovering conversations no longer assume Telegram: an agent may talk only through its web chat or console.
+- **Templates and copies:** the `sharedMemory` field is written as `true` (Hatchabot before v2.170.0 needs it) and ignored on import; memory has been always shared since v2.107.0. `sharedMemory: true` on an agent PATCH no longer rewrites anything.
+- **Import:** a large full copy was decompressed twice on import, once only to read what kind of file it is. Only the start of the file is read for that now.
+- **Channels:** removed the unused `hosts` list from the Slack and Discord connectors (an egress allow list that nothing enforced).
+- **Docs:** the GCE guide piped get.docker.com to sh. It now runs the Hatchabot installer, which installs Docker from a pinned, checked script, with Docker's data on the data disk.
+- **Docs:** folders mounted at their own host path for adopted OpenClaw agents are now described in data-sources.md and the features tour, with how they differ from `/data` folders.
+- **Docs:** the features tour covers every command in `hatchabot help` (`sources`, `switch-source`, `users` and others) and the operator profile (Settings → You).
+- **Docs:** pre-production.md listed risks closed weeks ago. Each section now gives its status and the release that fixed it, and a new section covers public access's trust rules and accepted risks.
+
+### Fixed
+- **Access:** an agent's Sharing → Access listed every Google account of its owner's as "removed — verified gone", though it never had them. Only an account it had and lost shows there now.
+- **Live tests:** clean installs run side by side shared one log folder, so one could read another's upgrade log mid-write and fail a good upgrade.
+- **Apps:** Stop app could be undone at the next start: an install made by hand never retired the waiting install of a new agent "from a repo", and Stop app left it in place. A direct install now retires it, and Stop app removes one still waiting.
+- **Apps:** a new agent's App could wait for ever when its setup finished while its repo was being read, and an earlier waiting install that finished deleted a newer request (or put its error on it). Each request is now tracked on its own, runs go one at a time per agent, and a request saved meanwhile goes in afterwards.
+- **Apps:** an older App install that was slow to read its repo went in over an App a newer request had installed meanwhile. It is now refused ("Its app changed meanwhile") and the newer one stays.
+- **Apps:** when replacing one App with another failed, the old App's tasks the owner had turned off came back on while the page said "unchanged". They now go back turned off, after a restart too.
+- **Apps:** a failed Roll back could leave the agent on the earlier release while the App row and its tasks named the newer one, ending "failed" with nothing to choose. A switch is now judged from the agent's live release link, and one that can't be put right waits for your choice.
+- **Apps:** installing an App into a running agent went ahead and said "installed and running" when its Google account was attached but could not be set up in the agent. The dialog now stops, says what failed and how to repair it, and installs nothing.
+- **Apps:** a new agent from an App repo took the first AI source in the list, not the ⭐ default, once the sources were reordered. The form now preselects the default.
+- **Apps:** a new agent's chat from its App kept `{app_dir}`, `{env}`, `{agent}` and `{name}` as written in its instructions (SOUL.md), from the page and `hatchabot app create`. They are now filled in as the App's tasks are.
+- **Apps:** installing an App was refused "on the same account" when the other agent only had that mailbox attached and its App used another one. Now only the account the other copy is configured with counts.
+- **Apps:** a kept value for a required list setting that held only commas became an empty list and was accepted. It is now asked for again.
+- **CLI:** `hatchabot app create` asked for a required setting whose default the App already gives. It now uses the same rule as installing, and a value of the wrong type stops it before an agent is made.
+- **Templates:** a template whose setup answers were long could not be imported with all of them: the answers went in the request's address, Node refused it past 16 KB, and since v2.166.0 the page refused first. The answers now go in the request body, ahead of the file, from the page and from `hatchabot import`, so every answer a template allows is sent.
+- **Templates:** a scheduled task from a template that the agent refused during setup waited, unseen, until a rebuild. The Schedule tab now lists it as "waiting to be added", with the reason and a **Try adding it now** button, and a Start or a wake tries again once the agent answers.
+- **AI sources:** on a shared Claude plan source, a new default model moved other accounts' agents that follow it onto a model their OpenClaw could not run, and every message failed with HTTP 400. Such an agent now keeps the model it runs, and the source's owner is told how many were kept (not which).
+- **Upgrade:** an upgrade of a git install stopped while it installed dependencies (Ctrl-C, a closed terminal, `systemctl stop`) left the new release with half its dependencies, and every upgrade after it said "Already on" that release. A stopped upgrade now puts the old release back at once, and one cut off by a power cut is put back by the next upgrade before it tries again.
+- **Doctor:** `hatchabot doctor` and the CLI read `.env` with their own parser, so an `export` line or a quoted value could read differently from what the service uses. They now read it as the service does.
+- **Channel timer:** `follow-channel.sh --install` and `follow-latest.sh --install` wrote a guessed path into the timer when node or docker was not on the PATH, and the timer then failed at every tick. They now stop with a clear message and install nothing.
+
+### Security
+- **Apps:** an App setting marked secret that failed validation was quoted in the error, and kept in the operation's outcome and its event. A secret value or default is never quoted now, and secret values are masked in an install's error before it is kept.
+- **Memory search:** each agent could send 600 calls a minute of up to 2 MB each, enough to keep the shared engine busy for every other agent. The door now also limits each agent to `HATCHABOT_EMBED_MB_PER_MIN` of text a minute (8 MB by default; a guest Hatchabot gets 8 times that).
+- **Runtime images:** checking what a runtime or derived image can do started its container with the network and no limits. It now runs with no network, 256 MB of memory, 64 processes and no capabilities.
+
 ## [2.169.0] — 2026-10-26
 
 ### Security

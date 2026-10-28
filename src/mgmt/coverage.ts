@@ -111,6 +111,7 @@ export const COVERAGE: Record<string, string> = {
 
   // ---- agents: scheduled tasks ----
   'POST /v1/agents/:id/crons': 'add_cron',
+  'POST /v1/agents/:id/crons/waiting': 'app: browser — Tasks, Try again on a template task still waiting',
   'PATCH /v1/agents/:id/crons/:jobId': 'set_cron_enabled',
   'POST /v1/agents/:id/crons/:jobId/run': 'run_cron',
   'POST /v1/agents/:id/chat': 'app: browser — an invited person chatting with the agent on the web (2026-09-29)',

@@ -50,7 +50,7 @@ export interface AgentAccess {
 
 /** A removal still pending after this long is an Alerts line. */
 export const STALE_REMOVAL_MS = 24 * 3600_000;
-/** An account verified gone is still shown ("removed — verified gone") this long. */
+/** An account verified gone is still shown ("removed — verified gone") this long from when it went. */
 const GONE_SHOWN_MS = 7 * 24 * 3600_000;
 /** Mismatches that go under Alerts (a missing one is ⚠ in the section only). */
 export const ALERT_MISMATCHES: readonly Mismatch[] = ['extra', 'differs', 'stale-removal'];
@@ -373,7 +373,8 @@ export function accessOverview(store: Store, agent: Agent, now = Date.now()): Ag
         ...(ours ? { mismatch: 'extra' as const, note: 'one of your connections, not attached to this agent — but it still holds it' }
           : { note: 'added inside the agent (in a chat, by the agent or a person) — not one of your connections, so Hatchabot does not manage it' }),
       });
-    } else if (v.status === 'absent' && v.at && now - Date.parse(v.at) < GONE_SHOWN_MS && vault.has(c.subject)) {
+    } else if (v.status === 'absent' && v.detail?.startsWith('gone ') && now - Date.parse(v.detail.slice(5)) < GONE_SHOWN_MS && vault.has(c.subject)) {
+      // Only one it had: every connection of the owner's is recorded absent on each look (goneDetail).
       google.push({ kind: 'google', subject: c.subject, label: c.subject, intended: false, managed: true, verified: v, note: 'removed — verified gone' });
     }
   }

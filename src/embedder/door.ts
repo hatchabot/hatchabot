@@ -13,6 +13,13 @@
  *   tenant's key stands for its whole fleet, so it gets EMBED_GUEST_FACTOR
  *   times that, 8 by default, and as many in flight), caps the body at 2 MB
  *   and the inputs at 256, times out at 60 s;
+ * - holds each key to EMBED_MB_PER_MIN of request bodies a minute (8 MB, the
+ *   guest factor times that for a guest): a call count alone let each call
+ *   carry 2 MB, so a prompt-injected agent kept the engine busy for every
+ *   agent on the machine (HB-0026). A minute's worth may come at once, and a
+ *   call is charged its size once read, so a key in debt is refused until it
+ *   refills. 8 MB a minute is far more text than the engine embeds in one:
+ *   indexing, even a whole re-index, waits on the engine, not on this;
  * - forwards the body unchanged to the server with the server's own key and
  *   returns the answer as it came;
  * - `GET /health` answers for the server behind it, to a caller holding the
@@ -32,6 +39,7 @@ export function doorScript(): string {
     'const KEYS=process.env.EMBED_KEYS_FILE||"/keys/embed-keys.json";',
     'const PER_MIN=Number(process.env.EMBED_PER_MIN||600),GUEST_X=Math.max(1,Number(process.env.EMBED_GUEST_FACTOR)||8);',
     'const isGuest=(a)=>String(a).startsWith("guest:");const perMin=(a)=>isGuest(a)?PER_MIN*GUEST_X:PER_MIN;const maxInflight=(a)=>isGuest(a)?MAX_INFLIGHT_AGENT*GUEST_X:MAX_INFLIGHT_AGENT;',
+    'const BYTES_PER_MIN=(Number(process.env.EMBED_MB_PER_MIN)||8)*1024*1024;const bytesPerMin=(a)=>isGuest(a)?BYTES_PER_MIN*GUEST_X:BYTES_PER_MIN;',
     'const KEYS_TTL=Number(process.env.EMBED_KEYS_TTL_MS||2000);',
     'const MAX_BODY=2*1024*1024,MAX_INPUTS=256,TIMEOUT=60000;',
     'let keys={},keysMtime=-1,keysAt=0;',
@@ -45,6 +53,9 @@ export function doorScript(): string {
     'const buckets=new Map();',
     'function allow(agent){const now=Date.now(),cap=perMin(agent);let b=buckets.get(agent);if(!b){b={t:cap,at:now};buckets.set(agent,b);}',
     ' b.t=Math.min(cap,b.t+(now-b.at)*cap/60000);b.at=now;if(b.t<1)return false;b.t-=1;return true;}',
+    'const byteBuckets=new Map();',
+    'function byteBucket(agent){const now=Date.now(),cap=bytesPerMin(agent);let b=byteBuckets.get(agent);if(!b){b={t:cap,at:now};byteBuckets.set(agent,b);}',
+    ' b.t=Math.min(cap,b.t+(now-b.at)*cap/60000);b.at=now;return b;}',
     'function send(res,code,obj){res.writeHead(code,{"content-type":"application/json"});res.end(JSON.stringify(obj));}',
     'const server=http.createServer((req,res)=>{',
     ' const a=req.headers.authorization||"";const tok=a.startsWith("Bearer ")?a.slice(7):"";',
@@ -56,7 +67,7 @@ export function doorScript(): string {
     ' loadKeys();',
     ' const agent=tok?keys[crypto.createHash("sha256").update(tok).digest("hex")]:undefined;',
     ' if(!agent){send(res,401,{error:"unauthorized"});req.resume();return;}',
-    ' if(!allow(agent)){send(res,429,{error:"rate limited"});req.resume();return;}',
+    ' if(byteBucket(agent).t<=0||!allow(agent)){send(res,429,{error:"rate limited"});req.resume();return;}',
     ' if(inflight>=MAX_INFLIGHT||(inflightBy.get(agent)||0)>=maxInflight(agent)){send(res,429,{error:"busy"});req.resume();return;}',
     ' inflight++;inflightBy.set(agent,(inflightBy.get(agent)||0)+1);let released=false;',
     ' const release=()=>{if(released)return;released=true;inflight--;inflightBy.set(agent,Math.max(0,(inflightBy.get(agent)||1)-1));};',
@@ -66,9 +77,9 @@ export function doorScript(): string {
     ' const ac=new AbortController();let upstream=false;',
     ' res.on("close",()=>{if(upstream){if(!res.writableEnded)ac.abort();}else release();});',
     ' const chunks=[];let size=0,over=false;',
-    ' req.on("data",c=>{if(over)return;size+=c.length;if(size>MAX_BODY){over=true;send(res,413,{error:"body too large"});req.destroy();}else chunks.push(c);});',
+    ' req.on("data",c=>{if(over)return;size+=c.length;if(size>MAX_BODY){over=true;byteBucket(agent).t-=size;send(res,413,{error:"body too large"});req.destroy();}else chunks.push(c);});',
     ' req.on("error",()=>{});',
-    ' req.on("end",async()=>{if(over)return;const started=Date.now();const raw=Buffer.concat(chunks);let n=1;',
+    ' req.on("end",async()=>{if(over)return;const started=Date.now();const raw=Buffer.concat(chunks);let n=1;byteBucket(agent).t-=raw.length;',
     '  try{const j=JSON.parse(raw.toString("utf8"));if(Array.isArray(j.input))n=j.input.length;}catch(e){send(res,400,{error:"bad json"});return;}',
     '  if(n>MAX_INPUTS){send(res,413,{error:"too many inputs"});return;}',
     '  try{const h={"content-type":"application/json"};const k=upkey();if(k)h.authorization="Bearer "+k;',

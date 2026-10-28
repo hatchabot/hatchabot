@@ -27,7 +27,7 @@ const THIRD = 'user-third';
 /** Slack as the fake platform sees it: one token is good, everything else refused. */
 function fakeSlack(): ChannelConnector {
   return {
-    kind: 'slack', label: 'Slack', hosts: [],
+    kind: 'slack', label: 'Slack',
     fields: [{ key: 'token', label: 'Token', pattern: /^ok-/, help: 'starts with ok-' }],
     secretValue: (c) => String(c.token),
     credsFromSecret: (secret) => ({ token: secret }),

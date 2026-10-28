@@ -22,7 +22,10 @@ NAME=hatchabot-follow-latest
 if [ "${1:-}" = --install ]; then
   mkdir -p "$UNITS"
   # Quoted whole, as install-service.sh writes it: unquoted, a space in a path split it (audit #044).
-  UNIT_PATH="$(dirname "$(command -v node)"):$(dirname "$(command -v docker || echo /usr/bin/docker)"):/usr/local/bin:/usr/bin:/bin"
+  # Not found here, refused rather than guessed into the unit (HB-0042).
+  NODE_BIN="$(command -v node)" || { echo "node not found on PATH — run this from a shell where 'node --version' works." >&2; exit 1; }
+  DOCKER_BIN="$(command -v docker)" || { echo "docker not found on PATH — run this from a shell where 'docker version' works." >&2; exit 1; }
+  UNIT_PATH="$(dirname "$NODE_BIN"):$(dirname "$DOCKER_BIN"):/usr/local/bin:/usr/bin:/bin"
   cat > "$UNITS/$NAME.service" <<EOF
 [Unit]
 Description=Hatchabot: deploy the newest release tag to this machine

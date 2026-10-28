@@ -89,7 +89,7 @@ HATCHABOT_EMBED_MODEL=embeddinggemma
 ```
 
 The door treats a guest like an agent: its own key, its own rate limit (eight times an agent's — the key stands for the guest's whole fleet; `EMBED_GUEST_FACTOR` on the host tunes it)
-(`HATCHABOT_EMBED_PER_MIN`), its own log line — never a body. `hbt embedder
+(`HATCHABOT_EMBED_PER_MIN`, `HATCHABOT_EMBED_MB_PER_MIN`), its own log line — never a body. `hbt embedder
 guest-rm t2` stops the key at once. Leave the service tenant's door port out
 of its socket-owner rule (the key is the gate there), and give the service
 tenant's slice the engine's 2 GiB. `scripts/shared-host-test.sh

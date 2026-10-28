@@ -184,11 +184,20 @@ export function expand(t: string, vars: { [k: string]: unknown }): string {
 }
 
 /** The placeholders for a release. `at` points them elsewhere (its tests run in the candidate, against the staged data folder). */
-export function appVars(m: AppManifest, facts: AgentFacts, at: { app_dir?: string; data_dir?: string } = {}) {
+export function appVars(m: AppManifest, facts: Pick<AgentFacts, 'slug'>, at: { app_dir?: string; data_dir?: string } = {}) {
   const p = appPaths(m.app);
   const base = { app_dir: at.app_dir ?? p.current, data_dir: at.data_dir ?? p.data, agent: facts.slug, name: m.name, env: '' };
   const env = Object.fromEntries(Object.entries(m.env ?? {}).map(([k, v]) => [k, expand(v, base)]));
   return { ...base, env: Object.entries(env).map(([k, v]) => `${k}=${sq(v)}`).join(' '), envMap: env };
+}
+
+/**
+ * Its `chat` for the persona of a new agent with this slug, the placeholders
+ * filled as its tasks' are: it went into SOUL.md as written, "{app_dir}"
+ * and all (HB-0259).
+ */
+export function appChat(m: AppManifest, slug: string): string | undefined {
+  return m.chat === undefined ? undefined : expand(m.chat, appVars(m, { slug }));
 }
 
 /** What Hatchabot has no value for, when a required field is filled from it. */
@@ -227,7 +236,9 @@ export function mergeConfig(m: AppManifest, facts: AgentFacts, existing: Record<
     const cleared = given && typeof values[f.key] === 'string' && !(values[f.key] as string).trim();
     if (given && !cleared) {
       const v = coerce(f.type, values[f.key]);
-      if (v === INVALID) invalid.push(`${f.key} must be ${TYPE_WORD[f.type ?? 'text']} (got ${JSON.stringify(values[f.key]).slice(0, 60)})`);
+      // A secret's value is never said back: the error is answered, and kept
+      // with the operation and its event (HB-0260).
+      if (v === INVALID) invalid.push(`${f.key} must be ${TYPE_WORD[f.type ?? 'text']}${f.secret ? '' : ` (got ${JSON.stringify(values[f.key]).slice(0, 60)})`}`);
       // A required list given as [] is no value, as '' is for text: it was
       // written, and the app ran with no recipients (review R03, 2026-10-23).
       else if (f.required && blank(v)) { missing.push(f.label ? `${f.key} (${f.label})` : f.key); missingKeys.push(f.key); }
@@ -241,8 +252,10 @@ export function mergeConfig(m: AppManifest, facts: AgentFacts, existing: Record<
       // kept "abc" under it unasked (review R04, 2026-10-23). A value the new
       // type refuses is asked for again, not thrown: it was valid when given.
       // A secret field's value is kept as it is. An optional one's is cleared.
+      // Required is judged after the coercion: ", ," kept for a required list
+      // became [] and was accepted (HB-0263).
       const kept = f.type && !f.secret ? coerce(f.type, out[f.key]) : out[f.key];
-      if (kept !== INVALID) out[f.key] = kept;
+      if (kept !== INVALID && !(f.required && blank(kept))) out[f.key] = kept;
       else if (f.required) { delete out[f.key]; missing.push(f.label ? `${f.key} (${f.label})` : f.key); missingKeys.push(f.key); }
       else out[f.key] = f.type === 'list' ? [] : f.type === 'number' || f.type === 'bool' ? null : '';
       continue;
@@ -251,7 +264,7 @@ export function mergeConfig(m: AppManifest, facts: AgentFacts, existing: Record<
       // The default is held to its field's type like a value given: "abc"
       // for a number was written as it was. '' and null stay "no value".
       const d = f.default === '' || f.default === null ? f.default : coerce(f.type, f.default);
-      if (d === INVALID) invalid.push(`the app's default for ${f.key} is not ${TYPE_WORD[f.type ?? 'text']} (${JSON.stringify(f.default).slice(0, 60)}; its ${MANIFEST_FILE} needs fixing)`);
+      if (d === INVALID) invalid.push(`the app's default for ${f.key} is not ${TYPE_WORD[f.type ?? 'text']} (${f.secret ? '' : `${JSON.stringify(f.default).slice(0, 60)}; `}its ${MANIFEST_FILE} needs fixing)`);
       else if (f.required && blank(d)) { missing.push(f.label ? `${f.key} (${f.label})` : f.key); missingKeys.push(f.key); }
       else out[f.key] = d;
     } else if (f.required) { missing.push(f.label ? `${f.key} (${f.label})` : f.key); missingKeys.push(f.key); }
@@ -328,7 +341,7 @@ export interface InstallDeps {
    * a mailbox that came from a default or the old file). `existing` is the
    * file as it was. Throwing stops the install before anything live changes.
    */
-  checkConfig?: (config: Record<string, unknown>, existing: Record<string, unknown>) => void;
+  checkConfig?: (config: Record<string, unknown>, existing: Record<string, unknown>) => void | Promise<void>;
   /** The app record's release (agent_apps): its manifest stands in when the live release's copy cannot be read. */
   recorded?: { app: string; sha: string; manifest: unknown };
 }
@@ -462,7 +475,7 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
         throw e;
       }
       if (unfilled.length) throw new AppError(`Hatchabot has nothing to fill ${unfilled.join(', ')} with; set that up, then try again.`);
-      d.checkConfig?.(config, existing);
+      await d.checkConfig?.(config, existing);
       secrets = secretValues(m, config);
       const w = await d.provider.writeToVolume(d.runtimeRef,
         ['sh', '-c', `umask 077 && cat > ${sq(staged)}`], Buffer.from(JSON.stringify(config, null, 2) + '\n'));
@@ -518,6 +531,8 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
     // A (simulated) dead process puts nothing back and clears nothing: the
     // restart finds it as it is (appOperations.ts, resumeAppOperation).
     if (e instanceof SimulatedCrash) { crashed = true; throw e; }
+    // No secret value given reaches the error (kept with the operation and its event): HB-0260.
+    if (e instanceof Error) e.message = maskSecrets(e.message, [...secretValues(m, values), ...secrets].sort((a, b) => b.length - a.length));
     if (!switching) throw outcome(e, { unchanged: true });
     // Put the previous release back: its config (when this one was moved in; the
     // new one goes back to staging first, so "Use the new release" still has it)
@@ -559,22 +574,44 @@ export async function clearStaging(d: InstallDeps, app: string, short?: string):
  * Point `current` back at an earlier release that is still there, and give it
  * its tasks. `from` is the manifest of the release being left (its tasks are
  * the ones put back if the new set cannot be scheduled; `current` goes back too).
+ *
+ * A switch that answers an error may have landed all the same (its reply
+ * lost): the link, read again, decides. One that cannot be put back, or
+ * whose place cannot be read, is thrown `held`: the code, the tasks and the
+ * record may disagree, and the operation waits for the owner's choice. It
+ * ended failed with no choice to make (HB-0254).
  */
 export async function switchTo(d: InstallDeps, m: AppManifest, sha: string, from?: AppManifest): Promise<void> {
   const p = appPaths(m.app);
   const short = sha.slice(0, 12);
   const before = await currentLink(d, m.app);
+  /** Where `current` points now; undefined when it cannot be read. */
+  const linkNow = () => currentLink(d, m.app).catch(() => undefined);
   d.step?.('switching');
-  const r = await sh(d, `cd ${sq(p.root)} && test -d releases/${short} && ln -sfn releases/${short} current.new && mv -T current.new current`);
-  if (r.code !== 0) throw new AppError(`Release ${short} is no longer in the agent.`);
+  const r = await sh(d, `cd ${sq(p.root)} && test -d releases/${short} && ln -sfn releases/${short} current.new && mv -T current.new current`)
+    .catch((err: unknown) => ({ code: 1, stdout: '', stderr: (err as Error)?.message ?? String(err) }));
+  if (r.code !== 0) {
+    const now = await linkNow();
+    if (now === before) throw outcome(new AppError(`Release ${short} is no longer in the agent, or could not be switched on (${errText(r) || 'no output'}). Nothing was changed.`), { unchanged: true });
+    if (now !== `releases/${short}`) {
+      throw outcome(new AppError(`Switching to ${short} answered an error (${errText(r) || 'no output'}), and the agent's live release could not be confirmed after it. It waits for your choice on its page.`), { held: true });
+    }
+    // It landed: go on as if it had answered.
+  }
   try {
     await syncTasks(d, m, from);
     d.step?.('tasks');
   } catch (e) {
     if (e instanceof SimulatedCrash) throw e;
     const back = await sh(d, pointBack(p, before)).catch(() => ({ code: 1, stdout: '', stderr: '' }));
-    if (e instanceof Error) e.message += back.code === 0 ? ` Still on ${shaOf(before) ?? 'the release it had'}.` : ' Pointing back at the release it had failed too.';
-    throw e;
+    // The link decides, as above: a put-back whose reply was lost is back.
+    const isBack = back.code === 0 || (await linkNow()) === before;
+    if (e instanceof Error) {
+      e.message += isBack
+        ? ` Still on ${shaOf(before) ?? 'the release it had'}.`
+        : ` Pointing back at the release it had failed too, so the agent runs ${short} while Hatchabot's record says ${shaOf(before) ?? 'the release it had'}. It waits for your choice on its page.`;
+    }
+    throw outcome(e, isBack ? { unchanged: !(e as { tasksUnconfirmed?: boolean })?.tasksUnconfirmed } : { held: true });
   }
 }
 
@@ -628,8 +665,11 @@ function addArgv(d: InstallDeps, m: AppManifest, t: AppManifest['tasks'][number]
  * answer an error (its reply lost, a timeout). So it lists the jobs, takes off
  * any that were not there before, re-adds the old ones that are gone, and lists
  * again; only that second list may say the tasks are as they were.
+ *
+ * `off`: tasks the owner had turned off whose jobs are gone (taken off for
+ * another app that then failed): they go back on turned off (HB-0253).
  */
-export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppManifest): Promise<string[]> {
+export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppManifest, off: readonly string[] = []): Promise<string[]> {
   // A call that rejects (the daemon gone mid-way) is a failed call: thrown, it
   // left the replacement jobs already made beside the old ones (review R05, 2026-10-23).
   const run = (argv: string[]): Promise<ExecResult> => d.provider.exec(d.runtimeRef, argv, { timeoutMs: 60_000 })
@@ -688,8 +728,10 @@ export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppMa
   const made: string[] = [];
   // A task the owner turned off stays off in the new version: re-added
   // switched on, an Update ran work they had stopped (HB-0229). Off when
-  // every old job of that name was.
-  const offBefore = (name: string) => old.some((j) => j.name === name) && old.filter((j) => j.name === name).every((j) => j.enabled === false);
+  // every old job of that name was; with none, when `off` names it.
+  const offBefore = (name: string) => old.some((j) => j.name === name)
+    ? old.filter((j) => j.name === name).every((j) => j.enabled === false)
+    : off.includes(name);
   for (const t of m.tasks) {
     const r = await run([...addArgv(d, m, t), ...(offBefore(`${m.app}-${t.name}`) ? ['--disabled'] : [])]);
     if (r.code !== 0) throw await fail(`Could not schedule ${m.app}-${t.name}: ${errText(r)}.`);

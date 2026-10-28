@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { ICON_PALETTE, IDEA_COUNT, colorFor, keywordIcon, parseChoices, parseIdeas, pickIcons, suggestIcons, validIcon, validIconColor } from '../src/orchestrator/agentIcons.js';
+import { ICON_PALETTE, IDEA_COUNT, WANT_MAX, colorFor, keywordIcon, parseChoices, parseIdeas, pickIcons, suggestIcons, validIcon, validIconColor } from '../src/orchestrator/agentIcons.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { Agent, AIProfile } from '../src/domain/types.js';
 
@@ -68,6 +68,8 @@ describe('picking icons', () => {
     expect(keywordIcon('Stock Watcher')).toBe('📈');
     expect(keywordIcon('Helper', 'plans our trip to Sicily')).toBe('🧭');
     expect(keywordIcon('Zork')).toBe('🤖');
+    expect(keywordIcon('Holiday list')).toBe('🎄');
+    expect(keywordIcon('Location scout', 'education')).toBe('🤖'); // "cat" and "pet" only as words
   });
   it('colour is stable and from the palette', () => {
     expect(colorFor('Budget Tracker')).toBe(colorFor('budget tracker'));
@@ -124,13 +126,36 @@ describe('icon ideas (the icon dialog)', () => {
     expect(out).toEqual({ via: 'ai', ideas: [] });
   });
   it('without an AI, or when it fails or answers junk, the keyword table stands in', async () => {
-    for (const complete of [undefined, async () => { throw new Error('429'); }, async () => 'no idea']) {
+    const cases = [
+      [undefined, 'no-ai', undefined],
+      [async () => { throw new Error('429 rate limited'); }, 'ai-failed', '429 rate limited'],
+      [async () => 'no idea', 'ai-failed', 'its answer held no emoji'],
+    ] as const;
+    for (const [complete, why, error] of cases) {
       const out = await suggestIcons({ name: 'Stock Watcher', persona: 'and our taxes' }, { complete });
       expect(out.via).toBe('keywords');
       expect(out.ideas.map((i) => i.icon)).toEqual(['📈', '🧾', '🤖']);
+      expect([out.why, out.error]).toEqual([why, error]);
     }
     const again = await suggestIcons({ name: 'Stock Watcher', persona: 'and our taxes' }, { exclude: ['📈', '🧾', '🤖'] });
-    expect(again).toEqual({ via: 'keywords', ideas: [] });
+    expect(again).toEqual({ via: 'keywords', ideas: [], why: 'no-ai' });
+  });
+  it('what the owner asks for reaches the prompt, bounded, as data', async () => {
+    const seen: string[] = [];
+    const complete = async (_system: string, user: string) => { seen.push(user); return '[{"icon":"🎂","color":"#3aa36b"}]'; };
+    const out = await suggestIcons({ name: 'Gift Planner' }, { complete, want: '  a   birthday cake ' + 'x'.repeat(200) });
+    expect(out).toEqual({ via: 'ai', ideas: [{ icon: '🎂', color: '#3aa36b' }] });
+    expect(seen[0]).toContain('The owner wants it to show: "a birthday cake x');
+    expect(seen[0]).not.toContain('x'.repeat(WANT_MAX));
+    await suggestIcons({ name: 'Gift Planner' }, { complete });
+    expect(seen[1]).not.toContain('The owner wants');
+  });
+  it('without an AI, the owner\'s words come before the name in the keyword table', async () => {
+    // Before: "Holiday list" matched nothing, and the only idea was 🤖.
+    const named = await suggestIcons({ name: 'Holiday list' });
+    expect(named.ideas.map((i) => i.icon)).toEqual(['🎄', '📝', '🤖']);
+    const asked = await suggestIcons({ name: 'Recipe Box' }, { want: 'a gift for my mum' });
+    expect(asked.ideas.map((i) => i.icon)).toEqual(['🎁', '🍳', '🤖']);
   });
   it('parseIdeas keeps one emoji each and palette colours only', () => {
     expect(parseIdeas('nothing')).toEqual([]);
@@ -232,6 +257,8 @@ describe('icon routes', () => {
     expect((await f.inject({ method: 'POST', url: '/v1/agents/x1/icons/suggest', headers: H, payload: {} })).statusCode).toBe(404);
     expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/icons/suggest', headers: H, payload: { exclude: 'x' } })).statusCode).toBe(400);
     expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/icons/suggest', headers: H, payload: { exclude: [1] } })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/icons/suggest', headers: H, payload: { want: 5 } })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/icons/suggest', headers: H, payload: { want: 'x'.repeat(501) } })).statusCode).toBe(400);
     expect(calls).toHaveLength(0);
     await f.close();
   });
@@ -240,7 +267,24 @@ describe('icon routes', () => {
     const { store, f } = await world();
     store.insertAgent(agent('a1', 'Recipe Box'));
     const r = await f.inject({ method: 'POST', url: '/v1/agents/a1/icons/suggest', headers: H, payload: {} });
-    expect(r.json()).toMatchObject({ via: 'keywords', ideas: [{ icon: '🍳' }, { icon: '🤖' }] });
+    expect(r.json()).toMatchObject({ via: 'keywords', why: 'no-ai', ideas: [{ icon: '🍳' }, { icon: '🤖' }] });
     await f.close();
+  });
+
+  it('suggest follows what the owner asked for, and keeps why the AI failed out of the answer', async () => {
+    const { store, f, calls } = await world('[{"icon":"🎂","color":"#3aa36b"}]');
+    store.insertAIProfile(PROFILE);
+    store.insertAgent(agent('a1', 'Gift Planner'));
+    const r = await f.inject({ method: 'POST', url: '/v1/agents/a1/icons/suggest', headers: H, payload: { want: 'a birthday cake' } });
+    expect(r.json()).toEqual({ via: 'ai', ideas: [{ icon: '🎂', color: '#3aa36b' }] });
+    expect(calls[0]).toContain('The owner wants it to show: \\"a birthday cake\\"');
+    await f.close();
+    const failing = await world('nothing usable');
+    failing.store.insertAIProfile(PROFILE);
+    failing.store.insertAgent(agent('a1', 'Holiday list'));
+    const k = (await failing.f.inject({ method: 'POST', url: '/v1/agents/a1/icons/suggest', headers: H, payload: {} })).json();
+    expect(k).toMatchObject({ via: 'keywords', why: 'ai-failed', ideas: [{ icon: '🎄' }, { icon: '📝' }, { icon: '🤖' }] });
+    expect(k).not.toHaveProperty('error');
+    await failing.f.close();
   });
 });

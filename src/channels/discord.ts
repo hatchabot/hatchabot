@@ -46,7 +46,6 @@ export function discordConnector(f: FetchLike = fetch): ChannelConnector {
     kind: 'discord',
     label: 'Discord',
     fields: FIELDS,
-    hosts: ['discord.com', 'gateway.discord.gg', 'cdn.discordapp.com', 'media.discordapp.net'],
 
     secretValue(creds) {
       return cleanField(creds, FIELDS[0]!);

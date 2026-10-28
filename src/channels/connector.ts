@@ -36,8 +36,6 @@ export interface ChannelConnector {
   readonly kind: ConnectorKind;
   readonly label: string;
   readonly fields: ConnectorField[];
-  /** Hosts the management agent's proxy must let through for this channel. */
-  readonly hosts: string[];
   verify(creds: Record<string, string>): Promise<VerifiedChannel>;
   /** The secret stored for the agent, from the verified fields. */
   secretValue(creds: Record<string, string>): string;

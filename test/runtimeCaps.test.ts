@@ -62,6 +62,21 @@ describe('probeImageCapabilities', () => {
     expect(log).toContain(`rm -f ${name}`);
   });
 
+  it('the probe container has no network, bounded memory and processes, and no capabilities (HB-0079)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-capsdocker-'));
+    const bin = join(dir, 'docker');
+    writeFileSync(bin, `#!/usr/bin/env bash\nfor a in "$@"; do echo "$a"; done >> "$(dirname "$0")/args"\nif [ "$1" = image ]; then echo sha256:4444444444444444; else echo node=v22; fi\n`, { mode: 0o755 });
+    await probeImageCapabilities('test-image-e:1', { docker: bin });
+    const args = readFileSync(join(dir, 'args'), 'utf8').split('\n');
+    const run = args.slice(args.indexOf('run'), args.lastIndexOf('test-image-e:1'));
+    const pair = (flag: string) => run[run.indexOf(flag) + 1];
+    expect(pair('--network')).toBe('none');
+    expect(pair('--memory')).toBe('256m');
+    expect(pair('--pids-limit')).toBe('64');
+    expect(pair('--cap-drop')).toBe('ALL');
+    expect(pair('--security-opt')).toBe('no-new-privileges');
+  });
+
   it('a tag rebuilt onto another image is probed again, not answered from the cache (#124)', async () => {
     const docker = stubDocker('openclaw=OpenClaw 1\nnode=v22', 'sha256:1111111111111111');
     expect((await probeImageCapabilities('test-image-c:1', { docker })).tools.openclaw).toBe('OpenClaw 1');

@@ -297,10 +297,24 @@ export async function materializeConnection(
  */
 export function recordGoogleSeen(store: Store, agentId: string, held: string[], also: Iterable<string> = [], at = new Date().toISOString()): void {
   const seen = new Set(held.map((e) => e.toLowerCase()));
+  const prior = new Map(store.listAccessChecks(agentId).filter((c) => c.kind === 'google').map((c) => [c.subject, c]));
+  const removing = new Set(store.connectionRemovals(agentId).map((e) => e.toLowerCase()));
   for (const e of seen) store.recordAccessCheck(agentId, 'google', e, true, undefined, at);
   for (const e of new Set([...also].map((x) => x.toLowerCase()))) {
-    if (!seen.has(e)) store.recordAccessCheck(agentId, 'google', e, false, undefined, at);
+    if (!seen.has(e)) store.recordAccessCheck(agentId, 'google', e, false, goneDetail(prior.get(e), removing.has(e), at), at);
   }
+}
+
+/**
+ * An absent account's detail: "gone <when>" once the agent had it (found
+ * there before, or a removal of it ran), kept from the first time it was
+ * found gone; nothing for an account it never had. Every connection of the
+ * owner's is recorded absent on each look, and without this each one showed
+ * as "removed — verified gone" (2026-10-27).
+ */
+export function goneDetail(prior: { present: boolean | null; detail: string | null } | undefined, removed: boolean, at: string): string | undefined {
+  if (prior?.present === false && prior.detail?.startsWith('gone ')) return prior.detail;
+  return removed || prior?.present ? `gone ${at}` : undefined;
 }
 
 /** The accounts gog holds on the volume, or null when that can't be read. */
@@ -353,7 +367,9 @@ export async function dematerializeConnection(
       `~/.local/bin/gog auth remove --force -- "${email}" 2>/dev/null || gog auth remove --force -- "${email}"`,
     );
     if (res.code === 0) {
-      deps.store.recordAccessCheck(agent.id, 'google', email.toLowerCase(), false);
+      const subject = email.toLowerCase(), at = new Date().toISOString();
+      const prior = deps.store.listAccessChecks(agent.id).find((c) => c.kind === 'google' && c.subject === subject);
+      deps.store.recordAccessCheck(agent.id, 'google', subject, false, goneDetail(prior, true, at), at);
       deps.log?.('connection.removed_from_agent', { agentId: agent.id, email });
       return { ok: true };
     }

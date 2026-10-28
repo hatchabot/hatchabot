@@ -22,7 +22,6 @@ function fakeConnector(kind: 'slack' | 'discord', firstAccount = kind === 'slack
   return {
     kind, label: kind === 'slack' ? 'Slack' : 'Discord',
     fields: [{ key: 'token', label: 'Token', pattern: /^ok-/, help: 'starts with ok-' }],
-    hosts: [],
     secretValue: (c) => String(c.token),
     credsFromSecret: (secret) => ({ token: secret }),
     async rename(secret, name) {

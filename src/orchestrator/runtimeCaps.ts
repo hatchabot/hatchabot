@@ -42,6 +42,14 @@ const PROBES: Array<{ key: string; cmd: string }> = [
 /** Deliberately-absent extras — surfaced so "can it?" has a truthful no. */
 const ABSENT_PROBES = ['ffmpeg', 'whisper', 'chromium'];
 
+/**
+ * The probe runs whatever a derived image's owner-written Dockerfile put on
+ * the PATH: no network, bounded memory and processes, no capabilities and no
+ * way to gain them, like the provider's other one-shot containers (HB-0079).
+ * Printing a version needs none of them.
+ */
+export const PROBE_SANDBOX = ['--network', 'none', '--memory', '256m', '--pids-limit', '64', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges'];
+
 /** Keyed `<tag>@<image id>`. */
 const cache = new Map<string, RuntimeCapabilities>();
 
@@ -70,7 +78,7 @@ export async function probeImageCapabilities(
   try {
     ({ stdout } = await execFileP(
       opts.docker ?? 'docker',
-      ['run', '--rm', '--name', name, '--entrypoint', 'bash', image, '-c', script],
+      ['run', '--rm', '--name', name, ...PROBE_SANDBOX, '--entrypoint', 'bash', image, '-c', script],
       { timeout: opts.timeoutMs ?? 60_000, killSignal: 'SIGKILL' },
     ));
   } catch (err) {

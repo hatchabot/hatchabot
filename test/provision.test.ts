@@ -6,8 +6,11 @@ import {
   checkpointMemory,
   provisionAgent,
   rebuildAgent,
+  retryPendingSchedules,
+  retryPendingSchedulesWhenUp,
   runProvisionSteps,
 } from '../src/orchestrator/provision.js';
+import { AgentBusyError, whileBusy } from '../src/orchestrator/busy.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { dataSourcesSection, memoryPolicySection, operatorSection, replaceSection, DATA_SOURCES_HEADING, OPERATOR_HEADING } from '../src/openclaw/workspace.js';
 import { Store } from '../src/store/store.js';
@@ -135,7 +138,7 @@ describe('runProvisionSteps', () => {
     w.provider.execResponses.set('cron list', { code: 1, stdout: '', stderr: 'gateway restarting' });
     await runProvisionSteps(w.deps, first.agent.id);
     expect(w.provider.execLog.some((c) => c[0] === 'cron' && c[1] === 'add')).toBe(false);
-    expect(w.store.getPendingSchedules(first.agent.id)).toEqual(parked);
+    expect(w.store.getPendingSchedules(first.agent.id)).toEqual([{ ...parked[0], why: expect.stringMatching(/could not be read/) }]);
   });
 
   it('a template task the gateway refused at setup is added by the next rebuild, once (audit #017)', async () => {
@@ -145,7 +148,7 @@ describe('runProvisionSteps', () => {
     w.store.setPendingSchedules(first.agent.id, parked);
     w.provider.execResponses.set('cron add', { code: 1, stdout: '', stderr: 'gateway busy' });
     expect((await runProvisionSteps(w.deps, first.agent.id)).agent.state).toBe('RUNNING');
-    expect(w.store.getPendingSchedules(first.agent.id)).toEqual(parked);
+    expect(w.store.getPendingSchedules(first.agent.id)).toEqual([{ ...parked[0], why: expect.stringMatching(/refused it: .*gateway busy/) }]);
     const adds = () => w.provider.execLog.filter((c) => c[0] === 'cron' && c[1] === 'add' && c.includes('Morning brief')).length;
     expect(adds()).toBe(1);
     w.provider.execResponses.set('cron add', { code: 0, stdout: '{"id":"brief-1"}', stderr: '' });
@@ -155,6 +158,49 @@ describe('runProvisionSteps', () => {
     // Nothing parked any more: a later rebuild adds nothing.
     expect((await rebuildAgent(w.deps, first.agent.id)).state).toBe('RUNNING');
     expect(adds()).toBe(2);
+  });
+
+  it('a template task still waiting is added once a started agent answers, not only by a rebuild (HB-0231)', async () => {
+    const w = await world({ parkFirst: true });
+    const first = await provisionAgent(w.deps, INPUT);
+    const parked = [{ name: 'Morning brief', message: 'Post the brief.', everyMs: 3_600_000 }];
+    w.store.setPendingSchedules(first.agent.id, parked);
+    w.provider.execResponses.set('cron add', { code: 1, stdout: '', stderr: 'gateway busy' });
+    await runProvisionSteps(w.deps, first.agent.id);
+    expect(w.store.getPendingSchedules(first.agent.id)).toHaveLength(1);
+    const adds = () => w.provider.execLog.filter((c) => c[0] === 'cron' && c[1] === 'add' && c.includes('Morning brief')).length;
+    // Started again, its gateway not healthy yet: it waits for it, then adds the task.
+    w.provider.execResponses.set('cron add', { code: 0, stdout: '{"id":"brief-1"}', stderr: '' });
+    const realStatus = w.provider.status.bind(w.provider);
+    let asks = 0;
+    w.provider.status = async (ref) => (++asks < 3 ? { phase: 'running', healthy: false } as any : realStatus(ref));
+    const slept: number[] = [];
+    await retryPendingSchedulesWhenUp(w.deps, first.agent.id, () => {}, async (ms) => { slept.push(ms); });
+    expect(slept).toHaveLength(2);
+    expect(adds()).toBe(2);
+    expect(w.store.getPendingSchedules(first.agent.id)).toEqual([]);
+    // Nothing waiting: nothing asked.
+    await retryPendingSchedulesWhenUp(w.deps, first.agent.id, () => {}, async () => {});
+    expect(adds()).toBe(2);
+  });
+
+  it('a retry while something holds the agent is left to it; a stopped agent is not tried (HB-0231)', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.setPendingSchedules(agent.id, [{ name: 'Morning brief', message: 'Post the brief.', everyMs: 3_600_000 }]);
+    const adds = () => w.provider.execLog.filter((c) => c[0] === 'cron' && c[1] === 'add').length;
+    const before = adds();
+    await whileBusy(agent.id, async () => {
+      await expect(retryPendingSchedules(w.deps, agent.id)).rejects.toBeInstanceOf(AgentBusyError);
+      await retryPendingSchedulesWhenUp(w.deps, agent.id, () => {}, async () => {}); // quietly left
+    });
+    expect(adds()).toBe(before);
+    w.store.setAgentState(agent.id, 'STOPPED');
+    expect(await retryPendingSchedules(w.deps, agent.id)).toHaveLength(1);
+    expect(adds()).toBe(before);
+    w.store.setAgentState(agent.id, 'RUNNING');
+    expect(await retryPendingSchedules(w.deps, agent.id)).toEqual([]);
+    expect(adds()).toBe(before + 1);
   });
 
   it('retries from FAILED reusing the already-created channel row', async () => {

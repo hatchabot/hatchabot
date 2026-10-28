@@ -8,7 +8,8 @@ import { rootCertificates } from 'node:tls';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { defaultBackupsDir, defaultDbPath } from './envCompat.js';
+import { applyLegacyEnv, defaultBackupsDir, defaultDbPath } from './envCompat.js';
+import { activeValues, envValue } from './config/envFile.js';
 import { readSetStatus } from './orchestrator/backups.js';
 import { funnelOff, funnelStatus, tailnetInfo, targetsPort } from './ops/tailnet.js';
 import { envFilePath, publicIntentIsStale, readPublicIntent } from './ops/publicIntent.js';
@@ -340,9 +341,19 @@ export function checkoutFacts(dir = process.cwd()): DoctorFacts['checkout'] {
 function sh(cmd: string, args: string[], timeout = 8000): string | undefined {
   try { return execFileSync(cmd, args, { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return undefined; }
 }
+/**
+ * The settings in force in a .env, read as the server reads them: the same
+ * lines (`activeValues`) and values (`envValue`) — a parser of its own here
+ * read `export` lines and quotes its own way, so doctor and the CLI could
+ * report a setting the server does not use. AGENTCLAW_* names stand in for
+ * an unset HATCHABOT_* one.
+ */
 export function envMap(file: string): Record<string, string> {
+  let text: string;
+  try { text = readFileSync(file, 'utf8'); } catch { return {}; /* absent */ }
   const m: Record<string, string> = {};
-  try { for (const l of readFileSync(file, 'utf8').split('\n')) { const t = l.trim(); if (!t || t.startsWith('#') || !t.includes('=')) continue; m[t.slice(0, t.indexOf('=')).replace(/^AGENTCLAW_/, 'HATCHABOT_')] = t.slice(t.indexOf('=') + 1).replace(/^['"]|['"]$/g, ''); } } catch { /* absent */ }
+  for (const [k, v] of activeValues(text)) m[k] = envValue(v);
+  applyLegacyEnv(m);
   return m;
 }
 

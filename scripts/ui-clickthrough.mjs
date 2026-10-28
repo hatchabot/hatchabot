@@ -1491,8 +1491,8 @@ const SCENARIOS = String.raw`(() => {
         ok('Kitchen: 180K of a 200K window = 90%', rows[0][1] === 'claude-opus-4-8' && rows[0][2] === '180K' && rows[0][3] === '200K' && rows[0][5] === '90%');
         eq('Kitchen has no cap; the menu offers only caps below its window', [capSel('a1').value, [...capSel('a1').options].map((o) => o.textContent)], ['', ['None', '100K', '150K']]);
         ok('Garden: Full counts against the cap Hatchabot set', rows[1][2] === '30K' && capSel('a2').value === '150000' && rows[1][5] === '20%');
-        ok('typical call and 1 in 10 over, each in its own column', rows[0][6] === '40K' && rows[0][7] === '90K');
-        ok('the note says what they mean', document.getElementById('fleetContextNow').textContent.includes('one in ten carried more'));
+        ok('one column, the median call, then the last call', rows[0][6] === '40K' && rows[0].length === 8 && !rows[0].includes('90K'));
+        ok('the note says what it means', document.getElementById('fleetContextNow').textContent.includes('Median call') && !document.getElementById('fleetContextNow').textContent.includes('1 in 10'));
       } finally {
         fleetUsageDlg.close();
         delete window.__override['/v1/token-health'];
@@ -1791,6 +1791,35 @@ const SCENARIOS = String.raw`(() => {
       ok('the failing one says so: ' + rows[0].textContent.replace(/\s+/g, ' ').slice(0, 200), rows[0].querySelector('.chip.FAILED') && rows[0].textContent.includes('5 in a row') && rows[0].textContent.includes('next'));
       ok('the healthy one is ok: ' + rows[1].textContent.replace(/\s+/g, ' ').slice(0, 200), !rows[1].querySelector('.chip.FAILED') && rows[1].textContent.includes('last run ok'));
       v2Close(); window.__crons = [];
+    },
+    waitingTemplateTasks: async () => {
+      // HB-0231: a template task the agent refused at setup waited, unseen, for a rebuild. The Tasks
+      // list shows it with why, and one button tries again.
+      const task = { id: 'c8', name: 'Morning brief', scheduleKind: 'cron', scheduleExpr: '0 8 * * *', enabled: true, payloadKind: 'agentTurn', message: 'hi', lastStatus: 'ok', consecutiveErrors: 0 };
+      const waiting = [{ name: 'Weekly menu', message: 'Plan next week dinners', cron: '0 9 * * 1', tz: 'UTC', why: 'the agent refused it: gateway busy' }];
+      window.__override['/v1/agents/a1/crons'] = { crons: [task], waiting };
+      try {
+        openV2Agent('a1', 'schedule');
+        const rows = await until(() => { const r = [...document.querySelectorAll('#cronList .pair')]; return r.length === 2 ? r : null; });
+        const first = rows[0].textContent.replace(/\s+/g, ' ');
+        ok('the waiting task is listed first, marked: ' + first.slice(0, 200), first.includes('Weekly menu') && first.includes('waiting to be added') && first.includes('0 9 * * 1'));
+        ok('with why, and when it is tried again: ' + first.slice(0, 300), first.includes('Not added yet: the agent refused it: gateway busy.') && first.includes('starts, wakes or is rebuilt'));
+        ok('the agent\'s own task is still there', rows[1].textContent.includes('Morning brief'));
+        const btn = document.getElementById('cronWaitingRetry');
+        ok('one button to try again: ' + (btn && btn.textContent), !!btn && btn.textContent.includes('Try adding it now'));
+        window.__answer = { 'POST /v1/agents/a1/crons/waiting': [{ status: 200, body: { waiting: [] } }] };
+        window.__override['/v1/agents/a1/crons'] = { crons: [task, { ...task, id: 'c9', name: 'Weekly menu', scheduleExpr: '0 9 * * 1' }], waiting: [] };
+        const before = calls('POST', /\/v1\/agents\/a1\/crons\/waiting$/).length;
+        btn.click();
+        await until(() => calls('POST', /\/v1\/agents\/a1\/crons\/waiting$/).length === before + 1);
+        await until(() => !document.getElementById('cronWaitingRetry') && document.querySelectorAll('#cronList .pair').length === 2);
+        ok('added: the list shows it as a task now', [...document.querySelectorAll('#cronList .pair')].some((r) => r.textContent.includes('Weekly menu') && !r.textContent.includes('waiting to be added')));
+        ok('and said so: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('Added.'));
+      } finally {
+        delete window.__override['/v1/agents/a1/crons'];
+        window.__answer = {};
+        v2Close();
+      }
     },
     signOutEverywhere: async () => {
       // The account menu ends every session, after asking; a refusal is shown, not swallowed (review, 2026-09-29).
@@ -2917,7 +2946,7 @@ const SCENARIOS = String.raw`(() => {
         await imp;
         const t = calls('POST', /\/v1\/agents\/import$/).slice(before + 1);
         eq('the template was uploaded, once', t.length, 1);
-        eq('with the answer in the request', decodeURIComponent(t[0].url.split('values=')[1] || ''), JSON.stringify({ subject: 'Algebra' }));
+        eq('with the answer in the body, ahead of the file', (await t[0].body.text()).split('\n')[0], JSON.stringify({ values: { subject: 'Algebra' } }));
         ok('the small template was read whole: ' + out, out > 100);
         ok('said what was imported: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('Imported “Homework Helper”'));
         // A file that is not gzip at all is uploaded as it is, as before.
@@ -2930,10 +2959,10 @@ const SCENARIOS = String.raw`(() => {
         if (paramFormDlg.open) paramFormDlg.close();
       }
     },
-    importAnswersTooLong: async () => {
-      // R25 (v2.166.0, interim): the setup answers ride the request's address; about five full-length
-      // (2,000-character) answers passed Node's 16 KB limit and came back as a bare "Import failed" (a 431
-      // with no body). The page refuses first and says what is over.
+    importAnswersInBody: async () => {
+      // HB-0093 (v2.170.0): the setup answers rode the request's address; about five full-length
+      // (2,000-character) answers passed Node's 16 KB limit (a bare 431), and from v2.166.0 the page
+      // refused them up front. They go in the body now, ahead of the file, so all of them are sent.
       const gzipFile = async (json, name) => new File([await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).blob()], name);
       const parameters = ['one', 'two', 'three', 'four', 'five'].map((k) => ({ key: k, label: 'Answer ' + k, type: 'text' }));
       const tpl = await gzipFile(JSON.stringify({ format: 'hatchabot-template', version: 1, agent: { name: 'Long Answers' }, files: {}, parameters }), 'long-answers.template.hatchabot');
@@ -2942,31 +2971,24 @@ const SCENARIOS = String.raw`(() => {
         // The form settled from the scenario before (its close event is a queued task); a stale toast cleared.
         await until(() => !paramFormDlg.open && paramFormResolve === null); await sleep(0);
         document.getElementById('toast').textContent = '';
+        window.__answer = { 'POST /v1/agents/import': [{ status: 201, body: { kind: 'template', name: 'Long Answers' } }] };
         const imp = importAgentFile(tpl);
         await formOpened();
-        // Written answers: a space or a comma takes three characters in the address.
+        // Written answers: a space or a comma took three characters in the address.
         const prose = (n) => 'A made-up answer, written out in full sentences, as a person would. '.repeat(40).slice(0, n);
-        for (let i = 0; i < 5; i++) document.getElementById('pfv-' + i).value = prose(i === 2 ? 2000 : 1990);
+        for (let i = 0; i < 5; i++) document.getElementById('pfv-' + i).value = prose(2000);
         submitParamForm();
         await imp;
-        const toastText = () => document.getElementById('toast').textContent;
-        await until(() => toastText().includes('too long to send together'), 3000).catch(() => {
-          throw new Error('not refused: toast ' + JSON.stringify(toastText()) + ', form open ' + paramFormDlg.open + ', imports made ' + (calls('POST', /\/v1\/agents\/import$/).length - before));
-        });
-        const said = toastText();
-        ok('refused in words: ' + said, /[\d,.]+ characters over/.test(said) && /“Answer three”, 2[,.]?000 characters/.test(said) && said.includes('Overview after the import'));
-        eq('no request was made', calls('POST', /\/v1\/agents\/import$/).length - before, 0);
-        // Answers that fit are sent.
-        window.__answer = { 'POST /v1/agents/import': [{ status: 200, body: { kind: 'template', name: 'Long Answers' } }] };
-        await until(() => !paramFormDlg.open && paramFormResolve === null); await sleep(0);
-        const imp2 = importAgentFile(tpl);
-        await formOpened();
-        for (let i = 0; i < 5; i++) document.getElementById('pfv-' + i).value = prose(2000);
-        document.getElementById('pfv-3').value = 'short';
-        document.getElementById('pfv-4').value = 'short';
-        submitParamForm();
-        await imp2;
-        eq('three full answers and two short ones went', calls('POST', /\/v1\/agents\/import$/).length - before, 1);
+        const sent = calls('POST', /\/v1\/agents\/import$/).slice(before);
+        eq('one request went', sent.length, 1);
+        ok('nothing in the address: ' + sent[0].url, !sent[0].url.includes('?'));
+        eq('sent as an import with answers', sent[0].headers['content-type'], 'application/vnd.hatchabot.import');
+        const bytes = new Uint8Array(await sent[0].body.arrayBuffer());
+        const nl = bytes.indexOf(10);
+        const head = JSON.parse(new TextDecoder().decode(bytes.subarray(0, nl)));
+        eq('all five full answers in the body', Object.values(head.values).map((v) => v.length).join(','), '2000,2000,2000,2000,2000');
+        eq('the file after them, whole', bytes.length - nl - 1, tpl.size);
+        ok('no refusal, the import said: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('Imported “Long Answers”'));
       } finally {
         window.__answer = {};
         if (paramFormDlg.open) paramFormDlg.close();
@@ -3082,6 +3104,16 @@ const SCENARIOS = String.raw`(() => {
         await until(() => document.getElementById('toast').textContent.includes('not switched'));
         ok('the toast names the agent that was not switched and why: ' + document.getElementById('toast').textContent,
           document.getElementById('toast').textContent.includes('not switched: Homework Helper (its runtime is too old for claude-haiku-4-5'));
+        // Other accounts' followers held the same way are counted, not named (HB-0245).
+        document.getElementById('toast').textContent = '';
+        openApplyModel('p1', 'claude-haiku-4-5', [], onProfile, 'Claude token');
+        await until(() => applyModelDlg.open);
+        toggleApplyAll(false);
+        window.__answer = { 'POST /v1/ai-profiles/p1/apply-default-model': [{ body: { applied: 0, held: 2, live: 0, staged: 0, othersHeld: 2 } }] };
+        document.getElementById('applyModelBtn').click();
+        await until(() => document.getElementById('toast').textContent.includes('other accounts'));
+        ok('the toast counts the other accounts\' agents kept on their model: ' + document.getElementById('toast').textContent,
+          document.getElementById('toast').textContent.includes('Existing agents keep their models. 2 agents of other accounts that follow this source were kept on their model: their runtimes are too old for claude-haiku-4-5 on a Claude plan.'));
       } finally { if (applyModelDlg.open) applyModelDlg.close(); }
     },
   });
@@ -3732,7 +3764,7 @@ const SCENARIOS = String.raw`(() => {
       window.__answer['POST /v1/agents/a1/icons/suggest'] = [
         { body: { via: 'ai', ideas: [{ icon: '🪙', color: '#e0a13a' }, { icon: '🔭', color: '#5a7fd6' }, { icon: '🐝', color: '#c9b03a' }] } },
         { body: { via: 'ai', ideas: [{ icon: '🧩', color: '#8a6fd0' }] } },
-        { body: { via: 'keywords', ideas: [] } },
+        { body: { via: 'keywords', why: 'ai-failed', ideas: [] } },
       ];
       const mark = window.__calls.length;
       const patches = () => window.__calls.slice(mark).filter((c) => c.method === 'PATCH');
@@ -3755,10 +3787,14 @@ const SCENARIOS = String.raw`(() => {
         const shown = asks().at(-1).body.exclude;
         ok('the second ask leaves out what was shown: ' + JSON.stringify(shown), ['🪙', '🔭', '🐝'].every((e) => shown.includes(e)));
         ok('the earlier ideas stay on show', ideaBtns()[0].dataset.emoji === '🪙' && ideaBtns()[3].dataset.emoji === '🧩');
+        ok('nothing asked for, nothing sent', !('want' in asks().at(-1).body));
         await until(ready);
-        document.getElementById('v2IconAutoBtn').click();
-        await until(() => document.getElementById('v2IconNote').textContent.includes('isn’t available'));
+        document.getElementById('v2IconWant').value = '  a birthday cake ';
+        document.getElementById('v2IconWant').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await until(() => document.getElementById('v2IconNote').textContent.includes('didn’t answer'));
+        eq('Enter in the box asks, with the words typed', asks().at(-1).body.want, 'a birthday cake');
         ok('without the AI it says so, and keeps what it had', ideaBtns().length === 4);
+        ok('and says an emoji can be pasted', document.getElementById('v2IconNote').textContent.includes('paste any emoji'));
         ok('still nothing saved', !patches().length);
         await until(ready);
         document.getElementById('v2IconSaveBtn').click();
@@ -3766,7 +3802,7 @@ const SCENARIOS = String.raw`(() => {
         eq('Save sends the pick', { icon: patch.body.icon, iconColor: patch.body.iconColor }, { icon: '🔭', iconColor: '#5a7fd6' });
         await until(() => !v2IconDlg.open);
         openV2Icon('a1');
-        ok('opened again, it starts without ideas', document.getElementById('v2IconIdeasBox').hidden && !ideaBtns().length && !document.getElementById('v2IconNote').textContent);
+        ok('opened again, it starts without ideas or words', document.getElementById('v2IconIdeasBox').hidden && !ideaBtns().length && !document.getElementById('v2IconNote').textContent && !document.getElementById('v2IconWant').value);
         v2IconDlg.close();
       } finally {
         if (window.__answer) delete window.__answer['POST /v1/agents/a1/icons/suggest'];
@@ -4083,6 +4119,61 @@ const SCENARIOS = String.raw`(() => {
         eq('left blank, it is not sent: the app keeps the one it has, or its default', sent(mark)?.body.values, { mailbox: 'demo@example.org' });
       } finally {
         if (window.__answer) delete window.__answer['POST /v1/apps/inspect'];
+        if (appDlg.open) appDlg.close();
+        await refresh(false);
+      }
+    },
+    // The App form (app audit, 2026-10-27): the default AI source, the chat filled in, an account that failed to attach.
+    appFormChecks: async () => {
+      const MAN = { app: 'demoapp', name: 'Demo App', chat: 'Run cd {app_dir} for {agent}.', tasks: [], config: { fields: [] }, connections: [{ kind: 'google', purpose: 'its mailbox', field: 'mailbox' }] };
+      const read = { status: 200, body: { sha: 'c0ffee0123456789c0ffee0123456789c0ffee01', manifest: MAN, connections: MAN.connections, ask: [{ key: 'mailbox', type: 'email', required: true }] } };
+      const FILLED = 'Run cd /home/node/.openclaw/apps/demoapp/current for garden-helper.';
+      const keys = ['POST /v1/apps/inspect', 'POST /v1/agents', 'POST /v1/agents/newapp3/connections/attach', 'POST /v1/agents/newapp3/app/pending', 'POST /v1/agents/a1/connections/attach'];
+      const prevProfiles = profiles;
+      try {
+        window.__answer = window.__answer || {};
+        window.__override['/v1/connections'] = { connections: [{ id: 'c2', kind: 'google', email: 'other@example.org', attachedTo: [] }] };
+        // The default source moved below another: it is still the one picked (HB-0258).
+        profiles = [{ id: 'pay', name: 'API key', vendor: 'anthropic', defaultSource: false }, { id: 'plan', name: 'Plan', vendor: 'anthropic', defaultSource: true }];
+        window.__answer['POST /v1/apps/inspect'] = [read, { status: 200, body: { ...read.body, chat: FILLED } }];
+        window.__answer['POST /v1/agents'] = [{ status: 200, body: { id: 'newapp3', name: 'Garden Helper', state: 'PROVISIONING' } }];
+        window.__answer['POST /v1/agents/newapp3/connections/attach'] = [{ status: 200, body: { attached: true, live: false } }];
+        window.__answer['POST /v1/agents/newapp3/app/pending'] = [{ status: 200, body: { pending: true, app: 'demoapp', name: 'Demo App' } }];
+        openAppDlg('create');
+        document.getElementById('appSource').value = '~/demoapp';
+        await appRead();
+        eq('the default AI source is picked', document.getElementById('appProfile').value, 'plan');
+        document.getElementById('appName').value = 'Garden Helper';
+        document.getElementById('appConn').value = 'c2'; appConnPicked();
+        let mark = window.__calls.length;
+        await appGo();
+        let sent = window.__calls.slice(mark);
+        const look = sent.find((c) => c.path === '/v1/apps/inspect');
+        eq('its chat is asked for, for this name', look && look.body, { source: '~/demoapp', name: 'Garden Helper' });
+        const made = sent.find((c) => c.method === 'POST' && c.path === '/v1/agents');
+        eq('the new agent gets the default source', made && made.body.aiProfileId, 'plan');
+        eq('and the chat filled in (HB-0259)', made && made.body.persona, FILLED);
+        ok('a new agent: an account not live yet is fine', sent.some((c) => c.path === '/v1/agents/newapp3/app/pending') && !appDlg.open);
+        // Into a running agent: the account went on but could not be set up in it. Nothing is installed (HB-0257).
+        window.__answer['POST /v1/apps/inspect'] = [read];
+        window.__answer['POST /v1/agents/a1/connections/attach'] = [{ status: 200, body: { attached: true, live: false, error: 'made-up import failure' } }];
+        openAppDlg('install', 'a1');
+        document.getElementById('appSource').value = '~/demoapp';
+        await appRead();
+        document.getElementById('appConn').value = 'c2'; appConnPicked();
+        mark = window.__calls.length;
+        await appGo();
+        sent = window.__calls.slice(mark);
+        const err = document.getElementById('appErr').textContent;
+        ok('it says the account failed, and why: ' + err, err.includes('other@example.org is attached, but could not be set up') && err.includes('made-up import failure'));
+        ok('the account was attached', sent.some((c) => c.path === '/v1/agents/a1/connections/attach'));
+        ok('nothing was installed', !sent.some((c) => c.path === '/v1/agents/a1/app'));
+        ok('the dialog stays open to try again', appDlg.open);
+        ok('it never says it is running: ' + document.getElementById('toast').textContent, !document.getElementById('toast').textContent.includes('installed and running'));
+      } finally {
+        profiles = prevProfiles;
+        for (const k of keys) if (window.__answer) delete window.__answer[k];
+        delete window.__override['/v1/connections'];
         if (appDlg.open) appDlg.close();
         await refresh(false);
       }

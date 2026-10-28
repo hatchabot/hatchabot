@@ -1775,7 +1775,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     const door = this.#embedDoorName();
     const doorUser = await this.containerUserFor(spec.uid, spec.gid);
     const doorHash = createHash('sha256').update(JSON.stringify([
-      spec.doorBind, spec.doorPort, spec.perMin, dirname(spec.keysFile), EMBED_MODEL_BASENAME(spec.keysFile), EMBED_MODEL_BASENAME(spec.serverKeyFile),
+      spec.doorBind, spec.doorPort, spec.perMin, spec.mbPerMin, dirname(spec.keysFile), EMBED_MODEL_BASENAME(spec.keysFile), EMBED_MODEL_BASENAME(spec.serverKeyFile),
       spec.doorImage, createHash('sha256').update(spec.doorScript).digest('hex'), doorUser,
     ])).digest('hex').slice(0, 16);
     const doorState = await this.#containerState(door);
@@ -1802,7 +1802,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       // would never be seen until the door restarted.
       '-v', this.remote ? keysMount : `${dirname(spec.keysFile)}:/keys:ro`, '-e', `EMBED_KEYS_FILE=/keys/${EMBED_MODEL_BASENAME(spec.keysFile)}`,
       '-e', 'EMBED_UPSTREAM=http://embedder:8080', '-e', `EMBED_SERVER_KEY_FILE=/keys/${EMBED_MODEL_BASENAME(spec.serverKeyFile)}`,
-      '-e', `EMBED_PER_MIN=${spec.perMin}`, '-e', 'EMBED_DOOR_PORT=8093',
+      '-e', `EMBED_PER_MIN=${spec.perMin}`, '-e', `EMBED_MB_PER_MIN=${spec.mbPerMin}`, '-e', 'EMBED_DOOR_PORT=8093',
       '--entrypoint', 'node', spec.doorImage, '-e', spec.doorScript,
     ]);
     if (run.code !== 0) {

@@ -4,7 +4,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { brotliDecompressSync, gunzipSync } from 'node:zlib';
+import { brotliDecompressSync, gunzipSync, gzipSync } from 'node:zlib';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { etagMatches, registerRoutes } from '../src/api/routes.js';
@@ -188,5 +188,55 @@ describe('never compressed', () => {
     expect(arc.statusCode).toBe(200);
     expect(arc.headers['content-encoding']).toBeUndefined();
     expect(arc.body).toBe(text);
+  });
+});
+
+describe('the console proxy and what the gateway itself compresses (HB-0043)', () => {
+  /** A gateway that gzips whatever it can (as a proxy in front of OpenClaw might), and answers JSON on a document path. */
+  async function gzippingGateway(): Promise<{ port: number; asked: () => Record<string, unknown> }> {
+    let last: Record<string, unknown> = {};
+    const server = createServer((req, res) => {
+      last = req.headers;
+      if (req.url === '/chat/missing') { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end('{"error":"no such page","href":"/assets/x"}'); return; }
+      if (req.url === '/chat/plain') { res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('base path "" and src="/assets/x.js"'); return; }
+      const [type, body] = /\.js$/.test(req.url ?? '') ? ['text/javascript', BIG_JS] : ['text/html; charset=utf-8', BIG_HTML];
+      res.writeHead(200, { 'Content-Type': type, 'Content-Encoding': 'gzip' });
+      res.end(gzipSync(body));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    toClose.push(server);
+    return { port: (server.address() as any).port, asked: () => last };
+  }
+
+  it('a gzipped asset passes through byte for byte, labelled gzip, never compressed twice', async () => {
+    const gw = await gzippingGateway();
+    const { f } = await world({ gatewayPort: gw.port });
+    const js = await f.inject({ method: 'GET', url: '/v1/agents/a1/ui/assets/app.js', headers: { ...as, 'accept-encoding': 'gzip, br' } });
+    expect(js.statusCode).toBe(200);
+    expect(js.headers['content-encoding']).toBe('gzip');
+    expect(gw.asked()['accept-encoding']).toBe('gzip, br');
+    expect(gunzipSync(js.rawPayload).toString('utf8')).toBe(BIG_JS);
+  });
+
+  it('a document the gateway compressed although it was asked not to is passed on as it came, not rewritten into garbage', async () => {
+    const gw = await gzippingGateway();
+    const { f } = await world({ gatewayPort: gw.port });
+    const doc = await f.inject({ method: 'GET', url: '/v1/agents/a1/ui/chat', headers: { ...as, 'accept-encoding': 'gzip, br' } });
+    expect(gw.asked()['accept-encoding']).toBeUndefined();
+    expect(doc.statusCode).toBe(200);
+    expect(doc.headers['content-encoding']).toBe('gzip');
+    expect(gunzipSync(doc.rawPayload).toString('utf8')).toBe(BIG_HTML);
+  });
+
+  it('an answer on a document path that is not HTML (an error in JSON, plain text) passes untouched, with its status', async () => {
+    const gw = await gzippingGateway();
+    const { f } = await world({ gatewayPort: gw.port });
+    const missing = await f.inject({ method: 'GET', url: '/v1/agents/a1/ui/chat/missing', headers: as });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.headers['content-type']).toMatch(/^application\/json/);
+    expect(missing.body).toBe('{"error":"no such page","href":"/assets/x"}');
+    const plain = await f.inject({ method: 'GET', url: '/v1/agents/a1/ui/chat/plain', headers: as });
+    expect(plain.statusCode).toBe(200);
+    expect(plain.body).toBe('base path "" and src="/assets/x.js"');
   });
 });

@@ -66,7 +66,8 @@ codebase gets deployed, updated and rolled back from Hatchabot.
   merely starts with `<app>-` is left alone.
 - `env`, `command`, `chat`: placeholders `{app_dir}` (the live release),
   `{data_dir}`, `{agent}` (the OpenClaw agent id), `{name}`, `{env}` (the env
-  as `K=V …`).
+  as `K=V …`). `chat` is filled in once, when a new agent is made from the
+  app (its SOUL.md); an update does not change it.
 - `config.fields`: written to `{data_dir}/<file>` as JSON. A field is asked for
   (`required`, `default`) or filled by Hatchabot (`from`). Values already in the
   file are kept on update; new fields get their defaults. A value given as empty
@@ -127,16 +128,27 @@ off first and puts them back if the new one fails.
 
 **One copy per account.** An install is refused (409) when another live agent
 already runs the same app on the account its values name (the mailbox): two
-copies would both answer every email. The dialog warns first; `allowShared`
+copies would both answer every email. What the other copy runs on is read
+from its config in that agent; one not running, or whose config cannot be
+read, counts. The dialog warns first; `allowShared`
 (the dialog's confirmation) overrides it. It is judged on the config the app
 would run with (the values given, the agent's existing file, the manifest's
 defaults), for installs, updates and new agents from a repo alike; an update
 is refused only for an account it adds, not one already confirmed. Installs of
-one app on one account run one at a time.
+one app on one account run one at a time. An install or update is judged on
+the agent's app as it was when it was asked: when another install, update or
+Stop app finished while it read its source, it is refused ("Its app changed
+meanwhile"), and the later change stands.
+
+Replacing an app with another takes the old app's tasks off first and, if the
+new one fails, puts them back as they were (one you had turned off stays off;
+the operation records which, so a restart puts them back the same way).
 
 **Update** is the same from step 1 with a newer commit; **rollback** points
 `current` back at the previous release and re-syncs its tasks (if they cannot
-be scheduled, it stays on the release it had).
+be scheduled, it stays on the release it had). A switch whose answer is lost
+is judged from the link itself; when the release and the record cannot be
+brought back together, the roll back waits for your choice on the agent's page.
 
 ## Commands
 
@@ -157,10 +169,14 @@ API: `POST /v1/apps/inspect`, `GET|POST|DELETE /v1/agents/:id/app`,
 - **New agent → "run an app from a repo"** (the machine's owner): give the
   folder or git address, read it, pick the Google account it needs (the
   mailbox follows the account), fill in what it asks for, Create. The account
-  is attached before the agent first runs. The agent
-  is made with the app's name, chat and model, and Hatchabot installs the app
+  is attached before the agent first runs; into a running agent, an account
+  that cannot be set up in it stops the install. The agent
+  is made with the app's name, chat and model (the ⭐ default AI source unless
+  another is picked), and Hatchabot installs the app
   as soon as the agent is running (`POST /v1/agents/:id/app/pending`, run when
-  provisioning finishes), so closing the browser does not lose it.
+  provisioning finishes), so closing the browser does not lose it. A second
+  request replaces a waiting one, and goes in after one already running. A
+  direct install of an app retires a waiting one, and so does Stop app.
 - **The agent's page → App**: which app, which commit, from where, and whether
   its tests passed, with **⬆ Update** (the newest commit; its tests run first
   and the running version stays if they fail, with their output shown),

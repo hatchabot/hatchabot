@@ -57,9 +57,9 @@ describe('docs syncs run with the agent held (HB-0230)', () => {
     await expectHeld(w, id, p);
   });
 
-  it('a new memory cap together with a memory-policy flip is not refused by its own sync', async () => {
+  it('a new memory cap together with an old client\'s sharedMemory: true is not refused by its own sync', async () => {
     const w = await makeWorld();
-    const id = await seedRunningAgent(w, { sharedMemory: false });
+    const id = await seedRunningAgent(w);
     const res = await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { memoryCap: '4g', sharedMemory: true } });
     expect(res.statusCode, res.body).toBe(200);
     expect(w.store.getAgent(id)!.sharedMemory).toBe(true);

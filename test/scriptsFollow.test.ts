@@ -482,3 +482,41 @@ describe('scripts/follow-latest.sh runs only a release the workflow published (#
     expect(w.urls()).toEqual([]);
   });
 });
+
+describe('the follow timers refuse to guess where node and docker are (HB-0042)', () => {
+  const tool = (name: string) => spawnSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim();
+  const BASH = tool('bash');
+  /** A PATH of only what the install step uses, plus the shims asked for: no /usr/bin, where a real docker may be. */
+  function sandbox(script: string, shims: string[]) {
+    const root = mkdtempSync(join(tmpdir(), 'hb-follow-path-')); dirs.push(root);
+    const home = join(root, 'home'); mkdirSync(home, { recursive: true });
+    const bin = join(root, 'bin'); mkdirSync(bin);
+    for (const t of ['dirname', 'sed', 'cat', 'mkdir']) symlinkSync(tool(t), join(bin, t));
+    for (const s of ['systemctl', ...shims]) writeFileSync(join(bin, s), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const app = join(root, 'app'); mkdirSync(join(app, 'scripts'), { recursive: true });
+    writeFileSync(join(app, 'scripts', script), readFileSync(join('scripts', script)), { mode: 0o755 });
+    const run = (...args: string[]) => spawnSync(BASH, [join(app, 'scripts', script), '--install', ...args], { encoding: 'utf8', env: scriptEnv(home, bin, { HATCHABOT_PROD_DIR: app }) });
+    const unit = (name: string) => join(home, '.config', 'systemd', 'user', `${name}.service`);
+    return { bin, run, unit };
+  }
+  for (const [script, args, name] of [['follow-channel.sh', ['stable'], 'hatchabot-follow-channel'], ['follow-latest.sh', [], 'hatchabot-follow-latest']] as const) {
+    it(`${script} --install fails clearly without docker or node, and writes no unit`, () => {
+      const noDocker = sandbox(script, ['node']);
+      const r = noDocker.run(...args);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/docker not found on PATH/);
+      expect(existsSync(noDocker.unit(name))).toBe(false);
+      const noNode = sandbox(script, ['docker']);
+      const n = noNode.run(...args);
+      expect(n.status).toBe(1);
+      expect(n.stderr).toMatch(/node not found on PATH/);
+      expect(existsSync(noNode.unit(name))).toBe(false);
+    });
+    it(`${script} --install puts the node and docker it found on the unit's PATH`, () => {
+      const both = sandbox(script, ['node', 'docker']);
+      const r = both.run(...args);
+      expect(r.status, r.stderr).toBe(0);
+      expect(readFileSync(both.unit(name), 'utf8')).toContain(`Environment="PATH=${both.bin}:${both.bin}:/usr/local/bin:/usr/bin:/bin"`);
+    });
+  }
+});

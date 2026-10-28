@@ -65,52 +65,60 @@ sudo chown "$USER" /mnt/data
 
 ---
 
-## 3. Install Docker + Node 22, and put Docker's data on the data disk
+## 3. Put Docker's data on the data disk
+
+Docker reads `/etc/docker/daemon.json` when it first starts, so write it before
+Docker is installed (step 4): its images and volumes then live on the
+persistent disk, covered by its snapshots.
 
 ```bash
-# Docker Engine
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker "$USER"      # log out/in (or `newgrp docker`) after this
-
-# Point docker's storage at the persistent disk, so volumes are snapshot-covered.
-sudo mkdir -p /mnt/data/docker
+sudo mkdir -p /etc/docker /mnt/data/docker
 echo '{ "data-root": "/mnt/data/docker" }' | sudo tee /etc/docker/daemon.json
-sudo systemctl restart docker
-
-# Node 22 (nvm keeps it in your user, which is where the service runs it)
-curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-. ~/.nvm/nvm.sh && nvm install 22
 ```
-
-Re-SSH after the group change so `docker` works without sudo.
 
 ---
 
-## 4. Install Hatchabot
+## 4. Install Hatchabot (and Docker)
 
-`setup-host.sh` checks prereqs, writes `.env` (a random `HATCHABOT_SECRET_KEY`
-plus a password you choose), builds the runtime image, installs the systemd user
-service, and links the `hatchabot` CLI.
+The Hatchabot installer installs Docker as well, so there is nothing else to
+set up first. Run it as your own user (not root), with the install directory on
+the data disk:
 
 ```bash
-git clone https://github.com/hatchabot/hatchabot.git /mnt/data/hatchabot
-cd /mnt/data/hatchabot
-./scripts/setup-host.sh    # writes .env (secret key + your password), builds the image, installs the service
+curl -fsSL https://hatchabot.com/install.sh | HATCHABOT_DIR=/mnt/data/hatchabot bash
 ```
 
+What it does:
+- **Docker:** it offers to install Docker Engine with Docker's own install
+  script, taken at one fixed commit and run only when its checksum matches the
+  one the installer carries (never whatever `get.docker.com` serves that day).
+  It adds you to the `docker` group; no log-out is needed.
+- **Hatchabot:** on Debian 12 it downloads the release's prebuilt bundle, with
+  its own Node inside, so Node, git and a compiler are not needed
+  (`docs/install-bundle.md`).
+- **Setup:** `scripts/setup-host.sh` writes `.env` (a random
+  `HATCHABOT_SECRET_KEY`, and how people sign in: an account each, or one shared
+  password), fetches the agent runtime image, installs the systemd user service
+  and the nightly backup timer, and links the `hatchabot` command.
+
 Then append the server-specific settings to the `.env` it created (systemd reads
-this file; values with special characters use single quotes):
+this file, and the last line for a name wins; values with special characters
+use single quotes), and restart the service:
 
 ```bash
+cd /mnt/data/hatchabot
 cat >> .env <<'EOF'
-HATCHABOT_DB=/mnt/data/hatchabot.sqlite
 HATCHABOT_BIND=127.0.0.1
 HATCHABOT_PUBLIC_URL=https://hatchabot.example.com
 HATCHABOT_BACKUP_DIR=/mnt/data/hatchabot-backups
 # Optional cap so no one account can exhaust the box:
 # HATCHABOT_MAX_AGENTS_PER_ACCOUNT=10
 EOF
+systemctl --user restart hatchabot
 ```
+
+The database stays where the installer put it, `data/hatchabot.sqlite` in the
+install directory, which is already on the data disk.
 
 `HATCHABOT_BIND=127.0.0.1` keeps the app private so **only the TLS proxy**
 (step 5) reaches it. (Skip this line if you use native TLS instead.)
@@ -213,16 +221,20 @@ tarballs per the header of `scripts/backup-volumes.sh`), put the **same**
 ## 9. Start it and survive reboots
 
 ```bash
-# The systemd user service was installed by setup-host.sh. Let it run at boot
-# without an interactive login:
+# The installer enabled the service and the backup timer, and turned on
+# lingering so they start at boot without a login. To check, or to turn
+# lingering on where the installer could not:
 sudo loginctl enable-linger "$USER"
 systemctl --user enable --now hatchabot
 systemctl --user enable --now hatchabot-backup.timer
 systemctl --user status hatchabot --no-pager
 ```
 
-Open `https://hatchabot.example.com`, enter the password you chose, and create
-an agent.
+Open `https://hatchabot.example.com` and create an agent. With an account for
+each person (the installer's default), the first account needs the setup code
+the server prints when it starts (`journalctl --user -u hatchabot | grep -i
+"setup code"`), and that account becomes the owner; with one shared password,
+enter the one you chose.
 
 ---
 

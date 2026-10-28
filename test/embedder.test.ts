@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { bootStartEmbedder, EmbedderService, embedKeyHash, fileMode, sha256File, EMBED_MODEL_FILE } from '../src/embedder/embedder.js';
+import { bootStartEmbedder, EmbedderService, scheduleEmbedderBoot, embedKeyHash, fileMode, sha256File, EMBED_MODEL_FILE } from '../src/embedder/embedder.js';
 
 /**
  * The machine's embedding service: model file, keys file, start/stop, and
@@ -354,3 +354,59 @@ describe('the 30th audit: the boot auto-start', () => {
   });
 });
 
+
+describe('the boot timers the server sets (HB-0043: they sit behind !VITEST)', () => {
+  afterEach(() => { vi.useRealTimers(); });
+  /** A stand-in service: what the boot start and the health loop read and call. */
+  const fake = (o: { enabled: boolean; hostId?: string; tick?: () => Promise<string> }) => {
+    const calls: string[] = [];
+    return {
+      calls, stoppedByOwner: false, external: undefined, hostId: o.hostId, enabled: o.enabled,
+      async start() { calls.push('start'); this.enabled = true; },
+      async healthTick() { calls.push('tick'); return o.tick ? o.tick() : 'ok'; },
+    };
+  };
+  it('starts an untouched service on an engine-free image after the boot delay, then ticks every enabled service', async () => {
+    vi.useFakeTimers();
+    const local = fake({ enabled: false });
+    const runnerOn = fake({ enabled: true, hostId: 'r1', tick: async () => 'restarted' });
+    const runnerOff = fake({ enabled: false, hostId: 'r2' });
+    const warned: string[] = [];
+    const events: string[] = [];
+    const stop = scheduleEmbedderBoot({
+      embedder: local as never, localHostId: () => 'h1', imageInfo: async () => ({ embedEngine: 'none' }),
+      log: (e) => events.push(e), services: () => [local, runnerOn, runnerOff] as never,
+      warn: (_d, msg) => warned.push(msg), bootMs: 1000, healthMs: 60_000,
+    });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(local.calls).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(local.calls).toEqual(['start']);
+    expect(events).toEqual(['embed.auto_started']);
+    // The first health pass 30 s after the boot start: enabled services only.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect([local.calls, runnerOn.calls, runnerOff.calls]).toEqual([['start', 'tick'], ['tick'], []]);
+    expect(warned).toEqual(['embedder restarted by the health loop']);
+    // Then every healthMs, counted from start-up: 60 s, 120 s, …
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(runnerOn.calls.length).toBe(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(runnerOn.calls.length).toBe(3);
+    stop();
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(runnerOn.calls.length).toBe(3);
+  });
+  it('a boot start that throws is logged, and the health loop still runs', async () => {
+    vi.useFakeTimers();
+    const local = fake({ enabled: false });
+    local.start = async () => { throw new Error('docker is down'); };
+    const warned: string[] = [];
+    const stop = scheduleEmbedderBoot({
+      embedder: local as never, localHostId: () => 'h1', imageInfo: async () => ({ embedEngine: 'none' }),
+      services: () => [local] as never, warn: (_d, msg) => warned.push(msg), bootMs: 10, healthMs: 1_000_000,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(warned).toEqual(['embedder auto-start at boot failed']);
+    stop();
+  });
+});

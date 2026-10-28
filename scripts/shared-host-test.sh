@@ -349,7 +349,8 @@ if [ "$TENANTS" -ge 2 ]; then
     && ok "$a cannot see $b's Docker socket or home" || bad "$a can see $b's files: socket '$xs' home '$xh'"
 fi
 
-L exec "$VM" -- sh -c 'free -m | sed -n 2p; for u in t1 t2; do printf "%s: " $u; systemctl show user-$(id -u $u).slice -p MemoryCurrent --value 2>/dev/null | awk "{printf \"%d MiB\\n\", \$1/1048576}"; done' >"$OUT/memory.txt" 2>/dev/null
+# Every tenant made above, however many --tenants asked for (HB-0042).
+L exec "$VM" -- sh -c 'free -m | sed -n 2p; for u in "$@"; do printf "%s: " $u; systemctl show user-$(id -u $u).slice -p MemoryCurrent --value 2>/dev/null | awk "{printf \"%d MiB\\n\", \$1/1048576}"; done' _ $(seq -f 't%g' 1 "$TENANTS") >"$OUT/memory.txt" 2>/dev/null
 echo
 echo "── $PASS passed, $FAIL failed · memory: $(tr '\n' ' ' <"$OUT/memory.txt") · logs: $OUT ──"
 printf '%s\n' "${RESULTS[@]}" >"$OUT/summary.txt"

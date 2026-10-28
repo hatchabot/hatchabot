@@ -7,101 +7,143 @@ users the operator does *not* vouch for — a paying customer, a colleague, a
 stranger with a link.
 
 Each item says what is deliberately permitted today, why it is acceptable here,
-and what "fixed" looks like. Items marked **ACCEPTED RISK** have matching `⚠`
-comments in the code at the exact place the check belongs.
+and what "fixed" looks like. Items that have since been fixed stay listed, under
+their old numbers (the code refers to them), with the release that fixed them.
+The wider threat model for family members on one machine is in
+[family-member-risk-assessment.md](family-member-risk-assessment.md).
+
+*Checked against the code and `CHANGELOG.md` as of v2.170.0.*
+
+| § | Item | Status |
+|---|---|---|
+| 1 | A shared machine-login Claude source mounts the owner's `~/.claude` | Fixed in v0.120.0; no new machine-login sources since v2.39.0 |
+| 2 | Un-sharing an AI source does not revoke it | Fixed in v2.87.0 |
+| 3 | The fleet media and search keys reach every account | **Open** |
+| 4 | First sign-in claims the whole installation | Fixed for accounts mode (v1.10.0, v2.31.1); **open** for Google sign-in without an allowlist |
+| 5 | Containers run without full capability restrictions | **Partly open** |
+| 6 | Members can read more than they should | Fixed in v2.39.0 and v2.88.4 |
+| 7 | Operational gaps that bite at scale | **Partly open** (one item) |
+| 8 | Every DM member shares one conversation thread | **Open** (stated to members since v2.107.0) |
+| 9 | Session resets in the chat lose the thread | **Partly closed** |
+| 10 | Public access rests on its listener's trust rules | **Accepted risks**, listed |
 
 ---
 
-## 1. ACCEPTED RISK — a shared machine-login Claude Max source mounts the owner's `~/.claude`
+## 1. FIXED — a shared machine-login Claude Max source mounted the owner's `~/.claude`
 
-*Found in the 2026-08-27 audit. Deliberately left open on 2026-08-27.*
+*Found in the 2026-08-27 audit; relaxed again on 2026-08-28 as an accepted
+risk; closed in v0.120.0.*
 
-A Claude Max AI source comes in two flavours:
+A Claude Max AI source came in two flavours:
 
 | Flavour | What it is | What sharing it grants |
 |---|---|---|
 | **Machine login** (no stored credential) | the profile owner's `~/.claude` **directory**, bind-mounted into the agent container | OAuth refresh token, every Claude Code transcript under `~/.claude/projects/`, and **write** access to `settings.json` — whose hooks execute as that owner |
 | **Setup token** (`claude setup-token`) | a token in the SecretStore, injected as `CLAUDE_CODE_OAUTH_TOKEN` | the OAuth token only — no filesystem, no transcripts, no code execution |
 
-Marking a **machine-login** profile `shared` lets any other account create an
-agent on it, which mounts the owner's `~/.claude` **read-write** into that
-account's container. Agents run with permission prompts disabled, so the other
-account can read the directory simply by asking their own agent.
+**What is in the code now:**
 
-**Why it is accepted here:** the operator trusts every account on this
-installation and asked to keep household sharing working.
+- `buildRuntimeSpec` (`src/orchestrator/provision.ts`) mounts `claudeAuthDir()`
+  only when `profile.ownerId === agent.ownerId`: the backstop.
+- `PATCH /v1/ai-profiles/:id` refuses to mark a machine-login source shared.
+- Creating an agent, switching its source, a class's source and the bulk
+  switch all refuse a machine-login source for another account's agent.
+- Since v2.39.0 no new machine-login source can be created (unless
+  `HATCHABOT_ALLOW_MACHINE_LOGIN=1`): the mount is read-write even for the
+  owner's own agents, so an agent talked into writing a hook into
+  `settings.json` would run it as the owner. Existing ones keep working, and
+  the Security check says to move them to a setup token.
 
-**What "fixed" looks like** (all three, together):
+**Still true:** a shared setup token or API key is injected into the other
+account's containers, so its users can read it. Sharing it is *acceptable*,
+not *safe*; the genuinely safe design is for Hatchabot to broker the calls and
+never hand the credential over.
 
-1. `src/orchestrator/provision.ts` — restore `profile.ownerId === agent.ownerId`
-   on the `claudeAuthDir()` mount. This is the backstop; without it the other
-   two are bypassable.
-2. `src/api/routes.ts` — `POST /v1/agents`: refuse a `subscription` profile with
-   no `secretRef` whose `ownerId` differs from the caller's.
-3. `src/api/routes.ts` — the profile-switch branch of `PATCH /v1/agents/:id`:
-   the same check.
+## 2. FIXED in v2.87.0 — un-sharing an AI profile did not revoke it
 
-Better still, refuse at the **Shared toggle** (`PATCH /v1/ai-profiles/:id`) so a
-machine-login profile cannot be marked shared at all, and point the operator at
-`claude setup-token` instead. Note a setup token is still a long-lived
-credential to the owner's Claude account — sharing it is *acceptable*, not
-*safe*; the genuinely safe design is for Hatchabot to broker the calls and never
-hand the credential over.
+`buildRuntimeSpec` now re-checks at every build that the source is the agent
+owner's or still shared, and refuses the build with "Its AI source is no longer
+shared with you" otherwise. An agent already running on it keeps it until its
+next rebuild or move (a build is the moment it moves); a refused rebuild keeps
+the agent running as it was and says why. A source that other accounts'
+agents still use cannot be deleted until they move; the machine owner's
+**Migrate all off…** (`hatchabot migrate-source`) moves them onto a shared
+source.
 
-## 2. Un-sharing an AI profile does not revoke it
+## 3. The fleet media and search keys reach every account
 
-`buildRuntimeSpec` re-reads the profile on every provision/rebuild with no
-shared/ownership re-check, so once another account's agent is on your source,
-flipping **Shared** off changes nothing — it keeps using your credential
-forever. The profile also cannot be deleted while their agent references it.
-Sharing is therefore a **one-way door**. Fix: re-validate access at provision
-time and fail the agent with a clear reason when it has been revoked.
-
-## 3. The fleet media key reaches every account
-
-`MEDIA_KEY_REF` (`GEMINI_API_KEY`) is injected into **every** agent container
-regardless of owner, while the routes that manage it are host-owner-only. Any
-account can read it out of its own container. Fix: scope it per owner, or treat
-it as an explicitly shared house credential.
+`MEDIA_KEY_REF` (`GEMINI_API_KEY`, for voice notes) and `SEARCH_KEY_REF`
+(`BRAVE_API_KEY`, for web search) are injected into **every** agent container
+regardless of owner (the management agent gets no search key), while the
+routes that manage them are host-owner-only. Any account can read them out of
+its own container. The Security check lists them as shared fleet keys. Fix:
+scope them per owner, or treat them as explicitly shared house credentials
+that the owner is told about when inviting someone.
 
 ## 4. First sign-in claims the whole installation
 
-`store.adoptLocalOwnerData` re-keys every `dev-owner` row — agents, profiles,
-**hosts**, memberships, peers, tokens — to whichever principal authenticates
-first, with no email allowlist. On a box switched to identity mode, the first
-account to sign in inherits the installation *and* host ownership (drain/delete
-host, media key, pool, backups, `agents?all=1`). Fix: an explicit operator
-allowlist, or a one-time claim token.
+`store.adoptLocalOwnerData` re-keys every row the installation's password-mode
+owner held — agents, sources, **hosts**, memberships, peers, tokens and the
+rest — to the first real account.
 
-## 5. Containers run without capability restrictions
+- **Accounts mode (the installer's default): fixed.** Account #1 is made from
+  the machine itself, or from elsewhere only with the setup code the server
+  prints when it starts (v1.10.0, and over a tailnet v2.31.1). Rootless Docker
+  and Docker Desktop hosts ask for the code even at localhost. The public
+  address never allows it (§10).
+- **Google sign-in (identity mode): still open unless an allowlist is set.**
+  The first Google account to sign in inherits the installation *and* host
+  ownership. `HATCHABOT_ALLOWED_EMAILS` limits sign-in to listed addresses, and
+  since v2.103.0 the Security check shows a critical warning while it is unset;
+  nothing requires it. Fix: refuse identity mode without an allowlist, or a
+  one-time claim code as in accounts mode.
 
-Agent containers get `--memory` and `--pids-limit` but no `--cap-drop=ALL` and
-no `--security-opt=no-new-privileges`, while executing model-generated shell and
-Python. The image runs as non-root, which is the main protection. Fix: drop
-capabilities by default.
+## 5. Containers run without full capability restrictions
 
-## 6. Members can read more than they should
+Agent containers execute model-generated shell and Python. They run as
+non-root (the main protection), with `--security-opt=no-new-privileges`
+(v0.120.0), `--memory`, `--pids-limit`, `--init`, capped logs, and on their own
+Docker network with inter-container traffic off (v1.16.0). The browser,
+memory-search and door containers also drop every capability.
 
-- `GET /v1/agents/:id` returns the full `publicAgent` to a role-`user` member,
-  including host filesystem paths (`dataSources[].hostPath`) and env-var names.
-- `GET /v1/usage` is member-visible while `GET /v1/agents/:id/usage` is
-  owner-only — the same data behind two different gates, and the fleet route
-  runs a `docker exec` in the owner's container on a member's request.
+**Still missing for agents:** `--cap-drop=ALL` (an agent container keeps
+Docker's default capabilities), a CPU limit (one agent can take every core),
+and a disk quota (an agent can fill the disk; `scripts/agent-disk-check.mjs`
+only warns). `HATCHABOT_MAX_AGENTS_PER_ACCOUNT` caps how many agents one
+account can have. Fix: drop capabilities by default (with a compatibility
+check), add `--cpus`, and a per-agent volume quota where the storage driver
+allows one.
+
+## 6. FIXED — members could read more than they should
+
+- `GET /v1/agents/:id` gives a member of someone else's agent what it can do,
+  never the owner's host paths (`dataSources[].hostPath`), env-var names or
+  the gateway port (v2.39.0).
+- `GET /v1/usage` and every other usage view count only the caller's own
+  agents (v2.88.4), so a member's request no longer reaches into the owner's
+  containers.
 
 ## 7. Operational gaps that bite at scale
 
-- `kickRebuild` checks `inflight` but not the `busy` flag, so a batch rebuild
-  reports success for agents that were silently dropped mid-move/mid-restore.
-- No reconcile rule for `DELETING`, and the web UI hides Delete in that state —
-  a crash mid-delete strands the agent with its secrets un-scrubbed.
+- ~~`kickRebuild` checks `inflight` but not the `busy` flag, so a batch rebuild
+  reports success for agents that were silently dropped~~ — fixed in v2.156.0:
+  each queued rebuild is a recorded operation, a rebuild that cannot run ends
+  failed with the reason (`hatchabot ops`, Alerts), and bulk source switches
+  list busy agents as skipped.
+- A process killed **mid-delete** still leaves the agent in `DELETING`: no
+  reconcile rule finishes it, and the app shows no Delete in that state. A
+  Delete through the API (`hatchabot delete <agent>`) re-enters and finishes
+  it. A teardown that fails parks the agent in FAILED with Delete offered
+  again, and keys a failed delete left behind are swept at start (v2.160.0).
 - ~~Reconcile and `scripts/backup-volumes.sh` skip runner-host agents~~ —
   both cover them now (backups v2.133.0, reconcile v2.134.0).
-- Backup restore proceeds after its own safety snapshot fails (`exportState`
-  rejects past ~1 GB on `maxBuffer`), then runs a destructive replace.
-- `openclawImport` rewrote the user's live `openclaw.json` non-atomically
-  (fixed in v2.169.0: a temp file renamed over it).
-- `tcp://` runner endpoints were accepted with no TLS enforcement (fixed in
-  v2.169.0: TLS only, `--tlsverify`, and refused without a client certificate).
+- ~~Backup restore proceeds after its own safety snapshot fails~~ — fixed in
+  v2.91.0: a restore refuses when its safety copy cannot be taken.
+- ~~`openclawImport` rewrote the user's live `openclaw.json` non-atomically~~
+  — fixed in v2.169.0: a temp file renamed over it.
+- ~~`tcp://` runner endpoints were accepted with no TLS enforcement~~ — fixed
+  in v2.169.0: TLS only, `--tlsverify`, and refused without a client
+  certificate.
 
 ## 8. Every DM member shares one conversation thread
 
@@ -111,11 +153,8 @@ OpenClaw keys a direct-chat session per AGENT, not per person: `agent:<slug>:mai
 Every member who DMs the bot writes into that one transcript, and the session's
 `route`/`origin`/`lastTo` fields simply track whoever spoke most recently. Group
 chats get their own key (`agent:<slug>:telegram:group:<id>`), so the shape is one
-shared DM thread plus one per group.
-
-Verified on this installation: **a test agent** has three active members, one
-session file, and 223 user messages in it — 3 flagged `senderIsOwner: true`, 220
-`false`. Two people's conversations, one thread.
+shared DM thread plus one per group. (A web-chat guest has conversations of
+their own; the owner's Telegram DM and console share the main one.)
 
 **What this means.** Anything a member says is context for the agent's replies to
 every other member. Nobody is quoted verbatim to anyone else, but the agent
@@ -124,77 +163,88 @@ it what was discussed. For a family agent that is arguably the point;
 for a health, legal, or money agent shared between two people it is not what
 either would assume.
 
-The per-agent **Shared memory** toggle does NOT govern this — it only selects a
-section of `AGENTS.md` describing whether `MEMORY.md` entries are contributed by
-everyone. Session sharing happens underneath, either way.
+The agent's memory (`MEMORY.md`) is one for everyone too: the "private memory"
+switch only changed an instruction, and was removed in v2.107.0. Since then
+everyone who joins an agent is told its memory is shared (the invite page, the
+welcome message, the web chat).
 
 **What "fixed" looks like:** decide whether an agent's threads are shared or
 per-member, make it a visible per-agent setting, and — if per-member — route each
-sender to their own session key. Until then the sharing should at minimum be
-stated where members are invited, since today nothing tells them.
+sender to their own session key. Until then the advice stands: for something
+private, give that person their own agent.
 
-## 9. PARTIALLY CLOSED — session resets: the race is fixed and checkpoints exist, but chat-initiated resets still lose the thread
+## 9. PARTIALLY CLOSED — session resets: the guards exist, but a reset typed in the chat still loses the thread
 
-*Opened 2026-08-30 with a wrong explanation; corrected 2026-08-31; partially
-closed since — see "Shipped" and "Still open" below.*
+*Opened 2026-08-30; corrected 2026-08-31 and 2026-09-06.*
 
-**Retracted:** an earlier version of this entry claimed OpenClaw resets every
-conversation at 4am UTC. That is false. The default policy resolves to
-`mode: "daily", atHour: 4`, but it is plainly not enforced: 19 of 35 live
-sessions on this box have kept talking across 4am boundaries, 14 of them hold a
-gap longer than 24 hours between consecutive messages, and one holds a gap of
-**570 hours**. No idle threshold is enforced either, for the same reason. The
-"9/9 resets fit the daily rule" test that produced the wrong claim was nearly
-vacuous — any reset of a day-old session satisfies it.
-
-**What is actually established:**
-
-- Resets are *command-driven*, not time-driven. The trigger is
-  `RESET_COMMAND_RE = /^\/(new|reset)(?:\s+([\s\S]*))?$/i` on an inbound
-  message, or the `sessions.reset` gateway RPC. There is no timer.
-- Only 9 resets exist across this installation's whole history.
-- 7 of the 9 had no Hatchabot operation on that agent within 8–29 hours.
-- The 2 on Piano Practice landed 11s and 15s after a container replacement — but
-  there have been 298 `runtime.rebuilt` events in total, so replacement plainly
-  does not reset a session as a rule.
-- Archiving never deletes a transcript. The previous one is kept beside the new
-  one as `<session>.jsonl.reset.<iso>`.
-
-**Still unknown:** what issued the reset in those 9 cases. The open candidates
-are a `/new` or `/reset` typed in the chat, and something specific to the
-container-replacement path that fires only sometimes.
-
-**The decisive test, run 2026-08-31:** Piano Practice was archived mid-conversation
-(about Van Gogh), restored, left alone for five minutes, then messaged in the
-existing chat with no command. The thread survived intact — same session id,
-no new `.reset.` file, the Van Gogh exchange still in context. Messaged 11s,
-15s and 35s after earlier restores, the same agent reset every time. So the
-trigger is TIMING, not archiving: an agent messaged seconds after its container
-comes back starts a new session.
+An agent's conversation can end and start fresh in three ways: a `/new` or
+`/reset` typed in the chat (or the `sessions.reset` gateway call), OpenClaw's
+idle reset after a gap, and a message that arrives seconds after the container
+comes back. The previous transcript is never deleted: it is kept beside the new
+one as `<session>.jsonl.reset.<time>`.
 
 **Shipped:**
 
 - v0.72.0 — `waitForSkillsSettled` holds an agent in PROVISIONING / REBUILDING
-  until its skill inventory stops changing, which is a proxy for "done moving"
-  rather than a claim about the mechanism — `runRebuildHook` can install
-  skills seconds before the agent goes live, on this very path. The probe is
-  bounded and never fails a provision, and it logs `runtime.ready` with the
-  settling time so the proxy can be judged from production data.
-- A manual checkpoint: **📝 Save chat to memory** on the card
-  (`POST /v1/agents/:id/checkpoint`) has the agent summarise the live
-  conversation into `MEMORY.md` (~20s, measured on a short conversation).
-- The same checkpoint offered automatically before the resets Hatchabot itself
-  causes: a pre-ticked checkbox on the AI-source switch and the bulk
-  switch-and-rebuild.
+  until its skill inventory stops changing, so it is not messaged seconds after
+  its container comes back (a test agent messaged within 35 seconds of a
+  restore reset every time; left five minutes, its thread survived).
+- v0.114.0 — a 30-day idle window (OpenClaw's default rolled a conversation
+  after about a day), the bundled active-memory plugin (a fresh session
+  recalls the standing facts from `MEMORY.md` before it answers), and a
+  memory habit in every agent's AGENTS.md.
+- A checkpoint: **📝 Chat → Memory** (`POST /v1/agents/:id/checkpoint`) has
+  the agent write the conversation's key facts into `MEMORY.md` (~20s), and is
+  offered pre-ticked before the resets Hatchabot itself causes (a source
+  switch, the bulk switch-and-rebuild).
+- v0.134.0 — **📥 Recover context** stages an ended conversation into the
+  workspace and has the agent save what matters; v2.1.0 — after every rebuild
+  Hatchabot checks for a reset and says so on the agent's card.
 
 **Still open:** nothing hooks OpenClaw's **`before_reset`** — the hook fires
 with the outgoing transcript's messages, the natural place to hang a
-checkpoint — so a `/new` or `/reset` typed in the chat still loses the thread
-with no checkpoint. `MEMORY.md` is written only if the agent chooses to write
-it (on Piano Practice it was still the 166-byte stub), so a chat-initiated reset
-takes the only copy of that context.
+checkpoint — so a `/new` or `/reset` typed in the chat still ends the thread
+with no checkpoint. What survives is what the agent chose to write to
+`MEMORY.md`, plus Recover context, which the owner has to run.
+
+## 10. Public access rests on its listener's trust rules (accepted risks)
+
+*Since v2.114.0; off unless the machine's owner turns it on. Not yet tried on a
+real tailnet.*
+
+"Reach it from anywhere" makes the sign-in page reachable from the internet
+through Tailscale Funnel. Its design and safeguards are in
+[public-access.md](public-access.md); the rules it stands on are:
+
+- **Trust is decided by the listener, and nothing else.** A request is public
+  if and only if it arrived on the public listener (`127.0.0.1:8092`, the one
+  port Funnel is pointed at; `src/api/trust.ts`). No header moves a request
+  between classes. Anything else on the machine that connects to that port
+  is treated as public too, and can choose its own address for the
+  per-address limits.
+- **Public requests never count as "on this machine"**: no first account, no
+  owner's first claim, no command-line, peer or Google bearer tokens, and no
+  in-process calls of the management agent. A browser session is the only way
+  in.
+- **Safeguards a–j must all hold**, or public access cannot be turned on, and
+  the public listener answers 503 to everyone while one is off: a sign-in per
+  person, a second factor for passwords and owners, only invited people,
+  public traffic on its own listener, only classified routes, public limits
+  and lockouts, new-device notices, stricter sessions, automatic upgrades on
+  `stable`, and a security record.
+
+**Accepted, and stated in public-access.md ("What is NOT protected"):** a flaw
+in OpenClaw's gateway reachable by a signed-in guest's chat; a flaw in
+Hatchabot's own sign-in code (hence automatic upgrades); denial of service and
+cheap lockouts of the *public* address; a stolen signed-in device; chat-only
+guests let in on a password alone if the owner turns that on; Google accounts
+without owner rights having no second factor there; "Forgot password?" asks
+used up from the internet; invitation codes being bearer links; and the
+OpenClaw console's own pages served without Hatchabot's content security
+policy.
 
 ---
 
-*Sources: the 2026-08-25 and 2026-08-27 audits. The full finding list, including
-what was fixed, is in `CHANGELOG.md` under v0.39.0, v0.40.0 and v0.59.0.*
+*Sources: the 2026-08-25 and 2026-08-27 audits, and the audits since. The
+finding lists, including what was fixed, are in `CHANGELOG.md` under the
+releases named above.*

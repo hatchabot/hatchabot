@@ -55,6 +55,8 @@ export interface EmbedderSpec {
   /** Host path of the file holding the server's key (0600, beside keysFile). */
   serverKeyFile: string;
   perMin: number;
+  /** Request bodies a minute, per key, in MB (HB-0026). */
+  mbPerMin: number;
   /** Run the door as this user so it can read the 0600 keys file. */
   uid: number;
   gid: number;
@@ -283,6 +285,7 @@ export class EmbedderService {
       doorBind: (!this.#o.hostId && process.env.HATCHABOT_EMBED_BIND?.trim()) || (await this.#o.doorBind()),
       keysFile: this.keysFile,
       perMin: Number(process.env.HATCHABOT_EMBED_PER_MIN) || 600,
+      mbPerMin: Number(process.env.HATCHABOT_EMBED_MB_PER_MIN) || 8,
       uid: typeof process.getuid === 'function' ? process.getuid() : 1000,
       gid: typeof process.getgid === 'function' ? process.getgid() : 1000,
       modelSha256: this.#o.modelSha256 ?? EMBED_MODEL_SHA256,
@@ -440,6 +443,36 @@ export async function bootStartEmbedder(o: {
   }
   await o.embedder.start();
   return 'started';
+}
+
+/**
+ * The timers the server sets at boot (off under test, src/api/routes.ts): the
+ * boot start a moment after start-up, then the health loop over every
+ * enabled service — this machine's, and each runner's that was turned on (an
+ * asleep runner is skipped, and its service comes back when it wakes). Its
+ * own function so a test can run it on fake timers (HB-0043). Returns a stop.
+ */
+export function scheduleEmbedderBoot(o: Parameters<typeof bootStartEmbedder>[0] & {
+  services: () => EmbedderService[];
+  warn: (detail: Record<string, unknown>, msg: string) => void;
+  bootMs: number;
+  healthMs: number;
+}): () => void {
+  const boot = setTimeout(() => {
+    void bootStartEmbedder(o).catch((err) => o.warn({ err: String(err) }, 'embedder auto-start at boot failed'));
+  }, o.bootMs);
+  // An enabled service that fell over comes back; a fleet event says so.
+  const healthTicks = () => {
+    for (const svc of o.services()) {
+      if (!svc.enabled) continue;
+      void svc.healthTick().then((r) => { if (r === 'restarted') o.warn({ host: svc.hostId ?? 'local' }, 'embedder restarted by the health loop'); })
+        .catch((err) => o.warn({ err, host: svc.hostId ?? 'local' }, 'embedder health tick failed'));
+    }
+  };
+  const first = setTimeout(healthTicks, o.bootMs + 30_000);
+  const every = setInterval(healthTicks, o.healthMs);
+  for (const t of [boot, first, every]) t.unref();
+  return () => { clearTimeout(boot); clearTimeout(first); clearInterval(every); };
 }
 
 /** Which engine a NEW agent gets: the fleet default (HATCHABOT_EMBED_DEFAULT), baked unless the owner flipped it. */

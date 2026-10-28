@@ -596,11 +596,14 @@ async function api(ctx: Ctx, path: string, init: RequestInit = {}): Promise<Resp
  * or run on the default image (--drop-pin).
  */
 async function uploadAgentFile(ctx: Ctx, path: string, params: URLSearchParams, data: Buffer, flags: Map<string, string>,
-  askLine: (q: string) => Promise<string>): Promise<any> {
+  askLine: (q: string) => Promise<string>, values?: Record<string, string>): Promise<any> {
   if (flags.has('build-image')) params.set('image', 'build');
   if (flags.has('drop-pin')) params.set('image', 'drop');
+  // A template's setup answers go ahead of the file in the body: in the
+  // address, long ones passed Node's 16 KB limit (HB-0093).
+  const body = values ? Buffer.concat([Buffer.from(JSON.stringify({ values }) + '\n'), data]) : data;
   const send = async () => (await api(ctx, `${path}${params.size ? `?${params}` : ''}`, {
-    method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: data,
+    method: 'POST', headers: { 'content-type': values ? 'application/vnd.hatchabot.import' : 'application/octet-stream' }, body,
   })).json();
   try {
     return await send();
@@ -1780,8 +1783,14 @@ async function main() {
         const [name, src] = plain(rest.slice(1));
         if (!name || !src) fail('usage: hatchabot app create <name> <dir|url> [--profile <source>] [--no-telegram] [key=value …]');
         const source = appSourceArg(src!);
-        const look: any = await (await jsonPost('/v1/apps/inspect', { source, ref: flags.get('ref') })).json();
-        const missing = look.ask.filter((f: any) => f.required && !(f.key in kv(rest.slice(1)))).map((f: any) => f.key);
+        // Its name too: the chat comes back with {app_dir}, {agent}… filled in for this agent (HB-0259).
+        const look: any = await (await jsonPost('/v1/apps/inspect', { source, ref: flags.get('ref'), name })).json();
+        // What is missing by installation's own rule: a required setting with a
+        // valid default needs nothing typed (HB-0262).
+        const { mergeConfig, AppError } = await import('./orchestrator/apps.js');
+        let missing: string[] = [];
+        try { missing = mergeConfig(look.manifest, { slug: '', name: name!, timezone: '' }, {}, kv(rest.slice(1))).missingKeys; }
+        catch (e) { if (e instanceof AppError) fail(e.message); throw e; }
         if (missing.length) fail(`${look.manifest.name} needs: ${missing.map((k: string) => `${k}=…`).join(' ')}`);
         const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];
         const hosts: any[] = await (await api(ctx, '/v1/hosts')).json() as any[];
@@ -1789,7 +1798,7 @@ async function main() {
         const profile = picked.hit?.id ?? fail(picked.problem!);
         const host = (hosts.find((h) => h.kind === 'local') ?? hosts[0])?.id ?? fail('no host configured');
         const created: any = await (await jsonPost('/v1/agents', {
-          name, persona: look.manifest.chat || look.manifest.description || undefined, aiProfileId: profile, hostId: host,
+          name, persona: (look.chat ?? look.manifest.chat) || look.manifest.description || undefined, aiProfileId: profile, hostId: host,
           telegram: flags.has('no-telegram') ? false : undefined,
         })).json();
         console.log(`creating "${name}"…`);
@@ -2473,9 +2482,9 @@ async function main() {
           // Non-TTY with required fields: let the server's validation name them.
         } catch { /* not gunzippable here (full backup?) — server sorts it out */ }
       }
-      if (values && Object.keys(values).length) params.set('values', JSON.stringify(values));
       if (flags.has('no-telegram')) params.set('telegram', '0');
-      const j = await uploadAgentFile(ctx, '/v1/agents/import', params, data, flags, askLine);
+      const j = await uploadAgentFile(ctx, '/v1/agents/import', params, data, flags, askLine,
+        values && Object.keys(values).length ? values : undefined);
       if (j.kind === 'agent') {
         // A full copy goes on in the background (v2.156.0): follow it.
         const started = startedOperation(j);

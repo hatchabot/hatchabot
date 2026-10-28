@@ -190,6 +190,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.169.0`
 - **Code:** `scripts/upgrade.sh` — `restore_prev`, `SWAPPING`, `not_ours`; `scripts/follow-channel.sh` — `.swapping`
 
+### A git install is on the new release with half its dependencies after an upgrade was stopped, and every upgrade since says "Already on vX.Y.Z"
+- **Check:** the install has a `.git` folder and a `node_modules.prev` folder; `git describe --tags` names the new release; `node_modules` lacks `.hatchabot-lock-stamp`. The upgrade was stopped while it installed dependencies (Ctrl-C, a closed terminal, `systemctl stop`, a power cut).
+- **Cause:** stopped by a signal, `scripts/upgrade.sh` ended without putting the old release back, and it kept no record of being part-way: the next run read the new release as installed and stopped there. The service went on running the old release until its next restart, which then had to install the dependencies itself.
+- **Fix:** upgrade from a release with the fix: a stopped upgrade now puts the old release back at once, and one killed outright (a power cut) is put back by the next `hatchabot upgrade` or timer tick before it upgrades again. On an older release, in the install folder: `git checkout <the old tag>`, `rm -rf node_modules && mv node_modules.prev node_modules`, then `hatchabot upgrade`.
+- **Fixed in:** `v2.170.0`
+- **Code:** `scripts/upgrade.sh` — `FROM_FILE`, `rollback`, `finish`
+
 ### `hatchabot upgrade beta` is undone: the channel file says stable again
 - **Check:** `cat <install>/data/channel` (before v2.169.0, `~/.config/hatchabot/channel`) against `systemctl --user cat hatchabot-follow-channel` (its ExecStart channel).
 - **Cause:** the timer's own upgrade saved its channel over the one chosen by hand.
@@ -252,6 +259,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade, then run `./scripts/install-service.sh` in the install folder (and `./scripts/follow-channel.sh --install <channel>` if the timer is installed): the units are rewritten with the PATH quoted whole. Or by hand: change the line to `Environment="PATH=…"` in `~/.config/systemd/user/hatchabot.service` and `hatchabot-backup.service`, then `systemctl --user daemon-reload && systemctl --user restart hatchabot`.
 - **Fixed in:** `v2.168.0`
 - **Code:** `scripts/install-service.sh` — `systemd_quoted`; `deploy/hatchabot.service`; `scripts/follow-channel.sh` — `UNIT_PATH`
+
+### The channel timer will not install: "node not found on PATH" or "docker not found on PATH"
+- **Check:** `./scripts/follow-channel.sh --install <channel>` (or `follow-latest.sh --install`) stops with that line and writes no unit; `command -v node` or `command -v docker` prints nothing in the same shell.
+- **Cause:** the timer's unit is given the folders of the `node` and `docker` this shell finds. Before v2.170.0 a missing one was guessed (`/usr/bin/docker`, or the current folder for node), and the unit then failed at every tick, out of sight in the journal.
+- **Fix:** run it from a shell where `node --version` and `docker version` work (a bundle install finds its own Node). A timer installed by an older release with a wrong PATH: install it again the same way.
+- **Fixed in:** `v2.170.0`
+- **Code:** `scripts/follow-channel.sh` — `NODE_BIN`, `DOCKER_BIN`, `UNIT_PATH`; `scripts/follow-latest.sh` — `NODE_BIN`, `DOCKER_BIN`
 
 ### After a bundle install, an older native install's hatchabot command is broken, or the new command stops working once the old checkout is removed
 - **Check:** `ls -l ~/.local/bin/hatchabot ~/.local/bin/hbt` shows links (`->`) into another checkout's `bin/hatchabot.mjs`, and `head -3 <that checkout>/bin/hatchabot.mjs` starts `#!/usr/bin/env bash` and `# Hatchabot (hatchabot) — written by scripts/link-cli.sh`.
@@ -754,6 +768,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.169.0`
 - **Code:** `src/api/routes.ts` — `'/v1/ai-profiles/:id/apply-default-model'`, `subscriptionRuntimeProblem`
 
+### On a shared Claude plan source, my agent fails every message with "request format rejected, HTTP 400" after the source's owner changed its default
+- **Check:** your agent follows the shared source's default (no model of its own on its AI tab), the source is a Claude subscription, the new default is claude-opus-5-5, and your agent runs OpenClaw older than 2026.9.7; its gateway log has `claude_code_version_too_old`.
+- **Cause:** v2.169.0 held back the source owner's own agents whose runtime was too old for the new default, but another account's agents that follow the default moved with it unchecked.
+- **Fix:** upgrade: such an agent is kept on the model it runs (pinned to it), and the source's owner is told how many other accounts' agents were kept, without their names. For one already moved, pick its earlier model on its AI tab, or give it a newer runtime image.
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/api/routes.ts` — `'/v1/ai-profiles/:id/apply-default-model'`, `subscriptionRuntimeProblem`; `web/index.html` — `applyModelToSelected`
+
 ### A Claude source's model menu leaves out models the newer agents on it can run
 - **Check:** the source's agents run different runtime images (one on a runner, or one pinned to an older image); `openclaw models list --provider anthropic --all` in the console of the agent on the newest image lists the missing model.
 - **Cause:** the menu came from the first running agent found on the source; one on an older image has a smaller catalog, and its list pruned the menu (and flagged the missing models as stale) for every agent on the source.
@@ -903,6 +924,55 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/api/routes.ts` — `sharedAppConflicts`
 
+### Installing an app is refused "on the same account", though the other agent's app uses another mailbox
+- **Check:** the agent the message names has the account attached (its settings → Connections), but its app's config (`config.json` under `~/.openclaw/apps/<app>/data` in that agent) names another address.
+- **Cause:** before v2.170.0 the check counted every live agent with the account attached and the same app, not the account its app was configured with.
+- **Fix:** upgrade: the check reads the other agent's app config and refuses only when it names that account. An agent that is not running, or whose config cannot be read, still counts. The dialog still warns by attachment, so confirm there when the other copy uses another address. On an older version, confirm in the dialog (`allowShared`), or detach the account from the other agent.
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/api/routes.ts` — `sharedAppConflicts`, `appAccountsOf`
+
+### An app was installed and said "installed and running", but it cannot use the Google account picked for it
+- **Check:** the account shows attached in the agent's settings → Connections, the app's commands fail to sign in to Google, and the agent's log has `connection.attached` from that install.
+- **Cause:** before v2.170.0 "Run an app" went on with the install when attaching the account answered that it was attached but could not be set up in the agent.
+- **Fix:** upgrade: the dialog stops, says what failed, and installs nothing. Press Install again; if it fails again, connect the account again in ⚙ Settings → Connections. On an older version, restart the agent (the account is set up as it starts) or detach it and attach it again.
+- **Fixed in:** `v2.170.0`
+- **Code:** `web/index.html` — `appGo`, `appAttachProblem`
+
+### A new agent made from an app repo is on the wrong AI source
+- **Check:** "New agent from a repo" was used without touching its AI source box, and the ⭐ default source is not first in ⚙ Settings → AI sources.
+- **Cause:** before v2.170.0 the app form preselected nothing, so the first source in the list was used (perhaps a paid API key), where regular creation and the CLI use the ⭐ default.
+- **Fix:** upgrade: the form preselects the ⭐ default. Move an agent made on the wrong one from its settings (its AI source).
+- **Fixed in:** `v2.170.0`
+- **Code:** `web/index.html` — `appRead`
+
+### A new agent made from an app repo has "{app_dir}" or "{env}" in its instructions (SOUL.md)
+- **Check:** the app's `hatchabot.json` has a `chat` with placeholders, and the agent's SOUL.md (its settings → Files) shows them as written.
+- **Cause:** before v2.170.0 the page and `hatchabot app create` copied `chat` into the new agent as it was; only the app's tests and tasks had their placeholders filled in.
+- **Fix:** upgrade: a new agent's chat has `{app_dir}`, `{data_dir}`, `{agent}`, `{name}` and `{env}` filled in, as its tasks do. The text is written once, when the agent is made: an app update does not change it. For an agent made before, edit its SOUL.md.
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/orchestrator/apps.ts` — `appChat`, `appVars`; `src/cli.ts` — `app create`; `web/index.html` — `appGo`
+
+### `hatchabot app create` asks for a setting whose default the app already gives
+- **Check:** `hatchabot app inspect <dir|url>` lists the setting as required with a default, and `app create` stops with "… needs: key=…" before making the agent.
+- **Cause:** before v2.170.0 the CLI asked for every required setting not typed, ignoring defaults; installing takes the default.
+- **Fix:** upgrade: the CLI judges what is missing by the rule installing uses. On an older version, pass the default as `key=value`.
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/cli.ts` — `app create`; `src/orchestrator/apps.ts` — `mergeConfig`
+
+### An app setting marked secret shows in an install error, or in the operation and event records
+- **Check:** the app's `hatchabot.json` marks the field `"secret": true`, and a value of the wrong type (an email field given text that is not an address) was given; the error said "must be … (got …)" with the value.
+- **Cause:** before v2.170.0 the check of a value's type quoted it in its error, secret or not, and the error was kept as the operation's outcome and in its event.
+- **Fix:** upgrade: a secret field's value, or its default, is never quoted, and any secret value given is masked in an install's error before it is kept. Change a key or password already shown.
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/orchestrator/apps.ts` — `mergeConfig`, `installRelease`, `maskSecrets`
+
+### An app runs with an empty list for a required setting (no recipients)
+- **Check:** the app's config (`config.json` under `~/.openclaw/apps/<app>/data` in the agent) has `[]` for a field its `hatchabot.json` marks required with `"type": "list"`, and the value before was text such as `, ,`.
+- **Cause:** before v2.170.0 a kept value was checked for being blank before it was turned into a list, so text with only commas became `[]` and was accepted.
+- **Fix:** upgrade: a kept value is checked after it is turned into its type, so the install or update asks for it. Give it with `key=value`, or in the dialog.
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/orchestrator/apps.ts` — `mergeConfig`
+
 ### Two agents run the same app on one mailbox, and nothing warned you
 - **Check:** each agent's page → App shows the app, and both agents' app config (`config.json` under `~/.openclaw/apps/<app>/data` in the agent) names the same address.
 - **Cause:** the check looked only at the values typed in. A mailbox that came from the app's default or from the agent's existing config was not checked; an update, even one that changed the mailbox, was never checked; and two installs at the same moment could each miss the other.
@@ -1028,6 +1098,41 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: only the app's own jobs (`<app>-…`) are checked. On an older version, give the unnamed job a name or remove it.
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/orchestrator/apps.ts` — `appJobs`
+
+### After Stop app, the app and its scheduled tasks came back at the next start
+- **Check:** the agent was made "from a repo" and its app was then installed by hand (Run an app from a repo, or `hatchabot app install`); after Stop app and a restart of Hatchabot, the App row names the app again and its Setup log shows `app.installed` with no install of yours.
+- **Cause:** before v2.170.0 the install that had waited for the new agent stayed recorded after a direct install replaced it, and Stop app did not remove it, so the start installed it again.
+- **Fix:** upgrade, then press Stop app again: a direct install now retires the waiting install, and Stop app removes one still recorded.
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/api/routes.ts` — `/v1/agents/:id/app`, `runPendingApp`; `src/orchestrator/appPending.ts` — `dropAppPending`
+
+### A new agent's app never goes in: its page keeps saying "Installing its app from … once it is running…"
+- **Check:** the agent is running, its App row still says it is waiting, and its Setup log has no `app.installed` or `app.install_failed`; either setup finished while the app's repo was being read, or a second request to install was made while the first was still running.
+- **Cause:** before v2.170.0 the request judged the agent by its state before reading the repo, so one whose setup finished meanwhile was never started; and a request that finished deleted a newer request saved while it ran (or put its error on it).
+- **Fix:** upgrade. On an older version, restart Hatchabot, or make the request again from the agent's page once the first has finished.
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/api/routes.ts` — `runPendingApp`, `runPendingOnce`, `/v1/agents/:id/app/pending`; `src/orchestrator/appPending.ts` — `dropAppPending`, `onePendingChange`
+
+### Installing an app is refused: "Its app changed meanwhile (another install or update finished)"
+- **Check:** another install, update or Stop app of this agent's app finished while this install was still reading its repo.
+- **Cause:** from v2.170.0 an install judges the agent's app as it was when it was asked, as an update does: the later change wins and the older request is refused rather than going in over it.
+- **Fix:** look at the agent's App row, then install again if you still want this app.
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/api/routes.ts` — `installFromSource`, `appStillAsWas`
+
+### A scheduled task you had turned off is on again after an app replacement failed ("unchanged")
+- **Check:** installing another app in place of the agent's app failed (its tests, say) and said the running app was unchanged, and `openclaw cron list --all` in the agent shows the old app's task you had turned off as enabled, with a new id.
+- **Cause:** before v2.170.0 the old app's tasks were put back from its manifest alone, switched on, whether the install failed or a restart cut it off.
+- **Fix:** upgrade: the tasks that were off are recorded before they come off and go back on turned off, and the install says so when that cannot be confirmed. On an older version, turn the task off again on the agent's Schedule tab (or `openclaw cron disable <id>`).
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/api/routes.ts` — `installFromSource`; `src/orchestrator/appOperations.ts` — `putTasksBack`; `src/orchestrator/apps.ts` — `syncTasks`
+
+### A failed app Roll back leaves the agent on the earlier release while its App row names the newer one
+- **Check:** the Roll back answered an error, and the agent's `apps/<app>/current` link names the release it went back to while the App row (and its tasks' schedule) still name the newer one; its operation in Activity ended "failed" with nothing to choose.
+- **Cause:** before v2.170.0 a switch whose reply was lost was taken as not made, and a failed point-back after the tasks could not be set ended the operation as failed instead of holding it.
+- **Fix:** upgrade: a switch is judged from the link itself, and when the release and the record cannot be brought back together the operation waits for your choice (Use the release it went back to, or Stay on the newer). On an older version, run Roll back again, or Update.
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/orchestrator/apps.ts` — `switchTo`; `src/orchestrator/appOperations.ts` — `appChoices`
 
 ### Promoting a newer OpenClaw is refused: "… cannot read the data of agents already on 2026.8 or newer"
 - **Check:** the agents it names run OpenClaw 2026.7 (`hatchabot list`), not 2026.8 or newer.
@@ -1631,6 +1736,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.157.0`
 - **Code:** `src/orchestrator/accessOverview.ts` — `verifyAgentAccess`
 
+### Access lists Google accounts the agent never had as "removed — verified gone"
+- **Check:** Sharing → Access on an agent with no Google account attached lists each of your Google connections, every one "removed — verified gone", after Verify now or a start, wake or rebuild.
+- **Cause:** each look records every connection of yours as held or not, and the overview showed any not held as a removal for a week, whether or not the agent ever had it.
+- **Fix:** upgrade. Only an account the agent had (found there before, or removed from it) shows as removed, for a week from when it went. Nothing was ever given to the agent: the rows were a display fault.
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/orchestrator/googleConnections.ts` — `recordGoogleSeen`, `goneDetail`; `src/orchestrator/accessOverview.ts` — `accessOverview`
+
 ### Access shows "removal pending over a day" for a Google account
 - **Check:** Sharing → Access shows the account with ⚠ and "removal pending since …"; is the agent stopped, asleep, or on a runner that is off?
 - **Cause:** a removal runs only inside a running agent: it waits for the next start, wake or rebuild — or gog's remove kept failing.
@@ -2028,6 +2140,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.162.0`
 - **Code:** `src/orchestrator/hibernate.ts` — `hibernateAgent`, `settledBlocker`
 
+### ✨ Ideas in the icon dialog never offers the icon you have in mind
+- **Check:** the ideas are only 🤖, or nothing like what you want; the note under them says the management AI didn't answer or none of your sources can make ideas. On the machine, `journalctl --user -u hatchabot | grep "icon ideas"` gives the AI's error.
+- **Cause:** the ideas came from the AI's reading of the name alone, with no way to say what you wanted; when the AI didn't answer, the keyword table stood in, and it knew no seasonal or everyday words ("Holiday list" matched nothing).
+- **Fix:** upgrade, then type what it should show ("a birthday cake") in **What should it show?** and press ✨ (or Enter). Any emoji can also be pasted straight into the Emoji box.
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/orchestrator/agentIcons.ts` — `suggestIcons`, `keywordIcon`; `web/index.html` — `v2IconIdeas`
+
 ## Memory and conversations
 
 ### After a quiet night the agent says it has no context ("this is a fresh session")
@@ -2120,6 +2239,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade; until then, any key change for that runner (a rebuild of one of its agents) or Restart of its service copies the current file.
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/embedder/embedder.ts` — `syncKeys`, `start`
+
+### Memory search answers "rate limited" while an agent indexes a lot of text
+- **Check:** `docker logs <prefix>-embed-door` shows the agent's calls, and its memory search gets 429 "rate limited"; `HATCHABOT_EMBED_MB_PER_MIN` in `.env` is set low.
+- **Cause:** the memory search door holds each agent to a call count (`HATCHABOT_EMBED_PER_MIN`, 600) and, from v2.170.0, to an amount of text a minute (`HATCHABOT_EMBED_MB_PER_MIN`, 8 MB), so one agent cannot keep the engine busy for every other. The default is far more text than the engine embeds in a minute; a lowered value can make a large re-index wait.
+- **Fix:** raise or unset `HATCHABOT_EMBED_MB_PER_MIN` and restart Hatchabot (the door is replaced with the new limit).
+- **Fixed in:** `v2.170.0`
+- **Code:** `src/embedder/door.ts` — `doorScript`, `byteBucket`; `src/embedder/embedder.ts` — `mbPerMin`
 
 ### A snapshot is refused: "… is there but could not be read" or "Couldn't read … — is the agent healthy?"
 - **Check:** the agent page's Snapshots list has no new entry; inside the agent, `ls -l ~/.openclaw/agents/<slug>/agent/` shows the named file with odd permissions, or as a folder.
@@ -2997,9 +3123,9 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### A copy made from a template is missing one of the template's scheduled tasks, and a rebuild does not bring it back
 - **Check:** the template (or the original) has the task, the copy's Scheduled tasks list does not, and the copy's Setup log has `schedule.apply_failed` (or `schedule.list_failed`) from its first setup.
 - **Cause:** a task the gateway refused while the copy was being set up stays parked to be tried again, but before v2.168.0 only a setup tried again, and the copy was already running; a rebuild never did.
-- **Fix:** upgrade, then Rebuild the copy: a rebuild adds the parked tasks (each once; one already there by name is not added again). On an older version, add the task by hand on the copy's Schedule tab.
-- **Fixed in:** `v2.168.0`
-- **Code:** `src/orchestrator/provision.ts` — `applyPendingSchedules`, `rebuildAgent`
+- **Fix:** upgrade. From v2.170.0 the copy's Schedule tab lists the task as "waiting to be added" with the reason it was refused; **Try adding it now** adds it, and a Start, a wake or a rebuild tries again too (each once; one already there by name is not added again). On v2.168.0 and v2.169.0, Rebuild the copy. On an older version, add the task by hand on the copy's Schedule tab.
+- **Fixed in:** `v2.168.0` (a rebuild); `v2.170.0` (shown, Try again, Start and wake)
+- **Code:** `src/orchestrator/provision.ts` — `applyPendingSchedules`, `retryPendingSchedules`, `retryPendingSchedulesWhenUp`, `rebuildAgent`; `src/api/routes.ts` — `waitingTasks`, `clearPinsWhenUp`, `'/v1/agents/:id/crons/waiting'`; `web/index.html` — `cronWaitingRows`, `retryWaitingCrons`
 
 ### Share, Clone or New child: "Couldn't read its scheduled tasks, so the copy would have none — nothing was exported"
 - **Check:** the agent's Scheduled tasks list does not load either, or `openclaw cron list --json` inside the agent fails.
@@ -3073,10 +3199,10 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ### Importing a template with long setup answers says only "Import failed" (or, from v2.166.0, "The setup answers are too long to send together")
 - **Check:** the template asks several setup questions and the answers are long (about five full-length answers of 2,000 characters, fewer if they hold many spaces or punctuation). In DevTools → Network the `POST /v1/agents/import?values=…` request has a very long address and the answer is a `431` with no body; the server log shows nothing, because Node refused the request before the app saw it.
-- **Cause:** the setup answers travel in the request's address, and Node refuses a request whose address and headers together pass 16 KB. The page showed the empty answer as a bare "Import failed".
-- **Fix:** shorten some answers and import again; the rest can be finished in the agent's Overview after the import (Setup values). From v2.166.0 the page refuses before sending, saying how many characters are over and which answer is longest. The transport is unchanged (interim fix); a later release will send the answers in the request body.
-- **Fixed in:** `v2.166.0` (interim)
-- **Code:** `web/index.html` — `importValuesTooLong`, `IMPORT_VALUES_MAX_CHARS`, `importAgentFile`; `src/api/routes.ts` — `'/v1/agents/import'`; `scripts/ui-clickthrough.mjs` — `importAnswersTooLong`
+- **Cause:** the setup answers travelled in the request's address, and Node refuses a request whose address and headers together pass 16 KB. The page showed the empty answer as a bare "Import failed"; v2.166.0 only refused before sending, saying how many characters were over.
+- **Fix:** upgrade: the page sends the answers in the request body, ahead of the file (`application/vnd.hatchabot.import`), so every answer a template allows goes through. On an older version, shorten some answers and finish the rest in the agent's Overview after the import (Setup values). A script that still sends `?values=` keeps working within the address's limit.
+- **Fixed in:** `v2.170.0` (`v2.166.0` refused in words)
+- **Code:** `web/index.html` — `IMPORT_WITH_VALUES`, `importAgentFile`; `src/api/routes.ts` — `IMPORT_WITH_VALUES`, `IMPORT_HEAD_MAX_BYTES`, `'/v1/agents/import'`; `scripts/ui-clickthrough.mjs` — `importAnswersInBody`
 ### An agent made from a template cannot be edited or snapshotted: "SOUL.md is over 256KB", though the template was small
 - **Check:** the template imported fine, but editing the agent's SOUL.md or AGENTS.md in the app says it is over 256KB, snapshots and Download copy refuse it, and the template file itself is a few KB. Its files use a setup field many times, and the answer given was long.
 - **Cause:** a template's files were held to the core-file limit as written, with their `{{placeholders}}`; the file as rendered with the answers was not. A 9 KB file with 1,000 placeholders and a 2,000-character answer became a 2 MB SOUL.md.

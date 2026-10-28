@@ -127,6 +127,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('memory', 'HATCHABOT_EMBED_PORT', '8093', 'The service\'s port, on the address agents reach this machine at.'),
   s('memory', 'HATCHABOT_EMBED_BIND', null, 'That address. Unset: found automatically (the Docker bridge gateway).'),
   s('memory', 'HATCHABOT_EMBED_PER_MIN', '600', 'Calls a minute, per agent.'),
+  s('memory', 'HATCHABOT_EMBED_MB_PER_MIN', '8', 'Text a minute, per agent, in MB: far more than the engine embeds in a minute, so indexing never waits on it. Lower it to keep one agent from busying the engine for the rest.'),
   s('memory', 'HATCHABOT_EMBEDDER_MEMORY', '2g', 'The engine\'s memory limit.'),
   s('memory', 'HATCHABOT_EMBEDDER_IMAGE', null, 'The engine image. Unset: the one pinned by digest in this release.'),
   s('memory', 'HATCHABOT_EMBED_HEALTH_MS', '300000', 'How often a running service is checked (and restarted if it stopped).'),

@@ -24,6 +24,20 @@ export function activeValues(text: string): Map<string, string> {
   return out;
 }
 
+/**
+ * A value as the service reads it: systemd's EnvironmentFile drops the
+ * whitespace around it and one layer of quotes — single-quoted verbatim (with
+ * the `'\''` escape setup-host.sh writes), double-quoted with backslash
+ * escapes. Anything else, a `# note` after the value included, is part of the
+ * value there.
+ */
+export function envValue(raw: string): string {
+  const v = raw.trim();
+  if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1).replace(/'\\''/g, "'");
+  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) return v.slice(1, -1).replace(/\\(["\\$`])/g, '$1');
+  return v;
+}
+
 /** `export NAME=value`: a shell-sourced file (the macOS launcher) assigns it in place, in order. */
 const EXPORTED = /^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
 

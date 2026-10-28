@@ -22,6 +22,7 @@ let doorOut = '';
 const keysFile = join(mkdtempSync(join(tmpdir(), 'hb-door-')), 'keys.json');
 const KEY_A = 'agent-a-secret-key';
 const KEY_R = 'agent-r-secret-key'; // its own bucket, for the rate-limit case
+const KEY_M = 'agent-m-secret-key'; // its own byte budget (HB-0026)
 
 beforeAll(async () => {
   upstream = createServer((req, res) => {
@@ -36,7 +37,7 @@ beforeAll(async () => {
   });
   await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r));
   upstreamPort = (upstream.address() as { port: number }).port;
-  writeFileSync(keysFile, JSON.stringify({ [embedKeyHash(KEY_A)]: 'agent-a', [embedKeyHash(KEY_R)]: 'agent-r', [embedKeyHash('guest-key-t2')]: 'guest:t2' }));
+  writeFileSync(keysFile, JSON.stringify({ [embedKeyHash(KEY_A)]: 'agent-a', [embedKeyHash(KEY_R)]: 'agent-r', [embedKeyHash(KEY_M)]: 'agent-m', [embedKeyHash('guest-key-t2')]: 'guest:t2' }));
   writeFileSync(join(keysFile, '..', 'server-key'), 'server-secret\n');
   door = spawn(process.execPath, ['-e', doorScript()], {
     env: {
@@ -45,6 +46,7 @@ beforeAll(async () => {
       EMBED_SERVER_KEY_FILE: join(keysFile, '..', 'server-key'),
       EMBED_KEYS_FILE: keysFile,
       EMBED_PER_MIN: '3',
+      EMBED_MB_PER_MIN: '0.01', // 10,485 bytes a minute
       EMBED_GUEST_FACTOR: '4',
       EMBED_KEYS_TTL_MS: '0',
       EMBED_DOOR_PORT: '0',
@@ -98,6 +100,15 @@ describe('the embed door', () => {
     const guest: number[] = [];
     for (let i = 0; i < 13; i++) guest.push((await call('guest-key-t2', { input: 'x' })).status);
     expect(guest).toEqual([...Array(12).fill(200), 429]);
+  });
+
+  it('holds each agent to a byte budget, not only a call count (HB-0026)', async () => {
+    // Two 6 KB calls: the first fits, the second is let in (the budget is not
+    // yet spent) and leaves it in debt, so a third, tiny one is refused —
+    // though one call of the three a minute is still left.
+    const big = { input: ['m'.repeat(6000)] };
+    const codes = [(await call(KEY_M, big)).status, (await call(KEY_M, big)).status, (await call(KEY_M, { input: 'x' })).status];
+    expect(codes).toEqual([200, 200, 429]);
   });
 
   it('picks up a re-minted key from the file without a restart', async () => {

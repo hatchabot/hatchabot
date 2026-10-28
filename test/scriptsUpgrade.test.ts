@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -118,6 +118,83 @@ describe('scripts/upgrade.sh', () => {
     expect(third.status, third.stdout + third.stderr).toBe(0);
     expect(existsSync(lock)).toBe(false);
   }, 20_000);
+});
+
+describe('scripts/upgrade.sh cut off part-way through the install (HB-0043)', () => {
+  /**
+   * An install step that leaves half a node_modules and then hangs, as
+   * `npm ci` cut off would; `started` says it got there. The upgrade runs in
+   * its own process group, so a signal reaches it and the install as a stop
+   * of the service or a Ctrl-C does.
+   */
+  function cutOff(w: World, signal: NodeJS.Signals, where: 'install' | 'restart' = 'install') {
+    const started = join(w.root, 'started');
+    const hang = `#!/usr/bin/env bash\nmkdir -p node_modules/half-installed; touch ${JSON.stringify(started)}; exec sleep 30\n`;
+    writeFileSync(join(w.bin, 'hanging-step'), hang, { mode: 0o755 });
+    const p = spawn('bash', [join(w.install, 'scripts', 'upgrade.sh'), 'stable'], {
+      detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...w.env, HATCHABOT_UPGRADE_IMAGE: '0',
+        HATCHABOT_INSTALL_CMD: where === 'install' ? join(w.bin, 'hanging-step') : 'true',
+        HATCHABOT_RESTART_CMD: where === 'restart' ? join(w.bin, 'hanging-step') : join(w.bin, 'fake-restart') },
+    });
+    let out = '';
+    p.stdout!.on('data', (c) => (out += c)); p.stderr!.on('data', (c) => (out += c));
+    return new Promise<{ code: number | null; out: string }>((resolve, reject) => {
+      const t0 = Date.now();
+      const poll = setInterval(() => {
+        if (existsSync(started)) { clearInterval(poll); process.kill(-p.pid!, signal); }
+        else if (Date.now() - t0 > 15_000) { clearInterval(poll); process.kill(-p.pid!, 'SIGKILL'); reject(new Error(`never reached the ${where}: ${out}`)); }
+      }, 20);
+      p.on('exit', (code) => resolve({ code, out }));
+    });
+  }
+
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    it(`${signal} in the install: the old release and its dependencies are put back at once, and it says 3`, async () => {
+      const w = world();
+      const r = await cutOff(w, signal);
+      expect(r.code, r.out).toBe(3);
+      expect(r.out).toMatch(/stopped part-way — putting v1\.0\.0 back/);
+      expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
+      expect(readFileSync(join(w.install, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+      expect(existsSync(join(w.install, 'node_modules', 'half-installed'))).toBe(false);
+      expect(existsSync(join(w.install, 'node_modules.prev'))).toBe(false);
+      expect(restarted(w)).toBe(0);
+      // Nothing left for the next run to repair.
+      const next = run(w, { HATCHABOT_INSTALL_CMD: 'false' }, ['stable']);
+      expect(next.stdout).not.toMatch(/cut off part-way/);
+    });
+  }
+
+  it('killed in the install (SIGKILL, a power cut): the next run puts the old release back first, not "Already on" the new one', async () => {
+    const w = world();
+    const r = await cutOff(w, 'SIGKILL');
+    expect(r.code).toBe(null);
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.1.0'); // half-way: the new code, half its dependencies
+    // A next run whose install fails too: it must still end on the old release with its own dependencies.
+    const next = run(w, { HATCHABOT_INSTALL_CMD: 'false' }, ['stable']);
+    expect(next.status, next.stdout + next.stderr).toBe(3);
+    expect(next.stdout).toMatch(/cut off part-way — putting v1\.0\.0 back first/);
+    expect(next.stdout).toMatch(/Upgrading v1\.0\.0 → v1\.1\.0/);
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
+    expect(readFileSync(join(w.install, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+    expect(existsSync(join(w.install, 'node_modules.prev'))).toBe(false);
+    expect(restarted(w)).toBe(0); // the service never left the old release
+    // And one that installs: on the new release.
+    const third = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['stable']);
+    expect(third.status, third.stdout + third.stderr).toBe(0);
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.1.0');
+  });
+
+  it('killed while the service restarts onto the new release: the next run restarts the old one it put back', async () => {
+    const w = world();
+    await cutOff(w, 'SIGKILL', 'restart');
+    const next = run(w, { HATCHABOT_INSTALL_CMD: 'false' }, ['stable']);
+    expect(next.stdout).toMatch(/cut off part-way — putting v1\.0\.0 back first/);
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
+    expect(readFileSync(join(w.install, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+    expect(restarted(w)).toBe(1); // back onto the old release
+  });
 });
 
 describe('the upgrade lock knows its holder (#226)', () => {
