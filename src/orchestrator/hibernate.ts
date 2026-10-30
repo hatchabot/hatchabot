@@ -139,6 +139,10 @@ export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string,
       const fresh = await deps.lastActiveFor(deps.store.getAgent(a.id) ?? now).then((v) => v ?? '', () => undefined);
       if (fresh === undefined) throw new NoLongerSleepy('its activity could not be read');
       if ((Date.parse(fresh) || 0) > (Date.parse(opts.seen ?? '') || 0)) throw new NoLongerSleepy('active recently');
+      // And the settings once more, in the same tick as the stop: "Never
+      // sleep" saved during the reads above lost to it all the same (HB-0294).
+      const late = settledBlocker(deps, deps.store.getAgent(a.id) ?? now, true);
+      if (late) throw new NoLongerSleepy(late);
     }
     const t = Date.now();
     bedtime = Math.floor(t / 1000);

@@ -19,9 +19,10 @@ import { ChannelSetupRequired } from '../channels/channel.js';
 import { DOORMAN_EMBED_PORT } from '../ops/doorman.js';
 import { agentTimeZone } from './timezone.js';
 import { AgentBusyError, whileBusy } from './busy.js';
+import { rethrowIfCrash } from './operations.js';
 import { notifyAgentChat } from '../channels/notify.js';
 import { autoSnapshot, workspacePath, writeFileInAgent } from './snapshots.js';
-import { addCron, conversationDeliverySupported, cronTargetFor, listCrons } from './crons.js';
+import { addCron, conversationDeliverySupported, cronTargetFor, listCrons, type Cron } from './crons.js';
 import { syncModelReviewCron } from './modelReview.js';
 import { channelTimeoutEnv } from './channelTimeout.js';
 import { syncContextCap } from './compaction.js';
@@ -267,10 +268,16 @@ async function provisionChannelOrGoWebOnly(
   }
 }
 
+/**
+ * `busyHeld`: the caller already holds the agent's busy flag (an owner's
+ * "Try again" on a held operation runs under it), so it is not taken again.
+ */
 export async function runProvisionSteps(
   deps: ProvisionDeps,
   agentId: string,
+  opts: { busyHeld?: boolean } = {},
 ): Promise<ProvisionResult> {
+  if (opts.busyHeld) return runProvisionStepsInner(deps, agentId);
   return whileBusy(agentId, () => runProvisionStepsInner(deps, agentId));
 }
 
@@ -1058,11 +1065,20 @@ async function applyPendingSchedules(
     log('schedule.list_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) });
     return undefined;
   });
-  const existing = new Set((listed ?? []).map((c) => c.name).filter((n): n is string => !!n));
   const stillPending: typeof pendingSchedules = listed ? []
     : pendingSchedules.map((sch) => ({ ...sch, why: 'its list of tasks could not be read, so it was not added (it may be there already)' }));
   for (const sch of listed ? pendingSchedules : []) {
-    if (existing.has(sch.name)) { log('schedule.already_present', { agentId, name: sch.name }); continue; }
+    // Landed already only when the task of that name is this one: another
+    // task that happens to have the name (an hourly "Morning" of the owner's
+    // own) made this one count as added, and it was dropped (HB-0290). Such
+    // a clash stays parked, with why, for the owner to settle.
+    const named = (listed ?? []).filter((c) => !c.system && c.name === sch.name);
+    if (named.some((c) => sameSchedule(c, sch))) { log('schedule.already_present', { agentId, name: sch.name }); continue; }
+    if (named.length) {
+      stillPending.push({ ...sch, why: 'another task already has this name (with another schedule or message), so it was not added: rename or remove that one, then Try again' });
+      log('schedule.name_taken', { agentId, name: sch.name });
+      continue;
+    }
     const out = await addCron(provider, runtimeRef, agent.slug, {
       name: sch.name, message: sch.message, cron: sch.cron, everyMs: sch.everyMs, tz: sch.tz,
       // Quiet in the template, quiet here; unsaid (older templates) announces.
@@ -1079,6 +1095,13 @@ async function applyPendingSchedules(
     }
   }
   store.setPendingSchedules(agentId, stillPending.length ? stillPending : null);
+}
+
+/** Whether a listed task is a parked declaration as addCron makes it (intervals to the second, as msToEvery sends them). */
+function sameSchedule(c: Cron, sch: { message: string; cron?: string; everyMs?: number; tz?: string }): boolean {
+  if ((c.message ?? '').trim() !== sch.message.trim()) return false;
+  if (sch.cron) return c.scheduleExpr === sch.cron && (!sch.tz || c.scheduleTz === sch.tz);
+  return !!sch.everyMs && !!c.everyMs && Math.round(c.everyMs / 1000) === Math.max(1, Math.round(sch.everyMs / 1000));
 }
 
 /**
@@ -1225,40 +1248,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     // been used the most.
     await waitForHealthy(provider, runtimeRef, sleep, 120);
     log('runtime.healthy', { agentId, runtimeRef });
-    // Sessions pinned to a runtime this seed no longer names (runtimePins.ts).
-    await clearStaleRuntimePins(provider, runtimeRef, agent.slug, (e, d) => log(e, { agentId, ...d }))
-      .catch((err) => log('runtime.pin_failed', { agentId, error: String(err).slice(0, 200) }));
-    log('runtime.syncing', { agentId });
-    // Removed sources first: their keys come off before any source is (re)synced.
-    await scrubRemovedDataSources(deps, agentId, runtimeRef, true, log).catch(() => false);
-    await syncGitDataSources(deps, agentId, runtimeRef, log);
-    // Step 7.6: attached platform connections (Google via gog) land on the
-    // volume — best-effort per connection; a Google hiccup never fails a
-    // build, and import is idempotent so the next provision heals it.
-    await syncConnections({ store, secrets: deps.secrets, provider, log }, agentId, runtimeRef)
-      .catch((err) => log('connection.sync_failed', { agentId, error: String(err).slice(0, 200) }));
-    await syncDataSourceDocs(deps, agentId, runtimeRef, log);
-    await syncInstallDocs(deps, agentId, runtimeRef, log);
-    // What it can reach, looked at in the new container (access overview) — read-only, best-effort,
-    // and not awaited: a slow probe must never hold up a build (2026-10-09).
-    void verifyAgentAccess({ store, secrets: deps.secrets, provider }, agentId, runtimeRef).catch(() => undefined);
-    // Its context cap (compaction.ts), re-applied for the model it runs now.
-    await syncContextCap({ store, provider, log: (e, d) => log(e, { agentId, ...d }) }, store.getAgent(agentId) ?? agent, runtimeRef)
-      .catch((err) => log('token.context_cap_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
-    await runRebuildHook(deps, agentId, runtimeRef, log);
-    log('runtime.settling', { agentId });
-    await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
-    await reindexMemoryIfSwitched(deps, agentId, runtimeRef, log);
-    // Template tasks a setup could not schedule: retried here (audit #017).
-    await applyPendingSchedules(deps, store.getAgent(agentId) ?? agent, runtimeRef, log);
-    // The weekly model review rides on rebuilds too: a management agent made
-    // before it existed is never provisioned again, only rebuilt (2026-10-03).
-    if (agent.ops) {
-      await syncModelReviewCron({ store, provider, log }, agent, runtimeRef)
-        .catch((err) => log('schedule.model_review_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
-    }
-    log('runtime.rebuilt', { agentId, runtimeRef });
-    store.dropCarriedMemorySeed(agentId); // on the volume now (see provision)
+    await finishRebuild(deps, agent, runtimeRef, log);
     const live = store.setAgentState(agentId, 'RUNNING');
     void explainFailedCheckpoint();
     return live;
@@ -1275,6 +1265,82 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     store.setAgentState(agentId, 'FAILED', reason);
     return store.getAgent(agentId)!;
   }
+}
+
+/**
+ * What a rebuild does once its new container answers: its sources,
+ * connections, docs, context cap, rebuild hook, memory index and parked
+ * schedules. Each step leaves what is done as it is, so a rebuild cut off by
+ * a restart after its container came up runs them again (HB-0301).
+ */
+async function finishRebuild(deps: ProvisionDeps, agent: Agent, runtimeRef: string, log: (event: string, detail: Record<string, unknown>) => void): Promise<void> {
+  const { store, provider } = deps;
+  const agentId = agent.id;
+  const sleep = deps.sleep ?? defaultSleep;
+  // Sessions pinned to a runtime this seed no longer names (runtimePins.ts).
+  await clearStaleRuntimePins(provider, runtimeRef, agent.slug, (e, d) => log(e, { agentId, ...d }))
+    .catch((err) => log('runtime.pin_failed', { agentId, error: String(err).slice(0, 200) }));
+  log('runtime.syncing', { agentId });
+  // Removed sources first: their keys come off before any source is (re)synced.
+  await scrubRemovedDataSources(deps, agentId, runtimeRef, true, log).catch(() => false);
+  await syncGitDataSources(deps, agentId, runtimeRef, log);
+  // Step 7.6: attached platform connections (Google via gog) land on the
+  // volume — best-effort per connection; a Google hiccup never fails a
+  // build, and import is idempotent so the next provision heals it.
+  await syncConnections({ store, secrets: deps.secrets, provider, log }, agentId, runtimeRef)
+    .catch((err) => log('connection.sync_failed', { agentId, error: String(err).slice(0, 200) }));
+  await syncDataSourceDocs(deps, agentId, runtimeRef, log);
+  await syncInstallDocs(deps, agentId, runtimeRef, log);
+  // What it can reach, looked at in the new container (access overview) — read-only, best-effort,
+  // and not awaited: a slow probe must never hold up a build (2026-10-09).
+  void verifyAgentAccess({ store, secrets: deps.secrets, provider }, agentId, runtimeRef).catch(() => undefined);
+  // Its context cap (compaction.ts), re-applied for the model it runs now.
+  await syncContextCap({ store, provider, log: (e, d) => log(e, { agentId, ...d }) }, store.getAgent(agentId) ?? agent, runtimeRef)
+    .catch((err) => log('token.context_cap_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
+  await runRebuildHook(deps, agentId, runtimeRef, log);
+  log('runtime.settling', { agentId });
+  await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
+  await reindexMemoryIfSwitched(deps, agentId, runtimeRef, log);
+  // Template tasks a setup could not schedule: retried here (audit #017).
+  await applyPendingSchedules(deps, store.getAgent(agentId) ?? agent, runtimeRef, log);
+  // The weekly model review rides on rebuilds too: a management agent made
+  // before it existed is never provisioned again, only rebuilt (2026-10-03).
+  if (agent.ops) {
+    await syncModelReviewCron({ store, provider, log }, agent, runtimeRef)
+      .catch((err) => log('schedule.model_review_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
+  }
+  log('runtime.rebuilt', { agentId, runtimeRef });
+  store.dropCarriedMemorySeed(agentId); // on the volume now (see provision)
+}
+
+/**
+ * A rebuild cut off by a restart with its new container up and answering:
+ * the steps after health run again, then it is RUNNING. Failing, it ends as
+ * a failed rebuild does: stopped and FAILED, with the reason.
+ */
+export async function finishInterruptedRebuild(
+  deps: ProvisionDeps,
+  agentId: string,
+  opts: { busyHeld?: boolean } = {},
+): Promise<Agent | undefined> {
+  // `busyHeld`: as for runProvisionSteps (an owner's "Try again" already holds it).
+  const run = async (): Promise<Agent | undefined> => {
+    const log = deps.log ?? (() => {});
+    const agent = deps.store.getAgent(agentId);
+    if (!agent?.runtimeRef || agent.state !== 'REBUILDING') return agent;
+    try {
+      await finishRebuild(deps, agent, agent.runtimeRef, log);
+      return deps.store.setAgentState(agentId, 'RUNNING');
+    } catch (err) {
+      rethrowIfCrash(err);
+      const reason = userMessageFor(err);
+      log('rebuild.failed', { agentId, reason, error: String(err) });
+      await deps.provider.stop(agent.runtimeRef).catch(() => {});
+      deps.store.setAgentState(agentId, 'FAILED', reason);
+      return deps.store.getAgent(agentId);
+    }
+  };
+  return opts.busyHeld ? run() : whileBusy(agentId, run);
 }
 
 /** The source and model each spec was rendered with: what recordApplied stamps (audit #094). */
@@ -1462,6 +1528,22 @@ export function prefixedModelRef(
 }
 
 /**
+ * One agent's repo access changes, one at a time: a sync writing a deploy key
+ * and a removal scrubbing it. A sync that had read a key went on to write it
+ * after the removal had scrubbed it and said so, and nothing was left to
+ * retry the scrub (HB-0274).
+ */
+const gitAccessTurns = new Map<string, Promise<unknown>>();
+function inGitAccessTurn<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = gitAccessTurns.get(agentId) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  const settled = run.catch(() => undefined);
+  gitAccessTurns.set(agentId, settled);
+  void settled.then(() => { if (gitAccessTurns.get(agentId) === settled) gitAccessTurns.delete(agentId); });
+  return run;
+}
+
+/**
  * Clone (or refresh) each git data source inside the running container. Runs on
  * every provision and rebuild, and is idempotent (buildGitSyncScript only clones
  * when the tree is absent). Best-effort: a repo whose deploy key the owner
@@ -1484,16 +1566,24 @@ export async function syncGitDataSources(
     if (!publicRepo && (!d.secretRef || !host)) continue;
     try {
       const commit = { name: agent.name, email: `${agent.slug}@hatchabot.local` };
-      const script = publicRepo
-        ? buildPublicGitSyncScript({ mountName: d.mountName, httpsUrl: d.repoUrl }, commit)
-        : buildGitSyncScript(
-            { mountName: d.mountName, sshUrl: d.repoUrl, host: host! },
-            Buffer.from(await secrets.get(d.secretRef!), 'utf8').toString('base64'),
-            commit,
-          );
-      // A deploy key rides in the script: over stdin, off every command line (2026-09-30).
-      const res = await provider.execShell(runtimeRef, script, publicRepo ? undefined : { secret: true });
-      if (res.code !== 0) {
+      // In the agent's turn, and only for a source still there once its key
+      // is read: one removed meanwhile is the removal's to scrub (HB-0274).
+      const res = await inGitAccessTurn(agentId, async () => {
+        const script = publicRepo
+          ? buildPublicGitSyncScript({ mountName: d.mountName, httpsUrl: d.repoUrl! }, commit)
+          : buildGitSyncScript(
+              { mountName: d.mountName, sshUrl: d.repoUrl!, host: host! },
+              Buffer.from(await secrets.get(d.secretRef!), 'utf8').toString('base64'),
+              commit,
+            );
+        const now = store.getDataSource(agentId, d.id);
+        if (!now || now.secretRef !== d.secretRef || now.repoUrl !== d.repoUrl) return undefined;
+        // A deploy key rides in the script: over stdin, off every command line (2026-09-30).
+        return provider.execShell(runtimeRef, script, publicRepo ? undefined : { secret: true });
+      });
+      if (!res) {
+        log('datasource.git_sync_skipped', { agentId, mountName: d.mountName, why: 'removed' });
+      } else if (res.code !== 0) {
         // Persist the reason on the source, not just in the audit log — a repo
         // that never cloned (nearly always: its deploy key isn't on the host
         // yet) has to be visible on the card, or it hides among the successes.
@@ -1528,10 +1618,27 @@ export async function scrubRemovedDataSources(
   runtimeRef: string | null | undefined,
   running: boolean,
   log: (event: string, detail: Record<string, unknown>) => void = () => {},
+  opts: { settle?: boolean } = {},
+): Promise<boolean> {
+  return inGitAccessTurn(agentId, () => scrubRemovedNow(deps, agentId, runtimeRef, running, log, opts.settle !== false));
+}
+
+/**
+ * `settle` false scrubs the volume and records nothing: a move scrubs the
+ * copy before it starts, and the copy may yet be thrown away by a rollback
+ * that restarts the source with the key still on it (HB-0317).
+ */
+async function scrubRemovedNow(
+  deps: Pick<ProvisionDeps, 'store' | 'secrets' | 'provider'>,
+  agentId: string,
+  runtimeRef: string | null | undefined,
+  running: boolean,
+  log: (event: string, detail: Record<string, unknown>) => void,
+  settle: boolean,
 ): Promise<boolean> {
   const { store, secrets, provider } = deps;
   for (const r of store.dataSourceRemovals(agentId)) {
-    if (r.secretRef) {
+    if (r.secretRef && settle) {
       try {
         await secrets.delete(r.secretRef);
         store.settleDataSourceRemoval(r.id, { secret: true });
@@ -1542,17 +1649,18 @@ export async function scrubRemovedDataSources(
     if (!r.mountName) continue;
     // Never a shape the script can't hold safely (no "..", no leading dot):
     // nothing of ours is there.
-    if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(r.mountName)) { store.settleDataSourceRemoval(r.id, { volume: true }); continue; }
+    if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(r.mountName)) { if (settle) store.settleDataSourceRemoval(r.id, { volume: true }); continue; }
     // Added again under the same name with a key of its own: its sync writes
     // the new key over the old one, and scrubbing now would take the new one.
     const again = store.listDataSources(agentId).filter((d) => d.kind === 'git' && d.mountName === r.mountName);
-    if (again.some((d) => !!d.secretRef)) { store.settleDataSourceRemoval(r.id, { volume: true }); continue; }
+    if (again.some((d) => !!d.secretRef)) { if (settle) store.settleDataSourceRemoval(r.id, { volume: true }); continue; }
     if (!runtimeRef) continue;
     // The key, and the clone unless a source of that name (public) owns the
     // folder now (HB-0002). Judged by what is left, not by each command's exit.
     const script = buildGitRemovalScript(r.mountName, r.repoUrl, { keepClone: again.length > 0 });
     const res = await (running ? provider.execShell(runtimeRef, script) : provider.execShellOnVolume(runtimeRef, script)).catch(() => undefined);
     if (res?.code === 0) {
+      if (!settle) continue;
       store.settleDataSourceRemoval(r.id, { volume: true });
       log('datasource.key_removed', { agentId, name: r.mountName, clone: !!r.repoUrl && !again.length });
     } else {

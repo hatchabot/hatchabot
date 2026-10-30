@@ -13,7 +13,7 @@ import { clearBusy } from '../src/orchestrator/busy.js';
 import { newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/operations.js';
 import { resolvePendingValues, stashPendingSecrets } from '../src/orchestrator/appPending.js';
 import {
-  AppError, fieldsToAsk, hostGit, installRelease, manifestAt, mergeConfig, parseManifest, parseSource, removeTasks, repoFor, resolveRelease, switchTo, type AgentFacts,
+  AppError, fieldsToAsk, hostGit, installRelease, manifestAt, mergeConfig, parseManifest, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts,
 } from '../src/orchestrator/apps.js';
 
 /**
@@ -1720,5 +1720,57 @@ describe('apps: what the 2026-10-22 review found', () => {
     const m = withFields([{ key: 'app_password', secret: true }, { key: 'api_key', secret: true }]);
     await expect(stashPendingSecrets(secrets, 'a1', m, { app_password: 'made-up-new', api_key: 'made-up-two' })).rejects.toThrow(/disk full/);
     expect([...kept]).toEqual([['app-pending/a1/app_password', JSON.stringify('the-old-one')]]);
+  });
+});
+
+describe('apps: what the 2026-10-29 audit found', () => {
+  const withFields = (fields: unknown[]) => parseManifest(JSON.stringify({ ...MANIFEST, config: { fields } }));
+
+  it('a field Hatchabot fills is held to its type: a list gets a list, a number a number (HB-0303)', () => {
+    const m = withFields([{ key: 'recipients', type: 'list', from: 'owner.email', required: true }, { key: 'agent_name', type: 'text', from: 'agent.name' }]);
+    expect(mergeConfig(m, { ...FACTS, ownerEmail: 'owner@example.org' }, {}, {})).toMatchObject({ config: { recipients: ['owner@example.org'], agent_name: 'Demo' }, missing: [], unfilled: [] });
+    // No address to fill it with: an empty list, and said.
+    const none = mergeConfig(m, FACTS, {}, {});
+    expect(none.config.recipients).toEqual([]);
+    expect(none.unfilled).toEqual([expect.stringMatching(/^recipients/)]);
+    // A fact that is not of the field's type is the manifest's mistake, said as one.
+    expect(() => mergeConfig(withFields([{ key: 'contact', type: 'email', from: 'agent.name' }]), FACTS, {}, {})).toThrow(/contact is filled from agent\.name, which is not an email address/);
+    // A numeric Telegram id fills a number field. The manifest is not
+    // refused when read: an app installed with it had to stay updatable.
+    const chat = withFields([{ key: 'chat_id', type: 'number', from: 'owner.telegram', required: true }]);
+    expect(mergeConfig(chat, { ...FACTS, ownerTelegram: '4242' }, {}, {}).config.chat_id).toBe(4242);
+    expect(mergeConfig(chat, { ...FACTS, ownerTelegram: undefined }, {}, {}).unfilled).toEqual([expect.stringMatching(/^chat_id/)]);
+    // Nothing to fill it with: no value (null), as a cleared number is, not ''.
+    const optional = withFields([{ key: 'chat_id', type: 'number', from: 'owner.telegram' }]);
+    expect(mergeConfig(optional, { ...FACTS, ownerTelegram: undefined }, { chat_id: 99 }, {}).config.chat_id).toBeNull();
+    const flag = withFields([{ key: 'on', type: 'bool', from: 'agent.name' }]);
+    expect(() => mergeConfig(flag, FACTS, {}, {})).toThrow(/on is filled from agent\.name, which is not true or false/);
+  });
+
+  it('a required list given as blank items is asked for, as ", ," is (HB-0364)', () => {
+    const m = withFields([{ key: 'recipients', type: 'list', required: true }]);
+    expect(mergeConfig(m, FACTS, {}, { recipients: ['', ' '] }).missingKeys).toEqual(['recipients']);
+    expect(mergeConfig(m, FACTS, {}, { recipients: [' a@example.org ', ''] }).config.recipients).toEqual(['a@example.org']);
+  });
+
+  it("the owner's own task with an app task's name is not the app's: an install leaves it (HB-0304)", async () => {
+    const jobs: Array<Record<string, unknown>> = [
+      { id: 'personal', name: 'demoapp-tick', enabled: true, payload: { kind: 'agentTurn', message: 'my own reminder' } },
+      { id: 'old-app', name: 'demoapp-tick', enabled: true, payload: { kind: 'command', argv: ['true'] } },
+    ];
+    let n = 0;
+    const provider = {
+      exec: async (_ref: string, argv: string[]): Promise<ExecResult> => {
+        if (argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs }), stderr: '' };
+        if (argv[1] === 'add') { const id = `app-${++n}`; jobs.push({ id, name: argv[argv.indexOf('--name') + 1], enabled: true, payload: { kind: 'command' } }); return { code: 0, stdout: JSON.stringify({ id }), stderr: '' }; }
+        if (argv[1] === 'rm') jobs.splice(jobs.findIndex((j) => j.id === argv[2]), 1);
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    };
+    const m = parseManifest(JSON.stringify({ ...MANIFEST, tasks: [{ name: 'tick', every: '1h', command: ['true'] }] }));
+    await syncTasks({ provider: provider as any, runtimeRef: 'x', facts: FACTS }, m);
+    expect(jobs.map((j) => j.id)).toEqual(['personal', 'app-1']);
+    await removeTasks({ provider: provider as any, runtimeRef: 'x', facts: FACTS }, 'demoapp', m);
+    expect(jobs.map((j) => j.id)).toEqual(['personal']);
   });
 });

@@ -34,10 +34,13 @@ if [ -f BUNDLE.json ] && [ -x .node/bin/node ]; then
   case ":$PATH:" in
     *":$BIN:"*) ;;
     *)
-      LINE="export PATH=\"$BIN:\$PATH\""
+      # Escaped inside the line's double quotes, as the launcher's folder is:
+      # a home named home$X was expanded by every new shell (audit, 2026-10-29).
+      BIN_Q="$(printf '%s' "$BIN" | sed -e 's/[\\$`"]/\\&/g')"
+      LINE="export PATH=\"$BIN_Q:\$PATH\""
       for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
         [ -f "$rc" ] || [ "$rc" = "$HOME/.$(basename "${SHELL:-bash}")rc" ] || continue
-        grep -qF "$BIN" "$rc" 2>/dev/null || { printf '\n# hatchabot CLI\n%s\n' "$LINE" >> "$rc"; echo "added to $rc: $LINE"; }
+        grep -qF "$BIN_Q" "$rc" 2>/dev/null || { printf '\n# hatchabot CLI\n%s\n' "$LINE" >> "$rc"; echo "added to $rc: $LINE"; }
       done
       echo "Open a new terminal (or run: $LINE) for the change to take effect there." ;;
   esac
@@ -74,10 +77,12 @@ echo "linked: $BIN/hatchabot$([ -L "$BIN/hbt" ] && echo ", $BIN/hbt")"
 case ":$PATH:" in
   *":$BIN:"*) ;;
   *)
-    LINE="export PATH=\"$BIN:\$PATH\""
+    # Escaped inside the line's double quotes, as above (audit, 2026-10-29).
+    BIN_Q="$(printf '%s' "$BIN" | sed -e 's/[\\$`"]/\\&/g')"
+    LINE="export PATH=\"$BIN_Q:\$PATH\""
     for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
       [ -f "$rc" ] || [ "$rc" = "$HOME/.$(basename "${SHELL:-bash}")rc" ] || continue
-      grep -qF "$BIN" "$rc" 2>/dev/null || { printf '\n# hatchabot CLI\n%s\n' "$LINE" >> "$rc"; echo "added to $rc: $LINE"; }
+      grep -qF "$BIN_Q" "$rc" 2>/dev/null || { printf '\n# hatchabot CLI\n%s\n' "$LINE" >> "$rc"; echo "added to $rc: $LINE"; }
     done
     export PATH="$BIN:$PATH"
     echo "Open a new terminal (or run: $LINE) for the change to take effect there."

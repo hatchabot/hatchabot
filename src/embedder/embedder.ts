@@ -17,8 +17,8 @@
  * Nothing uses the service until an agent is switched to it (step 2).
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync, renameSync } from 'node:fs';
-import { join } from 'node:path';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync, renameSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import type { RuntimeProvider } from '../providers/provider.js';
@@ -115,6 +115,35 @@ export function sha256File(path: string): Promise<string> {
   });
 }
 
+/**
+ * The model fetch under way for each model file. This machine's service and
+ * every runner's share one file (models/ in the data folder): two starting
+ * at once removed each other's half-made copy (HB-0346). One fetch per file
+ * at a time; the next finds it there and checked.
+ */
+const modelTurns = new Map<string, Promise<void>>();
+
+/**
+ * Half-made copies of `dest` whose maker is gone: a restart during a copy
+ * or a 30-minute download left one (up to the model's size) for good. The
+ * caller holds the file's turn, so none of this process's is under way; a
+ * live process's is left alone.
+ */
+function clearStaleParts(dest: string): void {
+  const dir = join(dest, '..'), base = basename(dest);
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return; }
+  for (const n of names) {
+    if (n === `${base}.part`) { rmSync(join(dir, n), { force: true }); continue; }
+    if (!n.startsWith(`${base}.`) || !n.endsWith('.part')) continue;
+    const pid = Number(/^\.(\d+)\.[0-9a-f]+\.part$/.exec(n.slice(base.length))?.[1]);
+    if (!pid) continue;
+    let alive = pid !== process.pid;
+    if (alive) try { process.kill(pid, 0); } catch (err) { alive = (err as NodeJS.ErrnoException).code === 'EPERM'; }
+    if (!alive) rmSync(join(dir, n), { force: true });
+  }
+}
+
 export class EmbedderService {
   readonly #o: EmbedderServiceOpts;
   #busy: Promise<unknown> = Promise.resolve();
@@ -187,26 +216,46 @@ export class EmbedderService {
   }
 
   /** The model file: out of the runtime image if possible, else downloaded — checked either way. */
-  async ensureModel(): Promise<void> {
-    const want = this.#o.modelSha256 ?? EMBED_MODEL_SHA256;
+  ensureModel(): Promise<void> {
     const dest = this.modelPath;
+    const next = (modelTurns.get(dest) ?? Promise.resolve()).then(() => this.#ensureModelNow(dest));
+    const turn = next.catch(() => {});
+    modelTurns.set(dest, turn);
+    void turn.then(() => { if (modelTurns.get(dest) === turn) modelTurns.delete(dest); });
+    return next;
+  }
+  async #ensureModelNow(dest: string): Promise<void> {
+    const want = this.#o.modelSha256 ?? EMBED_MODEL_SHA256;
     mkdirSync(join(dest, '..'), { recursive: true });
-    if (existsSync(dest) && (await sha256File(dest)) === want) return;
-    rmSync(dest, { force: true });
-    const provider = this.#o.provider();
-    if (provider.copyFromImage && (await provider.copyFromImage(this.#o.runtimeImage, EMBED_MODEL_IN_IMAGE, dest).catch(() => false))) {
-      if ((await sha256File(dest)) === want) { this.#o.log?.('embedder.model_copied', { from: this.#o.runtimeImage }); return; }
-      rmSync(dest, { force: true });
+    clearStaleParts(dest);
+    if (existsSync(dest)) {
+      if ((await sha256File(dest)) === want) return;
+      rmSync(dest, { force: true }); // a refetch that fails must not leave it looking present
     }
-    const url = this.#o.modelUrl ?? EMBED_MODEL_URL;
-    this.#o.log?.('embedder.model_download', { url });
-    const res = await fetch(url, { signal: AbortSignal.timeout(30 * 60_000) });
-    if (!res.ok || !res.body) throw new Error(`model download failed: ${res.status}`);
-    const part = `${dest}.part`;
-    await pipeline(Readable.fromWeb(res.body as never), createWriteStream(part));
-    const got = await sha256File(part);
-    if (got !== want) { rmSync(part, { force: true }); throw new Error(`model checksum mismatch: ${got}`); }
-    renameSync(part, dest);
+    // Made under a name of its own and renamed into place once checked: the
+    // file at `dest` is always whole, for a runner's start reading it to copy.
+    const part = `${dest}.${process.pid}.${randomBytes(4).toString('hex')}.part`;
+    try {
+      const provider = this.#o.provider();
+      if (provider.copyFromImage && (await provider.copyFromImage(this.#o.runtimeImage, EMBED_MODEL_IN_IMAGE, part).catch(() => false))) {
+        if ((await sha256File(part).catch(() => '')) === want) {
+          renameSync(part, dest);
+          this.#o.log?.('embedder.model_copied', { from: this.#o.runtimeImage });
+          return;
+        }
+        rmSync(part, { force: true });
+      }
+      const url = this.#o.modelUrl ?? EMBED_MODEL_URL;
+      this.#o.log?.('embedder.model_download', { url });
+      const res = await fetch(url, { signal: AbortSignal.timeout(30 * 60_000) });
+      if (!res.ok || !res.body) throw new Error(`model download failed: ${res.status}`);
+      await pipeline(Readable.fromWeb(res.body as never), createWriteStream(part));
+      const got = await sha256File(part);
+      if (got !== want) throw new Error(`model checksum mismatch: ${got}`);
+      renameSync(part, dest);
+    } finally {
+      rmSync(part, { force: true });
+    }
   }
 
   /** The door's key file: every live agent's key hash. Rewritten whenever keys change. */
@@ -229,7 +278,7 @@ export class EmbedderService {
     writeFileSync(tmp, body, { mode: 0o600 });
     chmodSync(tmp, 0o600);
     renameSync(tmp, this.keysFile); // atomic: the door never reads a half-written file
-    if (this.#o.hostId && this.enabled && body !== this.#pushed) this.#pushLater = this.#pushKeys(body);
+    if (this.#o.hostId && this.enabled && !this.#removing && body !== this.#pushed) this.#pushLater = this.#pushKeys(body);
   }
 
   /** What syncKeys last wrote, and a count of its changes: a start tells by it whether keys changed while it copied them. */
@@ -238,11 +287,16 @@ export class EmbedderService {
   /** A runner's door reads its own copy: what was last copied there, and the copy under way. */
   #pushed: string | undefined;
   #pushLater: Promise<void> = Promise.resolve();
+  /** Moved on by remove: a copy queued before it is not made after it (HB-0349). */
+  #epoch = 0;
+  /** Set while remove runs: a key change meanwhile queues no copy, which would land after the volumes went. */
+  #removing = false;
   #pushKeys(body: string): Promise<void> {
+    const epoch = this.#epoch;
     const next = this.#pushLater.catch(() => {}).then(async () => {
-      if (body === this.#pushed) return;
+      if (epoch !== this.#epoch || body === this.#pushed) return;
       await this.#o.provider().pushEmbedKeys?.(this.#keyFiles());
-      this.#pushed = body;
+      if (epoch === this.#epoch) this.#pushed = body;
     });
     next.catch((err) => this.#o.log?.('embedder.keys_push_failed', { host: this.#o.hostId, error: String(err).slice(0, 200) }));
     return next;
@@ -366,13 +420,26 @@ export class EmbedderService {
   remove(onMachine: boolean): Promise<{ leftThere?: string }> {
     return this.#serial(async () => {
       if (!this.#o.hostId) throw new Error('This machine\'s own service is not removed.');
+      // A key copy to the runner that is waiting is dropped, and the one under
+      // way lands before the volumes go: it used to land after, and made the
+      // runner's key volume again, holding the retired key (HB-0349). Nothing
+      // goes there when the runner did not answer, so that removal does not
+      // wait on a copy that may hang until its timeout.
+      this.#epoch++;
+      this.#removing = true;
       let leftThere: string | undefined;
-      if (onMachine) {
-        try { await this.#o.provider().removeEmbedder?.(); }
-        catch (err) { leftThere = (err instanceof Error ? err.message : String(err)).slice(0, 200); }
+      try {
+        if (onMachine) {
+          await this.#pushLater.catch(() => {});
+          try { await this.#o.provider().removeEmbedder?.(); }
+          catch (err) { leftThere = (err instanceof Error ? err.message : String(err)).slice(0, 200); }
+        }
+        await this.#o.secrets.delete(`${EMBEDDER_KEY_REF}/${this.#o.hostId}`).catch(() => {});
+        rmSync(this.dir, { recursive: true, force: true });
+      } finally {
+        // Gone with the folder: its enabled file no longer asks for copies.
+        this.#removing = false;
       }
-      await this.#o.secrets.delete(`${EMBEDDER_KEY_REF}/${this.#o.hostId}`).catch(() => {});
-      rmSync(this.dir, { recursive: true, force: true });
       this.#pushed = undefined;
       this.#o.log?.('embedder.removed', { host: this.#o.hostId, onMachine, ...(leftThere ? { leftThere } : {}) });
       return leftThere ? { leftThere } : {};

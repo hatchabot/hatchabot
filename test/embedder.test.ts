@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
@@ -408,5 +409,195 @@ describe('the boot timers the server sets (HB-0043: they sit behind !VITEST)', (
     await vi.advanceTimersByTimeAsync(10);
     expect(warned).toEqual(['embedder auto-start at boot failed']);
     stop();
+  });
+});
+
+describe('HB-0346: services starting at once share one model fetch', () => {
+  it('a second service waits for the first one\'s copy instead of removing it, and no half-made file is ever at the model\'s path', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'hb-embed-model-'));
+    const content = Buffer.from('copied-model');
+    const ref = join(dataDir, 'ref'); writeFileSync(ref, content);
+    const want = await sha256File(ref);
+    const dest = join(dataDir, 'models', EMBED_MODEL_FILE);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let entered!: () => void;
+    const inCopy = new Promise<void>((r) => { entered = r; });
+    const copies: string[] = [];
+    const provider = {
+      copyFromImage: async (_image: string, _src: string, to: string) => {
+        copies.push(to);
+        writeFileSync(to, content.subarray(0, 4)); // half of it, then the gate
+        entered();
+        await gate;
+        writeFileSync(to, content);
+        return true;
+      },
+    };
+    const make = (hostId?: string) => new EmbedderService({
+      provider: () => provider as never, hostId, secrets: new MemSecrets(), store: {} as never, dataDir, runtimeImage: 'x:1',
+      doorScript: 'noop', doorBind: async () => '127.0.0.1', modelSha256: want,
+    });
+    const first = make().ensureModel();
+    await inCopy;
+    expect(existsSync(dest)).toBe(false); // the half-made copy is under a name of its own
+    const second = make('runner-1').ensureModel();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(copies).toHaveLength(1); // the second waits its turn
+    release();
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+    expect(copies).toHaveLength(1); // and then finds the model there
+    expect(readFileSync(dest)).toEqual(content);
+    expect(copies[0]).not.toBe(dest);
+    expect(existsSync(copies[0]!)).toBe(false);
+  });
+
+  it('a copy that fails its checksum leaves nothing behind', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'hb-embed-model-'));
+    const ref = join(dataDir, 'ref'); writeFileSync(ref, 'copied-model');
+    const svc = new EmbedderService({
+      provider: () => ({ copyFromImage: async (_i: string, _s: string, to: string) => { writeFileSync(to, 'wrong'); return true; } }) as never,
+      secrets: new MemSecrets(), store: {} as never, dataDir, runtimeImage: 'x:1', doorScript: 'noop', doorBind: async () => '127.0.0.1',
+      modelSha256: await sha256File(ref), modelUrl: 'http://127.0.0.1:9/model.gguf',
+    });
+    await expect(svc.ensureModel()).rejects.toThrow();
+    expect(readdirSync(join(dataDir, 'models'))).toEqual([]);
+  });
+
+  it('a model file that fails its checksum is removed even when the refetch fails, so the status does not call it present', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'hb-embed-model-'));
+    const ref = join(dataDir, 'ref'); writeFileSync(ref, 'copied-model');
+    const svc = new EmbedderService({
+      provider: () => ({}) as never, secrets: new MemSecrets(), store: {} as never, dataDir, runtimeImage: 'x:1',
+      doorScript: 'noop', doorBind: async () => '127.0.0.1', modelSha256: await sha256File(ref), modelUrl: 'http://127.0.0.1:9/model.gguf',
+    });
+    mkdirSync(join(dataDir, 'models'), { recursive: true });
+    writeFileSync(svc.modelPath, 'copied-mo'); // cut short
+    await expect(svc.ensureModel()).rejects.toThrow();
+    expect(existsSync(svc.modelPath)).toBe(false);
+    expect((await svc.status()).modelPresent).toBe(false);
+  });
+
+  it('a half-made copy left by a process that is gone is cleared at the next fetch; one of a live process is not', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'hb-embed-model-'));
+    const content = Buffer.from('copied-model');
+    const ref = join(dataDir, 'ref'); writeFileSync(ref, content);
+    const models = join(dataDir, 'models');
+    mkdirSync(models, { recursive: true });
+    const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+    const stale = [`${EMBED_MODEL_FILE}.part`, `${EMBED_MODEL_FILE}.${dead.stdout}.0a1b2c3d.part`];
+    const live = `${EMBED_MODEL_FILE}.${process.ppid}.0a1b2c3d.part`;
+    for (const f of [...stale, live, 'other.gguf.1.0a1b2c3d.part']) writeFileSync(join(models, f), 'half');
+    const svc = new EmbedderService({
+      provider: () => ({ copyFromImage: async (_i: string, _s: string, to: string) => { writeFileSync(to, content); return true; } }) as never,
+      secrets: new MemSecrets(), store: {} as never, dataDir, runtimeImage: 'x:1', doorScript: 'noop', doorBind: async () => '127.0.0.1',
+      modelSha256: await sha256File(ref),
+    });
+    await svc.ensureModel();
+    expect(readdirSync(models).sort()).toEqual([EMBED_MODEL_FILE, live, 'other.gguf.1.0a1b2c3d.part'].sort());
+  });
+});
+
+describe('HB-0349: removing a runner\'s service waits out a key copy under way', () => {
+  it('the copy under way lands before the volumes go, and one queued behind it is dropped', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'hb-embed-remove-'));
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let entered!: () => void;
+    const inPush = new Promise<void>((r) => { entered = r; });
+    let pushes = 0;
+    const provider = {
+      pushEmbedKeys: async (files: { serverKeyFile: string; keysFile: string }) => {
+        pushes++;
+        readFileSync(files.serverKeyFile, 'utf8');
+        entered();
+        await gate;
+        readFileSync(files.keysFile, 'utf8');
+        order.push('pushed');
+      },
+      removeEmbedder: async () => { order.push('removed'); },
+    };
+    const secrets = new MemSecrets();
+    await secrets.put('embedder/key/runner-1', 'made-up-engine-key');
+    let tokens: Array<{ tokenHash: string; agentId: string; state: string; hostId: string }> = [];
+    const svc = new EmbedderService({
+      provider: () => provider as never, hostId: 'runner-1', secrets, store: { listEmbedTokens: () => tokens } as never,
+      dataDir, runtimeImage: 'x:1', doorScript: 'noop', doorBind: async () => '127.0.0.1',
+    });
+    mkdirSync(svc.dir, { recursive: true });
+    writeFileSync(svc.enabledFile, 'on');
+    writeFileSync(svc.serverKeyFile, 'made-up-engine-key\n');
+    const first = svc.syncKeysNow();
+    await inPush;
+    tokens = [{ tokenHash: 'a'.repeat(64), agentId: 'a1', state: 'RUNNING', hostId: 'runner-1' }];
+    const queued = svc.syncKeysNow(); // a second copy, behind the first
+    const removed = svc.remove(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(order).toEqual([]); // remove waits for the copy under way
+    release();
+    expect(await removed).toEqual({});
+    await expect(Promise.all([first, queued])).resolves.toEqual([undefined, undefined]);
+    expect(order).toEqual(['pushed', 'removed']);
+    expect(pushes).toBe(1);
+    expect(existsSync(svc.dir)).toBe(false);
+  });
+
+  it('a copy asked for while the removal waits is not made at all', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'hb-embed-remove-'));
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let entered!: () => void;
+    const inPush = new Promise<void>((r) => { entered = r; });
+    const provider = {
+      pushEmbedKeys: async () => { order.push('push'); entered(); await gate; order.push('pushed'); },
+      removeEmbedder: async () => { order.push('remove-start'); await new Promise((r) => setTimeout(r, 10)); order.push('remove-end'); },
+    };
+    let tokens: Array<{ tokenHash: string; agentId: string; state: string; hostId: string }> = [];
+    const svc = new EmbedderService({
+      provider: () => provider as never, hostId: 'runner-1', secrets: new MemSecrets(), store: { listEmbedTokens: () => tokens } as never,
+      dataDir, runtimeImage: 'x:1', doorScript: 'noop', doorBind: async () => '127.0.0.1',
+    });
+    mkdirSync(svc.dir, { recursive: true });
+    writeFileSync(svc.enabledFile, 'on');
+    const first = svc.syncKeysNow();
+    await inPush;
+    const removed = svc.remove(true);
+    await new Promise((r) => setTimeout(r, 5));
+    tokens = [{ tokenHash: 'b'.repeat(64), agentId: 'a2', state: 'RUNNING', hostId: 'runner-1' }];
+    const late = svc.syncKeysNow(); // a key retired or minted while removal waits (store.onEmbedKeyRetired)
+    release();
+    expect(await removed).toEqual({});
+    await expect(Promise.all([first, late])).resolves.toEqual([undefined, undefined]);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(order).toEqual(['push', 'pushed', 'remove-start', 'remove-end']);
+  });
+
+  it('a runner that did not answer is removed at once, without waiting on a copy that hangs', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'hb-embed-remove-'));
+    let entered!: () => void;
+    const inPush = new Promise<void>((r) => { entered = r; });
+    let removedThere = 0;
+    const provider = {
+      pushEmbedKeys: () => { entered(); return new Promise<void>(() => {}); }, // the runner dropped off mid-copy
+      removeEmbedder: async () => { removedThere++; },
+    };
+    const secrets = new MemSecrets();
+    await secrets.put('embedder/key/runner-1', 'made-up-engine-key');
+    const svc = new EmbedderService({
+      provider: () => provider as never, hostId: 'runner-1', secrets,
+      store: { listEmbedTokens: () => [{ tokenHash: 'c'.repeat(64), agentId: 'a3', state: 'RUNNING', hostId: 'runner-1' }] } as never,
+      dataDir, runtimeImage: 'x:1', doorScript: 'noop', doorBind: async () => '127.0.0.1',
+    });
+    mkdirSync(svc.dir, { recursive: true });
+    writeFileSync(svc.enabledFile, 'on');
+    void svc.syncKeysNow();
+    await inPush;
+    const timeout = new Promise((r) => setTimeout(() => r('still waiting'), 500));
+    expect(await Promise.race([svc.remove(false), timeout])).toEqual({});
+    expect(removedThere).toBe(0);
+    expect(existsSync(svc.dir)).toBe(false);
+    await expect(secrets.get('embedder/key/runner-1')).rejects.toThrow();
   });
 });

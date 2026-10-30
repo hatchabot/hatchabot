@@ -212,6 +212,18 @@ describe('uploads and opening in the browser', () => {
     const b = await f.inject({ method: 'GET', url: '/v1/agents/a1/fs/file?path=x.gguf&inline=1', headers: as });
     expect(b.headers['content-disposition']).toBe('attachment; filename="x.gguf"');
   });
+  it('a long name keeps its extension, so an image opens as an image (HB-0299)', async () => {
+    expect(downloadName(`photos/${'a'.repeat(120)}.png`, 'slug')).toBe(`${'a'.repeat(116)}.png`);
+    expect(downloadName('n'.repeat(130), 'slug')).toBe('n'.repeat(120));
+    expect(downloadName(`${'b'.repeat(60)}.tar.gz`, 'slug')).toBe(`${'b'.repeat(60)}.tar.gz`);
+    const { f, provider } = await world();
+    provider.execResponses.set('sh-volume', { code: 0, stdout: 'regular file\t5\n', stderr: '' });
+    provider.streamBytes = Buffer.from('hello');
+    const r = await f.inject({ method: 'GET', url: `/v1/agents/a1/fs/file?inline=1&path=${'a'.repeat(120)}.png`, headers: as });
+    expect(r.statusCode).toBe(200);
+    expect(r.headers['content-type']).toBe('image/png');
+    expect(r.headers['content-disposition']).toBe(`inline; filename="${'a'.repeat(116)}.png"`);
+  });
   it('an upload lands through a writable one-shot; an existing name is refused until overwrite is asked; never into OpenClaw\'s state', async () => {
     const { f, provider } = await world();
     const hdr = { ...as, 'content-type': 'application/octet-stream' };

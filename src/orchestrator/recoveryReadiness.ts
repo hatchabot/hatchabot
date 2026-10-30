@@ -116,6 +116,7 @@ function drillChecks(v: DrillRecord['volumes'][number]): string[] {
   else if (v.restored === false) out.push(DRILL_NOTE[v.note] ?? 'restore failed');
   else if (v.note === 'budget') out.push('not restored this time (the hour ran out)');
   else if (v.note === 'nodocker') out.push('not restored (docker was not answering)');
+  else if (v.note === 'missing') out.push('its archive is not in the set');
   return out;
 }
 

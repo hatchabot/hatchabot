@@ -10,6 +10,9 @@
 //
 // No dependencies: it runs on a host that has only what Hatchabot itself needs.
 
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 const parse = (v) => {
   const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(v).trim());
   return m ? { n: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ?? '' } : null;
@@ -62,7 +65,13 @@ export function embedEngine(openclawVersion) {
   return cmp(v, parse('2026.8.0')) >= 0 ? 'none' : 'baked';
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run as a command, by its path on disk: compared as a URL, an install whose
+// path has a space (encoded %20 in the URL) printed nothing and exited 0, and
+// the image build went on without its engine rule (audit, 2026-10-29).
+const isMain = () => {
+  try { return !!process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); } catch { return false; }
+};
+if (isMain()) {
   const [, , verb, a, b] = process.argv;
   if (verb === 'node-ok') process.exit(satisfies(b, a) ? 0 : 1);
   if (verb === 'embed-engine') { console.log(embedEngine(a)); process.exit(0); }

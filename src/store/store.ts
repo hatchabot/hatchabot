@@ -4171,9 +4171,17 @@ export class Store {
       ON CONFLICT(agent_id) DO UPDATE SET tokens = excluded.tokens, set_at = excluded.set_at`).run(agentId, tokens, at);
     this.db.prepare(`DELETE FROM agent_context_caps WHERE agent_id = ? AND tokens IS NULL AND applied_model IS NULL`).run(agentId);
   }
-  /** What Hatchabot last wrote into the agent's config: the model the cap is on, or null when it has none there. */
+  /**
+   * What Hatchabot last wrote into the agent's config: the model the cap is on, or null when it has none there.
+   * A cap written after its row went (removed meanwhile) gets a row again, with no cap asked for, so the next
+   * sync takes it out (HB-0312).
+   */
   markContextCapApplied(agentId: string, model: string | null, at: string): void {
     this.db.prepare(`UPDATE agent_context_caps SET applied_model = ?, applied_at = ? WHERE agent_id = ?`).run(model, at, agentId);
+    if (model) {
+      this.db.prepare(`INSERT OR IGNORE INTO agent_context_caps (agent_id, tokens, applied_model, applied_at, set_at)
+        SELECT ?, NULL, ?, ?, ? WHERE EXISTS (SELECT 1 FROM agents WHERE id = ? AND state != 'DELETED')`).run(agentId, model, at, at, agentId);
+    }
     this.db.prepare(`DELETE FROM agent_context_caps WHERE agent_id = ? AND tokens IS NULL AND applied_model IS NULL`).run(agentId);
   }
   addTokenAction(a: TokenActionRow): void {

@@ -231,6 +231,9 @@ export interface ExecResult {
   /** Not run at all: the remote machine did not answer a quick connect
    *  (asleep or offline). Shaped like a timeout, so it never reads as "gone". */
   unreachable?: boolean;
+  /** Not run: a read-only run's volume is not there. Mounting it would have
+   *  made it, empty, and answered as if the agent had no files (HB-0332). */
+  volumeMissing?: boolean;
 }
 
 export interface RuntimeProvider {
@@ -369,6 +372,8 @@ export interface RuntimeProvider {
   stopEmbedder?(): Promise<void>;
   /** The service gone for good, with its volumes and network (a runner being removed from this Hatchabot). */
   removeEmbedder?(): Promise<void>;
+  /** The container a runtime ref names on this provider (a legacy ref's is not its bare fragment). */
+  containerName?(runtimeRef: string): string;
   /** An agent's own browser (src/orchestrator/browser.ts): start it, or keep the one sharing the agent's current network. */
   ensureBrowser?(spec: import('../orchestrator/browser.js').BrowserSpec): Promise<'running' | 'started'>;
   stopBrowser?(agentContainer: string): Promise<void>;

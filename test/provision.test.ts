@@ -203,6 +203,29 @@ describe('runProvisionSteps', () => {
     expect(adds()).toBe(before + 1);
   });
 
+  it('a waiting task is dropped as added only when the task of its name is it; another task by that name keeps it waiting (HB-0290)', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const parked = { name: 'Morning brief', message: 'Post the brief.', everyMs: 7_200_000 };
+    const listing = (job: object) => w.provider.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [{ id: 'j1', enabled: true, ...job }] }) });
+    const adds = () => w.provider.execLog.filter((c) => c[0] === 'cron' && c[1] === 'add').length;
+    const before = adds();
+    // The owner's own hourly "Morning brief" with another prompt: not this task.
+    listing({ name: 'Morning brief', schedule: { kind: 'every', everyMs: 3_600_000 }, payload: { kind: 'agentTurn', message: 'Something else' } });
+    w.store.setPendingSchedules(agent.id, [parked]);
+    expect(await retryPendingSchedules(w.deps, agent.id)).toEqual([{ ...parked, why: expect.stringMatching(/another task already has this name/) }]);
+    expect(adds()).toBe(before);
+    // The same task, landed by an earlier try whose answer was lost: done, and not added twice.
+    listing({ name: 'Morning brief', schedule: { kind: 'every', everyMs: 7_200_000 }, payload: { kind: 'agentTurn', message: 'Post the brief.' } });
+    expect(await retryPendingSchedules(w.deps, agent.id)).toEqual([]);
+    expect(adds()).toBe(before);
+    // A cron-expression one: its expression and zone are compared too.
+    const daily = { name: 'Daily menu', message: 'Plan dinner.', cron: '0 9 * * *', tz: 'UTC' };
+    listing({ name: 'Daily menu', schedule: { kind: 'cron', expr: '0 9 * * *', tz: 'Pacific/Chatham' }, payload: { kind: 'agentTurn', message: 'Plan dinner.' } });
+    w.store.setPendingSchedules(agent.id, [daily]);
+    expect(await retryPendingSchedules(w.deps, agent.id)).toHaveLength(1);
+  });
+
   it('retries from FAILED reusing the already-created channel row', async () => {
     const w = await world({ failOn: 'start' });
     const { agent } = await provisionAgent(w.deps, INPUT);

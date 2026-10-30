@@ -63,7 +63,8 @@ codebase gets deployed, updated and rolled back from Hatchabot.
 - `tasks`: OpenClaw command tasks, named `<app>-<name>`, re-synced on every
   install, update and rollback. `every` (`1m`, `15m`, `1h`) or `cron`. Only
   the names the app's manifests make are its own: another task whose name
-  merely starts with `<app>-` is left alone.
+  merely starts with `<app>-` is left alone, and so is one of the exact name
+  that is not a command task (a reminder of the owner's).
 - `env`, `command`, `chat`: placeholders `{app_dir}` (the live release),
   `{data_dir}`, `{agent}` (the OpenClaw agent id), `{name}`, `{env}` (the env
   as `K=V …`). `chat` is filled in once, when a new agent is made from the
@@ -75,7 +76,11 @@ codebase gets deployed, updated and rolled back from Hatchabot.
   switch); left out, the value it has stays. A value must fit its `type`
   (`number`, `bool`, `list`, `email`), or the install is refused. A `required`
   field filled by Hatchabot stops the install when Hatchabot has nothing to
-  fill it with (e.g. `owner.telegram` before the owner links Telegram). `"secret": true`
+  fill it with (e.g. `owner.telegram` before the owner links Telegram). What
+  Hatchabot fills is held to the field's `type` like a value given (a `list`
+  gets one item, a `number` filled from `owner.telegram` the number); one
+  that does not fit stops the install. A
+  `list` given as items has them trimmed and blanks dropped, as `a, b` is. `"secret": true`
   marks a password or key: the dialog asks for it in a hidden box, never
   filled in, and a new agent's install that waits for the agent to be ready
   keeps it in Hatchabot's secret store, not in the database, until it goes in.

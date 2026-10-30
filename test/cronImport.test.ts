@@ -332,4 +332,69 @@ describe('readOpenclawCrons + workspace resolution', () => {
     expect(await migrateCrons({ store, provider }, 'a1', join(root, 'ws-tech'), { configPath: cfg, dbPath: src, readyGapMs: 0 })).toEqual({ total: 2, carried: 2, failed: 0 });
     expect(adds().length).toBe(before);
   });
+
+  /** A running agent "tech" and a 2026.9 source store holding `jobs` for garden-advisor. */
+  async function adoptWorld(file: string, jobs: object[]) {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+    store.insertAgent({ id: 'a1', ownerId: 'o', name: 'Tech', slug: 'tech', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: 'x', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'tech', workspace: { files: {}, configPatch: { agentId: 'tech', authMode: 'api-key' } }, env: {} });
+    store.setAgentRuntimeRef('a1', runtimeRef);
+    await provider.start(runtimeRef);
+    store.setAgentState('a1', 'RUNNING');
+    const src = join(root, file);
+    const s = new Database(src);
+    s.exec('CREATE TABLE cron_jobs (job_id TEXT, agent_id TEXT, declaration_key TEXT, job_json TEXT, updated_at INTEGER)');
+    jobs.forEach((j, i) => s.prepare('INSERT INTO cron_jobs VALUES (?,?,?,?,?)').run(`s${i}`, 'garden-advisor', null, JSON.stringify(j), 1));
+    s.close();
+    const adopt = () => migrateCrons({ store, provider }, 'a1', join(root, 'ws-tech'), { configPath: cfg, dbPath: src, readyGapMs: 0 });
+    const adds = () => provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'add');
+    return { provider, adopt, adds };
+  }
+
+  it('a task there already for another recipient is another task, and is added (HB-0287)', async () => {
+    const OTHER = ['55', '50', '0', '04'].join('');
+    const brief = { name: 'Daily brief', schedule: { kind: 'every', everyMs: 3_600_000 }, payload: { kind: 'agentTurn', message: 'Write the brief' } };
+    const { provider, adopt, adds } = await adoptWorld('recipients.sqlite', [{ ...brief, sessionTarget: 'isolated', delivery: { mode: 'announce', channel: 'telegram', to: CHAT } }]);
+    provider.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [
+      { id: 'j1', enabled: false, ...brief, delivery: { mode: 'announce', channel: 'telegram', to: OTHER } },
+    ] }) });
+    expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
+    expect(adds()).toHaveLength(1);
+    expect(adds()[0]).toEqual(expect.arrayContaining(['--channel', 'telegram', '--to', CHAT]));
+    // The one brought over (its recipient written channel-qualified) is not added twice.
+    provider.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [
+      { id: 'j1', enabled: false, ...brief, delivery: { mode: 'announce', channel: 'telegram', to: OTHER } },
+      { id: 'j2', enabled: false, ...brief, delivery: { mode: 'announce', channel: 'telegram', to: `telegram:${CHAT}` } },
+    ] }) });
+    expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
+    expect(adds()).toHaveLength(1);
+  });
+
+  it('a task bound to a conversation is bound to the same conversation of the adopted agent (HB-0288)', async () => {
+    const { provider, adopt, adds } = await adoptWorld('bound.sqlite', [
+      { name: 'Console brief', schedule: { kind: 'every', everyMs: 3_600_000 }, payload: { kind: 'agentTurn', message: 'Write the brief' }, sessionTarget: 'current', sessionKey: 'agent:garden-advisor:main', delivery: { mode: 'announce' } },
+      { name: 'Elsewhere', schedule: { kind: 'every', everyMs: 3_600_000 }, payload: { kind: 'agentTurn', message: 'x' }, sessionTarget: 'current', sessionKey: 'agent:other-agent:main', delivery: { mode: 'announce' } },
+    ]);
+    // The second is bound to another agent's conversation: reported, not carried unbound.
+    expect(await adopt()).toEqual({ total: 2, carried: 1, failed: 1 });
+    expect(adds()).toHaveLength(1);
+    expect(adds()[0]).toEqual(expect.arrayContaining(['--session', 'current', '--session-key', 'agent:tech:main']));
+    // Its conversation is made sure of first, as for a task the app binds.
+    const created = provider.execLog.find((a) => a[0] === 'gateway' && a[2] === 'sessions.create');
+    expect(created && JSON.parse(created[4]!)).toEqual({ key: 'agent:tech:main', agentId: 'tech' });
+  });
+
+  it('a task on a custom conversation of its own (session:standup) is carried as it is (HB-0288)', async () => {
+    const { adopt, adds } = await adoptWorld('custom.sqlite', [
+      { name: 'Standup', schedule: { kind: 'every', everyMs: 3_600_000 }, payload: { kind: 'agentTurn', message: 'Plan the day' }, sessionTarget: 'session:standup', delivery: { mode: 'none' } },
+      { name: 'Mapped', schedule: { kind: 'every', everyMs: 3_600_000 }, payload: { kind: 'agentTurn', message: 'Water the beds' }, sessionTarget: 'session:agent:garden-advisor:beds', delivery: { mode: 'none' } },
+    ]);
+    // OpenClaw scopes a key with no agent: prefix to the agent that runs it.
+    expect(await adopt()).toEqual({ total: 2, carried: 2, failed: 0 });
+    expect(adds()[0]).toEqual(expect.arrayContaining(['--session', 'session:standup']));
+    expect(adds()[1]).toEqual(expect.arrayContaining(['--session', 'session:agent:tech:beds']));
+  });
 });

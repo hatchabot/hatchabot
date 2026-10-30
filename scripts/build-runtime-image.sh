@@ -25,7 +25,9 @@ REPO="${HATCHABOT_IMAGE_REPO:-$(printf '%s' "${HATCHABOT_IMAGE:-hatchabot-runtim
 # :OPENCLAW_VERSION image and so an agent can pin one for a candidate run. Set
 # IMAGE_TAG=2026.7.1-2-emb1 (etc.) for a content revision; it defaults to the
 # OpenClaw version for the normal upgrade flow.
+TAG_GIVEN="${IMAGE_TAG:-}"
 IMAGE_TAG="${IMAGE_TAG:-${OPENCLAW_VERSION}}"
+DEFAULT_OPENCLAW="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | sed -n 1p)"
 
 # Extra system packages ("the base image, plus tcpdump"). Space-separated apt
 # names. An image with extras is never the plain version tag: it gets its own
@@ -37,7 +39,12 @@ if [ -n "${EXTRA_PACKAGES:-}" ]; then
   fi
   EXTRA_ARG=(--build-arg "EXTRA_PACKAGES=${EXTRA_PACKAGES}")
   if [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ]; then
-    IMAGE_TAG="${OPENCLAW_VERSION}-plus-$(printf '%s' "${EXTRA_PACKAGES}" | tr ' ' '-' | cut -c1-40)"
+    NAMES="$(printf '%s' "${EXTRA_PACKAGES}" | tr ' ' '-')"
+    IMAGE_TAG="${OPENCLAW_VERSION}-plus-$(printf '%s' "$NAMES" | cut -c1-40)"
+    # A list longer than the tag shows ends in a checksum of all of it: two
+    # lists alike for forty characters got one tag, and building the second
+    # replaced the image agents had pinned for the first (audit, 2026-10-29).
+    [ "${#NAMES}" -le 40 ] || IMAGE_TAG="${IMAGE_TAG}-$(printf '%s' "${EXTRA_PACKAGES}" | cksum | cut -d' ' -f1)"
   fi
   BUILD_LOCAL=1   # a published image never carries someone's extra packages
 fi
@@ -61,6 +68,18 @@ if [ "$EMBED_ENGINE" = baked ] && [ "$ENGINE_RULE" = none ]; then
 fi
 if [ "$EMBED_ENGINE" = none ] && [ "$ENGINE_RULE" = baked ] && [ "$IMAGE_TAG" = "$OPENCLAW_VERSION" ]; then
   IMAGE_TAG="${OPENCLAW_VERSION}-lite"
+fi
+# Another Node, plugin pins or plugins for the OpenClaw this release publishes
+# make another image than the standard one: like extra packages and -lite, it
+# gets its own tag, so it never takes the version tag agents pin (or pass for
+# the standard image). For another OpenClaw these settings are how its image
+# is made to build (the messages below say to set them): its tag stays.
+CUSTOM=""
+for v in LLAMA_CPP_PROVIDER_VERSION NODE_IMAGE CHANNEL_PLUGIN_VERSION BAKED_PLUGINS PLUGIN_INSTALL; do
+  [ -z "${!v:-}" ] || CUSTOM="${CUSTOM}${v}=${!v} "
+done
+if [ -n "$CUSTOM" ] && [ -z "$TAG_GIVEN" ] && [ "${OPENCLAW_VERSION}" = "${DEFAULT_OPENCLAW}" ]; then
+  IMAGE_TAG="${IMAGE_TAG}-custom-$(printf '%s' "$CUSTOM" | cksum | cut -d' ' -f1)"
 fi
 if [ "${DRYRUN:-0}" = 1 ]; then
   echo "dry run: would build ${REPO}:${IMAGE_TAG} (OpenClaw ${OPENCLAW_VERSION}, engine ${EMBED_ENGINE})"
@@ -116,7 +135,16 @@ legacy_published() {
   if [ -n "$PULLED" ]; then use_pulled "$PULLED"; fi
   echo "Not published (or offline) — building locally instead."
 }
-if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] && [ -z "${LLAMA_CPP_PROVIDER_VERSION:-}" ] && [ "${EMBED_ENGINE}" = "${ENGINE_RULE}" ]; then
+# A build asked to differ from the release's image (another Node, plugin
+# pins or plugins) is made here: the published image carries none of it, and
+# was pulled in its place while the build said it was done (audit, 2026-10-29).
+for v in LLAMA_CPP_PROVIDER_VERSION NODE_IMAGE CHANNEL_PLUGIN_VERSION BAKED_PLUGINS PLUGIN_INSTALL; do
+  if [ -n "${!v:-}" ] && [ "${BUILD_LOCAL:-0}" != "1" ]; then
+    echo "${v} is set, and the published image is built without it — building locally."
+    BUILD_LOCAL=1
+  fi
+done
+if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] && [ "${EMBED_ENGINE}" = "${ENGINE_RULE}" ]; then
   # This install's release, and what it vouches for (#47, 2026-10-10): a
   # release with a manifest (v2.159.0 on) names its runtime image by digest,
   # and only that image is pulled — a tag can be moved, a digest cannot, and
@@ -151,8 +179,6 @@ if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] 
       exit 1 ;;
   esac
 fi
-DEFAULT_OPENCLAW="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | sed -n 1p)"
-
 # The embedding plugin is published in step with OpenClaw and declares it as a
 # peer, so a newer OpenClaw needs a newer plugin. Given explicitly, use that;
 # for the proven default, keep the Dockerfile's pin; otherwise take the newest
@@ -254,21 +280,22 @@ docker build \
   -f docker/Dockerfile.runtime \
   docker/
 
-# Trust, but verify: the image must actually run the version it is named for.
+# Trust, but verify: the image must actually run the version it is named for —
+# one word of its version line, exactly. Found anywhere in the line, OpenClaw
+# 2026.9.80 passed for 2026.9.8 (audit, 2026-10-29).
 RUNS="$(docker run --rm --network none --entrypoint openclaw "${REPO}:${IMAGE_TAG}" --version 2>/dev/null | sed -n 1p || true)"
-case "$RUNS" in
-  *"${OPENCLAW_VERSION}"*) ;;
-  *) echo "✗ ${REPO}:${IMAGE_TAG} runs '${RUNS:-nothing}', not OpenClaw ${OPENCLAW_VERSION}. Removing it." >&2
-     NEW_ID="$(docker image inspect --format '{{.Id}}' "${REPO}:${IMAGE_TAG}" 2>/dev/null || true)"
-     # The same image as before the build is what was there: left as it was.
-     if [ -z "$PREV_ID" ] || [ "$NEW_ID" != "$PREV_ID" ]; then
-       docker rmi "${REPO}:${IMAGE_TAG}" >/dev/null 2>&1 || true
-       if [ -n "$PREV_ID" ] && docker tag "$PREV_ID" "${REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
-         echo "  ${REPO}:${IMAGE_TAG} names the image it named before this build again." >&2
-       fi
-     fi
-     exit 1 ;;
-esac
+if ! printf '%s\n' "$RUNS" | tr -s ' \t' '\n\n' | sed -e 's/^[(v]*//' -e 's/[),;:]*$//' | grep -qxF -- "${OPENCLAW_VERSION}"; then
+  echo "✗ ${REPO}:${IMAGE_TAG} runs '${RUNS:-nothing}', not OpenClaw ${OPENCLAW_VERSION}. Removing it." >&2
+  NEW_ID="$(docker image inspect --format '{{.Id}}' "${REPO}:${IMAGE_TAG}" 2>/dev/null || true)"
+  # The same image as before the build is what was there: left as it was.
+  if [ -z "$PREV_ID" ] || [ "$NEW_ID" != "$PREV_ID" ]; then
+    docker rmi "${REPO}:${IMAGE_TAG}" >/dev/null 2>&1 || true
+    if [ -n "$PREV_ID" ] && docker tag "$PREV_ID" "${REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
+      echo "  ${REPO}:${IMAGE_TAG} names the image it named before this build again." >&2
+    fi
+  fi
+  exit 1
+fi
 
 if [ "${NO_LATEST:-0}" != "1" ]; then
   docker tag "${REPO}:${IMAGE_TAG}" "${REPO}:latest"

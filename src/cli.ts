@@ -12,7 +12,7 @@
  */
 import './envCompat.js'; // must stay the first import: aliases AGENTCLAW_* env on load
 import { chmod, readFile, writeFile } from 'node:fs/promises';
-import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -307,7 +307,8 @@ Commands:
                                default; the workspace is agents/<slug>/agent
                                under .openclaw). Works stopped or archived.
   get <agent> <path> [-o <file>]
-                               Download a file, or a folder as .tar.gz
+                               Download a file, or a folder as .tar.gz (. is its
+                               whole home folder)
   put <agent> <file> [dir] [--overwrite]
                                Upload a file into a folder of the agent (its
                                workspace when no dir is given)
@@ -499,6 +500,102 @@ function repoDir(): string {
  * install directory (2026-09-24).
  */
 const userPath = (p: string): string => resolve(process.env.HATCHABOT_CWD || process.cwd(), p);
+
+/**
+ * Whether rename() may not replace an existing file: in a folder with the
+ * sticky bit (like /tmp) only the file's owner, the folder's owner or root may
+ * (HB-0358) — found then only after a backup had stopped the agent.
+ */
+export function renameRefused(dir: { uid: number; mode: number }, file: { uid: number }, uid: number): boolean {
+  return (dir.mode & 0o1000) !== 0 && uid !== 0 && uid !== file.uid && uid !== dir.uid;
+}
+
+/**
+ * Where a download is saved, made ready BEFORE the server is asked for it: a
+ * folder, or one this account can't write into, is refused while nothing has
+ * happened yet — `backup` stops the agent to export it (HB-0358). The bytes go
+ * to a new 0600 file beside the destination, which replaces it only once
+ * complete: an interrupted download left the earlier copy cut short (HB-0360).
+ * A destination that is a symlink is written through, as before — a dangling
+ * one too, to the file the system would make. A file this account may write,
+ * in a folder it can't add files to, is still written: the download waits in
+ * the temp folder and is copied over it once complete. A pipe or a device
+ * (`-o /dev/stdout`, `-o >(cmd)`) has nothing to replace: written directly.
+ */
+async function saveTarget(out: string, nothingDone: string): Promise<{ file: import('node:fs/promises').FileHandle; commit(): Promise<void>; discard(): Promise<void> }> {
+  const { copyFile, open, rename, rm } = await import('node:fs/promises');
+  const { randomBytes } = await import('node:crypto');
+  const { basename } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  let target = out;
+  let exists = false;
+  try {
+    const st = statSync(out);
+    if (st.isDirectory()) fail(`${out} is a folder — give the file to save as (--out ${join(out, 'name')}) — ${nothingDone}`);
+    if (!st.isFile()) {
+      const direct = await open(out, 'w').catch((e: Error) => fail(`cannot write to ${out}: ${e.message} — ${nothingDone}`));
+      return { file: direct, commit: () => direct.close(), discard: () => direct.close().catch(() => {}) };
+    }
+    target = realpathSync(out);
+    exists = true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') fail(`cannot use ${out}: ${(e as Error).message} — ${nothingDone}`);
+    // A link to a file not made yet: the file it names (stat followed it and
+    // found nothing). Its folder part is resolved by the system, never by
+    // text: `..` after a linked folder is that folder's parent, and by text
+    // it named another file, which the download then replaced (HB-0360).
+    for (let hops = 0; hops < 40; hops++) {
+      let link: string;
+      try { link = readlinkSync(target); } catch { break; }
+      const name = basename(link);
+      const folder = link.startsWith('/') ? dirname(link) : `${dirname(target)}/${dirname(link)}`;
+      try {
+        target = name === '..' || name === '.' ? realpathSync.native(`${folder}/${name}`) : `${realpathSync.native(folder)}/${name}`;
+      } catch {
+        // Its folder is not there, so the system could make nothing. Text would
+        // name another folder (one that may exist), so this stops as it would.
+        fail(`cannot write to ${out}: the folder its link names, ${folder}, is not there — ${nothingDone}`);
+      }
+    }
+  }
+  // A name near the 255-byte limit leaves no room for the part file's own.
+  const chars = [...basename(target)];
+  while (Buffer.byteLength(chars.join('')) > 200) chars.pop();
+  const tag = randomBytes(4).toString('hex');
+  // 'wx': made new, never a file (or symlink) someone else left there.
+  let part = join(dirname(target), `.${chars.join('')}.${tag}.part`);
+  let inPlace = false;
+  // One this account may not replace (another's file in /tmp) was found only
+  // at the rename, after the backup stopped the agent: refused now. Nor is it
+  // written into: its owner could read what the download holds.
+  let refused = false;
+  if (exists) try { refused = renameRefused(statSync(dirname(target)), statSync(target), process.getuid?.() ?? 0); } catch { /* the open below says */ }
+  if (refused) fail(`cannot replace ${target}: another account's file, in a shared folder — ${nothingDone}`);
+  let file = await open(part, 'wx', 0o600).catch(() => undefined);
+  if (!file && exists) {
+    try { accessSync(target, fsConstants.W_OK); chmodSync(target, 0o600); } catch { fail(`cannot write into ${dirname(target)} or ${target} — ${nothingDone}`); }
+    part = join(tmpdir(), `hatchabot-${tag}.part`);
+    file = await open(part, 'wx', 0o600).catch(() => undefined);
+    inPlace = true;
+  }
+  if (!file) fail(`cannot write into ${dirname(target)} — ${nothingDone}`);
+  const fh = file;
+  await fh.chmod(0o600).catch(() => {}); // whatever the umask took away
+  const discard = async () => { await fh.close().catch(() => {}); await rm(part, { force: true }).catch(() => {}); };
+  // Ctrl-C mid-download: the half-made file goes, the earlier copy stays.
+  const onSignal = () => { try { rmSync(part, { force: true }); } catch { /* gone already */ } process.exit(130); };
+  process.once('SIGINT', onSignal);
+  return {
+    file: fh,
+    commit: async () => {
+      process.off('SIGINT', onSignal);
+      await fh.close().catch(() => {});
+      if (!inPlace) return rename(part, target);
+      try { await copyFile(part, target); } finally { await rm(part, { force: true }).catch(() => {}); }
+    },
+    discard: async () => { process.off('SIGINT', onSignal); await discard(); },
+  };
+}
 
 /**
  * An app's `<dir|url>`: a git address (https://…, ssh://…, git@host:…) goes
@@ -726,16 +823,19 @@ export function opsTable(ops: Array<Record<string, any>>, nameOf: (id: string | 
 }
 
 /**
- * `<agent>` → one agent. An exact name or slug wins; then a case-insensitive
- * name; an id prefix only from 4 characters. The old rule matched ANY id
- * prefix, so `hatchabot delete a` picked whichever agent's id began with "a".
+ * `<agent>` → one agent. A whole id wins (it is the one name nobody can
+ * reuse; an agent named after another's id must not shadow it); then an exact
+ * name or slug; then a case-insensitive name; an id prefix only from 4
+ * characters. The old rule matched ANY id prefix, so `hatchabot delete a`
+ * picked whichever agent's id began with "a".
  */
 export function matchAgent<T extends { id: string; name: string; slug: string }>(list: T[], ref: string): { hit?: T; problem?: string } {
   const r = ref.trim();
   if (!r) return { problem: 'give an agent (name, slug or id)' };
   const one = (xs: T[], what: string) =>
     xs.length === 1 ? { hit: xs[0] } : xs.length > 1 ? { problem: `"${r}" ${what} ${xs.length} agents: ${xs.map((a) => a.name).join(', ')}` } : undefined;
-  return one(list.filter((a) => a.name === r || a.slug === r), 'names')
+  return one(list.filter((a) => a.id === r), 'is the id of')
+    ?? one(list.filter((a) => a.name === r || a.slug === r), 'names')
     ?? one(list.filter((a) => a.name.toLowerCase() === r.toLowerCase()), 'names')
     ?? (r.length >= 4 ? one(list.filter((a) => a.id.startsWith(r)), 'starts the id of') : undefined)
     ?? { problem: `no agent matches "${r}"${r.length < 4 ? ' (an id needs at least 4 characters)' : ''} — try \`hatchabot list\`` };
@@ -758,11 +858,18 @@ export function matchTask<T extends { id: string; name?: string }>(list: T[], re
   return { problem: `no task matches "${r}" — see: hatchabot tasks <agent>` };
 }
 
-/** The AI source an agent should get: the one named, else your ⭐ default. */
+/**
+ * The AI source an agent should get: the one named, else your ⭐ default. A
+ * name two sources share is refused with their ids, not resolved to the first
+ * (that could be another account's, or another model).
+ */
 export function pickProfile<T extends { id: string; name: string; defaultSource?: boolean; mine?: boolean }>(profiles: T[], ref?: string): { hit?: T; problem?: string } {
   if (ref) {
-    const hit = profiles.find((p) => p.id === ref) ?? profiles.find((p) => p.name.toLowerCase() === ref.toLowerCase());
-    return hit ? { hit } : { problem: `no AI source "${ref}" — see: hatchabot sources` };
+    const byId = profiles.find((p) => p.id === ref);
+    if (byId) return { hit: byId };
+    const named = profiles.filter((p) => p.name.toLowerCase() === ref.toLowerCase());
+    if (named.length > 1) return { problem: `"${ref}" names ${named.length} AI sources — use its id: ${named.map((p) => p.id).join(', ')}` };
+    return named[0] ? { hit: named[0] } : { problem: `no AI source "${ref}" — see: hatchabot sources` };
   }
   // Not simply the first: that could be a local model nobody meant, or another
   // account's shared source. The app picks the ⭐ default; so does the CLI.
@@ -1505,17 +1612,25 @@ async function main() {
       // Move agents onto one AI source in a single call. --to <id|name>,
       // optional --agents a,b,c (default: ALL of yours), --rebuild to apply now.
       const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];
-      const want = flags.get('to') ?? fail('usage: hatchabot switch-source --to <source id or name> [--agents a,b] [--rebuild]');
-      const target = profiles.find((p) => p.id === want || p.name.toLowerCase() === want.toLowerCase())
-        ?? fail(`no AI source matches "${want}". Have: ${profiles.map((p) => p.name).join(', ') || '(none)'}`);
+      const want = flags.get('to')?.trim() || fail('usage: hatchabot switch-source --to <source id or name> [--agents a,b] [--rebuild]');
+      // The --profile rule: a name two sources share is refused with their
+      // ids — the first could be another account's, and with no --agents
+      // every agent of yours moved onto it (HB-0354).
+      const picked = pickProfile(profiles, want);
+      const target = picked.hit ?? fail(picked.problem!);
       const filter = agentsFilter(flags);
       if (filter.problem) fail(filter.problem);
       const apply = filter.names;
       let ids: string[] | undefined;
       if (apply) {
-        // Resolve names/slugs to ids so a human can pass either.
+        // Each name, slug or id the way every <agent> argument is read: a
+        // whole id is its own agent, a shared name is refused (HB-0355). All
+        // are checked before anything moves.
         const all: any[] = await (await api(ctx, '/v1/agents')).json() as any[];
-        ids = apply.map((a) => all.find((x) => x.id === a || x.slug === a || x.name.toLowerCase() === a.toLowerCase())?.id ?? a);
+        const found = apply.map((a) => matchAgent(all, a));
+        const problems = found.filter((f) => !f.hit).map((f) => f.problem);
+        if (problems.length) fail(`${problems.join('; ')} — nothing was switched`);
+        ids = found.map((f) => f.hit!.id);
       }
       const res: any = await (await jsonPost(`/v1/ai-profiles/${target.id}/adopt-agents`, {
         apply: ids,
@@ -2380,16 +2495,18 @@ async function main() {
       // Where it goes is checked BEFORE the export stops the agent: a missing
       // folder threw after the stop, leaving it STOPPED and the copy discarded
       // (night review, 2026-09-28).
-      const out = userPath(flags.get('out') ?? `${a.slug}.hatchabot`);
-      try { accessSync(dirname(out), fsConstants.W_OK); } catch { fail(`cannot write into ${dirname(out)} — nothing was stopped`); }
-      const res = await api(ctx, `/v1/agents/${a.id}/backup`);
-      const droppedHeader = res.headers.get('x-hatchabot-dropped');
+      // An existing folder there threw only after the stop too (HB-0358).
       // 0600: this archive embeds the live bot token, so it must not be
       // readable by other accounts on the machine (the note below says as much).
-      await writeFile(out, Buffer.from(await res.arrayBuffer()), { mode: 0o600 });
-      // `mode` only applies when the file is CREATED: writing over an existing,
-      // world-readable file kept its old mode. Set it explicitly (CLI audit).
-      await chmod(out, 0o600);
+      const out = userPath(flags.get('out') ?? `${a.slug}.hatchabot`);
+      const save = await saveTarget(out, 'nothing was stopped');
+      let droppedHeader: string | null;
+      try {
+        const res = await api(ctx, `/v1/agents/${a.id}/backup`);
+        droppedHeader = res.headers.get('x-hatchabot-dropped');
+        await save.file.writeFile(Buffer.from(await res.arrayBuffer()));
+        await save.commit();
+      } catch (e) { await save.discard(); throw e; }
       console.log(`backed up to ${out}`);
       if (droppedHeader) console.log(`note: NOT in the file — its ${droppedHeader.split(',').join(' and ')} bot and the people linked there (they stay on this machine).`);
       console.log('note: the file is a complete private copy — it contains the bot token, treat it like a password.');
@@ -2514,7 +2631,7 @@ async function main() {
       const res: any = await (await jsonPost(`/v1/agents/${a.id}/clone`, { name, ...(flags.has('no-telegram') ? { telegram: false } : {}) })).json();
       console.log(`cloned "${a.name}" → "${res.name}" (${res.state})${flags.has('no-telegram') ? ' — no Telegram: talk to it in the web app.' : ' — connect its Telegram bot to finish.'}`);
       if (res.memoryCopyFailed) console.log("note: its daily notes (memory/) and USER.md couldn't be read — only MEMORY.md came along.");
-      else if (res.memoryNotCopied?.length) console.log(`note: these memory files stayed behind (too big or not text): ${res.memoryNotCopied.join(', ')}`);
+      else if (res.memoryNotCopied?.length) console.log(`note: these memory files stayed behind (too big, not text or unreadable): ${res.memoryNotCopied.join(', ')}`);
       if (res.notCopied?.length) console.log(`note: its data sources (${res.notCopied.join(', ')}) did not come along — add them again.`);
       return;
     }
@@ -2579,7 +2696,7 @@ async function main() {
         return;
       }
       const a = await resolveAgent(ctx, rest[0] ?? fail(`usage: hatchabot ${cmd} <agent>`));
-      await api(ctx, `/v1/agents/${a.id}/${cmd}`, {
+      const res = await api(ctx, `/v1/agents/${a.id}/${cmd}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: '{}',
@@ -2591,12 +2708,18 @@ async function main() {
       // --wait: scripts need "stopped" / "running", not "requested" (CLI audit).
       const want = cmd === 'stop' || cmd === 'hibernate' ? 'STOPPED' : 'RUNNING';
       const limit = minutesFlag(15);
+      // One budget for the operation and the state check after it.
       const deadline = Date.now() + limit * 60_000;
-      await new Promise((r) => setTimeout(r, 2000));
-      // A rebuild of a running agent stays RUNNING while it waits its turn and
-      // takes its checkpoint: "RUNNING" is the answer only once it has been
-      // seen leaving (use-case audit, 2026-09-27).
-      let left = cmd !== 'rebuild';
+      // A rebuild names its operation (#127): followed to its end, a rebuild
+      // done before the first look counts too — watching for the agent to
+      // leave RUNNING waited out the timeout on one (HB-0356).
+      const started = cmd === 'rebuild' ? startedOperation(await res.json().catch(() => null)) : undefined;
+      if (started) await followOperation(ctx, started, new Map([...flags, ['timeout', String(limit)]]), a.name);
+      else await new Promise((r) => setTimeout(r, 2000));
+      // Without one (an older server), a rebuild of a running agent stays
+      // RUNNING while it waits its turn and takes its checkpoint: "RUNNING" is
+      // the answer only once it has been seen leaving (use-case audit, 2026-09-27).
+      let left = cmd !== 'rebuild' || !!started;
       for (;;) {
         const now = (await (await api(ctx, `/v1/agents/${a.id}`)).json()) as any;
         if (!left && (now.state !== 'RUNNING' || now.busy)) left = true;
@@ -2824,7 +2947,19 @@ async function main() {
       const want = rest[1];
       if (want !== undefined && want !== 'on' && want !== 'off') fail('usage: hatchabot browser <agent> [on|off]');
       if (want) {
-        await api(ctx, `/v1/agents/${a.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ browser: want === 'on' }) });
+        // Already so: the server changes nothing and starts no rebuild.
+        if (!!a.browser === (want === 'on')) { console.log(`"${a.name}" ${want === 'on' ? 'already has its own browser' : 'has no browser'}: nothing to change.`); return; }
+        const r: any = await (await api(ctx, `/v1/agents/${a.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ browser: want === 'on' }) })).json().catch(() => null);
+        // A rebuild already under way: saved, but no rebuild of its own
+        // started, and the next step is the owner's — say so, not "rebuilding" (HB-0357).
+        if (r?.browserPending) { console.log(`"${a.name}": ${r.browserPending}`); return; }
+        // The server rebuilds only a built agent at rest (running or
+        // stopped); archived, failed or not yet made, the switch waits for
+        // its next build, and no rebuild was started.
+        if (!a.runtimeRef || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) {
+          console.log(`"${a.name}": saved. No rebuild was started while it is ${a.state ?? 'not built'}; its next build ${want === 'on' ? 'gives it its own browser' : 'removes its browser'}.`);
+          return;
+        }
         console.log(want === 'on'
           ? `"${a.name}" gets its own browser: rebuilding now; the browser starts within a minute of it.`
           : `"${a.name}" no longer has a browser: rebuilding now.`);
@@ -2927,22 +3062,27 @@ async function main() {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot get <agent> <path> [-o file]'));
       const path = rest.slice(1).join(' ').trim() || fail('give the path inside the agent (see: hatchabot files <agent>)');
       // A folder comes as .tar.gz; a file as itself. Ask which it is first.
-      const parent = path.split('/').filter(Boolean).slice(0, -1).join('/');
-      const leaf = path.split('/').filter(Boolean).pop() ?? '';
-      const listing: any = await (await api(ctx, `/v1/agents/${a.id}/fs?path=${encodeURIComponent(parent)}`)).json();
-      const entry = (listing.entries ?? []).find((e: any) => e.name === leaf);
-      const isDir = entry?.type === 'dir';
-      const res = await api(ctx, `/v1/agents/${a.id}/fs/${isDir ? 'archive' : 'file'}?path=${encodeURIComponent(path)}`);
-      const out = userPath(flags.get('out') ?? (leaf + (isDir ? '.tar.gz' : '')));
-      const { createWriteStream } = await import('node:fs');
+      // Its parts as the server reads them (cleanRelPath): `.` and `/` are
+      // the home folder itself, not a file named "." (HB-0359).
+      const parts = path.split('/').filter((s) => s !== '' && s !== '.');
+      const parent = parts.slice(0, -1).join('/');
+      const leaf = parts.at(-1) ?? '';
+      let isDir = !leaf;
+      if (leaf) {
+        const listing: any = await (await api(ctx, `/v1/agents/${a.id}/fs?path=${encodeURIComponent(parent)}`)).json();
+        isDir = (listing.entries ?? []).find((e: any) => e.name === leaf)?.type === 'dir';
+      }
+      const out = userPath(flags.get('out') ?? ((leaf || a.slug) + (isDir ? '.tar.gz' : '')));
       const { pipeline } = await import('node:stream/promises');
       const { Readable } = await import('node:stream');
-      // `mode` applies only to a NEW file: an existing 0644 one kept its mode
-      // and the agent's file was world-readable (night review). Tightened
-      // before a byte is written, and again after.
-      if (existsSync(out)) await chmod(out, 0o600);
-      await pipeline(Readable.fromWeb(res.body as never), createWriteStream(out, { mode: 0o600 }));
-      await chmod(out, 0o600);
+      // A new 0600 file (the agent's files may hold its tokens), put in place
+      // only once complete (saveTarget).
+      const save = await saveTarget(out, 'nothing was downloaded');
+      try {
+        const res = await api(ctx, `/v1/agents/${a.id}/fs/${isDir ? 'archive' : 'file'}?path=${encodeURIComponent(parts.join('/'))}`);
+        await pipeline(Readable.fromWeb(res.body as never), save.file.createWriteStream());
+        await save.commit();
+      } catch (e) { await save.discard(); throw e; }
       console.log(`saved ${out}${isDir ? ' (folder as .tar.gz)' : ''}`);
       return;
     }

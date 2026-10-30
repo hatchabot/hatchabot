@@ -82,7 +82,7 @@ import { contextStats, exportTranscript, recoverContext } from '../orchestrator/
 import { archiveAgent, ArchiveError, copyElsewhere, leaveBotToCopy } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
 import { commandOwnersFor, reapplyCurrentSettings, retryPendingSchedules, retryPendingSchedulesWhenUp } from '../orchestrator/provision.js';
-import { CronSystemOwnedError, CRON_QUICK_CHECK_MS, addCron, editCron, cronTargetFor, pendingRetarget, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
+import { CronSystemOwnedError, CRON_QUICK_CHECK_MS, addCron, cronStoreReadShell, editCron, cronTargetFor, pendingRetarget, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
 import { dropAppPending, onePendingChange, pendingSecretRefs, resolvePendingValues, stashOldPendingSecrets, stashPendingSecrets } from '../orchestrator/appPending.js';
 import { request as httpRequest } from 'node:http';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
@@ -94,7 +94,7 @@ import { agentRecommendations, buildRecommendations } from '../orchestrator/reco
 import { MACHINE, MAX_BUDGET, MIN_BUDGET, budgetLine, budgetView, machineTz, monthKey, monthSpend, pausedReplySweep, prevMonth, primeSpendAlert, runBudgets, stepLine, stepView, suggestBudget, type BudgetView, type StepView } from '../orchestrator/budgets.js';
 import { compactAgent, CompactError, syncContextCap, type CompactMode } from '../orchestrator/compaction.js';
 import type { TokenHealthRaw } from '../orchestrator/usage.js';
-import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orchestrator/unread.js';
+import { consoleActivity, cronRunsSignature, markQuietTasks, quietTaskIds, type SessionEntry, sessionsReadShell } from '../orchestrator/unread.js';
 import { guestConsoleSessionKey } from '../openclaw/consoleIdentity.js';
 import { webChatStoreKey } from '../orchestrator/webChat.js';
 import { RecentTracker, RECENT_CAP, orderRecent, previewFor, previewLine, type RecentPeople, type RecentViewer } from '../orchestrator/recent.js';
@@ -154,12 +154,13 @@ import {
   pushedParameters,
   readCloneMemory,
   renderedTooBig,
+  renderPersona,
   resolveParamValues,
   TemplateParamSchema,
   TEMPLATE_FORMAT,
   LEGACY_TEMPLATE_FORMAT,
 } from '../orchestrator/template.js';
-import { MAX_DATA_SOURCES } from '../orchestrator/dataSourceLimits.js';
+import { MAX_DATA_SOURCES, MAX_MOUNT_NAME } from '../orchestrator/dataSourceLimits.js';
 import { agentHealth, aiSourceHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { forgetDmPolicy } from '../orchestrator/dmPolicyMemo.js';
@@ -758,6 +759,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!agent || agent.ownerId !== ownerIdOf(req)) return undefined;
     return agent;
   };
+  /**
+   * Deleted or being deleted: nothing more is stored for it. A credential
+   * saved then sat on the tombstone, past the delete's scrub (HB-0322). Asked
+   * again after any wait, since the delete may land during it.
+   */
+  const agentGone = (id: string): boolean => {
+    const state = store.getAgent(id)?.state;
+    return !state || state === 'DELETED' || state === 'DELETING';
+  };
+  const AGENT_GONE = 'It was deleted.';
 
   /**
    * Phase 4 (docs/identity.md): an agent a member may *see* — theirs by
@@ -1042,6 +1053,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // Remote runner providers (Cluster mode) are built per host from its stored
   // Docker endpoint and kept for the process — this cache is that store.
   const remoteProviderCache = deps.remoteProviders ?? new Map<string, RuntimeProvider>();
+  /** Runners whose removal is under way: no agent is created, imported or moved onto one (HB-0275). */
+  const removingHosts = new Set<string>();
+  const HOST_GOING = 'That host is being removed.';
   const providerFor = (hostId: string): RuntimeProvider => {
     const host = store.getHost(hostId);
     if (!host) throw new Error(`No such host: ${hostId}`);
@@ -1901,8 +1915,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * against the agent's volume in a throwaway container, so the change is in
    * place when it next starts (a plain start does NOT re-provision config).
    * Records the applied model on success. Returns how it was applied.
+   * One at a time per agent, each reading the model when its turn comes: an
+   * older `models set` still running when a newer choice was applied
+   * finished last and left the runtime on the older model (HB-0323).
    */
-  const applyModelToRuntime = async (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed' | 'rebuild'> => {
+  const modelApplies = new Map<string, Promise<unknown>>();
+  const applyModelToRuntime = (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed' | 'rebuild'> => {
+    const next = (modelApplies.get(agentId) ?? Promise.resolve()).catch(() => {}).then(() => applyModelNow(agentId));
+    const settled = next.catch(() => {}).finally(() => { if (modelApplies.get(agentId) === settled) modelApplies.delete(agentId); });
+    modelApplies.set(agentId, settled);
+    return next;
+  };
+  const applyModelNow = async (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed' | 'rebuild'> => {
     const a = store.getAgent(agentId);
     const p = a && store.getAIProfile(a.aiProfileId);
     if (!a || !p || !a.runtimeRef || a.migratedTo) return 'none';
@@ -2280,7 +2304,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Body: { name?: string; model?: string; aiProfileId?: string; image?: string } }>('/v1/agent-classes', async (req, reply) => {
     const rawBody = (req.body ?? {}) as Record<string, unknown>;
     // A number where a string belongs used to reach .trim() and answer 500 (audit, 2026-10-23).
-    for (const k of ['name', 'model', 'aiProfileId']) if (rawBody[k] !== undefined && rawBody[k] !== null && typeof rawBody[k] !== 'string') return reply.code(400).send({ error: `${k}: a string.` });
+    for (const k of ['name', 'model', 'aiProfileId', 'image', 'memoryCap', 'swapAllowance']) if (rawBody[k] !== undefined && rawBody[k] !== null && typeof rawBody[k] !== 'string') return reply.code(400).send({ error: `${k}: a string.` });
     const b = rawBody as { name?: string; model?: string; aiProfileId?: string };
     const name = (b.name ?? '').trim().slice(0, 48);
     if (!name) return reply.code(400).send({ error: 'A class needs a name.' });
@@ -2511,7 +2535,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!profile) continue;
       const ref = modelRefOf(a, profile);
       const want = cap.tokens && profile.vendor !== 'local' ? `${ref.provider}/${ref.id}` : undefined;
-      if ((want ?? null) === (cap.appliedModel ?? null)) continue;
+      // A cap changed after it was last written (saved while stopped or busy)
+      // is on the same model: the model alone said "done" for good (HB-0318).
+      const changed = !!cap.tokens && (!cap.appliedAt || cap.setAt > cap.appliedAt);
+      if ((want ?? null) === (cap.appliedModel ?? null) && !changed) continue;
       // A write that was refused (a hand edit, a busy gateway) waits 6 hours, not every pass; a rebuild tries at once.
       if ((capRetryAt.get(a.id) ?? 0) > Date.now()) continue;
       const r = await syncContextCap({ store, provider: providerFor(a.hostId), log: (e, d) => trace(a.id)(e, d) }, a, a.runtimeRef!).catch(() => 'failed' as const);
@@ -3263,8 +3290,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/browser', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
-    const c = containerOf(agent.runtimeRef);
-    const b = c ? (await providerFor(agent.hostId).listBrowsers?.().catch(() => []))?.find((x) => x.agentContainer === c) : undefined;
+    const p = agent.runtimeRef ? providerFor(agent.hostId) : undefined;
+    const c = containerOf(agent.runtimeRef, p);
+    const b = p && c ? (await p.listBrowsers?.().catch(() => []))?.find((x) => x.agentContainer === c) : undefined;
     return { on: !!agent.browser, running: !!b?.running, image: browserImage().image };
   });
 
@@ -4164,58 +4192,73 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (host.kind === 'local') {
       return reply.code(400).send({ error: 'The local host is this machine — it cannot be removed.' });
     }
-    const still = store.listAllActiveAgents().filter((a) => a.hostId === host.id);
-    if (still.length) {
-      return reply.code(409).send({
-        error: `${still.length} agent${still.length === 1 ? '' : 's'} still run on this host — move or delete them first.`,
-      });
-    }
-    // A move to or from it that is not over still needs it: Put back starts
-    // the agent's intact copy there. Removed, the agent was pointed back at a
-    // machine Hatchabot no longer knew, and could not be started (audit #085).
-    const moving = store.operationsWithStatus(['queued', 'running', 'interrupted', 'held'])
-      .filter((o) => o.kind === 'move-host' && (o.params.from === host.id || o.params.to === host.id));
-    if (moving.length) {
-      const names = [...new Set(moving.map((o) => (o.agentId && store.getAgent(o.agentId)?.name) || 'an agent'))];
-      return reply.code(409).send({
-        error: `A move to or from this host is not over (${names.join(', ')}) — settle it on the agent's page (Alerts) first.`,
-        operation: moving[0]!.id,
-      });
-    }
-    // What it ran for this Hatchabot goes with it (2026-10-09): its memory
-    // search service and agents' browsers on the machine when it answers,
-    // and the service's key and state here either way. Not answering, they
-    // stay there, and the owner is told what to remove by hand.
-    const p = providerFor(host.id);
-    const answers = p.reachable ? await p.reachable().catch(() => false) : true;
-    // A runner row that is this machine's own Docker under another name (the
-    // move's cardinal hazard, moveHost.ts) holds THIS machine's service and
-    // browsers: nothing there is touched unless the daemons are known to differ.
-    const local = store.localHostId();
-    const sameDaemon = answers && local
-      ? await Promise.all([p.daemonId(), providerFor(local).daemonId()]).then(([a, b]) => a === b, () => undefined)
-      : false;
-    const reachable = answers && sameDaemon === false;
-    const left: string[] = [];
-    if (reachable && p.listBrowsers && p.stopBrowser) {
-      for (const b of await p.listBrowsers().catch(() => [])) {
-        await p.stopBrowser(b.agentContainer).catch(() => { left.push(b.name); });
+    // Asked before anything is touched, after the machine is probed, and again
+    // in the same tick as the delete, since an agent created, imported or moved there
+    // while the machine was probed below was left on a host that was gone
+    // (HB-0275).
+    const inUse = (): { error: string; operation?: string } | undefined => {
+      const still = store.listAllActiveAgents().filter((a) => a.hostId === host.id);
+      if (still.length) {
+        return { error: `${still.length} agent${still.length === 1 ? '' : 's'} still run on this host — move or delete them first.` };
       }
-    }
-    const svc = runnerEmbedders.get(host.id) ?? embedderFor(host.id);
-    const emb = await svc.remove(reachable).catch((err) => ({ leftThere: String((err as Error)?.message ?? err).slice(0, 200) }));
-    runnerEmbedders.delete(host.id);
-    for (const k of [...remoteProviderCache.keys()]) if (k.startsWith(`${host.id}:`)) remoteProviderCache.delete(k);
-    store.deleteHost(host.id);
-    const prefix = process.env.HATCHABOT_PREFIX || 'hatchabot';
-    const warning = sameDaemon === true ? undefined
-      : !reachable
-      ? `${host.name} ${answers ? 'could not be told apart from this machine\'s Docker' : 'did not answer'}, so what Hatchabot ran there is still on it: remove the containers and volumes named ${prefix}-embed… (and any …-browser) with docker on that machine.`
-      : emb.leftThere || left.length
-        ? `Some of what Hatchabot ran on ${host.name} could not be removed (${[emb.leftThere, ...left].filter(Boolean).join('; ')}): remove it with docker on that machine.`
-        : undefined;
-    trace()('host.removed', { host: host.id, reachable, ...(warning ? { leftThere: warning } : {}) });
-    return { ok: true, ...(warning ? { warning } : {}) };
+      // A move to or from it that is not over still needs it: Put back starts
+      // the agent's intact copy there. Removed, the agent was pointed back at a
+      // machine Hatchabot no longer knew, and could not be started (audit #085).
+      const moving = store.operationsWithStatus(['queued', 'running', 'interrupted', 'held'])
+        .filter((o) => o.kind === 'move-host' && (o.params.from === host.id || o.params.to === host.id));
+      if (moving.length) {
+        const names = [...new Set(moving.map((o) => (o.agentId && store.getAgent(o.agentId)?.name) || 'an agent'))];
+        return {
+          error: `A move to or from this host is not over (${names.join(', ')}) — settle it on the agent's page (Alerts) first.`,
+          operation: moving[0]!.id,
+        };
+      }
+      return undefined;
+    };
+    { const busy = inUse(); if (busy) return reply.code(409).send(busy); }
+    if (removingHosts.has(host.id)) return reply.code(409).send({ error: HOST_GOING });
+    // Reserved until the row is gone: nothing new is placed on it meanwhile.
+    removingHosts.add(host.id);
+    try {
+      // What it ran for this Hatchabot goes with it (2026-10-09): its memory
+      // search service and agents' browsers on the machine when it answers,
+      // and the service's key and state here either way. Not answering, they
+      // stay there, and the owner is told what to remove by hand.
+      const p = providerFor(host.id);
+      const answers = p.reachable ? await p.reachable().catch(() => false) : true;
+      // A runner row that is this machine's own Docker under another name (the
+      // move's cardinal hazard, moveHost.ts) holds THIS machine's service and
+      // browsers: nothing there is touched unless the daemons are known to differ.
+      const local = store.localHostId();
+      const sameDaemon = answers && local
+        ? await Promise.all([p.daemonId(), providerFor(local).daemonId()]).then(([a, b]) => a === b, () => undefined)
+        : false;
+      const reachable = answers && sameDaemon === false;
+      // And before anything there is touched: an agent that arrived while the
+      // machine was asked keeps its browser and memory search key (HB-0275).
+      { const busy = inUse(); if (busy) return reply.code(409).send(busy); }
+      const left: string[] = [];
+      if (reachable && p.listBrowsers && p.stopBrowser) {
+        for (const b of await p.listBrowsers().catch(() => [])) {
+          await p.stopBrowser(b.agentContainer).catch(() => { left.push(b.name); });
+        }
+      }
+      const svc = runnerEmbedders.get(host.id) ?? embedderFor(host.id);
+      const emb = await svc.remove(reachable).catch((err) => ({ leftThere: String((err as Error)?.message ?? err).slice(0, 200) }));
+      { const busy = inUse(); if (busy) return reply.code(409).send(busy); }
+      runnerEmbedders.delete(host.id);
+      for (const k of [...remoteProviderCache.keys()]) if (k.startsWith(`${host.id}:`)) remoteProviderCache.delete(k);
+      store.deleteHost(host.id);
+      const prefix = process.env.HATCHABOT_PREFIX || 'hatchabot';
+      const warning = sameDaemon === true ? undefined
+        : !reachable
+        ? `${host.name} ${answers ? 'could not be told apart from this machine\'s Docker' : 'did not answer'}, so what Hatchabot ran there is still on it: remove the containers and volumes named ${prefix}-embed… (and any …-browser) with docker on that machine.`
+        : emb.leftThere || left.length
+          ? `Some of what Hatchabot ran on ${host.name} could not be removed (${[emb.leftThere, ...left].filter(Boolean).join('; ')}): remove it with docker on that machine.`
+          : undefined;
+      trace()('host.removed', { host: host.id, reachable, ...(warning ? { leftThere: warning } : {}) });
+      return { ok: true, ...(warning ? { warning } : {}) };
+    } finally { removingHosts.delete(host.id); }
   });
 
   /**
@@ -5311,6 +5354,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!host || (host.ownerId !== ownerId && host.kind !== 'local')) {
       return reply.code(400).send({ error: 'Unknown host' });
     }
+    if (removingHosts.has(host.id)) return reply.code(409).send({ error: HOST_GOING });
     // A machine-login Max source (subscription, no stored token) IS the
     // operator's ~/.claude. Another account selecting it would mount that
     // directory into their container — refuse (family-member hardening). The
@@ -5361,6 +5405,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           `You already have an agent called "${clash.name}" (${clash.state.toLowerCase()}). ` +
           `Pick a different name, or delete that one first.`,
       });
+    }
+    // A rename to this name still under way (it holds the name until it
+    // answers): made now, the rename then saved it too (HB-0305).
+    if (!holdOnce(req, `agent-name:${ownerId}:${parsed.data.name.trim().toLowerCase()}`)) {
+      return reply.code(409).send({ error: `An agent of yours is being renamed "${parsed.data.name.trim()}" right now. Pick another name, or try again in a moment.` });
     }
 
     const { seedMembers, skipPool, telegram, ...create } = parsed.data;
@@ -5426,10 +5475,32 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * takes a second to start, so 30 running agents cost 8 s per cold list.
    */
   const sessionsCache = new Map<string, { fetchedAt: number; value?: Record<string, SessionEntry>; refreshing?: boolean }>();
+  /** Per agent: its quiet tasks, as of the scheduled runs its records showed then (HB-0302). */
+  const quietTasksCache = new Map<string, { runs: string; ids: Set<string>; at: number }>();
   const readSessions = async (a: Agent): Promise<Record<string, SessionEntry> | undefined> => {
     try {
       const res = await providerFor(a.hostId).execShell(a.runtimeRef!, sessionsReadShell(a.slug));
-      if (res.code === 0 && res.stdout.trim()) return JSON.parse(res.stdout) as Record<string, SessionEntry>;
+      if (res.code === 0 && res.stdout.trim()) {
+        const sessions = JSON.parse(res.stdout) as Record<string, SessionEntry>;
+        // An agent with a bot: its scheduled runs are delivered there, but a
+        // quiet task's are read only in the console (HB-0302). Its tasks are
+        // read (one Node start) only when it has scheduled runs at all.
+        // Read again only after a task has run since the last read, or ten
+        // minutes on (a task changed in between, made quiet or not).
+        const runs = cronRunsSignature(sessions);
+        if (!a.webOnly && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(a.slug) && runs) {
+          let quiet = quietTasksCache.get(a.id);
+          if (quiet?.runs !== runs || Date.now() - quiet.at > 10 * 60_000) {
+            const jobs = await providerFor(a.hostId).execShell(a.runtimeRef!, cronStoreReadShell(a.slug)).catch(() => undefined);
+            const ids = jobs?.code === 0 ? quietTaskIds(jobs.stdout) : undefined;
+            quiet = ids ? { runs, ids, at: Date.now() } : undefined;
+            if (quiet) quietTasksCache.set(a.id, quiet);
+            else quietTasksCache.delete(a.id);
+          }
+          if (quiet?.ids.size) markQuietTasks(sessions, quiet.ids);
+        }
+        return sessions;
+      }
     } catch {
       /* a container hiccup: no mark this minute */
     }
@@ -6249,6 +6320,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (name !== undefined && name.trim().toLowerCase() !== agent.name.trim().toLowerCase()) {
         const same = store.listAgents(agent.ownerId).find((x) => x.id !== agent.id && x.state !== 'DELETED' && x.name.trim().toLowerCase() === name.trim().toLowerCase());
         if (same) return reply.code(409).send({ error: `You already have an agent called "${same.name}". Pick another name.` });
+        // Held until this request answers: two renames to one name, each past
+        // the check above while the other awaited its memory cap, both saved
+        // it (HB-0305).
+        if (!holdOnce(req, `agent-name:${agent.ownerId}:${name.trim().toLowerCase()}`)) {
+          return reply.code(409).send({ error: `An agent of yours is being renamed "${name.trim()}" right now. Pick another name, or try again in a moment.` });
+        }
       }
       if (
         name === undefined &&
@@ -6342,6 +6419,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // could otherwise read another user's files through their own agent.
         if (paths.length && !ownsLocalHost(req)) {
           return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+        }
+        // The same rule as a folder data source: a runner's docker cannot see
+        // this machine's disk, and the folder was saved but never mounted (HB-0284).
+        if (paths.some((p) => !had.has(p)) && store.getHost(agent.hostId)?.kind !== 'local') {
+          return reply.code(400).send({ error: `"${agent.name}" runs on another machine, which cannot see this machine's folders. Move it here first, or give it a git repo instead.` });
         }
         for (const p of paths) {
           // Refuse the dangerous ones by name, and require the folder to
@@ -6862,6 +6944,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           }
           // Rendered past the core-file limit: refused before the snapshot and the writes (review R16).
           for (const w of writes) if (Buffer.byteLength(w.content, 'utf8') > MAX_FILE_BYTES) throw renderedTooBig(w.name);
+          // The description too: over the limit, the agent's own backup could not be imported (HB-0309).
+          if (typeof paramFiles.persona === 'string') renderPersona(paramFiles.persona, resolved);
           await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-params');
           // All the files or none: a SOUL.md written and an AGENTS.md that
           // failed left the agent half on the new values while its stored
@@ -6873,11 +6957,33 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             writeFileInAgent(providerFor(agent.hostId), agent.runtimeRef!, workspacePath(agent.slug, name), Buffer.from(text, 'utf8').toString('base64'));
           const written: Array<[string, string | undefined]> = [];
           for (const w of writes) {
-            const before = await readCoreFile(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, w.name).catch(() => undefined);
-            const r = await write(w.name, w.content);
+            let beforeRead = true;
+            const before = await readCoreFile(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, w.name).catch(() => {
+              beforeRead = false;
+              return undefined;
+            });
+            // A write that threw (the runner's daemon gone mid-call) is a
+            // failed write too: it skipped the putting back (HB-0310). It may
+            // have landed before the call was lost: unless both reads worked
+            // and it still reads as it was (missing included), that file goes
+            // back too.
+            let threw = false;
+            const r = await write(w.name, w.content).catch((err: unknown) => {
+              threw = true;
+              return { code: 1, stdout: '', stderr: err instanceof Error ? err.message : String(err) };
+            });
             if (r.code !== 0) {
-              const back = await Promise.all(written.map(([name, was]) => (was !== undefined ? write(name, was).then((x) => x.code === 0, () => false) : false)));
-              const lost = written.filter((_, i) => !back[i]).map(([name]) => name);
+              let nowRead = true;
+              const now = threw
+                ? await readCoreFile(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, w.name).catch(() => {
+                  nowRead = false;
+                  return undefined;
+                })
+                : before;
+              const landed = threw && !(beforeRead && nowRead && now === before);
+              const undo = landed ? [...written, [w.name, before] as [string, string | undefined]] : written;
+              const back = await Promise.all(undo.map(([name, was]) => (was !== undefined ? write(name, was).then((x) => x.code === 0, () => false) : false)));
+              const lost = undo.filter((_, i) => !back[i]).map(([name]) => name);
               return { ...r, lost };
             }
             written.push([w.name, before]);
@@ -6906,7 +7012,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       const layer = paramFiles!; // set on entry or seeded inside the guard
       if (typeof layer.persona === 'string') {
-        store.setAgentPersona(agent.id, applyParamValues(layer.persona, resolved));
+        store.setAgentPersona(agent.id, renderPersona(layer.persona, resolved));
       }
       // Persist the freshly seeded layer alongside the values on a master's
       // first edit; imported copies already have theirs stored.
@@ -7997,6 +8103,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   }>('/v1/agents/:id/data-sources', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (agentGone(agent.id)) return reply.code(409).send({ error: AGENT_GONE });
     const parsed = z
       .object({
         kind: z.enum(['folder', 'git']),
@@ -8039,6 +8146,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const problem = sharePathProblem(p);
       if (problem) return reply.code(400).send({ error: problem });
       if (!existsSync(p)) return reply.code(400).send({ error: `No such folder on this machine: ${p}` });
+      // A file was saved as a folder, and its own Check then said it was not one (HB-0361).
+      if (statSync(p, { throwIfNoEntry: false })?.isDirectory() === false) return reply.code(400).send({ error: `${p} is a file, not a folder. Give the folder it is in.` });
       const atHostPath = parsed.data.atHostPath === true;
       const targetProblem = atHostPath ? hostPathTargetProblem(p) : undefined;
       if (targetProblem) return reply.code(400).send({ error: targetProblem });
@@ -8054,7 +8163,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       let mountName = atHostPath
         ? p.replace(/^\/+|\/+$/g, '').replace(/[^\w.-]+/g, '-')
         : basename(p.replace(/\/+$/, ''));
-      if (atHostPath) for (let n = 2, base = mountName; clashes(mountName); n++) mountName = `${base}-${n}`;
+      // No longer than a template or a full copy carries (HB-0320): a /data
+      // folder lives at its name, so a longer one is refused; a host-path
+      // label is only a label, so it is cut short, with room for a "-n".
+      if (!atHostPath && mountName.length > MAX_MOUNT_NAME) {
+        return reply.code(400).send({ error: `The folder's name is over ${MAX_MOUNT_NAME} characters, longer than a copy of the agent can carry. Rename it, or share a folder with a shorter name.` });
+      }
+      if (atHostPath && mountName.length > MAX_MOUNT_NAME) mountName = mountName.slice(0, MAX_MOUNT_NAME - 8);
+      if (atHostPath) for (let n = 2, base = mountName.slice(0, MAX_MOUNT_NAME - 8); clashes(mountName); n++) mountName = `${base}-${n}`;
       if (clashes(mountName)) {
         return reply.code(409).send({ error: `Another source already lives at /data/${mountName}. Rename or remove it first.` });
       }
@@ -8075,6 +8191,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const RESERVED = new Set(['agents', 'sessions', 'config', 'logs', 'pylibs', 'skills', 'memory', 'workspace', 'connections', 'credentials', 'state', 'npm', 'devices', 'identity', 'cron', 'media', 'extensions', 'plugins', 'bin', 'data']);
     if (RESERVED.has(git.repoName) || git.repoName.startsWith('.')) {
       return reply.code(400).send({ error: `"${git.repoName}" is a reserved name — it would collide with the agent's own files. Use a differently named repo.` });
+    }
+    if (git.repoName.length > MAX_MOUNT_NAME) {
+      return reply.code(400).send({ error: `The repo's name is over ${MAX_MOUNT_NAME} characters, longer than a copy of the agent can carry.` });
     }
     if (clashes(git.repoName)) {
       return reply.code(409).send({ error: `Another source is already named "${git.repoName}". Remove it first.` });
@@ -8114,6 +8233,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     addingSources.set(agent.id, adding);
     try {
       await secrets.put(secretRef, key.privateKey);
+      if (agentGone(agent.id)) {
+        await secrets.delete(secretRef).catch(() => {});
+        return reply.code(409).send({ error: AGENT_GONE });
+      }
       store.insertDataSource({
         id, agentId: agent.id, kind: 'git', access, mountName: git.repoName,
         repoUrl: git.sshUrl, secretRef, pubKey: key.publicKey, createdAt: new Date().toISOString(),
@@ -8238,6 +8361,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (agentGone(agent.id)) return reply.code(409).send({ error: AGENT_GONE });
       const parsed = z
         .object({ name: z.string().trim().min(1).max(128), value: z.string().min(1).max(8192) })
         .safeParse(req.body ?? {});
@@ -8262,6 +8386,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const id = randomUUID();
       const secretRef = `agent-env/${id}`;
       await secrets.put(secretRef, value);
+      if (agentGone(agent.id)) {
+        await secrets.delete(secretRef).catch(() => {});
+        return reply.code(409).send({ error: AGENT_GONE });
+      }
+      // Checked again after the secret store's await (HB-0285): two additions
+      // in flight at once each saw room for one more, and the agent ended
+      // over the limit its own template has to import under.
+      const now = store.listAgentEnv(agent.id);
+      const clash = now.some((e) => e.name === name)
+        ? `"${name}" is already set — remove it first to change its value.`
+        : now.length >= MAX_AGENT_ENV_VARS
+          ? `An agent can have at most ${MAX_AGENT_ENV_VARS} variables (so that a copy of it can be imported again) — remove one first.`
+          : undefined;
+      if (clash) {
+        await secrets.delete(secretRef).catch(() => {});
+        return reply.code(409).send({ error: clash });
+      }
       try {
         store.insertAgentEnv({ id, agentId: agent.id, name, secretRef, createdAt: new Date().toISOString() });
       } catch (err) {
@@ -9808,21 +9949,28 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (!job) return reply.code(404).send({ error: 'That task no longer exists.' });
         if (job.system) return reply.code(409).send({ error: new CronSystemOwnedError().userMessage });
         if (job.payloadKind === 'command') return reply.code(409).send({ error: 'Shell-command tasks are edited by asking the agent.' });
+        // A blank zone clears the task's own zone (HB-0366); on a task with
+        // none it changes nothing, and a request with nothing else is done.
+        const tz = parsed.data.tz === '' && !job.scheduleTz ? undefined : parsed.data.tz;
+        const change = {
+          name: parsed.data.name,
+          message: parsed.data.message,
+          cron: parsed.data.cron,
+          everyMs: parsed.data.everyMinutes ? Math.round(parsed.data.everyMinutes * 60_000) : undefined,
+          tz,
+        };
+        const edited = Object.values(change).some((v) => v !== undefined);
         try {
-          const out = await whileBusy(agent.id, () => editCron(provider, agent.runtimeRef!, job.id, {
-            name: parsed.data.name,
-            message: parsed.data.message,
-            cron: parsed.data.cron,
-            everyMs: parsed.data.everyMinutes ? Math.round(parsed.data.everyMinutes * 60_000) : undefined,
-            tz: parsed.data.tz || undefined,
-          }));
-          if (!out.ok) return reply.code(502).send({ error: out.error });
-          trace(agent.id)('cron.edited', { id: job.id, name: parsed.data.name ?? job.name, fields: Object.keys(parsed.data) });
-          if (turn === undefined) return { ok: true, edited: true };
-          if (!(await whileBusy(agent.id, () => setCronEnabled(provider, agent.runtimeRef!, job.id, turn)))) {
-            return reply.code(502).send({ error: `The task was changed, but couldn't be ${turn ? 'enabled' : 'disabled'} — try that again.` });
+          if (edited) {
+            const out = await whileBusy(agent.id, () => editCron(provider, agent.runtimeRef!, job.id, change, job));
+            if (!out.ok) return reply.code(502).send({ error: out.error });
+            trace(agent.id)('cron.edited', { id: job.id, name: parsed.data.name ?? job.name, fields: Object.keys(parsed.data) });
           }
-          return { ok: true, edited: true, enabled: turn };
+          if (turn === undefined) return { ok: true, edited };
+          if (!(await whileBusy(agent.id, () => setCronEnabled(provider, agent.runtimeRef!, job.id, turn)))) {
+            return reply.code(502).send({ error: `The task ${edited ? 'was changed, but ' : ''}couldn't be ${turn ? 'enabled' : 'disabled'} — try that again.` });
+          }
+          return { ok: true, edited, enabled: turn };
         } catch (err) {
           if (err instanceof CronSystemOwnedError) return reply.code(409).send({ error: err.userMessage });
           if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
@@ -10174,9 +10322,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Under the agent's lock, as the Discord/Slack attach is: two attaches at
     // once (a double-click) both passed the checks above, and the second's
     // insert threw ChannelTakenError as a 500 (audit, 2026-10-23).
-    let attached: 'ok' | 'has-one' | 'taken';
+    let attached: 'ok' | 'has-one' | 'taken' | 'gone';
     try {
       attached = await whileBusy(agent.id, async () => {
+        // Deleted, archived or rebuilding while the bot was found: a row and a
+        // token saved now sat on a tombstone (HB-0296). The bot goes back the
+        // way a detach sends it (a pasted one parked in the pool first), with
+        // no farewell: it never served this agent.
+        const now = store.getAgent(agent.id);
+        if (!now?.runtimeRef || (now.state !== 'RUNNING' && now.state !== 'STOPPED')) {
+          const pool = (deps.channel as { pool?: { owns(u: string): boolean; addToPool(u: string, t: string, o?: string | null): Promise<void> } }).pool;
+          if (pool && !pool.owns(result.accountId)) {
+            try { await pool.addToPool(result.accountId, await secrets.get(result.secretRef), agent.ownerId); }
+            catch (err) { trace(agent.id)('channel.recycle_failed', { error: String(err).slice(0, 200) }); }
+          }
+          await deps.channel.release(result.accountId, { reason: 'swapped', agentId: agent.id }).catch(() => {});
+          if (result.secretRef.startsWith('channel/')) await secrets.delete(result.secretRef).catch(() => {});
+          return 'gone' as const;
+        }
         if (store.getChannelForAgent(agent.id)) return 'has-one' as const;
         try {
           store.insertChannel({
@@ -10193,6 +10356,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
       throw err;
     }
+    if (attached === 'gone') return reply.code(409).send({ error: `It changed while its bot was being found (it is ${(store.getAgent(agent.id)?.state ?? 'deleted').toLowerCase()}); the bot was not connected.` });
     if (attached === 'has-one') return reply.code(409).send({ error: 'It already has a Telegram bot.' });
     if (attached === 'taken') return reply.code(409).send({ error: `@${result.accountId} was just connected to another agent. Each agent needs its own bot.` });
     store.setAgentWebOnly(agent.id, false);
@@ -10244,10 +10408,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const now = store.getAgent(agent.id);
         if (!now?.runtimeRef || (now.state !== 'RUNNING' && now.state !== 'STOPPED') || now.hostId !== agent.hostId) return BUSY;
         if (store.getChannelForAgent(agent.id)?.accountId !== row.accountId) return BUSY;
-        if (now.state === 'RUNNING') {
-          await provider.stop(now.runtimeRef);
-          store.setAgentState(agent.id, 'STOPPED');
+        // Whatever the record says: a STOPPED row whose container still ran
+        // (state drift) kept polling a token the pool then leased out (HB-0273).
+        try { await stopAndConfirm(provider, now.runtimeRef); }
+        catch (err) {
+          rethrowIfCrash(err);
+          trace(agent.id)('channel.stop_failed', { error: String(err).slice(0, 200) });
+          return 'It did not stop, so its bot stays with it for now. Try again when its machine answers.';
         }
+        if (now.state === 'RUNNING') store.setAgentState(agent.id, 'STOPPED');
         const pool = (deps.channel as { pool?: { owns(u: string): boolean; addToPool(u: string, t: string, o?: string | null): Promise<void> } }).pool;
         if (pool && !pool.owns(row.accountId)) {
           try { await pool.addToPool(row.accountId, await secrets.get(row.secretRef), agent.ownerId); }
@@ -11458,16 +11627,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!agent.runtimeRef) return reply.code(409).send({ error: 'This agent has no stored volume to inspect.' });
     const provider = providerFor(agent.hostId);
     // A read that failed is said, not shown as an agent with no files (#151).
-    let files: Awaited<ReturnType<typeof listInspectableFiles>>, transcript: { totalTurns: number };
+    // A chat history that cannot be read does not hide the files: its count
+    // is null, and the Chat history tab says why when it is opened.
+    let files: Awaited<ReturnType<typeof listInspectableFiles>>, transcriptTurns: number | null;
     try {
-      [files, transcript] = await Promise.all([
+      [files, transcriptTurns] = await Promise.all([
         listInspectableFiles(provider, agent.runtimeRef, agent.slug),
-        readTranscript(provider, agent.runtimeRef, agent.slug, { maxTurns: 0 }),
+        readTranscript(provider, agent.runtimeRef, agent.slug, { maxTurns: 0 }).then((t) => t.totalTurns, () => null),
       ]);
     } catch (err) {
       return reply.code(502).send({ error: err instanceof InspectReadError ? err.message : "Couldn't read the agent's stored files." });
     }
-    return { files, transcriptTurns: transcript.totalTurns, name: agent.name, state: agent.state };
+    return { files, transcriptTurns, name: agent.name, state: agent.state };
   });
 
   app.get<{ Params: { id: string; name: string } }>('/v1/agents/:id/inspect/file/:name', async (req, reply) => {
@@ -12113,6 +12284,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!host || (host.ownerId !== ownerIdOf(req) && host.kind !== 'local')) {
         return reply.code(400).send({ error: 'Unknown host' });
       }
+      if (removingHosts.has(host.id)) return reply.code(409).send({ error: HOST_GOING });
       if (host.id === agent.hostId) {
         return reply.code(400).send({ error: 'The agent is already on that host.' });
       }
@@ -12185,7 +12357,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // the downward one through — found 2026-10-07, as the promote guard's was.
       if (agent.runtimeRef) {
         const running = await providerFor(agent.hostId).info(agent.runtimeRef).catch(() => ({} as { openclawVersion?: string }));
-        const there = await providerFor(host.id).currentImageInfo(dropPin ? undefined : (agent.image ?? undefined)).catch(() => ({} as { openclawVersion?: string }));
+        const there = await Promise.resolve().then(() => providerFor(host.id).currentImageInfo(dropPin ? undefined : (agent.image ?? undefined))).catch(() => ({} as { openclawVersion?: string }));
         if (moveCrossesDown(running.openclawVersion, there.openclawVersion)) {
           return reply.code(409).send({ error: `This agent runs OpenClaw ${running.openclawVersion}; ${host.name} would run ${there.openclawVersion}, which cannot read its data. Copy this machine's image there first (Settings → Hosts → Check, then Install image).` });
         }
@@ -12193,6 +12365,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Every check has passed; a busy agent is the one refusal left. The pin
       // itself is dropped by the move, on its record (moveHost.ts).
       if (dropPin && isBusy(agent.id)) return reply.code(409).send({ error: 'The agent is busy — try again in a moment.' });
+      // The runner may have been removed during the awaits above: refused as
+      // that, not as a server error from its provider (HB-0275). From here to
+      // the move's operation is one tick, so a removal still running sees it.
+      if (!store.getHost(host.id) || removingHosts.has(host.id)) return reply.code(409).send({ error: HOST_GOING });
       // The move is recorded as an operation (operations.ts) and answers 202
       // with it once it has begun; the move goes on in the background
       // (phase 3). ?wait=1: the old answer, when it is over.
@@ -12414,6 +12590,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         ? hosts.find((h) => h.id === req.query.hostId)
         : (hosts.find((h) => h.kind === 'local') ?? hosts[0]);
       if (!host) return reply.code(400).send({ error: 'No host available to import onto.' });
+      if (removingHosts.has(host.id)) return reply.code(409).send({ error: HOST_GOING });
       if (req.query.aiProfileId) {
         const p = store.getAIProfile(req.query.aiProfileId);
         if (!p || (p.ownerId !== ownerId && !p.shared)) {
@@ -12732,6 +12909,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (body.hostId && !store.listHosts(me.ownerId).some((h) => h.id === body.hostId)) {
         return reply.code(400).send({ error: 'Unknown host.' });
       }
+      if (body.hostId && removingHosts.has(body.hostId)) return reply.code(409).send({ error: HOST_GOING });
       const host = body.hostId ? undefined : store.listHosts(me.ownerId).find((h) => h.kind === 'local');
       // Claimed before the first await; a second Accept finds it taken.
       if (!store.setShareStatus(req.params.id, 'accepted', me.ownerId)) {
@@ -12983,14 +13161,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // (10th audit). Live files are only the source when no layer exists.
     // A file read as empty is pushed as empty; only a file that is not there
     // is left out.
+    // The two reads hold the master's busy guard, as a file save does: a save
+    // between them sent every child the old SOUL.md with the new AGENTS.md
+    // (HB-0311).
     let layer: { soul?: string; agents?: string; persona?: string };
     try {
-      layer = master.paramFiles ?? {
+      layer = master.paramFiles ?? await whileBusy(master.id, async () => ({
         soul: await readCapped(master, 'SOUL.md'),
         agents: await readCapped(master, 'AGENTS.md'),
         persona: typeof master.persona === 'string' ? master.persona : undefined,
-      };
+      }));
     } catch (err) {
+      if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
       if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
       if (err instanceof SnapshotError) return reply.code(502).send({ error: `Couldn't read the master's files: ${err.userMessage}` });
       return reply.code(502).send({ error: "Couldn't read the master's files — is its machine awake?" });
@@ -13038,6 +13220,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           .filter((p) => p.target !== 'env' && p.target !== 'datasource')
           .map((p) => ({ ...p, required: false }));
         const values = resolveParamValues(pushedParams, child.paramValues ?? {});
+        // Rendered before any file is written: one too long fails this child only (HB-0309).
+        const persona = typeof layer.persona === 'string' ? renderPersona(layer.persona, values) : undefined;
         await whileBusy(child.id, async () => {
           await autoSnapshot(snapshotDeps(child), child.id, 'pre-params');
           // The child's "## Data sources" section is platform-maintained and
@@ -13045,8 +13229,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // master's file told every child it had the master's repos until
           // the next rebuild (10th audit). Splice each child's own section
           // back into the pushed content.
+          let childAgentsRead = true;
           const childAgentsMd = typeof layer.agents === 'string'
-            ? await readCapped(child, 'AGENTS.md').catch(() => undefined)
+            ? await readCapped(child, 'AGENTS.md').catch(() => {
+              childAgentsRead = false;
+              return undefined;
+            })
             : undefined;
           const childDataSection = extractSection(childAgentsMd ?? '', DATA_SOURCES_HEADING);
           // Both files or neither: a SOUL.md written and an AGENTS.md that
@@ -13067,8 +13255,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
                 rendered = replaceSection(rendered, DATA_SOURCES_HEADING, childDataSection);
               }
               if (Buffer.byteLength(rendered, 'utf8') > MAX_FILE_BYTES) throw renderedTooBig(nameF); // review R16
-              const before = nameF === 'AGENTS.md' ? childAgentsMd : await readCapped(child, nameF).catch(() => undefined);
-              const r = await write(nameF, rendered);
+              let beforeRead = nameF === 'AGENTS.md' ? childAgentsRead : true;
+              const before = nameF === 'AGENTS.md' ? childAgentsMd : await readCapped(child, nameF).catch(() => {
+                beforeRead = false;
+                return undefined;
+              });
+              // A write that threw may have landed before the call was lost
+              // (HB-0310): unless both reads worked and it still reads as it
+              // was, it goes back with the others.
+              const r = await write(nameF, rendered).catch(async (err: unknown) => {
+                let nowRead = true;
+                const now = await readCapped(child, nameF).catch(() => {
+                  nowRead = false;
+                  return undefined;
+                });
+                if (!(beforeRead && nowRead && now === before)) written.push([nameF, before]);
+                throw err;
+              });
               if (r.code !== 0) throw new Error('write failed');
               written.push([nameF, before]);
             }
@@ -13078,9 +13281,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             throw new Error(`write failed, and ${written.filter((_, i) => !back[i]).map(([n]) => n).join(', ')} could not be put back: restore the pre-params snapshot`);
           }
         });
-        if (typeof layer.persona === 'string') {
-          store.setAgentPersona(child.id, applyParamValues(layer.persona, values));
-        }
+        if (persona !== undefined) store.setAgentPersona(child.id, persona);
         // The pushed RAW layer becomes the child's new template layer, so its
         // own Setup-values edits keep working against the CURRENT definition —
         // and the master's current field declarations come along, so the
@@ -13094,7 +13295,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         trace(child.id)('definition.pushed', { from: master.id });
         results.push({ id: child.id, name: child.name, ok: true });
       } catch (err) {
-        results.push({ id: child.id, name: child.name, ok: false, error: String((err as Error).message ?? err).slice(0, 120) });
+        // 200: a too-long description's reason (146) and renderedTooBig's were cut mid-word at 120 (HB-0309).
+        results.push({ id: child.id, name: child.name, ok: false, error: String((err as Error).message ?? err).slice(0, 200) });
       }
     }
     return { pushed: results.filter((r) => r.ok).length, results };
@@ -13313,6 +13515,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         ? hosts.find((h) => h.id === req.query.hostId)
         : (hosts.find((h) => h.kind === 'local') ?? hosts[0]);
       if (!host) return reply.code(400).send({ error: 'No host available to import onto.' });
+      if (removingHosts.has(host.id)) return reply.code(409).send({ error: HOST_GOING });
       if (req.query.aiProfileId) {
         const p = store.getAIProfile(req.query.aiProfileId);
         if (!p || (p.ownerId !== ownerId && !p.shared)) {
@@ -14703,7 +14906,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return reply.code(202).send(publicAgent(store.getAgent(agent.id)!));
   });
 
-  app.delete<{ Params: { id: string }; Querystring: { recycleBot?: string } }>('/v1/agents/:id', async (req, reply) => {
+  /**
+   * Deletes under way in this process. The page offers Delete on a DELETING
+   * agent too (one a restart interrupted, HB-0265), so a second Delete while
+   * the first still tears down is turned away rather than run beside it.
+   */
+  const deletesRunning = new Set<string>();
+  type DeleteRoute = { Params: { id: string }; Querystring: { recycleBot?: string } };
+  app.delete<DeleteRoute>('/v1/agents/:id', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent || agent.state === 'DELETED') return deleteAgent(req, reply);
+    if (deletesRunning.has(agent.id)) return reply.code(409).send({ error: 'It is being deleted already: wait for that to finish.' });
+    deletesRunning.add(agent.id);
+    try { return await deleteAgent(req, reply); } finally { deletesRunning.delete(agent.id); }
+  });
+  const deleteAgent = async (req: FastifyRequest<DeleteRoute>, reply: FastifyReply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     // Fully gone — say so. A DELETING agent, by contrast, is a delete that was
@@ -14844,7 +15061,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     await dropAppPending(store, secrets, agent.id);
     store.scrubAgentResidue(agent.id);
     return publicAgent(store.setAgentState(agent.id, 'DELETED'));
-  });
+  };
 
   return {
     /**

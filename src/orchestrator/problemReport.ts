@@ -43,19 +43,34 @@ const isPrivateV4 = (a: number, b: number) =>
  * A private IPv6 address: unique local (fc00::/7, a tailnet's fd7a:…), link-
  * or site-local (fe80::/9), loopback, or a private IPv4 mapped (::ffff:10.0.0.7).
  * Only IPv4 was masked, so a runner's fd00:… address went public (#211).
+ * Judged on its eight groups, not its spelling: 0:0::ffff:c0a8:102 is
+ * ::ffff:192.168.1.2 too, and went public (HB-0365).
  */
 const isPrivateV6 = (addr: string) => {
   const ip = addr.replace(/%.*$/, '');
   if (!isIPv6(ip)) return false;
-  const v4 = /^::ffff:(\d+)\.(\d+)\.\d+\.\d+$/i.exec(ip);
-  if (v4) return isPrivateV4(+v4[1]!, +v4[2]!);
-  // The same mapped address in hex (::ffff:a00:7 is ::ffff:10.0.0.7).
-  const hex = /^(?:::|(?:0{1,4}:){5})ffff:([0-9a-f]{1,4}):[0-9a-f]{1,4}$/i.exec(ip);
-  if (hex) { const hi = parseInt(hex[1]!, 16); return isPrivateV4(hi >> 8, hi & 0xff); }
-  if (ip === '::1') return true;
-  const first = ip.startsWith('::') ? 0 : parseInt(ip.split(':')[0]!, 16);
-  return (first & 0xfe00) === 0xfc00 || (first & 0xff80) === 0xfe80;
+  const g = v6Groups(ip);
+  if (!g) return false;
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return isPrivateV4(g[6]! >> 8, g[6]! & 0xff);
+  if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return true;
+  return (g[0]! & 0xfe00) === 0xfc00 || (g[0]! & 0xff80) === 0xfe80;
 };
+/** A valid IPv6 address (isIPv6) as its eight 16-bit groups: `::` filled in, a dotted IPv4 tail as two groups. */
+function v6Groups(ip: string): number[] | undefined {
+  let s = ip.toLowerCase();
+  const v4 = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(s);
+  if (v4) {
+    const [a, b, c, d] = v4.slice(1).map(Number) as [number, number, number, number];
+    s = `${s.slice(0, v4.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = s.split('::');
+  const part = (h: string) => (h ? h.split(':').map((x) => parseInt(x, 16)) : []);
+  const head = part(halves[0]!);
+  if (halves.length === 1) return head.length === 8 ? head : undefined;
+  const tail = part(halves[1]!);
+  const fill = 8 - head.length - tail.length;
+  return halves.length === 2 && fill >= 0 ? [...head, ...Array<number>(fill).fill(0), ...tail] : undefined;
+}
 // Never masked as a private name: the manager's own names, and the words the masks and headings are made of.
 const NOT_PRIVATE = /^(hatchabot([ -](agent|manager))?|openclaw|agent|name|host|user|bot|email)$/i;
 
@@ -457,6 +472,37 @@ export function newerRelease(a: string, b: string): boolean {
   return false;
 }
 
+const matchNorm = (v: string) => v.toLowerCase().replace(/[“”‘’]/g, "'").replace(/[^a-z0-9.'"`/:_ -]+/g, ' ').replace(/\s+/g, ' ').trim();
+const matchQuoted = (v: string) => [...v.matchAll(/"([^"\n]{8,240})"|'([^'\n]{8,240})'|`([^`\n]{8,240})`|“([^”\n]{8,240})”/g)]
+  .map((m) => matchNorm(m[1] ?? m[2] ?? m[3] ?? m[4] ?? '')).filter((q) => q.length >= 8);
+const matchWords = (v: string) => matchNorm(v).replace(/['"`]/g, ' ').split(' ').filter(Boolean);
+
+interface PlaybookEntry { title: string; titleQuoted: string[]; titleKeys: Set<string>; body: string; bodyPlain: string; fixedIn?: string; text: string }
+/** The playbook split and normalized once per version of the file: a query only compares. */
+let playbookCache: { path: string; mtimeMs: number; size: number; entries: PlaybookEntry[] } | undefined;
+function playbookEntries(path: string): PlaybookEntry[] | undefined {
+  let st;
+  try { st = statSync(path); } catch { return undefined; }
+  if (playbookCache?.path === path && playbookCache.mtimeMs === st.mtimeMs && playbookCache.size === st.size) return playbookCache.entries;
+  let doc: string;
+  try { doc = readFileSync(path, 'utf8'); } catch { return undefined; }
+  const entries = doc.split(/^### /m).slice(1).map((block) => {
+    const title = block.split('\n')[0]!.trim();
+    const fixedIn = /^- \*\*Fixed in:\*\*\s*`?(v[\d.]+)`?/m.exec(block)?.[1];
+    return {
+      title,
+      titleQuoted: matchQuoted(title),
+      titleKeys: new Set(matchWords(title).filter((x) => x.length >= 4 && !STOP.has(x))),
+      body: matchNorm(block),
+      bodyPlain: matchWords(block).join(' '),
+      ...(fixedIn ? { fixedIn } : {}),
+      text: `### ${block.trim()}`,
+    };
+  });
+  playbookCache = { path, mtimeMs: st.mtimeMs, size: st.size, entries };
+  return entries;
+}
+
 /**
  * The playbook entries a symptom most likely is, best first, each in full (the
  * Hatchabot agent's check_known_problem). Scored on what a person or a log
@@ -468,27 +514,20 @@ export function matchKnownProblems(appDir: string, symptom: string, installed: s
   installed: string;
   matches: Array<{ title: string; score: number; fixedIn?: string; fixedInNewerRelease?: boolean; text: string }>;
 } {
-  let doc = '';
-  try { doc = readFileSync(join(appDir, PLAYBOOK), 'utf8'); } catch { return { installed, matches: [] }; }
-  const norm = (v: string) => v.toLowerCase().replace(/[“”‘’]/g, "'").replace(/[^a-z0-9.'"`/:_ -]+/g, ' ').replace(/\s+/g, ' ').trim();
-  const quoted = (v: string) => [...v.matchAll(/"([^"\n]{8,240})"|'([^'\n]{8,240})'|`([^`\n]{8,240})`|“([^”\n]{8,240})”/g)]
-    .map((m) => norm(m[1] ?? m[2] ?? m[3] ?? m[4] ?? '')).filter((q) => q.length >= 8);
-  const words = (v: string) => norm(v).replace(/['"`]/g, ' ').split(' ').filter(Boolean);
-  const sym = norm(symptom), symWords = words(symptom), symQuoted = quoted(symptom);
+  const entries = playbookEntries(join(appDir, PLAYBOOK));
+  if (!entries) return { installed, matches: [] };
+  const sym = matchNorm(symptom), symWords = matchWords(symptom), symQuoted = matchQuoted(symptom);
   const shingles = new Set(symWords.slice(0, -2).map((_, i) => symWords.slice(i, i + 3).join(' ')).filter((g) => g.replace(/ /g, '').length >= 9));
   const symKeys = new Set(symWords.filter((w) => w.length >= 4 && !STOP.has(w)));
   const scored: Array<{ title: string; score: number; fixedIn?: string; fixedInNewerRelease?: boolean; text: string }> = [];
-  for (const block of doc.split(/^### /m).slice(1)) {
-    const title = block.split('\n')[0]!.trim();
-    const body = norm(block), bodyPlain = words(block).join(' ');
+  for (const e of entries) {
     let score = 0;
-    for (const q of quoted(title)) if (sym.includes(q)) score += 12;
-    for (const q of symQuoted) if (body.includes(q)) score += 12;
-    for (const g of shingles) if (bodyPlain.includes(g)) score += 2;
-    for (const w of new Set(words(title).filter((x) => x.length >= 4 && !STOP.has(x)))) if (symKeys.has(w)) score += 1;
+    for (const q of e.titleQuoted) if (sym.includes(q)) score += 12;
+    for (const q of symQuoted) if (e.body.includes(q)) score += 12;
+    for (const g of shingles) if (e.bodyPlain.includes(g)) score += 2;
+    for (const w of e.titleKeys) if (symKeys.has(w)) score += 1;
     if (score < 5) continue;
-    const fixedIn = /^- \*\*Fixed in:\*\*\s*`?(v[\d.]+)`?/m.exec(block)?.[1];
-    scored.push({ title, score, ...(fixedIn ? { fixedIn, fixedInNewerRelease: newerRelease(fixedIn, installed) } : {}), text: `### ${block.trim()}` });
+    scored.push({ title: e.title, score, ...(e.fixedIn ? { fixedIn: e.fixedIn, fixedInNewerRelease: newerRelease(e.fixedIn, installed) } : {}), text: e.text });
   }
   scored.sort((a, b) => b.score - a.score);
   return { installed, matches: scored.slice(0, max) };

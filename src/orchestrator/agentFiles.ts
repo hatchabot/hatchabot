@@ -101,10 +101,17 @@ export function tarArgv(rel: string): string[] {
   return ['sh', '-c', `${guard(rel)} [ -d "$P" ] || exit 4; cd "$(dirname "$P")" && exec tar cz -- "$(basename "$P")"`];
 }
 
-/** A download name for a path: the last segment, or the agent's slug for home. */
+/**
+ * A download name for a path: the last segment, or the agent's slug for home.
+ * Cut to 120 characters with its extension kept: cut off, an image opened
+ * inline lost its type and came as text (HB-0299).
+ */
 export function downloadName(rel: string, slug: string): string {
   const last = rel.split('/').filter(Boolean).pop();
-  return (last ?? slug).replace(/[^\w.+-]+/g, '_').slice(0, 120) || slug;
+  const name = (last ?? slug).replace(/[^\w.+-]+/g, '_');
+  if (name.length <= 120) return name || slug;
+  const ext = /\.[A-Za-z0-9]{1,10}$/.exec(name)?.[0] ?? '';
+  return name.slice(0, 120 - ext.length) + ext;
 }
 
 /**

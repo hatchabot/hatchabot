@@ -91,10 +91,11 @@ case "$*" in
   "inspect --format {{.State.Running}} hatchabot-embedder") [ -f "$d/embedder" ] && echo true || exit 1 ;;
   "inspect --format {{.State.Running}} hatchabot-embed-door") [ -f "$d/door" ] && echo true || exit 1 ;;
   "inspect hatchabot-embedder --format "*) cat "$d/embedder" ;;
-  "inspect hatchabot-embed-door --format "*) cat "$d/door" ;;
+  "inspect hatchabot-embed-door --format "*) printf '%s|%s\\n' "$(cat "$d/door")" "$(cat "$d/door-nets" 2>/dev/null)" ;;
   "run -d --name hatchabot-embedder "*) echo "$*" | grep -oE 'hatchabot\\.embed-key=[0-9a-f]+' | cut -d= -f2 > "$d/embedder"; echo embedderid ;;
-  "run -d --name hatchabot-embed-door "*) echo "$*" | grep -oE 'hatchabot\\.embed-door=[0-9a-f]+' | cut -d= -f2 > "$d/door"; echo doorid ;;
-  "rm -f hatchabot-embed-door") rm -f "$d/door" ;;
+  "run -d --name hatchabot-embed-door "*) echo "$*" | grep -oE 'hatchabot\\.embed-door=[0-9a-f]+' | cut -d= -f2 > "$d/door"; echo 'bridge,' > "$d/door-nets"; echo doorid ;;
+  "network connect hatchabot-embed hatchabot-embed-door") echo 'bridge,hatchabot-embed,' > "$d/door-nets" ;;
+  "rm -f hatchabot-embed-door") rm -f "$d/door" "$d/door-nets" ;;
   "port "*) echo "8093/tcp -> 127.0.0.1:8093" ;;
 esac
 exit 0
@@ -130,5 +131,26 @@ exit 0
     await provider.ensureEmbedder({ ...spec, perMin: 900, mbPerMin: 2 } as never);
     expect(doorRuns()).toBe(3);
     expect(argv().filter((l) => l.startsWith('run -d --name hatchabot-embed-door')).at(-1)).toContain('-e EMBED_MB_PER_MIN=2 ');
+  });
+  it('a kept door that never joined the server\'s network (a start cut off before its connect) is connected (HB-0330)', async () => {
+    const { provider, dir, argv } = statefulStub();
+    const keyFile = join(dir, 'server-key');
+    writeFileSync(keyFile, 'the-key\n');
+    const spec = {
+      image: 'test-image:latest', modelPath: join(dir, 'model.gguf'), modelAlias: 'embeddinggemma', key: 'the-key',
+      doorImage: 'test-image:latest', doorScript: 'noop', doorPort: 8093, doorBind: '127.0.0.1',
+      keysFile: join(dir, 'keys.json'), serverKeyFile: keyFile, uid: process.getuid!(), gid: process.getgid!(), perMin: 600, mbPerMin: 8,
+    };
+    const connects = () => argv().filter((l) => l === 'network connect hatchabot-embed hatchabot-embed-door').length;
+    await provider.ensureEmbedder(spec as never);
+    expect(connects()).toBe(1);
+    // Joined: kept as it is, no second connect.
+    await provider.ensureEmbedder(spec as never);
+    expect(connects()).toBe(1);
+    // Cut off between the door's run and its connect: same configuration, bridge only.
+    writeFileSync(join(dir, 'door-nets'), 'bridge,\n');
+    await provider.ensureEmbedder(spec as never);
+    expect(connects()).toBe(2);
+    expect(argv().filter((l) => l.startsWith('run -d --name hatchabot-embed-door'))).toHaveLength(1);
   });
 });

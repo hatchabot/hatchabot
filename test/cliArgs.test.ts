@@ -54,6 +54,14 @@ describe('<agent> matching (audit: any id prefix matched)', () => {
   it('an exact name beats an id prefix that also fits', () => {
     expect(matchAgent(list, 'abcd').hit?.name).toBe('abcd');
   });
+  it('a whole id picks that agent even when another is named after it (HB-0355)', () => {
+    const two = [
+      { id: 'agent-first-0000', name: 'Kitchen Helper', slug: 'kitchen-helper' },
+      { id: 'agent-second-0000', name: 'agent-first-0000', slug: 'ledger' },
+    ];
+    expect(matchAgent(two, 'agent-first-0000').hit?.id).toBe('agent-first-0000');
+    expect(matchAgent(two, 'ledger').hit?.id).toBe('agent-second-0000');
+  });
 });
 
 describe('the AI source create picks (audit: it took the first in the list)', () => {
@@ -67,6 +75,14 @@ describe('the AI source create picks (audit: it took the first in the list)', ()
     expect(pickProfile(profiles, 'local qwen').hit?.id).toBe('p-local');
     expect(pickProfile(profiles, 'p-shared').hit?.id).toBe('p-shared');
     expect(pickProfile(profiles, 'nope').problem).toMatch(/no AI source/);
+  });
+  it('refuses a name two sources share, listing their ids (HB-0354)', () => {
+    const twins = [{ id: 'p-one', name: 'Claude Max' }, { id: 'p-two', name: 'claude max' }];
+    const r = pickProfile(twins, 'Claude Max');
+    expect(r.hit).toBeUndefined();
+    expect(r.problem).toMatch(/names 2 AI sources/);
+    expect(r.problem).toContain('p-one, p-two');
+    expect(pickProfile(twins, 'p-two').hit?.id).toBe('p-two');
   });
   it('without a default, one of your own before a shared one', () => {
     expect(pickProfile([profiles[1]!, profiles[0]!]).hit?.id).toBe('p-local');

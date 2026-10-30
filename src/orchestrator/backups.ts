@@ -7,7 +7,7 @@
  * trigger a run or prune an old one.
  */
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { defaultBackupsDir } from '../envCompat.js';
 import { fileURLToPath } from 'node:url';
@@ -206,6 +206,12 @@ export function pruneBackup(date: string, base = backupsDir()): boolean {
   // level under the (resolved) base — no `..`, no symlink hop out.
   if (dirname(target) !== resolve(base)) throw new Error('Refusing to delete outside the backups directory.');
   if (!existsSync(target)) return false;
+  // A dated link to a folder elsewhere is not followed: the lock below was
+  // written into the folder it points at, outside the backups directory, and
+  // left there live while only the link went (HB-0328).
+  if (lstatSync(target).isSymbolicLink()) {
+    throw new Error(`The ${date} backup is a link to a folder elsewhere, not a set kept here. Remove the link (or what it points at) by hand once you have looked.`);
+  }
   // A set a run is still writing is not deleted: removing it took the run's
   // lock with it, so the run wrote into nothing and a second run could start
   // on the same day (#139). The lock is taken here, as the script takes it,

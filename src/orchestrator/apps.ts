@@ -228,8 +228,16 @@ export function mergeConfig(m: AppManifest, facts: AgentFacts, existing: Record<
   };
   for (const f of m.config?.fields ?? []) {
     if (f.from) {
-      out[f.key] = fact[f.from];
-      if (f.required && !String(fact[f.from] ?? '').trim()) unfilled.push(`${f.key} (${UNFILLED[f.from] ?? `no ${f.from}`})`);
+      // Held to its field's type like a value given: a list filled from
+      // owner.email was written as a string, with nothing said (HB-0303).
+      // A number filled from owner.telegram (a numeric id) is one; a fact
+      // that does not fit is said here, not refused when the manifest is
+      // read: an installed release with it could no longer be updated.
+      const empty = !String(fact[f.from] ?? '').trim();
+      const v = empty ? (f.type === 'list' ? [] : f.type === 'number' || f.type === 'bool' ? null : '') : coerce(f.type, fact[f.from]);
+      if (v === INVALID) invalid.push(`${f.key} is filled from ${f.from}, which is not ${TYPE_WORD[f.type ?? 'text']} (its ${MANIFEST_FILE} needs fixing)`);
+      else out[f.key] = v;
+      if (f.required && empty) unfilled.push(`${f.key} (${UNFILLED[f.from] ?? `no ${f.from}`})`);
       continue;
     }
     const given = Object.prototype.hasOwnProperty.call(values, f.key) && values[f.key] !== undefined;
@@ -314,7 +322,9 @@ function coerce(type: string | undefined, v: unknown): unknown {
       if (s !== undefined && /^(0|false|no|off)$/i.test(s)) return false;
       return INVALID;
     case 'list':
-      if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return v;
+      // Items trimmed and blanks dropped, as for "a, b": ['', ' '] passed a
+      // required list that ' , ' did not (HB-0364).
+      if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return v.map((x) => x.trim()).filter(Boolean);
       return s !== undefined ? s.split(',').map((x) => x.trim()).filter(Boolean) : INVALID;
     case 'email':
       return s !== undefined && /^[^\s@]+@[^\s@]+$/.test(s) ? v : INVALID;
@@ -630,7 +640,10 @@ export function appTaskNames(...ms: Array<AppManifest | undefined>): Set<string>
  * what is there). Only the app's own jobs must be whole: an unnamed job of the
  * agent's own is none of its business (it blocked every app change, #74). The
  * names, not a "<app>-" prefix: the owner's own task "news-digest" was taken
- * off with app "news" (audit, 2026-10-20).
+ * off with app "news" (audit, 2026-10-20). And only command jobs, as an app's
+ * are: the owner's own reminder that happened to be named "<app>-<task>" was
+ * taken off by an install (HB-0304). A job whose payload is not listed is
+ * still taken for the app's, as before.
  */
 export async function appJobs(d: InstallDeps, names: ReadonlySet<string>): Promise<Job[]> {
   const list = await d.provider.exec(d.runtimeRef, ['cron', 'list', '--all', '--json'], { timeoutMs: 60_000 });
@@ -638,7 +651,11 @@ export async function appJobs(d: InstallDeps, names: ReadonlySet<string>): Promi
   let jobs: unknown;
   try { jobs = JSON.parse(list.stdout).jobs; } catch { throw new AppError("The agent's scheduled tasks did not read as JSON."); }
   if (!Array.isArray(jobs) || jobs.some((j) => !j || typeof j !== 'object')) throw new AppError("The agent's scheduled task list is incomplete or malformed. Try again.");
-  const mine = (jobs as Array<{ id?: unknown; name?: unknown }>).filter((x) => typeof x.name === 'string' && names.has(x.name));
+  const isCommand = (x: { payload?: unknown }) => {
+    const kind = x.payload && typeof x.payload === 'object' ? (x.payload as { kind?: unknown }).kind : undefined;
+    return kind === undefined || kind === 'command';
+  };
+  const mine = (jobs as Array<{ id?: unknown; name?: unknown; payload?: unknown }>).filter((x) => typeof x.name === 'string' && names.has(x.name) && isCommand(x));
   if (mine.some((j) => typeof j.id !== 'string')) throw new AppError("The agent's scheduled task list is incomplete or malformed. Try again.");
   return mine as Job[];
 }

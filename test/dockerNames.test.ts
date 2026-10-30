@@ -11,7 +11,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -97,4 +97,41 @@ describe('scripts/backup-volumes.sh names volumes by the same rule', () => {
     expect(record).toMatchObject({ state: 'complete', volumes: 1, missing: [], orphans: [] });
     expect(existsSync(join(set, agentArchiveName(LEGACY, 'second')))).toBe(true);
   });
+});
+
+/** scripts/uninstall.sh (service only) with a registry of `refs`: the docker lookups it makes. */
+function uninstallLookups(refs: string[], prefix = 'hatchabot') {
+  const root = mkdtempSync(join(tmpdir(), 'hb-dnames-un-')); dirs.push(root);
+  const install = join(root, 'install'); const bin = join(root, 'bin'); const home = join(root, 'home');
+  for (const d of [join(install, 'scripts'), join(install, 'data'), bin, home]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(install, 'scripts', 'uninstall.sh'), readFileSync('scripts/uninstall.sh'), { mode: 0o755 });
+  writeFileSync(join(install, '.env'), `HATCHABOT_SECRET_KEY=not-a-real-key\nHATCHABOT_PREFIX=${prefix}\n`);
+  const db = new Database(join(install, 'data', 'hatchabot.sqlite'));
+  db.exec('CREATE TABLE agents (id TEXT, state TEXT, runtime_ref TEXT, image TEXT)');
+  refs.forEach((r, i) => db.prepare('INSERT INTO agents VALUES (?, ?, ?, NULL)').run(`a${i}`, 'RUNNING', r));
+  db.close();
+  symlinkSync(join(dirname(createRequire(import.meta.url).resolve('better-sqlite3/package.json')), '..'), join(install, 'node_modules'));
+  const log = join(root, 'calls.log');
+  for (const tool of ['docker', 'systemctl', 'npm']) writeFileSync(join(bin, tool), `#!/usr/bin/env bash\necho "${tool} $*" >> ${JSON.stringify(log)}\nexit 0\n`, { mode: 0o755 });
+  symlinkSync(process.execPath, join(bin, 'node'));
+  const r = spawnSync('bash', [join(install, 'scripts', 'uninstall.sh'), '--yes'], { encoding: 'utf8', env: {
+    HOME: home, PATH: `${bin}:/usr/bin:/bin`, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
+  } });
+  return { r, calls: existsSync(log) ? readFileSync(log, 'utf8') : '' };
+}
+
+describe('scripts/uninstall.sh names containers and volumes by the same rule (HB-0282)', () => {
+  for (const prefix of ['hatchabot', 'second']) {
+    it(`under the ${prefix} prefix: a legacy agent's container and volume are looked up as the provider names them`, () => {
+      const refs = [LEGACY, MODERN, RENAMED];
+      const { r, calls } = uninstallLookups(refs, prefix);
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      for (const ref of refs) {
+        const { container, volume } = dockerNames(ref, prefix);
+        expect(calls, ref).toContain(`docker ps -aq --filter name=^/${container}$`);
+        expect(calls, ref).toContain(`docker volume ls -q --filter name=^${volume}$`);
+      }
+      expect(calls).not.toContain('name=^/123456abcdef$');
+    });
+  }
 });

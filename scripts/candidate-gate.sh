@@ -100,7 +100,8 @@ CONTAINER="$(docker ps --format '{{.Names}}' | grep -E "^(hatchabot|agentclaw)-$
 step "the container runs the candidate image, and openclaw --version agrees"
 img="$(docker inspect "$CONTAINER" --format '{{.Config.Image}}')"
 runs="$(inagent 'openclaw --version 2>/dev/null | sed -n 1p')"
-[ "$img" = "$TAG" ] && echo "$runs" | grep -q "$VERSION" && ok || bad "image $img, runs '$runs'"
+# One word of the line, exactly: a match anywhere took 2026.9.80 for 2026.9.8.
+[ "$img" = "$TAG" ] && printf '%s\n' "$runs" | tr -s ' \t' '\n\n' | sed -e 's/^[(v]*//' -e 's/[),;:]*$//' | grep -qxF -- "$VERSION" && ok || bad "image $img, runs '$runs'"
 
 step "openclaw doctor accepts the config Hatchabot wrote (no errors; no post-upgrade findings)"
 errs="$(inagent "openclaw doctor --lint --json --severity-min error 2>/dev/null" | json 'v=>(v.findings||[]).map(f=>f.checkId+": "+f.message).join(" | ")')"

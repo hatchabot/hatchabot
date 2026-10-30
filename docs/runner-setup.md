@@ -33,7 +33,9 @@ into a terminal *on the runner*. It does three idempotent things:
   `~/.ssh/agentclaw_runner` — passphrase-less, used only for runners);
 - adds Docker's usual directories to `PATH` for **non-interactive** shells
   (`~/.zshenv`, `~/.bashrc`) — on macOS, `docker -H ssh://…` otherwise fails
-  with *"command not found"* because sshd's default PATH is `/usr/bin:/bin`;
+  with *"command not found"* because sshd's default PATH is `/usr/bin:/bin`.
+  The line goes at the top of each file: most Linux `~/.bashrc` files stop
+  early for non-interactive shells, and a line below that never runs;
 - self-checks that `docker` answers.
 
 ### 3. Add the address
@@ -52,6 +54,13 @@ supported. On add, the control plane automatically:
   authentication failures"* the moment no ssh-agent is around;
 - sets `StrictHostKeyChecking accept-new` for that host, so the first
   connection doesn't stall on a host-key prompt nobody can answer;
+- puts that block at the top of `~/.ssh/config`, followed by `Host *` so
+  everything you had there still applies to every host as before: ssh keeps
+  the first value it reads, so a `Host *` of yours above it would win. The
+  block names no user or port; those come from the address each time, so two
+  addresses for one machine on different ports each reach their own.
+  (`HATCHABOT_SSH_DIR`, a setting for tests, writes the key and the block
+  elsewhere; ssh reads only `~/.ssh/config`, so leave it unset.);
 - pings the daemon and checks for the runtime image.
 
 If the row says **runtime image missing**, tap **Install image** — the control

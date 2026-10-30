@@ -376,6 +376,46 @@ exit 0
   });
 });
 
+describe('HB-0333: an archive restores to the same place however its paths are spelled', () => {
+  /** A docker stub that runs the import's real script, its /vol and /tmp files moved into a folder of the test's own. */
+  function importer() {
+    const dd = mkdtempSync(join(tmpdir(), 'acl-import-layout-'));
+    const target = join(dd, 'target');
+    const scratch = join(dd, 'scratch');
+    execFileSync('mkdir', ['-p', target, scratch]);
+    const bin = join(dd, 'docker');
+    writeFileSync(bin, `#!${process.execPath}
+const fs = require('node:fs');
+const a = process.argv.slice(2);
+if (a[0] !== 'run') process.exit(0);
+const script = a[a.length - 1].replaceAll('/tmp/s.tgz', ${JSON.stringify(join(scratch, 's.tgz'))}).replaceAll('/tmp/s.list', ${JSON.stringify(join(scratch, 's.list'))})
+  .replaceAll('/vol', ${JSON.stringify(target)}).replace('chown -R 1000:1000', 'true');
+const r = require('node:child_process').spawnSync('/bin/sh', ['-c', script], { input: fs.readFileSync(0), env: { PATH: '/usr/bin:/bin' } });
+process.stderr.write(r.stderr ?? '');
+process.exit(r.status ?? 1);
+`, { mode: 0o755 });
+    const tree = join(dd, 'tree');
+    execFileSync('mkdir', ['-p', join(tree, '.openclaw/agents/main/agent')]);
+    writeFileSync(join(tree, '.openclaw/openclaw.json'), '{}');
+    writeFileSync(join(tree, '.openclaw/agents/main/agent/SOUL.md'), '# soul');
+    const tgz = (args: string[]) => { const out = join(dd, `a${Math.random().toString(36).slice(2)}.tgz`); execFileSync('tar', ['czf', out, ...args]); return readFileSync(out); };
+    return { p: new LocalDockerProvider({ docker: bin, image: 'test-image:latest' }), target, tree, tgz };
+  }
+  it('./.openclaw/…, .openclaw/… and the old layout all end in the volume\'s .openclaw', async () => {
+    for (const make of [
+      (w: ReturnType<typeof importer>) => w.tgz(['-C', w.tree, '.']),
+      (w: ReturnType<typeof importer>) => w.tgz(['-C', w.tree, '.openclaw']),
+      (w: ReturnType<typeof importer>) => w.tgz(['-C', join(w.tree, '.openclaw'), '.']),
+    ]) {
+      const w = importer();
+      await w.p.importState('docker://hatchabot-kitchen-helper-df918a55', make(w));
+      expect(readFileSync(join(w.target, '.openclaw/openclaw.json'), 'utf8')).toBe('{}');
+      expect(readFileSync(join(w.target, '.openclaw/agents/main/agent/SOUL.md'), 'utf8')).toBe('# soul');
+      expect(existsSync(join(w.target, '.openclaw/.openclaw'))).toBe(false);
+    }
+  });
+});
+
 describe('daemon-access errors are unknown, not absent', () => {
   it('reports unknown on a docker permission-denied error', async () => {
     // A user briefly out of the docker group after a reboot: inspect exits
@@ -630,6 +670,24 @@ describe('exporting a volume that is not there (2026-10-09)', () => {
     expect(argv()).not.toMatch(/^run /m); // no one-shot that would have created the volume
   });
 
+  it('a read-only look inside reports the volume missing instead of creating it (HB-0332)', async () => {
+    const { p, argv } = noVolume();
+    const res = await p.execShellOnVolume('docker://hatchabot-kitchen-helper-df918a55', 'find . -type f', { readOnly: true });
+    expect(res).toMatchObject({ code: 1, volumeMissing: true });
+    expect(argv()).toMatch(/^volume inspect --format \{\{\.Name\}\} hatchabot-kitchen-helper-df918a55-vol$/m);
+    expect(argv()).not.toMatch(/^run /m);
+    const { listInspectableFiles } = await import('../src/orchestrator/inspect.js');
+    await expect(listInspectableFiles(p, 'docker://hatchabot-kitchen-helper-df918a55', 'kitchen-helper')).rejects.toThrow(/volume is gone/);
+  });
+
+  it('a read-only run goes on as before when the volume is there; a writable one is not asked', async () => {
+    await provider.execShellOnVolume('docker://hatchabot-kitchen-helper-df918a55', 'true', { readOnly: true });
+    expect(argv()).toMatch(/^volume inspect .*\n.*run --rm .*hatchabot-kitchen-helper-df918a55-vol:\/home\/node:ro /m);
+    writeFileSync(LOG, '');
+    await provider.execShellOnVolume('docker://hatchabot-kitchen-helper-df918a55', 'true');
+    expect(argv()).not.toMatch(/^volume inspect /m);
+  });
+
   it('exports as before when the volume is there', async () => {
     await provider.exportState('df918a55-88cd-4d00-a17c-b8415a26ceb6/kitchen-helper');
     expect(argv()).toMatch(/^volume inspect /m);
@@ -711,5 +769,57 @@ describe('HB-0050: info() does not run docker inspect on every poll', () => {
     await p.start(ref);
     await p.info(ref);
     expect(inspects()).toBe(3);
+  });
+});
+
+describe('HB-0278: an info() failure the caller handles does not end the process', () => {
+  it('a missing docker binary rejects info() once, with no second, unhandled rejection', () => {
+    const dd = mkdtempSync(join(tmpdir(), 'acl-info-nodocker-'));
+    const mod = JSON.stringify(join(process.cwd(), 'src/providers/localDockerProvider.ts'));
+    const code = `import { LocalDockerProvider } from ${mod};
+const p = new LocalDockerProvider({ docker: ${JSON.stringify(join(dd, 'no-docker-here'))} });
+await p.info('kitchen-helper-df918a55').catch(() => process.stdout.write('caught\\n'));
+await new Promise((r) => setTimeout(r, 100));
+process.stdout.write('still here\\n');`;
+    const r = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], { cwd: process.cwd(), env: { ...process.env, HOME: dd }, encoding: 'utf8', timeout: 30_000 });
+    expect(r.stderr).not.toMatch(/Docker is not available/);
+    expect(r.stdout).toBe('caught\nstill here\n');
+    expect(r.status).toBe(0);
+  });
+});
+
+describe('HB-0331: a rootless runner gets the rootless host address and a loopback door', () => {
+  function runner(securityOptions: string) {
+    const dd = mkdtempSync(join(tmpdir(), 'acl-rootless-runner-'));
+    const st = join(dd, 'docker');
+    writeFileSync(st, `#!/usr/bin/env bash
+case "$*" in
+  *" info --format "*) echo 'Ubuntu 24.04 LTS|${securityOptions}' ;;
+  *" network inspect bridge "*) echo '172.17.0.1' ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    return new LocalDockerProvider({ docker: st, host: 'ssh://runner@10.0.0.9', reachProbe: async () => true });
+  }
+  it('rootless: no bridge address to bind, and agents reach the runner at 10.0.2.2', async () => {
+    const p = runner('[name=seccomp,profile=builtin name=rootless name=cgroupns]');
+    expect(await p.rootless()).toBe(true);
+    expect(await p.hostGatewayAddress()).toBeUndefined();
+    expect(await p.hostAliasTarget()).toBe('10.0.2.2');
+    expect(await p.hostAddressForAgents()).toBe('10.0.2.2');
+  });
+  it('a runner under root Docker keeps its bridge gateway and host-gateway', async () => {
+    const p = runner('[name=seccomp,profile=builtin name=cgroupns]');
+    expect(await p.hostGatewayAddress()).toBe('172.17.0.1');
+    expect(await p.hostAliasTarget()).toBe('host-gateway');
+    expect(await p.hostAddressForAgents()).toBe('172.17.0.1');
+  });
+  it('HATCHABOT_DOCKER_ROOTLESS speaks for this machine only: a runner is always asked', async () => {
+    vi.stubEnv('HATCHABOT_DOCKER_ROOTLESS', '0');
+    try {
+      expect(await runner('[name=rootless]').rootless()).toBe(true);
+      vi.stubEnv('HATCHABOT_DOCKER_ROOTLESS', '1');
+      expect(await runner('[name=seccomp]').rootless()).toBe(false);
+    } finally { vi.unstubAllEnvs(); }
   });
 });

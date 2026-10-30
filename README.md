@@ -574,6 +574,6 @@ MIT — see [LICENSE](LICENSE).
 | `HATCHABOT_CLI_TIMEOUT_MS` | server | Mgmt CLI completion timeout (default 180000). |
 | `HATCHABOT_READY_TIMEOUT_MS` / `HATCHABOT_READY_POLL_MS` | server | Agent health-wait tuning at provision. |
 | `HATCHABOT_NAME_REPAIR_MS` / `HATCHABOT_IDLE_RENAME_MS` | server | Bot display-name repair/rename sweep cadence. |
-| `HATCHABOT_SSH_DIR` | server | Override the runner-setup SSH dir. |
+| `HATCHABOT_SSH_DIR` | server | **Test-only**: where runner setup writes its key and config instead of `~/.ssh`. ssh and Docker read only `~/.ssh/config`, so runners set up with it are not reached unless that file has `Include <dir>/config` at its top. |
 | `OPENCLAW_STATE_DB` | server | Override the adopted-OpenClaw state DB path (cron import). |
 | `HATCHABOT_OPENCLAW_GATEWAY_UNIT` | server | systemd unit name quiesced during adopt. |

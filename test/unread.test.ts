@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
-import { consoleActivity, sessionsReadShell } from '../src/orchestrator/unread.js';
+import { consoleActivity, cronJobOfKey, cronRunsSignature, markQuietTasks, quietTaskIds, sessionsReadShell } from '../src/orchestrator/unread.js';
 
 describe('unread: what counts as console activity', () => {
   it('counts a web console exchange', () => {
@@ -22,6 +22,29 @@ describe('unread: what counts as console activity', () => {
     const s = { 'agent:x:cron:abc': { updatedAt: 300 } };
     expect(consoleActivity(s, { webOnly: false })).toBe(0);
     expect(consoleActivity(s, { webOnly: true })).toBe(300);
+  });
+  it('on an agent with a bot, a quiet task\'s runs count: they went nowhere else (HB-0302)', () => {
+    expect(cronJobOfKey('agent:x:cron:abc')).toBe('abc');
+    expect(cronJobOfKey('agent:x:cron:abc:run:1700')).toBe('abc');
+    expect(cronJobOfKey('agent:x:main')).toBeUndefined();
+    const quiet = quietTaskIds(JSON.stringify({ jobs: [{ id: 'abc', delivery: { mode: 'none' } }, { id: 'def', delivery: { mode: 'announce' } }, { id: 'ghi' }] }));
+    expect([...quiet!]).toEqual(['abc']);
+    expect(quietTaskIds('')).toBeUndefined();
+    const s = markQuietTasks({ 'agent:x:cron:abc:run:1': { updatedAt: 300 }, 'agent:x:cron:def': { updatedAt: 400 } }, quiet!);
+    expect(consoleActivity(s, { webOnly: false })).toBe(300);
+  });
+  it('OpenClaw\'s own quiet upkeep (a declared job) is never a quiet task of the owner\'s (HB-0302)', () => {
+    const quiet = quietTaskIds(JSON.stringify({ jobs: [
+      { id: 'abc', delivery: { mode: 'none' } },
+      { id: 'review', declarationKey: 'skill-collection-review', delivery: { mode: 'none' } },
+    ] }));
+    expect([...quiet!]).toEqual(['abc']);
+  });
+  it('the scheduled runs\' signature changes only when a task has run again (HB-0302)', () => {
+    const sig = cronRunsSignature({ 'agent:x:cron:b:run:1': { updatedAt: 5 }, 'agent:x:cron:a': { updatedAt: 3 }, 'agent:x:cron:b:run:2': { updatedAt: 9 }, 'agent:x:main': { updatedAt: 99 } });
+    expect(sig).toBe('a@3,b@9');
+    expect(cronRunsSignature({ 'agent:x:main': { updatedAt: 99 } })).toBe('');
+    expect(cronRunsSignature({ 'agent:x:cron:b:run:3': { updatedAt: 12 }, 'agent:x:cron:a': { updatedAt: 3 } })).not.toBe(sig);
   });
   it('takes the newest of several and survives junk', () => {
     expect(consoleActivity({ a: { updatedAt: 1 }, b: { lastInteractionAt: 9 }, c: null as never, d: { updatedAt: 'x' as never } }, { webOnly: false })).toBe(9);

@@ -145,6 +145,103 @@ case "$1" in */.hatchabot-next-*/hatchabot/BUNDLE.json) kill -9 "$PPID" ;; esac
     expect(existsSync(join(w.install, '.swapping'))).toBe(false);
   });
 
+  /** A shim mv that kills the upgrade when it moves `from` (before the move, or after it). */
+  const cutAt = (w: ReturnType<typeof world>, from: string, when: 'before' | 'after') => {
+    const bin = join(w.root, `cut-${when}`); mkdirSync(bin);
+    const kill = `case "$1" in ${from}) kill -9 "$PPID"; exit 1 ;; esac`;
+    writeFileSync(join(bin, 'mv'), `#!/usr/bin/env bash\n${when === 'before' ? kill + '\n' : ''}${JSON.stringify(REAL_MV)} "$@" || exit $?\n${when === 'after' ? kill + '\n' : ''}`, { mode: 0o755 });
+    return bin;
+  };
+  /** The next run, offline: it must put v2.0.0 back whole before anything else. */
+  const repaired = (w: ReturnType<typeof world>) => {
+    const next = upgrade(w, 'v2.0.9');
+    expect(next.stdout).toContain('was cut off part-way — putting v2.0.0 back first');
+    expect(next.status, next.stdout + next.stderr).toBe(3);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    expect(JSON.parse(read(join(w.install, 'BUNDLE.json'))).tag).toBe('v2.0.0');
+    for (const gone of ['.swapping', '.prev-release']) expect(existsSync(join(w.install, gone)), gone).toBe(false);
+  };
+
+  it('a rollback cut off after putting one file back: the next run keeps that old file, not deletes it as the new one\'s (HB-0279)', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1', { restartRc: 1 });
+    // The new release does not come up; its rollback is killed once the old BUNDLE.json is back.
+    const cut = upgrade(w, 'v2.0.1', cutAt(w, '*/.prev-release/BUNDLE.json', 'after'));
+    expect(cut.signal, cut.stdout + cut.stderr).toBe('SIGKILL');
+    expect(JSON.parse(read(join(w.install, 'BUNDLE.json'))).tag).toBe('v2.0.0');
+    expect(existsSync(join(w.install, '.prev-release', 'VERSION'))).toBe(true);
+    repaired(w);
+  });
+
+  it('a swap cut off just before it moved an old file aside: the old file is put back, not removed (HB-0279)', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1');
+    const cut = upgrade(w, 'v2.0.1', cutAt(w, `${w.install}/VERSION`, 'before'));
+    expect(cut.signal, cut.stdout + cut.stderr).toBe('SIGKILL');
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    repaired(w);
+  });
+
+  it('the first upgrade off a release from before the fix, cut off between writing `in VERSION` and moving the old one aside: the old one is kept (HB-0279)', () => {
+    // The installed upgrade.sh (v2.170.1 and before) writes the `in` line first, then moves the old file aside.
+    const w = world();
+    const now = read('scripts/upgrade.sh');
+    const aside = '    if [ -e "$DIR/$f" ]; then mv "$DIR/$f" "$PREV/" || { echo "Could not move $DIR/$f aside."; exit 3; }; fi\n';
+    const journal = '    printf \'in %s\\n\' "$f" >> "$SWAPPING"\n';
+    expect(now).toContain(aside + journal);
+    writeFileSync(join(w.install, 'scripts', 'upgrade.sh'), now.replace(aside + journal, journal + aside), { mode: 0o755 });
+    publish(w.base, 'v2.0.1');
+    const cut = upgrade(w, 'v2.0.1', cutAt(w, `${w.install}/VERSION`, 'before'));
+    expect(cut.signal, cut.stdout + cut.stderr).toBe('SIGKILL');
+    expect(read(join(w.install, '.swapping'))).toMatch(/^in VERSION$/m);
+    expect(existsSync(join(w.install, '.prev-release', 'VERSION'))).toBe(false);
+    expect(read(join(w.install, 'scripts', 'upgrade.sh'))).toBe(now); // the new one came in first, and repairs it
+    repaired(w);
+  });
+
+  it('a rollback cut off again, then finished by the old release\'s own upgrade.sh, still ends on the old release whole (HB-0279)', () => {
+    // The first upgrade off a release from before the fix: the old upgrade.sh
+    // swaps (its restore_prev is v2.170.1's, below), is killed, the new one (scripts/ came in first) starts the
+    // rollback and is killed after putting scripts/ and BUNDLE.json back,
+    // and the old upgrade.sh, which reads only `in` lines, finishes it.
+    const w = world();
+    // This upgrade.sh with v2.170.1's restore_prev, which reads only `in` lines.
+    const OLD_RESTORE = `restore_prev() {
+  local line f
+  if [ -f "$SWAPPING" ]; then
+    while IFS= read -r line; do
+      case "$line" in "in "?*) f="\${line#in }" ;; *) continue ;; esac
+      not_ours "$f" || rm -rf "\${DIR:?}/$f"
+    done < "$SWAPPING"
+  fi
+  for f in "$PREV"/* "$PREV"/.[!.]*; do
+    [ -e "$f" ] || continue
+    rm -rf "\${DIR:?}/\${f##*/}"
+    mv "$f" "$DIR/" || return 1
+  done
+  rm -rf "$PREV"
+  rm -f "$SWAPPING"
+}
+`;
+    const now = read('scripts/upgrade.sh');
+    const start = now.indexOf('restore_prev() {'), end = now.indexOf('\n}\n', start) + 3;
+    expect(start).toBeGreaterThan(0);
+    const oldScript = now.slice(0, start) + OLD_RESTORE + now.slice(end);
+    expect(oldScript).not.toContain('grep -vxF');
+    writeFileSync(join(w.install, 'scripts', 'upgrade.sh'), oldScript, { mode: 0o755 });
+    publish(w.base, 'v2.0.1');
+    const killer = join(w.root, 'killer'); mkdirSync(killer);
+    writeFileSync(join(killer, 'mv'), `#!/usr/bin/env bash\n${JSON.stringify(REAL_MV)} "$@" || exit $?\ncase "$1" in */.hatchabot-next-*/hatchabot/BUNDLE.json) kill -9 "$PPID" ;; esac\n`, { mode: 0o755 });
+    expect(upgrade(w, 'v2.0.1', killer).signal).toBe('SIGKILL');
+    expect(read(join(w.install, 'scripts', 'upgrade.sh'))).not.toBe(oldScript);
+    const second = upgrade(w, 'v2.0.9', cutAt(w, '*/.prev-release/BUNDLE.json', 'after'));
+    expect(second.signal, second.stdout + second.stderr).toBe('SIGKILL');
+    expect(read(join(w.install, 'scripts', 'upgrade.sh'))).toBe(oldScript);
+    repaired(w);
+    expect(existsSync(join(w.install, 'scripts', 'restart.sh'))).toBe(true);
+    expect(existsSync(join(w.install, '.node', 'bin', 'node'))).toBe(true);
+  });
+
   it('a folder the old release did not list is replaced, not given the new one inside it (HB-0071)', () => {
     const w = world();
     mkdirSync(join(w.install, 'docs')); writeFileSync(join(w.install, 'docs', 'old.md'), 'left over');

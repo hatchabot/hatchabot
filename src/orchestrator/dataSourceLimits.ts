@@ -9,3 +9,11 @@
  * neighbours, so a constant in either was not there yet for the other.
  */
 export const MAX_DATA_SOURCES = 32;
+
+/**
+ * The longest name a data source may have (its /data folder, its clone dir,
+ * or a host-path mount's label): what a template's dataNeeds and a full
+ * copy's dataSources read. A 129-character folder name was accepted and the
+ * agent's own template could not be imported (HB-0320).
+ */
+export const MAX_MOUNT_NAME = 128;

@@ -28,7 +28,7 @@ import { formatSwapAllowance, parseSwapAllowance } from './swap.js';
 import { existsSync } from 'node:fs';
 import { MAX_FILE_BYTES } from './snapshots.js';
 import { MAX_TEMPLATE_PARAMS, PARAM_KEY_RE, TemplateParamSchema } from './template.js';
-import { MAX_DATA_SOURCES } from './dataSourceLimits.js';
+import { MAX_DATA_SOURCES, MAX_MOUNT_NAME } from './dataSourceLimits.js';
 import { GIT_MOUNT_NAME_RE, normalizeGitUrl } from './gitSource.js';
 import { STATE_CACHE_EXCLUDES } from '../providers/volumeCopy.js';
 import { manifestSchema as appManifestSchema } from './apps.js';
@@ -229,14 +229,18 @@ const ManifestSchema = z.object({
     dataSources: z.array(z.object({
       kind: z.enum(['folder', 'git']),
       access: z.enum(['ro', 'rw']),
-      mountName: z.string().min(1).max(128),
+      mountName: z.string().min(1).max(MAX_MOUNT_NAME),
       hostPath: z.string().max(512).optional(),
       mountAtHostPath: z.boolean().optional(),
       repoUrl: z.string().max(512).optional(),
       pubKey: z.string().max(4000).optional(),
       deployKey: z.string().max(16000).optional(),
     })).max(MAX_DATA_SOURCES).optional(),
-    model: z.string().max(64).optional(),
+    // Held to the limit ai.model has: holding an agent on a source's long
+    // default pinned that model as its override, and the agent's own backup
+    // was refused (HB-0321). Applied only when the destination's source
+    // offers it, so one that is not usable is dropped, not fatal.
+    model: z.string().max(256).optional().catch(undefined),
     // Its home-screen icon travels with it; a bad value is dropped, not fatal.
     icon: z.string().max(16).optional().catch(undefined),
     iconColor: z.string().max(7).optional().catch(undefined),
@@ -489,6 +493,9 @@ export async function exportAgent(
     }
     dataSources.push(row);
   }
+  const cls = agent.classId ? store.getAgentClass(agent.classId) : undefined;
+  const memoryCap = agent.memoryCap ?? cls?.memoryCap;
+  const swapAllowance = agent.swapAllowance ?? cls?.swapAllowance;
   const manifest: ExportManifest = {
     format: EXPORT_FORMAT,
     version: EXPORT_VERSION,
@@ -504,8 +511,11 @@ export async function exportAgent(
       model: agent.model,
       icon: agent.icon,
       iconColor: agent.iconColor,
-      ...(agent.memoryCap ? { memoryCap: agent.memoryCap } : {}),
-      ...(agent.swapAllowance ? { swapAllowance: agent.swapAllowance } : {}),
+      // Its own budgets, else its class's: the class does not travel, and an
+      // agent on an 8 GB class came back on the default 3 GB (HB-0313). The
+      // destination holds them to its own rules (importedLimits).
+      ...(memoryCap ? { memoryCap } : {}),
+      ...(swapAllowance ? { swapAllowance } : {}),
       ...(agent.parameters?.length ? { setup: {
         parameters: agent.parameters,
         ...(agent.paramValues ? { values: agent.paramValues } : {}),
@@ -838,6 +848,9 @@ async function importAgentInner(
     createdAt: now,
     updatedAt: now,
   };
+  // The checks above wait on the network: the machine may have been removed
+  // meanwhile, and an agent placed on it was stranded (HB-0275).
+  if (!store.getHost(host.id)) throw new TransferError('The machine it was going to was removed meanwhile. Import it again onto another.');
   store.insertAgent(agent);
   if (image.pin) store.setAgentImage(agent.id, image.pin);
   // Before provisioning reads them: the container is made with these limits.

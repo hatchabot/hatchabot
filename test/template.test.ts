@@ -50,6 +50,22 @@ describe('importTemplate: what the 2026-10-23 review found', () => {
   });
 });
 
+describe('importTemplate: a description filled past the backup limit (HB-0309)', () => {
+  it('is refused before anything is made', async () => {
+    const { store, provider } = await world();
+    const data = gzipSync(JSON.stringify({
+      format: 'hatchabot-template', version: 1, exportedAt: 'now',
+      agent: { name: 'Long description', persona: '{{topic}} '.repeat(5) }, files: {}, ai: { vendor: 'anthropic' },
+      parameters: [{ key: 'topic', label: 'Topic', type: 'text', required: true, target: 'soul' }],
+    }));
+    expect(() => importTemplate({ store, provider }, data, { ownerId: 'owner-a', values: { topic: 'x'.repeat(2000) } }))
+      .toThrow(/the description would be over 8,000 characters/);
+    expect(store.listAgents('owner-a').map((a) => a.name)).toEqual(['Advisor']);
+    const { agent } = importTemplate({ store, provider }, data, { ownerId: 'owner-a', values: { topic: 'x'.repeat(1500) } });
+    expect(agent.persona).toHaveLength(7505);
+  });
+});
+
 describe('exportTemplate', () => {
   it('captures the trained files + needs, and leaks NO identity', async () => {
     const { store, provider } = await world();
@@ -406,6 +422,42 @@ describe('setup-field answers and declarations (workflow audit, 2026-10-10)', ()
     expect(resolveParamValues([field({ key: 'constructor', type: 'boolean', required: false })] as any, {})).toEqual({});
     expect(resolveParamValues([field({ key: 'toString', required: false })] as any, {})).toEqual({});
     expect(resolveParamValues([field({ key: 'constructor', type: 'boolean' })] as any, { constructor: 'yes' })).toEqual({ constructor: 'true' });
+  });
+
+  it('an optional choice is cleared with a blank; a required one says it is required (HB-0363)', () => {
+    const p = [field({ type: 'choice', required: false, options: ['formal', 'casual'] })] as any;
+    expect(resolveParamValues(p, {})).toEqual({});
+    expect(resolveParamValues(p, { k: '' })).toEqual({ k: '' });
+    expect(resolveParamValues(p, { k: '  ' })).toEqual({ k: '' });
+    expect(resolveParamValues([{ ...p[0], default: 'formal' }], { k: '' })).toEqual({ k: '' });
+    expect(() => resolveParamValues(p, { k: 'stern' })).toThrow(/must be one of: formal, casual/);
+    expect(() => resolveParamValues([{ ...p[0], required: true }], { k: '' })).toThrow(/"K" is required/);
+  });
+
+  it('a repo field whose repo name is longer than a copy carries is refused (HB-0320)', async () => {
+    const { store, provider } = await world();
+    const data = gzipSync(Buffer.from(JSON.stringify({
+      format: 'hatchabot-template', version: 1, exportedAt: 'now',
+      agent: { name: 'Pantry', persona: '' }, files: {}, ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [],
+      parameters: [field({ key: 'repo', label: 'Recipes repo', target: 'datasource' })],
+    })));
+    expect(() => importTemplate({ store, provider }, data, { ownerId: 'owner-a', values: { repo: `git@git.example.org:pantry/${'r'.repeat(129)}.git` } }))
+      .toThrow(/"Recipes repo": the repo name is over 128 characters/);
+    expect(importTemplate({ store, provider }, data, { ownerId: 'owner-a', values: { repo: `git@git.example.org:pantry/${'r'.repeat(128)}.git` } }).dataSourceValues).toHaveLength(1);
+  });
+
+  it('an optional repo or credential field keyed "constructor" left blank imports (HB-0298)', async () => {
+    const { store, provider } = await world();
+    for (const target of ['env', 'datasource']) {
+      const data = gzipSync(Buffer.from(JSON.stringify({
+        format: 'hatchabot-template', version: 1, exportedAt: 'now',
+        agent: { name: `Blank ${target}`, persona: '' }, files: {}, ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [],
+        parameters: [field({ key: 'constructor', required: false, target })],
+      })));
+      const r = importTemplate({ store, provider }, data, { ownerId: 'owner-a' });
+      expect(r.envValues).toEqual([]);
+      expect(r.dataSourceValues).toEqual([]);
+    }
   });
 
   it('spaces alone do not answer a required field (review, 2026-10-22)', () => {

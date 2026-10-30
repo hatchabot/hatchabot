@@ -45,12 +45,20 @@ sed_escape() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
 # could not start, audit #044): a backslash or a quote escaped, and % doubled
 # (systemd reads %h and the like there).
 systemd_quoted() { printf '%s' "$1" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g'; }
-DIR_ESC="$(sed_escape "$(pwd)")"
+# The install folder too, as systemd reads it where it goes (audit,
+# 2026-10-29): % doubled everywhere (a folder named install-%q was read as
+# another folder); in ExecStart's quoted words a backslash or a quote escaped,
+# and in its arguments (not the program, which is taken as written) a $
+# doubled, since systemd expands ${NAME} there.
+DIR_ESC="$(sed_escape "$(printf '%s' "$(pwd)" | sed -e 's/%/%%/g')")"
+EXE_DIR_ESC="$(sed_escape "$(systemd_quoted "$(pwd)")")"
+ARG_DIR_ESC="$(sed_escape "$(systemd_quoted "$(pwd)" | sed -e 's/\$/$$/g')")"
 PATH_ESC="$(sed_escape "$(systemd_quoted "$SERVICE_PATH")")"
-sed -e "s|__HATCHABOT_DIR__|$DIR_ESC|g" -e "s|__HATCHABOT_PATH__|$PATH_ESC|g" \
-  deploy/hatchabot.service > ~/.config/systemd/user/hatchabot.service
-sed -e "s|__HATCHABOT_DIR__|$DIR_ESC|g" -e "s|__HATCHABOT_PATH__|$PATH_ESC|g" \
-  deploy/hatchabot-backup.service > ~/.config/systemd/user/hatchabot-backup.service
+for u in hatchabot.service hatchabot-backup.service; do
+  sed -e "/^ExecStart=/s|__HATCHABOT_DIR__|$EXE_DIR_ESC|" -e "/^ExecStart=/s|__HATCHABOT_DIR__|$ARG_DIR_ESC|g" \
+    -e "s|__HATCHABOT_DIR__|$DIR_ESC|g" -e "s|__HATCHABOT_PATH__|$PATH_ESC|g" \
+    "deploy/$u" > ~/.config/systemd/user/"$u"
+done
 cp deploy/hatchabot-backup.timer ~/.config/systemd/user/hatchabot-backup.timer
 systemctl --user daemon-reload
 # enable --now alone would leave an already-running service on the old unit —

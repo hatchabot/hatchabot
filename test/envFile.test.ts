@@ -76,6 +76,48 @@ describe('putting a .env in order', () => {
     expect((loose as { changed: boolean }).changed).toBe(true);
   });
 
+  // Audit, 2026-10-29 (HB-0292, HB-0293): what a shell sourcing the file ends with, before and after.
+  const sourced = (text: string, name: string) => {
+    const home = mkdtempSync(join(tmpdir(), 'hb-env-sh-'));
+    return execFileSync('/bin/bash', ['--noprofile', '--norc', '-c', `${text}\nprintf %s "$${name}"`], { env: { HOME: home, PATH: home }, encoding: 'utf8' });
+  };
+
+  it('leaves a file alone when a value names a lowercase setting or one inside $((…)) that the tidy would move', () => {
+    for (const text of ['custom_port=8123\nPORT=$custom_port\n', 'CUSTOM_PORT=8123\nPORT=$((CUSTOM_PORT+1))\n', 'CUSTOM_PORT=8123\nPORT=${#CUSTOM_PORT}\n']) {
+      const r = syncEnvText(text);
+      expect(r.ok, text).toBe(false);
+      expect((r as { error: string }).error, text).toBe('PORT uses a $ that would be read in another order — left as it was');
+    }
+    // Arithmetic on numbers only, or naming nothing the file sets: tidied, and reads the same.
+    for (const text of ['PORT=$((8000+123))\nDOCKER_HOST=unix:///run/user/1000/docker.sock\n', 'lower=1\nPORT=$((OTHER+8123))\n']) {
+      const r = syncEnvText(text);
+      expect(r.ok && r.changed, text).toBe(true);
+      expect(sourced((r as { text: string }).text, 'PORT'), text).toBe(sourced(text, 'PORT'));
+    }
+  });
+
+  it('leaves a file alone when a quote opened after a prefix runs the value over several lines', () => {
+    for (const text of ['HATCHABOT_PASSWORD=prefix"first\nsecond"\nPORT=8123\n', "HATCHABOT_PASSWORD=pre'first\nsecond'\nPORT=8123\n", 'note="a"b"c\nd"\nPORT=8123\n', "HATCHABOT_PASSWORD=#it's\nmine'\nPORT=8123\n"]) {
+      const r = syncEnvText(text);
+      expect(r.ok, text).toBe(false);
+      expect((r as { error: string }).error, text).toMatch(/has a quote part-way through its value that is not closed on its line/);
+    }
+    // Closed after a prefix, an escaped quote, a quote in a comment: tidied, and reads the same.
+    for (const text of ['HATCHABOT_PASSWORD=prefix"first"last\nPORT=8123\n', 'HATCHABOT_PASSWORD=pre\\"x\nPORT=8123\n', "PORT=8123 # the owner's port\nDOCKER_HOST=unix:///run/user/1000/docker.sock\n"]) {
+      const r = syncEnvText(text);
+      expect(r.ok && r.changed, text).toBe(true);
+      for (const name of ['HATCHABOT_PASSWORD', 'PORT']) expect(sourced((r as { text: string }).text, name), text).toBe(sourced(text, name));
+    }
+  });
+
+  it('a quote opened part-way and never closed is refused for what it is: one line to systemd, more to a shell (audit, 2026-10-29)', () => {
+    expect(syncEnvText("HATCHABOT_NAME=the family's house\nPORT=8123\n")).toEqual({ ok: false, error: "HATCHABOT_NAME has a quote part-way through its value that is not closed on its line: a shell reading .env (the macOS service) reads on into the next lines, which this tidy cannot keep in order — left as it was" });
+    const r = syncEnvText("HATCHABOT_PUBLIC_URL=https://hb.example.org/#it's\nPORT=1\n");
+    expect((r as { error: string }).error).toMatch(/^HATCHABOT_PUBLIC_URL has a quote part-way through its value/);
+    // Opened at the start of the value, it runs on for systemd too.
+    expect((syncEnvText('GREETING= "first\nsecond"\nPORT=1\n') as { error: string }).error).toMatch(/^GREETING has a value on more than one line/);
+  });
+
   it('leaves an exported value that runs over several lines alone, as it does a plain one', () => {
     const r = syncEnvText('export NOTE="first line\nHATCHABOT_REBUILD_POLICY=manual\nlast line"\n');
     expect(r).toEqual({ ok: false, error: 'NOTE has a value on more than one line, which this tidy cannot keep together — left as it was' });

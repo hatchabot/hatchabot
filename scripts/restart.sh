@@ -24,7 +24,16 @@ fi
 # Wait for it to answer, so "restarted" means "actually serving".
 # .env (the unit's EnvironmentFile) is what the service runs with; its values
 # may be quoted or carry an inline comment — take the bare value, last wins.
-envval() { { sed -n "s/^$1=//p" .env 2>/dev/null || true; } \
+# systemd also takes spaces around the = (PORT = 9137): read only as PORT=,
+# that was probed on 8080 for a minute and reported down (audit, 2026-10-29).
+# The Mac's launchd job sources .env with bash (launchd-plist.sh), where only
+# NAME=value sets it: PORT = 9137 is a command, PORT= 9137 sets nothing.
+if [ "$(uname -s)" = "Darwin" ]; then
+  envlines() { sed -n -e "/^[[:space:]]*$1=[[:space:]][[:space:]]*[^#[:space:]]/d" -e "s/^[[:space:]]*$1=//p" .env; }
+else
+  envlines() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" .env; }
+fi
+envval() { { envlines "$1" 2>/dev/null || true; } \
   | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' \
   | tail -n1; }
 PORT="$(envval PORT)"
@@ -46,7 +55,7 @@ esac
 LISTENER="${SCHEME}://${PROBE_HOST}:${PORT}"
 # TLS usually terminates in front (e.g. tailscale serve), so the listener is
 # not the front door: report the PUBLIC https URL when configured.
-PUBLIC_URL="$( { sed -n 's/^HATCHABOT_PUBLIC_URL=//p' "$HOME/.config/hatchabot/env" 2>/dev/null; sed -n 's/^HATCHABOT_PUBLIC_URL=//p' .env 2>/dev/null; } \
+PUBLIC_URL="$( { sed -n 's/^HATCHABOT_PUBLIC_URL=//p' "$HOME/.config/hatchabot/env" 2>/dev/null; sed -n 's/^[[:space:]]*HATCHABOT_PUBLIC_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null; } \
   | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' | tail -n1 || true)"
 # 60s, not 30: the DGX control plane takes ~40s to serve, and the old cap
 # printed a scary failure for a boot that was going fine.

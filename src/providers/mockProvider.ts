@@ -188,7 +188,8 @@ export class MockProvider implements RuntimeProvider {
     const chat = this.#webChatRead(script);
     if (chat) return chat;
     this.execLog.push(['sh-volume', script]);
-    return this.execResponses.get('sh-volume') ?? { code: 0, stdout: '', stderr: '' };
+    // The archived-chat reader always answers a heading line: {} is "no conversation".
+    return this.execResponses.get('sh-volume') ?? { code: 0, stdout: script.includes('hatchabot-inspect-') ? '{}\n' : '', stderr: '' };
   }
 
   /** What a volume stream would carry (tests set it); the argv is logged like a shell. */

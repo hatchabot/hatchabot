@@ -93,6 +93,30 @@ describe('DELETE /v1/agents/:id teardown', () => {
     expect(releaseCalls).toEqual(['botacct']);
   });
 
+  it('an agent left DELETING by a stopped process is finished by Delete; a second Delete while one runs is turned away (HB-0265)', async () => {
+    const { store, secrets, provider, releaseCalls, f } = await world();
+    // The process stopped mid-delete: DELETING, nothing torn down.
+    store.setAgentState('a1', 'DELETING');
+    let open!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    const destroy = provider.destroy.bind(provider);
+    let destroys = 0;
+    provider.destroy = async (ref, o) => { destroys++; await gate; return destroy(ref, o); };
+    const first = del(f);
+    await new Promise((r) => setTimeout(r, 20));
+    const second = await del(f);
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error).toMatch(/being deleted already/);
+    open();
+    expect((await first).statusCode).toBe(200);
+    expect(destroys).toBe(1);
+    expect(store.getAgent('a1')!.state).toBe('DELETED');
+    expect(secrets.map.has('agent-env/e1')).toBe(false);
+    expect(releaseCalls).toEqual(['botacct']);
+    // Done, it is gone: a later Delete says so, and is not held as running.
+    expect((await del(f)).statusCode).toBe(404);
+  });
+
   it('a stored key that will not delete keeps the agent retryable, with the rows that name it (C089)', async () => {
     const { store, secrets, f } = await world();
     await secrets.put('agent-call-token/a1', 'CALL-TOKEN');

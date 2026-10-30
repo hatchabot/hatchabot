@@ -197,6 +197,77 @@ describe('scripts/upgrade.sh cut off part-way through the install (HB-0043)', ()
   });
 });
 
+describe('scripts/upgrade.sh cut off while it removes a node_modules.prev (HB-0266)', () => {
+  const REAL_RM = spawnSync('sh', ['-c', 'command -v rm'], { encoding: 'utf8' }).stdout.trim();
+  /** An rm that, removing a node_modules.prev holding `file`, deletes that one file and signals the upgrade. */
+  const cutRm = (w: World, file: string, signal: string) => writeFileSync(join(w.bin, 'rm'), `#!/usr/bin/env bash
+if [ "$1 $2" = "-rf node_modules.prev" ] && [ -f node_modules.prev/${file} ]; then ${JSON.stringify(REAL_RM)} -f node_modules.prev/${file}; kill -${signal} "$PPID"; exit 1; fi
+exec ${JSON.stringify(REAL_RM)} "$@"
+`, { mode: 0o755 });
+  const installNew = (w: World) => {
+    writeFileSync(join(w.bin, 'install-new'), '#!/usr/bin/env bash\nmkdir -p node_modules && echo new > node_modules/new-marker\n', { mode: 0o755 });
+    return { HATCHABOT_INSTALL_CMD: join(w.bin, 'install-new') };
+  };
+  const at = (w: World) => w.git(w.install, 'describe', '--tags', '--exact-match');
+
+  for (const signal of ['KILL', 'TERM']) {
+    it(`SIG${signal} once the new release is up, while the old dependencies are removed: the next run leaves the new release alone`, () => {
+      const w = world();
+      cutRm(w, 'marker', signal);
+      const first = run(w, installNew(w), ['stable']);
+      // Stopped by a signal it can see, it says what is true: upgraded (HB-0266).
+      if (signal === 'TERM') { expect(first.status, first.stdout + first.stderr).toBe(0); expect(first.stdout).toContain('Now on v1.1.0.'); }
+      expect(at(w)).toBe('v1.1.0');
+      const next = run(w, installNew(w), ['stable']);
+      expect(next.stdout).not.toMatch(/cut off part-way/);
+      expect(next.stdout).toMatch(/Already on v1\.1\.0/);
+      expect(at(w)).toBe('v1.1.0');
+      expect(readFileSync(join(w.install, 'node_modules', 'new-marker'), 'utf8')).toBe('new\n');
+      expect(restarted(w)).toBe(1);
+    });
+  }
+
+  it('SIGTERM while a stale node_modules.prev is removed, before anything moved: node_modules is left alone', () => {
+    const w = world();
+    mkdirSync(join(w.install, 'node_modules.prev')); writeFileSync(join(w.install, 'node_modules.prev', 'stale'), 'x');
+    cutRm(w, 'stale', 'TERM');
+    const r = run(w, installNew(w), ['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(r.stdout).not.toMatch(/Rolling back/);
+    expect(at(w)).toBe('v1.0.0');
+    expect(readFileSync(join(w.install, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+    expect(restarted(w)).toBe(0);
+  });
+});
+
+describe('scripts/upgrade.sh with its checkout cut off part-way (HB-0266)', () => {
+  it('HEAD and index still on the old release, files rewritten: the rollback puts every tracked file back', () => {
+    const w = world();
+    writeFileSync(join(w.src, 'added.txt'), 'only in v1.2.0\n');
+    w.git(w.src, 'add', '-A'); w.git(w.src, 'commit', '-q', '-m', 'v3'); w.git(w.src, 'tag', 'v1.2.0');
+    w.git(w.src, 'push', '-q', w.origin, 'main', 'v1.2.0');
+    w.git(w.install, 'fetch', '-q', '--tags', 'origin');
+    // The checkout writes the new files, then stops before it records the new HEAD and index.
+    writeFileSync(join(w.bin, 'git'), `#!/usr/bin/env bash
+if [ "$1 $2 $3" = "checkout --quiet v1.2.0" ]; then
+  ${JSON.stringify(REAL_GIT)} "$@" || exit 1
+  ${JSON.stringify(REAL_GIT)} update-ref --no-deref HEAD "$(${JSON.stringify(REAL_GIT)} rev-parse 'v1.0.0^{commit}')"
+  ${JSON.stringify(REAL_GIT)} read-tree v1.0.0
+  exit 1
+fi
+exec ${JSON.stringify(REAL_GIT)} "$@"
+`, { mode: 0o755 });
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['v1.2.0']);
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    rmSync(join(w.bin, 'git'));
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
+    expect(w.git(w.install, 'status', '--porcelain')).toBe('');
+    expect(existsSync(join(w.install, 'added.txt'))).toBe(false);
+    expect(readFileSync(join(w.install, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+    expect(restarted(w)).toBe(0);
+  });
+});
+
 describe('the upgrade lock knows its holder (#226)', () => {
   /** The holder line upgrade.sh writes: pid and its start time, as ps tells it. */
   const holder = (pid: number) => `${pid} ${execFileSync('bash', ['-c', `LC_ALL=C ps -o lstart= -p ${pid} | tr -s ' ' | sed 's/^ //;s/ $//'`], { encoding: 'utf8' }).trim()}`;

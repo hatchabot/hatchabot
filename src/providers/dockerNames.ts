@@ -1,11 +1,12 @@
 /**
  * The docker names a runtime ref stands for: one rule for the provider
  * (localDockerProvider.ts), the archive a backup set holds for an agent
- * (backups.ts agentArchiveName), and the nightly backup, which carries a copy
- * of it in scripts/backup-volumes.sh (test/dockerNames.test.ts holds the two
- * together). Each had its own, and a legacy ref's volume was an "orphan" to
- * the backup, missed every night, under a name no restore could find
- * (audit #021).
+ * (backups.ts agentArchiveName), and the nightly backup and uninstall, which
+ * carry a copy of it in scripts/backup-volumes.sh and scripts/uninstall.sh
+ * (test/dockerNames.test.ts holds them together). Each had its own, and a
+ * legacy ref's volume was an "orphan" to the backup, missed every night, under
+ * a name no restore could find (audit #021); uninstall never found a legacy
+ * agent's container or volume at all (HB-0282).
  */
 
 /** Docker object prefix for new agents; `agentclaw` is what installs from before the rename used. */

@@ -53,8 +53,10 @@ export async function autoUpgradeStatus(p: AutoUpgradeProbes = realProbes()): Pr
   const active = await p.systemctl(['is-active', TIMER]);
   if (active !== 'active') return { ok: false, why: 'The channel timer is installed but not running.' };
   const unit = await p.readFile(join(p.home, '.config/systemd/user/hatchabot-follow-channel.service'));
-  // The install the timer runs, from its ExecStart (follow-channel.sh --install writes it quoted).
-  const dir = /^ExecStart=.*?"([^"]+)\/scripts\/follow-channel\.sh"/m.exec(unit ?? '')?.[1];
+  // The install the timer runs, from its ExecStart (follow-channel.sh --install
+  // writes it quoted, a \ or " escaped and % and $ doubled, as systemd reads it).
+  const dir = /^ExecStart=.*?"((?:[^"\\]|\\.)+)\/scripts\/follow-channel\.sh"/m.exec(unit ?? '')?.[1]
+    ?.replace(/\\(.)/g, '$1').replace(/%%/g, '%').replace(/\$\$/g, '$');
   const pin = ((dir ? await p.readFile(join(dir, 'data', 'channel')) : undefined) ?? await p.readFile(join(p.home, '.config/hatchabot/channel')))?.trim();
   // As follow-channel.sh decides it on each tick (audit #043).
   const channel = pin && /^(stable|beta|latest)$/.test(pin) ? pin : /^ExecStart=.*follow-channel\.sh"?\s+(\S+)\s*$/m.exec(unit ?? '')?.[1];

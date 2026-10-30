@@ -2,6 +2,70 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.171.0] — 2026-10-30
+
+The fixes for an audit of v2.170.1: 95 findings and two known open items, each with its own regression test.
+
+### Security
+- **Backups:** the nightly backup reached a `tcp://` runner without TLS verification, so a runner set up with TLS was skipped every night as asleep, and a plain one was read without checking who answered. Every call to a `tcp://` runner now uses verified TLS, as the app does.
+- **Data sources:** a git sync in flight could write back a deploy key that removing the repo had just scrubbed, and a move skipped a scrub still to do. A sync and a removal of one agent's repos now take turns, a sync writes a key only for a source still there, and a move scrubs the copied volume before the agent starts on its new machine.
+- **Agents:** a deleted agent no longer takes a new environment variable or repo deploy key, and a Telegram add that finishes after the agent was deleted connects nothing and gives the bot back.
+- **Telegram:** Detach Telegram stops the agent's runtime even when its tile says Stopped, and gives the bot back only once the stop is confirmed, so two copies never poll one bot.
+- **Second factors:** removing a factor cancels an authenticator app shown before it, and a password or factor reset while a password was being checked voids that check.
+- **Memory search:** removing a runner while its memory-search keys were being copied there could bring the key volume back after the removal said everything was gone. The removal now waits for that copy (not when the runner did not answer) and starts no new one.
+- **Problem reports:** a private IPv6 address is masked however its zeros are written.
+
+### Fixed
+- **Deploys and upgrades:** stopping a deploy or upgrade during its install (`systemctl stop`, Ctrl-C), or during its checkout, left production on the new release with half its dependencies or with files of both releases. A stopped one now puts the previous release back at once; one killed outright (SIGKILL, a power cut) is put back by the next run, and the follow-latest and channel timers now make that run even when the install is already on the newest release or the release was set aside. One stopped once the new release is serving says so and exits 0. A rollback, or a bundle swap, cut off part-way no longer deletes old-release files the next time it runs, including on the first upgrade off v2.170.1 or earlier.
+- **Backups:** two installs sharing one backups folder overwrote each other's database and key in the same day's set, and each one's retention pruned the other's sets. A set now records the install that made it: another install's run stops before writing (give each install its own `HATCHABOT_BACKUP_DIR`), its retention leaves that set alone, and an older set belongs to the install whose key it saved.
+- **Backups:** a failed or killed local archive client left its archive container running and writing into the set. The container now has no network, is named, and is removed when its client fails or the run ends.
+- **Restore drills:** a drill passed, and said the backup would bring the system back, though an archive the set lists as captured was missing; it now names each missing archive and fails. A drill run by hand now uses the backups folder set in `.env`. A drill no longer removes another install's running drill. Two drills can no longer both take over one dead drill's lock, and a lock whose pid now belongs to another user's process is taken over after 3 hours. Settings → Backups no longer hides a failed drill behind an older pass.
+- **Backups and restore drills:** one stopped by a signal (the drill's 90-minute limit, a service restart, a shutdown) was recorded "passed" or "complete". It is now recorded failed or incomplete.
+- **Backups:** deleting a dated backup that is a link to a folder elsewhere left a live lock in that folder. Delete now refuses links and touches nothing.
+- **Compressed swap:** `enable-compressed-swap.sh --undo` switched off and reset any `/dev/zram0`, including one the machine had before Hatchabot. It now switches off only the device its own helper made.
+- **Uninstall:** agents made before slugs (`docker://<short id>`) are now found, stopped and, with `--purge`, removed; each agent's browser container is removed too. It no longer says agents were stopped when Docker refused (it names them and exits 1; a purge that cannot remove a running agent keeps the database and `.env`), and agents on an already-deleted runner no longer block `--purge`.
+- **Settings file tidy:** on a Mac, tidying `.env` at start-up could change a value that used a lowercase variable or arithmetic, or one whose quote opened part-way and closed on the next line. Such a file is now left as written, with `env.sync_refused` and the setting's name in the log.
+- **Service install:** an install folder with a `%` in its name (or a `$` in a program argument) made systemd read the units as pointing elsewhere. Every unit setting is now escaped for systemd.
+- **Command install:** a home folder with a `$`, a backtick or a quote in its name made the PATH line in `~/.bashrc` or `~/.zshrc` expand in every new shell. The line is now escaped.
+- **Restart and deploy health checks:** a `.env` line with spaces around the `=` (`PORT = 9137`), which systemd accepts, was missed, so the scripts probed 8080, reported the service down, and a deploy rolled back a healthy release. On Linux the scripts now read it as systemd does; on a Mac as the launchd job does.
+- **First-run link:** the installer's "Open Hatchabot" link always asked plain `http://127.0.0.1`. It now asks the listener as configured (native TLS, a single bind address) and gives a loopback-only install no LAN link.
+- **Runtime image build:** an image running another OpenClaw whose version contained the requested one (2026.9.80 for 2026.9.8) passed the version check, here and in the candidate gate; it must now match exactly. Build settings (`NODE_IMAGE`, `CHANNEL_PLUGIN_VERSION`, `BAKED_PLUGINS`, `PLUGIN_INSTALL`, `LLAMA_CPP_PROVIDER_VERSION`) for the published version were ignored in favour of the stock image; they now build `<version>-custom-<checksum>`. Two extra-package lists that matched in their first forty characters no longer share a tag. The build works from a path with a space in it.
+- **Hosts:** a runner being removed could gain an agent while it was checked, which was then left on a missing host. A runner being removed now takes no new, imported, moved or shared agent, and its removal stops if an agent arrived.
+- **Agents:** two renames to one name at once, or a new agent made with the name a rename is saving, could leave two agents with the same name.
+- **Models:** live model changes for one agent apply one at a time, so the newest pick is the one running.
+- **Context caps:** a cap changed while the agent was stopped is written once it runs, and a cap removed during its first apply stays off.
+- **Sleep:** "Never sleep" saved while an idle agent is being put to sleep keeps it awake.
+- **Rebuilds:** a rebuild cut off by a restart after its container came up was marked done on its health alone; recovery now finishes its remaining steps (repos, rebuild hook, waiting tasks). "Try again" on a held setup or rebuild whose container is up settles it instead of always answering "busy".
+- **Folders:** an agent on a runner can no longer be given a legacy shared folder it cannot mount, and a folder source must be a folder, not a file. A folder or repo name over 128 characters is refused, as templates and full copies cannot carry it.
+- **Environment variables:** two added at the same moment could take an agent past 64, and its template then could not be imported.
+- **Setup values:** a file write that failed part-way could leave SOUL.md on the new values and AGENTS.md on the old. Every file written is now put back; one that cannot be is named, with the snapshot to restore. Values that would fill the description past 8,000 characters are refused before anything is written. An optional choice can be cleared with "(none)".
+- **Push definition:** a file saved on the master during a push could mix old and new versions; the master is now read while held busy, and a child file written just before its runner dropped is put back with the others.
+- **Templates:** the personal-data check now reads the agent's name too, and an optional field keyed "constructor", left blank, no longer breaks the import.
+- **Full copies:** a copy now carries the memory cap and swap allowance an agent gets from its class, and an agent held on a model name over 64 characters can be imported again.
+- **Classes:** a number given for a class's image, memory cap or swap allowance is refused with a message, not a server error.
+- **Clones:** a memory folder or note that cannot be read is named, in the app and in `hatchabot clone`, not silently left out.
+- **Files:** a picture with a long file name keeps its extension and opens as a picture.
+- **Schedule tab:** a reminder (a main-session task) shows its text and stays a reminder when edited. Clearing a task's Timezone box clears its zone.
+- **Tasks:** a delivery repair cut short by a lost runner no longer forgets the tasks it had already made quiet. A waiting template task is no longer dropped because a different task has its name.
+- **Bring in from OpenClaw:** a task that differs only in its recipient is brought over, and a task bound to a conversation stays bound to the same conversation.
+- **Apps:** a setup field Hatchabot fills is written as its field's type (a list of one address; a number from the owner's Telegram id; no value when there is nothing to fill it with), and a filled value that does not fit stops the install with what to fix. Installing, updating or stopping an app leaves alone the owner's own task with an app task's name. A required list of blank items is asked for again.
+- **Apps (page):** pressing Install and then opening the dialog on another agent while the account attached installed the wrong repo on the wrong agent; a press now installs what it was pressed for. A late repo read no longer fills a dialog opened since. An on/off setting whose default is written "false" now starts off.
+- **Unread:** a quiet scheduled task's result now marks unread on an agent with a bot; OpenClaw's own upkeep jobs do not.
+- **Runners:** a second address for one machine on the default port is no longer sent to the first one's port. The setup snippet puts docker's PATH line at the top of `~/.bashrc`, so a non-interactive guard no longer hides it, and the managed ssh block goes at the top of `~/.ssh/config`, so an earlier `Host *` no longer overrides it (existing files are fixed by hand: see docs/troubleshooting.md). An image copy that loaded before the sender closed is no longer reported as failed.
+- **Runners:** on rootless Docker the memory-search door was published on an address that exists only inside the rootless namespace. A runner's daemon is now checked for rootless mode and gets the loopback door and host address this machine does (its Docker needs host loopback on).
+- **Memory search:** a door left off the server's network by a restart made every later start fail; each start now connects it. Two services starting at once could remove each other's copy of the model.
+- **Docker:** with the docker command missing, the home screen's container check could crash the service through an unhandled rejection.
+- **Browser:** a changed `HATCHABOT_BROWSER_MEMORY` now reaches running browsers, and agents from before slug names can start their browser.
+- **Archived agents:** looking inside an agent whose volume was gone created an empty volume; it now says the volume is gone. Chat history reads OpenClaw 2026.9's database, shows the main conversation rather than the biggest, says when the main one is empty, and says what could not be read and why.
+- **Restore:** a home-layout archive whose paths did not start with `./` was restored one folder too deep.
+- **Agents (page):** an agent left on "Deleting" by a restart now offers Delete on its page, which finishes the delete.
+- **Runtime images:** trying an image on agents now runs Chat → Memory first, as its question promised.
+- **Icons:** saving an icon no longer closes another agent's icon dialog opened meanwhile.
+- **CLI:** a name two AI sources share is refused with their ids (`--profile`, `switch-source --to`), and a full agent id always picks its own agent. `rebuild --wait` follows the rebuild to its end. `browser on|off` says what really happens next. `backup --out` checks the destination before the agent is stopped. `get <agent> .` downloads the home folder. A download that fails part-way no longer destroys the earlier copy at `--out`; a link there is followed as the system would.
+
+### Changed
+- **Runners:** `HATCHABOT_SSH_DIR` is now listed as a setting for tests (under "Never in production"): ssh and Docker read only `~/.ssh/config`, so the key and config it puts elsewhere are not used.
+
 ## [2.170.1] — 2026-10-28
 
 v2.170.0 was tagged but never published: the publisher's privacy gate stopped it. Everything listed under 2.170.0 below ships in this release.

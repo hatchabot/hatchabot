@@ -13,7 +13,7 @@ const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
 /** Restart a fake install whose service answers only at `serving`; returns the URLs curl was asked for. */
-function restart(env: string, serving: string) {
+function restart(env: string, serving: string, os = 'Linux') {
   const root = mkdtempSync(join(tmpdir(), 'hb-restart-')); dirs.push(root);
   const home = join(root, 'home'); mkdirSync(home);
   const repo = join(root, 'install'); mkdirSync(join(repo, 'scripts'), { recursive: true });
@@ -23,7 +23,7 @@ function restart(env: string, serving: string) {
   const bin = join(root, 'bin'); mkdirSync(bin);
   const asked = join(root, 'curl.log');
   for (const tool of ['systemctl', 'launchctl', 'sleep', 'journalctl']) writeFileSync(join(bin, tool), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-  writeFileSync(join(bin, 'uname'), '#!/usr/bin/env bash\necho Linux\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'uname'), `#!/usr/bin/env bash\necho ${os}\n`, { mode: 0o755 });
   // The last argument is the URL; only the listener's real address answers.
   writeFileSync(join(bin, 'curl'), `#!/usr/bin/env bash\nurl="\${@: -1}"\necho "$* " >> ${JSON.stringify(asked)}\n[ "$url" = ${JSON.stringify(serving)} ]\n`, { mode: 0o755 });
   const r = spawnSync('bash', [join(repo, 'scripts', 'restart.sh')], { encoding: 'utf8', env: scriptEnv(home, `${bin}:/usr/bin:/bin`) });
@@ -48,6 +48,19 @@ describe('scripts/restart.sh health probe (#225)', () => {
   it('a plain listener (TLS in front, or none) is still asked at http://localhost', () => {
     const r = restart('HATCHABOT_BIND=0.0.0.0\n', 'http://localhost:8080/healthz');
     expect(r.status, r.out).toBe(0);
+  });
+
+  it('reads a setting written with spaces around the =, as systemd does (audit, 2026-10-29)', () => {
+    const r = restart('PORT = 9137\n  HATCHABOT_TLS_CERT =/etc/hb/cert.pem\nHATCHABOT_BIND= 192.0.2.10\n', 'https://192.0.2.10:9137/healthz');
+    expect(r.status, r.out).toBe(0);
+    expect(r.calls).toHaveLength(1);
+  });
+
+  it('on a Mac, .env is read as the launchd job reads it, with bash: PORT = 9137 sets nothing there (audit, 2026-10-29)', () => {
+    // launchd-plist.sh sources .env with bash: the service listens on 8080.
+    expect(restart('PORT = 9137\n', 'http://localhost:8080/healthz', 'Darwin').status).toBe(0);
+    expect(restart('PORT=7000\nPORT= 9137\n', 'http://localhost:7000/healthz', 'Darwin').status).toBe(0);
+    expect(restart('  PORT="9137"  # moved\n', 'http://localhost:9137/healthz', 'Darwin').status).toBe(0);
   });
 
   it('a listener that does not answer still fails, naming where it was asked', () => {

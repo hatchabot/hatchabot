@@ -36,10 +36,12 @@ beforeAll(async () => {
 });
 afterAll(() => { server.close(); rmSync(home, { recursive: true, force: true }); });
 
-const AGENT = { id: 'agent-0001-test', name: 'Test Agent', slug: 'test-agent', hostId: 'h1', state: 'RUNNING' };
+const AGENT = { id: 'agent-0001-test', name: 'Test Agent', slug: 'test-agent', hostId: 'h1', state: 'RUNNING', runtimeRef: 'fixture-runtime-1' };
+/** What GET /v1/agents lists, when a test needs another agent than AGENT. */
+let listed: unknown[] | undefined;
 function common(req: IncomingMessage): ReturnType<Handler> {
   if (req.url === '/v1/config') return { json: { authMode: 'accounts' } };
-  if (req.method === 'GET' && (req.url === '/v1/agents' || req.url === '/v1/agents?all=1')) return { json: [AGENT] };
+  if (req.method === 'GET' && (req.url === '/v1/agents' || req.url === '/v1/agents?all=1')) return { json: listed ?? [AGENT] };
   if (req.method === 'GET' && req.url === '/v1/hosts') {
     return { json: [{ id: 'h1', name: 'box', kind: 'local' }, { id: 'h2', name: 'Test Runner', kind: 'cloud' }] };
   }
@@ -175,6 +177,91 @@ describe('hatchabot backups restore', () => {
   }, 60_000);
 });
 
+describe('hatchabot rebuild --wait (HB-0356)', () => {
+  const rebuildOp = (status: string, outcome?: string) => ({ id: 'op_rebuild1', agentId: AGENT.id, kind: 'rebuild', kindLabel: 'Rebuild', title: 'Rebuilding', status, steps: 4, requestedAt: new Date().toISOString(), ...(outcome ? { outcome } : {}) });
+  it('follows the operation: a rebuild done before the first look still answers RUNNING', async () => {
+    seen.length = 0;
+    handler = (req) => {
+      if (req.method === 'POST' && req.url === `/v1/agents/${AGENT.id}/rebuild`) return { status: 202, json: { rebuilding: true, operation: rebuildOp('running') } };
+      if (req.url === '/v1/operations/op_rebuild1') return { json: rebuildOp('succeeded', 'Rebuilt.') };
+      // Never seen leaving RUNNING: the rebuild was over before anyone looked.
+      if (req.method === 'GET' && req.url === `/v1/agents/${AGENT.id}`) return { json: { ...AGENT, busy: false } };
+      return undefined;
+    };
+    const r = await cli('rebuild', 'Test Agent', '--wait', '--timeout', '0.05');
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toMatch(/✓ Rebuilt\./);
+    expect(r.out).toMatch(/"Test Agent" is RUNNING\./);
+    expect(seen.some((s) => s.url === '/v1/operations/op_rebuild1')).toBe(true);
+  }, 60_000);
+  it('a failed rebuild operation exits 1 with its outcome', async () => {
+    handler = (req) => {
+      if (req.method === 'POST' && req.url === `/v1/agents/${AGENT.id}/rebuild`) return { status: 202, json: { rebuilding: true, operation: rebuildOp('running') } };
+      if (req.url === '/v1/operations/op_rebuild1') return { json: rebuildOp('failed', 'The new container did not start.') };
+      if (req.method === 'GET' && req.url === `/v1/agents/${AGENT.id}`) return { json: { ...AGENT, busy: false } };
+      return undefined;
+    };
+    const r = await cli('rebuild', 'Test Agent', '--wait');
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/failed: The new container did not start\./);
+    expect(r.out).not.toMatch(/is RUNNING/);
+  }, 60_000);
+  it('--timeout is one budget: the state check after a slow operation does not start a second one', async () => {
+    seen.length = 0;
+    let looks = 0;
+    handler = (req) => {
+      if (req.method === 'POST' && req.url === `/v1/agents/${AGENT.id}/rebuild`) return { status: 202, json: { rebuilding: true, operation: rebuildOp('running') } };
+      // Five looks a second apart: the operation ends 5 s into a 6 s budget.
+      if (req.url === '/v1/operations/op_rebuild1') return { json: ++looks >= 5 ? rebuildOp('succeeded', 'Rebuilt.') : rebuildOp('running') };
+      if (req.method === 'GET' && req.url === `/v1/agents/${AGENT.id}`) return { json: { ...AGENT, busy: true } };
+      return undefined;
+    };
+    const r = await cli('rebuild', 'Test Agent', '--wait', '--timeout', '0.1');
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/is still RUNNING after 0\.1 min/);
+    // Checks 3 s apart from 5 s on: two fit in the 6 s budget; a fresh 6 s
+    // window after the operation took three or more.
+    expect(seen.filter((s) => s.method === 'GET' && s.url === `/v1/agents/${AGENT.id}`).length).toBeLessThanOrEqual(2);
+  }, 60_000);
+});
+
+describe('hatchabot browser <agent> on|off (HB-0357)', () => {
+  it('a rebuild already under way: prints what the server says to do, not "rebuilding now"', async () => {
+    const pending = 'Saved. A rebuild was already under way and may have begun before this change: if its browser is not as you set it once that rebuild ends, rebuild the agent.';
+    handler = (req) => req.method === 'PATCH' && req.url === `/v1/agents/${AGENT.id}` ? { json: { ...AGENT, browser: true, browserPending: pending } } : undefined;
+    const r = await cli('browser', 'Test Agent', 'on');
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toContain(pending);
+    expect(r.out).not.toMatch(/rebuilding now/);
+  }, 60_000);
+  it('a rebuild it started: says rebuilding', async () => {
+    handler = (req) => req.method === 'PATCH' && req.url === `/v1/agents/${AGENT.id}` ? { json: { ...AGENT, browser: true } } : undefined;
+    const r = await cli('browser', 'Test Agent', 'on');
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toMatch(/gets its own browser: rebuilding now/);
+  }, 60_000);
+  it('an agent the server does not rebuild (archived, failed, not built yet): saved, no rebuild claimed', async () => {
+    for (const [state, runtimeRef] of [['ARCHIVED', 'fixture-runtime-1'], ['FAILED', 'fixture-runtime-1'], ['PROVISIONING', undefined], ['STOPPED', undefined]] as const) {
+      listed = [{ ...AGENT, state, runtimeRef, browser: false }];
+      handler = (req) => req.method === 'PATCH' && req.url === `/v1/agents/${AGENT.id}` ? { json: { ...AGENT, state, runtimeRef, browser: true } } : undefined;
+      try {
+        const r = await cli('browser', 'Test Agent', 'on');
+        expect(r.code, r.err).toBe(0);
+        expect(r.out, state).toMatch(/saved\. No rebuild was started/);
+        expect(r.out, state).not.toMatch(/rebuilding now/);
+      } finally { listed = undefined; }
+    }
+  }, 120_000);
+  it('already so: changes nothing and claims no rebuild', async () => {
+    seen.length = 0;
+    handler = () => undefined;
+    const r = await cli('browser', 'Test Agent', 'off');
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toMatch(/has no browser: nothing to change/);
+    expect(seen.some((s) => s.method === 'PATCH')).toBe(false);
+  }, 60_000);
+});
+
 describe('commands an older server answers the old way', () => {
   it('rehost prints the old answer when no operation comes back', async () => {
     handler = (req) => {
@@ -185,6 +272,17 @@ describe('commands an older server answers the old way', () => {
     const r = await cli('rehost', 'Test Agent', 'Test Peer');
     expect(r.code, r.err).toBe(0);
     expect(r.out).toMatch(/done — now running on Test Peer as remote-1/);
+  }, 60_000);
+  it('rebuild --wait without an operation waits to see it leave RUNNING, then come back', async () => {
+    const states = [{ ...AGENT, busy: true }, { ...AGENT, busy: false }];
+    handler = (req) => {
+      if (req.method === 'POST' && req.url === `/v1/agents/${AGENT.id}/rebuild`) return { status: 202, json: { rebuilding: true } };
+      if (req.method === 'GET' && req.url === `/v1/agents/${AGENT.id}`) return { json: states.length > 1 ? states.shift() : states[0] };
+      return undefined;
+    };
+    const r = await cli('rebuild', 'Test Agent', '--wait');
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toMatch(/"Test Agent" is RUNNING\./);
   }, 60_000);
 });
 

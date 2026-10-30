@@ -19,7 +19,11 @@ describe('deploy and upgrade', () => {
     const lines = s.split('\n');
     const removals = lines.map((l, i) => (/rm -rf node_modules\.prev/.test(l) && !/restore_deps|\[ -d node_modules \]/.test(l) ? i : -1)).filter((i) => i >= 0);
     const serving = lines.findIndex((l) => /Serving \$GOT/.test(l));
-    expect(removals).toEqual([serving]); // the only removal is on the serving line
+    // A stale leftover is removed before the working one goes aside (and before the
+    // `.from` record is written, HB-0266); after that, only on the serving line.
+    const aside = lines.findIndex((l) => /mv node_modules node_modules\.prev/.test(l));
+    expect(aside).toBeGreaterThan(-1);
+    expect(removals.filter((i) => i > aside)).toEqual([serving]);
   });
   it('deploy-release and upgrade.sh take the same mkdir lock (flock and mkdir did not exclude each other)', () => {
     const d = src('scripts/deploy-release.sh'), u = src('scripts/upgrade.sh');

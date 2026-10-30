@@ -84,8 +84,16 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     }
     return challenge;
   };
-  /** Their factors were reset or one removed: nothing begun before goes on (the generation also says so). */
-  const forgetCeremonies = (ownerId: string): void => { challenges.delete(`get:${ownerId}`); challenges.delete(`create:${ownerId}`); };
+  /**
+   * Their factors were reset or one removed: nothing begun before goes on (the
+   * generation also says so). That includes an authenticator app shown but not
+   * yet confirmed: it was allowed on the proof given before the change (HB-0297).
+   */
+  const forgetCeremonies = (ownerId: string): void => {
+    challenges.delete(`get:${ownerId}`);
+    challenges.delete(`create:${ownerId}`);
+    store.deleteSecondFactors(ownerId, 'totp', { unconfirmedOnly: true });
+  };
   /** One use: the ceremony the answer names is taken out whether or not what follows succeeds. */
   const take = (kind: 'get' | 'create', ownerId: string, clientDataJSON: unknown): string | undefined => {
     const sent = clientDataChallenge(clientDataJSON);
@@ -122,6 +130,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
   /** Proof beyond the session before factors change (see the header). Answers the refusal itself. */
   const proveManage = async (req: FastifyRequest, reply: FastifyReply, ownerId: string, current: unknown): Promise<boolean> => {
     const local = store.localAccount(ownerId);
+    const gen = store.secondFactorGeneration(ownerId);
     // At the public address someone who has a factor has just given it (the gate's step-up).
     // (One the gate counts HERE: a passkey made for another address was never asked for.)
     if (isPublic(req) && api.secondFactorNeed(ownerId) === 'yes') return true;
@@ -135,6 +144,14 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     release();
     if (!right) {
       void reply.code(401).send({ error: 'Current password is wrong.', needsPassword: true });
+      return false;
+    }
+    // Judged again once the (slow) check is done: a password reset, the
+    // account disabled or its factors reset meanwhile voids what was proved,
+    // as a reset is meant to take the account back (HB-0314).
+    const now = store.localAccount(ownerId);
+    if (!now || now.disabled || now.pwHash !== local.pwHash || store.secondFactorGeneration(ownerId) !== gen) {
+      void reply.code(409).send({ error: 'Your password or second factors changed while this was being checked. Sign in again and try again.' });
       return false;
     }
     return true;
@@ -278,7 +295,13 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     const row = store.listSecondFactors(ownerId, { kind: 'totp', unconfirmed: true }).find((f) => f.id === req.body?.id && !f.confirmedAt);
     const key = row ? unseal(secret, row.data) : undefined;
     const step = key ? totpVerify(key, String(req.body?.code ?? '')) : undefined;
-    if (!row || step === undefined) {
+    // Gone: a factor removed or reset (or another app started) since it was
+    // shown cancels it. Said, not "the code is not right" (HB-0297).
+    if (!row) {
+      api.throttle.noteFailure(req, bucket, '2fa');
+      return reply.code(409).send({ error: 'This setup was cancelled: your second factors changed since the code was shown. Close it and add the app again.' });
+    }
+    if (step === undefined) {
       api.throttle.noteFailure(req, bucket, '2fa');
       return reply.code(401).send({ error: 'That code is not right. Check the app shows this Hatchabot, and try the next code.' });
     }

@@ -8,7 +8,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
-import { scrubRemovedDataSources } from '../src/orchestrator/provision.js';
+import { scrubRemovedDataSources, syncGitDataSources } from '../src/orchestrator/provision.js';
 import { isBusy } from '../src/orchestrator/busy.js';
 
 /**
@@ -98,6 +98,30 @@ describe('POST /v1/agents/:id/data-sources', () => {
     expect(sources).toHaveLength(2);
     expect(sources.every((s) => s.mountAtHostPath === true)).toBe(true);
     expect(sources[0]!.hostPath).toBe(join(p1, 'docs'));
+  });
+
+  it('a name longer than a template or copy carries: a /data folder or repo is refused, a host-path label cut short (HB-0320)', async () => {
+    const { store, f } = await world();
+    const root = tmp();
+    mkdirSync(join(root, 'f'.repeat(129)));
+    mkdirSync(join(root, 'g'.repeat(128)));
+    const long = await addSource(f, { kind: 'folder', access: 'ro', path: join(root, 'f'.repeat(129)) });
+    expect(long.statusCode).toBe(400);
+    expect(long.json().error).toMatch(/over 128 characters/);
+    expect((await addSource(f, { kind: 'folder', access: 'ro', path: join(root, 'g'.repeat(128)) })).statusCode).toBe(200);
+    const repo = await addSource(f, { kind: 'git', access: 'ro', public: true, repoUrl: `https://git.example.org/pantry/${'r'.repeat(129)}` });
+    expect(repo.statusCode).toBe(400);
+    expect(repo.json().error).toMatch(/over 128 characters/);
+    // Two deep folders that share a long path each get a label within the limit, and their own.
+    const deep = join(root, 'h'.repeat(70), 'i'.repeat(70));
+    mkdirSync(join(deep, 'one'), { recursive: true });
+    mkdirSync(join(deep, 'two'), { recursive: true });
+    expect((await addSource(f, { kind: 'folder', access: 'ro', path: join(deep, 'one'), atHostPath: true })).statusCode).toBe(200);
+    expect((await addSource(f, { kind: 'folder', access: 'ro', path: join(deep, 'two'), atHostPath: true })).statusCode).toBe(200);
+    const labels = store.listDataSources('a1').filter((d) => d.mountAtHostPath).map((d) => d.mountName);
+    expect(labels).toHaveLength(2);
+    expect(new Set(labels).size).toBe(2);
+    for (const l of labels) expect(l.length).toBeLessThanOrEqual(128);
   });
 
   it('atHostPath: refuses sharing the exact same path twice', async () => {
@@ -354,6 +378,49 @@ describe('a removed repo source whose key could not be scrubbed is retried (A054
     const mark = w.provider.execLog.length;
     expect(await scrubRemovedDataSources({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.runtimeRef, true)).toBe(true);
     expect(w.provider.execLog.slice(mark).some((c) => String(c[1] ?? '').includes('recipes_deploy'))).toBe(false);
+  });
+
+  it('a sync that had read the key before the removal never writes it back (HB-0274)', async () => {
+    const w = await live();
+    const key = await w.secrets.get(w.ref);
+    let entered!: () => void, release!: () => void;
+    const inRead = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const get = w.secrets.get.bind(w.secrets);
+    w.secrets.get = async (r: string) => { const v = await get(r); if (r === w.ref) { entered(); await gate; } return v; };
+    const mark = w.provider.execLog.length;
+    const sync = syncGitDataSources({ store: w.store, secrets: w.secrets, provider: w.provider } as any, 'a1', w.runtimeRef, () => {});
+    await inRead;
+    const removed = del(w.f, w.id);
+    release();
+    expect((await removed).json().removedKey.scrubbed).toBe(true);
+    await sync;
+    const scripts = w.provider.execLog.slice(mark).filter((c) => c[0] === 'sh').map((c) => String(c[1]));
+    expect(scripts.some((s) => s.includes(Buffer.from(key, 'utf8').toString('base64')))).toBe(false);
+    expect(scripts.some((s) => s.includes('rm -f /home/node/.openclaw/.ssh/recipes_deploy'))).toBe(true);
+    expect(w.store.dataSourceRemovals('a1')).toEqual([]);
+  });
+
+  it('a removal waits for a sync already writing the key, and scrubs after it (HB-0274)', async () => {
+    const w = await live();
+    let writing!: () => void, finish!: () => void;
+    const inWrite = new Promise<void>((r) => { writing = r; });
+    const done = new Promise<void>((r) => { finish = r; });
+    const order: string[] = [];
+    const execShell = w.provider.execShell.bind(w.provider);
+    w.provider.execShell = async (ref: string, script: string, opts?: any) => {
+      if (opts?.secret) { writing(); await done; order.push('sync'); } else if (script.includes('recipes_deploy')) order.push('scrub');
+      return execShell(ref, script, opts);
+    };
+    const sync = syncGitDataSources({ store: w.store, secrets: w.secrets, provider: w.provider } as any, 'a1', w.runtimeRef, () => {});
+    await inWrite;
+    const removed = del(w.f, w.id);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(order).toEqual([]); // the scrub has not run under the write
+    finish();
+    expect((await removed).json().removedKey.scrubbed).toBe(true);
+    await sync;
+    expect(order).toEqual(['sync', 'scrub']);
   });
 
   it('on a stopped agent the scrub runs on its volume', async () => {

@@ -109,6 +109,50 @@ describe('switch-source refuses an --agents list that names nobody (audit #059)'
   }, 60_000);
 });
 
+describe('switch-source reads --to and --agents the way every other command does (HB-0354, HB-0355)', () => {
+  const shared = [
+    { id: 'p-theirs', name: 'Shared', mine: false, kind: 'api_key' },
+    { id: 'p-mine', name: 'shared', mine: true, kind: 'api_key' },
+  ];
+  const adopt = (id: string): Route => ({ path: `/v1/ai-profiles/${id}/adopt-agents`, reply: { switched: 1 } });
+
+  it('a name two sources share is refused with their ids, and nothing moves', () => {
+    const r = cli([{ path: '/v1/ai-profiles', reply: shared }, adopt('p-theirs'), adopt('p-mine')], ['switch-source', '--to', 'shared']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/names 2 AI sources — use its id: p-theirs, p-mine/);
+    expect(r.requests.some((x) => x.path.endsWith('/adopt-agents'))).toBe(false);
+    // Its id picks it.
+    const ok = cli([{ path: '/v1/ai-profiles', reply: shared }, adopt('p-mine')], ['switch-source', '--to', 'p-mine']);
+    expect(ok.status, ok.stderr).toBe(0);
+    expect(ok.requests.some((x) => x.path === '/v1/ai-profiles/p-mine/adopt-agents')).toBe(true);
+    // An empty --to is a usage error, never the default source.
+    const empty = cli([{ path: '/v1/ai-profiles', reply: profiles }, adopt('p2')], ['switch-source', '--to', ' ']);
+    expect(empty.status).toBe(1);
+    expect(empty.requests.some((x) => x.path.endsWith('/adopt-agents'))).toBe(false);
+  }, 60_000);
+
+  it('a whole id in --agents is its own agent, even with another named after it listed first', () => {
+    const list = [
+      { id: 'agent-y', name: 'agent-x', slug: 'agent-x', state: 'RUNNING', role: 'owner', aiProfileId: 'p1' },
+      { id: 'agent-x', name: 'Kitchen', slug: 'kitchen', state: 'RUNNING', role: 'owner', aiProfileId: 'p1' },
+    ];
+    const r = cli([{ path: '/v1/ai-profiles', reply: profiles }, { path: '/v1/agents', reply: list }, adopt('p2')], ['switch-source', '--to', 'p2', '--agents', 'agent-x']);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.requests.find((x) => x.path === '/v1/ai-profiles/p2/adopt-agents')?.body.apply).toEqual(['agent-x']);
+  }, 60_000);
+
+  it('a name two agents share, or one nobody has, stops the whole switch', () => {
+    const twins = [...agents, { id: 'a5', name: 'homework helper', slug: 'homework-helper-2', state: 'RUNNING', role: 'owner', aiProfileId: 'p1' }];
+    for (const [names, why] of [['HOMEWORK HELPER,Recipe Box', /names 2 agents/], ['Recipe Box,Nobody Here', /no agent matches "Nobody Here"/]] as const) {
+      const r = cli([{ path: '/v1/ai-profiles', reply: profiles }, { path: '/v1/agents', reply: twins }, adopt('p2')], ['switch-source', '--to', 'p2', '--agents', names]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(why);
+      expect(r.stderr).toMatch(/nothing was switched/);
+      expect(r.requests.some((x) => x.path.endsWith('/adopt-agents'))).toBe(false);
+    }
+  }, 60_000);
+});
+
 describe('adopt puts the new agent on the default AI source (audit #060)', () => {
   it('the ⭐ default, wherever it sits in the list; --profile still wins', () => {
     expect(pickProfile(profiles).hit?.id).toBe('p2');

@@ -246,6 +246,7 @@ PREV_ZPOOL=$(cat $ZS/zpool 2>/dev/null || echo)
 PREV_POOL=$(cat $ZS/max_pool_percent 2>/dev/null || echo 20)
 PREV_SHRINKER=$(cat $ZS/shrinker_enabled 2>/dev/null || echo Y)
 PREV_SWAPPINESS=$(cat /proc/sys/vm/swappiness)
+PREV_ZRAM0=$(grep -q '^/dev/zram0 ' /proc/swaps && echo 1 || echo 0)
 MADE_SWAPFILE=$make_swapfile"
   fi
   write "$CONF" "# Hatchabot compressed swap (scripts/enable-compressed-swap.sh). Re-applied at boot by $UNIT.
@@ -293,13 +294,28 @@ vm.swappiness = $SWAPPINESS"
   note "check:       hatchabot doctor"
 }
 
+# Whether /dev/zram0 is the one the helper made (and so --undo's to switch
+# off). Undo switched off any zram0, a distribution's own one too, which was
+# there before Hatchabot and is no setting of its own (HB-0281). The helper
+# labels its device hatchabot-zram; where the label cannot be read, by what
+# was recorded: zram mode, and no zram0 in use before the first run.
+ours_zram() {
+  grep -q '^/dev/zram0 ' /proc/swaps || return 1
+  local label
+  if label="$(blkid -p -s LABEL -o value /dev/zram0 2>/dev/null)"; then [ "$label" = hatchabot-zram ]; return; fi
+  [ "$SET_MODE" = zram ] && [ "${PREV_ZRAM0:-0}" != 1 ]
+}
+
 undo() {
   say "This will undo Hatchabot's compressed swap on $(hostname):"
-  [ -f "$CONF" ] && . "$CONF"
+  local SET_MODE="" OURS_ZRAM=0
+  [ -f "$CONF" ] && . "$CONF" && SET_MODE="$MODE"
   [ -f "$STATE" ] && . "$STATE"
+  ! ours_zram || OURS_ZRAM=1
   note "• the boot unit $UNIT, its helper and settings are removed"
   note "• zswap goes back to enabled=${PREV_ZSWAP_ENABLED:-N}, compressor ${PREV_COMPRESSOR:-lzo}${PREV_ZPOOL:+, zpool $PREV_ZPOOL}, pool ${PREV_POOL:-20}%"
-  grep -q '^/dev/zram0 ' /proc/swaps && note "• /dev/zram0 is switched off: what it holds is read back into memory (needs that much free memory)"
+  [ "$OURS_ZRAM" = 1 ] && note "• /dev/zram0 is switched off: what it holds is read back into memory (needs that much free memory)"
+  [ "$OURS_ZRAM" = 1 ] || ! grep -q '^/dev/zram0 ' /proc/swaps || note "• /dev/zram0 stays on: Hatchabot did not make it"
   [ -f "$SYSCTL" ] && note "• vm.swappiness back to ${PREV_SWAPPINESS:-60}"
   [ "${MADE_SWAPFILE:-0}" = 1 ] && note "• the /swapfile this script made: you are asked separately"
   note "Agents then run without swap (Hatchabot withholds their allowance within ten minutes, and at once on a start or wake)."
@@ -310,7 +326,7 @@ undo() {
     run rm -f "$UNIT_FILE"
     run systemctl daemon-reload
   fi
-  if grep -q '^/dev/zram0 ' /proc/swaps; then
+  if [ "$OURS_ZRAM" = 1 ]; then
     run swapoff /dev/zram0
     run sh -c 'echo 1 > /sys/block/zram0/reset'
   fi

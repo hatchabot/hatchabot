@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Store } from '../store/store.js';
 import type { RuntimeProvider } from '../providers/provider.js';
+import { DEFAULT_PREFIX, dockerNames } from '../providers/dockerNames.js';
 
 /** Where an agent's OpenClaw finds its browser (in its own network namespace). */
 export const BROWSER_CDP_URL = 'http://127.0.0.1:9222';
@@ -42,9 +43,18 @@ export function browserImage(): { dockerfile: string; image: string } {
   return cached;
 }
 
-/** The container a runtime ref names (docker://<name>). */
-export const containerOf = (runtimeRef: string | undefined): string | undefined =>
-  /^[a-z]+:\/\/(.+)$/.exec(runtimeRef ?? '')?.[1];
+/**
+ * The container a runtime ref names, by its provider's rule: a legacy
+ * docker://<uuid> agent's container is not its bare fragment (HB-0325).
+ * A provider without one: docker's rule (dockerNames) for a docker:// ref,
+ * else the ref's name.
+ */
+export const containerOf = (runtimeRef: string | undefined, p?: Pick<RuntimeProvider, 'containerName'>): string | undefined => {
+  if (!runtimeRef) return undefined;
+  if (p?.containerName) return p.containerName(runtimeRef);
+  if (/^docker:\/\/./.test(runtimeRef)) return dockerNames(runtimeRef, process.env.HATCHABOT_PREFIX || DEFAULT_PREFIX).container;
+  return /^[a-z]+:\/\/(.+)$/.exec(runtimeRef)?.[1];
+};
 
 /**
  * What the sweeps share (2026-10-09). Each machine is swept by one sweep at a
@@ -108,7 +118,7 @@ async function sweepHost(
   const agents = deps.store.listAllActiveAgents();
   const want = new Map<string, string>();
   for (const a of agents) {
-    const c = containerOf(a.runtimeRef);
+    const c = a.hostId === hostId ? containerOf(a.runtimeRef, p) : undefined;
     if (a.hostId === hostId && a.browser === true && a.state === 'RUNNING' && c) want.set(c, a.id);
   }
   const have = await p.listBrowsers().catch(() => []);

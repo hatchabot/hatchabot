@@ -5,10 +5,10 @@
  * step that silently broke the first live runner when done by hand.
  */
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   ensureRunnerKey,
   ensureSshConfigBlock,
@@ -38,6 +38,13 @@ describe('ensureRunnerKey', () => {
   });
 });
 
+/** What ssh itself makes of a config for a host (no connection is made), or '' where no ssh client is installed. */
+function sshResolve(dir: string, host: string): string {
+  try {
+    return execFileSync('ssh', ['-G', '-F', join(dir, 'config'), host], { encoding: 'utf8', env: { PATH: process.env.PATH!, HOME: dir } });
+  } catch { return ''; }
+}
+
 describe('ensureSshConfigBlock', () => {
   it('writes an IdentitiesOnly block once per host and leaves other config alone', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'acl-sshcfg-'));
@@ -46,8 +53,8 @@ describe('ensureSshConfigBlock', () => {
     const cfg = readFileSync(join(dir, 'config'), 'utf8');
     expect(cfg).toContain('# my own stuff'); // untouched
     expect(cfg).toContain('Host runner.example');
-    expect(cfg).toContain('User bob');
-    expect(cfg).toContain('Port 2222');
+    // User and port come from the address on every call, never from here (HB-0300).
+    expect(cfg.split('Host *')[0]).not.toMatch(/^\s*(User|Port) /m);
     expect(cfg).toContain('IdentitiesOnly yes'); // beats any ssh-agent
     expect(cfg).toContain('StrictHostKeyChecking accept-new'); // no first-connect stall
 
@@ -72,6 +79,56 @@ describe('ensureSshConfigBlock', () => {
     expect(() => sshConfigPath('/home/x"y/.ssh/key')).toThrow(/quote or line break/);
   });
 
+  it('a second address for the same machine on the default port is not sent to the first one\'s port (HB-0300)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshcfg-'));
+    await ensureSshConfigBlock('ssh://bob@runner.example:2222', { sshDir: dir });
+    await ensureSshConfigBlock('ssh://runner.example', { sshDir: dir });
+    const cfg = readFileSync(join(dir, 'config'), 'utf8');
+    expect(cfg.match(/^Host runner\.example$/gm)).toHaveLength(1);
+    const resolved = sshResolve(dir, 'runner.example');
+    if (resolved) {
+      expect(resolved).toMatch(/^port 22$/m);
+      expect(resolved).not.toMatch(/^user bob$/m);
+    }
+  });
+
+  it('wins over a Host * written before it, and leaves what was there in force for every host (HB-0316)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshcfg-'));
+    const mine = 'ServerAliveInterval 42\nHost *\n    IdentitiesOnly no\n    StrictHostKeyChecking ask\nHost mine\n    User me\n';
+    writeFileSync(join(dir, 'config'), mine);
+    await ensureSshConfigBlock('ssh://bob@runner.example', { sshDir: dir });
+    await ensureSshConfigBlock('ssh://second.example', { sshDir: dir });
+    const cfg = readFileSync(join(dir, 'config'), 'utf8');
+    expect(cfg.endsWith(mine)).toBe(true); // the person's own lines, untouched, after ours
+    const runner = sshResolve(dir, 'runner.example');
+    if (runner) {
+      expect(runner).toMatch(/^identitiesonly yes$/m);
+      expect(runner).toMatch(/^stricthostkeychecking accept-new$/m);
+      expect(runner).toMatch(/^serveraliveinterval 42$/m); // a top-level line still applies everywhere
+      expect(sshResolve(dir, 'second.example')).toMatch(/^identitiesonly yes$/m);
+      const other = sshResolve(dir, 'mine');
+      expect(other).toMatch(/^identitiesonly no$/m);
+      expect(other).toMatch(/^stricthostkeychecking ask$/m);
+      expect(other).toMatch(/^user me$/m);
+      expect(other).toMatch(/^serveraliveinterval 42$/m);
+    }
+  });
+
+  it('two runners added at once both get their block; a symlinked config stays a symlink', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshcfg-'));
+    const real = join(dir, 'dotfiles-config');
+    writeFileSync(real, '# my own stuff\n', { mode: 0o644 });
+    symlinkSync(real, join(dir, 'config'));
+    await Promise.all([ensureSshConfigBlock('ssh://one.example', { sshDir: dir }), ensureSshConfigBlock('ssh://two.example', { sshDir: dir })]);
+    expect(lstatSync(join(dir, 'config')).isSymbolicLink()).toBe(true);
+    const cfg = readFileSync(real, 'utf8');
+    expect(cfg).toContain('Host one.example');
+    expect(cfg).toContain('Host two.example');
+    expect(cfg).toContain('# my own stuff');
+    expect(statSync(real).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir).filter((f) => f.includes('hatchabot-'))).toEqual([]); // no temp file left
+  });
+
   it('ignores tcp endpoints (no ssh side to configure)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'acl-sshcfg2-'));
     await ensureSshConfigBlock('tcp://runner:2376', { sshDir: dir });
@@ -86,6 +143,79 @@ describe('runnerSetupSnippet', () => {
     expect(s).toContain('authorized_keys');
     expect(s).toContain('/usr/local/bin'); // the macOS docker-not-found fix
     expect(s).toContain('command -v docker'); // self-check at the end
+  });
+});
+
+describe('runnerSetupSnippet on a runner (in a sandbox: a temp HOME and a PATH of shims, no docker)', () => {
+  const sandbox = () => {
+    const home = mkdtempSync(join(tmpdir(), 'acl-runnerhome-'));
+    mkdirSync(join(home, 'bin'));
+    for (const c of ['mkdir', 'chmod', 'grep', 'cat', 'rm', 'cp', 'mv']) {
+      const at = ['/usr/bin', '/bin'].map((d) => join(d, c)).find((f) => existsSync(f));
+      if (at) symlinkSync(at, join(home, 'bin', c));
+    }
+    return { home, env: { HOME: home, PATH: join(home, 'bin') } };
+  };
+  const shells = ['/bin/bash', '/bin/zsh', '/bin/sh'].filter((sh) => existsSync(sh));
+
+  it('puts the PATH line above a ~/.bashrc that returns early for non-interactive shells (HB-0315)', () => {
+    for (const sh of shells) {
+      const { home, env } = sandbox();
+      const guard = 'case $- in *i*) ;; *) return;; esac\nalias ll="ls -l"\n';
+      writeFileSync(join(home, 'dotfiles-bashrc'), guard, { mode: 0o640 });
+      symlinkSync(join(home, 'dotfiles-bashrc'), join(home, '.bashrc'));
+      for (let i = 0; i < 2; i++) { // twice: idempotent
+        // As pasted into a shell that refuses to overwrite files with > (set -o noclobber).
+        const r = spawnSync(sh, ['-c', `set -o noclobber\n${runnerSetupSnippet('ssh-ed25519 AAAA test-key')}`], { env, encoding: 'utf8' });
+        expect(r.status, `${sh}: ${r.stderr}`).toBe(0);
+        expect(r.stdout).toContain('docker not found');
+      }
+      const rc = readFileSync(join(home, '.bashrc'), 'utf8');
+      expect(rc.match(/agentclaw: docker on PATH/g), sh).toHaveLength(1);
+      expect(rc.endsWith(guard), sh).toBe(true); // the person's own lines, whole, after ours
+      expect(lstatSync(join(home, '.bashrc')).isSymbolicLink(), sh).toBe(true);
+      expect(statSync(join(home, 'dotfiles-bashrc')).mode & 0o777).toBe(0o640);
+      expect(readdirSync(home).filter((f) => f.includes('agentclaw-new'))).toEqual([]);
+      // What a non-interactive ssh command's bash makes of it.
+      const after = spawnSync('/bin/bash', ['--noprofile', '--norc', '-c', '. "$HOME/.bashrc"; printf "%s" "$PATH"'], { env, encoding: 'utf8' });
+      expect(after.stdout, sh).toContain('/usr/local/bin');
+      // A missing ~/.zshenv is made, holding just the line.
+      expect(readFileSync(join(home, '.zshenv'), 'utf8')).toContain('export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"');
+      expect(readFileSync(join(home, '.ssh', 'authorized_keys'), 'utf8')).toBe('ssh-ed25519 AAAA test-key\n');
+    }
+  });
+
+  it('replaces a plain ~/.bashrc whole (its mode kept), and leaves one it cannot rewrite as it was, saying so', () => {
+    const run = (sh: string, env: NodeJS.ProcessEnv) => spawnSync(sh, ['-c', `set -o noclobber\n${runnerSetupSnippet('ssh-ed25519 AAAA test-key')}`], { env, encoding: 'utf8' });
+    const guard = '[ -z "$PS1" ] && return\nalias ll="ls -l"\n';
+    for (const sh of shells) {
+      const { home, env } = sandbox();
+      writeFileSync(join(home, '.bashrc'), guard, { mode: 0o640 });
+      expect(run(sh, env).status, sh).toBe(0);
+      const rc = readFileSync(join(home, '.bashrc'), 'utf8');
+      expect(rc.startsWith('# agentclaw: docker on PATH'), sh).toBe(true);
+      expect(rc.endsWith(guard), sh).toBe(true);
+      expect(statSync(join(home, '.bashrc')).mode & 0o777, sh).toBe(0o640);
+      expect(readdirSync(home).filter((f) => f.includes('agentclaw-new')), sh).toEqual([]);
+      if (process.getuid?.() === 0) continue; // root reads and writes anything
+      // One it cannot read: never replaced by the PATH line alone.
+      const { home: h2, env: e2 } = sandbox();
+      writeFileSync(join(h2, '.bashrc'), guard, { mode: 0o200 });
+      const r2 = run(sh, e2);
+      expect(r2.stdout, sh).toContain(`could not add docker's PATH line to ${h2}/.bashrc`);
+      chmodSync(join(h2, '.bashrc'), 0o600);
+      expect(readFileSync(join(h2, '.bashrc'), 'utf8'), sh).toBe(guard);
+      expect(readdirSync(h2).filter((f) => f.includes('agentclaw-new')), sh).toEqual([]);
+      // A symlink into a store it cannot write (home-manager): left whole, said, no litter.
+      const { home: h3, env: e3 } = sandbox();
+      writeFileSync(join(h3, 'store-bashrc'), guard, { mode: 0o444 });
+      symlinkSync(join(h3, 'store-bashrc'), join(h3, '.bashrc'));
+      const r3 = run(sh, e3);
+      expect(r3.stdout, sh).toContain('it is read-only');
+      expect(readFileSync(join(h3, 'store-bashrc'), 'utf8'), sh).toBe(guard);
+      expect(lstatSync(join(h3, '.bashrc')).isSymbolicLink(), sh).toBe(true);
+      expect(readdirSync(h3).filter((f) => f.includes('agentclaw-new')), sh).toEqual([]);
+    }
   });
 });
 
@@ -159,6 +289,23 @@ cat > /dev/null; exit 0
     const res = await installRuntimeImage('ssh://r@x', { docker, stallMs: 300 });
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/stopped moving/);
+  });
+
+  it('a receiver that has loaded it before the sender closes is a good copy, not a failed one (HB-0319)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-imgorder-'));
+    const docker = join(dir, 'docker');
+    // The sender closes its output, then takes a moment to exit 0; the receiver exits 0 at the end of its input.
+    writeFileSync(docker, `#!${process.execPath}
+const fs = require('fs'); const a = process.argv.slice(2);
+if (a.includes('info')) console.log('x86_64');
+else if (a.includes('save')) { fs.writeSync(1, 'image-bytes'); fs.closeSync(1); setTimeout(() => process.exit(0), 700); }
+else if (a.includes('load')) { process.stdin.resume(); process.stdin.on('end', () => process.exit(0)); }
+else process.exit(2);
+`, { mode: 0o755 });
+    expect(await installRuntimeImage('ssh://r@x', { docker, stallMs: 10_000 })).toEqual({ ok: true });
+    // The sender failing after the receiver loaded is still a failure, with its exit code.
+    writeFileSync(docker, readFileSync(docker, 'utf8').replace('process.exit(0), 700', 'process.exit(5), 300'));
+    expect(await installRuntimeImage('ssh://r@x', { docker, stallMs: 10_000 })).toEqual({ ok: false, error: 'exit 5/0' });
   });
 
   it('a runner unpacking the last layers after the image is all sent is not "stalled" (2026-10-09)', async () => {

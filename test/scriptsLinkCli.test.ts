@@ -18,9 +18,9 @@ const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 const shim = (dir: string, name: string, body: string) => writeFileSync(join(dir, name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
 
-function bundle(folder = 'hatchabot') {
+function bundle(folder = 'hatchabot', homeName = 'home') {
   const root = mkdtempSync(join(tmpdir(), 'hb-link-cli-')); dirs.push(root);
-  const home = join(root, 'home'), bin = join(root, 'bin'), app = join(root, folder), launchers = join(home, '.local', 'bin');
+  const home = join(root, homeName), bin = join(root, 'bin'), app = join(root, folder), launchers = join(home, '.local', 'bin');
   for (const d of [join(app, 'scripts'), join(app, '.node', 'bin'), join(app, 'bin'), bin, launchers]) mkdirSync(d, { recursive: true });
   writeFileSync(join(app, 'BUNDLE.json'), '{"tag":"v1.0.0","platform":"linux-x64"}\n');
   shim(join(app, '.node', 'bin'), 'node', 'printf "node ran: %s\\n" "$*"');
@@ -29,7 +29,7 @@ function bundle(folder = 'hatchabot') {
   for (const t of ['systemctl', 'docker', 'npm', 'launchctl']) shim(bin, t, 'exit 0');
   const env = scriptEnv(home, `${launchers}:${bin}:/usr/bin:/bin`);
   const run = (script: string, ...args: string[]) => spawnSync('bash', [join(app, 'scripts', script), ...args], { encoding: 'utf8', input: '', env });
-  return { root, app, launchers, env, run };
+  return { root, home, app, launchers, bin, env, run };
 }
 
 describe('scripts/link-cli.sh on a bundle install', () => {
@@ -64,5 +64,22 @@ describe('scripts/link-cli.sh on a bundle install', () => {
     expect(u.status, u.stdout + u.stderr).toBe(0);
     expect(existsSync(join(b.launchers, 'hatchabot'))).toBe(false);
     expect(existsSync(join(b.launchers, 'hbt'))).toBe(false);
+  });
+});
+
+describe('scripts/link-cli.sh writes a PATH line a new shell reads as written (audit, 2026-10-29)', () => {
+  it('a $, a backtick or a quote in the home folder\'s name stays in the profile\'s line, and a second run adds no other', () => {
+    const b = bundle('hatchabot', 'home$EXPANSION `x` "q"');
+    writeFileSync(join(b.home, '.bashrc'), '');
+    // ~/.local/bin is not on the PATH yet, so the profile gets the line.
+    const env = scriptEnv(b.home, `${b.bin}:/usr/bin:/bin`, { SHELL: '/bin/bash' });
+    const link = () => spawnSync('bash', [join(b.app, 'scripts', 'link-cli.sh'), '--no-doctor'], { encoding: 'utf8', input: '', env });
+    const r = link();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    const shell = spawnSync('bash', ['--noprofile', '--norc', '-c', '. "$HOME/.bashrc"; printf %s "$PATH"'], { encoding: 'utf8', env: scriptEnv(b.home, '/usr/bin:/bin') });
+    expect(shell.status, shell.stderr).toBe(0);
+    expect(shell.stdout.split(':')[0]).toBe(b.launchers);
+    expect(link().status).toBe(0);
+    expect(readFileSync(join(b.home, '.bashrc'), 'utf8').match(/# hatchabot CLI/g)).toHaveLength(1);
   });
 });

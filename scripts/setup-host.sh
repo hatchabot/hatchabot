@@ -161,7 +161,16 @@ say "Linking the hatchabot CLI…"
 mkdir -p ~/.config/hatchabot
 # The CLI assumes port 8080: an install on another port (a tenant on a shared
 # host, a second install) tells it here so `hbt` works without --url.
-P="$(sed -n 's/^PORT=//p' .env | sed -n 1p | sed -e 's/[[:space:]]*#.*$//' -e "s/^['\"]//" -e "s/['\"]$//")"
+# Read as the service reads it, the last line wins (audit, 2026-10-29;
+# first-run-link.sh and restart.sh read it the same way): systemd takes spaces
+# around the =; the Mac's launchd job sources .env with bash, where only
+# PORT=value sets it (PORT = 9137 is a command, PORT= 9137 sets nothing).
+if [ "$(uname -s)" = "Darwin" ]; then
+  P="$(sed -n -e '/^[[:space:]]*PORT=[[:space:]][[:space:]]*[^#[:space:]]/d' -e 's/^[[:space:]]*PORT=//p' .env)"
+else
+  P="$(sed -n 's/^[[:space:]]*PORT[[:space:]]*=[[:space:]]*//p' .env)"
+fi
+P="$(printf '%s\n' "$P" | tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//")"
 if [ -n "$P" ] && [ "$P" != 8080 ] && ! grep -q '^HATCHABOT_URL=' ~/.config/hatchabot/env 2>/dev/null; then
   echo "HATCHABOT_URL=http://127.0.0.1:$P" >> ~/.config/hatchabot/env
 fi

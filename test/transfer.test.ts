@@ -230,6 +230,23 @@ describe('agent export/import', () => {
     expect(member.store.getAgent(b.id)!.swapAllowance).toBe('2g');
   });
 
+  it("carries the memory cap and swap its class gives it, and its own over the class's (HB-0313)", async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    src.store.upsertAgentClass({ id: 'heavy', ownerId: 'o', name: 'Heavy', memoryCap: '8g', swapAllowance: '4g' });
+    src.store.setAgentClass('a1', 'heavy');
+    const m = JSON.parse(gunzipSync((await exportAgent(src.deps, 'a1')).data).toString('utf8'));
+    expect(m.agent).toMatchObject({ memoryCap: '8g', swapAllowance: '4g' });
+    expect(m.agent.classId).toBeUndefined();
+    const own = await installation('owner-b');
+    const a = await importAgent(own.deps, (await exportAgent(src.deps, 'a1')).data, { ownerId: 'owner-b', mayBuild: true });
+    expect(own.store.getAgent(a.id)).toMatchObject({ memoryCap: '8g', swapAllowance: '4g' });
+    // Its own setting wins over the class's.
+    src.store.setAgentSwapAllowance('a1', '1g');
+    const m2 = JSON.parse(gunzipSync((await exportAgent(src.deps, 'a1')).data).toString('utf8'));
+    expect(m2.agent).toMatchObject({ memoryCap: '8g', swapAllowance: '1g' });
+  });
+
   it('drops the override when the destination source cannot serve it', async () => {
     const src = await installation();
     await seedSourceAgent(src);

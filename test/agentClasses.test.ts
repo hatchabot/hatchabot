@@ -30,6 +30,16 @@ async function world() {
 }
 
 describe('agent classes', () => {
+  it('a number where an image, memory cap or swap allowance belongs is a 400, not a 500 (HB-0362)', async () => {
+    const { store, f } = await world();
+    for (const field of ['image', 'memoryCap', 'swapAllowance']) {
+      const r = await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Pantry', [field]: 42 } });
+      expect(r.statusCode, field).toBe(400);
+      expect(r.json().error).toBe(`${field}: a string.`);
+    }
+    expect(store.listAgentClasses(OWNER)).toEqual([]);
+  });
+
   it('creates a class and assigning it applies the class model live (no rebuild)', async () => {
     const { store, provider, f } = await world();
     const created = await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Light', model: 'claude-sonnet-5' } });

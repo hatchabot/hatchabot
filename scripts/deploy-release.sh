@@ -28,16 +28,26 @@ cd "$PROD"
 # explicit rollback says 1. Set before the first step that can fail: a fetch
 # that met another fetch's ref lock said 1 before anything was changed, and
 # the tag was set aside for good (audit #032).
-ROLLED_BACK=0; CHANGING=0; RESTARTED=0; LOCK=""
+ROLLED_BACK=0; CHANGING=0; RESTARTED=0; ASIDE=0; SERVING=0; LOCK=""
 finish() {
   local rc=$?
   set +e
   if [ "$rc" != 0 ] && [ "$CHANGING" = 1 ]; then CHANGING=0; rc=3; echo "The deploy stopped part-way — putting $CUR back."; rollback; fi
+  # Stopped once the new release was serving (removing the old dependencies):
+  # it is deployed, not a failure to try again (HB-0266). A node_modules.prev
+  # left half removed goes with the next deploy.
+  if [ "$SERVING" = 1 ]; then rm -f "$FROM_FILE"; rc=0; fi
   [ -z "$LOCK" ] || [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$ME" ] || rm -rf "$LOCK"
   case "$rc" in 0|2|3|4) ;; 1) [ "$ROLLED_BACK" = 1 ] || rc=3 ;; *) rc=3 ;; esac
   exit "$rc"
 }
 trap finish EXIT
+# Stopped by a signal (`systemctl stop` of the timer's unit, a Ctrl-C, a closed
+# terminal), bash ended without running finish: a deploy cut off in the
+# install left prod on the new tag with half its dependencies and the old ones
+# in node_modules.prev (HB-0266). Ended through exit, finish puts the old one
+# back, as upgrade.sh does (HB-0043).
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 git fetch --tags --force --quiet origin || { echo "Could not fetch from $PROD's origin (above) — nothing was changed; try again later."; exit 3; }
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "Tag $TAG not found on origin."; exit 2; }
 # Refusing is right; refusing without saying WHAT is not. An untracked stray —
@@ -88,20 +98,55 @@ if ! take_lock; then
   fi
   take_lock || { echo "Another deploy or upgrade of $PROD is running (lock $LOCK_PATH)."; exit 4; }
 fi
+# A deploy in progress, beside the lock, in the record upgrade.sh keeps
+# (its FROM_FILE, the same file for the same checkout): `from <release>`, then
+# `restarted` once the service was restarted onto the new one. Left behind,
+# the run was killed part-way (SIGKILL, a power cut): the checkout may be on
+# the new tag with half its dependencies, and the old ones in
+# node_modules.prev. Put the old release back first, then deploy as usual
+# (HB-0266).
+FROM_FILE="${LOCK_PATH%.lock.d}.from"
+if [ -f "$FROM_FILE" ]; then
+  FROM="$(sed -n 's/^from //p' "$FROM_FILE" | sed -n 1p)"
+  echo "A deploy of $PROD was cut off part-way — putting ${FROM:-the previous release} back first."
+  { [ -n "$FROM" ] && git checkout --quiet "$FROM"; } || { echo "Could not check out ${FROM:-the previous release} (above): node_modules.prev holds its dependencies."; exit 3; }
+  [ ! -d node_modules.prev ] || { rm -rf node_modules; mv node_modules.prev node_modules; }
+  if grep -qx restarted "$FROM_FILE"; then systemctl --user restart "$SVC" || true; fi
+  rm -f "$FROM_FILE"
+fi
 CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
 echo "Deploying $TAG to $PROD (currently $CUR)…"
 # `npm ci` wipes node_modules first: keep the working one aside until the new
 # one is in, or an npm outage leaves prod with no dependencies (exit 3 = that;
 # the old release is back untouched).
-restore_deps() { rm -rf node_modules; [ -d node_modules.prev ] && mv node_modules.prev node_modules; return 0; }
+# Only once the working one was moved aside (ASIDE): stopped while a stale
+# node_modules.prev was being removed, the rollback deleted the only working
+# node_modules (HB-0266).
+restore_deps() {
+  if [ -d node_modules.prev ]; then rm -rf node_modules; mv node_modules.prev node_modules
+  elif [ "$ASIDE" = 1 ]; then rm -rf node_modules; fi
+  return 0
+}
 # The service is restarted only when it was restarted onto the new release:
 # an install that failed left the old one serving, and restarting it anyway
 # restarted production every ten minutes while a tag that cannot install kept
 # failing (review, 2026-10-09).
+# A checkout cut off part-way (a signal to the whole unit) leaves HEAD and the
+# index on CUR with files rewritten, and a plain checkout of CUR kept them:
+# mixed code, refused as local changes by every later deploy (HB-0266). Then
+# the new tag first, and back, forced: tracked files only (the deploy started
+# from a clean tree), so .env and data/ stay.
+back_to_cur() {
+  if [ "$(git rev-parse HEAD)" != "$(git rev-parse "$TAG^{commit}")" ] && [ -n "$(git status --porcelain)" ]; then
+    git checkout --quiet --force "$TAG" || return 1
+  fi
+  git checkout --quiet --force "$CUR"
+}
 rollback() {
   echo "Rolling back to ${CUR}…"
-  git checkout --quiet "$CUR" && restore_deps || return 1
-  if [ "$RESTARTED" = 1 ]; then systemctl --user restart "$SVC"; fi
+  back_to_cur && restore_deps || return 1
+  if [ "$RESTARTED" = 1 ]; then systemctl --user restart "$SVC" || return 1; fi
+  rm -f "$FROM_FILE"
 }
 # The install upgrade.sh does: ensure-deps installs, compiles the database
 # driver where its prebuilt one does not load (sqlite-driver.sh) and writes
@@ -113,15 +158,19 @@ INSTALL="${HATCHABOT_INSTALL_CMD:-install_deps}"   # overridable for tests only
 # node_modules.prev as the only working copy. Put back first: deleted as a
 # leftover, a failed install then had nothing to roll back to (audit #033).
 [ -d node_modules ] || [ ! -d node_modules.prev ] || mv node_modules.prev node_modules
+# A leftover, removed before the record is written: half removed under it,
+# the next run's repair would move it in as the old release's.
+rm -rf node_modules.prev
 CHANGING=1
-rm -rf node_modules.prev; [ -d node_modules ] && mv node_modules node_modules.prev
+printf 'from %s\n' "$CUR" > "$FROM_FILE"
+if [ -d node_modules ]; then mv node_modules node_modules.prev; fi; ASIDE=1
 git checkout --quiet "$TAG"
 # A failed install must not leave prod checked out at a tag it can't run.
 $INSTALL || { CHANGING=0; rollback || true; exit 3; }
 # node_modules.prev stays until the new release is SERVING: removed here, a
 # failed health check's rollback found nothing to restore and left prod with
 # no dependencies at all (night review, 2026-09-28).
-RESTARTED=1
+RESTARTED=1; echo restarted >> "$FROM_FILE"
 systemctl --user restart "$SVC" || { CHANGING=0; ROLLED_BACK=1; rollback || true; exit 1; }
 WANT="$(node -e 'console.log(require("./package.json").version)')"
 # Health URL from the production .env, not the caller's shell: PORT, native
@@ -129,7 +178,8 @@ WANT="$(node -e 'console.log(require("./package.json").version)')"
 # the same) — the bare value, and the LAST line that sets it. The first was
 # taken, so a .env that set PORT twice was probed on the old port (audit #031).
 # (No .env is "not set": under pipefail sed's exit 2 for a missing file ended the deploy.)
-envval() { { sed -n "s/^$1=//p" .env 2>/dev/null || true; } \
+# Spaces around the = too, as systemd reads it (PORT = 9137; audit, 2026-10-29).
+envval() { { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" .env 2>/dev/null || true; } \
   | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//" | tail -n1; }
 P="$(envval PORT)"; P="${P:-8080}"
 SCHEME=http; [ -n "$(envval HATCHABOT_TLS_CERT)" ] && SCHEME=https
@@ -147,7 +197,9 @@ esac
 URL="${HATCHABOT_HEALTH_URL:-$SCHEME://$PROBE_HOST:$P/}"
 for i in $(seq 1 45); do
   GOT="$(curl -sk "$URL" 2>/dev/null | grep -oE 'HATCHABOT_VERSION="[^"]+"' | sed -n 1p | cut -d'"' -f2 || true)"
-  [ "$GOT" = "$WANT" ] && { CHANGING=0; rm -rf node_modules.prev; echo "Serving $GOT."; exit 0; }
+  # The record goes first: left behind beside a half-removed node_modules.prev,
+  # the next deploy moved that in over the release now serving.
+  [ "$GOT" = "$WANT" ] && { CHANGING=0; SERVING=1; rm -f "$FROM_FILE"; echo "Serving $GOT."; rm -rf node_modules.prev || true; exit 0; }
   sleep 2
 done
 echo "Service restarted but is not serving $WANT — check: journalctl --user -u $SVC -n 50"

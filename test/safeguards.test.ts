@@ -108,6 +108,11 @@ describe('automatic upgrades: what counts as on', () => {
     delete files['/home/x/hatchabot/data/channel'];   // an install from before v2.169.0: the user's file, as before
     expect(await autoUpgradeStatus(p)).toMatchObject({ ok: false, channel: 'beta' });
   });
+  it('reads the install back from a unit that escapes a %, a $ or a quote in its folder (audit, 2026-10-29)', async () => {
+    const files: Record<string, string> = { '/home/x/hb-%q $x "q"/data/channel': 'stable\n', '/home/x/.config/hatchabot/channel': 'beta\n' };
+    const unit = '[Service]\nExecStart=/usr/bin/env bash "/home/x/hb-%%q $$x \\"q\\"/scripts/follow-channel.sh" stable\n';
+    expect(await autoUpgradeStatus({ ...probes(), readFile: async (f: string) => (f.endsWith('.service') ? unit : files[f]) })).toEqual({ ok: true, channel: 'stable' });
+  });
 });
 
 describe('who has owner rights, and their factors, straight from the database', () => {

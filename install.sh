@@ -229,6 +229,8 @@ INSTALLED=""
 if [ -f "$UNIT" ]; then
   INSTALLED="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | sed -n 1p)"
   INSTALLED="${INSTALLED/#\%h/$HOME}"
+  # install-service.sh doubles a % in the folder for systemd (audit, 2026-10-29).
+  INSTALLED="$(printf '%s' "$INSTALLED" | sed 's/%%/%/g')"
 elif [ "$OS" = Darwin ]; then
   # launchd has no WorkingDirectory: the job names its install dir (plist_dir,
   # read back the same way uninstall.sh does). Linux-only, this

@@ -54,6 +54,15 @@ describe('redactForPublic', () => {
     expect(redactForPublic('public ::ffff:8c52:7003', {})).toBe('public ::ffff:8c52:7003');
   });
 
+  it('masks a private address however its zeros are written (HB-0365)', () => {
+    for (const a of ['0:0::ffff:c0a8:0102', '0::FFFF:192.168.1.2', '0000:0:0:0::ffff:a00:7', '0:0:0:0:0:ffff:10.0.0.7', '0:0:0:0:0:0:0:1', '0::1', 'fd7a:0:0::5']) {
+      expect(redactForPublic(`peer ${a} up`, {}), a).toBe('peer <private-ip> up');
+    }
+    for (const a of ['0:0::ffff:8c52:7003', '0::ffff:140.82.112.3', '2001:db8:0::ffff:c0a8:102', '::ffff:0:c0a8:102']) {
+      expect(redactForPublic(`peer ${a} up`, {}), a).toBe(`peer ${a} up`);
+    }
+  });
+
   it('leaves public addresses and ordinary words alone', () => {
     expect(redactForPublic('pulled ghcr.io/hatchabot/runtime:2026.9.6 from 140.82.112.3; patience', ctx)).toBe('pulled ghcr.io/hatchabot/runtime:2026.9.6 from 140.82.112.3; patience');
   });
@@ -165,7 +174,7 @@ describe('check_known_problem (matchKnownProblems)', () => {
   it('every playbook entry is found first from its own symptom line', () => {
     const missed = titles.filter((t) => matchKnownProblems(process.cwd(), t, 'v2.138.0').matches[0]?.title !== t);
     expect(missed).toEqual([]);
-  }, 30_000); // each entry against all of them: grows with the playbook (321 entries took 4.5 s)
+  }, 30_000); // each entry against all of them: grows with the playbook (703 entries: 3 s with it parsed once, 19–33 s before)
   it('the incident the Hatchabot agent got wrong is found from how it was described (2026-10-07), with the whole entry', () => {
     const r = matchKnownProblems(process.cwd(), "taxkit QA: every message failed with 'LLM request failed (request format rejected, HTTP 400)' when the chat was switched to Claude Opus 5.5", 'v2.138.0');
     expect(r.matches[0]!.title).toMatch(/request format rejected, HTTP 400/);

@@ -55,6 +55,8 @@ INSTALLED_DIR=""
 if [ -f "$UNIT" ]; then
   INSTALLED_DIR="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | sed -n 1p)"
   INSTALLED_DIR="${INSTALLED_DIR/#\%h/$HOME}"
+  # install-service.sh doubles a % in the folder for systemd (audit, 2026-10-29).
+  INSTALLED_DIR="$(printf '%s' "$INSTALLED_DIR" | sed 's/%%/%/g')"
 elif [ "$(uname -s)" = "Darwin" ]; then
   # launchd has no WorkingDirectory here: the job is given the install dir
   # (plist_dir), so read it back out of whichever plist exists.
@@ -98,24 +100,38 @@ case "$DB_PATH" in /*) ;; *) DB_PATH="$ENV_DIR/$DB_PATH" ;; esac
 case "$BACKUP_DIR" in /*) ;; *) BACKUP_DIR="$ENV_DIR/$BACKUP_DIR" ;; esac
 DATA_DIR="$(dirname "$DB_PATH")"
 
+PREFIX="${HATCHABOT_PREFIX:-hatchabot}"
 # Containers and volumes belong to Hatchabot by name: agentclaw- is the old
 # prefix, still worn by agents made before the rename.
 # THIS install's agents — the names its database holds — never every
 # hatchabot-* container on the machine: a test install beside production used
 # to stop (or, with --purge, destroy) production's agents (26th audit). With
 # no readable database there is nothing to scope by, and docker is left alone.
+# One line per agent, "<container> <volume>", by the provider's own rule
+# (src/providers/dockerNames.ts, kept the same by test/dockerNames.test.ts):
+# a legacy pre-slug ref (docker://<short id>) is agentclaw-<short> and
+# agentclaw-vol-<short>. The bare id was looked up, found nothing, and such
+# agents were "none running" while they ran, and orphaned by a purge (HB-0282).
 agent_names() {
   [ -f "$DB_PATH" ] && [ -d "$REPO/node_modules/better-sqlite3" ] || return 0
   (cd "$REPO" && node -e '
     const db = require("better-sqlite3")(process.argv[1], { readonly: true });
-    for (const r of db.prepare("SELECT runtime_ref FROM agents WHERE runtime_ref IS NOT NULL").all())
-      console.log(String(r.runtime_ref).replace(/^docker:\/\//, ""));' "$DB_PATH" 2>/dev/null)
+    const P = process.argv[2];
+    for (const r of db.prepare("SELECT runtime_ref FROM agents WHERE runtime_ref IS NOT NULL").all()) {
+      const s = String(r.runtime_ref);
+      const n = s.replace(/^\w+:\/\//, "");
+      if (!s.startsWith("docker://") || n.startsWith(P + "-") || n.startsWith("agentclaw-")) { console.log(n + " " + n + "-vol"); continue; }
+      const p = P === "hatchabot" ? "agentclaw" : P;
+      console.log(p + "-" + n.slice(0, 12) + " " + p + "-vol-" + n.slice(0, 12));
+    }' "$DB_PATH" "$PREFIX" 2>/dev/null)
 }
 # Its exit status counts too: a database the module cannot open (a Node major
 # upgrade breaks the native build) printed nothing, which read as "no agents"
 # — "none running" with agents still up, or a purge that orphaned every
 # volume (night review, 2026-09-28).
-if NAMES="$(agent_names)"; then DB_READ=1; else DB_READ=0; NAMES=""; fi
+if AGENT_REFS="$(agent_names)"; then DB_READ=1; else DB_READ=0; AGENT_REFS=""; fi
+NAMES="$(printf '%s\n' "$AGENT_REFS" | cut -s -d' ' -f1)"
+VOL_NAMES="$(printf '%s\n' "$AGENT_REFS" | cut -s -d' ' -f2)"
 if [ "$DB_READ" = 0 ]; then
   echo "Cannot read the database at $DB_PATH (node could not open it — after a Node upgrade, run npm rebuild in $REPO), so this install's agents are unknown. Refusing rather than guess."; exit 2
 fi
@@ -130,14 +146,18 @@ fi
 # command here asks this one: --purge deleted the only record of them and the
 # key to their data, said they were gone, and left them running there (audit
 # #037). They are named; --purge refuses while there are any, unless
-# --forget-runners says to leave them where they are.
+# --forget-runners says to leave them where they are. Not a DELETED one: the
+# app removed its runtime before it said so, and its row is history kept for
+# the slug. Counted, a runner's last deleted agent blocked every purge, with
+# "Delete them in the app first" for agents already deleted (HB-0345).
 runner_agents() {
   [ -f "$DB_PATH" ] && [ -d "$REPO/node_modules/better-sqlite3" ] || return 0
   (cd "$REPO" && node -e '
     const db = require("better-sqlite3")(process.argv[1], { readonly: true });
     const has = (t, c) => !!db.prepare("SELECT 1 FROM pragma_table_info(?) WHERE name = ?").get(t, c);
     if (!has("agents", "host_id") || !has("hosts", "settings")) process.exit(0);
-    for (const r of db.prepare("SELECT a.name AS agent, h.name AS host, h.settings AS settings FROM agents a JOIN hosts h ON h.id = a.host_id").all()) {
+    const live = has("agents", "state") ? " WHERE a.state IS NOT \x27DELETED\x27" : "";
+    for (const r of db.prepare("SELECT a.name AS agent, h.name AS host, h.settings AS settings FROM agents a JOIN hosts h ON h.id = a.host_id" + live).all()) {
       let s = {}; try { s = JSON.parse(r.settings) || {}; } catch {}
       const at = typeof s.dockerHost === "string" ? s.dockerHost.trim() : "";
       if (at) console.log(`${r.agent} (on ${r.host}: ${at})`);
@@ -160,7 +180,7 @@ fi
 # nothing, read as "no agents, no volumes": --purge then deleted the database
 # and .env — the only map from the agents to their containers and volumes, and
 # the key — said they were all gone, and left them running (audit #024).
-DOCKER_OK=0; DOCKER_LOST=0
+DOCKER_OK=0; DOCKER_LOST=0; AGENTS_UP=""; AGENTS_UP_HOW=""
 have docker && docker info >/dev/null 2>&1 && DOCKER_OK=1
 if [ "$PURGE" = 1 ] && [ -n "$NAMES" ] && [ "$DOCKER_OK" != 1 ]; then
   if have docker; then echo "Docker is not answering (is it running, and is $(id -un) in the docker group?), so this install's"
@@ -176,7 +196,6 @@ agent_ids() {
     const db = require("better-sqlite3")(process.argv[1], { readonly: true });
     for (const r of db.prepare("SELECT id FROM agents").all()) console.log(r.id);' "$DB_PATH" 2>/dev/null)
 }
-PREFIX="${HATCHABOT_PREFIX:-hatchabot}"
 # A lookup that fails is not "none": it returns 1, and the caller says so.
 containers() {
   [ -n "$NAMES" ] || return 0
@@ -184,11 +203,15 @@ containers() {
   for n in $NAMES; do docker ps -aq --filter "name=^/$n$" 2>/dev/null || return 1; done
 }
 # The service containers of THIS install: its agents' doormen (by the agent
-# label), and the memory search service pair under this install's prefix.
-# Left behind, a doorman kept its console port and an embedder its old key,
-# and a reinstall failed on both (a MacBook, 2026-09-25).
+# label), their browsers (by the agent container they belong to), and the
+# memory search service pair under this install's prefix. Left behind, a
+# doorman kept its console port and an embedder its old key, and a reinstall
+# failed on both (a MacBook, 2026-09-25). A browser went on running in the
+# stopped agent's network, after "no longer running" (HB-0344).
 service_containers() {
   for id in $(agent_ids); do docker ps -aq --filter "label=hatchabot.role=doorman" --filter "label=hatchabot.agent=$id" 2>/dev/null; done
+  local n
+  for n in $NAMES; do docker ps -aq --filter "label=hatchabot.role=browser" --filter "label=hatchabot.browser-of=$n" 2>/dev/null; done
   docker ps -aq --filter "name=^/$PREFIX-embedder$" --filter "name=^/$PREFIX-embed-door$" 2>/dev/null
 }
 service_networks() {
@@ -196,9 +219,15 @@ service_networks() {
   docker network ls -q --filter "name=^$PREFIX-embed$" 2>/dev/null
 }
 volumes() {
-  [ -n "$NAMES" ] || return 0
-  local n
-  for n in $NAMES; do docker volume ls -q --filter "name=^$n-vol$" 2>/dev/null || return 1; done
+  [ -n "$VOL_NAMES" ] || return 0
+  local v
+  for v in $VOL_NAMES; do docker volume ls -q --filter "name=^$v$" 2>/dev/null || return 1; done
+}
+# Which of this install's agents still run (a container name a line); one
+# Docker could not be asked about counts as running.
+running_agents() {
+  local n r
+  for n in $NAMES; do r="$(docker ps -q --filter "name=^/$n$" 2>/dev/null)" || r=unknown; [ -z "$r" ] || echo "$n"; done
 }
 # Containers on this daemon that belong to ANOTHER Hatchabot install: an
 # agent (hatchabot.gen), a service container (hatchabot.role) or the name
@@ -385,33 +414,51 @@ if have docker; then
   # agent needing a Rebuild after a reinstall, which is not "nothing you would
   # miss is deleted". --purge removes them below.
   say "Stopping agents…"
+  # The doormen, the browsers and the memory search service hold nothing of
+  # the agents' (a rebuild or the next start makes them afresh), so they go
+  # even without --purge: a reinstall must not meet them on its ports. First:
+  # a browser lives in its agent's network.
+  SIDS="$(service_containers | sort -u)"
+  if [ -n "$SIDS" ]; then
+    # shellcheck disable=SC2086
+    docker rm -f $SIDS >/dev/null 2>&1 && echo "  removed $(echo "$SIDS" | wc -l | tr -d ' ') service containers (doormen, browsers, memory search)"
+  fi
   if ! CIDS="$(containers)"; then
     DOCKER_LOST=1
     echo "  could NOT ask Docker for this install's agents, so none was stopped (docker ps -a lists them)"
   elif [ -n "$CIDS" ]; then
+    # A stop Docker refused is not a stop: it was ignored, and the last line
+    # said Hatchabot was no longer running, exit 0, with the agent up (HB-0343).
     # shellcheck disable=SC2086
-    docker stop $CIDS >/dev/null 2>&1
-    echo "  stopped $(echo "$CIDS" | wc -l | tr -d ' ') containers (kept, with their volumes)"
+    if ERR="$(docker stop $CIDS 2>&1 >/dev/null)"; then
+      echo "  stopped $(echo "$CIDS" | wc -l | tr -d ' ') containers (kept, with their volumes)"
+    else
+      AGENTS_UP="$(running_agents)"
+      if [ -n "$AGENTS_UP" ]; then
+        echo "  could NOT stop $(echo "$AGENTS_UP" | wc -l | tr -d ' ') of $(echo "$CIDS" | wc -l | tr -d ' ') containers: ${ERR:-docker refused}"
+        AGENTS_UP_HOW="Docker would not stop them"
+      else
+        echo "  stopped $(echo "$CIDS" | wc -l | tr -d ' ') containers (kept, with their volumes)"
+      fi
+    fi
   else
     echo "  none running"
-  fi
-  # The doormen and the memory search service hold nothing of the agents'
-  # (a rebuild or the next start makes them afresh), so they go even without
-  # --purge: a reinstall must not meet them on its ports.
-  SIDS="$(service_containers | sort -u)"
-  if [ -n "$SIDS" ]; then
-    # shellcheck disable=SC2086
-    docker rm -f $SIDS >/dev/null 2>&1 && echo "  removed $(echo "$SIDS" | wc -l | tr -d ' ') service containers (doormen, memory search)"
   fi
 fi
 
 if [ "$PURGE" = 1 ]; then
   if have docker; then
     say "Removing agent containers…"
-    CIDS="$(containers)" || { DOCKER_LOST=1; echo "  could NOT ask Docker for them"; }
-    if [ -n "$CIDS" ]; then
+    if ! CIDS="$(containers)"; then DOCKER_LOST=1; echo "  could NOT ask Docker for them"
+    elif [ -z "$CIDS" ]; then AGENTS_UP=""
+    else
       # shellcheck disable=SC2086
-      docker rm -f $CIDS >/dev/null 2>&1 && echo "  removed $(echo "$CIDS" | wc -l | tr -d ' ') containers"
+      if docker rm -f $CIDS >/dev/null 2>&1; then
+        echo "  removed $(echo "$CIDS" | wc -l | tr -d ' ') containers"; AGENTS_UP=""
+      else
+        AGENTS_UP="$(running_agents)"; AGENTS_UP_HOW="Docker would not remove them"
+        [ -z "$AGENTS_UP" ] || echo "  could NOT remove $(echo "$AGENTS_UP" | wc -l | tr -d ' ') running containers"
+      fi
     fi
     say "Deleting agent volumes…"
     VOLS="$(volumes)" || { DOCKER_LOST=1; echo "  could NOT ask Docker for them"; }
@@ -467,18 +514,43 @@ if [ "$PURGE" = 1 ]; then
     echo "Kept the database ($DB_PATH) and $ENV_DIR/.env: they are the map to them. Start Docker and run this again."
     exit 1
   fi
+  # Nor while an agent still runs: they are its map and its key (HB-0343).
+  if [ -n "$AGENTS_UP" ]; then
+    echo
+    echo "These agents of this install are still running ($AGENTS_UP_HOW):"
+    for n in $AGENTS_UP; do echo "  · $n"; done
+    echo "Kept the database ($DB_PATH) and $ENV_DIR/.env: they are the map to them. See why (docker inspect <name>), then run this again."
+    exit 1
+  fi
   say "Deleting local state…"
   # The backups first, and only Hatchabot's own sets: the folder may be a NAS
   # mount other machines back up into (backup-volumes.sh prunes only its dated
   # sets for that reason), and --backups used to rm -rf all of it (review,
   # 2026-10-09). The folder goes only when that leaves it empty.
   if [ "$BACKUPS" = 1 ] && [ -d "$BACKUP_DIR" ]; then
-    SETS=0
+    # Nor another install's sets, when two share the folder: a set names the
+    # install that made it (.backup-owner), or an older one the key it saved,
+    # fingerprinted as backup-volumes.sh's key_owner does (HB-0280).
+    key_owner() {
+      node -e '
+      const fs = require("node:fs");
+      const { parseEnv } = require("node:util");
+      const saved = process.argv[1];
+      const key = saved ? (() => { const f = fs.existsSync(saved) ? parseEnv(fs.readFileSync(saved, "utf8")) : {}; return f.HATCHABOT_SECRET_KEY ?? f.AGENTCLAW_SECRET_KEY; })()
+        : process.env.HATCHABOT_SECRET_KEY ?? process.env.AGENTCLAW_SECRET_KEY;
+      if (key) process.stdout.write(require("node:crypto").createHash("sha256").update("hatchabot-backup-owner\0" + key).digest("hex").slice(0, 16));' "${1:-}" 2>/dev/null || true
+    }
+    OWNER="$(key_owner)"
+    SETS=0; THEIRS=0
     for d in "$BACKUP_DIR"/20??-??-??; do
       [ -d "$d" ] && { [ -f "$d/backup-status.json" ] || [ -f "$d/hatchabot.sqlite" ]; } || continue
+      so="$(cat "$d/.backup-owner" 2>/dev/null || true)"
+      if [ -z "$so" ] && [ -n "$OWNER" ] && [ -f "$d/secret-key.env" ]; then so="$(key_owner "$d/secret-key.env")"; fi
+      if [ -n "$OWNER" ] && [ -n "$so" ] && [ "$so" != "$OWNER" ]; then THEIRS=$((THEIRS + 1)); continue; fi
       rm -rf "$d" && SETS=$((SETS + 1))
     done
     echo "  removed $SETS backup sets from $BACKUP_DIR"
+    [ "$THEIRS" = 0 ] || echo "  kept $THEIRS sets another Hatchabot install made there"
     if rmdir "$BACKUP_DIR" 2>/dev/null; then echo "  removed $BACKUP_DIR (empty now)"
     else echo "  kept $BACKUP_DIR itself: it holds more than Hatchabot's backup sets"; fi
   fi
@@ -517,7 +589,13 @@ if [ "$PURGE" = 1 ]; then
 fi
 
 say "Done."
-echo "Hatchabot is no longer running or installed on this machine."
+if [ -n "$AGENTS_UP" ]; then
+  echo "Hatchabot's service is removed, but these agents of this install are still running ($AGENTS_UP_HOW):"
+  for n in $AGENTS_UP; do echo "  · $n"; done
+  echo "See why (docker inspect <name>, and the Docker daemon's log), then: docker stop <name>"
+else
+  echo "Hatchabot is no longer running or installed on this machine."
+fi
 [ "$DOCKER_LOST" = 0 ] || echo "But Docker did not answer, so this install's agents were not stopped: see docker ps."
 if [ "$PURGE" = 1 ] && [ -n "${VOLS_LEFT:-}" ]; then
   echo "Its agents and database are gone, but these agent volumes are NOT — their data is still on this machine:"
@@ -550,5 +628,5 @@ fi
 echo "The clone itself is untouched. To remove it:  rm -rf \"$REPO\""
 echo "Telegram bots are not deletable from here: @BotFather → /mybots → /deletebot."
 # A purge that left volumes behind did not finish its job, nor did a stop
-# Docker did not answer: say so to a caller too.
-[ -z "${VOLS_LEFT:-}" ] && [ "$DOCKER_LOST" = 0 ] || exit 1
+# Docker did not answer or refused: say so to a caller too.
+[ -z "${VOLS_LEFT:-}" ] && [ "$DOCKER_LOST" = 0 ] && [ -z "$AGENTS_UP" ] || exit 1

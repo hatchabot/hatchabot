@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -62,6 +62,25 @@ describe('scripts/follow-channel.sh', () => {
     writeFileSync(join(app, '.swapping'), 'from v1.0.0\n');
     expect(w.run(0).status).toBe(0);
     expect(lines(w.log)).toEqual(['upgrade stable timer=1 target=v1.1.0']);
+  });
+
+  it('a git install\'s upgrade killed part-way, on the new release already, is handed to upgrade.sh to repair, not taken as done (HB-0266)', () => {
+    const w = world();
+    const app = join(w.root, 'app');
+    const env = scriptEnv(w.home, '/usr/bin:/bin');
+    const git = (...args: string[]) => execFileSync(REAL_GIT, args, { cwd: app, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    git('init', '-q', '-b', 'main'); git('add', '-A'); git('commit', '-qm', 'v1.1.0'); git('tag', 'v1.1.0');
+    expect(w.run(0).status).toBe(0);
+    expect(lines(w.log)).toEqual([]); // on it already: nothing to do
+    // The record upgrade.sh keeps beside its lock while it changes the tree.
+    const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', app], { encoding: 'utf8' }).trim();
+    mkdirSync(w.state, { recursive: true }); writeFileSync(join(w.state, `upgrade-${key}.from`), 'from v1.0.0\n');
+    expect(w.run(0).status).toBe(0);
+    expect(lines(w.log)).toEqual(['upgrade stable timer=1 target=v1.1.0']);
+    // A release set aside earlier: the repair still runs (it puts the earlier release back).
+    writeFileSync(join(w.state, `follow-channel-failed-${key}`), 'v1.1.0\n');
+    expect(w.run(0).status).toBe(0);
+    expect(lines(w.log)).toEqual(['upgrade stable timer=1 target=v1.1.0', 'upgrade stable timer=1 target=v1.1.0']);
   });
 
   it('follows its own install\'s channel, not another install\'s choice; the user\'s one file only when it has none (HB-0235)', () => {
@@ -308,6 +327,12 @@ describe('scripts/deploy-release.sh (review, 2026-10-09)', () => {
       }
     });
 
+    it('a setting written with spaces around the = is read as systemd reads it (audit, 2026-10-29)', () => {
+      const w = serving('PORT = 9137\n', 'http://127.0.0.1:9137/');
+      expect(w.r.status, w.r.stdout + w.r.stderr).toBe(0);
+      expect(w.asked()).toEqual(['http://127.0.0.1:9137/']);
+    });
+
     it('a name set twice in .env is read as the service reads it: the last one, without its comment', () => {
       const w = serving('PORT=8080\nHATCHABOT_TLS_CERT=\nPORT=9090   # moved off 8080\n', 'http://127.0.0.1:9090/');
       expect(w.r.status, w.r.stdout + w.r.stderr).toBe(0);
@@ -328,6 +353,171 @@ describe('scripts/deploy-release.sh (review, 2026-10-09)', () => {
     expect(w.at()).toBe('v1.0.0');
     expect(existsSync(join(w.prod, 'node_modules', 'marker'))).toBe(true);
     expect(lines(w.log)).toEqual([]); // nothing installed, nothing restarted
+  });
+
+  describe('cut off part-way through the install (HB-0266)', () => {
+    /**
+     * A deploy whose install leaves half a node_modules and hangs, as `npm ci`
+     * cut off would. It runs in its own process group, so a signal reaches it
+     * and the install as `systemctl stop` of the timer's unit does.
+     */
+    function cutOff(w: ReturnType<typeof prodWorld>, signal: NodeJS.Signals) {
+      const started = join(w.root, 'started');
+      writeFileSync(join(w.bin, 'hanging-step'), `#!/usr/bin/env bash\nmkdir -p node_modules/half-installed; touch ${JSON.stringify(started)}; exec sleep 30\n`, { mode: 0o755 });
+      const p = spawn('bash', [join(w.prod, 'scripts', 'deploy-release.sh'), 'v1.1.0'], {
+        detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...w.env, HATCHABOT_PROD_DIR: w.prod, HATCHABOT_INSTALL_CMD: join(w.bin, 'hanging-step') },
+      });
+      let out = '';
+      p.stdout!.on('data', (c) => (out += c)); p.stderr!.on('data', (c) => (out += c));
+      return new Promise<{ code: number | null; out: string }>((resolve, reject) => {
+        const t0 = Date.now();
+        const poll = setInterval(() => {
+          if (existsSync(started)) { clearInterval(poll); process.kill(-p.pid!, signal); }
+          else if (Date.now() - t0 > 15_000) { clearInterval(poll); process.kill(-p.pid!, 'SIGKILL'); reject(new Error(`never reached the install: ${out}`)); }
+        }, 20);
+        p.on('exit', (code) => resolve({ code, out }));
+      });
+    }
+    const deps = (w: ReturnType<typeof prodWorld>) => existsSync(join(w.prod, 'node_modules', 'marker')) && !existsSync(join(w.prod, 'node_modules', 'half-installed')) && !existsSync(join(w.prod, 'node_modules.prev'));
+
+    for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+      it(`${signal} in the install: the old release and its dependencies are put back at once, and it says 3`, async () => {
+        const w = prodWorld();
+        const r = await cutOff(w, signal);
+        expect(r.code, r.out).toBe(3);
+        expect(r.out).toMatch(/stopped part-way — putting v1\.0\.0 back/);
+        expect(w.at()).toBe('v1.0.0');
+        expect(deps(w)).toBe(true);
+        expect(lines(w.log).filter((l) => l.startsWith('systemctl'))).toEqual([]);
+        // Nothing left for the next run to repair.
+        const next = w.deploy({ FAKE_DEPS_RC: '1' });
+        expect(next.stdout).not.toMatch(/cut off part-way/);
+      });
+    }
+
+    it('killed in the install (SIGKILL, a power cut): the next run puts the old release back first, not the half-installed one aside', async () => {
+      const w = prodWorld();
+      const r = await cutOff(w, 'SIGKILL');
+      expect(r.code).toBe(null);
+      expect(w.at()).toBe('v1.1.0'); // half-way: the new code, half its dependencies
+      const next = w.deploy({ FAKE_DEPS_RC: '1' });
+      expect(next.status, next.stdout + next.stderr).toBe(3);
+      expect(next.stdout).toMatch(/cut off part-way — putting v1\.0\.0 back first/);
+      expect(next.stdout).toMatch(/currently v1\.0\.0/);
+      expect(w.at()).toBe('v1.0.0');
+      expect(deps(w)).toBe(true);
+      expect(lines(w.log).filter((l) => l.startsWith('systemctl'))).toEqual([]); // the service never left the old release
+      const third = w.deploy();
+      expect(third.status, third.stdout + third.stderr).toBe(0);
+      expect(w.at()).toBe('v1.1.0');
+    });
+
+    it('killed in the install: follow-latest, though prod is on the newest tag, runs the deploy that repairs it', async () => {
+      const w = prodWorld();
+      writeFileSync(join(w.root, 'follow-latest.sh'), readFileSync('scripts/follow-latest.sh'), { mode: 0o755 });
+      const follow = () => spawnSync('bash', [join(w.root, 'follow-latest.sh')], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod } });
+      expect((await cutOff(w, 'SIGKILL')).code).toBe(null);
+      expect(w.at()).toBe('v1.1.0');
+      expect(existsSync(join(w.prod, 'node_modules', 'half-installed'))).toBe(true);
+      const r = follow();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/cut off part-way — putting v1\.0\.0 back first/);
+      expect(r.stdout).toContain('Serving 1.1.0.');
+      expect(w.at()).toBe('v1.1.0');
+      expect(existsSync(join(w.prod, 'node_modules', 'half-installed'))).toBe(false);
+      expect(lines(w.log).filter((l) => l.startsWith('ensure-deps'))).toEqual(['ensure-deps --quiet']);
+      // Repaired and deployed: the next tick has nothing to do.
+      const next = follow();
+      expect(next.status, next.stdout + next.stderr).toBe(0);
+      expect(next.stdout).toBe('');
+    });
+
+    it('killed in a hand deploy of a tag the timer had set aside: follow-latest still repairs it', async () => {
+      const w = prodWorld();
+      writeFileSync(join(w.root, 'follow-latest.sh'), readFileSync('scripts/follow-latest.sh'), { mode: 0o755 });
+      const follow = () => spawnSync('bash', [join(w.root, 'follow-latest.sh')], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod } });
+      const state = join(w.env.HOME!, '.local', 'state', 'hatchabot');
+      mkdirSync(state, { recursive: true }); writeFileSync(join(state, 'follow-latest-failed'), 'v1.1.0\n');
+      expect((await cutOff(w, 'SIGKILL')).code).toBe(null);
+      expect(w.at()).toBe('v1.1.0');
+      const r = follow();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/cut off part-way — putting v1\.0\.0 back first/);
+      expect(existsSync(join(w.prod, 'node_modules', 'half-installed'))).toBe(false);
+    });
+  });
+
+  it('a checkout cut off part-way (HEAD and index still on the old tag, files rewritten): the rollback puts every tracked file back (HB-0266)', () => {
+    const w = prodWorld();
+    // The checkout writes the new files, then stops before it records the new HEAD and index.
+    writeFileSync(join(w.bin, 'git'), `#!/usr/bin/env bash
+if [ "$1 $2 $3" = "checkout --quiet v1.1.0" ]; then
+  ${JSON.stringify(REAL_GIT)} "$@" || exit 1
+  ${JSON.stringify(REAL_GIT)} update-ref --no-deref HEAD "$(${JSON.stringify(REAL_GIT)} rev-parse 'v1.0.0^{commit}')"
+  ${JSON.stringify(REAL_GIT)} read-tree v1.0.0
+  exit 1
+fi
+exec ${JSON.stringify(REAL_GIT)} "$@"
+`, { mode: 0o755 });
+    const r = w.deploy();
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    rmSync(join(w.bin, 'git'));
+    expect(w.at()).toBe('v1.0.0');
+    expect(w.git(w.prod, 'status', '--porcelain')).toBe('');
+    expect(readFileSync(join(w.prod, 'package.json'), 'utf8')).toContain('"1.0.0"');
+    expect(existsSync(join(w.prod, 'scripts', 'ensure-deps.sh'))).toBe(false);
+    expect(readFileSync(join(w.prod, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+    // And the next deploy is not refused as local changes.
+    const next = w.deploy();
+    expect(next.status, next.stdout + next.stderr).toBe(0);
+    expect(w.at()).toBe('v1.1.0');
+  });
+
+  describe('cut off while it removes a node_modules.prev (HB-0266)', () => {
+    const REAL_RM = spawnSync('sh', ['-c', 'command -v rm'], { encoding: 'utf8' }).stdout.trim();
+    /** An rm that, removing a node_modules.prev holding `file`, deletes that one file and signals the deploy. */
+    const cutRm = (w: ReturnType<typeof prodWorld>, file: string, signal: string) => writeFileSync(join(w.bin, 'rm'), `#!/usr/bin/env bash
+if [ "$1 $2" = "-rf node_modules.prev" ] && [ -f node_modules.prev/${file} ]; then ${JSON.stringify(REAL_RM)} -f node_modules.prev/${file}; kill -${signal} "$PPID"; exit 1; fi
+exec ${JSON.stringify(REAL_RM)} "$@"
+`, { mode: 0o755 });
+    const installNew = (w: ReturnType<typeof prodWorld>) => {
+      writeFileSync(join(w.bin, 'install-new'), '#!/usr/bin/env bash\nmkdir -p node_modules && echo new > node_modules/new-marker\n', { mode: 0o755 });
+      return { HATCHABOT_INSTALL_CMD: join(w.bin, 'install-new') };
+    };
+
+    for (const signal of ['KILL', 'TERM']) {
+      it(`SIG${signal} once the new release is serving, while the old dependencies are removed: the next deploy leaves the new release alone`, () => {
+        const w = prodWorld();
+        cutRm(w, 'marker', signal);
+        const first = w.deploy(installNew(w));
+        // Stopped by a signal it can see, it says what is true: deployed (HB-0266).
+        if (signal === 'TERM') { expect(first.status, first.stdout + first.stderr).toBe(0); expect(first.stdout).toContain('Serving 1.1.0.'); }
+        expect(w.at()).toBe('v1.1.0');
+        expect(readFileSync(join(w.prod, 'node_modules', 'new-marker'), 'utf8')).toBe('new\n');
+        const next = w.deploy(installNew(w));
+        expect(next.stdout).not.toMatch(/cut off part-way/);
+        expect(next.status, next.stdout + next.stderr).toBe(0);
+        expect(next.stdout).toMatch(/currently v1\.1\.0/);
+        expect(w.at()).toBe('v1.1.0');
+        expect(readFileSync(join(w.prod, 'node_modules', 'new-marker'), 'utf8')).toBe('new\n');
+      });
+    }
+
+    it('SIGTERM while a stale node_modules.prev is removed, before anything moved: production\'s node_modules is left alone', () => {
+      const w = prodWorld();
+      mkdirSync(join(w.prod, 'node_modules.prev')); writeFileSync(join(w.prod, 'node_modules.prev', 'stale'), 'x');
+      cutRm(w, 'stale', 'TERM');
+      const r = w.deploy(installNew(w));
+      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.stdout).not.toMatch(/Rolling back/);
+      expect(w.at()).toBe('v1.0.0');
+      expect(readFileSync(join(w.prod, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+      expect(lines(w.log).filter((l) => l.startsWith('systemctl'))).toEqual([]);
+      const next = w.deploy(installNew(w));
+      expect(next.stdout).not.toMatch(/cut off part-way/);
+      expect(next.status, next.stdout + next.stderr).toBe(0);
+    });
   });
 
   it('takes its lock in the user\'s state folder, not /tmp', () => {

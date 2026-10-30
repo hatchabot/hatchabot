@@ -15,7 +15,7 @@ import { openclawConfigPath } from './openclawImport.js';
 import { sq } from './apps.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
-import { listCrons, type Cron } from './crons.js';
+import { ensureConversation, listCrons, type Cron } from './crons.js';
 
 function stateDbPath(): string {
   return process.env.OPENCLAW_STATE_DB || resolve(homedir(), '.openclaw/state/openclaw.sqlite');
@@ -39,7 +39,9 @@ export interface SourceCron {
    *  ("no route") and, when it does route, delivers the isolated agent's chatty
    *  final reply. Carrying them makes an adopted cron reach the same chat it
    *  did before. */
-  sessionTarget?: string; // main | isolated
+  sessionTarget?: string; // main | isolated | current | session:<key>
+  /** The conversation a `current` task is bound to (`agent:<id>:…`). */
+  sessionKey?: string;
   deliveryMode?: string; // announce | none
   deliveryChannel?: string; // telegram | last | …
   deliveryTo?: string; // Telegram chatId / E.164
@@ -213,7 +215,7 @@ export function readOpenclawCronStore(sourceAgentId: string, dbPath = stateDbPat
     if (!cols.has('schedule_kind') || !cols.has('payload_kind')) return { crons: [], error: 'the task store has a shape this Hatchabot does not know' };
     // Delivery columns are newer; select them only if present so an older
     // source DB still imports (just without the delivery target).
-    const deliveryCols = ['session_target', 'delivery_mode', 'delivery_channel', 'delivery_to', 'delivery_account_id'].filter((c) => cols.has(c));
+    const deliveryCols = ['session_target', 'session_key', 'delivery_mode', 'delivery_channel', 'delivery_to', 'delivery_account_id'].filter((c) => cols.has(c));
     const rows = db
       .prepare(
         `SELECT name, description, schedule_kind, schedule_expr, schedule_tz, every_ms, at,
@@ -233,6 +235,7 @@ export function readOpenclawCronStore(sourceAgentId: string, dbPath = stateDbPat
         payloadKind: (r.payload_kind as string) ?? undefined,
         payloadMessage: (r.payload_message as string) ?? undefined,
         sessionTarget: (r.session_target as string) ?? undefined,
+        sessionKey: (r.session_key as string) || undefined,
         deliveryMode: (r.delivery_mode as string) ?? undefined,
         deliveryChannel: (r.delivery_channel as string) ?? undefined,
         deliveryTo: (r.delivery_to as string) ?? undefined,
@@ -264,6 +267,7 @@ function sourceCronOfJob(j: Record<string, any>): SourceCron {
     payloadKind: str(p.kind),
     payloadMessage: str(p.message) ?? str(p.text) ?? str(p.command),
     sessionTarget: str(j.sessionTarget),
+    sessionKey: str(j.sessionKey),
     // The gateway reads a stored delivery with no mode as "announce" (crons.ts pendingRetarget).
     deliveryMode: str(d.mode) ?? (j.delivery && typeof j.delivery === 'object' ? 'announce' : undefined),
     deliveryChannel: str(d.channel),
@@ -320,6 +324,9 @@ export function cronAddArgs(c: SourceCron, slug: string): string[] | null {
   // chat instead of falling back to `announce → last` (no route → fail-closed,
   // or the isolated agent's chatty reply leaking to whoever chatted last).
   if (c.sessionTarget) args.push('--session', c.sessionTarget);
+  // Bound to a conversation: its key (remapped to this agent by migrateCrons).
+  // Without it a `current` task had no conversation to write its result to.
+  if (c.sessionTarget === 'current' && c.sessionKey) args.push('--session-key', c.sessionKey);
   if (c.deliveryMode === 'announce') {
     args.push('--announce');
     // A telegram destination is stored either bare (1000000001) or channel-
@@ -333,6 +340,41 @@ export function cronAddArgs(c: SourceCron, slug: string): string[] | null {
   }
   return args;
 }
+
+/**
+ * A source conversation key (`agent:<id>:<rest>`) as the adopted agent's,
+ * which runs as `slug`. Undefined for another agent's key, or one of no known
+ * shape: that binding cannot be carried. A key with no `agent:` prefix (a
+ * custom `session:standup`) is already the running agent's own: OpenClaw
+ * scopes it to the agent that runs it (toAgentStoreSessionKey), so it is
+ * carried as it is.
+ */
+export function remapSessionKey(key: string, sourceAgentId: string, slug: string): string | undefined {
+  if (!/^agent:/i.test(key.trim())) return key;
+  const m = /^agent:([^:]+):(.+)$/.exec(key);
+  return m && m[1]!.toLowerCase() === sourceAgentId.trim().toLowerCase() ? `agent:${slug}:${m[2]}` : undefined;
+}
+
+/**
+ * Where a source task runs, as the adopted agent's: a `current` task's
+ * conversation and a `session:<key>` target are the source agent's, and were
+ * carried as they were (`current` lost its key altogether, HB-0288). Null when
+ * the binding is to a conversation that cannot be mapped.
+ */
+function remapSession(c: SourceCron, sourceAgentId: string, slug: string): Pick<SourceCron, 'sessionTarget' | 'sessionKey'> | null {
+  if (c.sessionTarget === 'current' && c.sessionKey) {
+    const key = remapSessionKey(c.sessionKey, sourceAgentId, slug);
+    return key ? { sessionTarget: 'current', sessionKey: key } : null;
+  }
+  if (c.sessionTarget?.startsWith('session:')) {
+    const key = remapSessionKey(c.sessionTarget.slice('session:'.length), sourceAgentId, slug);
+    return key ? { sessionTarget: `session:${key}`, sessionKey: undefined } : null;
+  }
+  return { sessionTarget: c.sessionTarget, sessionKey: undefined };
+}
+
+/** A recipient written bare or channel-qualified (`telegram:…`) is one recipient. */
+const bareTo = (to: string | undefined) => to?.replace(/^telegram:/i, '');
 
 export interface CronMigrateResult {
   total: number;
@@ -396,8 +438,16 @@ export async function migrateCrons(
   let carried = 0;
   let failed = 0;
   for (const c of crons) {
+    const session = remapSession(c, entry.id, agent.slug);
+    if (!session) {
+      // Reported, not carried unbound: it would have run somewhere else.
+      failed++;
+      log('cron.migrate_unmappable_session', { name: c.name ?? '(unnamed)', sessionTarget: c.sessionTarget });
+      continue;
+    }
     const rewritten: SourceCron = {
       ...c,
+      ...session,
       payloadMessage: applyReplacements(c.payloadMessage, pairs),
       description: applyReplacements(c.description, pairs),
     };
@@ -408,8 +458,16 @@ export async function migrateCrons(
       : c.scheduleKind === 'every' ? j.everyMs === c.everyMs
       : c.scheduleKind === 'at' ? j.atMs !== undefined && j.atMs === (/^\d+$/.test(String(c.at ?? '').trim()) ? Number(c.at) : Date.parse(String(c.at)))
       : true;
+    // And who it goes to: the same briefing for two recipients is two tasks,
+    // and the second was counted as carried and never added (HB-0287). Only a
+    // named recipient is compared: an implicit one is re-pointed after the
+    // adopt (crons.ts retargetImplicitCrons), so the earlier copy no longer has it.
+    const kindOf = (k: string | undefined) => (k === 'systemEvent' || k === 'command' ? k : 'agentTurn');
+    const named = c.deliveryMode === 'announce' && !!c.deliveryChannel && c.deliveryChannel !== 'last' && !!c.deliveryTo;
+    const sameRecipient = (j: Cron) => !named || (j.announce === true && j.deliveryChannel === c.deliveryChannel && bareTo(j.deliveryTo) === bareTo(c.deliveryTo));
     const same = there.find((j) => !j.system && !!c.name && j.name === c.name && j.scheduleKind === c.scheduleKind
-      && sameTime(j) && (j.message ?? '') === (rewritten.payloadMessage ?? ''));
+      && sameTime(j) && (j.message ?? '') === (rewritten.payloadMessage ?? '')
+      && kindOf(j.payloadKind) === kindOf(c.payloadKind) && sameRecipient(j));
     if (same) {
       carried++;
       log('cron.migrate_already_present', { name: c.name, id: same.id });
@@ -422,6 +480,10 @@ export async function migrateCrons(
       continue;
     }
     try {
+      // A bound task's conversation must exist before it runs (crons.ts ensureConversation); best-effort.
+      if (rewritten.sessionTarget === 'current' && rewritten.sessionKey) {
+        await ensureConversation(deps.provider, agent.runtimeRef, agent.slug, rewritten.sessionKey).catch(() => false);
+      }
       const res = await deps.provider.exec(agent.runtimeRef, args);
       if (res.code === 0) carried++;
       else {

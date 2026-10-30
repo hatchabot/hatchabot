@@ -35,6 +35,8 @@ if [ "${1:-}" = --install ]; then
   valid "${2:-}" || { echo "Usage: $0 --install stable|beta|latest"; exit 1; }
   command -v systemctl >/dev/null 2>&1 || { echo "This needs systemd (Linux). On a Mac, run 'hatchabot upgrade' from time to time."; exit 1; }
   mkdir -p "$UNITS"
+  # The install folder goes in ExecStart's quotes as systemd reads them: a
+  # backslash or quote escaped, % and $ doubled (install-%q, audit 2026-10-29).
   # The user manager's PATH does not include a node installed by nvm or
   # Homebrew. Quoted whole, as install-service.sh writes it (audit #044).
   # Not found here, refused: a guessed path baked into the unit failed every
@@ -49,7 +51,7 @@ Description=Hatchabot: follow the release channel chosen last (installed for $2)
 [Service]
 Type=oneshot
 Environment="PATH=$(printf '%s' "$UNIT_PATH" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g')"
-ExecStart=/usr/bin/env bash "$DIR/scripts/follow-channel.sh" $2
+ExecStart=/usr/bin/env bash "$(printf '%s' "$DIR" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g' -e 's/\$/$$/g')/scripts/follow-channel.sh" $2
 UNIT
   cat > "$UNITS/$NAME.timer" <<UNIT
 [Unit]
@@ -99,21 +101,26 @@ TARGET="$("$DIR/scripts/release-target.sh" "$CHANNEL" 2>/dev/null)" || exit 0
 [ -n "$TARGET" ] || exit 0
 if [ -f BUNDLE.json ] && [ ! -d .git ]; then CUR="$(sed -nE 's/.*"tag":"([^"]+)".*/\1/p' BUNDLE.json)"
 else CUR="$(git describe --tags --exact-match 2>/dev/null || true)"; fi
-# A bundle swap that was cut off (.swapping) may have the new BUNDLE.json in
-# already: upgrade.sh repairs it, so it runs (HB-0049).
-[ "$CUR" = "$TARGET" ] && [ ! -f .swapping ] && exit 0
-mkdir -p "$STATE"
 # This install's own records, keyed on its path as the upgrade lock is: one
 # file for every install of the user's let a release that failed on one set
 # it aside on another, which then stayed behind (audit #034). The records
 # from before (unkeyed) are taken over by the first install that looks.
 KEY="$(printf %s "$DIR" | cksum | cut -d' ' -f1)"
+# A bundle swap that was cut off (.swapping) may have the new BUNDLE.json in
+# already, and a git install's upgrade killed part-way (its record beside the
+# lock) the new release checked out with half its dependencies: upgrade.sh
+# repairs both, so it runs (HB-0049, HB-0266).
+[ "$CUR" = "$TARGET" ] && [ ! -f .swapping ] && [ ! -f "$STATE/upgrade-$KEY.from" ] && exit 0
+mkdir -p "$STATE"
 FAILED="$STATE/follow-channel-failed-$KEY"
 TRIES="$STATE/follow-channel-tries-$KEY"; MAX_TRIES=8
 for r in failed tries; do
   [ ! -f "$STATE/follow-channel-$r" ] || [ -e "$STATE/follow-channel-$r-$KEY" ] || mv -f "$STATE/follow-channel-$r" "$STATE/follow-channel-$r-$KEY" || true
 done
-if [ "$(cat "$FAILED" 2>/dev/null)" = "$TARGET" ]; then exit 0; fi
+# A release set aside stays aside, but not with a cut swap or a killed
+# upgrade to repair: upgrade.sh puts the earlier release back first, then
+# tries this one once more.
+if [ ! -f .swapping ] && [ ! -f "$STATE/upgrade-$KEY.from" ] && [ "$(cat "$FAILED" 2>/dev/null)" = "$TARGET" ]; then exit 0; fi
 # A release whose install keeps failing (exit 3: npm ci against a lockfile
 # that does not match, a driver that will not compile) is not tried every ten
 # minutes for ever: after each failure in a row the wait doubles (10 min,

@@ -7,7 +7,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import { buildConfigCommands } from '../src/openclaw/configWriter.js';
-import { BROWSER_CDP_URL, browserImage, browserSweep } from '../src/orchestrator/browser.js';
+import { BROWSER_CDP_URL, browserImage, browserSweep, containerOf } from '../src/orchestrator/browser.js';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
 
 /**
@@ -68,6 +68,37 @@ describe('the sweep keeps each machine\'s browsers in step with its agents', () 
     const r = await browserSweep(w.deps);
     expect(r).toEqual({ started: [], removed: [], failed: [] });
     expect(w.p.browsers.has('hatchabot-off')).toBe(true);
+  });
+});
+
+describe('a legacy agent (docker://<uuid>) gets its browser beside its real container (HB-0325)', () => {
+  it('the sweep names the container by the provider\'s rule, and keeps the browser it made', async () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: '1' } as never);
+    store.insertAgent({ id: 'old', ownerId: 'o', name: 'old', slug: 'old', state: 'RUNNING', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    store.setAgentRuntimeRef('old', 'docker://12345678-abcd-4321-abcd-123456789012');
+    store.setAgentBrowser('old', true);
+    const naming = new LocalDockerProvider({ docker: '/nonexistent/docker', image: 'test-image:latest' });
+    const browsers = new Map<string, boolean>();
+    const started: string[] = [];
+    const p = {
+      containerName: (ref: string) => naming.containerName(ref),
+      listBrowsers: async () => [...browsers.keys()].map((c) => ({ name: `${c}-browser`, agentContainer: c, running: true })),
+      stopBrowser: async (c: string) => { browsers.delete(c); },
+      ensureBrowser: async (spec: { agentContainer: string }) => { started.push(spec.agentContainer); browsers.set(spec.agentContainer, true); return 'started' as const; },
+    };
+    const deps = { store, hostIds: () => ['h1'], providerFor: () => p as never, state: { sweeping: new Map(), buildFailed: new Map() } };
+    expect((await browserSweep(deps)).started).toEqual(['agentclaw-12345678-abc']);
+    const again = await browserSweep(deps);
+    expect(again.removed).toEqual([]);
+    expect([...browsers.keys()]).toEqual(['agentclaw-12345678-abc']);
+    expect(started).toEqual(['agentclaw-12345678-abc', 'agentclaw-12345678-abc']);
+  });
+  it('without a provider rule, a docker:// ref is named by docker\'s rule; other refs by their name', () => {
+    expect(containerOf('docker://12345678-abcd-4321-abcd-123456789012')).toBe('agentclaw-12345678-abc');
+    expect(containerOf('docker://hatchabot-kitchen-helper-df918a55')).toBe('hatchabot-kitchen-helper-df918a55');
+    expect(containerOf('mock://a1')).toBe('a1');
+    expect(containerOf(undefined)).toBeUndefined();
   });
 });
 
@@ -167,7 +198,7 @@ describe('switching it on or off', () => {
 });
 
 describe('the container (docker argv)', () => {
-  function stub(agentStarted: string, browserLabel?: string) {
+  function stub(agentStarted: string, browserLabel?: string, browserMemory = 1024 ** 3, askedLabel = '') {
     const dir = mkdtempSync(join(tmpdir(), 'hb-browser-'));
     const log = join(dir, 'argv.log');
     const bin = join(dir, 'docker');
@@ -176,7 +207,7 @@ cat > /dev/null &
 printf '%s\\n' "$*" >> ${JSON.stringify(log)}
 case "$*" in
   "inspect hatchabot-a1 --format "*) echo "true|${agentStarted}" ;;
-  "inspect hatchabot-a1-browser --format "*) ${browserLabel ? `echo "true|${browserLabel}|${browserImage().image}"` : 'exit 1'} ;;
+  "inspect hatchabot-a1-browser --format "*) ${browserLabel ? `echo "true|${browserLabel}|${browserImage().image}|${askedLabel}|${browserMemory}"` : 'exit 1'} ;;
   "image inspect "*) exit 1 ;;
   "build "*) exit 0 ;;
   "run -d "*) echo newid ;;
@@ -229,5 +260,20 @@ exit 0
     const restarted = stub('2026-10-08T11:00:00Z', '2026-10-08T10:00:00Z');
     expect(await restarted.p.ensureBrowser(spec)).toBe('started');
     expect(restarted.argv()).toContain('rm -f hatchabot-a1-browser');
+  });
+  it('replaced when HATCHABOT_BROWSER_MEMORY no longer matches its limit (HB-0326)', async () => {
+    const old = stub('2026-10-08T10:00:00Z', '2026-10-08T10:00:00Z', 1024 ** 3);
+    expect(await old.p.ensureBrowser({ ...spec, memory: '2g' })).toBe('started');
+    expect(old.argv()).toContain('rm -f hatchabot-a1-browser');
+    expect(old.argv().find((l) => l.startsWith('run -d'))).toContain('--memory 2g');
+    // The same limit spelled another way is the same limit.
+    const same = stub('2026-10-08T10:00:00Z', '2026-10-08T10:00:00Z', 1536 * 1024 ** 2);
+    expect(await same.p.ensureBrowser({ ...spec, memory: '1.5G' })).toBe('running');
+    expect(await same.p.ensureBrowser({ ...spec, memory: '1536m' })).toBe('running');
+    // Where the kernel has no memory limits Docker holds 0: the label says what it was started with.
+    const noLimits = stub('2026-10-08T10:00:00Z', '2026-10-08T10:00:00Z', 0, '1g');
+    expect(await noLimits.p.ensureBrowser(spec)).toBe('running');
+    expect(await noLimits.p.ensureBrowser({ ...spec, memory: '2g' })).toBe('started');
+    expect(old.argv().find((l) => l.startsWith('run -d'))).toContain('--label hatchabot.browser-memory=2g');
   });
 });

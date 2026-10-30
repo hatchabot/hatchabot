@@ -20,7 +20,7 @@ export interface DrillVolume {
   layout: boolean | null;
   /** true: restored into a throwaway and its files found; false: that failed; null: not tried. */
   restored: boolean | null;
-  /** '' | unreadable | layout | extract | timeout | budget | nodocker */
+  /** '' | unreadable | layout | extract | timeout | budget | nodocker | missing (the set's record says it was captured; no archive) */
   note: string;
   passed: boolean;
 }
@@ -146,7 +146,7 @@ export const DRILL_KILL_MS = 90 * 60_000;
  * unchanged). The script runs under `nice`, with the server's environment
  * (its HATCHABOT_BACKUP_DIR) and its trigger for the record.
  */
-export function startDrill(now: number, trigger: 'app' | 'scheduled', onFinish?: (state: DrillRunState) => void): DrillRunState {
+export function startDrill(now: number, trigger: 'app' | 'scheduled', onFinish?: (state: DrillRunState) => void, killAfterMs = DRILL_KILL_MS): DrillRunState {
   if (runState.status === 'running') return runState;
   // Under a test runner the real script would drill this machine's real
   // backups (as "Back up now" once did, 2026-10-03): tests name their own.
@@ -170,13 +170,20 @@ export function startDrill(now: number, trigger: 'app' | 'scheduled', onFinish?:
     child = spawn('bash', ['-c', 'if command -v nice >/dev/null 2>&1; then exec nice -n 10 bash "$0"; else exec bash "$0"; fi', script], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, HATCHABOT_DRILL_TRIGGER: trigger },
+      // Its own process group, so the time limit stops the step it is in too.
+      detached: true,
     });
   } catch (err) {
     runState = { status: 'error', startedAt: now, trigger, summary: String((err as Error)?.message ?? err) };
     return runState;
   }
   // SIGTERM: the script's EXIT trap removes its throwaway volume and writes its record.
-  const killer = setTimeout(() => { lines.push('The drill took longer than 90 minutes and was stopped.'); child.kill('SIGTERM'); }, DRILL_KILL_MS);
+  // To the whole group: bash runs its TERM trap only once the command it waits
+  // for ends, and a restore step may take 15 minutes (HB-0368 review).
+  const killer = setTimeout(() => {
+    lines.push('The drill took longer than 90 minutes and was stopped.');
+    try { if (child.pid) process.kill(-child.pid, 'SIGTERM'); else child.kill('SIGTERM'); } catch { child.kill('SIGTERM'); }
+  }, killAfterMs);
   killer.unref?.();
   child.stdout?.on('data', capture);
   child.stderr?.on('data', capture);

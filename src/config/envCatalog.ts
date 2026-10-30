@@ -144,12 +144,11 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('runtime', 'HATCHABOT_GATEWAY_PORT_BASE', '19100', 'First loopback port for the agents\' own gateways.'),
   s('runtime', 'HATCHABOT_INTERNAL_URL', null, 'How agents reach this app from inside Docker. Unset: the Docker host address and PORT.'),
   s('runtime', 'HATCHABOT_HOST_ALIAS_IP', null, 'The address agents use for this machine. Unset: found automatically.'),
-  s('runtime', 'HATCHABOT_DOCKER_ROOTLESS', null, '1 or 0 to say whether Docker is rootless. Unset: detected.'),
+  s('runtime', 'HATCHABOT_DOCKER_ROOTLESS', null, '1 or 0 to say whether this machine\'s Docker is rootless (a runner\'s is always detected). Unset: detected.'),
   s('runtime', 'HATCHABOT_DOCKER_DESKTOP', null, '1 or 0 to say whether this is Docker Desktop (its agents reach this machine from loopback). Unset: detected; macOS and Windows count as Desktop.'),
   s('runtime', 'HATCHABOT_CONTAINERS_ON_LOOPBACK', null, '1 publishes agent ports on 127.0.0.1 only. Unset: set automatically under rootless Docker.'),
   s('runtime', 'HATCHABOT_OPENCLAW_GATEWAY_UNIT', 'openclaw-gateway', 'The systemd unit of an OpenClaw install on this machine, for bringing its agents in.'),
   s('runtime', 'HATCHABOT_CLAUDE_BIN', null, 'Path to the claude command, if it is not on PATH.'),
-  s('runtime', 'HATCHABOT_SSH_DIR', null, 'Where runner SSH keys and config live. Unset: ~/.ssh.'),
   s('runtime', 'HATCHABOT_BROWSER_MEMORY', '1g', 'Memory limit of each agent\'s own browser (docs/browser.md).'),
   s('runtime', 'HATCHABOT_BROWSER_SWEEP_MS', '60000', 'How often the agents\' browsers are brought in step with them (started, moved to a restarted agent, removed).'),
 
@@ -195,6 +194,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
 
   // Never in production
   s('never', 'HATCHABOT_ALLOW_OWNER_HEADER', null, '1 lets a request header choose the owner. For tests only; the security check flags it as critical.'),
+  s('never', 'HATCHABOT_SSH_DIR', null, 'Where runner setup writes its SSH key and config, instead of ~/.ssh. For tests only: ssh and Docker read only ~/.ssh/config, so runners set up with it are not reached unless that file includes it.'),
 ];
 
 /**

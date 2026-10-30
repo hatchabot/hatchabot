@@ -37,6 +37,8 @@ DIR="$HATCHABOT_UPGRADE_DIR"; cd "$DIR"
 ROLLED_BACK=0   # 1 once the new release was tried and did not come up
 CHANGING=0      # 1 while the tree is part-way between two releases
 RESTARTED=0     # 1 once the service was restarted onto the new release
+ASIDE=0         # 1 once a git install's node_modules was moved aside
+SERVING=0       # 1 once the new release is up: only tidying is left
 LOCK=""; STAGE=""
 undo() { :; }   # set below, per kind of install
 finish() {
@@ -45,6 +47,10 @@ finish() {
   if [ "$rc" != 0 ] && [ "$CHANGING" = 1 ]; then
     CHANGING=0; rc=3; echo "The upgrade stopped part-way — putting ${CUR:-the previous release} back."; undo
   fi
+  # Stopped once the new release was up (removing what it replaced, fetching
+  # the runtime image): it is upgraded, not a failure to try again (HB-0266).
+  # What was half removed goes with the next upgrade.
+  if [ "$SERVING" = 1 ]; then rm -f "$SWAPPING" "$FROM_FILE"; rc=0; fi
   # Only its holder lets it go: a lock cleared and taken by another run is theirs.
   [ -z "$LOCK" ] || [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$ME" ] || rm -rf "$LOCK"
   rm -f "$HATCHABOT_UPGRADE_COPY"; [ -z "$STAGE" ] || rm -rf "$STAGE"
@@ -166,29 +172,45 @@ fi
 # release back first, then upgrades as usual.
 SWAPPING="$DIR/.swapping"; PREV="$DIR/.prev-release"
 # A name a bundle's file list may not touch: a path, or what is this machine's.
-not_ours() { case "$1" in ''|*/*|.|..|.env|data|.swapping|.prev-release) return 0 ;; esac; return 1; }
-# Back to the release in .prev-release: what came in from the new bundle
-# removed, the previous files moved back. Run again after a cut, it goes on.
+not_ours() { case "$1" in ''|*/*|.|..|.env|data|.swapping|.swapping.tmp|.prev-release) return 0 ;; esac; return 1; }
+# Back to the release in .prev-release: the previous files moved back, then
+# what else came in from the new bundle removed. Run again after a cut, it
+# goes on: each file's `in` line is struck from .swapping before it moves
+# back, so one already back is the old release's, never removed as the new
+# one's. It was, and a rollback cut off after putting a file back deleted it
+# for good (HB-0279). Struck, not marked: an upgrade.sh from before this
+# reads only `in` lines, and scripts/ goes back first (cut off, the tree
+# holds an upgrade.sh that goes on), so the old one may finish the job.
 restore_prev() {
-  local line f
+  local line f n
+  for f in "$PREV"/scripts "$PREV"/* "$PREV"/.[!.]*; do
+    [ -e "$f" ] || continue
+    n="${f##*/}"
+    # One of that name here, the new one, would take the old one inside
+    # itself, a directory in a directory (HB-0071).
+    rm -rf "${DIR:?}/$n"
+    if [ -f "$SWAPPING" ] && grep -qxF "in $n" "$SWAPPING"; then
+      { grep -vxF "in $n" "$SWAPPING" || [ $? = 1 ]; } > "$SWAPPING.tmp" && mv -f "$SWAPPING.tmp" "$SWAPPING" || return 1
+    fi
+    mv "$f" "$DIR/" || return 1
+  done
+  # The new release's unpacked bundle, beside the install.
+  STAGED="$(sed -n 's/^stage //p' "$SWAPPING" 2>/dev/null | sed -n 1p)"
+  case "$STAGED" in "$(dirname "$DIR")"/.hatchabot-next-*) ;; *) STAGED="" ;; esac
   if [ -f "$SWAPPING" ]; then
     while IFS= read -r line; do
       case "$line" in "in "?*) f="${line#in }" ;; *) continue ;; esac
+      # Still in the bundle, the new one never moved in: the one here is the
+      # old one. An upgrade.sh from before v2.171.0 wrote `in` before moving
+      # the old one aside, and a cut in between lost it (HB-0279).
+      if [ -n "$STAGED" ] && { [ -e "$STAGED/hatchabot/$f" ] || [ -L "$STAGED/hatchabot/$f" ]; }; then continue; fi
       not_ours "$f" || rm -rf "${DIR:?}/$f"
     done < "$SWAPPING"
   fi
-  for f in "$PREV"/* "$PREV"/.[!.]*; do
-    [ -e "$f" ] || continue
-    # One of that name still here (moved in before it was written down) would
-    # take the old one inside itself, a directory in a directory (HB-0071).
-    rm -rf "${DIR:?}/${f##*/}"
-    mv "$f" "$DIR/" || return 1
-  done
   rm -rf "$PREV"
-  # The new release's unpacked bundle, beside the install, goes with it.
-  STAGED="$(sed -n 's/^stage //p' "$SWAPPING" 2>/dev/null | sed -n 1p)"
-  case "$STAGED" in "$(dirname "$DIR")"/.hatchabot-next-*) rm -rf "$STAGED" ;; esac
-  rm -f "$SWAPPING"
+  # The unpacked bundle goes with it.
+  [ -z "$STAGED" ] || rm -rf "$STAGED"
+  rm -f "$SWAPPING" "$SWAPPING.tmp"
 }
 if [ "$BUNDLED" = 1 ] && [ -f "$SWAPPING" ]; then
   echo "An upgrade of $DIR was cut off part-way — putting $(sed -n 's/^from //p' "$SWAPPING" | sed -n 1p) back first."
@@ -294,10 +316,12 @@ if [ "$BUNDLED" = 1 ]; then
   while IFS= read -r f; do
     [ -n "$f" ] && [ -e "$NEW/$f" ] || continue
     ! not_ours "$f" || continue
-    printf 'in %s\n' "$f" >> "$SWAPPING"
     # One already here goes aside, whether the old release listed it or not:
-    # moved onto, a folder takes the new one inside itself (HB-0071).
+    # moved onto, a folder takes the new one inside itself (HB-0071). Aside
+    # before it is written down: written first, a cut in between left the
+    # old one here under a name the rollback removes (HB-0279).
     if [ -e "$DIR/$f" ]; then mv "$DIR/$f" "$PREV/" || { echo "Could not move $DIR/$f aside."; exit 3; }; fi
+    printf 'in %s\n' "$f" >> "$SWAPPING"
     mv "$NEW/$f" "$DIR/" || { echo "Could not move the new $f into $DIR."; exit 3; }
   done < <(grep -x scripts "$NEW/.bundle-files" || true; grep -vx scripts "$NEW/.bundle-files" || true)
   # What the old release had and this one does not.
@@ -309,23 +333,41 @@ if [ "$BUNDLED" = 1 ]; then
   done <<< "$OLDLIST"
   RESTARTED=1; echo restarted >> "$SWAPPING"
   PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh" || { CHANGING=0; ROLLED_BACK=1; rollback_bundle || true; exit 1; }
-  CHANGING=0
+  CHANGING=0; SERVING=1
   rm -f "$SWAPPING"
-  rm -rf "$PREV"
   echo "Now on $TARGET."
+  rm -rf "$PREV"
 else
 # `npm ci` deletes node_modules before installing, so a registry outage or a
 # full disk used to leave the machine with NO dependencies (and the rollback's
 # own npm ci failing under the same fault). Keep the working tree aside until
 # the new one is in.
-restore_deps() { rm -rf node_modules; [ -d node_modules.prev ] && mv node_modules.prev node_modules; return 0; }
+# Only once the working one was moved aside (ASIDE): stopped while a stale
+# node_modules.prev was being removed, the rollback deleted the only working
+# node_modules (HB-0266).
+restore_deps() {
+  if [ -d node_modules.prev ]; then rm -rf node_modules; mv node_modules.prev node_modules
+  elif [ "$ASIDE" = 1 ]; then rm -rf node_modules; fi
+  return 0
+}
 # The service is restarted only if it was restarted onto the new release: an
 # install that failed left the old one running, and restarting it anyway
 # restarted production every ten minutes while a release that cannot install
 # kept failing (review, 2026-10-09).
+# A checkout cut off part-way (a signal to the whole unit) leaves HEAD and
+# the index on CUR with files rewritten, and a plain checkout of CUR kept
+# them: mixed code, refused as local changes by every later upgrade (HB-0266).
+# Then the new release first, and back, forced: tracked files only (the
+# upgrade started from a clean tree), so .env and data/ stay.
+back_to_cur() {
+  if [ "$(git rev-parse HEAD)" != "$(git rev-parse "$TARGET^{commit}")" ] && [ -n "$(git status --porcelain)" ]; then
+    git checkout --quiet --force "$TARGET" || return 1
+  fi
+  git checkout --quiet --force "$CUR"
+}
 rollback() {
   echo "Rolling back to ${CUR}…"
-  git checkout --quiet "$CUR" && restore_deps || return 1
+  back_to_cur && restore_deps || return 1
   if [ "$RESTARTED" = 1 ]; then $RESTART; fi
 }
 undo() { rollback && rm -f "$FROM_FILE"; }
@@ -333,17 +375,21 @@ undo() { rollback && rm -f "$FROM_FILE"; }
 # left node_modules.prev as the only working copy. Put back first: deleted as
 # a leftover, a failed install then had nothing to roll back to (audit #033).
 [ -d node_modules ] || [ ! -d node_modules.prev ] || mv node_modules.prev node_modules
+# A leftover, removed before the record is written: half removed under it,
+# the next run's repair would move it in as the old release's.
+rm -rf node_modules.prev
 CHANGING=1
 printf 'from %s\n' "$CUR" > "$FROM_FILE"
-rm -rf node_modules.prev; [ -d node_modules ] && mv node_modules node_modules.prev
+if [ -d node_modules ]; then mv node_modules node_modules.prev; fi; ASIDE=1
 git checkout --quiet "$TARGET"
 # Exit 3: the install step failed (usually transient) and the old release is back untouched.
 $INSTALL || { CHANGING=0; { rollback && rm -f "$FROM_FILE"; } || true; exit 3; }
 RESTARTED=1; echo restarted >> "$FROM_FILE"
 $RESTART || { CHANGING=0; ROLLED_BACK=1; { rollback && rm -f "$FROM_FILE"; } || true; exit 1; }
-CHANGING=0
-rm -rf node_modules.prev; rm -f "$FROM_FILE"
-echo "Now on $TARGET."
+CHANGING=0; SERVING=1
+# The record first: left behind beside a half-removed node_modules.prev, the
+# next run moved that in over the release now serving.
+rm -f "$FROM_FILE"; echo "Now on $TARGET."; rm -rf node_modules.prev || true
 fi
 
 # The runtime image this release defaults to (OpenClaw X in the Dockerfile),

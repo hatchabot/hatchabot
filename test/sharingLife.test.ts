@@ -7,7 +7,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
@@ -78,6 +78,17 @@ describe('what a shared copy mentions', () => {
     expect(s.emails).toBe(4);
     expect(s.tokens).toBe(1); // the credentials in the repo address
     expect(s.hits.map((h) => h.where)).toEqual(expect.arrayContaining(['AGENTS.md', 'Description', 'Scheduled task “Digest”', 'Setup field “Contact”', 'Data source “docs”']));
+  });
+
+  it("scans the agent's name, which travels in the file too (HB-0291)", () => {
+    const m: TemplateManifest = {
+      format: 'hatchabot-template', version: 1, exportedAt: 'now',
+      agent: { name: 'pantry@example.org', persona: '' }, files: {}, ai: { vendor: 'anthropic' },
+      dataNeeds: [], envNeeds: [], parameters: [],
+    };
+    const s = scanTemplate(m);
+    expect(s.emails).toBe(1);
+    expect(s.hits[0]).toMatchObject({ where: 'Name', kind: 'email' });
   });
 
   it('strips the pre-rename install notes heading too', () => {
@@ -152,6 +163,31 @@ describe('a clone carries the daily notes and USER.md', () => {
     const out = await readCloneMemory(localShell(dir, 'kitchen'), 'ref', 'kitchen');
     expect(out.files['memory/a/b/c/note.md']).toBe('deep\n');
     expect(out.skipped).toEqual(['memory/a/b/c/d/e/f/g/h/']);
+  });
+
+  it.skipIf(process.getuid?.() === 0)('a folder or note that cannot be read is listed, not left out unsaid (HB-0295)', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hb-clone-mem-'));
+    mkdirSync(join(dir, 'memory', 'private'), { recursive: true });
+    writeFileSync(join(dir, 'memory', 'private', 'note.md'), 'keep me\n');
+    writeFileSync(join(dir, 'memory', 'locked.md'), 'locked\n');
+    writeFileSync(join(dir, 'memory', 'open.md'), 'open\n');
+    chmodSync(join(dir, 'memory', 'private'), 0);
+    chmodSync(join(dir, 'memory', 'locked.md'), 0);
+    try {
+      const out = await readCloneMemory(localShell(dir, 'kitchen'), 'ref', 'kitchen');
+      expect(out.failed).toBeUndefined();
+      expect(out.files).toEqual({ 'memory/open.md': 'open\n' });
+      expect(out.skipped.sort()).toEqual(['memory/locked.md', 'memory/private/']);
+    } finally {
+      chmodSync(join(dir, 'memory', 'private'), 0o700);
+      chmodSync(join(dir, 'memory', 'locked.md'), 0o600);
+    }
+  });
+
+  it('an agent with no memory/ folder copies its USER.md and lists nothing', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hb-clone-mem-'));
+    writeFileSync(join(dir, 'USER.md'), '# About them\n');
+    expect(await readCloneMemory(localShell(dir, 'kitchen'), 'ref', 'kitchen')).toEqual({ files: { 'USER.md': '# About them\n' }, skipped: [] });
   });
 
   it('never seeds a name that climbs out of memory/', async () => {

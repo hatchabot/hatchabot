@@ -24,8 +24,9 @@ first trial one question took 315,000 tokens (2026-10-08).
 - Each agent with the browser on gets **its own Chromium**, in a container
   beside the agent's. It shares only the agent's network (so the agent reaches
   it at `127.0.0.1:9222` and nothing else can), not its files.
-- It has a memory limit of its own (1 GB; `HATCHABOT_BROWSER_MEMORY`). Agents
-  without the browser run none, and their browser tool is switched off.
+- It has a memory limit of its own (1 GB; `HATCHABOT_BROWSER_MEMORY`). A
+  change reaches running browsers at the next sweep, which replaces them.
+  Agents without the browser run none, and their browser tool is switched off.
 - Its profile lives in memory: **nothing it logs into is kept** across a
   restart of the agent. It starts with no cookies and no saved logins.
 - It runs headless, with Chromium's own sandbox off (normal inside a

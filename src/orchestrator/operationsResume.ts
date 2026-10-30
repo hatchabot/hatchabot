@@ -10,7 +10,7 @@ import { AgentBusyError, whileBusy } from './busy.js';
 import { recoverMigrate, resumeMigrate, type MigrateDeps } from './migrate.js';
 import { recoverMoveHost, resumeMoveHost } from './moveHost.js';
 import { BACKGROUND_KINDS, currentBootId, handleFor, markInterrupted, rethrowIfCrash, type Operation } from './operations.js';
-import { reapplyCurrentSettings, runProvisionSteps, type ProvisionDeps } from './provision.js';
+import { finishInterruptedRebuild, reapplyCurrentSettings, runProvisionSteps, type ProvisionDeps } from './provision.js';
 import { applyReconcileRule } from './reconcile.js';
 import { recoverSnapshotRestore, resumeSnapshotRestore } from './snapshots.js';
 import { resumeImport } from './transfer.js';
@@ -73,7 +73,8 @@ function depsFor(ctx: ResumeContext, op: Operation): MigrateDeps | undefined {
   };
 }
 
-async function runKind(ctx: ResumeContext, op: Operation, action: string | undefined, askAttempts?: number): Promise<void> {
+/** `busyHeld`: the caller holds the agent's busy flag already (the owner's choice runs under it). */
+async function runKind(ctx: ResumeContext, op: Operation, action: string | undefined, askAttempts?: number, busyHeld = false): Promise<void> {
   const log = ctx.logFor?.(op.agentId);
   switch (op.kind) {
     case 'move-host': {
@@ -123,7 +124,7 @@ async function runKind(ctx: ResumeContext, op: Operation, action: string | undef
     }
     case 'rebuild':
     case 'provision':
-      return resumeBackground(ctx, op);
+      return resumeBackground(ctx, op, busyHeld);
     case 'install-image':
       handleFor(ctx.store, op.id).fail('The image copy was interrupted by a restart — install it again.', {
         actions: [{ action: 'install-again', label: 'Install again' }], recommended: 'install-again',
@@ -149,7 +150,7 @@ async function runKind(ctx: ResumeContext, op: Operation, action: string | undef
  * (its snapshot, its checkpoint turn) — is queued again. A machine that does
  * not answer leaves it interrupted, asked again by the 10-minute pass.
  */
-async function resumeBackground(ctx: ResumeContext, op: Operation): Promise<void> {
+async function resumeBackground(ctx: ResumeContext, op: Operation, busyHeld = false): Promise<void> {
   const h = handleFor(ctx.store, op.id);
   const agent = op.agentId ? ctx.store.getAgent(op.agentId) : undefined;
   const what = op.kind === 'rebuild' ? 'rebuild' : 'setup';
@@ -189,11 +190,22 @@ async function resumeBackground(ctx: ResumeContext, op: Operation): Promise<void
     const r = await runProvisionSteps({
       store: ctx.store, secrets: ctx.secrets, provider, channel: ctx.channel, embedder: ctx.embedder, log: base,
       ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
-    }, agent.id);
+    }, agent.id, { busyHeld });
     if (r.agent.state === 'RUNNING') h.done('Interrupted by a restart after it came up; the rest of its setup ran again, and it is running.');
     else if (r.agent.state === 'FAILED') h.fail(r.agent.stateReason ?? 'Setup was interrupted by a restart — tap Retry.');
     else if (r.agent.pendingAction) h.fail('Setup was interrupted by a restart while it waited for a step from you — finish that step on its page.');
     else h.fail('Setup was interrupted by a restart.');
+    return;
+  }
+  // A rebuild likewise: up after its new container was made, its steps after
+  // health (sources, hook, parked schedules) had not run (HB-0301).
+  if (op.kind === 'rebuild' && status?.phase === 'running' && status.healthy) {
+    const r = await finishInterruptedRebuild({
+      store: ctx.store, secrets: ctx.secrets, provider, channel: ctx.channel, embedder: ctx.embedder, log: base,
+      ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
+    }, agent.id, { busyHeld });
+    if (r?.state === 'RUNNING') h.done('Interrupted by a restart after it came up; the rest of its rebuild ran again, and it is running.');
+    else h.fail(r?.stateReason ?? 'The rebuild was interrupted by a restart — tap Retry.');
     return;
   }
   if (applyReconcileRule(ctx.store, agent, status, log) === 'unknown') return; // still interrupted: the next pass asks again
@@ -259,7 +271,8 @@ export async function recoverOperation(ctx: ResumeContext, opId: string, action:
   // "Try again" (offered when putting it right failed) runs the kind's restart
   // rule again; the other choices are the kind's own.
   const own = CHOICES.has(op.kind) && (action !== 'retry' || OWN_RETRY.has(op.kind));
-  const run = () => runKind(ctx, op, own ? action : undefined);
+  // Run under the busy flag taken here: the restart rule must not take it again (HB-0301).
+  const run = () => runKind(ctx, op, own ? action : undefined, undefined, !!op.agentId);
   try {
     if (op.agentId) await whileBusy(op.agentId, run);
     else await run();

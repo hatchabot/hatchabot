@@ -30,9 +30,10 @@ export interface Cron {
   everyMs?: number;
   /** For kind 'at': the one-shot time in ms. */
   atMs?: number;
-  /** 'agentTurn' (a prompt fired at the agent) | 'command' (a gateway shell). */
+  /** 'agentTurn' (a prompt fired at the agent) | 'systemEvent' (a main-session
+   *  reminder) | 'command' (a gateway shell). */
   payloadKind?: string;
-  /** The prompt (agentTurn) or command (command), for a preview. */
+  /** The prompt (agentTurn), reminder text (systemEvent) or command (command), for a preview. */
   message?: string;
   /** What the scheduler knows about its runs — without these nothing could
    *  tell a task that fires from one that silently never does. */
@@ -52,6 +53,9 @@ export interface Cron {
   sessionTarget?: string;
   /** The conversation a 'current' task is bound to (its result is written there). */
   sessionKey?: string;
+  /** Who an announcing task names as its recipient (the gateway's delivery.channel / delivery.to). */
+  deliveryChannel?: string;
+  deliveryTo?: string;
 }
 
 /** One past run of a task: what the agent produced, and whether it arrived. */
@@ -90,8 +94,13 @@ function normalizeCron(j: Record<string, any>): Cron {
       && (!j.delivery.channel || j.delivery.channel === 'last' || !j.delivery.to),
     sessionTarget: typeof j.sessionTarget === 'string' ? j.sessionTarget : undefined,
     sessionKey: typeof j.sessionKey === 'string' && j.sessionKey ? j.sessionKey : undefined,
+    deliveryChannel: typeof j.delivery?.channel === 'string' && j.delivery.channel ? j.delivery.channel : undefined,
+    deliveryTo: typeof j.delivery?.to === 'string' && j.delivery.to ? j.delivery.to : undefined,
+    // A system event keeps its words in `text`: unread, a main-session
+    // reminder showed no text and its edit lost it (HB-0286).
     message:
       typeof p.message === 'string' ? p.message
+      : typeof p.text === 'string' ? p.text
       : typeof p.command === 'string' ? p.command
       : typeof p.shell === 'string' ? p.shell
       : undefined,
@@ -355,23 +364,30 @@ export async function retargetImplicitCrons(
   const to = await usableTarget(provider, runtimeRef, target);
   let changed = 0, failed = 0;
   const stillHeld = new Set<string>();
+  // One that throws (a runner gone mid-pass) is a failure, not the end of the
+  // pass: a throw lost the ids of the tasks already made quiet, which then
+  // stayed quiet for good (HB-0289). Undefined = threw: it may have changed.
+  const point = (id: string, t: CronTarget | undefined, j?: Cron) => retargetCron(provider, runtimeRef, id, t, j).catch(() => undefined);
   if (!to) {
-    // Nowhere to post: quiet, and remembered so a later pass can undo it.
+    // Nowhere to post: quiet, and remembered so a later pass can undo it
+    // (one that may have gone quiet too: still announcing, it is not held).
     for (const j of waiting) stillHeld.add(j.id);
     for (const j of todo) {
-      if (await retargetCron(provider, runtimeRef, j.id, undefined)) { changed++; stillHeld.add(j.id); } else failed++;
+      const done = await point(j.id, undefined);
+      if (done) changed++; else failed++;
+      if (done !== false) stillHeld.add(j.id);
     }
     return { changed, failed, held: [...stillHeld] };
   }
   const change = isConversation(to) ? todo.filter((j) => !bound(j)) : todo;
   if (isConversation(to) && (change.length || waiting.some((j) => !bound(j)))) await ensureConversation(provider, runtimeRef, slug, to.session);
   for (const j of change) {
-    if (await retargetCron(provider, runtimeRef, j.id, to, j)) changed++; else failed++;
+    if (await point(j.id, to, j)) changed++; else failed++;
   }
   for (const j of waiting) {
     // A task bound to a conversation of its own goes back to announcing there.
     const its = isConversation(to) && bound(j) ? { session: j.sessionKey! } : to;
-    if (await retargetCron(provider, runtimeRef, j.id, its, j)) changed++; else { failed++; stillHeld.add(j.id); }
+    if (await point(j.id, its, j)) changed++; else { failed++; stillHeld.add(j.id); }
   }
   return { changed, failed, held: [...stillHeld] };
 }
@@ -530,6 +546,7 @@ export interface EditCronOptions {
   /** A new schedule: at most one of cron/everyMs. */
   cron?: string;
   everyMs?: number;
+  /** A zone to run the expression in; '' clears the one it has (the gateway's own zone then). */
   tz?: string;
 }
 
@@ -545,17 +562,37 @@ export async function editCron(
   runtimeRef: string,
   jobId: string,
   opts: EditCronOptions,
+  job?: Pick<Cron, 'payloadKind' | 'scheduleExpr' | 'scheduleTz'>,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  // A zone is cleared only by sending the schedule without one: `cron edit`
+  // reads `--tz ''` as no zone given, and `--cron` alone keeps the old zone
+  // (HB-0366). The gateway's cron.update replaces the schedule it is given.
+  // A new expression still goes through `cron edit` first, so a failed clear
+  // leaves the task on its new expression in its old zone, as the error says.
+  const clearTz = opts.tz === '' && !opts.everyMs && !!job?.scheduleTz && !!(opts.cron || job.scheduleExpr);
   const argv = ['cron', 'edit', jobId];
   if (opts.name !== undefined) argv.push('--name', opts.name);
-  if (opts.message !== undefined) argv.push('--message', opts.message);
+  // The task's own payload kind: `--message` makes a system event an agent
+  // turn, which a main-session task refuses (HB-0286).
+  if (opts.message !== undefined) argv.push(job?.payloadKind === 'systemEvent' ? '--system-event' : '--message', opts.message);
   if (opts.cron) argv.push('--cron', opts.cron);
   else if (opts.everyMs) argv.push('--every', msToEvery(opts.everyMs));
   if (opts.tz) argv.push('--tz', opts.tz);
-  if (argv.length === 3) return { ok: false, error: 'Nothing to change.' };
-  const res = await provider.exec(runtimeRef, argv);
-  if (refusedAsSystem(res)) throw new CronSystemOwnedError();
-  if (res.code !== 0) return { ok: false, error: (res.stderr || res.stdout || 'cron edit failed').slice(0, 300) };
+  if (argv.length === 3 && !clearTz) return { ok: false, error: 'Nothing to change.' };
+  if (argv.length > 3) {
+    const res = await provider.exec(runtimeRef, argv);
+    if (refusedAsSystem(res)) throw new CronSystemOwnedError();
+    if (res.code !== 0) return { ok: false, error: (res.stderr || res.stdout || 'cron edit failed').slice(0, 300) };
+  }
+  if (clearTz) {
+    const patch = { id: jobId, patch: { schedule: { kind: 'cron', expr: opts.cron || job!.scheduleExpr } } };
+    const res = await provider.exec(runtimeRef, ['gateway', 'call', 'cron.update', '--params', JSON.stringify(patch), '--json']);
+    if (refusedAsSystem(res)) throw new CronSystemOwnedError();
+    if (res.code !== 0) {
+      const why = (res.stderr || res.stdout || 'cron update failed').slice(0, 300);
+      return { ok: false, error: argv.length > 3 ? `The task was changed, but its timezone could not be cleared: ${why}` : why };
+    }
+  }
   return { ok: true };
 }
 

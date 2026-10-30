@@ -517,6 +517,25 @@ const SCENARIOS = String.raw`(() => {
         !after.some((c) => (c.method === 'POST' && /\/crons$/.test(c.path)) || c.method === 'DELETE'));
       v2Close(); window.__crons = [];
     },
+    scheduleEditClearZone: async () => {
+      // Emptying the Timezone box of a zoned task sends a zone: the viewer's
+      // ("yours if blank"), or none. It sent nothing and the old zone stayed (HB-0366).
+      window.__crons = [{ id: 'c9', name: 'Morning brief', scheduleExpr: '0 8 * * *', scheduleTz: 'Pacific/Chatham', message: 'Good morning', enabled: true, payloadKind: 'agentTurn' }];
+      try {
+        openV2Agent('a1', 'schedule');
+        await until(() => cronCache.some((c) => c.id === 'c9'));
+        editCronJob('c9');
+        eq('the form carries the zone', document.getElementById('cronTz').value, 'Pacific/Chatham');
+        const mark = window.__calls.length;
+        document.getElementById('cronTz').value = '';
+        document.getElementById('cronAddBtn').click();
+        const patched = await until(() => window.__calls.slice(mark).find((c) => c.method === 'PATCH' && c.path === '/v1/agents/a1/crons/c9'));
+        let mine = '';
+        try { mine = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { mine = ''; }
+        eq('the cleared zone is sent', patched.body, { tz: mine });
+        await until(() => document.getElementById('cronAddBtn').textContent === 'Add task');
+      } finally { cancelCronEdit(); v2Close(); window.__crons = []; }
+    },
     scheduleSaveThenSwitch: async () => {
       // A save still waiting when another agent's Schedule tab is opened and one of its tasks
       // is being edited: the save goes to the first agent, and the second edit is left alone (#69).
@@ -1758,6 +1777,29 @@ const SCENARIOS = String.raw`(() => {
         ok('the first agent\'s file is not shown for the second: ' + document.getElementById('inspFileBody').textContent, !document.getElementById('inspFileBody').textContent.includes('first agent'));
         ok('nor its conversation', !document.getElementById('inspChatBody').textContent.includes('first-agent turn'));
       } finally { window.fetch = prev; release(); if (inspectDlg.open) inspectDlg.close(); }
+    },
+    inspectEmptyMainSaysSo: async () => {
+      // HB-0307: a main conversation found but emptied by a reset is said as that, not as no conversation at all.
+      const prev = window.fetch;
+      const J = (b) => new Response(JSON.stringify(b), { status: 200, headers: { 'content-type': 'application/json' } });
+      let tools = false;
+      window.fetch = async (input, init) => {
+        const path = String(typeof input === 'string' ? input : input.url).split('?')[0];
+        if (path === '/v1/agents/a1/inspect/transcript') return J({ turns: [], sessionFile: 'sess-new', totalTurns: tools ? 451 : 0 });
+        if (path === '/v1/agents/a1/inspect') return J({ files: [], transcriptTurns: 0 });
+        return prev(input, init);
+      };
+      try {
+        await openInspect('a1', 'First');
+        await loadInspectChat();
+        const meta = document.getElementById('inspChatMeta').textContent;
+        ok('it says the main conversation is empty: ' + meta, meta.includes('main conversation is empty') && !meta.includes('No conversation found'));
+        // Records, but only tool steps among the newest: not called empty.
+        tools = true;
+        await loadInspectChat();
+        const meta2 = document.getElementById('inspChatMeta').textContent;
+        ok('records with nothing to show are not called empty: ' + meta2, meta2.includes('tool steps') && meta2.includes('451') && !meta2.includes('empty'));
+      } finally { window.fetch = prev; if (inspectDlg.open) inspectDlg.close(); }
     },
     pollFetchesLess: async () => {
       // No /members fan-out on v2, no /pairing for web-only agents, no hidden Activity card, a light backups read (night review #24/#25/#47).
@@ -4794,6 +4836,15 @@ const SCENARIOS = String.raw`(() => {
         await until(() => calls('POST', /\/v1\/backups\/drill$/).length === 1);
         await until(() => document.getElementById('bkDrillBtn').textContent === 'Drilling…');
         ok('the button waits while it runs', document.getElementById('bkDrillBtn').disabled);
+        // HB-0353: a run that failed with no record of its own is said first, in the warning colour, not behind the older pass.
+        const drill = window.__override['/v1/backups/readiness'].drill;
+        renderDrillRun({ ...drill, run: { status: 'error', startedAt: Date.parse('2026-10-09T05:10:00Z'), trigger: 'app', summary: 'Restoring 12 volumes\nThe newest backup could not be read' } });
+        const failed = document.getElementById('bkDrill');
+        ok('the failed run first: ' + failed.textContent, failed.textContent.startsWith('The latest restore drill failed: The newest backup could not be read. Before it: Last drill 2026-10-05'));
+        eq('in the warning colour', failed.style.color, 'var(--warn)');
+        // A run whose own record was written is that record: the pass after it is not called a failure.
+        renderDrillRun({ ...drill, run: { status: 'error', startedAt: Date.parse('2026-10-01T05:10:00Z'), trigger: 'app', summary: 'An old failure' } });
+        ok('an older failed run is not said: ' + failed.textContent, failed.textContent.startsWith('Last drill 2026-10-05') && !failed.textContent.includes('old failure') && failed.style.color === '');
       } finally {
         clearTimeout(bkDrillTimer); bkDrillTimer = null; aiDlg.close(); window.__answer = {};
         delete window.__override['/v1/backups']; delete window.__override['/v1/backups/readiness']; v2Readiness = null; v2ReadinessAt = 0;
@@ -5428,6 +5479,17 @@ const SCENARIOS = String.raw`(() => {
         ok('names the credential left out: ' + t, t.includes('MAIL_KEY') && t.includes('Extra credentials'));
       } finally { window.prompt = p; window.__answer = {}; }
     },
+    cloneNamesUnreadableMemory: async () => {
+      // HB-0295: a memory folder the agent could not read is named in the message, not left out unsaid.
+      const p = window.prompt;
+      window.prompt = () => 'Homework Copy';
+      window.__answer = { 'POST /v1/agents/a1/clone': [{ status: 201, body: { id: 'a-copy', name: 'Homework Copy', notCopied: [], envNotCopied: [], memoryNotCopied: ['memory/private/'] } }] };
+      try {
+        await cloneAgent('a1', 'Homework Helper');
+        const t = $('toast').textContent;
+        ok('names the folder left out: ' + t, t.includes('memory/private/') && t.includes('unreadable'));
+      } finally { window.prompt = p; window.__answer = {}; }
+    },
     healthOfflineChatNotSlow: async () => {
       // A Discord or Slack bot offline degrades health; Alerts says that, not "slow to respond" (regression audit, 2026-10-22).
       const off = v2HealthProblems({ reachable: true, status: 'degraded', ok: true, disconnected: ['discord'] });
@@ -5630,6 +5692,201 @@ const SCENARIOS = String.raw`(() => {
         eq('the cleared ones sent empty, the yes kept', sent[0].body.values, { style: '', reminders: 'true', topics: '' });
       } finally {
         a.parameters = was; window.__promptAnswer = null;
+        if (paramFormDlg.open) paramFormDlg.close();
+      }
+    },
+    // Audit of v2.170.1 (2026-10-29). HB-0265: a delete a restart interrupted leaves the agent
+    // DELETING; its Overview still offers Delete, which finishes it.
+    auditDeletingOffersDelete: async () => {
+      try {
+        await withAgents((a) => a.id === 'a1' ? { ...a, state: 'DELETING' } : undefined);
+        openV2Agent('a1', 'overview');
+        await until(() => byText('#v2AgentDlg .v2danger', 'Archive or delete'));
+        ok('a DELETING agent has Delete', !!byText('#v2AgentDlg .v2danger button', 'Delete'));
+        ok('and no Archive', !byText('#v2AgentDlg .v2danger button', 'Archive'));
+        ok('it says Delete finishes it: ' + document.querySelector('#v2AgentDlg .v2danger').textContent, document.querySelector('#v2AgentDlg .v2danger').textContent.includes('Delete… finishes it'));
+      } finally { v2Close(); await agentsCleanup(); }
+    },
+    // HB-0350: Try on agents says Chat → Memory runs first; the rebuild asks for it.
+    auditTrySavesChatFirst: async () => {
+      try {
+        window.__confirmAnswer = true; window.__confirms = [];
+        tryState = { tag: 'hatchabot-runtime:candidate', picked: new Set(['a1']) };
+        const mark = window.__calls.length;
+        await runTryOnAgents();
+        ok('the question promises it: ' + window.__confirms.at(-1), window.__confirms.at(-1).includes('Chat → Memory runs first'));
+        const sent = window.__calls.slice(mark).filter((c) => c.method !== 'GET').map((c) => [c.method, c.path, c.body]);
+        eq('pinned, then rebuilt with the checkpoint', sent, [['PATCH', '/v1/agents/a1', { image: 'hatchabot-runtime:candidate' }], ['POST', '/v1/agents/a1/rebuild', { checkpoint: true }]]);
+      } finally { tryState = null; window.__confirms = []; if (tryDlg.open) tryDlg.close(); }
+    },
+    // HB-0351: a read of a repo that answers after the dialog was opened again lands nowhere.
+    auditAppLateReadLandsNowhere: async () => {
+      const MAN = { app: 'demoapp', name: 'Demo App', tasks: [], config: { fields: [] }, connections: [] };
+      const h = auditHold();
+      try {
+        window.__answer = window.__answer || {};
+        window.__answer['POST /v1/apps/inspect'] = [{ status: 200, body: { sha: 'c0ffee0123456789c0ffee0123456789c0ffee01', manifest: MAN, connections: [], ask: [{ key: 'mode', default: 'shadow' }] } }];
+        openAppDlg('install', 'a1');
+        document.getElementById('appSource').value = '~/demoapp';
+        h.once(/^\/v1\/apps\/inspect$/, 'POST');
+        const reading = appRead();
+        await until(() => h.held.length === 1);
+        appDlg.close();
+        openAppDlg('install', 'a2');
+        document.getElementById('appSource').value = '~/otherapp';
+        await h.free(); await reading;
+        eq('the box still names the new repo', document.getElementById('appSource').value, '~/otherapp');
+        ok('the old repo is not taken', appInspected === null && !document.getElementById('appF_mode'));
+        ok('nor shown: ' + document.getElementById('appInfo').textContent, !document.getElementById('appInfo').textContent.includes('Demo App'));
+        ok('Install is still off, Read it on', document.getElementById('appGoBtn').disabled && !document.getElementById('appReadBtn').disabled);
+      } finally {
+        await h.free();
+        if (window.__answer) delete window.__answer['POST /v1/apps/inspect'];
+        if (appDlg.open) appDlg.close();
+      }
+    },
+    // HB-0283: Install pressed for A, the dialog opened on B and another repo read while A's account attached:
+    // A gets its own app; B's dialog is left as it is.
+    auditAppInstallKeepsItsTarget: async () => {
+      const MAN = { app: 'demoapp', name: 'Demo App', tasks: [], config: { fields: [] }, connections: [{ kind: 'google', purpose: 'its mailbox', field: 'mailbox' }] };
+      const OTHER = { app: 'otherapp', name: 'Other App', tasks: [], config: { fields: [] }, connections: [] };
+      const keys = ['POST /v1/apps/inspect', 'POST /v1/agents/a1/connections/attach'];
+      const h = auditHold();
+      try {
+        window.__answer = window.__answer || {};
+        window.__override['/v1/connections'] = { connections: [{ id: 'c2', kind: 'google', email: 'other@example.org', attachedTo: [] }] };
+        window.__answer['POST /v1/apps/inspect'] = [
+          { status: 200, body: { sha: 'c0ffee0123456789c0ffee0123456789c0ffee01', manifest: MAN, connections: MAN.connections, ask: [{ key: 'mailbox', type: 'email', required: true }] } },
+          { status: 200, body: { sha: 'feedc0de0123456789feedc0de0123456789feed', manifest: OTHER, connections: [], ask: [{ key: 'colour', default: 'green' }] } }];
+        window.__answer['POST /v1/agents/a1/connections/attach'] = [{ status: 200, body: { attached: true, live: true } }];
+        openAppDlg('install', 'a1');
+        document.getElementById('appSource').value = '~/demoapp';
+        await appRead();
+        document.getElementById('appConn').value = 'c2'; appConnPicked();
+        const mark = window.__calls.length;
+        h.once(/^\/v1\/agents\/a1\/connections\/attach$/, 'POST');
+        const going = appGo();
+        await until(() => h.held.length === 1);
+        appDlg.close();
+        openAppDlg('install', 'a2');
+        document.getElementById('appSource').value = '~/otherapp';
+        await appRead();
+        await h.free(); await going;
+        const sent = window.__calls.slice(mark).filter((c) => c.method === 'POST' && /^\/v1\/agents\//.test(c.path)).map((c) => [c.path, c.body]);
+        eq("A's account and A's app, with A's values", sent, [['/v1/agents/a1/connections/attach', { connectionId: 'c2' }], ['/v1/agents/a1/app', { source: '~/demoapp', values: { mailbox: 'other@example.org' } }]]);
+        ok("B's dialog stays open on B's repo", appDlg.open && appDlgAgent === 'a2' && appInspected?.source === '~/otherapp');
+        ok("and its Install is still on", !document.getElementById('appGoBtn').disabled);
+      } finally {
+        await h.free();
+        for (const k of keys) if (window.__answer) delete window.__answer[k];
+        delete window.__override['/v1/connections'];
+        if (appDlg.open) appDlg.close();
+        await refresh(false);
+      }
+    },
+    // HB-0352: an app's on/off field with the default "false" (or "off", "no", "0") starts off, as the server reads it.
+    auditAppBoolDefaults: async () => {
+      const MAN = { app: 'demoapp', name: 'Demo App', tasks: [], config: { fields: [] }, connections: [] };
+      const ask = [['quiet', 'false'], ['dry', 'off'], ['loud', 'yes'], ['fast', true], ['slow', 'No'], ['zero', '0']].map(([key, d]) => ({ key, type: 'bool', default: d }));
+      try {
+        window.__answer = window.__answer || {};
+        window.__answer['POST /v1/apps/inspect'] = [{ status: 200, body: { sha: 'c0ffee0123456789c0ffee0123456789c0ffee01', manifest: MAN, connections: [], ask } }];
+        openAppDlg('install', 'a1');
+        document.getElementById('appSource').value = '~/demoapp';
+        await appRead();
+        eq('ticked as the server reads them', ask.map((f) => document.getElementById('appF_' + f.key).checked), [false, false, true, true, false, false]);
+        eq('and sent so untouched', appValues(), { quiet: 'false', dry: 'false', loud: 'true', fast: 'true', slow: 'false', zero: 'false' });
+      } finally {
+        if (window.__answer) delete window.__answer['POST /v1/apps/inspect'];
+        if (appDlg.open) appDlg.close();
+      }
+    },
+    // HB-0367: A's icon saved, its dialog closed and B's opened while it saved: B's stays open, with what was typed.
+    auditIconSaveLeavesNextOpening: async () => {
+      const h = auditHold();
+      try {
+        openV2Icon('a1');
+        document.getElementById('v2IconInput').value = '🐣';
+        h.once(/^\/v1\/agents\/a1$/, 'PATCH');
+        const saving = v2IconSave(document.getElementById('v2IconSaveBtn'));
+        await until(() => h.held.length === 1);
+        v2IconDlg.close();
+        openV2Icon('a2');
+        document.getElementById('v2IconInput').value = '🏡';
+        await h.free(); await saving;
+        ok("B's dialog is still open", v2IconDlg.open && v2IconFor === 'a2');
+        eq('with what was typed in it', document.getElementById('v2IconInput').value, '🏡');
+        const patch = window.__calls.filter((c) => c.method === 'PATCH' && c.path === '/v1/agents/a1').at(-1);
+        eq("A's icon was saved", patch && patch.body.icon, '🐣');
+        v2IconDlg.close();
+        // A's save ending while B's goes on leaves B's Save off: a second press would send it again.
+        const btn = document.getElementById('v2IconSaveBtn');
+        openV2Icon('a1');
+        h.once(/^\/v1\/agents\/a1$/, 'PATCH');
+        const first = v2IconSave(btn);
+        await until(() => h.held.length === 1);
+        v2IconDlg.close();
+        openV2Icon('a2');
+        ok('Save is on in the new opening', !btn.disabled);
+        h.once(/^\/v1\/agents\/a2$/, 'PATCH');
+        const second = v2IconSave(btn);
+        await until(() => h.held.length === 2);
+        h.held.shift()(); await first;
+        ok("A's save ending leaves B's Save off", btn.disabled && v2IconDlg.open);
+        await h.free(); await second;
+        ok("B's own save turns it back on", !btn.disabled);
+      } finally { await h.free(); if (v2IconDlg.open) v2IconDlg.close(); }
+    },
+    optionalChoiceClears: async () => {
+      // HB-0363: an optional choice offers a blank, in the setup form and in Setup values; a required one does not.
+      const a = agents.find((x) => x.id === 'a1'), was = { parameters: a.parameters, paramValues: a.paramValues, state: a.state };
+      try {
+        a.parameters = [
+          { key: 'tone', label: 'Tone', type: 'choice', target: 'soul', required: false, options: ['formal', 'casual'] },
+          { key: 'grade', label: 'Grade', type: 'choice', target: 'soul', required: true, options: ['5', '6'] },
+        ];
+        window.__promptAnswer = 'Homework Helper Jr';
+        await until(() => !paramFormDlg.open && paramFormResolve === null); await sleep(0);
+        const before = calls('POST', /\/v1\/agents\/a1\/derive$/).length;
+        const deriving = deriveChild('a1', 'Homework Helper');
+        await formOpened();
+        // Untouched it starts on its first option, as before: on the blank, {{tone}} itself landed in the files.
+        eq('the optional choice starts on its first option', document.getElementById('pfv-0').value, 'formal');
+        ok('and offers a blank', [...document.getElementById('pfv-0').options].some((o) => o.value === ''));
+        ok('the required choice has no blank', ![...document.getElementById('pfv-1').options].some((o) => o.value === ''));
+        submitParamForm();
+        await deriving;
+        const sent = calls('POST', /\/v1\/agents\/a1\/derive$/).slice(before);
+        eq('a click-through sends both first options', sent[0].body.values, { tone: 'formal', grade: '5' });
+        // "(none)" picked is sent as a blank value, not left out.
+        await until(() => !paramFormDlg.open && paramFormResolve === null); await sleep(0);
+        const deriving2 = deriveChild('a1', 'Homework Helper');
+        await formOpened();
+        document.getElementById('pfv-0').value = '';
+        submitParamForm();
+        await deriving2;
+        const sent2 = calls('POST', /\/v1\/agents\/a1\/derive$/).slice(before);
+        eq('(none) is sent blank', sent2[1].body.values, { tone: '', grade: '5' });
+        // Setup values later: the chosen tone can be cleared.
+        a.state = 'RUNNING'; a.paramValues = { tone: 'casual', grade: '6' };
+        renderSetupValues(a);
+        eq('the stored tone is shown', document.getElementById('spv-tone').value, 'casual');
+        document.getElementById('spv-tone').value = '';
+        eq('cleared, it is sent empty', collectSetupValues(a), { tone: '', grade: '6' });
+        // A default that differs from its option by case or a space starts on that option, not on the blank.
+        a.parameters[0].default = ' Formal';
+        await until(() => !paramFormDlg.open && paramFormResolve === null); await sleep(0);
+        const deriving3 = deriveChild('a1', 'Homework Helper');
+        await formOpened();
+        eq('a default spelt otherwise starts on its option', document.getElementById('pfv-0').value, 'formal');
+        submitParamForm();
+        await deriving3;
+        eq('and a click-through sends it', calls('POST', /\/v1\/agents\/a1\/derive$/).slice(before)[2].body.values, { tone: 'formal', grade: '5' });
+        a.paramValues = { grade: '6' };
+        renderSetupValues(a);
+        eq('Setup values shows that default on its option too', document.getElementById('spv-tone').value, 'formal');
+      } finally {
+        Object.assign(a, was); window.__promptAnswer = null;
         if (paramFormDlg.open) paramFormDlg.close();
       }
     },

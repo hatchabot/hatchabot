@@ -10,6 +10,7 @@ import {
   recordApplied,
   reindexMemoryIfSwitched,
   runRebuildHook,
+  scrubRemovedDataSources,
   waitForHealthy,
   waitForSkillsSettled,
   type ProvisionDeps,
@@ -108,6 +109,10 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
         `runs there. Remove the duplicate host entry instead of moving.`,
     );
   }
+  // Removed while the daemons were asked: moved onto it, the agent pointed at
+  // a machine Hatchabot no longer knew. A removal still under way sees the
+  // operation begun below, in this same tick, and stops (HB-0275).
+  if (!store.getHost(targetHostId)) throw new TransferError(`${targetHost.name} was removed meanwhile — the move was cancelled.`);
 
   const oldRef = agent.runtimeRef;
   const wasRunning = agent.state === 'RUNNING';
@@ -282,6 +287,14 @@ async function completeOnTarget(
   await target.provision(respec);
   store.setAgentRuntimeRef(agentId, newRef);
   recordApplied(store, agentId, respec);
+  // A removed repo whose deploy key was still to be scrubbed rode the copied
+  // volume: scrubbed there before it can start. Only a start or wake retried
+  // it, and the move ran neither, so the moved agent could still use the key
+  // (HB-0317). Nothing is recorded yet: a rollback restarts the source, whose
+  // volume still holds the key, and its next start must still scrub it.
+  if (store.dataSourceRemovals(agentId).length) {
+    await scrubRemovedDataSources(tdeps, agentId, newRef, false, log, { settle: false }).catch(() => false);
+  }
   op.step('target-configured');
   // Left stopped, it is not started to run its rebuild hook: the hook is
   // owed to this new container's first start instead. It ran only for a
@@ -304,6 +317,13 @@ async function completeOnTarget(
     if (store.getAgent(agentId)!.state !== 'RUNNING') store.setAgentState(agentId, 'RUNNING');
   }
   op.step('settled');
+  // Settled there: the removal is recorded done only now, by scrubbing the
+  // copy again (judged by what is left, so a second pass is a no-op). Never
+  // throws: nothing after 'settled' may undo the move. What is left stays
+  // recorded for its next start there.
+  if (store.dataSourceRemovals(agentId).length) {
+    await scrubRemovedDataSources(tdeps, agentId, newRef, p.wasRunning, log).catch(() => false);
+  }
 }
 
 /**

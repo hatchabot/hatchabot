@@ -30,6 +30,18 @@ set -euo pipefail
 [ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
 
+# A run by hand (./scripts/restore-drill.sh, as the README has it) gets the
+# settings the app runs with, as scripts/backup-volumes.sh does: .env. Without
+# it a backups folder set only there was not found, and the drill looked in
+# ~/hatchabot-backups instead (HB-0324). What the environment already has
+# wins. Read by Node's dotenv parser, never run as shell code.
+if [ -f .env ]; then
+  while IFS= read -r -d '' kv; do export "$kv"; done < <(node -e '
+    const { parseEnv } = require("node:util");
+    for (const [k, v] of Object.entries(parseEnv(require("node:fs").readFileSync(".env", "utf8"))))
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && process.env[k] === undefined) process.stdout.write(k + "=" + v + "\0");')
+fi
+
 # Pre-rename .env files: alias AGENTCLAW_* → HATCHABOT_* (existing HATCHABOT_* wins).
 for v in $(compgen -A variable AGENTCLAW_ 2>/dev/null); do n="HATCHABOT_${v#AGENTCLAW_}"; [ -n "${!n+x}" ] || export "$n=${!v}"; done
 BASE="${HATCHABOT_BACKUP_DIR:-$HOME/hatchabot-backups}"
@@ -97,27 +109,80 @@ finish() {
   [ "$rc" -eq 0 ] || fail=1
   write_record
   cleanup
-  [ -n "$LOCK" ] && rm -rf "$LOCK"
+  # Only this drill's own lock: one that names another drill is that drill's.
+  [ -n "$LOCK" ] && [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK"
   exit "$rc"
 }
 # One drill at a time: the schedule and "Run a drill now" (or the live test)
 # would restore into docker side by side. The backup script's lock: mkdir is
-# atomic everywhere, the lock holds the pid, a dead holder's lock is taken over.
+# atomic everywhere, the lock holds the pid, a dead holder's lock is taken over
+# — one drill at a time, decided again inside: two drills that both read the
+# same dead pid each wrote their own and both went on (HB-0347). A takeover a
+# SIGKILL cut short is cleared when old; the drill that clears it stops.
 take_lock() {
   mkdir -m 700 -p "$RECORD_DIR" 2>/dev/null || { RECORD_DIR=""; return 0; }
   chmod 700 "$RECORD_DIR" 2>/dev/null || true
-  if ! mkdir "$RECORD_DIR/.lock" 2>/dev/null; then
-    local holder; holder="$(cat "$RECORD_DIR/.lock/pid" 2>/dev/null || true)"
-    if { [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; } || { [ -z "$holder" ] && [ -z "$(find "$RECORD_DIR/.lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; }; then
-      echo "✗ Another restore drill${holder:+ (pid $holder)} is running — this one stops; that drill's record will say how it went." >&2
-      exit 1
+  local lock="$RECORD_DIR/.lock"
+  if ! mkdir "$lock" 2>/dev/null; then
+    lock_busy "$lock" && drill_locked_out
+    if ! mkdir "$lock.takeover" 2>/dev/null; then
+      find "$lock.takeover" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null || true
+      holder=""; drill_locked_out
     fi
-    echo "  • an earlier drill that was killed left its lock — taking it over" >&2
+    if lock_busy "$lock"; then rmdir "$lock.takeover"; drill_locked_out; fi
+    rm -rf "$lock"
+    # A drill that came in by the front door meanwhile has it now.
+    if ! mkdir "$lock" 2>/dev/null; then rmdir "$lock.takeover"; holder=""; drill_locked_out; fi
+    echo "$$" > "$lock/pid"
+    rmdir "$lock.takeover"
+    echo "  • an earlier drill that was killed left its lock — taken over" >&2
   fi
-  echo "$$" > "$RECORD_DIR/.lock/pid"
-  LOCK="$RECORD_DIR/.lock"
+  echo "$$" > "$lock/pid"
+  LOCK="$lock"
+}
+holder=""
+# Whether pid $1 is running: another user's process answers kill -0 with "not
+# permitted", and is alive (scripts/backup-volumes.sh, pid_alive).
+pid_alive() {
+  local e
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  e="$(LC_ALL=C kill -0 "$1" 2>&1)" && return 0
+  case "$e" in *"No such process"*) return 1 ;; esac
+  return 0
+}
+# Whether lock $1 is held: its pid lives, or it has no pid yet and is new. A
+# pid that is another user's process (another install's drill in a shared
+# folder) is a drill only for as long as one runs: the app stops its drill at
+# 90 minutes (src/orchestrator/drills.ts, DRILL_KILL_MS). A killed drill's pid
+# that a reboot gave to another user's daemon kept every drill out for as
+# long as that daemon ran.
+lock_busy() {
+  holder="$(cat "$1/pid" 2>/dev/null || true)"
+  if [ -n "$holder" ]; then
+    pid_alive "$holder" || return 1
+    kill -0 "$holder" 2>/dev/null && return 0
+    [ -z "$(find "$1" -maxdepth 0 -mmin +180 2>/dev/null)" ]
+    return
+  fi
+  [ -d "$1" ] && [ -z "$(find "$1" -maxdepth 0 -mmin +1 2>/dev/null)" ]
+}
+# Whether a drill's container or volume ($1, hatchabot-restore-drill-<pid>-<n>)
+# is a drill's whose process is gone.
+drill_gone() {
+  local p
+  case "$1" in hatchabot-restore-drill-*) ;; *) return 1 ;; esac
+  p="${1#hatchabot-restore-drill-}"; p="${p%%-*}"
+  case "$p" in ''|*[!0-9]*) return 1 ;; esac
+  ! pid_alive "$p"
+}
+drill_locked_out() {
+  echo "✗ Another restore drill${holder:+ (pid $holder)} is running — this one stops; that drill's record will say how it went." >&2
+  exit 1
 }
 trap finish EXIT
+# Stopped by a signal (the app's time limit, a restart), bash ran finish with
+# the last command's 0, and a drill cut short was recorded passed (HB-0368).
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
 if [ $# -ge 1 ]; then
   BACKUP="$1"
@@ -144,6 +209,11 @@ else
   done < <(find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' | sort -r)
   [ -n "$BACKUP" ] || { REASON=no-complete-set; echo "✗ No complete backup set under $BASE" >&2; exit 1; }
 fi
+# What this drill's throwaway containers and volumes are labelled with: its
+# backups folder, whose lock it holds (see the clean-up in step 4).
+DRILL_OWNER=""
+if [ -n "$LOCK" ]; then DRILL_OWNER="$(cd "$RECORD_DIR" && pwd -P | cksum | cut -d' ' -f1)" || DRILL_OWNER=""; fi
+[ -n "$DRILL_OWNER" ] || DRILL_OWNER=none
 SET_DATE="$(basename "$BACKUP")"
 SET_STATE="$(set_state "$BACKUP")"
 echo "Drilling restore from: $BACKUP"
@@ -255,6 +325,25 @@ if [ "${#VOL_NAMES[@]}" -eq 0 ]; then
   fail=1
 fi
 
+# Every volume the set's run says it captured whole must have its archive
+# here. Only the archives found were checked, so one gone from the set (or
+# never written under its name) was left out of the drill, which passed and
+# said the backup would bring the system back (HB-0276). Each is named, with
+# the note "missing", and fails the drill. A set from before the record has
+# no list to hold it to.
+while IFS= read -r v; do
+  [ -n "$v" ] || continue
+  [ -f "$BACKUP/$v.tgz" ] && continue
+  echo "  ✗ $v: the set's record says it was captured, but its archive is not in the set" >&2
+  VOL_NAMES+=("$v"); VOL_TGZ+=(""); VOL_BYTES+=(0)
+  VOL_READ+=(""); VOL_LAYOUT+=(""); VOL_REST+=(""); VOL_NOTE+=(missing)
+  fail=1
+done < <(node -e '
+  let r = {};
+  try { r = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); } catch {}
+  for (const v of Array.isArray(r.captured) ? r.captured : [])
+    if (typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(v)) console.log(v);' "$BACKUP/backup-status.json" 2>/dev/null || true)
+
 # --- 4. Each archive restored into a throwaway volume --------------------------
 # Largest first (the old drill's one restore, so a short hour still proves it),
 # then by name. Only archives that read whole with the layout are tried.
@@ -281,12 +370,23 @@ if [ -n "$order" ]; then
     fail=1
   else
     if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then IMAGE="debian:stable-slim"; fi
-    # What a killed drill left behind (its container, its volume) goes first.
-    for c in $(docker ps -aq --filter label=hatchabot.restore-drill=1 2>/dev/null || true); do docker rm -f "$c" >/dev/null 2>&1 || true; done
-    for v in $(docker volume ls -q --filter label=hatchabot.restore-drill=1 2>/dev/null || true) \
-             $(docker volume ls -q 2>/dev/null | grep '^acl-restore-drill-' || true); do
-      docker volume rm -f "$v" >/dev/null 2>&1 || true
+    # What a killed drill left behind (its container, its volume) goes first:
+    # this backups folder's, which this drill's lock says no drill is using,
+    # and any other whose drill's process is gone. Every drill's was removed,
+    # another install's running drill on the same Docker among them (HB-0327).
+    # The label names the folder (a checksum of its path); "1" is from before.
+    mine_ct=""; mine_vol=""
+    if [ -n "$LOCK" ]; then
+      mine_ct="$(docker ps -a --filter "label=hatchabot.restore-drill=$DRILL_OWNER" --format '{{.Names}}' 2>/dev/null || true)"
+      mine_vol="$(docker volume ls -q --filter "label=hatchabot.restore-drill=$DRILL_OWNER" 2>/dev/null || true)"
+    fi
+    for c in $(docker ps -a --filter label=hatchabot.restore-drill --format '{{.Names}}' 2>/dev/null || true); do
+      if grep -qxF -- "$c" <<<"$mine_ct" || drill_gone "$c"; then docker rm -f "$c" >/dev/null 2>&1 || true; fi
     done
+    for v in $(docker volume ls -q --filter label=hatchabot.restore-drill 2>/dev/null || true); do
+      if grep -qxF -- "$v" <<<"$mine_vol" || drill_gone "$v"; then docker volume rm -f "$v" >/dev/null 2>&1 || true; fi
+    done
+    for v in $(docker volume ls -q 2>/dev/null | grep '^acl-restore-drill-' || true); do docker volume rm -f "$v" >/dev/null 2>&1 || true; done
     T=""; command -v timeout >/dev/null 2>&1 && T="timeout"
     restore_start=$SECONDS
     n=0
@@ -301,14 +401,14 @@ if [ -n "$order" ]; then
       DRILL_VOL="hatchabot-restore-drill-$$-$n"
       DRILL_CT="hatchabot-restore-drill-$$-$n"
       rc=0
-      docker volume create --label hatchabot.restore-drill=1 "$DRILL_VOL" >/dev/null || rc=$?
+      docker volume create --label "hatchabot.restore-drill=$DRILL_OWNER" "$DRILL_VOL" >/dev/null || rc=$?
       files=""
       if [ "$rc" -eq 0 ]; then
         # As root, then chown — the same rules as the provider's importState:
         # a FRESH volume is root-owned, so extracting as the image's uid-1000
         # user fails on the first mkdir (the new-machine case). The layout
         # check counts files under agents/ in the restored volume.
-        files="$(${T:+$T $PER_RESTORE_SEC} docker run --rm --name "$DRILL_CT" --label hatchabot.restore-drill=1 \
+        files="$(${T:+$T $PER_RESTORE_SEC} docker run --rm --name "$DRILL_CT" --label "hatchabot.restore-drill=$DRILL_OWNER" \
           --network none --memory "$LIM_MEMORY" --memory-swap "$LIM_MEMORY" --cpus "$LIM_CPUS" --pids-limit 256 \
           --security-opt no-new-privileges --user root --entrypoint bash \
           -v "$DRILL_VOL:/data" -v "${VOL_TGZ[$i]}:/in/vol.tgz:ro" "$IMAGE" \

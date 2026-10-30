@@ -313,6 +313,51 @@ describe('passkey ceremonies', () => {
   });
 });
 
+describe('authenticator app enrolment and changes made meanwhile', () => {
+  it('an app shown before a factor was removed cannot be confirmed after it (HB-0297)', async () => {
+    h = await publicApp({ off: true });
+    const o = await h.addAccount('owner', { owner: true, totp: true });
+    const call = await priv(h, 'owner', o.password);
+    const old = h.store.listSecondFactors(o.id, { kind: 'totp' })[0]!;
+    const start = (await call('POST', '/v1/second-factor/totp', { current: o.password })).json();
+    expect((await call('DELETE', `/v1/second-factor/${old.id}`, { current: o.password })).statusCode).toBe(200);
+    const late = await call('POST', '/v1/second-factor/totp/confirm', { id: start.id, code: totp(base32Decode(start.secret)) });
+    expect(late.statusCode).toBe(409);
+    expect(late.json().error).toMatch(/setup was cancelled/); // not "that code is not right"
+    expect(h.store.listSecondFactors(o.id, { unconfirmed: true })).toHaveLength(0);
+    // Starting again after the change works.
+    const again = (await call('POST', '/v1/second-factor/totp', { current: o.password })).json();
+    expect((await call('POST', '/v1/second-factor/totp/confirm', { id: again.id, code: totp(base32Decode(again.secret)) })).statusCode).toBe(200);
+    expect(h.store.listSecondFactors(o.id, { kind: 'totp' }).map((f) => f.id)).toEqual([again.id]);
+  });
+
+  it('a password reset, or a factor reset, while the password is checked voids that proof (HB-0314)', async () => {
+    h = await publicApp({ off: true });
+    const o = await h.addAccount('owner', { owner: true, totp: false });
+    const call = await priv(h, 'owner', o.password);
+    const throttle = h.app.publicAccess!.throttle;
+    const reserve = throttle.reserve!;
+    // What happens during the check: the account's password is reset (its old hash goes).
+    let during: (() => void) | undefined = () => { h!.store.setLocalAccountPassword(o.id, 'reset-hash', 'reset-salt'); };
+    throttle.reserve = (req, who) => { during?.(); during = undefined; return reserve(req, who); };
+    const r = await call('POST', '/v1/second-factor/totp', { current: o.password });
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toMatch(/changed while this was being checked/);
+    expect(h.store.listSecondFactors(o.id, { unconfirmed: true })).toHaveLength(0);
+
+    // The same for the person's factors reset while it is checked.
+    h.store.setLocalAccountPassword(o.id, h.store.localAccount(o.id)!.pwHash, h.store.localAccount(o.id)!.pwSalt);
+    const p = await h.addAccount('second', { totp: false });
+    const pcall = await priv(h, 'second', p.password);
+    during = () => { h!.store.bumpSecondFactorGeneration(p.id); };
+    expect((await pcall('POST', '/v1/second-factor/totp', { current: p.password })).statusCode).toBe(409);
+    expect(h.store.listSecondFactors(p.id, { unconfirmed: true })).toHaveLength(0);
+    // Nothing changing meanwhile: allowed as before.
+    expect((await pcall('POST', '/v1/second-factor/totp', { current: p.password })).statusCode).toBe(200);
+    throttle.reserve = reserve;
+  });
+});
+
 describe('second factors: the seal on a stored secret', () => {
   it('round-trips, and refuses a truncated auth tag (fixed at 16 bytes)', () => {
     // Without authTagLength, Node accepts any tag of 4 to 16 bytes, so a sealed value whose tag

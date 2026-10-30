@@ -20,13 +20,14 @@ afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, f
 const shim = (dir: string, name: string, body: string) => writeFileSync(join(dir, name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
 const TENANT = 'unix:///run/made-up-tenant/docker.sock';
 
-function host(label = '2026.9.8') {
+function host(label = '2026.9.8', os = 'Linux') {
   const root = mkdtempSync(join(tmpdir(), 'hb-setup-host-')); dirs.push(root);
   const app = join(root, 'app'), bin = join(root, 'bin'), home = join(root, 'home'), log = join(root, 'calls.log');
   for (const d of [join(app, 'scripts'), join(app, 'docker'), join(app, 'node_modules', '.bin'), bin, home]) mkdirSync(d, { recursive: true });
   writeFileSync(join(app, 'scripts', 'setup-host.sh'), readFileSync('scripts/setup-host.sh'), { mode: 0o755 });
   writeFileSync(join(app, 'docker', 'Dockerfile.runtime'), 'ARG OPENCLAW_VERSION=2026.9.8\n');
-  for (const s of ['ensure-deps.sh', 'link-cli.sh', 'first-run-link.sh']) shim(join(app, 'scripts'), s, 'exit 0');
+  for (const s of ['ensure-deps.sh', 'link-cli.sh', 'launchd-plist.sh']) shim(join(app, 'scripts'), s, 'exit 0');
+  shim(join(app, 'scripts'), 'first-run-link.sh', `echo "first-run link on $1" >> '${log}'`);
   shim(join(app, 'node_modules', '.bin'), 'tsx', 'exit 0');
   shim(join(app, 'scripts'), 'build-runtime-image.sh', `echo "build on \${DOCKER_HOST:-default}" >> '${log}'`);
   shim(join(app, 'scripts'), 'install-service.sh', `echo "service" >> '${log}'`);
@@ -36,7 +37,8 @@ case "$1 $2" in
   "image inspect") [ "\${DOCKER_HOST:-}" != '${TENANT}' ] || exit 1; case "$*" in *--format*) echo '${label}' ;; esac ;;
 esac
 exit 0`);
-  shim(bin, 'uname', 'echo Linux');
+  shim(bin, 'uname', `echo ${os}`);
+  shim(bin, 'launchctl', 'exit 0');
   symlinkSync(process.execPath, join(bin, 'node'));
   const run = (extra: Record<string, string> = {}) => spawnSync('bash', [join(app, 'scripts', 'setup-host.sh')], {
     encoding: 'utf8', input: '', env: scriptEnv(home, `${bin}:/usr/bin:/bin`, { HATCHABOT_SETUP_SIGNIN: 'accounts', ...extra }),
@@ -99,5 +101,26 @@ describe('scripts/setup-host.sh brings an older :latest up to this release\'s de
       expect(r.stdout, label).toContain('Runtime image already present');
       expect(h.calls(), label).not.toContain('build on default');
     }
+  });
+});
+
+describe('scripts/setup-host.sh reads PORT as the service will (audit, 2026-10-29)', () => {
+  it('Linux: spaces around the = count, as systemd reads them; the CLI and the link get that port', () => {
+    const h = host();
+    writeFileSync(join(h.app, '.env'), 'HATCHABOT_SECRET_KEY=made-up\nPORT = 9137\n', { mode: 0o600 });
+    const r = h.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(h.calls()).toContain('first-run link on 9137');
+  });
+
+  it('a Mac: the launchd job sources .env with bash, where PORT = 9137 sets nothing, so the service is on 8080', () => {
+    const h = host('2026.9.8', 'Darwin');
+    writeFileSync(join(h.app, '.env'), 'HATCHABOT_SECRET_KEY=made-up\nPORT=7000\nPORT = 9137\n', { mode: 0o600 });
+    const r = h.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(h.calls()).toContain('first-run link on 7000');
+    writeFileSync(join(h.app, '.env'), 'HATCHABOT_SECRET_KEY=made-up\nPORT= 9137\n', { mode: 0o600 });
+    expect(h.run().status).toBe(0);
+    expect(h.calls()).toContain('first-run link on 8080');
   });
 });

@@ -131,10 +131,11 @@ allows one.
   failed with the reason (`hatchabot ops`, Alerts), and bulk source switches
   list busy agents as skipped.
 - A process killed **mid-delete** still leaves the agent in `DELETING`: no
-  reconcile rule finishes it, and the app shows no Delete in that state. A
-  Delete through the API (`hatchabot delete <agent>`) re-enters and finishes
-  it. A teardown that fails parks the agent in FAILED with Delete offered
-  again, and keys a failed delete left behind are swept at start (v2.160.0).
+  reconcile rule finishes it. Delete (the agent's Overview since v2.171.0, or
+  `hatchabot delete <agent>`) re-enters and finishes it; a second Delete while
+  one runs is turned away. A teardown that fails parks the agent in FAILED with
+  Delete offered again, and keys a failed delete left behind are swept at start
+  (v2.160.0).
 - ~~Reconcile and `scripts/backup-volumes.sh` skip runner-host agents~~ —
   both cover them now (backups v2.133.0, reconcile v2.134.0).
 - ~~Backup restore proceeds after its own safety snapshot fails~~ — fixed in

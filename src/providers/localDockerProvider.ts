@@ -226,6 +226,10 @@ export class LocalDockerProvider implements RuntimeProvider {
     return dockerNames(runtimeRef, this.prefix);
   }
 
+  containerName(runtimeRef: string): string {
+    return this.#names(runtimeRef).container;
+  }
+
   /**
    * Pre-rename daemons (this host or a runner loaded by `docker save|load`)
    * hold the image as agentclaw-runtime:<tag>; make the new name exist there
@@ -725,6 +729,17 @@ export class LocalDockerProvider implements RuntimeProvider {
     // (archive inspection) get a :ro mount so the guarantee is enforced by
     // Docker, not just by which commands the script happens to run.
     const mount = opts?.readOnly ? `${volume}:/home/node:ro` : `${volume}:/home/node`;
+    // A read asks first, as exportState does: `-v` CREATES a volume that is
+    // not there, so looking inside an archived agent whose volume was gone
+    // made an empty one and showed an agent with no files (HB-0332).
+    if (opts?.readOnly) {
+      const has = await this.#docker(['volume', 'inspect', '--format', '{{.Name}}', volume]);
+      if (has.code !== 0) {
+        return /no such volume/i.test(has.stderr)
+          ? { code: 1, stdout: '', stderr: `volume ${volume} does not exist on this daemon`, volumeMissing: true }
+          : has;
+      }
+    }
     // The agent's own image when a caller runs its OpenClaw CLI against the
     // volume: the default image's version could refuse, or rewrite, a config
     // written by another (night review, 2026-09-28).
@@ -817,8 +832,12 @@ export class LocalDockerProvider implements RuntimeProvider {
       pending = this.#inspectInfo(container);
       const entry = { at: Date.now(), res: pending };
       this.#infoCache.set(container, entry);
-      // Only an answer is kept: a failure (gone, daemon away) is asked again next time.
-      void pending.then((r) => { if (r.code !== 0 && this.#infoCache.get(container) === entry) this.#infoCache.delete(container); });
+      // Only an answer is kept: a failure (gone, daemon away) is asked again
+      // next time. A thrown one (no docker binary) is the caller's to see;
+      // this side chain only forgets it, or it would be an unhandled
+      // rejection that ends the process (HB-0278).
+      const forget = () => { if (this.#infoCache.get(container) === entry) this.#infoCache.delete(container); };
+      void pending.then((r) => { if (r.code !== 0) forget(); }, forget);
     }
     return this.#infoAnswer(await pending);
   }
@@ -1238,7 +1257,9 @@ export class LocalDockerProvider implements RuntimeProvider {
           // only the compression, and a failed listing used to pick the old
           // layout and empty the volume before extraction found the junk (#213).
           'if ! tar tzf /tmp/s.tgz > /tmp/s.list; then echo "not a tar archive" >&2; exit 4; fi && ' +
-          'if grep -qE "^\\./\\.openclaw/" /tmp/s.list; then DEST=/vol; else DEST=/vol/.openclaw; fi && ' +
+          // `./.openclaw/…` and `.openclaw/…` are the same home layout: an
+          // archive made with `tar czf x .openclaw` went one level too deep (HB-0333).
+          'if grep -qE "^(\\./)?\\.openclaw/" /tmp/s.list; then DEST=/vol; else DEST=/vol/.openclaw; fi && ' +
           'find /vol -mindepth 1 -delete && mkdir -p "$DEST" && ' +
           'tar xz --no-same-owner -C "$DEST" -f /tmp/s.tgz && ' +
           // An old-layout archive is already in the home layout once here:
@@ -1429,7 +1450,10 @@ export class LocalDockerProvider implements RuntimeProvider {
     // Rootless: the bridge is inside the user's namespace. Docker Desktop: inside
     // its VM (a MacBook's memory-search door died on "listen tcp4 172.17.0.1:8093:
     // can't assign requested address", 2026-09-25). Neither is bindable here.
-    if (!this.remote && ((await this.rootless()) || (await this.desktop()))) return undefined;
+    // A rootless runner's bridge is no more bindable on the runner (HB-0331);
+    // a Desktop runner's door is put on loopback by its caller (routes.ts).
+    if (await this.rootless()) return undefined;
+    if (!this.remote && (await this.desktop())) return undefined;
     const res = await this.#docker(['network', 'inspect', 'bridge', '--format', '{{(index .IPAM.Config 0).Gateway}}']);
     const ip = res.stdout.trim();
     return res.code === 0 && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : undefined;
@@ -1467,9 +1491,10 @@ export class LocalDockerProvider implements RuntimeProvider {
     );
     return this.#daemon;
   }
-  /** Is this daemon rootless? HATCHABOT_DOCKER_ROOTLESS=1|0 overrides the probe. */
+  /** Is this daemon rootless? HATCHABOT_DOCKER_ROOTLESS=1|0 overrides the
+   *  probe of this machine's daemon; a runner's is always asked. */
   async rootless(): Promise<boolean> {
-    const forced = process.env.HATCHABOT_DOCKER_ROOTLESS;
+    const forced = this.remote ? undefined : process.env.HATCHABOT_DOCKER_ROOTLESS;
     if (forced === '1' || forced === 'true') return true;
     if (forced === '0' || forced === 'false') return false;
     return (await this.#daemonKind()).rootless;
@@ -1486,13 +1511,14 @@ export class LocalDockerProvider implements RuntimeProvider {
   async hostAliasTarget(): Promise<string> {
     const set = process.env.HATCHABOT_HOST_ALIAS_IP?.trim();
     if (set) return set;
-    return !this.remote && (await this.rootless()) ? ROOTLESS_HOST_ADDRESS : 'host-gateway';
+    // A rootless runner's host-gateway is its namespace's bridge, not the runner (HB-0331).
+    return (await this.rootless()) ? ROOTLESS_HOST_ADDRESS : 'host-gateway';
   }
 
   async hostAddressForAgents(): Promise<string | undefined> {
     const set = process.env.HATCHABOT_HOST_ALIAS_IP?.trim();
     if (set && /^\d{1,3}(\.\d{1,3}){3}$/.test(set)) return set;
-    if (!this.remote && (await this.rootless())) return ROOTLESS_HOST_ADDRESS;
+    if (await this.rootless()) return ROOTLESS_HOST_ADDRESS;
     if (!this.remote && (await this.desktop())) return HOST_ALIAS; // Docker Desktop defines it for every container
     return this.hostGatewayAddress();
   }
@@ -1589,15 +1615,23 @@ export class LocalDockerProvider implements RuntimeProvider {
     const name = this.#browserName(agent);
     // Kept only while it shares the CURRENT network namespace: an agent that
     // restarted has a new one, and a browser left in the old one is unreachable.
-    const cur = await this.#docker(['inspect', name, '--format', '{{.State.Running}}|{{ index .Config.Labels "hatchabot.browser-with" }}|{{.Config.Image}}']);
-    const [bRunning, bWith, bImage] = cur.stdout.trim().split('|');
-    if (cur.code === 0 && bRunning === 'true' && bWith === startedAt && bImage === spec.image) return 'running';
+    // And only at the memory limit asked for now: a changed
+    // HATCHABOT_BROWSER_MEMORY reached no running browser (HB-0326).
+    // What it was started with is its label: where the kernel has no memory
+    // limits Docker holds none (0), and a browser judged by that would be
+    // replaced every minute. One from before the label: the limit it holds.
+    const cur = await this.#docker(['inspect', name, '--format', '{{.State.Running}}|{{ index .Config.Labels "hatchabot.browser-with" }}|{{.Config.Image}}|{{ index .Config.Labels "hatchabot.browser-memory" }}|{{.HostConfig.Memory}}']);
+    const [bRunning, bWith, bImage, bAsked = '', bMemory = ''] = cur.stdout.trim().split('|');
+    const had = bAsked && bAsked !== '<no value>' ? dockerMemoryBytes(bAsked) : (/^\d+$/.test(bMemory) ? Number(bMemory) : undefined);
+    const wantMemory = dockerMemoryBytes(spec.memory);
+    const memoryOk = wantMemory === undefined || had === wantMemory;
+    if (cur.code === 0 && bRunning === 'true' && bWith === startedAt && bImage === spec.image && memoryOk) return 'running';
     if (cur.code === 0) await this.#docker(['rm', '-f', name]);
     await this.#ensureBrowserImage(spec.image, spec.dockerfile);
     const run = await this.#docker([
       'run', '-d', '--name', name, '--network', `container:${agent}`,
       '--label', 'hatchabot.role=browser', '--label', `hatchabot.browser-of=${agent}`, '--label', `hatchabot.browser-with=${startedAt}`,
-      '--label', `hatchabot.browser-prefix=${this.prefix}`,
+      '--label', `hatchabot.browser-prefix=${this.prefix}`, '--label', `hatchabot.browser-memory=${spec.memory}`,
       '--read-only', '--tmpfs', '/tmp:size=256m', '--tmpfs', '/profile:size=512m,uid=1000,gid=1000',
       '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
       '--memory', spec.memory, '--pids-limit', '512', '--shm-size', '256m',
@@ -1780,9 +1814,15 @@ export class LocalDockerProvider implements RuntimeProvider {
     ])).digest('hex').slice(0, 16);
     const doorState = await this.#containerState(door);
     let keepDoor = false;
+    let doorJoined = false;
     if (doorState !== 'absent') {
-      const worn = await this.#docker(['inspect', door, '--format', '{{ index .Config.Labels "hatchabot.embed-door" }}']);
-      keepDoor = worn.code === 0 && worn.stdout.trim() === doorHash;
+      const worn = await this.#docker(['inspect', door, '--format', '{{ index .Config.Labels "hatchabot.embed-door" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}']);
+      const [wornHash = '', wornNets = ''] = worn.stdout.trim().split('|');
+      keepDoor = worn.code === 0 && wornHash === doorHash;
+      // A door kept is not thereby on the server's network: a start cut off
+      // between its run and its connect left one that never joined, and the
+      // health check timed out on every start after (HB-0330).
+      doorJoined = keepDoor && wornNets.split(',').includes(net);
       if (!keepDoor) await this.#docker(['rm', '-f', door]);
       else if (doorState === 'stopped') await this.#must(['start', door], "Could not start the embedding service's door.");
     }
@@ -1813,7 +1853,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         ? `The memory search service's port ${spec.doorBind}:${spec.doorPort} is taken — likely by another Hatchabot on this Docker. Give this one its own port: HATCHABOT_EMBED_PORT in its .env, then restart it.`
         : "Could not start the embedding service's door.");
     }
-    const joined = keepDoor ? { code: 0, stdout: '', stderr: '' } : await this.#docker(['network', 'connect', net, door]);
+    const joined = doorJoined ? { code: 0, stdout: '', stderr: '' } : await this.#docker(['network', 'connect', net, door]);
     if (joined.code !== 0) throw new ProviderError(`embed door network connect failed: ${joined.stderr.slice(-500)}`, "Could not connect the embedding service's door to its server.");
     // Loading the model takes a few seconds; the door's /health answers for the server.
     // A runner's door is on that machine's own addresses, out of reach from
@@ -2075,12 +2115,23 @@ export class LocalDockerProvider implements RuntimeProvider {
   }
 }
 
-/** Minimal single-quote shell escaping for the generated seed script. */
 /** A script as `bash -s` reads it for execShell's `secret` mode: one group, its own stdin empty. */
 export const stdinScript = (script: string): string => `{\n${script}\n} </dev/null\n`;
 
+/** Minimal single-quote shell escaping for the generated seed script. */
 function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * A `docker --memory` value in bytes, as Docker reads it (binary units, an
+ * optional i/b: "1g", "512m", "1.5GiB"); undefined when it is not one.
+ */
+export function dockerMemoryBytes(value: string): number | undefined {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*([bkmgtp])?i?b?\s*$/i.exec(value);
+  if (!m) return undefined;
+  const power = 'bkmgtp'.indexOf((m[2] ?? 'b').toLowerCase());
+  return Math.trunc(Number(m[1]) * 1024 ** power);
 }
 
 /** Every secret a seed carries: token-like values in the config patch and the env. */

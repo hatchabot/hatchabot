@@ -164,44 +164,71 @@ export type SyncResult =
   | { ok: false; error: string };
 
 /**
+ * Any assignment a shell sourcing the file runs: plain, `export`, and a
+ * lowercase name (`custom_port=8123`), which this file keeps as a line it does
+ * not know and moves under "Other settings" (audit, 2026-10-29).
+ */
+const ASSIGN = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
+/**
  * The first setting whose value goes on past its line: an opening quote that
  * is not closed on it, or a trailing backslash. systemd (and dotenv) read
  * those as one value across several lines; this file is rewritten line by
  * line, which moves the continuation away under "Other settings" and changes
  * the value while every single line still compares equal (#79).
  */
-export function multilineSetting(text: string): string | undefined {
+export function multilineSetting(text: string): { name: string; partWay: boolean } | undefined {
   for (const line of text.split('\n')) {
     // `export NAME="…` too: the tidy keeps it, but the lines inside the value
-    // would be read (and moved) as settings of their own (audit, 2026-10-22).
-    const p = LINE.exec(line), e = p ? undefined : EXPORTED.exec(line);
-    const m = p && !p[1] ? [p[2]!, p[3]!] : e ? [e[1]!, e[2]!] : undefined;
+    // would be read (and moved) as settings of their own (audit, 2026-10-22);
+    // and a lowercase name's, kept and moved the same way (audit, 2026-10-29).
+    const m = ASSIGN.exec(line);
     if (!m) continue;
-    const v = m[1]!.trim();
-    if (/(^|[^\\])(\\\\)*\\$/.test(v)) return m[0];
-    const q = v[0];
-    if (q !== '"' && q !== "'") continue;
-    let closed = false;
-    for (let i = 1; i < v.length && !closed; i++) {
-      if (q === '"' && v[i] === '\\') i++;
-      else if (v[i] === q) closed = true;
+    const v = m[2]!.trim();
+    if (/(^|[^\\])(\\\\)*\\$/.test(v)) return { name: m[1]!, partWay: false };
+    // The quote state through the whole value, as a shell reads it: a quote
+    // opened after a prefix (`pw=prefix"first`) runs on too, and was split
+    // from its second line (audit, 2026-10-29). A `#` after a space starts a
+    // comment, so a quote in it opens nothing (`NAME=#…` right after the = is
+    // the value). Opened part-way (`the family's house`), systemd reads the
+    // quote as a plain character on one line; a shell (the macOS launcher)
+    // reads on.
+    const raw = m[2]!;
+    let q = '', at = 0;
+    for (let i = 0; i < raw.length; i++) {
+      const c = raw[i]!;
+      if (q === "'") { if (c === "'") q = ''; }
+      else if (q === '"') { if (c === '\\') i++; else if (c === '"') q = ''; }
+      else if (c === '\\') i++;
+      else if (c === '"' || c === "'") { q = c; at = i; }
+      else if (c === '#' && i > 0 && /\s/.test(raw[i - 1]!)) break;
     }
-    if (!closed) return m[0];
+    if (q) return { name: m[1]!, partWay: raw.slice(0, at).trim() !== '' };
   }
   return undefined;
 }
 
-/** The assignments a shell sourcing the file runs, in order (plain and `export`). */
+/** The assignments a shell sourcing the file runs, in order. */
 function assignments(text: string): string[] {
-  return text.split('\n').filter((l) => { const m = LINE.exec(l); return m ? !m[1] : EXPORTED.test(l); }).map((l) => l.trim());
+  return text.split('\n').filter((l) => ASSIGN.test(l)).map((l) => l.trim());
 }
-/** The settings a value names for a shell to expand (`$NAME`, `${NAME}`), outside single quotes. */
-const refs = (v: string) => [...v.trim().replace(/'[^']*'/g, '').matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]!);
+/**
+ * The settings a value names for a shell to expand (`$NAME`, `${NAME}`),
+ * outside single quotes. Inside `$((…))`, `$(…)` or backticks a setting is
+ * named bare (`$((CUSTOM_PORT+1))`): there every word counts.
+ */
+const refs = (v: string) => {
+  const s = v.trim().replace(/'[^']*'/g, '');
+  const bare = /\$\(|`/.test(s) ? [...s.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)].map((m) => m[0]) : [];
+  return [...[...s.matchAll(/\$\{?[#!]?([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]!), ...bare];
+};
 
 /** The new text for a file, refused unless every value in force stays byte-for-byte the same. */
 export function syncEnvText(existing: string): SyncResult {
+  // The message says which: a quote opened part-way is one line to systemd,
+  // and refused only for a shell's reading (audit, 2026-10-29).
   const spans = multilineSetting(existing);
-  if (spans) return { ok: false, error: `${spans} has a value on more than one line, which this tidy cannot keep together — left as it was` };
+  if (spans?.partWay) return { ok: false, error: `${spans.name} has a quote part-way through its value that is not closed on its line: a shell reading .env (the macOS service) reads on into the next lines, which this tidy cannot keep in order — left as it was` };
+  if (spans) return { ok: false, error: `${spans.name} has a value on more than one line, which this tidy cannot keep together — left as it was` };
   const text = renderEnv(existing);
   if (text === existing) return { ok: true, changed: false };
   const before = activeValues(existing), after = activeValues(text);
@@ -216,7 +243,9 @@ export function syncEnvText(existing: string): SyncResult {
   // `$HOME`) reads the same in any order: refusing it left the file untidied,
   // with the same warning at every start (final audit, 2026-10-22).
   const reordered = JSON.stringify(assignments(existing)) !== JSON.stringify(assignments(text));
-  const dollar = reordered ? [...sourcedBefore].find(([, v]) => refs(v).some((n) => sourcedBefore.has(n)))?.[0] : undefined;
+  const assigned = assignments(existing).map((l) => ASSIGN.exec(l)!);
+  const names = new Set(assigned.map((m) => m[1]!));
+  const dollar = reordered ? assigned.find((m) => refs(m[2]!).some((n) => names.has(n)))?.[1] : undefined;
   if (same && dollar) return { ok: false, error: `${dollar} uses a $ that would be read in another order — left as it was` };
   if (!same) {
     const diff = [...new Set([...before.keys(), ...after.keys(), ...sourcedBefore.keys(), ...sourcedAfter.keys()])]

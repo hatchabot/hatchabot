@@ -318,10 +318,9 @@ describe('the volume inspector', () => {
   function volume(w: Ctx) {
     w.provider.execShellOnVolume = async (_ref: string, script: string) => {
       if (script.includes('wc -c')) return { code: 0, stdout: '12 /home/node/.openclaw/agents/kitchen/agent/MEMORY.md\n5 /home/node/.openclaw/agents/kitchen/agent/SOUL.md\n', stderr: '' };
-      if (script.startsWith('ls -S')) return { code: 0, stdout: '/home/node/.openclaw/agents/kitchen/sessions/main.jsonl\n', stderr: '' };
-      if (script.startsWith('wc -l')) return { code: 0, stdout: '2 /home/node/.openclaw/agents/kitchen/sessions/main.jsonl\n', stderr: '' };
-      if (script.startsWith('tail -n')) {
+      if (script.includes('hatchabot-inspect')) { // the transcript's tail: a heading line, then its records
         return { code: 0, stdout: [
+          JSON.stringify({ sessionFile: 'main.jsonl', totalTurns: 2 }),
           JSON.stringify({ type: 'message', message: { role: 'user', content: 'what is for dinner' } }),
           JSON.stringify({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'Pasta.' }] } }),
         ].join('\n') + '\n', stderr: '' };
@@ -353,6 +352,31 @@ describe('the volume inspector', () => {
       expect(r.statusCode).toBe(502);
       expect(r.json().error).toMatch(/Couldn't read the agent's stored files/);
     }
+  });
+  it('a chat history that cannot be read leaves the file list; its own tab says why', async () => {
+    const w = await world();
+    const id = await seedRunningAgent(w);
+    volume(w);
+    const files = w.provider.execShellOnVolume;
+    w.provider.execShellOnVolume = async (ref: string, script: string) => script.includes('hatchabot-inspect')
+      ? { code: 3, stdout: '', stderr: 'transcript unreadable: the agent database: ERR_SQLITE_ERROR' }
+      : files(ref, script);
+    const r = await w.f.inject({ method: 'GET', url: `/v1/agents/${id}/inspect`, headers: as() });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ transcriptTurns: null, files: [{ name: 'MEMORY.md', bytes: 12 }, { name: 'SOUL.md', bytes: 5 }] });
+    const t = await w.f.inject({ method: 'GET', url: `/v1/agents/${id}/inspect/transcript`, headers: as() });
+    expect(t.statusCode).toBe(502);
+    expect(t.json().error).toBe("Couldn't read the agent's chat history: the agent database: ERR_SQLITE_ERROR. The volume was reached; this part of it could not be read.");
+  });
+  it('the mock runtime answers as an agent with no conversation', async () => {
+    const w = await world();
+    const id = await seedRunningAgent(w);
+    const r = await w.f.inject({ method: 'GET', url: `/v1/agents/${id}/inspect`, headers: as() });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ files: [], transcriptTurns: 0 });
+    const t = await w.f.inject({ method: 'GET', url: `/v1/agents/${id}/inspect/transcript`, headers: as() });
+    expect(t.statusCode).toBe(200);
+    expect(t.json()).toEqual({ turns: [], totalTurns: 0 });
   });
   it('only the six known files, only the owner, and only agents with a volume', async () => {
     const w = await world();

@@ -2,7 +2,7 @@ import { createGzip } from 'node:zlib';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile, chmod } from 'node:fs/promises';
+import { chmod, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { dockerConnArgs } from '../providers/runnerEndpoint.js';
@@ -87,13 +87,28 @@ export function sshConfigPath(path: string): string {
  * attempts), and accept-new means the first connect doesn't stall on a
  * host-key prompt. Idempotent: one marked block per hostname, never edited
  * if present — and never touching config the user wrote themselves.
+ *
+ * The block goes at the TOP of the file: ssh keeps the first value it reads
+ * for an option, so appended below a `Host *` that says `IdentitiesOnly no`
+ * it changed nothing (HB-0316). A `Host *` after it puts what was there
+ * before back in force for every host, as it was. No User or Port: the
+ * block is per hostname, and docker and the console tunnel pass both from
+ * the address on every call; a port written here was used by a later runner
+ * on the same machine at the default port (HB-0300).
  */
 export async function ensureSshConfigBlock(endpoint: string, p: RunnerPaths = {}): Promise<void> {
   const parsed = parseSshEndpoint(endpoint);
   if (!parsed) return; // tcp:// endpoints have no ssh side
-  const dir = sshDir(p);
+  // One rewrite at a time: two runners added at once each wrote the file from the same read.
+  const run = configWrites.then(() => writeSshConfigBlock(parsed.host, sshDir(p)));
+  configWrites = run.catch(() => {});
+  return run;
+}
+let configWrites: Promise<void> = Promise.resolve();
+
+async function writeSshConfigBlock(host: string, dir: string): Promise<void> {
   const cfg = join(dir, 'config');
-  const mark = `${CONFIG_MARK} ${parsed.host}`;
+  const mark = `${CONFIG_MARK} ${host}`;
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const existing = existsSync(cfg) ? await readFile(cfg, 'utf8') : '';
   // Whole-line match: `.includes(mark)` treats `# agentclaw-runner: vm` as
@@ -102,18 +117,26 @@ export async function ensureSshConfigBlock(endpoint: string, p: RunnerPaths = {}
   // with the wrong key).
   if (existing.split('\n').some((l) => l.trim() === mark)) return;
   const lines = [
-    '',
     mark,
-    `Host ${parsed.host}`,
-    ...(parsed.user ? [`    User ${parsed.user}`] : []),
-    ...(parsed.port ? [`    Port ${parsed.port}`] : []),
+    `Host ${host}`,
     `    IdentityFile ${sshConfigPath(join(dir, KEY_NAME))}`,
     '    IdentitiesOnly yes',
     '    StrictHostKeyChecking accept-new',
+    '# (end of that block: what follows applies to every host)',
+    'Host *',
     '',
   ];
-  await appendFile(cfg, lines.join('\n'), { mode: 0o600 });
-  await chmod(cfg, 0o600);
+  // Written beside the real file (a symlinked config stays a symlink) and renamed over it: never half a file.
+  const target = existsSync(cfg) ? await realpath(cfg) : cfg;
+  const tmp = `${target}.hatchabot-${process.pid}`;
+  try {
+    await writeFile(tmp, lines.join('\n') + existing, { mode: 0o600 });
+    await chmod(tmp, 0o600);
+    await rename(tmp, target);
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
 }
 
 /**
@@ -131,7 +154,22 @@ export function runnerSetupSnippet(pubKey: string): string {
     // zsh reads ~/.zshenv for every invocation, including non-interactive ssh
     // (macOS default shell); bash reads ~/.bashrc via sshd's shell (Linux
     // distros commonly source it non-interactively; harmless where not).
-    `for f in ~/.zshenv ~/.bashrc; do grep -qs 'agentclaw: docker on PATH' "$f" || printf '\\n# agentclaw: docker on PATH for non-interactive ssh\\nexport PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"\\n' >> "$f"; done`,
+    // At the TOP: a distro's ~/.bashrc starts by returning from any
+    // non-interactive shell, so a line appended below never ran (HB-0315).
+    // The new text goes in a file beside it first (a copy, so it keeps the
+    // mode), then over it with mv: a failed write never leaves it cut short.
+    // A symlink (dotfiles) is written through instead, so it stays one; if
+    // that fails, the whole text is kept and said. Works under noclobber.
+    `for f in ~/.zshenv ~/.bashrc; do`,
+    `  grep -qs 'agentclaw: docker on PATH' "$f" && continue; t="$f.agentclaw-new"`,
+    `  if [ -e "$t" ]; then echo "WARNING: $t is left from an earlier try: compare it with $f, then delete it and paste this again"; continue; fi`,
+    `  if { [ -L "$f" ] || [ ! -f "$f" ] || cp -p "$f" "$t"; } && { printf '# agentclaw: docker on PATH for non-interactive ssh\\nexport PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"\\n\\n'; [ ! -e "$f" ] || cat "$f"; } >| "$t"; then`,
+    `    if [ ! -L "$f" ]; then mv -f "$t" "$f" || { rm -f "$t"; echo "WARNING: could not add docker's PATH line to $f"; }`,
+    `    elif [ ! -w "$f" ]; then rm -f "$t"; echo "WARNING: could not add docker's PATH line to $f: it is read-only"`,
+    `    elif cat "$t" >| "$f"; then rm -f "$t"`,
+    `    else echo "WARNING: could not add docker's PATH line to $f; if it is now cut short, its whole text is in $t"; fi`,
+    `  else rm -f "$t"; echo "WARNING: could not add docker's PATH line to $f"; fi`,
+    `done`,
     `command -v docker >/dev/null && docker version --format 'docker OK — server {{.Server.Version}}' || echo 'WARNING: docker not found — install Docker first'`,
   ].join('\n');
 }
@@ -227,6 +265,14 @@ export async function installRuntimeImage(
       if (opts.onProgress && Date.now() - told > 1000) { told = Date.now(); opts.onProgress({ bytes, total: opts.total }); }
     });
     let saveCode: number | null = null;
+    let loadCode: number | null | undefined; // undefined until the receiver has closed
+    const judge = () => {
+      if (loadCode === 0 && saveCode === 0) return finish({ ok: true });
+      // The receiver is gone: a sender left running blocks on its full pipe
+      // for good, holding a daemon export (audit, 2026-10-22).
+      if (saveCode === null) save.kill('SIGKILL');
+      finish({ ok: false, error: stderr.slice(-400) || `exit ${saveCode ?? '?'}/${loadCode}` });
+    };
     save.on('close', (code) => {
       saveCode = code;
       if (code !== 0) load.kill('SIGKILL');
@@ -235,14 +281,15 @@ export async function installRuntimeImage(
       // killed as "stalled" just before it finished (2026-10-09). The overall
       // limit still stands.
       else clearTimeout(stall);
+      if (loadCode !== undefined) judge();
     });
     load.on('close', (code) => {
+      loadCode = code;
       opts.onProgress?.({ bytes, total: opts.total });
-      if (code === 0 && saveCode === 0) return finish({ ok: true });
-      // The receiver is gone: a sender left running blocks on its full pipe
-      // for good, holding a daemon export (audit, 2026-10-22).
-      if (saveCode === null) save.kill('SIGKILL');
-      finish({ ok: false, error: stderr.slice(-400) || `exit ${saveCode ?? '?'}/${code}` });
+      // Loaded, and the sender has sent everything but not yet closed: its
+      // exit decides, not a kill that reported a good copy as failed (HB-0319).
+      if (code === 0 && saveCode === null) return;
+      judge();
     });
     save.on('error', (err) => { load.kill('SIGKILL'); finish({ ok: false, error: String(err.message).slice(0, 200) }); });
     load.on('error', (err) => { save.kill('SIGKILL'); finish({ ok: false, error: String(err.message).slice(0, 200) }); });

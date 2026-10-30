@@ -249,6 +249,56 @@ describe('cron routes', () => {
     expect(odd.statusCode).toBe(400);
   });
 
+  it('a main-session reminder shows its text, and its edit keeps it a system event (HB-0286)', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [
+      { id: 'job-r', name: 'Water the plants', enabled: true, sessionTarget: 'main', schedule: { kind: 'every', everyMs: 3_600_000 }, payload: { kind: 'systemEvent', text: 'Water the plants' } },
+    ] }) });
+    const list = await f.inject({ method: 'GET', url: '/v1/agents/a1/crons', headers: as });
+    expect(list.json().crons[0]).toMatchObject({ payloadKind: 'systemEvent', message: 'Water the plants' });
+    const res = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-r', headers: as, payload: { message: 'Water the ferns' } });
+    expect(res.statusCode).toBe(200);
+    expect(provider.execLog.at(-1)).toEqual(['cron', 'edit', 'job-r', '--system-event', 'Water the ferns']);
+  });
+
+  it('PATCH with a blank timezone clears the task\'s zone; on a task with none it changes nothing (HB-0366)', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('cron list', { code: 0, stdout: CRON_JSON, stderr: '' });
+    const res = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: { tz: '' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, edited: true });
+    // `cron edit --tz ''` is "no zone given": the schedule goes to the gateway without one.
+    expect(provider.execLog.some((c) => c[1] === 'edit')).toBe(false);
+    const call = provider.execLog.at(-1)!;
+    expect(call.slice(0, 4)).toEqual(['gateway', 'call', 'cron.update', '--params']);
+    expect(JSON.parse(call[4]!)).toEqual({ id: 'job-1', patch: { schedule: { kind: 'cron', expr: '0 9 * * 1-5' } } });
+    // With a new expression too: name and expression go through `cron edit`,
+    // then the schedule (no zone) to the gateway.
+    await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: { name: 'Scan', cron: '0 7 * * *', tz: ' ' } });
+    expect(provider.execLog.at(-2)).toEqual(['cron', 'edit', 'job-1', '--name', 'Scan', '--cron', '0 7 * * *']);
+    expect(JSON.parse(provider.execLog.at(-1)![4]!)).toEqual({ id: 'job-1', patch: { schedule: { kind: 'cron', expr: '0 7 * * *' } } });
+    // A gateway that refuses is reported, not called done.
+    provider.execResponses.set('gateway call', { code: 1, stdout: '', stderr: 'invalid cron.update params' });
+    const refused = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: { tz: '' } });
+    expect(refused.statusCode).toBe(502);
+    // Refused after a change with a new expression: the expression was saved
+    // (in its old zone), and only the zone is reported as not cleared.
+    const partial = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: { name: 'Scan', cron: '0 7 * * *', tz: '' } });
+    expect(partial.statusCode).toBe(502);
+    expect(provider.execLog.at(-2)).toEqual(['cron', 'edit', 'job-1', '--name', 'Scan', '--cron', '0 7 * * *']);
+    expect(JSON.stringify(partial.json())).toMatch(/timezone could not be cleared/);
+    provider.execResponses.delete('gateway call');
+    // A task with no zone: nothing to clear, and nothing is called.
+    provider.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [
+      { id: 'job-u', name: 'Unzoned', enabled: true, schedule: { kind: 'cron', expr: '0 9 * * *' }, payload: { kind: 'agentTurn', message: 'scan' } },
+    ] }) });
+    const before = provider.execLog.length;
+    const none = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-u', headers: as, payload: { tz: '' } });
+    expect(none.statusCode).toBe(200);
+    expect(none.json()).toMatchObject({ ok: true, edited: false });
+    expect(provider.execLog.slice(before).some((c) => c[0] === 'gateway' || c[1] === 'edit')).toBe(false);
+  });
+
   it('PATCH rejects a missing enabled flag', async () => {
     const { f } = await world();
     const res = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: {} });
@@ -438,6 +488,34 @@ describe('delivery (regression: tasks on a web-only agent failed every run)', ()
     // No chat app: the same task goes quiet instead of failing every run.
     await retargetImplicitCrons(p, ref, 'kitchen', undefined);
     expect(p.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit').at(-1)).toEqual(['cron', 'edit', 'j1', '--no-deliver']);
+  });
+
+  it('a runner lost mid-pass still hands back the tasks it made quiet, to be pointed later (HB-0289)', async () => {
+    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    let quiet = false;
+    const edits: string[][] = [];
+    const jobs = () => [
+      { id: 'one', enabled: true, delivery: { mode: quiet ? 'none' : 'announce' } },
+      { id: 'two', enabled: true, delivery: { mode: 'announce' } },
+      { id: 'three', enabled: true, delivery: { mode: 'announce' } },
+    ];
+    const p = {
+      exec: async (_r: string, args: string[]) => {
+        if (args[1] === 'list') return { code: 0, stderr: '', stdout: JSON.stringify({ jobs: jobs() }) };
+        edits.push(args);
+        if (args[2] === 'one') { quiet = args.includes('--no-deliver'); return { code: 0, stdout: '', stderr: '' }; }
+        if (args[2] === 'two') throw new Error('runner disconnected');
+        return { code: 1, stdout: '', stderr: 'gateway busy' };
+      },
+    };
+    const r = await retargetImplicitCrons(p as any, 'r', 'kitchen', undefined);
+    // "two" threw: it may have gone quiet, so it is remembered too; "three" was refused, still announcing.
+    expect(r).toEqual({ changed: 1, failed: 2, held: ['one', 'two'] });
+    // Once there is a recipient, the quieted one is pointed at it.
+    const next = await retargetImplicitCrons(p as any, 'r', 'kitchen', { channel: 'telegram', to: TG_ID }, r.held);
+    expect(next.held).toEqual([]);
+    expect(edits.filter((a) => a[2] === 'one').at(-1)).toEqual(['cron', 'edit', 'one', '--announce', '--best-effort-deliver', '--channel', 'telegram', '--to', TG_ID]);
+    expect(quiet).toBe(false);
   });
 
   it('a task made quiet before the owner was linked is pointed at them once they are (#64)', async () => {

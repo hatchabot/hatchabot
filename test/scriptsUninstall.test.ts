@@ -289,6 +289,18 @@ describe('scripts/uninstall.sh acts on its own install (review, 2026-10-09)', ()
     return prod;
   }
 
+  it('a service whose folder has a % in its name (the unit doubles it) is still found, and still refused from a clone (audit, 2026-10-29)', () => {
+    const w = purgeWorld();
+    const prod = join(dirname(w.repo), 'prod-%q'); mkdirSync(join(prod, 'data'), { recursive: true });
+    writeFileSync(join(prod, 'data', 'hatchabot.sqlite'), 'production');
+    mkdirSync(join(w.home, '.config', 'systemd', 'user'), { recursive: true });
+    writeFileSync(join(w.home, '.config', 'systemd', 'user', 'hatchabot.service'), `[Service]\nWorkingDirectory=${prod.replace(/%/g, '%%')}\n`);
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(2);
+    expect(r.stdout).toContain(`The service runs from ${prod}, but this script is in ${w.repo}.`);
+    expect(existsSync(join(prod, 'data', 'hatchabot.sqlite'))).toBe(true);
+  });
+
   it('run from a clone the service does not run, it refuses and names both — production is untouched', () => {
     const w = purgeWorld();
     const prod = withProduction(w);
@@ -376,6 +388,25 @@ describe('scripts/uninstall.sh and the backups (review, 2026-10-09)', () => {
     expect(existsSync(join(backups, '2026-10-02'))).toBe(false);
     expect(existsSync(join(backups, '2026-10-03', 'photo.jpg'))).toBe(true);
     expect(existsSync(join(backups, 'other-machine', 'db.sqlite'))).toBe(true);
+  });
+
+  it('--backups leaves the sets another install made in a shared folder (HB-0280)', () => {
+    const w = purgeWorld();
+    dockerShim(w, VOLS);
+    const backups = join(dirname(w.repo), 'shared');
+    const set = (d: string, files: Record<string, string>) => { mkdirSync(join(backups, d), { recursive: true }); for (const [f, t] of Object.entries(files)) writeFileSync(join(backups, d, f), t); };
+    set('2026-10-01', { 'backup-status.json': '{}', '.backup-owner': 'feedfacefeedface\n' }); // the other install's
+    set('2026-10-02', { 'backup-status.json': '{}', 'secret-key.env': 'HATCHABOT_SECRET_KEY=another-made-up-key\n' }); // the other's, from before owner files
+    set('2026-10-03', { 'backup-status.json': '{}', 'secret-key.env': 'HATCHABOT_SECRET_KEY=x\n' }); // this install's, from before owner files
+    set('2026-10-04', { 'hatchabot.sqlite': 'x' }); // no owner, no key: as before, removed
+    writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x\nHATCHABOT_BACKUP_DIR=${backups}\n`);
+    const r = run(w, ['--purge', '--backups', '--yes']);
+    expect(r.stdout, r.stderr).toContain('removed 2 backup sets');
+    expect(r.stdout).toContain('kept 2 sets another Hatchabot install made there');
+    expect(existsSync(join(backups, '2026-10-01'))).toBe(true);
+    expect(existsSync(join(backups, '2026-10-02'))).toBe(true);
+    expect(existsSync(join(backups, '2026-10-03'))).toBe(false);
+    expect(existsSync(join(backups, '2026-10-04'))).toBe(false);
   });
 
   it('--purge without --backups keeps a backup folder that sits inside the data folder', () => {
@@ -535,5 +566,121 @@ describe('scripts/uninstall.sh unlinks only its own CLI (audit #029)', () => {
     expect(r.stdout).toContain('removed hbt');
     expect(existsSync(join(w.bin, 'hbt'))).toBe(false);
     expect(readFileSync(w.log, 'utf8')).toContain('npm unlink -g hatchabot');
+  });
+});
+
+describe('scripts/uninstall.sh finds, stops and reports every runtime of its agents (HB-0282, HB-0343, HB-0344, HB-0345)', () => {
+  type Row = { id: string; name: string; ref: string; state: string; host?: string };
+  /** A database as the app writes it (agents with a state, hosts), and the module to read it. */
+  function stateWorld(rows: Row[]) {
+    const w = world();
+    rmSync(join(w.repo, 'data', 'hatchabot.sqlite'));
+    const db = new Database(join(w.repo, 'data', 'hatchabot.sqlite'));
+    db.exec('CREATE TABLE hosts (id TEXT, kind TEXT, name TEXT, settings TEXT); CREATE TABLE agents (id TEXT, name TEXT, state TEXT, host_id TEXT, runtime_ref TEXT, image TEXT)');
+    db.prepare('INSERT INTO hosts VALUES (?, ?, ?, ?)').run('h-local', 'local', 'This machine', '{}');
+    db.prepare('INSERT INTO hosts VALUES (?, ?, ?, ?)').run('h-runner', 'cloud', 'Garage box', JSON.stringify({ dockerHost: 'ssh://garage-box.example.test' }));
+    for (const r of rows) db.prepare('INSERT INTO agents VALUES (?, ?, ?, ?, ?, NULL)').run(r.id, r.name, r.state, r.host ?? 'h-local', r.ref);
+    db.close();
+    symlinkSync(dirname(dirname(createRequire(import.meta.url).resolve('better-sqlite3/package.json'))), join(w.repo, 'node_modules'));
+    return w;
+  }
+  const calls = (w: ReturnType<typeof world>) => (existsSync(w.log) ? readFileSync(w.log, 'utf8').split('\n').filter(Boolean) : []);
+  const LEGACY = { id: '123456ab-cdef-4000-8000-000000000001', name: 'Meal Planner', ref: 'docker://123456abcdef', state: 'RUNNING' };
+  const MODERN = { id: '22222222-bbbb', name: 'Garden Notes', ref: 'docker://hatchabot-garden-notes-22222222', state: 'RUNNING' };
+
+  it('an agent from before slugs (docker://<short id>) is stopped under the name the provider gives it, agentclaw-<short>', () => {
+    const w = stateWorld([LEGACY]);
+    dockerShim(w, `*"ps -aq --filter name=^/agentclaw-123456abcdef$"*) echo legacy1 ;;`);
+    const r = run(w, ['--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(calls(w)).toContain('docker stop legacy1');
+    expect(r.stdout).toContain('stopped 1 containers');
+    expect(calls(w).join('\n')).not.toContain('name=^/123456abcdef$');
+  });
+
+  it('--purge removes a legacy agent\'s container and its agentclaw-vol-<short> volume', () => {
+    const w = stateWorld([LEGACY]);
+    dockerShim(w, `*"ps -aq --filter name=^/agentclaw-123456abcdef$"*) echo legacy1 ;;\n  ${VOLS}`);
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(calls(w)).toContain('docker rm -f legacy1');
+    expect(calls(w)).toContain('docker volume rm agentclaw-vol-123456abcdef');
+    expect(r.stdout).toContain('removed 1 volumes');
+  });
+
+  it('a stop Docker refuses: names the agent still running, never says Hatchabot is no longer running, and exits 1', () => {
+    const w = stateWorld([MODERN]);
+    dockerShim(w, `"ps -aq --filter name=^/hatchabot-garden-notes-22222222$") echo garden1 ;;
+  "ps -q --filter name=^/hatchabot-garden-notes-22222222$") echo garden1 ;;
+  "stop garden1") echo "Error response from daemon: cannot stop container: garden1: permission denied" >&2; exit 1 ;;`);
+    const r = run(w, ['--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stdout).toContain('could NOT stop 1 of 1 containers: Error response from daemon: cannot stop container');
+    expect(r.stdout).not.toContain('stopped 1 containers');
+    expect(r.stdout).not.toContain('Hatchabot is no longer running');
+    expect(r.stdout).toMatch(/still running \(Docker would not stop them\):\n {2}· hatchabot-garden-notes-22222222/);
+  });
+
+  it('a stop that failed for an agent no longer running (gone meanwhile) is a stop', () => {
+    const w = stateWorld([MODERN]);
+    dockerShim(w, `"ps -aq --filter name=^/hatchabot-garden-notes-22222222$") echo garden1 ;;
+  "stop garden1") echo "Error response from daemon: No such container: garden1" >&2; exit 1 ;;`);
+    const r = run(w, ['--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('stopped 1 containers');
+    expect(r.stdout).toContain('Hatchabot is no longer running');
+  });
+
+  it('a --purge whose stop was refused but whose removal worked ends clean', () => {
+    const w = stateWorld([MODERN]);
+    dockerShim(w, `"ps -aq --filter name=^/hatchabot-garden-notes-22222222$") echo garden1 ;;
+  "ps -q --filter name=^/hatchabot-garden-notes-22222222$") echo garden1 ;;
+  "stop garden1") exit 1 ;;
+  ${VOLS}`);
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(calls(w)).toContain('docker rm -f garden1');
+    expect(r.stdout).toContain('Hatchabot is no longer running');
+  });
+
+  it('a --purge whose agent Docker will neither stop nor remove keeps the database and .env, and exits 1', () => {
+    const w = stateWorld([MODERN]);
+    dockerShim(w, `"ps -aq --filter name=^/hatchabot-garden-notes-22222222$") echo garden1 ;;
+  "ps -q --filter name=^/hatchabot-garden-notes-22222222$") echo garden1 ;;
+  "stop garden1"|"rm -f garden1") exit 1 ;;
+  ${VOLS}`);
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stdout).toMatch(/still running \(Docker would not remove them\):\n {2}· hatchabot-garden-notes-22222222/);
+    expect(existsSync(join(w.repo, 'data', 'hatchabot.sqlite'))).toBe(true);
+    expect(existsSync(join(w.repo, '.env'))).toBe(true);
+  });
+
+  it('each agent\'s browser is removed, before the agent it shares a network with is stopped', () => {
+    const w = stateWorld([MODERN]);
+    dockerShim(w, `"ps -aq --filter name=^/hatchabot-garden-notes-22222222$") echo garden1 ;;
+  "ps -aq --filter label=hatchabot.role=browser --filter label=hatchabot.browser-of=hatchabot-garden-notes-22222222") echo browser1 ;;`);
+    const r = run(w, ['--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    const c = calls(w);
+    expect(c).toContain('docker rm -f browser1');
+    expect(c.indexOf('docker rm -f browser1')).toBeLessThan(c.indexOf('docker stop garden1'));
+    expect(r.stdout).toContain('removed 1 service containers (doormen, browsers, memory search)');
+  });
+
+  it('--purge is not held back by agents on a runner that were deleted in the app; one that is not deleted still holds it', () => {
+    const gone = { id: '33333333-cccc', name: 'Chore Chart', ref: 'docker://hatchabot-chore-chart-33333333', state: 'DELETED', host: 'h-runner' };
+    const w = stateWorld([MODERN, gone]);
+    dockerShim(w, VOLS);
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).not.toContain('another machine');
+    expect(existsSync(join(w.repo, 'data', 'hatchabot.sqlite'))).toBe(false);
+
+    const held = stateWorld([MODERN, { ...gone, state: 'ARCHIVED' }]);
+    const h = run(held, ['--purge', '--yes']);
+    expect(h.status, h.stdout + h.stderr).toBe(2);
+    expect(h.stdout).toContain('Chore Chart (on Garage box: ssh://garage-box.example.test)');
+    expect(existsSync(join(held.repo, 'data', 'hatchabot.sqlite'))).toBe(true);
   });
 });

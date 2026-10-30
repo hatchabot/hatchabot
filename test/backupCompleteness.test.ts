@@ -93,6 +93,8 @@ if [ "$1" = -H ]; then
   if read -r -t 0.2 leak; then echo "STDIN: $leak" >> "${root}/remote.log"; fi
   case "$host" in *asleep*) exit 255;; esac
   echo "$host $*" >> "${root}/remote.log"
+  # A tcp:// runner is spoken to over TLS: the flag comes first.
+  if [ "$1" = --tlsverify ]; then shift; fi
   case "$1" in
     version) exit 0 ;;
     # A volume named *gone* is not on the runner (as docker says it).
@@ -101,6 +103,7 @@ if [ "$1" = -H ]; then
   esac
   exit 0
 fi
+echo "$*" >> "${root}/local.log"
 case "$1 $2" in
   "volume ls") printf '%s\\n' ${volumes.map((v) => `'${v}'`).join(' ')} ;;
   "image inspect") exit 0 ;;
@@ -113,6 +116,8 @@ case "$1 $2" in
     f="$(grep -o "/out/[^' ]*" <<<"\${@: -1}" | head -1)"; f="\${f#/out/}"
     # A volume named *broken* fails half-way: a torn file, then tar's error.
     case "$vol" in *broken*) echo torn > "$out/$f"; exit 2;; esac
+    # A client killed (137) while its container goes on writing.
+    case "$vol" in *killed*) echo part > "$out/$f"; exit 137;; esac
     # A volume with a fixture tree runs the script's own tar command for
     # real, /data and /out pointed at temp dirs (review, 2026-09-29).
     if [ -d "${root}/vols/$vol" ]; then
@@ -156,6 +161,7 @@ esac
     });
     db.close();
   };
+  const localLog = () => (existsSync(join(root, 'local.log')) ? readFileSync(join(root, 'local.log'), 'utf8') : '');
   const remoteLog = () => (existsSync(join(root, 'remote.log')) ? readFileSync(join(root, 'remote.log'), 'utf8') : '');
   /** A set from a month ago, old enough for the 14-day pruning to remove. */
   const oldSet = (files: string[], date = '2026-01-02', daysAgo = 30) => {
@@ -174,10 +180,25 @@ esac
   };
   /** Today's set directory, as the script names it (before any run made it). */
   const today = () => join(backups, spawnSync('date', ['+%F'], { encoding: 'utf8' }).stdout.trim());
-  return { run, start, bin, root, setDir, fillVolume, repo, onRunners, remoteLog, oldSet, record, setState, backups, today };
+  return { run, start, bin, root, setDir, fillVolume, repo, onRunners, localLog, remoteLog, oldSet, record, setState, backups, today };
 }
 
 describe('scripts/backup-volumes.sh records how the run ended', () => {
+  it('a run stopped by a signal (the service restarting, a shutdown) is incomplete, never complete (HB-0368)', async () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol', 'hatchabot-notes-2-vol'], ['docker://hatchabot-kitchen-1', 'docker://hatchabot-notes-2']);
+    writeFileSync(join(w.root, 'slow'), '');
+    const c = spawn('bash', [join(w.repo, 'scripts', 'backup-volumes.sh')], {
+      env: { HOME: join(w.root, 'home'), PATH: `${w.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HATCHABOT_BACKUP_DIR: w.backups, HATCHABOT_PREFIX: 'hatchabot', NODE_PATH: join(dirname(createRequire(import.meta.url).resolve('better-sqlite3/package.json')), '..') },
+      stdio: 'ignore',
+    });
+    const t0 = Date.now();
+    while (!/^run /m.test(w.localLog()) && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 20));
+    c.kill('SIGTERM');
+    const code = await new Promise<number | null>((r) => c.on('exit', (n) => r(n)));
+    expect(code).toBe(143);
+    expect(readSetStatus(w.setDir())).toMatchObject({ complete: false });
+  }, 30_000);
+
   it('a run that refuses before it starts leaves the day\'s earlier record alone (2026-10-03)', () => {
     const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
     expect(w.run().status).toBe(0);
@@ -197,6 +218,22 @@ describe('scripts/backup-volumes.sh records how the run ended', () => {
     expect(existsSync(join(w.setDir(), 'agentclaw-old-garden.tgz'))).toBe(false);
     expect(existsSync(join(w.setDir(), 'hatchabot-kitchen-1-vol.tgz'))).toBe(true);
     expect(readSetStatus(w.setDir())).toMatchObject({ complete: true, orphans: ['agentclaw-old-garden'], failedVolumes: [] });
+  });
+
+  it('a local archive whose client was killed: its container, with no network, is removed by name, the set incomplete (HB-0348)', () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol', 'hatchabot-killed-2-vol'], ['docker://hatchabot-kitchen-1', 'docker://hatchabot-killed-2']);
+    const r = w.run();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/hatchabot-killed-2-vol failed \(exit 137\)/);
+    const runs = w.localLog().split('\n').filter((l) => l.startsWith('run '));
+    expect(runs).toHaveLength(2);
+    for (const l of runs) expect(l).toMatch(/^run --rm --name hatchabot-bk-\d+-\d+ --label hatchabot\.oneshot=hatchabot --network none --user root -v /);
+    const killed = runs.find((l) => l.includes('killed-2-vol:/data'))!.split(' ')[3];
+    const kept = runs.find((l) => l.includes('kitchen-1-vol:/data'))!.split(' ')[3];
+    expect(w.localLog()).toContain(`rm -f ${killed}\n`);
+    expect(w.localLog()).not.toContain(`rm -f ${kept}`);
+    expect(existsSync(join(w.setDir(), 'hatchabot-killed-2-vol.tgz.part'))).toBe(false);
+    expect(w.record()).toMatchObject({ state: 'incomplete', failedVolumes: ['hatchabot-killed-2-vol'], captured: ['hatchabot-kitchen-1-vol'] });
   });
 
   it('a failed volume leaves the set marked incomplete, naming it', () => {
@@ -235,12 +272,84 @@ describe('scripts/backup-volumes.sh records how the run ended', () => {
     expect(agentsMissingFromSet(set, agents, () => 'Laptop').map((m) => m.agentId)).toEqual(['r2']);
   });
 
+  it('a tcp:// runner is read over verified TLS, every call; an ssh:// one as before (HB-0277)', () => {
+    const w = scriptWorld([], []);
+    w.onRunners([
+      ['tcp://laptop.test:2376', 'docker://hatchabot-notes-3'],
+      ['tcp://laptop.test:2376', 'docker://hatchabot-broken-5'],
+      ['ssh://tablet.test', 'docker://hatchabot-garden-4'],
+    ]);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1); // the broken one
+    expect(spawnSync('gzip', ['-dc', join(w.setDir(), 'hatchabot-notes-3-vol.tgz')], { encoding: 'utf8' }).stdout).toBe('runner data');
+    const lines = w.remoteLog().split('\n').filter(Boolean);
+    const tcp = lines.filter((l) => l.startsWith('tcp://'));
+    // For each volume: is it awake, inspect, run; the failed one's container removed.
+    expect(tcp.map((l) => l.split(' ')[2])).toEqual(['version', 'volume', 'run', 'version', 'volume', 'run', 'rm']);
+    for (const l of tcp) expect(l.split(' ')[1], l).toBe('--tlsverify');
+    expect(lines.filter((l) => l.startsWith('ssh://')).every((l) => !l.includes('--tlsverify'))).toBe(true);
+    expect(w.record()).toMatchObject({ captured: ['hatchabot-notes-3-vol', 'hatchabot-garden-4-vol'], failedVolumes: ['hatchabot-broken-5-vol'] });
+  });
+
   it('with no registry agents to match (unreadable or empty), every volume is taken', () => {
     const w = scriptWorld(['hatchabot-kitchen-1-vol', 'agentclaw-old-garden'], []);
     // No active agents but volumes exist: the old trust-the-disk rule holds.
     const r = w.run();
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(existsSync(join(w.setDir(), 'agentclaw-old-garden.tgz'))).toBe(true);
+  });
+});
+
+describe('scripts/backup-volumes.sh: two installs sharing a backups folder (HB-0280)', () => {
+  it('a day\'s set stays the install\'s that made it: the other one stops before writing, and does not prune it', () => {
+    const a = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    const b = scriptWorld(['other-garden-2-vol'], ['docker://other-garden-2']);
+    writeFileSync(join(b.repo, '.env'), 'HATCHABOT_SECRET_KEY=another-made-up-key\n');
+    const shared = { HATCHABOT_BACKUP_DIR: a.backups };
+    const aOld = a.oldSet(['hatchabot.sqlite', 'hatchabot-kitchen-1-vol.tgz'], '2026-01-02');
+    expect(a.run().status).toBe(0);
+    expect(existsSync(aOld)).toBe(false); // its own old set is pruned as before
+    const set = a.setDir();
+    const owner = readFileSync(join(set, '.backup-owner'), 'utf8');
+    expect(owner).toMatch(/^[0-9a-f]{16}\n$/);
+    expect(owner).not.toContain('not-a-real-key');
+    const r = b.run({ ...shared, HATCHABOT_PREFIX: 'other' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/is another Hatchabot install's backup set .* Give each install a HATCHABOT_BACKUP_DIR of its own/);
+    // A's set is whole and A's: its registry, its key, its record, nothing of B's.
+    const db = new Database(join(set, 'hatchabot.sqlite'), { readonly: true });
+    expect(db.prepare('SELECT runtime_ref FROM agents').all()).toEqual([{ runtime_ref: 'docker://hatchabot-kitchen-1' }]);
+    db.close();
+    expect(readFileSync(join(set, 'secret-key.env'), 'utf8')).toContain('not-a-real-key');
+    expect(existsSync(join(set, 'other-garden-2-vol.tgz'))).toBe(false);
+    expect(readSetStatus(set)).toMatchObject({ complete: true });
+    expect(existsSync(join(set, '.backup-lock'))).toBe(false);
+    // A again the same day: its own set, written over as before.
+    expect(a.run().status).toBe(0);
+    // An old set of B's is not A's to prune; an old one from before the owner file is.
+    const bOld = a.oldSet(['hatchabot.sqlite', 'other-garden-2-vol.tgz'], '2026-01-03');
+    writeFileSync(join(bOld, '.backup-owner'), '0123456789abcdef\n');
+    const legacy = a.oldSet(['hatchabot.sqlite'], '2026-01-04');
+    expect(a.run().status).toBe(0);
+    expect(existsSync(bOld)).toBe(true);
+    expect(existsSync(legacy)).toBe(false);
+  });
+
+  it('an old set from before the owner file is the install\'s whose key it saved: the other one does not prune it (HB-0280)', () => {
+    const a = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    // Before the owner file, B ran after A each day: its key is in every set,
+    // beside both installs' archives. B's runs now stop at A's sets, so these
+    // are B's only backups.
+    const bLegacy = a.oldSet(['hatchabot.sqlite', 'hatchabot-kitchen-1-vol.tgz', 'other-garden-2-vol.tgz'], '2026-01-03');
+    writeFileSync(join(bLegacy, 'secret-key.env'), 'HATCHABOT_SECRET_KEY="another-made-up-key"\n');
+    const aLegacy = a.oldSet(['hatchabot.sqlite', 'hatchabot-kitchen-1-vol.tgz'], '2026-01-04');
+    writeFileSync(join(aLegacy, 'secret-key.env'), 'HATCHABOT_SECRET_KEY="not-a-real-key"\n');
+    const then = new Date(Date.now() - 30 * 86_400_000);
+    for (const d of [bLegacy, aLegacy]) utimesSync(d, then, then);
+    const r = a.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(existsSync(bLegacy)).toBe(true);
+    expect(existsSync(aLegacy)).toBe(false);
   });
 });
 

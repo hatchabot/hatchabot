@@ -62,6 +62,41 @@ describe('moveAgentToHost — across two daemons', () => {
     expect((await target.status(moved.runtimeRef!)).phase).toBe('stopped');
   });
 
+  it('a removed repo still to be scrubbed is scrubbed on the moved volume before it starts there (HB-0317)', async () => {
+    const { w, target, deps } = await crossDaemonWorld();
+    const id = await seedRunningAgent(w);
+    w.store.addDataSourceRemoval({ id: 'gone', agentId: id, mountName: 'recipes', repoUrl: 'git@example.org:example-owner/recipes.git' });
+    const order: string[] = [];
+    const onVolume = target.execShellOnVolume.bind(target);
+    target.execShellOnVolume = async (ref, script, opts) => { if (script.includes('recipes_deploy')) order.push('scrub'); return onVolume(ref, script, opts); };
+    const start = target.start.bind(target);
+    target.start = async (ref) => { order.push('start'); return start(ref); };
+
+    const moved = await moveAgentToHost(deps, id, 'h2');
+    expect(moved.state).toBe('RUNNING');
+    expect(order).toEqual(['scrub', 'start']);
+    expect(w.store.dataSourceRemovals(id)).toEqual([]);
+  });
+
+  it('a move rolled back after scrubbing its copy keeps the removal recorded for the source (HB-0317)', async () => {
+    const { w, target, deps } = await crossDaemonWorld();
+    const id = await seedRunningAgent(w);
+    w.store.addDataSourceRemoval({ id: 'gone', agentId: id, mountName: 'recipes', repoUrl: 'git@example.org:example-owner/recipes.git' });
+    let scrubbedCopy = false;
+    const onVolume = target.execShellOnVolume.bind(target);
+    target.execShellOnVolume = async (ref, script, opts) => { if (script.includes('recipes_deploy')) scrubbedCopy = true; return onVolume(ref, script, opts); };
+    // The copy starts but never answers: the move is rolled back.
+    target.status = async () => ({ phase: 'running', healthy: false });
+
+    await expect(moveAgentToHost(deps, id, 'h2')).rejects.toThrow(/rolled back/);
+    expect(scrubbedCopy).toBe(true);
+    const agent = w.store.getAgent(id)!;
+    expect(agent.hostId).toBe('h1');
+    expect(agent.state).toBe('RUNNING');
+    // The source's volume still holds the key: its next start must scrub it.
+    expect(w.store.dataSourceRemovals(id).map((r) => r.id)).toEqual(['gone']);
+  });
+
   it('rolls back onto the source host when the target provision fails', async () => {
     const w = await makeWorld();
     w.store.insertHost({

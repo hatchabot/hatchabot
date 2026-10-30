@@ -118,6 +118,10 @@ echo "$$" > "$LOCK/pid"
 # Only this run's own lock: one that names another run is that run's (#215).
 release_lock() { [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK"; return 0; }
 trap release_lock EXIT
+# Stopped by a signal (the service restarting, a shutdown), bash ran the EXIT
+# trap with the last command's 0, and finish wrote "complete" for a set cut
+# short (HB-0368). Ended through exit, it is recorded incomplete.
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
 # The set's own record. "running" until the end; whatever way the script ends
 # (a refusal, a failed volume, set -e, Ctrl-C) the EXIT trap writes the verdict.
@@ -141,18 +145,25 @@ write_status() {
 # The record starts only once the run can really begin (below): a run that
 # refuses before it starts (no database, no docker) must not replace the
 # verdict of an earlier run of the same day with "incomplete, 0 volumes".
-# A runner's archive container, while one is running ("<host>|<name>"). Named
-# so it can be removed: a timeout kills only the docker client, and the
-# container went on reading the agent's volume after the backup had failed
-# (#216). Removed (and waited for) on a failure, and on any way out of the run.
-remote_oneshot=""
-reap_remote() {
-  [ -n "$remote_oneshot" ] || return 0
-  local t=""; command -v timeout >/dev/null 2>&1 && t="timeout"
-  ${t:+$t 120} docker -H "${remote_oneshot%%|*}" rm -f "${remote_oneshot#*|}" </dev/null >/dev/null 2>&1 || true
-  remote_oneshot=""
+# An archive container, while one is running ("<host>|<name>", no host for
+# this machine). Named so it can be removed: a timeout kills only the docker
+# client, and the container went on reading the agent's volume after the
+# backup had failed (#216), on a runner and here alike (HB-0348). Removed
+# (and waited for) on a failure, and on any way out of the run.
+oneshot=""
+# A tcp:// runner is spoken to over verified TLS only, as the app does
+# (src/providers/runnerEndpoint.ts, dockerConnArgs): without it a runner set up
+# with TLS did not answer and was skipped as asleep, and a plain one was read
+# with nobody asked who it was (HB-0277). Printed for an unquoted $(…).
+tls_args() { case "$1" in [Tt][Cc][Pp]://*) printf '%s' --tlsverify ;; esac; }
+reap_oneshot() {
+  [ -n "$oneshot" ] || return 0
+  local t="" h="${oneshot%%|*}"; command -v timeout >/dev/null 2>&1 && t="timeout"
+  # shellcheck disable=SC2046  # no flag, or one
+  ${t:+$t 120} docker ${h:+-H "$h"} $(tls_args "$h") rm -f "${oneshot#*|}" </dev/null >/dev/null 2>&1 || true
+  oneshot=""
 }
-finish() { local rc=$?; reap_remote; if [ "$rc" -eq 0 ]; then write_status complete; else write_status incomplete; fi; release_lock; exit "$rc"; }
+finish() { local rc=$?; reap_oneshot; if [ "$rc" -eq 0 ]; then write_status complete; else write_status incomplete; fi; release_lock; exit "$rc"; }
 
 # The control plane's own database first: it holds the encrypted bot tokens,
 # the agent registry, memberships and snapshots. Volumes survive without it,
@@ -164,6 +175,36 @@ if [ ! -f "$DB_PATH" ]; then
   echo "✗ No database at $DB_PATH — a backup without the registry is not a backup." >&2
   exit 1
 fi
+# Whose set this is. Two installs sharing a base (another prefix, or another
+# machine on a NAS) wrote the same day's set in turn, and the later one's
+# registry and key replaced the earlier one's beside its archives: that set
+# no longer restored the first install (HB-0280). A set names its install by
+# a fingerprint of the key (each install has its own, for good; never the key
+# itself), and a set of another install's is left as it is: this run stops
+# before it writes anything, and retention below passes over such sets. A run
+# with no key has no fingerprint and goes on as before: the key step below
+# fails it, and the day's set says incomplete. With $1, the fingerprint of the
+# key a set saved there (its secret-key.env), for a set from before the owner
+# file (retention, below).
+key_owner() {
+  node -e '
+  const fs = require("node:fs");
+  const { parseEnv } = require("node:util");
+  const saved = process.argv[1];
+  const file = saved ? (fs.existsSync(saved) ? parseEnv(fs.readFileSync(saved, "utf8")) : {})
+    : fs.existsSync(".env") ? parseEnv(fs.readFileSync(".env", "utf8")) : {};
+  const key = (saved ? undefined : process.env.HATCHABOT_SECRET_KEY ?? process.env.AGENTCLAW_SECRET_KEY)
+    ?? file.HATCHABOT_SECRET_KEY ?? file.AGENTCLAW_SECRET_KEY;
+  if (key) process.stdout.write(require("node:crypto").createHash("sha256").update("hatchabot-backup-owner\0" + key).digest("hex").slice(0, 16));' "${1:-}" 2>/dev/null || true
+}
+owner="$(key_owner)"
+OWNER_FILE=".backup-owner"
+set_owner="$(cat "$DEST/$OWNER_FILE" 2>/dev/null || true)"
+if [ -n "$owner" ] && [ -n "$set_owner" ] && [ "$set_owner" != "$owner" ]; then
+  echo "✗ $DEST is another Hatchabot install's backup set (two installs share $BASE) — this run stops and leaves it as it is. Give each install a HATCHABOT_BACKUP_DIR of its own." >&2
+  exit 1
+fi
+[ -z "$owner" ] || printf '%s\n' "$owner" > "$DEST/$OWNER_FILE"
 # Past the refusal: from here on this run writes into the set, so it owns
 # the day's record (a later failure is recorded as incomplete, rightly).
 write_status running
@@ -351,8 +392,17 @@ while IFS= read -r vol; do
   # always a finished archive (a failed tar left a torn one under the real
   # name, which the retention below would have trusted).
   rc=0
-  docker run --rm --user root -v "$vol:/data:ro" -v "$DEST:/out" "$IMAGE" \
+  # Named and labelled as the app's one-shots are, so a failed client's
+  # container can be removed (reap_oneshot); with no network, as theirs: on
+  # docker's bridge, a "<prefix>-…" name was taken by `hatchabot doctor` for
+  # an agent left on the shared network.
+  oneshot="|${PREFIX}-bk-$$-$RANDOM$RANDOM"
+  docker run --rm --name "${oneshot#|}" --label "hatchabot.oneshot=$PREFIX" --network none --user root -v "$vol:/data:ro" -v "$DEST:/out" "$IMAGE" \
     bash -c "umask 077 && tar czf '/out/$vol.tgz.part' $TAR_EXCLUDES -C /data . ; rc=\$?; chown $(id -u):$(id -g) '/out/$vol.tgz.part' 2>/dev/null; exit \$rc" || rc=$?
+  # A client that failed or was killed may have left its container writing
+  # the .part: it is gone before the file is.
+  if [ "$rc" -gt 1 ]; then reap_oneshot; fi
+  oneshot=""
   if [ "$rc" -gt 1 ] || [ ! -f "$DEST/$vol.tgz.part" ] || ! mv -f "$DEST/$vol.tgz.part" "$DEST/$vol.tgz"; then
     rm -f "$DEST/$vol.tgz.part"
     echo "  ✗ $vol failed (exit $rc)" >&2
@@ -403,7 +453,7 @@ if [ -n "$remote" ]; then
   down_hosts=" "
   while IFS=$'\t' read -r rhost vol rstate; do
     [ -n "$vol" ] || continue
-    if [[ "$down_hosts" == *" $rhost "* ]] || ! ${T:+$T 30} docker -H "$rhost" version </dev/null >/dev/null 2>&1; then
+    if [[ "$down_hosts" == *" $rhost "* ]] || ! ${T:+$T 30} docker -H "$rhost" $(tls_args "$rhost") version </dev/null >/dev/null 2>&1; then
       if [[ "$down_hosts" != *" $rhost "* ]]; then
         echo "  • ${rhost#*://}: not answering (asleep or offline?) — its agents are not in this set" >&2
         down_hosts="$down_hosts$rhost "
@@ -416,7 +466,7 @@ if [ -n "$remote" ]; then
     # an empty volume was left on the runner (2026-10-09). Missing is missing,
     # as for a local agent; one whose first start failed has none to take.
     rc=0
-    inspect="$(${T:+$T 60} docker -H "$rhost" volume inspect --format '{{.Name}}' "$vol" </dev/null 2>&1)" || rc=$?
+    inspect="$(${T:+$T 60} docker -H "$rhost" $(tls_args "$rhost") volume inspect --format '{{.Name}}' "$vol" </dev/null 2>&1)" || rc=$?
     if [ "$rc" -ne 0 ]; then
       if [ "$rstate" = FAILED ] && [[ "$inspect" == *"o such volume"* ]]; then
         echo "  • $vol: its agent failed to start and has no volume — nothing to back up"
@@ -435,15 +485,15 @@ if [ -n "$remote" ]; then
     rc=0
     # Named and labelled as the app's one-shots are (its boot sweep removes
     # one that is left exited), so a failed run can remove it by name.
-    remote_oneshot="$rhost|${PREFIX}-bk-$$-$RANDOM$RANDOM"
+    oneshot="$rhost|${PREFIX}-bk-$$-$RANDOM$RANDOM"
     # </dev/null: over ssh, docker would read the rest of this loop's list.
-    # shellcheck disable=SC2086  # the excludes are separate words
-    ${T:+$T 3600} docker -H "$rhost" run --rm --name "${remote_oneshot#*|}" --label "hatchabot.oneshot=$PREFIX" --network none -v "$vol:/vol:ro" alpine \
+    # shellcheck disable=SC2046,SC2086  # the TLS flag and the excludes are separate words
+    ${T:+$T 3600} docker -H "$rhost" $(tls_args "$rhost") run --rm --name "${oneshot#*|}" --label "hatchabot.oneshot=$PREFIX" --network none -v "$vol:/vol:ro" alpine \
       tar cz ${TAR_EXCLUDES#--anchored } -C /vol . </dev/null > "$DEST/$vol.tgz.part" || rc=$?
     # A client that failed or timed out may have left its container running
     # on the runner: it is gone before the next volume, or the run ends.
-    if [ "$rc" -ne 0 ]; then reap_remote; fi
-    remote_oneshot=""
+    if [ "$rc" -ne 0 ]; then reap_oneshot; fi
+    oneshot=""
     # busybox tar has no "changed as we read it" exit 1: anything but 0 failed.
     if [ "$rc" -ne 0 ] || ! gzip -t "$DEST/$vol.tgz.part" 2>/dev/null; then
       rm -f "$DEST/$vol.tgz.part"
@@ -485,6 +535,14 @@ newer_vols=" "
 old_sets="$(find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' -mtime "+$KEEP_DAYS")"
 while IFS= read -r set; do
   [ -n "$set" ] || continue
+  # Another install's set (a shared base) is not this run's to prune. A set
+  # from before the owner file is the install's whose key it saved: two
+  # installs that wrote the same day's sets in turn left the later one's key
+  # in each, and the other install pruned those, the later one's only copies
+  # once its own runs stopped at the owner file (HB-0280).
+  so="$(cat "$set/$OWNER_FILE" 2>/dev/null || true)"
+  if [ -z "$so" ] && [ -n "$owner" ] && [ -f "$set/secret-key.env" ]; then so="$(key_owner "$set/secret-key.env")"; fi
+  if [ -n "$so" ] && [ "$so" != "$owner" ]; then continue; fi
   if grep -qxF -- "$set" <<<"$old_sets"; then
     held=""
     for tgz in "$set"/*.tgz; do

@@ -1,5 +1,5 @@
 import { validIcon, validIconColor } from './agentIcons.js';
-import { MAX_DATA_SOURCES } from './dataSourceLimits.js';
+import { MAX_DATA_SOURCES, MAX_MOUNT_NAME } from './dataSourceLimits.js';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
 import type { Agent, TemplateParam } from '../domain/types.js';
@@ -47,6 +47,8 @@ export const TEMPLATE_FORMAT = 'hatchabot-template';
 /** Files exported before the rename. */
 export const LEGACY_TEMPLATE_FORMAT = 'agentclaw-template';
 export const TEMPLATE_VERSION = 1;
+/** The longest description a template carries; a full backup's schema (transfer.ts) holds it to the same. */
+export const MAX_PERSONA_CHARS = 8000;
 /** What a template file may hold: older apps refuse a file with more. */
 export const MAX_TEMPLATE_PARAMS = 24;
 export const MAX_TEMPLATE_SCHEDULES = 12;
@@ -140,7 +142,7 @@ const TemplateSchema = z.object({
   exportedAt: z.string().max(64),
   agent: z.object({
     name: z.string().min(1).max(64),
-    persona: z.string().max(8000),
+    persona: z.string().max(MAX_PERSONA_CHARS),
     // `sharedMemory` is accepted and ignored: memory is always shared since
     // v2.107.0, so an old file's `false` means nothing (HB-0094).
     sharedMemory: z.boolean().optional(),
@@ -157,7 +159,7 @@ const TemplateSchema = z.object({
       z.object({
         kind: z.string().max(16),
         access: z.string().max(8),
-        mountName: z.string().max(128),
+        mountName: z.string().max(MAX_MOUNT_NAME),
         repoUrl: z.string().max(512).optional(),
       }),
     )
@@ -346,7 +348,8 @@ export const CLONE_MEMORY_TOTAL_BYTES = 5 * 1024 * 1024;
 // under memory/ (hidden entries skipped — .dreams is OpenClaw's own state),
 // as JSON. Anything too big, binary or oddly named is listed, not copied, and
 // so is a folder deeper than 8 levels: it was left out unsaid (review
-// 2026-10-22, A48).
+// 2026-10-22, A48). So is one, or a file, that cannot be read: a folder the
+// runtime user could not open was left out unsaid too (HB-0295).
 const READ_MEMORY_JS = `
 const fs = require('fs');
 const PER = ${CLONE_MEMORY_FILE_BYTES}, TOTAL = ${CLONE_MEMORY_TOTAL_BYTES};
@@ -356,16 +359,17 @@ function take(rel) {
   let st; try { st = fs.lstatSync(rel); } catch { return; }
   if (!st.isFile()) return;
   if (!okName(rel) || st.size > PER || total + st.size > TOTAL) { skipped.push(rel); return; }
-  const b = fs.readFileSync(rel), t = b.toString('utf8');
+  let b; try { b = fs.readFileSync(rel); } catch { skipped.push(rel); return; }
+  const t = b.toString('utf8');
   if (!Buffer.from(t, 'utf8').equals(b)) { skipped.push(rel); return; }
   files[rel] = t; total += st.size;
 }
 function walk(dir, depth) {
-  let names; try { names = fs.readdirSync(dir).sort(); } catch { return; }
+  let names; try { names = fs.readdirSync(dir).sort(); } catch (e) { if (!e || e.code !== 'ENOENT') skipped.push(dir + '/'); return; }
   for (const n of names) {
     if (n.startsWith('.')) continue;
     const rel = dir + '/' + n;
-    let st; try { st = fs.lstatSync(rel); } catch { continue; }
+    let st; try { st = fs.lstatSync(rel); } catch (e) { if (!e || e.code !== 'ENOENT') skipped.push(rel); continue; }
     if (st.isDirectory()) { if (depth < 8) walk(rel, depth + 1); else skipped.push(rel + '/'); } else take(rel);
   }
 }
@@ -416,6 +420,8 @@ export async function readCloneMemory(
 export function scanTemplate(m: TemplateManifest): PersonalScan {
   return scanPersonalData([
     ...Object.entries(m.files).map(([name, text]) => ({ where: name, text })),
+    // Its name too: it travels in the file (HB-0291).
+    { where: 'Name', text: m.agent.name },
     { where: 'Description', text: m.agent.persona },
     // Names, labels and options travel too: an address in one went out
     // unwarned (review, 2026-10-22).
@@ -504,6 +510,20 @@ export function renderedTooBig(name: string): TransferError {
 }
 
 /**
+ * The description with its placeholders filled, refused when that passes the
+ * limit a template or backup of the agent is read under: a short persona
+ * with a placeholder used five times took a 2,000-character answer to
+ * 10,000, and the agent's own backup could not be imported (HB-0309).
+ */
+export function renderPersona(text: string, values: Record<string, string>): string {
+  const out = applyParamValues(text, values);
+  if (out.length > MAX_PERSONA_CHARS) {
+    throw new TransferError(`With these setup values, the description would be over ${MAX_PERSONA_CHARS.toLocaleString('en-US')} characters — too long to copy or back up. Give shorter answers, or trim the template.`);
+  }
+  return out;
+}
+
+/**
  * Validate the importer's values against the template's declared fields.
  * Returns the effective values (importer's, else defaults) or throws a
  * TransferError naming every problem at once — the caller renders one form,
@@ -535,7 +555,10 @@ export function resolveParamValues(
     // declarations were trimmed must still be fillable (#169).
     const options = p.options?.map((o) => o.trim());
     if (p.type === 'choice' && v !== undefined && options?.length) {
-      if (!options.includes(v.trim())) {
+      // Blank clears an optional choice, as it does any other field; a
+      // required one is refused as required below, not as off the list (HB-0363).
+      if (v.trim() === '') v = '';
+      else if (!options.includes(v.trim())) {
         problems.push(`"${p.label}" must be one of: ${options.join(', ')}`);
         continue;
       }
@@ -635,12 +658,15 @@ export function importTemplate(
     ? manifest.parameters.map((p) => ({ ...p, required: false }))
     : manifest.parameters;
   const resolved = resolveParamValues(effectiveParams, opts.values);
+  // Own keys only: an optional field keyed "constructor" left blank read
+  // Object's function and crashed (HB-0298).
+  const given = (k: string): string | undefined => (Object.hasOwn(resolved, k) ? resolved[k] : undefined);
   // Env-target fields (Phase 2b) split off: their values become agent env
   // vars (write-only secrets), never file substitutions or stored paramValues.
   const envKeys = new Set(manifest.parameters.filter((p) => p.target === 'env').map((p) => p.key));
   const envValues = [...envKeys]
-    .filter((k) => resolved[k] !== undefined && resolved[k] !== '')
-    .map((k) => ({ name: k.toUpperCase(), value: resolved[k]! }));
+    .filter((k) => given(k) !== undefined && given(k) !== '')
+    .map((k) => ({ name: k.toUpperCase(), value: given(k)! }));
   const badValue = envValues.map((v) => envValueProblem(v.name, v.value)).find(Boolean);
   if (badValue) throw new TransferError(badValue);
   // Datasource-target fields: validate every pasted repo URL BEFORE creating
@@ -652,11 +678,15 @@ export function importTemplate(
   const dsProblems: string[] = [];
   for (const p of manifest.parameters) {
     if (p.target !== 'datasource') continue;
-    const v = resolved[p.key];
+    const v = given(p.key);
     if (v === undefined || v === '') continue; // optional and unfilled
     const git = normalizeGitUrl(v);
     if (!git) {
       dsProblems.push(`"${p.label}" is not a recognizable git repo — use git@host:owner/repo.git or https://host/owner/repo`);
+      continue;
+    }
+    if (git.repoName.length > MAX_MOUNT_NAME) {
+      dsProblems.push(`"${p.label}": the repo name is over ${MAX_MOUNT_NAME} characters, longer than a copy of the agent can carry`);
       continue;
     }
     if (RESERVED_MOUNTS.has(git.repoName) || git.repoName.startsWith('.')) {
@@ -730,6 +760,7 @@ export function importTemplate(
       : manifest.files[n];
     if (Buffer.byteLength(seed[n], 'utf8') > MAX_FILE_BYTES) throw renderedTooBig(n);
   }
+  const persona = renderPersona(manifest.agent.persona, values);
   let agent: Agent;
   try {
     // Fresh identity: importer owns it, provisions their own bot, invites their
@@ -737,7 +768,7 @@ export function importTemplate(
     agent = createAgentRecord(store, {
       ownerId: opts.ownerId,
       name,
-      persona: applyParamValues(manifest.agent.persona, values),
+      persona,
       aiProfileId: profile.id,
       hostId: host.id,
     });

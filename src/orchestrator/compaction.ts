@@ -321,8 +321,23 @@ export function nextProviderEntry(current: ProviderEntry | undefined, model: str
  * container (never wakes one): at the change, at every rebuild, after a model
  * change. A local model's agent gets none (local calls are free).
  */
-export async function syncContextCap(deps: { store: Store; provider: RuntimeProvider; log?(e: string, d: Record<string, unknown>): void }, agent: Agent, runtimeRef: string, now = Date.now()):
-  Promise<'applied' | 'removed' | 'unchanged' | 'skipped' | 'changed-by-hand' | 'failed'> {
+type CapDeps = { store: Store; provider: RuntimeProvider; log?(e: string, d: Record<string, unknown>): void };
+type CapOutcome = 'applied' | 'removed' | 'unchanged' | 'skipped' | 'changed-by-hand' | 'failed';
+/**
+ * One at a time per agent, each reading the stored cap when its turn comes:
+ * a removal answered while the first apply was still writing, and that apply
+ * then put the old cap in with no row left to take it out (HB-0312).
+ */
+const capSyncs = new Map<string, Promise<unknown>>();
+export function syncContextCap(deps: CapDeps, agent: Agent, runtimeRef: string, now?: number): Promise<CapOutcome> {
+  const next = (capSyncs.get(agent.id) ?? Promise.resolve()).catch(() => {})
+    .then(() => syncContextCapNow(deps, deps.store.getAgent(agent.id) ?? agent, runtimeRef, now ?? Date.now()));
+  const settled = next.catch(() => {}).finally(() => { if (capSyncs.get(agent.id) === settled) capSyncs.delete(agent.id); });
+  capSyncs.set(agent.id, settled);
+  return next;
+}
+
+async function syncContextCapNow(deps: CapDeps, agent: Agent, runtimeRef: string, now: number): Promise<CapOutcome> {
   const { store, provider } = deps;
   const cap = store.getContextCap(agent.id);
   if (!cap) return 'skipped';

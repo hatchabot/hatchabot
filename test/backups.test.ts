@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { DROP_CHAT_ACCOUNTS_SCRIPT } from '../src/orchestrator/members.js';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, statSync, lstatSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -89,6 +89,21 @@ describe('pruneBackup', () => {
     expect(() => pruneBackup('2026-08-24', base)).toThrow(BackupBusyError);
     expect(readFileSync(join(base, '2026-08-24', '.backup-lock', 'pid'), 'utf8')).toBe(String(process.pid));
     expect(existsSync(join(base, '2026-08-24', 'hatchabot.sqlite'))).toBe(true);
+  });
+
+  it('refuses a dated link to a folder elsewhere, and writes nothing there (HB-0328)', () => {
+    const elsewhere = mkdtempSync(join(tmpdir(), 'hb-bk-elsewhere-'));
+    try {
+      writeFileSync(join(elsewhere, 'hatchabot-kitchen-1-vol.tgz'), 'saved');
+      symlinkSync(elsewhere, join(base, '2026-08-26'));
+      expect(() => pruneBackup('2026-08-26', base)).toThrow(/is a link to a folder elsewhere/);
+      expect(() => pruneBackup('2026-08-26', base)).not.toThrow(BackupBusyError);
+      expect(readdirSync(elsewhere)).toEqual(['hatchabot-kitchen-1-vol.tgz']);
+      expect(lstatSync(join(base, '2026-08-26')).isSymbolicLink()).toBe(true);
+    } finally {
+      rmSync(join(base, '2026-08-26'), { force: true });
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
   });
 
   it('deletes a set whose run was killed (its lock names a pid that is gone)', () => {

@@ -76,11 +76,19 @@ git -C "$PROD" fetch --tags --force --quiet origin
 NEWEST="$(git -C "$PROD" tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | sed -n 1p)"
 [ -n "$NEWEST" ] || exit 0
 CUR="$(git -C "$PROD" describe --tags --exact-match 2>/dev/null || true)"
-[ "$CUR" = "$NEWEST" ] && exit 0
+# A deploy killed part-way (SIGKILL, a power cut) left prod on the new tag
+# with half its dependencies, and its record beside the lock (the one
+# deploy-release.sh keys on prod's path): the deploy repairs that first, so
+# it runs though prod is on the newest tag already (HB-0266).
+CUT="$STATE/upgrade-$(cd "$PROD" && printf %s "$PWD" | cksum | cut -d' ' -f1).from"
+[ "$CUR" = "$NEWEST" ] && [ ! -f "$CUT" ] && exit 0
 # Only ever forward: a checkout that is ahead (a hand deploy of a newer tag) stays.
 vernewer() { printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/'; }
-if [ -n "$CUR" ] && [ "$(vernewer "$CUR" "$NEWEST")" = "$CUR" ]; then exit 0; fi
-if [ "$(cat "$STATE/follow-latest-failed" 2>/dev/null)" = "$NEWEST" ]; then exit 0; fi
+if [ -n "$CUR" ] && [ "$CUR" != "$NEWEST" ] && [ "$(vernewer "$CUR" "$NEWEST")" = "$CUR" ]; then exit 0; fi
+# A tag set aside stays aside, but not with a killed deploy to repair: the
+# deploy repairs that and then tries the tag once more (aside again if it
+# still does not start).
+if [ ! -f "$CUT" ] && [ "$(cat "$STATE/follow-latest-failed" 2>/dev/null)" = "$NEWEST" ]; then exit 0; fi
 # A tag whose install keeps failing (exit 3) is not tried every ten minutes
 # for ever: after each failure in a row the wait doubles (10 min, 20, 40 … a
 # day at most), and after MAX_TRIES it is set aside like a tag that did not

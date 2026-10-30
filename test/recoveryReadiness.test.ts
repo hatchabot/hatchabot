@@ -10,7 +10,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { listBackups } from '../src/orchestrator/backups.js';
-import { drillDue, drillEvery, listDrills, resetDrillStateForTests } from '../src/orchestrator/drills.js';
+import { drillDue, drillEvery, listDrills, resetDrillStateForTests, startDrill, type DrillRunState } from '../src/orchestrator/drills.js';
 import { computeReadiness, usableFor, type ReadinessAgentIn } from '../src/orchestrator/recoveryReadiness.js';
 import { newBootForTests, beginOperation } from '../src/orchestrator/operations.js';
 import { as, makeWorld, seedRunningAgent } from './support/world.js';
@@ -73,6 +73,18 @@ describe('readiness from the sets on disk', () => {
     expect(by.a3!.restorable.map((s) => s.date)).toEqual([day(3)]);
     expect(by.a3!.restorable[0]).toMatchObject({ drill: 'failed' });
     expect(r).toMatchObject({ newestSet: day(1), newestFresh: true });
+  });
+
+  it('a drill that found an archive missing from its set says so (HB-0276)', () => {
+    const w = base();
+    w.set(day(0), ['hatchabot-a1-vol'], { state: 'complete', captured: ['hatchabot-a1-vol', 'hatchabot-a2-vol'] });
+    w.drill('2026-01-05T05-10-00Z', day(0), [
+      { volume: 'hatchabot-a1-vol', readable: true, layout: true, restored: true, note: '', result: 'passed' },
+      { volume: 'hatchabot-a2-vol', readable: null, layout: null, restored: null, note: 'missing', result: 'failed' },
+    ], 'failed');
+    const r = computeReadiness({ sets: listBackups(w.b), drills: listDrills(w.b), agents: [agent('a1'), agent('a2')], host: hosts, now: Date.now() });
+    const a2 = r.agents.find((a) => a.agentId === 'a2')!;
+    expect(a2.drill).toMatchObject({ passed: false, restored: null, checks: ['its archive is not in the set'] });
   });
 
   it('a record from before "captured": an archive there and not failed is whole', () => {
@@ -266,6 +278,21 @@ echo "made-up drill passed"
     delete process.env.HATCHABOT_DRILL_EVERY;
   });
 
+  it('the time limit stops the step the drill is in, not only the script (HB-0368 review)', async () => {
+    // Like the real script: a TERM trap, and a long step it waits for. bash runs
+    // the trap only when that step ends, so the signal must reach the step too.
+    const script = join(tmp('hb-drill-slow-'), 'drill.sh');
+    writeFileSync(script, "#!/bin/bash\ntrap 'exit 143' TERM\nx=$(sleep 30; echo done)\necho \"$x\"\n");
+    chmodSync(script, 0o700);
+    process.env.HATCHABOT_DRILL_SCRIPT = script;
+    let done: DrillRunState | undefined;
+    const t0 = Date.now();
+    expect(startDrill(t0, 'app', (s) => { done = s; }, 300).status).toBe('running');
+    await vi.waitFor(() => expect(done).toBeTruthy(), { timeout: 10_000, interval: 50 });
+    expect(Date.now() - t0).toBeLessThan(8_000);
+    expect(done).toMatchObject({ status: 'error' });
+    expect(done!.summary).toContain('was stopped');
+  }, 20_000);
   it('a drill cut off by a restart is recorded as failed, with what to do', async () => {
     const w = await world();
     const op = beginOperation(w.store, 'restore-drill', null, { trigger: 'scheduled' }, { hostId: 'h1' });

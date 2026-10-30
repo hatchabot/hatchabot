@@ -5244,11 +5244,17 @@ function renderDrillRun(d) {
   const when = d?.every && d.every !== 'off'
     ? ` Automatic drills: ${d.every}, between ${hh(d.hours?.from ?? 5)} and ${hh(d.hours?.to ?? 7)} after that night's backup.`
     : ' Automatic drills are off.';
-  const failedRun = run?.status === 'error' && !last ? ` ${(run.summary || '').split('\n').slice(-1)[0]}` : '';
-  const words = last
+  // A run that failed without writing a record of its own (it could not
+  // start, or stopped first) is newer than the last record: it is said first,
+  // in the warning colour, not hidden behind an older pass (HB-0353). A run
+  // whose record was written is that record.
+  const tail = (run?.summary || '').split('\n').slice(-1)[0];
+  const runFailed = run?.status === 'error' && (!last || !run.startedAt || !(Date.parse(last.at) >= run.startedAt - 5000));
+  const failedRun = runFailed && !last ? ` ${tail}` : '';
+  const words = (runFailed && last ? `The latest restore drill failed${tail ? `: ${tail}${/[.!?]$/.test(tail) ? '' : '.'}` : '.'} Before it: ` : '') + (last
     ? `Last drill ${last.at.slice(0, 10)}${last.set ? ` on the ${last.set} backup` : ''}: ${last.passed ? 'passed' : 'failed'} — ${last.checked} agent${last.checked === 1 ? '' : 's'} checked, ${last.restored} restored into a throwaway volume${last.failed ? `, ${last.failed} did not pass` : ''}${last.database !== 'ok' ? ', the database copy did not pass' : ''}${last.key !== 'ok' ? ', the saved key did not pass' : ''}.`
-    : 'No restore drill has run yet.';
-  el.style.color = last && !last.passed ? 'var(--warn)' : '';
+    : 'No restore drill has run yet.');
+  el.style.color = runFailed || (last && !last.passed) ? 'var(--warn)' : '';
   el.textContent = words + when + failedRun;
 }
 async function runDrillNow() {
@@ -6304,7 +6310,8 @@ async function runTryOnAgents() {
     const name = agents.find(a => a.id === id)?.name ?? id;
     try {
       await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image: tag } });
-      await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
+      // The confirm promises Chat → Memory first: the rebuild asks for it (a stopped agent has no chat to save; the server skips it).
+      await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: { checkpoint: true } });
       ok++;
     } catch (e) { failed.push(`${name}: ${e.message}`); }
   }
@@ -8370,8 +8377,10 @@ function renderSetupValues(a) {
     const help = p.help ? `<div class="sub">${esc(p.help)}</div>` : '';
     let input;
     if (p.type === 'choice') {
-      input = `<select id="spv-${esc(p.key)}" style="width:auto">${(p.options ?? [])
-        .map(o => `<option value="${esc(o)}"${o === cur ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+      // An optional choice can be cleared: a blank first option (HB-0363).
+      const pick = choiceStart(p.options ?? [], cur);
+      input = `<select id="spv-${esc(p.key)}" style="width:auto">${p.required ? '' : `<option value=""${pick === '' ? ' selected' : ''}>(none)</option>`}${(p.options ?? [])
+        .map(o => `<option value="${esc(o)}"${o === pick ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
     } else if (p.type === 'multichoice') {
       const picked = String(cur).split(',').map(s => s.trim());
       input = `<div id="spv-${esc(p.key)}" style="display:flex;flex-wrap:wrap;gap:10px">${(p.options ?? [])
@@ -9819,7 +9828,10 @@ async function addCronJob() {
         if (editing.scheduleExpr || Math.abs(everyMinutes * 60000 - (editing.everyMs || 0)) >= 1000) change.everyMinutes = everyMinutes;
       } else {
         if (cron !== (editing.scheduleExpr || '')) change.cron = cron;
-        if (tz && tz !== (editing.scheduleTz || '')) change.tz = tz;
+        // The box emptied on a task with a zone: "yours if blank", or no zone
+        // of its own when the browser names none. Ignored, the old zone stayed (HB-0366).
+        const zone = tz || (editing.scheduleTz ? browserTz : '');
+        if (zone !== (editing.scheduleTz || '')) change.tz = zone;
       }
       if (Object.keys(change).length) {
         await api(`/v1/agents/${forId}/crons/${encodeURIComponent(editing.id)}`, { method: 'PATCH', body: change });
@@ -10639,6 +10651,15 @@ let paramFormFields = [], paramFormResolve = null;
 function paramYes(v) {
   return /^(true|yes|1|on)$/i.test(String(v ?? '').trim());
 }
+// The option a choice starts on (HB-0363): the one its value names, trimmed
+// and whatever the case (an author's default "Formal" for "formal"), else the
+// first option, as the browser showed before "(none)" came first; '' only for
+// a blank value.
+function choiceStart(options, v) {
+  const want = String(v ?? '').trim();
+  if (!want) return '';
+  return options.find(o => o.trim() === want) ?? options.find(o => o.trim().toLowerCase() === want.toLowerCase()) ?? options[0] ?? '';
+}
 function collectParamValues(parameters, title) {
   paramFormFields = parameters;
   $('paramFormName').textContent = title || 'this agent';
@@ -10661,8 +10682,12 @@ function collectParamValues(parameters, title) {
     } else if (p.type === 'longtext') {
       input = `<textarea id="${id}" rows="3">${esc(p.default ?? '')}</textarea>`;
     } else if (p.type === 'choice') {
-      input = `<select id="${id}">${(p.options ?? []).map(o =>
-        `<option${String(p.default ?? '') === o ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+      // An optional choice can be cleared with "(none)" (HB-0363), but starts,
+      // as before, on its default or else its first option: left on a blank,
+      // a click-through left {{key}} itself in the new agent's files.
+      const pick = choiceStart(p.options ?? [], p.default ?? (p.options ?? [])[0]);
+      input = `<select id="${id}">${p.required ? '' : `<option value=""${pick.trim() === '' ? ' selected' : ''}>(none)</option>`}${(p.options ?? []).map(o =>
+        `<option${pick === o ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
     } else if (p.type === 'multichoice') {
       const defaults = String(p.default ?? '').split(',').map(s => s.trim());
       input = `<div id="${id}" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:6px">${(p.options ?? []).map(o =>
@@ -10708,7 +10733,8 @@ function submitParamForm() {
     const v = el.value.trim();
     if (!v) {
       if (p.required) { $('paramFormErr').textContent = `“${p.label || p.key}” is required.`; el.focus(); return; }
-      if (cleared) values[p.key] = '';
+      // "(none)" picked on a choice is a value: blank, not {{key}} left in the files.
+      if (cleared || (p.type === 'choice' && p.target !== 'env' && p.target !== 'datasource')) values[p.key] = '';
       continue; // empty optional with no default — let the template's own blank stand
     }
     values[p.key] = v;
@@ -11039,7 +11065,7 @@ async function cloneAgent(id, name) {
     if ((res.envNotCopied || []).length) left += ` Its variables ${res.envNotCopied.join(', ')} could not be read, so the copy does not have them: add them under Advanced → Extra credentials.`;
     // Its daily notes come too (2026-09-30); say when some could not.
     if (res.memoryCopyFailed) left += " Its daily notes (memory/) and USER.md couldn't be read, so only MEMORY.md came along.";
-    else if ((res.memoryNotCopied || []).length) left += ` Some memory files were too big or not text and stayed behind: ${res.memoryNotCopied.slice(0, 5).join(', ')}${res.memoryNotCopied.length > 5 ? '…' : ''}.`;
+    else if ((res.memoryNotCopied || []).length) left += ` Some memory files were too big, not text or unreadable and stayed behind: ${res.memoryNotCopied.slice(0, 5).join(', ')}${res.memoryNotCopied.length > 5 ? '…' : ''}.`;
     toast(`Cloned as "${res.name}" — it takes a spare bot from your pool; with none free it starts in the web app and you attach one later.${left}`, 30000);
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
@@ -11301,8 +11327,12 @@ async function loadInspectChat() {
   try {
     const t = await api(`/v1/agents/${id}/inspect/transcript?maxTurns=400`);
     if (inspectId !== id) return;
+    // A main conversation found but empty: a reset just before it was archived (HB-0307).
+    // Records but nothing to show: its newest ones are all tool steps, which are not shown.
     $('inspChatMeta').textContent = t.turns.length
       ? `${t.turns.length} shown${t.totalTurns > t.turns.length ? ` of ${t.totalTurns} (most recent)` : ''}`
+      : t.sessionFile && t.totalTurns > 0 ? `Nothing to show: the newest records of its main conversation (${t.totalTurns} in all) are tool steps, which are not shown here.`
+      : t.sessionFile ? 'Its main conversation is empty: it was started afresh just before the agent was archived. Data → History has the earlier ones.'
       : 'No conversation found on the volume.';
     $('inspChatBody').innerHTML = t.turns.map(turn => {
       const me = turn.role === 'user';
@@ -13304,12 +13334,17 @@ async function v2AppRetry(id, btn) {
 
 // ---- Run an app from a repo: a new agent, or into an existing one -----------------------------
 let appDlgMode = 'create', appDlgAgent = null, appInspected = null, appConns = [];
+// Each opening of the dialog, and each read of a repo in it: an answer for an
+// earlier one lands nowhere (HB-0351), and an Install press finishes for the
+// agent and repo it was pressed for (HB-0283).
+let appDlgGen = 0, appReadGen = 0;
 function openAppDlg(mode, agentId) {
   appDlgMode = mode; appDlgAgent = agentId || null; appInspected = null;
+  appDlgGen++; appReadGen++;
   const a = agentId ? v2Find(agentId) : null;
   $('appDlgTitle').textContent = mode === 'create' ? 'New agent from a repo' : `Run an app in ${a?.name || 'this agent'}`;
   $('appSource').value = ''; $('appInfo').innerHTML = ''; $('appForm').innerHTML = ''; $('appErr').textContent = '';
-  $('appOut').hidden = true; $('appGoBtn').disabled = true;
+  $('appOut').hidden = true; $('appGoBtn').disabled = true; $('appReadBtn').disabled = false;
   $('appGoBtn').textContent = mode === 'create' ? 'Create' : 'Install';
   appDlg.showModal();
   $('appSource').focus();
@@ -13317,13 +13352,19 @@ function openAppDlg(mode, agentId) {
 async function appRead() {
   const source = $('appSource').value.trim();
   if (!source) { $('appErr').textContent = 'Give a folder on this machine (~/myapp) or a git address.'; return; }
+  const gen = ++appReadGen;
   $('appErr').textContent = ''; $('appReadBtn').disabled = true; $('appInfo').innerHTML = '<div class="sub">Reading it…</div>';
   // The repo read before is forgotten first: a read that fails left Install
   // pointing at it, with its form still shown (#96).
   appInspected = null; $('appGoBtn').disabled = true; $('appForm').innerHTML = ''; $('appOut').hidden = true;
   try {
     const r = await api('/v1/apps/inspect', { method: 'POST', body: { source } });
+    const needGoogle = (r.connections || []).find(c => c.kind === 'google');
+    let conns = [];
+    if (needGoogle) { try { conns = ((await api('/v1/connections')).connections || []).filter(c => c.kind === 'google'); } catch { conns = []; } }
+    if (gen !== appReadGen) return; // the dialog was opened again, or another repo read, while this one was read
     appInspected = { ...r, source };
+    appConns = conns;
     const m = r.manifest;
     $('appInfo').innerHTML = `<div style="margin-top:10px"><b>${esc(m.name)}</b> <code>${esc(String(r.sha).slice(0, 12))}</code>
       ${m.description ? `<div class="sub">${esc(m.description)}</div>` : ''}
@@ -13332,7 +13373,9 @@ async function appRead() {
     const field = (f) => {
       const id = esc('appF_' + f.key); // a manifest's key is the app author's text (review, 2026-10-09)
       const label = `<label for="${id}">${esc(f.key)}${f.required ? ' <span style="color:var(--warn)">*</span>' : ''}${f.label ? ` <span class="sub">— ${esc(f.label)}</span>` : ''}</label>`;
-      if (f.type === 'bool') return `<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="${id}" style="width:auto" ${f.default ? 'checked' : ''}> ${esc(f.key)}${f.label ? ` <span class="sub">— ${esc(f.label)}</span>` : ''}</label>`;
+      // On as the server reads the default (mergeConfig): "false", "off", "no" and "0" are off, not truthy strings (HB-0352).
+      const on = f.default === true || (typeof f.default === 'string' && /^(1|true|yes|on)$/i.test(f.default.trim()));
+      if (f.type === 'bool') return `<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="${id}" style="width:auto" ${on ? 'checked' : ''}> ${esc(f.key)}${f.label ? ` <span class="sub">— ${esc(f.label)}</span>` : ''}</label>`;
       // A secret (an app password, a key) is typed into a hidden box, never
       // filled in and never offered by the browser's autofill; left blank, the
       // app keeps the one it has (or its default). It was a plain text box.
@@ -13341,9 +13384,6 @@ async function appRead() {
       return label + `<input type="${f.type === 'number' ? 'number' : f.type === 'email' ? 'email' : 'text'}" id="${id}" value="${esc(String(v))}">`;
     };
     const local = hosts.find(h => h.kind === 'local') || hosts[0];
-    const needGoogle = (r.connections || []).find(c => c.kind === 'google');
-    appConns = [];
-    if (needGoogle) { try { appConns = ((await api('/v1/connections')).connections || []).filter(c => c.kind === 'google'); } catch { appConns = []; } }
     const connPicker = needGoogle ? `<label for="appConn">Google account <span class="sub">— ${esc(needGoogle.purpose)}</span></label>
       <select id="appConn" onchange="appConnPicked()"><option value="">None yet (attach one later in its settings)</option>
         ${appConns.map(c => `<option value="${esc(c.id)}">${esc(c.email)}</option>`).join('')}</select>
@@ -13362,8 +13402,8 @@ async function appRead() {
       linked.addEventListener('change', () => { const h = appConns.find(c => c.email.toLowerCase() === linked.value.trim().toLowerCase()); if (h) { $('appConn').value = h.id; appConnPicked(); } });
     }
     if (needGoogle) appConnPicked();
-  } catch (e) { $('appInfo').innerHTML = ''; $('appErr').textContent = e.message; }
-  finally { $('appReadBtn').disabled = false; }
+  } catch (e) { if (gen === appReadGen) { $('appInfo').innerHTML = ''; $('appErr').textContent = e.message; } }
+  finally { if (gen === appReadGen) $('appReadBtn').disabled = false; }
 }
 /** The account picked: fill the field that names it, and say who else runs this app on it. */
 function appConnPicked() {
@@ -13401,10 +13441,10 @@ function appSharedOk() {
 /**
  * The Google account attach answered: did it go on (and, for an agent that
  * runs, work in it)? Its 200 can say it failed; the app was installed and
- * "running" with no login all the same (HB-0257).
+ * "running" with no login all the same (HB-0257). `email` is the account's,
+ * as it was when Install was pressed (the dialog may show another by now).
  */
-function appAttachProblem(r, mustBeLive) {
-  const email = appConns.find(c => c.id === $('appConn')?.value)?.email || 'The Google account';
+function appAttachProblem(r, mustBeLive, email = 'The Google account') {
   if (r?.attached === false) return `${email} was not attached${r.error ? ` (${r.error})` : ''}, so nothing was installed. Try again.`;
   if (r?.error || (mustBeLive && !r?.live)) return `${email} is attached, but could not be set up in the agent${r?.error ? ` (${r.error})` : ''}, so the app was not installed: its commands would have no login. Try again; if it fails again, connect the account again in ⚙ Settings → Connections.`;
   return '';
@@ -13421,53 +13461,62 @@ function appValues() {
 }
 async function appGo() {
   if (!appInspected) return;
+  // What this press acts on, as it was pressed: the dialog can be closed and
+  // opened on another agent, or another repo read, while the account attaches
+  // or the app installs; the rest went to them (HB-0283). Closed, or opened
+  // again, it is not this press's dialog: a failure is said in the toast.
+  const insp = appInspected, mode = appDlgMode, agentId = appDlgAgent, gen = appDlgGen;
+  const here = () => gen === appDlgGen && appDlg.open;
   const values = appValues();
   // A blank secret keeps the default, or in an agent that has the app the one
   // it has (the box is never filled in): the server says if there is none.
-  const missing = (appInspected.ask || []).filter(f => f.required && !values[f.key] && !(f.secret && (f.default !== undefined || appDlgMode !== 'create'))).map(f => f.key);
+  const missing = (insp.ask || []).filter(f => f.required && !values[f.key] && !(f.secret && (f.default !== undefined || mode !== 'create'))).map(f => f.key);
   if (missing.length) { $('appErr').textContent = `Fill in: ${missing.join(', ')}.`; return; }
   const mismatch = appConnMismatch();
   if (mismatch) { $('appErr').textContent = mismatch; return; }
-  const m = appInspected.manifest;
+  const m = insp.manifest;
   const shared = appSharedOk(); if (!shared.ok) return;
   const connId = $('appConn')?.value || '';
+  const connEmail = appConns.find(c => c.id === connId)?.email;
+  const form = mode === 'create' ? { name: $('appName').value.trim() || m.name, profile: ($('appProfile') && $('appProfile').value) || profiles[0]?.id, noTelegram: $('appNoTelegram').checked } : null;
   $('appGoBtn').disabled = true; $('appErr').textContent = ''; $('appOut').hidden = true;
   let created = null;
   try {
-    if (appDlgMode === 'create') {
-      const name = $('appName').value.trim() || m.name;
+    if (mode === 'create') {
+      const { name } = form;
       const local = hosts.find(h => h.kind === 'local') || hosts[0];
       // Its chat with {app_dir}, {agent}… filled in for this agent, as its tasks are: they reached SOUL.md as written (HB-0259).
       let chat = m.chat;
-      if (chat && /\{(app_dir|data_dir|agent|name|env)\}/.test(chat)) chat = (await api('/v1/apps/inspect', { method: 'POST', body: { source: appInspected.source, name } })).chat ?? chat;
+      if (chat && /\{(app_dir|data_dir|agent|name|env)\}/.test(chat)) chat = (await api('/v1/apps/inspect', { method: 'POST', body: { source: insp.source, name } })).chat ?? chat;
       const a = created = await api('/v1/agents', { method: 'POST', body: { name, persona: chat || m.description || undefined,
-        aiProfileId: ($('appProfile') && $('appProfile').value) || profiles[0]?.id, hostId: local?.id,
-        telegram: $('appNoTelegram').checked ? false : undefined } });
+        aiProfileId: form.profile, hostId: local?.id,
+        telegram: form.noTelegram ? false : undefined } });
       if (m.model) { try { await api(`/v1/agents/${a.id}/model`, { method: 'POST', body: { model: m.model } }); } catch { /* the source's default stays */ } }
       // Its account goes on before it first runs (it is materialized as the agent comes up).
-      if (connId) { const problem = appAttachProblem(await api(`/v1/agents/${a.id}/connections/attach`, { method: 'POST', body: { connectionId: connId } }), false); if (problem) throw new Error(problem); }
-      await api(`/v1/agents/${a.id}/app/pending`, { method: 'POST', body: { source: appInspected.source, values, ...(shared.allowShared ? { allowShared: true } : {}) } });
+      if (connId) { const problem = appAttachProblem(await api(`/v1/agents/${a.id}/connections/attach`, { method: 'POST', body: { connectionId: connId } }), false, connEmail); if (problem) throw new Error(problem); }
+      await api(`/v1/agents/${a.id}/app/pending`, { method: 'POST', body: { source: insp.source, values, ...(shared.allowShared ? { allowShared: true } : {}) } });
       created = null; // made whole: nothing below undoes it
-      appDlg.close();
+      if (here()) appDlg.close();
       toast(`Creating "${name}" — ${m.name} installs as soon as it is running (its tests run first).`, 12000);
       await refresh(false);
     } else {
       toast(`Installing ${m.name}: copying it in, running its tests, scheduling it…`, 120000, 'progress');
-      if (connId) { const problem = appAttachProblem(await api(`/v1/agents/${appDlgAgent}/connections/attach`, { method: 'POST', body: { connectionId: connId } }), true); if (problem) throw new Error(problem); }
-      await api(`/v1/agents/${appDlgAgent}/app`, { method: 'POST', body: { source: appInspected.source, values, ...(shared.allowShared ? { allowShared: true } : {}) } });
-      appDlg.close();
+      if (connId) { const problem = appAttachProblem(await api(`/v1/agents/${agentId}/connections/attach`, { method: 'POST', body: { connectionId: connId } }), true, connEmail); if (problem) throw new Error(problem); }
+      await api(`/v1/agents/${agentId}/app`, { method: 'POST', body: { source: insp.source, values, ...(shared.allowShared ? { allowShared: true } : {}) } });
+      if (here()) appDlg.close();
       toast(`${m.name} is installed and running.`);
-      if (v2AgentId === appDlgAgent) void v2LoadApp(appDlgAgent, true);
+      if (v2AgentId === agentId) void v2LoadApp(agentId, true);
     }
   } catch (e) {
     // A half-made agent holds the name, so Create again said "name taken":
     // remove it, as doAdopt does (review, 2026-10-09).
     if (created) { try { await api(`/v1/agents/${created.id}`, { method: 'DELETE' }); } catch {} void refresh(false); }
-    toast('Not installed.', 6000);
+    toast(here() ? 'Not installed.' : `${m.name} was not installed: ${e.message.split('\n')[0]}`, here() ? 6000 : 12000);
+    if (!here()) return;
     $('appErr').textContent = e.message.split('\n')[0];
     if (e.data?.test?.output) { $('appOut').hidden = false; $('appOut').textContent = e.data.test.output; }
     else if (e.message.includes('\n')) { $('appOut').hidden = false; $('appOut').textContent = e.message; }
-  } finally { $('appGoBtn').disabled = false; }
+  } finally { if (here()) $('appGoBtn').disabled = false; }
 }
 /** The Usage tab: the same page as ⋯ → Usage, inline. A read runs node in the
  *  container, so a sheet re-render within a minute reuses the last one. */
@@ -13844,8 +13893,11 @@ function v2Pane(a, tab) {
       <div class="v2danger"><h4>Archive or delete</h4><div class="v2v">
         ${a.archiving ? '<span class="sub">Archiving…</span>' : ''}
         ${['RUNNING', 'STOPPED', 'FAILED'].includes(a.state) && !a.archiving ? B('📥 Archive', `v2Close();archiveAgent('${id}','${n}','${a.state}')`, 'title="Keep it and its memory; hand its Telegram bot back"') : ''}
-        ${a.state !== 'DELETING' ? B('Delete…', `v2Close();del('${id}','${n}')`, 'class="danger"') : ''}
-        <span class="sub" style="flex-basis:100%">Archive keeps it and its memory, and frees its bot; Restore brings it back. Delete removes it for good.</span>
+        ${B('Delete…', `v2Close();del('${id}','${n}')`, 'class="danger"')}
+        <span class="sub" style="flex-basis:100%">${a.state === 'DELETING'
+          // A delete the process was stopped in stays DELETING: Delete again finishes it (HB-0265); the server turns one away while a delete still runs.
+          ? 'It is being deleted. If it stays here (Hatchabot restarted during the delete), Delete… finishes it.'
+          : 'Archive keeps it and its memory, and frees its bot; Restore brings it back. Delete removes it for good.'}</span>
       </div></div>`;
     case 'personality': return `
       ${slot('paneDef')}
@@ -14427,11 +14479,15 @@ v2AgentDlg.addEventListener('close', () => { if (v2AgentDlg.open) return; v2Park
 const V2_EMOJI = ['📈', '💹', '🧾', '⚖️', '💰', '🏢', '🏡', '🚗', '✈️', '🧭', '📅', '✅', '☑️', '🍳', '🥗', '🏃', '🩺', '🛡️',
   '💻', '🖥️', '🏛️', '🎓', '📚', '🎮', '📺', '💼', '🚀', '💡', '🎨', '🎵', '💐', '🎤', '📰', '🌮', '🌴', '🤖'];
 let v2IconFor = null, v2IconColor = null;
+/** Each opening of the dialog: a save that ends after it was closed and opened again leaves the new opening alone (HB-0367). */
+let v2IconGen = 0;
 /** Ideas the AI gave in this opening of the dialog: all on show, and left out of the next ask. */
 let v2IconIdeasShown = [];
 function openV2Icon(id) {
   const a = v2Find(id); if (!a) return;
-  v2IconFor = id; v2IconColor = a.iconColor || v2ColorFor(a.name);
+  v2IconFor = id; v2IconColor = a.iconColor || v2ColorFor(a.name); v2IconGen++;
+  // A save from an earlier opening may still be going: its button is this one's.
+  $('v2IconSaveBtn').disabled = false;
   $('v2IconName').textContent = a.name;
   $('v2IconInput').value = a.icon || '';
   $('v2IconErr').textContent = '';
@@ -14469,13 +14525,19 @@ function v2IconPreview() {
 }
 async function v2IconSave(btn) {
   const icon = $('v2IconInput').value.trim();
+  const id = v2IconFor, gen = v2IconGen;
+  const here = () => gen === v2IconGen && v2IconDlg.open;
   btn.disabled = true;
   try {
-    await api(`/v1/agents/${v2IconFor}`, { method: 'PATCH', body: { icon: icon || null, iconColor: v2IconColor } });
-    v2IconDlg.close();
+    await api(`/v1/agents/${id}`, { method: 'PATCH', body: { icon: icon || null, iconColor: v2IconColor } });
+    if (here()) v2IconDlg.close();
     await refresh(false);
-  } catch (e) { $('v2IconErr').textContent = /single emoji/.test(e.message) ? 'That isn’t a single emoji. Pick one above, or paste just one.' : e.message; }
-  finally { btn.disabled = false; }
+  } catch (e) {
+    const why = /single emoji/.test(e.message) ? 'That isn’t a single emoji. Pick one above, or paste just one.' : e.message;
+    if (here()) $('v2IconErr').textContent = why; else toast(`The icon was not saved: ${why}`, 10000);
+  }
+  // Opened again since, the button is that opening's: its own save turns it back on.
+  finally { if (gen === v2IconGen) btn.disabled = false; }
 }
 /** The ✨ button: ideas to choose from, added to those already on show; nothing is saved until Save. */
 async function v2IconIdeas(btn) {

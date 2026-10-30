@@ -15,6 +15,55 @@ export interface SessionEntry {
   origin?: { from?: string; provider?: string };
   /** 2026.8+: where the last exchange was delivered (`none` = nowhere but the console). */
   delivery?: { kind?: string; channel?: string };
+  /** Set by Hatchabot, not OpenClaw (markQuietTasks): a run of a task that delivers nowhere. */
+  quietTask?: boolean;
+}
+
+/** The task a scheduled run's conversation belongs to: `agent:<id>:cron:<job>[:run:<at>]`. */
+export function cronJobOfKey(key: string): string | undefined {
+  return /:cron:([^:]+)/.exec(key)?.[1];
+}
+
+/**
+ * The agent's quiet tasks (delivery "none"), from its task store as
+ * crons.ts cronStoreReadShell prints it; undefined when that says nothing
+ * readable (2026.7 keeps a file, or the read failed). OpenClaw's own upkeep
+ * (a declared job: the weekly skill review, memory dreaming) is quiet too,
+ * but holds nothing for the owner to read: never one of them.
+ */
+export function quietTaskIds(stdout: string): Set<string> | undefined {
+  let jobs: unknown;
+  try { jobs = JSON.parse(stdout).jobs; } catch { return undefined; }
+  if (!Array.isArray(jobs)) return undefined;
+  return new Set(jobs
+    .filter((j) => j && typeof j === 'object' && (typeof j.id === 'string' || typeof j.id === 'number') && j.delivery?.mode === 'none'
+      && !(typeof j.declarationKey === 'string' && j.declarationKey))
+    .map((j) => String(j.id)));
+}
+
+/**
+ * What the agent's scheduled runs look like in its session records: each
+ * task's newest run. Unchanged, no task has run since the last read, and its
+ * quiet tasks need not be read again.
+ */
+export function cronRunsSignature(sessions: Record<string, SessionEntry>): string {
+  const newest = new Map<string, number>();
+  for (const [key, s] of Object.entries(sessions)) {
+    const job = cronJobOfKey(key);
+    if (!job) continue;
+    const at = Number(s && typeof s === 'object' ? s.updatedAt : 0) || 0;
+    newest.set(job, Math.max(newest.get(job) ?? 0, at));
+  }
+  return [...newest].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([j, at]) => `${j}@${at}`).join(',');
+}
+
+/** Mark the runs of quiet tasks (consoleActivity counts them on an agent with a bot). */
+export function markQuietTasks(sessions: Record<string, SessionEntry>, quiet: ReadonlySet<string>): Record<string, SessionEntry> {
+  for (const [key, s] of Object.entries(sessions)) {
+    const job = cronJobOfKey(key);
+    if (job && quiet.has(job) && s && typeof s === 'object') s.quietTask = true;
+  }
+  return sessions;
 }
 
 /**
@@ -64,8 +113,9 @@ export function consoleActivity(sessions: Record<string, SessionEntry> | undefin
     if (!s || typeof s !== 'object') continue;
     if (opts.keys && !opts.keys.includes(key)) continue;
     // Scheduled runs on an agent with a bot are delivered there. Only a
-    // web-only agent's scheduled output has nowhere else to be read.
-    if (key.includes(':cron:') && !opts.webOnly) continue;
+    // web-only agent's scheduled output, and a quiet task's (its task
+    // delivers nowhere: HB-0302), have nowhere else to be read.
+    if (key.includes(':cron:') && !opts.webOnly && !s.quietTask) continue;
     const to = String(s.lastTo ?? s.origin?.from ?? '');
     // Undefined, not '', when the recipient names no app: '' stopped the ?? at
     // once, and a Telegram conversation recorded only by its origin counted as

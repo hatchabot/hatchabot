@@ -57,13 +57,16 @@ async function world() {
  * a read answers as readCoreFile's script does (exit 3 for a file that is
  * there but cannot be read; the empty-file mark for one that is empty).
  */
-function fakeVolume(provider: MockProvider, files: Map<string, string>, opts: { unreadable?: Set<string>; failWrite?: Set<string> } = {}) {
+function fakeVolume(provider: MockProvider, files: Map<string, string>, opts: { unreadable?: Set<string>; failWrite?: Set<string>; throwWrite?: Set<string>; landThenThrow?: Set<string> } = {}) {
   provider.execShell = async (_ref: string, script: string) => {
     const w = /^set -e; echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
     const name = /\/agent\/([A-Z]+\.md)/.exec(w ? w[2]! : script)?.[1];
     if (w && name) {
       if (opts.failWrite?.has(name)) return { code: 1, stdout: '', stderr: 'No space left on device' };
+      if (opts.throwWrite?.has(name)) throw new Error('daemon disconnected');
       files.set(name, Buffer.from(w[1]!, 'base64').toString('utf8'));
+      // The file landed (after the mv), then the call was lost: once.
+      if (opts.landThenThrow?.delete(name)) throw new Error('daemon disconnected');
       return { code: 0, stdout: '', stderr: '' };
     }
     if (script.startsWith('head -c') && name) {
@@ -541,6 +544,65 @@ describe('PUT /v1/agents/:id/params (edit values later)', () => {
     expect(Object.fromEntries(files)).toEqual({ 'SOUL.md': 'Soul brisk', 'AGENTS.md': 'Rules brisk' });
   });
 
+  it('values that fill the description past the backup limit are refused before any write (HB-0309)', async () => {
+    const { store, f, provider } = await world();
+    await runningMaster(store, provider);
+    store.setAgentParameters('a1', [STYLE]);
+    store.setAgentParamState('a1', { style: 'calm' }, { soul: 'Soul {{style}}', persona: '{{style}} '.repeat(5) });
+    const files = new Map([['SOUL.md', 'Soul calm']]);
+    fakeVolume(provider, files);
+    const res = await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: { style: 'x'.repeat(2000) } } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/description would be over 8,000 characters/);
+    expect(Object.fromEntries(files)).toEqual({ 'SOUL.md': 'Soul calm' });
+    expect(store.getAgent('a1')!.paramValues).toEqual({ style: 'calm' });
+    expect(store.listSnapshots('a1')).toEqual([]);
+  });
+
+  it('a second setup file whose write throws puts the first back too (HB-0310)', async () => {
+    const { store, f, provider } = await world();
+    await runningMaster(store, provider);
+    store.setAgentParameters('a1', [STYLE]);
+    store.setAgentParamState('a1', { style: 'calm' }, { soul: 'Soul {{style}}', agents: 'Rules {{style}}' });
+    const files = new Map([['SOUL.md', 'Soul calm'], ['AGENTS.md', 'Rules calm']]);
+    fakeVolume(provider, files, { throwWrite: new Set(['AGENTS.md']) });
+    const res = await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: { style: 'brisk' } } });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toMatch(/Nothing was changed/);
+    expect(Object.fromEntries(files)).toEqual({ 'SOUL.md': 'Soul calm', 'AGENTS.md': 'Rules calm' });
+    expect(store.getAgent('a1')!.paramValues).toEqual({ style: 'calm' });
+  });
+
+  it('a write that lands and then throws is put back as well (HB-0310)', async () => {
+    const { store, f, provider } = await world();
+    await runningMaster(store, provider);
+    store.setAgentParameters('a1', [STYLE]);
+    store.setAgentParamState('a1', { style: 'calm' }, { soul: 'Soul {{style}}', agents: 'Rules {{style}}' });
+    const files = new Map([['SOUL.md', 'Soul calm'], ['AGENTS.md', 'Rules calm']]);
+    fakeVolume(provider, files, { landThenThrow: new Set(['AGENTS.md']) });
+    const res = await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: { style: 'brisk' } } });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toMatch(/Nothing was changed/);
+    expect(Object.fromEntries(files)).toEqual({ 'SOUL.md': 'Soul calm', 'AGENTS.md': 'Rules calm' });
+    expect(store.getAgent('a1')!.paramValues).toEqual({ style: 'calm' });
+  });
+
+  it('a file that was not there and whose write throws without landing is not reported lost (HB-0310)', async () => {
+    const { store, f, provider } = await world();
+    await runningMaster(store, provider);
+    store.setAgentParameters('a1', [STYLE]);
+    store.setAgentParamState('a1', { style: 'calm' }, { soul: 'Soul {{style}}', agents: 'Rules {{style}}' });
+    // AGENTS.md is in the layer but not on the volume.
+    const files = new Map([['SOUL.md', 'Soul calm']]);
+    fakeVolume(provider, files, { throwWrite: new Set(['AGENTS.md']) });
+    const res = await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: { style: 'brisk' } } });
+    expect(res.statusCode).toBe(500);
+    // It read as missing before and after: it was not written, so nothing is lost.
+    expect(res.json().error).toMatch(/Nothing was changed/);
+    expect(Object.fromEntries(files)).toEqual({ 'SOUL.md': 'Soul calm' });
+    expect(store.getAgent('a1')!.paramValues).toEqual({ style: 'calm' });
+  });
+
   it('a master whose SOUL.md cannot be read is refused on its first edit, not seeded without it (audit #014)', async () => {
     const { store, f, provider } = await world();
     await runningMaster(store, provider);
@@ -648,6 +710,17 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     return { ...w, child: w.store.getAgent(child.id)! };
   }
 
+  it("a child refused for a description too long reads the whole reason (HB-0309)", async () => {
+    const { store, f, child } = await withChild();
+    // "growth " 1,200 times: 8,400 characters rendered.
+    store.setAgentParamState('a1', { style: 'value' }, { soul: 'Soul {{style}}', persona: '{{style}} '.repeat(1200) });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    const mine = res.json().results.find((r: { id: string }) => r.id === child.id);
+    expect(mine.ok).toBe(false);
+    // Cut at 120 characters it stopped at "Give shorter answ".
+    expect(mine.error).toMatch(/too long to copy or back up\. Give shorter answers, or trim the template\.$/);
+  });
+
   it('a master that removed all its fields takes them off its children too (review, 2026-10-22)', async () => {
     const { store, f, provider, child } = await withChild();
     expect(store.getAgent(child.id)!.parameters?.map((p) => p.key)).toEqual(['style']);
@@ -659,6 +732,29 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     expect(res.json().pushed).toBe(1);
     // style is gone; the undeclared {{region}} the pushed text uses is asked for, as derive does.
     expect(store.getAgent(child.id)!.parameters).toEqual([{ key: 'region', label: 'region', required: true, type: 'text', target: 'soul' }]);
+  });
+
+  it("the master's files are read under its busy guard: a save between the two reads is refused (HB-0311)", async () => {
+    const { f, provider, child, store } = await withChild();
+    provider.execResponses.set('sh', { code: 0, stdout: 'IMPROVED {{style}} playbook v2.\n', stderr: '' });
+    const shell = provider.execShell.bind(provider);
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>((r) => { enter = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    let paused = false;
+    provider.execShell = async (ref: string, script: string, opts?: any) => {
+      if (!paused && script.startsWith('head -c') && script.includes('/agents/mine/agent/SOUL.md')) { paused = true; enter(); await gate; }
+      return shell(ref, script, opts);
+    };
+    const pushed = f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    await entered;
+    const save = await f.inject({ method: 'PUT', url: '/v1/agents/a1/files/SOUL.md', headers: H, payload: { content: 'A rewritten {{style}} advisor.\n' } });
+    expect(save.statusCode).toBe(409);
+    expect(save.json().error).toMatch(/Another operation/);
+    release();
+    expect((await pushed).json().pushed).toBe(1);
+    expect(store.getAgent(child.id)!.paramFiles?.soul).toContain('IMPROVED {{style}}');
+    expect(isBusy('a1')).toBe(false);
   });
 
   it("the child's docs sync after a push holds the child: a save meanwhile is refused (HB-0230)", async () => {
@@ -706,6 +802,30 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     // SOUL.md went out with the new text, then back to what it was.
     expect(writes.map((x) => x.text)).toEqual(['IMPROVED growth playbook v2.\n', 'A growth advisor at work.\n']);
     expect(store.getAgent(child.id)!.paramFiles).toEqual(layerBefore);
+  });
+
+  it("a child's file that lands and then throws is put back with the others (HB-0310)", async () => {
+    const { store, f, provider, child } = await withChild();
+    store.setAgentParamState('a1', { style: 'value' }, { soul: 'Master {{style}}', agents: 'Master rules {{style}}' });
+    store.setAgentParamState(child.id, { style: 'growth' }, { soul: 'Child {{style}}', agents: 'Rules {{style}}' });
+    const layerBefore = store.getAgent(child.id)!.paramFiles;
+    const files = new Map([['SOUL.md', 'Child growth'], ['AGENTS.md', 'Rules growth']]);
+    fakeVolume(provider, files, { landThenThrow: new Set(['AGENTS.md']) });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(res.json()).toMatchObject({ pushed: 0, results: [{ id: child.id, ok: false, error: 'daemon disconnected' }] });
+    // AGENTS.md had landed before the call was lost: it goes back too, not only SOUL.md.
+    expect(Object.fromEntries(files)).toEqual({ 'SOUL.md': 'Child growth', 'AGENTS.md': 'Rules growth' });
+    expect(store.getAgent(child.id)!.paramFiles).toEqual(layerBefore);
+  });
+
+  it("a child's file that was not there and whose write throws is not reported lost (HB-0310)", async () => {
+    const { store, f, provider, child } = await withChild();
+    store.setAgentParamState('a1', { style: 'value' }, { soul: 'Master {{style}}', agents: 'Master rules {{style}}' });
+    const files = new Map([['SOUL.md', 'Child growth']]);
+    fakeVolume(provider, files, { throwWrite: new Set(['AGENTS.md']) });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(res.json()).toMatchObject({ pushed: 0, results: [{ id: child.id, ok: false, error: 'daemon disconnected' }] });
+    expect(Object.fromEntries(files)).toEqual({ 'SOUL.md': 'Child growth' });
   });
 
   it('a master file cleared on purpose is pushed as empty, not left as it was on the child (review 2026-10-23 R17)', async () => {
