@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.171.1] — 2026-10-31
+
+v2.171.0 was tagged but never published: its release build stopped when GitHub switched off the macOS 14 runners for a scheduled test of their retirement. Everything listed under 2.171.0 below ships in this release.
+
+### Changed
+For maintainers:
+- The macOS bundle is built on macOS 15, because GitHub retires its macOS 14 runners on 2026-11-02. The build now checks that the private Node and the database driver still load on macOS 14; on the first build they load on macOS 11 and up.
+
 ## [2.171.0] — 2026-10-30
 
 The fixes for an audit of v2.170.1: 95 findings and two known open items, each with its own regression test.

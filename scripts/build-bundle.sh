@@ -5,7 +5,8 @@
 #
 # Run it ON the platform it is for (the release workflow's matrix does: an old
 # Ubuntu for Linux, so the database driver it compiles loads on any glibc from
-# 2.35 up; macOS 14 for Apple silicon), with Node 22 on PATH and a C++
+# 2.35 up; macOS 15 for Apple silicon, its binaries checked to load on macOS
+# 14), with Node 22 on PATH and a C++
 # toolchain. The bundle is a plain archive — not an image — holding:
 #   hatchabot/            the release's files at <tag> (git archive)
 #   hatchabot/node_modules  production dependencies, the driver compiled here,
@@ -55,6 +56,14 @@ echo "== self-check"
   console.log("driver ok on node " + process.version);
 '
 ./.node/bin/node ./node_modules/tsx/dist/cli.mjs --version >/dev/null
+if [ "$PLATFORM" = darwin-arm64 ]; then
+  # Built on a newer macOS than the oldest this bundle promises.
+  for bin in .node/bin/node node_modules/better-sqlite3/build/Release/better_sqlite3.node; do
+    minos="$(vtool -show-build "$bin" | awk '$1 == "minos" { print $2; exit }')"
+    [ -n "$minos" ] && [ "${minos%%.*}" -le 14 ] || { echo "$bin needs macOS ${minos:-unknown}; this bundle promises 14" >&2; exit 1; }
+    echo "$bin loads on macOS $minos and up"
+  done
+fi
 
 VERSION="${TAG#v}"
 printf '{"version":"%s","tag":"%s","platform":"%s","node":"%s","builtAt":"%s"}\n' \

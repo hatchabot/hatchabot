@@ -164,3 +164,13 @@ tests that run on their own.
 | 2026-10-27 | smoke-adopt | pass | v2.169.0 | 1 |  |
 | 2026-10-27 | clean-install | pass | v2.169.0 | 2 |  |
 | 2026-10-27 | privacy | pass | v2.169.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-10-31 | upgrade-check | pass | v2.171.0 | 1 |  |
+| 2026-10-31 | privacy | pass | v2.171.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-10-31 | runner-scenarios | pass | v2.171.0 | 11 | OpenClaw 2026.9.8 |
+| 2026-10-31 | transfer | pass | v2.171.0 | 5 | OpenClaw 2026.9.8 |
+| 2026-10-31 | apps | pass | v2.171.0 | 4 | OpenClaw 2026.9.8 |
+| 2026-10-31 | browser | pass | v2.171.0 | 3 | OpenClaw 2026.9.8 |
+| 2026-10-31 | candidate-gate | pass | v2.171.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-10-31 | regress-autonomous | pass | v2.171.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-10-31 | restore-drill | pass | v2.171.0 | 3 | OpenClaw 2026.9.8 |
+| 2026-10-31 | smoke-adopt | pass | v2.171.0 | 1 |  |

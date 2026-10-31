@@ -47,7 +47,9 @@ jobs:
             platform: linux-x64
           - os: ubuntu-22.04-arm
             platform: linux-arm64
-          - os: macos-14
+          # A newer macOS than the oldest it runs on: build-bundle.sh checks the
+          # binaries still load on macOS 14. GitHub retires macos-14 on 2026-11-02.
+          - os: macos-15
             platform: darwin-arm64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
