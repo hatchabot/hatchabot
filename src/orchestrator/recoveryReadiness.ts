@@ -75,7 +75,9 @@ export interface ReadinessResult {
 
 /** Whole days since a set's date (local midnight), as the machine line counts them. */
 export function setAgeDays(date: string, now: number): number {
-  return Math.max(0, Math.floor((now - Date.parse(`${date}T00:00:00`)) / 86_400_000));
+  // By the calendar: the day the clocks go back has 25 hours.
+  const day = (d: Date) => Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+  return Math.max(0, Math.round((day(new Date(now)) - day(new Date(`${date}T00:00:00`))) / 86_400_000));
 }
 
 /**

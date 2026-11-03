@@ -2119,7 +2119,8 @@ async function main() {
         for (const t of r.tags) {
           const kind = t.derived ? `derived ${t.derived.status}` : t.isLatest ? 'same as default' : t.exists ? 'candidate' : 'NOT BUILT';
           const pins = t.pinned.map((a: any) => a.name).join(', ');
-          console.log(`  ${t.tag}  [${kind}]${pins ? '  pinned: ' + pins : ''}${t.classes.length ? '  classes: ' + t.classes.map((c: any) => c.name).join(', ') : ''}`);
+          const held = (t.blockers ?? []).filter((b: any) => b.kind === 'derived' || b.kind === 'container').map((b: any) => `${b.name} (${b.label})`);
+          console.log(`  ${t.tag}  [${kind}]${pins ? '  pinned: ' + pins : ''}${t.classes.length ? '  classes: ' + t.classes.map((c: any) => c.name).join(', ') : ''}${held.length ? '  held by: ' + held.join(', ') : ''}`);
         }
         return;
       }

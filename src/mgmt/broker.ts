@@ -622,7 +622,7 @@ export class Broker {
       if (name === 'end_base_trial') {
         // The manager's own pin is deliberate (it never follows a promote), not a trial (night review).
         if (agent.ops) throw new BrokerError('INVALID_INPUT', 'The Hatchabot agent keeps its own image on purpose; it is not trying a candidate.');
-        const onCandidate = imgs.tags.find((t) => t.pinned.some((p) => p.id === agent.id) && !t.derived && !t.isDefault);
+        const onCandidate = imgs.tags.find((t) => t.pinned.some((p) => p.id === agent.id && p.state !== 'ARCHIVED') && !t.derived && !t.isDefault); // an archived agent cannot be rebuilt off it
         if (!onCandidate) throw new BrokerError('INVALID_INPUT', `"${agent.name}" isn't trying a candidate image.`);
         return { agentId: agent.id, agentName: agent.name, spec: { tag: onCandidate.tag } };
       }

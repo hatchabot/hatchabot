@@ -255,6 +255,28 @@ ci_gate() {
   fi
   [ "$st" = "completed success" ] || die "CI failed on $TAG (${st#completed }): https://github.com/$slug/actions/runs/$id — nothing changed."
   echo "✓ CI passed on $TAG"
+  public_ci_note "$slug"
+}
+# The public repo's CI on the release: on GitHub's runners, not the dev repo's,
+# on a commit of its own. It failed there on every release for days with the
+# dev repo's green and nothing looking (HB-0379). Said, not a gate: the release
+# is out there already, and a read that fails stops nothing.
+public_ci_note() {
+  local pub_sha runs st
+  [ "$1" != "$PUB_SLUG" ] || return 0   # the run above was that one
+  # Under set -e and pipefail a failed read here ended promote with no word.
+  pub_sha="$(git ls-remote --tags "$PUBLIC" "refs/tags/$TAG" "refs/tags/$TAG^{}" 2>/dev/null | tail -n1 | cut -f1)" \
+    || { echo "⚠ Could not read the public repo's $TAG, so its CI was not looked at."; return 0; }
+  [ -n "$pub_sha" ] || return 0
+  runs="$(gh run list --repo "$PUB_SLUG" --workflow ci.yml --commit "$pub_sha" --event push --branch main --limit 1 --json databaseId,status,conclusion -q '.[] | "\(.databaseId) \(.status) \(.conclusion)"' 2>/dev/null)" \
+    || { echo "⚠ Could not read CI on $PUB_SLUG for $TAG."; return 0; }
+  st="${runs#* }"
+  case "$st" in
+    "") echo "⚠ No CI run on $PUB_SLUG for $TAG (${pub_sha:0:9}) to read." ;;
+    "completed success") echo "✓ CI passed on $PUB_SLUG too" ;;
+    completed*) echo "⚠ CI FAILED on $PUB_SLUG for $TAG (${st#completed }): https://github.com/$PUB_SLUG/actions/runs/${runs%% *} — look at it; a test that fails only on GitHub's runners shows there and nowhere else." ;;
+    *) echo "⚠ CI is still running on $PUB_SLUG for $TAG: https://github.com/$PUB_SLUG/actions/runs/${runs%% *}" ;;
+  esac
 }
 # The live tests (docs/live-tests.md): the unit suite and CI fake Docker,
 # OpenClaw and the machines; these do not. Each is due when it has never

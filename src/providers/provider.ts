@@ -181,6 +181,8 @@ export interface OpenClawConfigPatch {
   /** Other plugins the image bakes (label org.hatchabot.plugins), linked at seed
    *  time: `duckduckgo` on OpenClaw 2026.8+, where web search is no longer bundled. */
   bakedPlugins?: string[];
+  /** Web search named for this agent; unset names none, so a Brave key in its container wins (webSearch.ts). */
+  searchProvider?: 'duckduckgo';
   /** See RuntimeInfo.pluginInstall. Absent = link. */
   pluginInstall?: 'link' | 'npm';
   slack?: {
@@ -231,9 +233,15 @@ export interface ExecResult {
   /** Not run at all: the remote machine did not answer a quick connect
    *  (asleep or offline). Shaped like a timeout, so it never reads as "gone". */
   unreachable?: boolean;
-  /** Not run: a read-only run's volume is not there. Mounting it would have
-   *  made it, empty, and answered as if the agent had no files (HB-0332). */
+  /** Not run: the volume is not there. Mounting it would have made it, empty,
+   *  and answered as if the agent had no files or the write had worked
+   *  (HB-0332, HB-0373). */
   volumeMissing?: boolean;
+}
+
+export interface ImagesInUse {
+  containers: { name: string; imageId: string; state: string }[];
+  tags: { tag: string; imageId: string }[];
 }
 
 export interface RuntimeProvider {
@@ -283,7 +291,8 @@ export interface RuntimeProvider {
    * independent of the agent's own container — works while it is stopped,
    * and while it runs (durable state is all on the volume; writers must be
    * safe against concurrent reads). The volume is mounted at the same path
-   * the agent sees it, so scripts use the same file paths either way.
+   * the agent sees it, so scripts use the same file paths either way. A volume
+   * that is gone is reported (volumeMissing), never made.
    */
   execShellOnVolume(runtimeRef: string, script: string, opts?: { readOnly?: boolean; image?: string }): Promise<ExecResult>;
 
@@ -291,6 +300,7 @@ export interface RuntimeProvider {
    * Stream a command's stdout from a read-only one-shot on the agent's
    * VOLUME (a file's bytes, a folder as tar) — for downloads of any size
    * without buffering. Optional: a provider without it cannot serve files.
+   * A volume that is gone fails the stream (VolumeGoneError), never made.
    */
   streamFromVolume?(runtimeRef: string, argv: string[]): import('node:stream').Readable;
   /** The write-side twin: a one-shot on the VOLUME (writable) fed `input` on stdin — an upload. */
@@ -394,6 +404,13 @@ export interface RuntimeProvider {
   /** Remove a tag. Throws a ProviderError when a container still uses the image. */
   removeImageTag(ref: string): Promise<void>;
 
+  /**
+   * What decides whether Docker will remove a tag: every container (stopped
+   * ones too) with the exact image id it was made from, and every tag of any
+   * repository with its image id. Throws when Docker cannot be asked.
+   */
+  imagesInUse(): Promise<ImagesInUse>;
+
   /** Stable identity of the DAEMON this provider talks to. Two providers with
    *  equal daemonId() point at the same Docker daemon even if their endpoint
    *  strings differ (ssh://h vs ssh://h:22, IP vs hostname, local vs a runner
@@ -443,11 +460,29 @@ export interface RuntimeProvider {
   exportState(runtimeRef: string): Promise<Buffer>;
 
   /**
+   * The same snapshot streamed to `file` (created owner-only), for a caller
+   * that needs no Buffer: nothing is held in memory and no size is refused.
+   * `file` appears only once the archive is whole and on the disk; on any
+   * failure nothing is left behind (`file.part` meanwhile). The folder is
+   * synced after the rename, so the name is on the disk too. A full disk
+   * reads as such (isDiskFull); a volume that is gone as VolumeGoneError.
+   */
+  exportStateToFile(runtimeRef: string, file: string): Promise<void>;
+
+  /**
    * Restore a snapshot produced by exportState into the runtime's volume,
    * overwriting same-named files. Called between provision() and start() on
    * the import path, so the seeded skeleton is replaced by the real state.
    */
   importState(runtimeRef: string, data: Buffer): Promise<void>;
+
+  /**
+   * importState from an archive on disk, read as it goes. `ownCopy`: this
+   * install took it from this agent's own volume (a restore's safety copy),
+   * so the limit on what an untrusted archive may expand to does not apply.
+   * VolumeUntouchedError when it stopped before the volume was emptied.
+   */
+  importStateFromFile(runtimeRef: string, file: string, opts?: { ownCopy?: boolean }): Promise<void>;
 
   /**
    * Restore a tarball into ONE agent's workspace directory, leaving the rest
@@ -574,6 +609,19 @@ export function parseChannelsLabel(v: string | undefined): string[] {
   return (v ?? '').split(',').map((x) => x.trim()).filter((x) => /^[a-z]+$/.test(x));
 }
 
+/** What an owner hears when an agent's volume is not on its machine. */
+export const VOLUME_GONE = "This agent's stored files are not on its machine: its volume is gone.";
+
+/** A disk (or quota) that ran out, as an errno on the error or in a tool's words. */
+export function isDiskFull(err: unknown): boolean {
+  for (let e = err, depth = 0; e !== undefined && e !== null && depth < 5; e = (e as { cause?: unknown }).cause, depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (code === 'ENOSPC' || code === 'EDQUOT') return true;
+    if (/ENOSPC|EDQUOT|no space left|quota exceeded/i.test(e instanceof Error ? e.message : String(e))) return true;
+  }
+  return false;
+}
+
 export class ProviderError extends Error {
   constructor(
     message: string,
@@ -583,5 +631,25 @@ export class ProviderError extends Error {
   ) {
     super(message, options);
     this.name = 'ProviderError';
+  }
+}
+
+/**
+ * An import that stopped before it touched the volume: staging the archive or
+ * checking it failed, and the step that empties the volume never ran. There is
+ * nothing to put back, and trying to could only fail for the same reason.
+ */
+export class VolumeUntouchedError extends ProviderError {
+  constructor(message: string, userMessage: string) {
+    super(message, userMessage);
+    this.name = 'VolumeUntouchedError';
+  }
+}
+
+/** The agent's volume is not on its machine. Nothing was made in its place (HB-0373). */
+export class VolumeGoneError extends ProviderError {
+  constructor(message: string, userMessage: string = VOLUME_GONE) {
+    super(message, userMessage);
+    this.name = 'VolumeGoneError';
   }
 }

@@ -290,6 +290,109 @@ export async function materializeConnection(
   return { ok: true };
 }
 
+/** Only unambiguous mailbox characters, first one alphanumeric: an email goes into a shell line. */
+export const isAccountEmail = (email: string): boolean =>
+  /^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+$/.test(email) && email.length <= 254;
+
+export type GmailTestWhy =
+  | 'signin' | 'client' | 'blocked' | 'not-held' | 'api-off' | 'permission' | 'no-mailbox'
+  | 'busy' | 'google-down' | 'network' | 'keyring' | 'unknown';
+export interface GmailTest { ok: boolean; detail: string; why?: GmailTestWhy; messages?: number; unread?: number }
+
+const GOG = `G=~/.local/bin/gog; [ -x "$G" ] || G=gog; "$G"`;
+
+/** What gog 0.22's failure means, from its text and its stable exit codes (`gog exit-codes`). */
+export function gmailFailure(text: string, code?: number): GmailTestWhy {
+  if (/invalid_grant|expired or revoked/i.test(text)) return 'signin';
+  if (/invalid_client|unauthorized_client/.test(text)) return 'client';
+  if (/admin_policy_enforced|access_denied|org_internal/.test(text)) return 'blocked';
+  if (/not enabled for this OAuth project|accessNotConfigured|has not been used in project/.test(text)) return 'api-off';
+  if (/insufficient|SCOPE_INSUFFICIENT/i.test(text) || code === 6) return 'permission';
+  if (/Mail service not enabled/i.test(text)) return 'no-mailbox';
+  if (/GOG_KEYRING_PASSWORD|no TTY available/.test(text)) return 'keyring';
+  if (code === 4 || /^No auth for/m.test(text)) return /^No auth for/m.test(text) ? 'not-held' : 'signin';
+  if (code === 7 || /\b429\b|rateLimitExceeded/.test(text)) return 'busy';
+  if (code === 8 || /API error \(5\d\d/.test(text)) return 'google-down';
+  if (/dial tcp|lookup |i\/o timeout|deadline exceeded|TLS handshake|connection refused|network is unreachable|no route to host/i.test(text)) return 'network';
+  return 'unknown';
+}
+
+/**
+ * Is this agent's Gmail working? Two real calls at Google from inside it, as the
+ * agent makes them: the sign-in first, since gog keeps using an access token for
+ * up to an hour after the sign-in behind it was revoked; then the inbox's counts,
+ * which reads no mail and sends nothing.
+ */
+export async function testGmail(
+  deps: { store: Pick<Store, 'listAgentConnections' | 'getConnection'>; provider: RuntimeProvider },
+  agent: { id: string; runtimeRef: string },
+  email: string,
+): Promise<GmailTest> {
+  const lower = email.toLowerCase();
+  const attached = deps.store.listAgentConnections(agent.id).flatMap((at) => {
+    const c = deps.store.getConnection(at.connectionId);
+    return c && c.email.toLowerCase() === lower ? [{ ...at, createdAt: c.createdAt }] : [];
+  })[0];
+  const failed = (why: GmailTestWhy, raw = ''): GmailTest => {
+    const signIn = !attached
+      ? 'It was signed in from inside the agent: connect it under ⚙ Settings → Connections and attach it here, or have the agent sign in again.'
+      : attached.materializedAt && attached.materializedAt < attached.createdAt
+        ? 'The account was connected again since this agent got its sign-in: Disconnect it here and attach it again.'
+        : 'Press Connect for the account under ⚙ Settings → Connections, then attach it to this agent again.';
+    const detail: Record<GmailTestWhy, string> = {
+      signin: `Google no longer accepts this sign-in: it expired or was revoked. ${signIn}`,
+      client: 'Google does not accept the OAuth client this sign-in was made with. Check the client under ⚙ Settings → Connections, then connect the account again.',
+      blocked: 'Google refused: the administrator of this account does not allow this app.',
+      'not-held': 'This agent does not hold this account. Attach it again, or rebuild the agent if it is attached.',
+      'api-off': 'The Gmail API is off in the Google Cloud project of your OAuth client. Turn it on there, then test again.',
+      permission: 'The sign-in works, but it does not cover Gmail: it was left unticked on Google\'s consent screen. Press Connect for the account again, leave Gmail ticked, and attach it again.',
+      'no-mailbox': 'This Google account has no Gmail mailbox.',
+      busy: 'Google is limiting requests for this account just now. Try again in a few minutes.',
+      'google-down': 'Gmail is having trouble just now. Try again in a few minutes.',
+      network: 'This agent could not reach Google. Check this machine\'s internet connection.',
+      keyring: 'The agent could not unlock its Google sign-ins. Rebuild it, which sets that up again.',
+      unknown: raw ? `Gmail did not answer as expected: ${raw.split('\n')[0]!.slice(0, 200)}` : 'The agent did not answer in time. Try again in a moment.',
+    };
+    return { ok: false, why, detail: detail[why] };
+  };
+  const run = (args: string, timeoutMs: number) =>
+    deps.provider.execShell(agent.runtimeRef, `${GOG} ${args}`, { timeoutMs }).catch(() => undefined);
+
+  const check = await run('auth list --check --json --no-input', 90_000);
+  if (!check) return failed('unknown');
+  if (check.code === 127) return failed('not-held');
+  let list: unknown;
+  try { list = JSON.parse(check.stdout); } catch { list = undefined; }
+  const accounts = (list as { accounts?: unknown } | undefined)?.accounts;
+  if (Array.isArray(accounts)) {
+    const held = (accounts as Array<{ email?: unknown; valid?: unknown; error?: unknown } | null>)
+      .find((a) => typeof a?.email === 'string' && a.email.toLowerCase() === lower);
+    if (!held) return failed('not-held');
+    if (held.valid === false) { const e = String(held.error ?? ''); return failed(gmailFailure(e), e); }
+  } else if (check.code !== 0 && gmailFailure(check.stderr, check.code) !== 'unknown') {
+    return failed(gmailFailure(check.stderr, check.code));
+  }
+  // Anything else about the list says nothing of this account: the read below does.
+  const read = await run(`gmail labels get INBOX --account "${email}" --json --no-input`, 60_000);
+  if (!read) return failed('unknown');
+  if (read.code === 127) return failed('not-held');
+  if (read.code !== 0) {
+    const text = read.stderr || read.stdout;
+    return failed(gmailFailure(text, read.code), text);
+  }
+  let label: { messagesTotal?: unknown; messagesUnread?: unknown } | undefined;
+  try { label = (JSON.parse(read.stdout) as { label?: typeof label }).label; } catch { label = undefined; }
+  if (typeof label?.messagesTotal !== 'number') return failed('unknown', read.stdout);
+  const unread = typeof label.messagesUnread === 'number' ? label.messagesUnread : undefined;
+  const n = (x: number) => x.toLocaleString('en-US');
+  return {
+    ok: true,
+    messages: label.messagesTotal,
+    ...(unread !== undefined ? { unread } : {}),
+    detail: `Gmail works: the sign-in is good, and the inbox answered (${n(label.messagesTotal)} messages${unread !== undefined ? `, ${n(unread)} unread` : ''}). ${attached?.gmailNoSend ? 'Sending is switched off here, and was not tried.' : 'Sending was not tried.'}`,
+  };
+}
+
 /**
  * What one `gog auth list` showed, as access checks (docs/access-overview-design.md):
  * every account it names is present, and each of `also` it does not name is

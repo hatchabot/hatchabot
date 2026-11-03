@@ -22,9 +22,9 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import compress from '@fastify/compress';
 import { ChannelTakenError, normalizeHandle, type SectionSort, Store } from '../store/store.js';
-import type { SecretStore } from '../secrets/secretStore.js';
-import type { ContainerStats, ExecResult, RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
-import { ProviderError, parseByteSize } from '../providers/provider.js';
+import { SecretNotFoundError, type SecretStore } from '../secrets/secretStore.js';
+import type { ContainerStats, ExecResult, ImagesInUse, RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
+import { ProviderError, VOLUME_GONE, parseByteSize } from '../providers/provider.js';
 import { pingRunner, resolveProvider } from '../providers/resolveProvider.js';
 import { tcpTlsProblem } from '../providers/runnerEndpoint.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
@@ -130,6 +130,7 @@ import type { PendingConfirm } from '../mgmt/pendingStore.js';
 import { modelOption, modelOptionsFor, openclawAtLeast, SUBSCRIPTION_MIN_OPENCLAW, subscriptionModelProblem } from '../orchestrator/modelOptions.js';
 import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
 import { createOpsPush, unannounced } from '../ops/push.js';
+import { AGENT_SEARCH_TEST_ARGV, createSearchWatch, readAgentSearchTest } from '../orchestrator/webSearch.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
 import { pickIcons, suggestIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
 import { ENV_NAME_RE, envValueProblem, MAX_AGENT_ENV_VARS, reservedEnvProblem } from '../orchestrator/envPolicy.js';
@@ -169,7 +170,7 @@ import { replaceSection, extractSection, DATA_SOURCES_HEADING } from '../opencla
 import {
   DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar, grantedServices, isGoogleService,
   exchangeGoogleCode, googleAuthUrl, materializeConnection, offAgainIfDetached, removeQueuedNow, syncConnections, withConnectionLock,
-  parseOAuthClient, revokeGoogleToken, type OAuthClient,
+  isAccountEmail, parseOAuthClient, revokeGoogleToken, testGmail, type OAuthClient,
 } from '../orchestrator/googleConnections.js';
 import { accessAlertOf, accessOverview, agentsWithAccessFindings, verifyAgentAccess } from '../orchestrator/accessOverview.js';
 import { INSPECTABLE_FILES, InspectReadError, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
@@ -238,7 +239,7 @@ import {
   inspectWorkspace,
   botPollState,
 } from '../orchestrator/adopt.js';
-import type { Agent, AIProfile, Channel } from '../domain/types.js';
+import type { Agent, AIProfile, Channel, Host } from '../domain/types.js';
 import { LOCAL_OWNER, ownerIdOf, principalOf } from './principal.js';
 import { registerWebChatRoutes, webChatBusy } from './webChat.js';
 import {
@@ -265,6 +266,8 @@ import {
 } from '../orchestrator/snapshots.js';
 
 /** What an adopt says about the source's scheduled tasks. */
+/** One thing that stops a runtime image tag being deleted (imageBlockers). */
+type ImageBlocker = { kind: 'pin' | 'class' | 'derived' | 'container'; name: string; label: string; fix: string; mine: boolean; agentId?: string };
 type AdoptCrons = { total: number; carried: number; failed: number; deferred?: number; error?: string; notReady?: boolean };
 /** How long a deferred adopt waits for its agent's gateway to answer, from the first pass that
  *  found the agent running, before its tasks count as failed. */
@@ -276,6 +279,8 @@ const adoptWaitSaid = new Set<string>();
 
 
 export interface ApiDeps {
+  /** Stands in for the network when search is checked (tests). */
+  searchFetch?: typeof fetch;
   store: Store;
   secrets: SecretStore;
   /** Keyed by Host.provider — 'mock', 'local-docker', later 'gce'. */
@@ -1920,13 +1925,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * finished last and left the runtime on the older model (HB-0323).
    */
   const modelApplies = new Map<string, Promise<unknown>>();
-  const applyModelToRuntime = (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed' | 'rebuild'> => {
+  const applyModelToRuntime = (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed' | 'rebuild' | 'gone'> => {
     const next = (modelApplies.get(agentId) ?? Promise.resolve()).catch(() => {}).then(() => applyModelNow(agentId));
     const settled = next.catch(() => {}).finally(() => { if (modelApplies.get(agentId) === settled) modelApplies.delete(agentId); });
     modelApplies.set(agentId, settled);
     return next;
   };
-  const applyModelNow = async (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed' | 'rebuild'> => {
+  const applyModelNow = async (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed' | 'rebuild' | 'gone'> => {
     const a = store.getAgent(agentId);
     const p = a && store.getAIProfile(a.aiProfileId);
     if (!a || !p || !a.runtimeRef || a.migratedTo) return 'none';
@@ -1951,6 +1956,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (a.state === 'RUNNING') res = await provider.exec(a.runtimeRef, ['models', 'set', ref]);
     else if (a.state === 'STOPPED') res = await provider.execShellOnVolume(a.runtimeRef, `openclaw models set '${ref.replace(/'/g, '')}' >/dev/null`, { image: a.image ?? undefined });
     else return 'none';
+    // Not "try again, or Rebuild": a rebuild makes a fresh, empty volume, the
+    // agent healthy with no memory that saying so is there to prevent (HB-0373).
+    if (res.volumeMissing) { trace(agentId)('model.volume_gone', { model: ref }); return 'gone'; }
     if (res.code !== 0) { trace(agentId)('model.live_set_failed', { model: ref, stderr: (res.stderr || res.stdout).slice(0, 200) }); return 'failed'; }
     // What was applied is what was read before the call. A source switch (or
     // another model) saved while `models set` ran is not on the runtime:
@@ -2214,6 +2222,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!switching && cls.model && !modelWaitsForRebuild) {
       const how = await applyModelToRuntime(agent.id).catch(() => 'failed' as const);
       if (how === 'rebuild') return { rebuild: true };
+      if (how === 'gone') return { rebuild, modelPending: `its stored files are not on its machine: its volume is gone, so ${cls.model} could not be written to it (a Rebuild would make a fresh, empty volume)` };
       if (how === 'failed' && !rebuild) {
         return { rebuild, modelPending: `its runtime did not take ${cls.model}, so it still answers on its old model — try again, or Rebuild it to apply` };
       }
@@ -2629,9 +2638,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // A paused agent's bot answers whoever writes to it, once a chat (budgets.ts).
   let replySweeping = false;
   const runPausedReplies = async () => {
-    if (replySweeping || !store.listBudgetPauses({ open: true }).some((p) => p.kind === 'pause')) return;
+    if (replySweeping) return;
     replySweeping = true;
-    try { await pausedReplySweep({ store, secretOf: (ref) => secrets.get(ref), log: (event, detail) => { trace(String(detail.agentId ?? 'admin'))(event, detail); } }); }
+    try {
+      if (!store.listBudgetPauses({ open: true }).some((p) => p.kind === 'pause')) return;
+      await pausedReplySweep({ store, secretOf: (ref) => secrets.get(ref), log: (event, detail) => { trace(String(detail.agentId ?? 'admin'))(event, detail); } }); }
     catch (err) { app.log.warn({ err: String(err) }, 'budget.reply_failed'); }
     finally { replySweeping = false; }
   };
@@ -3332,7 +3343,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const verifyLater = () => verifyAgentAccess(connSyncDeps(a.hostId), a.id, ref).then(() => undefined, () => undefined);
     if (store.listConnections(a.ownerId).length || store.connectionRemovals(a.id).length) {
       void syncConnections(connSyncDeps(a.hostId), a.id, ref).catch((err: unknown) => trace(a.id)('connection.sync_failed', { error: String(err).slice(0, 200) }))
-        .then(verifyLater);
+        .then(verifyLater)
+        .catch(() => {}); // verifyLater throws when the host was removed during the sync (HB-0374)
     } else void verifyLater();
   };
   /** The same, for an agent something other than Start brought up (a restore), by id. */
@@ -3401,7 +3413,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * keeps the command owner and the per-app file ceilings in each config.
    */
   const retargetCronSweep = async () => {
-    for (const a of store.listAllActiveAgents()) {
+    // Off a timer: a database that fails here must not end the process.
+    let agents: Agent[];
+    try { agents = store.listAllActiveAgents(); }
+    catch (err) { app.log.warn({ err: String(err) }, 'cron.sweep_failed'); return; }
+    for (const a of agents) {
       if (a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) continue;
       try {
         await retargetAgentCrons(a as Agent & { runtimeRef: string }, 'sweep');
@@ -3441,8 +3457,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             `node -e 'const c=JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json","utf8")).channels||{};process.stdout.write(JSON.stringify(process.argv.slice(1).filter(k=>c[k]&&typeof c[k]==="object"&&c[k].mediaMaxMb===undefined)))' ${kinds.join(' ')}`);
           const missing = read.code === 0 ? (JSON.parse(read.stdout || '[]') as ChannelKindForFiles[]).filter((k) => kinds.includes(k)) : [];
           for (const kind of missing) {
-            const n = await applyFilesCap(a, kind);
-            trace(a.id)('files.cap_backfilled', { kind, ok: n > 0 });
+            const { applied } = await applyFilesCap(a, kind);
+            trace(a.id)('files.cap_backfilled', { kind, ok: applied > 0 });
           }
         }
       } catch { /* next time */ }
@@ -3577,7 +3593,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     quickRunning = true;
     try {
       try { await finishDeferredAdopts(); } catch { /* next time */ }
-      for (const a of store.listAllActiveAgents()) {
+      let agents: Agent[];
+      try { agents = store.listAllActiveAgents(); }
+      catch (err) { app.log.warn({ err: String(err) }, 'cron.sweep_failed'); return; }
+      for (const a of agents) {
         if (a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) { quickTried.delete(a.id); continue; }
         try {
           const due = await pendingRetarget(providerFor(a.hostId), a.runtimeRef, a.slug, cronTargetFor(store, a), store.quietedCrons(a.id));
@@ -3683,6 +3702,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     : `${sw.why ?? 'No compressed swap here.'} To turn it on: ${COMPRESSED_SWAP_FIX}.`;
   (app as unknown as { limitsCheck?: typeof limitsCheck; lastLimitsCheck?: () => LimitsCheckSummary | undefined }).limitsCheck = limitsCheck;
   (app as unknown as { lastLimitsCheck?: () => LimitsCheckSummary | undefined }).lastLimitsCheck = () => lastLimitsCheck;
+  (app as unknown as { runPausedReplies?: typeof runPausedReplies }).runPausedReplies = runPausedReplies;
   (app as unknown as { retargetCronSweep?: typeof retargetCronSweep }).retargetCronSweep = retargetCronSweep;
   (app as unknown as { quickCronRetarget?: typeof quickCronRetarget }).quickCronRetarget = quickCronRetarget;
   (app as unknown as { hibernateDeps?: HibernateDeps; ensureAwake?: typeof ensureAwake }).hibernateDeps = hibernateDeps;
@@ -3715,7 +3735,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           }
         };
         await Promise.all([worker(), worker(), worker()]);
-      })();
+      })().catch((err) => app.log.warn({ err: String(err) }, 'runtime.pin_sweep_failed')); // HB-0374
     }, Number(process.env.HATCHABOT_PINS_BOOT_MS) || 60_000).unref();
   }
   // In-process guard against two concurrent builds of the same name (the store's
@@ -3779,12 +3799,66 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       .finally(() => buildingImages.delete(name));
   };
 
+  /** Docker's view of which images are held, or null when it cannot be asked. */
+  const readImagesInUse = async (localHost: Host | undefined): Promise<ImagesInUse | null> => {
+    try { return localHost ? await providerFor(localHost.id).imagesInUse() : null; } catch { return null; }
+  };
+  /**
+   * Everything that stops a tag being deleted, each with how to clear it. The
+   * one list behind "Used by" and both deletes, so "nothing" means it deletes.
+   * A container counts only on the image's last tag: with another tag on the
+   * same image Docker removes the name and the container keeps running.
+   */
+  const imageBlockers = (tag: string, me: string, localHost: Host | undefined, inUse: ImagesInUse | null): ImageBlocker[] => {
+    const agents = store.listAllActiveAgents();
+    const others = (mine: boolean) => (mine ? '' : ', another account');
+    const pins: ImageBlocker[] = agents.filter((a) => a.image === tag).map((a) => {
+      const mine = a.ownerId === me;
+      const archived = a.state === 'ARCHIVED';
+      const runner = localHost && a.hostId !== localHost.id ? store.getHost(a.hostId)?.name ?? 'a runner' : null;
+      const fix = archived
+        ? (mine ? 'Restore it and discard its trial, or delete it.' : 'Its owner can restore it and discard the trial, or delete it.')
+        : (mine ? 'Discard its trial (✕).' : 'Its owner can move it to another image.');
+      return { kind: 'pin', name: a.name, label: `${archived ? 'archived, pinned' : 'pinned'}${runner ? `, on ${runner}` : ''}${others(mine)}`, fix, mine, agentId: a.id };
+    });
+    const classes: ImageBlocker[] = store.listAllAgentClasses().filter((c) => c.image === tag).map((c) => {
+      const mine = c.ownerId === me;
+      return { kind: 'class', name: c.name, label: `class${others(mine)}`, fix: mine ? "Change the class's image." : "Its owner can change the class's image.", mine };
+    });
+    const built: ImageBlocker[] = store.listDerivedImages().filter((d) => d.base === tag).map((d) =>
+      ({ kind: 'derived', name: d.name, label: 'derived image built on it', fix: 'Rebuild it on another base, or delete it.', mine: true }));
+    const imageId = inUse?.tags.find((t) => t.tag === tag)?.imageId;
+    const lastTag = !!imageId && inUse!.tags.filter((t) => t.imageId === imageId).length === 1;
+    const held = lastTag ? inUse!.containers.filter((c) => c.imageId === imageId) : [];
+    const containerOf = (a: Agent) => (a.runtimeRef ? providerFor(a.hostId).containerName?.(a.runtimeRef) ?? a.runtimeRef : undefined);
+    const containers: ImageBlocker[] = held.flatMap((c): ImageBlocker[] => {
+      const a = localHost && agents.find((x) => x.hostId === localHost.id && containerOf(x) === c.name);
+      if (a && pins.some((p) => p.agentId === a.id)) return []; // clearing the pin clears its container
+      if (!a) {
+        return [c.state === 'running'
+          ? { kind: 'container', name: c.name, label: 'container with no agent, running', fix: 'Check what it is, then stop and remove it with docker.', mine: true }
+          : { kind: 'container', name: c.name, label: 'leftover container', fix: `Remove it: docker rm ${c.name}`, mine: true }];
+      }
+      const mine = a.ownerId === me;
+      const archived = a.state === 'ARCHIVED';
+      const fix = archived
+        ? (mine ? 'Restore and rebuild it, which moves it off this image, or delete it.' : 'Its owner can restore and rebuild it, or delete it.')
+        : (mine ? 'Rebuild it, which moves it off this image.' : 'Its owner can rebuild it, which moves it off this image.');
+      return [{ kind: 'container', name: a.name, label: `${archived ? 'archived, container on it' : 'container on it'}${others(mine)}`, fix, mine, agentId: a.id }];
+    });
+    return [...pins, ...classes, ...built, ...containers];
+  };
+  const blockedMessage = (tag: string, blockers: ImageBlocker[]) =>
+    `${tag} is still in use. ${blockers.map((b) => `${b.name} (${b.label}): ${b.fix}`).join(' ')}`;
+
   /** Fleet runtime images: every tag on the local daemon, who is pinned where, what :latest points at. */
   app.get('/v1/runtime/images', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
     let tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[] = [];
+    const inUsePending = readImagesInUse(localHost);
     try { if (localHost) tags = await providerFor(localHost.id).listImageTags(); } catch { /* daemon hiccup: empty list, not a 500 */ }
+    const inUse = await inUsePending;
     const latestRow = tags.find((t) => t.tag === DEFAULT_BASE);
     const latestId = latestRow?.imageId;
     // Human answer to "what does :latest point to?": the version tags sharing its image id.
@@ -3792,7 +3866,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const derived = new Map(store.listDerivedImages().map((d) => [d.tag, d]));
     const me = ownerIdOf(req);
     const active = store.listAllActiveAgents().filter((a) => a.state !== 'ARCHIVED' && (!localHost || a.hostId === localHost.id)); // local daemon only
-    const agentRow = (a: Agent) => ({ id: a.id, name: a.name, state: a.state, mine: a.ownerId === me, classId: a.classId ?? null });
+    const agentRow = (a: Agent) => ({ id: a.id, name: a.name, state: a.state, mine: a.ownerId === me, classId: a.classId ?? null, runner: localHost && a.hostId !== localHost.id ? store.getHost(a.hostId)?.name ?? 'a runner' : null });
+    const everyAgent = store.listAllActiveAgents();
     const known = new Set(tags.map((t) => t.tag));
     // Pins to tags that don't exist (yet) still show, so a typo or an unbuilt candidate is visible.
     for (const a of active) if (a.image && !known.has(a.image)) { known.add(a.image); tags.push({ tag: a.image, imageId: '' }); }
@@ -3802,6 +3877,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return {
       default: DEFAULT_BASE,
       latestImageId: latestId,
+      containersChecked: !!inUse,
       defaultInfo: latestRow ? { resolvesTo, openclawVersion: latestRow.openclawVersion, size: latestRow.size, createdAt: latestRow.createdAt } : null,
       building: { base: baseBuild.running ? { version: baseBuild.version, candidate: baseBuild.candidate, startedAt: baseBuild.startedAt } : null },
       unpinned: active.filter((a) => !a.image).map(agentRow),
@@ -3814,8 +3890,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           exists: !!t.imageId,
           relation: relation(t),
           derived: derived.get(t.tag) ? { name: derived.get(t.tag)!.name, status: derived.get(t.tag)!.status, base: derived.get(t.tag)!.base, summary: derived.get(t.tag)!.dockerfile.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).join(' ; ').slice(0, 160) } : null,
-          pinned: active.filter((a) => a.image === t.tag).map(agentRow),
-          classes: store.listAgentClasses(me).filter((c) => c.image === t.tag).map((c) => ({ id: c.id, name: c.name })),
+          pinned: everyAgent.filter((a) => a.image === t.tag).map(agentRow),
+          classes: store.listAllAgentClasses().filter((c) => c.image === t.tag).map((c) => ({ id: c.id, name: c.name, mine: c.ownerId === me })),
+          blockers: imageBlockers(t.tag, me, localHost, inUse),
         })),
     };
   });
@@ -3830,7 +3907,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { tag, steps: await providerFor(localHost.id).imageHistory(tag) };
   });
 
-  /** Remove a version/candidate tag. The default, pinned tags and class images are refused; Docker refuses tags containers still use. */
+  /** Remove a version/candidate tag. The default is refused, and so is anything imageBlockers lists; Docker refuses tags containers still use. */
   app.delete<{ Params: { tag: string } }>('/v1/runtime/images/:tag', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const tag = req.params.tag;
@@ -3849,18 +3926,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       // falls through: a leftover image with no row of its own
     }
-    const pinned = store.listAllActiveAgents().filter((a) => a.image === tag); // archived pins count too: un-archiving would need the image
-    if (pinned.length) return reply.code(409).send({ error: `${pinned.length} agent${pinned.length === 1 ? ' is' : 's are'} pinned to it: ${pinned.map((a) => a.name).join(', ')}. Discard those trials first.` });
-    // Every account's classes: a member's class on this image loses its image too.
-    const cls = store.listAllAgentClasses().filter((c) => c.image === tag);
-    if (cls.length) return reply.code(409).send({ error: `Class ${cls.map((c) => c.name).join(', ')} uses it — change the class image first.` });
-    // A derived image built FROM it needs it for its next Rebuild (night review).
-    const built = store.listDerivedImages().filter((d) => d.base === tag);
-    if (built.length) return reply.code(409).send({ error: `The derived image ${built.map((d) => d.name).join(', ')} is built on it — rebuild ${built.length === 1 ? 'it' : 'them'} on another base first.` });
-    const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
+    const me = ownerIdOf(req);
+    const localHost = store.listHosts(me).find((h) => h.kind === 'local');
+    const blockers = imageBlockers(tag, me, localHost, await readImagesInUse(localHost));
+    if (blockers.length) return reply.code(409).send({ error: blockedMessage(tag, blockers) });
     if (!localHost) return reply.code(400).send({ error: 'No local host.' });
     try { await providerFor(localHost.id).removeImageTag(tag); }
-    catch (err) { return reply.code(409).send({ error: err instanceof ProviderError ? err.userMessage : String((err as Error).message) }); }
+    catch (err) {
+      // Docker's refusal names no one: a look now can, when the first could not or the container is new.
+      const now = imageBlockers(tag, me, localHost, await readImagesInUse(localHost));
+      if (now.length) return reply.code(409).send({ error: blockedMessage(tag, now) });
+      return reply.code(409).send({ error: err instanceof ProviderError ? err.userMessage : String((err as Error).message) });
+    }
     return { removed: tag };
   });
 
@@ -4066,17 +4143,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (buildingImages.has(rec.name)) {
       return reply.code(409).send({ error: 'Cannot delete while it is building.' });
     }
-    // Refuse while an agent still pins it — deleting the image out from under a
-    // pinned agent would fail its next rebuild with a cryptic "no such image".
-    const pinned = store.agentsPinnedToImage(rec.tag);
-    if (pinned.length) {
-      return reply.code(409).send({
-        error: `In use by ${pinned.length} agent(s): ${pinned.map((a) => a.name).join(', ')}. Unpin them first.`,
-      });
-    }
-    // A class naming it would pin its next member to a missing image (night review).
-    const classes = store.listAllAgentClasses().filter((c) => c.image === rec.tag);
-    if (classes.length) return reply.code(409).send({ error: `The class ${classes.map((c) => `"${c.name}"`).join(', ')} uses it. Change the class's image first.` });
+    // Refuse while anything needs it: a pinned agent's next rebuild would fail
+    // with a cryptic "no such image", a class would pin its next member to a
+    // missing image (night review), and Docker refuses while a container holds it.
+    const me = ownerIdOf(req);
+    const localHost = store.listHosts(me).find((h) => h.kind === 'local');
+    const blockers = imageBlockers(rec.tag, me, localHost, await readImagesInUse(localHost));
+    if (blockers.length) return reply.code(409).send({ error: blockedMessage(rec.tag, blockers) });
     // Take the image away FIRST, and only forget the row if that worked.
     // `docker rmi` resolves {ok:false} rather than throwing, and this ignored
     // it: a failed removal (a stopped container still referencing the image is
@@ -4379,13 +4452,74 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(400).send({ error: 'Paste a Brave Search API key.' });
     }
     await secrets.put(SEARCH_KEY_REF, parsed.data.key.trim());
+    recheckSearchSoon();
     return { set: true };
   });
 
   app.delete('/v1/search-key', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     await secrets.delete(SEARCH_KEY_REF).catch(() => {});
+    recheckSearchSoon();
     return { set: false };
+  });
+
+  // ---- which search the fleet uses, and whether it works (webSearch.ts) ------
+  const searchWatch = createSearchWatch({
+    store,
+    braveKey: () => secrets.get(SEARCH_KEY_REF).catch((err) => { if (err instanceof SecretNotFoundError) return undefined; throw err; }),
+    providerFor,
+    isBusy,
+    notify: (headline, detail) => {
+      const owner = store.listAllLocalHostOwners()[0];
+      if (owner) void opsPush.waiting(owner, headline, detail, { note: true });
+    },
+    log: (event, detail) => app.log.info(detail, event),
+    ...(deps.searchFetch ? { fetchImpl: deps.searchFetch, sleep: async () => {} } : {}),
+    ...(Number(process.env.HATCHABOT_SEARCH_CHECK_MS) > 0 ? { checkEveryMs: Number(process.env.HATCHABOT_SEARCH_CHECK_MS) } : {}),
+  });
+  /** A key changed, so what the fleet should use may have. Not in the tests: it asks the real Brave. */
+  function recheckSearchSoon(): void {
+    if (!process.env.VITEST) void searchWatch.recheck().catch((err) => app.log.warn({ err: String(err) }, 'search check failed'));
+  }
+  if (!process.env.VITEST) {
+    setInterval(() => { void searchWatch.tick().catch((err) => app.log.warn({ err: String(err) }, 'search check failed')); }, 10 * 60_000).unref();
+  }
+  const searchView = async () => ({
+    ...searchWatch.state(),
+    moving: searchWatch.moving(),
+    keySet: await secrets.get(SEARCH_KEY_REF).then(() => true, () => false),
+  });
+  app.get('/v1/web-search', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    return searchView();
+  });
+  // A check spends one Brave query; it runs one at a time, however often it is pressed.
+  app.post('/v1/web-search/check', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    await searchWatch.check();
+    return searchView();
+  });
+  app.put<{ Body: { mode?: string } }>('/v1/web-search', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const parsed = z.object({ mode: z.enum(['auto', 'duckduckgo']) }).safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: 'Choose auto or duckduckgo.' });
+    await searchWatch.setMode(parsed.data.mode);
+    return searchView();
+  });
+  // A real search in the agent, through its own settings and keys.
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/search-test', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (movedAway(agent, reply)) return reply;
+    if (agent.ops) return reply.code(409).send({ error: 'The Hatchabot agent searches through Hatchabot itself: test it under Settings → AI → Fleet search key.' });
+    if (agent.state !== 'RUNNING') return reply.code(409).send({ error: 'Start the agent first: this runs a real search inside it.' });
+    const res = await providerFor(agent.hostId).exec(agent.runtimeRef, AGENT_SEARCH_TEST_ARGV, { timeoutMs: 120_000 });
+    const out = readAgentSearchTest(res.stdout, res.stderr);
+    if (!out.ok) {
+      trace(agent.id)('search.test_failed', { why: out.why, stderr: (res.stderr || res.stdout).slice(-300) });
+      if (out.why === 'quota' || out.why === 'key') searchWatch.nudge();
+    }
+    return out;
   });
 
   // Stock the pool from the app: verify the token against Telegram, then store
@@ -4987,12 +5121,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // applyModelToRuntime re-reads agent + profile from the store, so it sees
       // the NEW default (the local `profile` object above is stale after
       // setAIProfileModel — using it applied the OLD model to every agent).
-      let live = 0, staged = 0, classDetached = 0;
+      let live = 0, staged = 0, volumeGone = 0, classDetached = 0;
       for (const a of mine) {
         if (!applyIds.has(a.id)) continue;
         if (detachClassIfDrifted(a.id)) classDetached++;
         const how = await applyModelToRuntime(a.id);
-        if (how === 'live') live++; else if (how === 'staged') staged++;
+        if (how === 'live') live++; else if (how === 'staged') staged++; else if (how === 'gone') volumeGone++;
       }
 
       const { secretRef: _s, ...safe } = store.getAIProfile(profile.id)!;
@@ -5000,7 +5134,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // echoed applyIds.size, which over-reported when the caller passed ids
       // that aren't theirs (a shared profile's other users) — they're filtered
       // out of `mine`, so nothing happened to them.
-      return { profile: safe, applied, held, live, staged, classDetached, ...(notSwitched.length ? { notSwitched } : {}), ...(othersHeld ? { othersHeld } : {}) };
+      return { profile: safe, applied, held, live, staged, classDetached, ...(volumeGone ? { volumeGone } : {}), ...(notSwitched.length ? { notSwitched } : {}), ...(othersHeld ? { othersHeld } : {}) };
     },
   );
 
@@ -5263,7 +5397,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (doormen.ips.has(ip)) {
       // Allow it, but keep the list honest: a doorman that is gone must not
       // keep an address that docker could hand to some other container.
-      if (Date.now() - doormen.at > DOORMEN_FRESH_MS) void refreshDoormen();
+      if (Date.now() - doormen.at > DOORMEN_FRESH_MS) void refreshDoormen().catch((err) => app.log.warn({ err: String(err) }, 'ops.doorman_refresh_failed')); // an agent on a removed host throws (HB-0374)
       return true;
     }
     // Unknown: a rebuild replaces the doorman and it comes back with a new
@@ -5322,6 +5456,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     store, secrets, opsPeerOk,
     notifyOps: (ownerId, body) => void opsNotifier.notify(ownerId, body),
     pushOps: (ownerId, headline, detail) => void opsPush.waiting(ownerId, headline, detail),
+    opsWeb: {
+      braveKey: async () => (searchWatch.state().active === 'brave' ? secrets.get(SEARCH_KEY_REF).catch(() => undefined) : undefined),
+      onBraveFailed: () => searchWatch.nudge(),
+    },
   });
 
   // ---- agents ---------------------------------------------------------------
@@ -5782,10 +5920,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     trace(a.id)('runtime.self_restarted', { count: n, exitCode: running.lastExitCode, startedAt: running.startedAt });
   };
   /** An agent's file ceiling on each of its apps, set live (OpenClaw hot-reloads it; a stopped agent's volume is edited). */
-  const applyFilesCap = async (a: Agent, only?: ChannelKindForFiles): Promise<number> => {
-    if (!a.runtimeRef || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) return 0;
+  const applyFilesCap = async (a: Agent, only?: ChannelKindForFiles): Promise<{ applied: number; gone: boolean }> => {
+    if (!a.runtimeRef || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) return { applied: 0, gone: false };
     const provider = providerFor(a.hostId);
-    let n = 0;
+    let n = 0, gone = false;
     for (const kind of new Set(store.listChannelsForAgent(a.id).map((c) => c.kind))) {
       if (kind !== 'telegram' && kind !== 'discord' && kind !== 'slack') continue;
       if (only && kind !== only) continue;
@@ -5794,9 +5932,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         ? await provider.exec(a.runtimeRef, ['config', 'set', `channels.${kind}.mediaMaxMb`, mb]).catch(() => undefined)
         : await provider.execShellOnVolume(a.runtimeRef, `openclaw config set channels.${kind}.mediaMaxMb ${mb} >/dev/null`, { image: a.image ?? undefined }).catch(() => undefined);
       if (res?.code === 0) n++;
-      else trace(a.id)('files.cap_failed', { kind, error: String(res?.stderr ?? 'no answer').slice(0, 200) });
+      else {
+        // Its one agent's loss, not a machine that is asleep (HB-0373).
+        gone ||= res?.volumeMissing === true;
+        trace(a.id)('files.cap_failed', { kind, error: String(res?.stderr ?? 'no answer').slice(0, 200) });
+      }
     }
-    return n;
+    return { applied: n, gone };
   };
 
   // ---- Defaults for this machine (machineDefaults.ts): written to .env, applied at once ----
@@ -5829,6 +5971,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const local = store.localHostId();
     const fleet = store.listAllActiveAgents().filter((a) => a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED') && !!store.getHost(a.hostId));
     const unreachable = new Set<string>();
+    const volumeGone: string[] = [];
     if (spec.key === 'agentMemory') {
       for (const a of fleet) {
         const cls = a.classId ? store.getAgentClass(a.classId) : undefined;
@@ -5859,13 +6002,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const kind = spec.key.slice(5).toLowerCase() as ChannelKindForFiles;
       for (const a of fleet) {
         if (unreachable.has(a.hostId)) continue;
-        const n = await applyFilesCap(a, kind);
-        applied += n;
-        if (!n && a.hostId !== local && store.listChannelsForAgent(a.id).some((c) => c.kind === kind)) unreachable.add(a.hostId);
+        const r = await applyFilesCap(a, kind);
+        applied += r.applied;
+        if (r.gone) volumeGone.push(a.name);
+        else if (!r.applied && a.hostId !== local && store.listChannelsForAgent(a.id).some((c) => c.kind === kind)) unreachable.add(a.hostId);
       }
     }
     trace()('machine.default_set', { key: spec.key, value: checked.value || 'off', applied });
-    return { default: readMachineDefaults().find((d) => d.key === spec.key), applied };
+    return { default: readMachineDefaults().find((d) => d.key === spec.key), applied, ...(volumeGone.length ? { volumeGone } : {}) };
   });
 
   const rebuildNeedOf = async (a: Agent) => {
@@ -6588,7 +6732,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
       if (group !== undefined) store.setAgentGroup(agent.id, group ? group : null);
 
-      if (parsed.data.filesMaxMb !== undefined) await applyFilesCap(store.getAgent(agent.id)!);
+      const filesCapGone = parsed.data.filesMaxMb !== undefined && (await applyFilesCap(store.getAgent(agent.id)!)).gone;
 
       if (runsHere) store.setAgentMigratedTo(agent.id, null);
       if (parsed.data.image !== undefined) {
@@ -6638,7 +6782,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
                     agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: chan.accountId,
                     text: `🏷 This agent was renamed: it's now “${name}”. Same agent, same chat — only the name changed.`,
                   },
-                );
+                ).catch(() => 0);
               }
             })
             .catch(() => {});
@@ -6664,6 +6808,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
       return {
         ...publicAgent(store.getAgent(agent.id)!, { classDetached }), ...(sameImage !== undefined ? { sameImage } : {}),
+        ...(filesCapGone ? { filesCapPending: `The limit is saved, but it could not be written to the agent. ${VOLUME_GONE}` } : {}),
         ...(browserPending ? { browserPending: 'Saved. A rebuild was already under way and may have begun before this change: if its browser is not as you set it once that rebuild ends, rebuild the agent.' } : {}),
       };
     },
@@ -6717,8 +6862,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (rel === undefined) { reply.code(400).send({ error: 'That is not a path inside the agent.' }); return undefined; }
     return { agent, rel };
   };
-  const fsFailure = (reply: FastifyReply, code: number) =>
-    code === 2 ? reply.code(404).send({ error: 'No such file or folder.' })
+  const fsFailure = (reply: FastifyReply, { code, volumeMissing }: ExecResult) =>
+    volumeMissing ? reply.code(404).send({ error: VOLUME_GONE })
+      : code === 2 ? reply.code(404).send({ error: 'No such file or folder.' })
       : code === 3 ? reply.code(400).send({ error: 'That path leads outside the agent.' })
       : code === 4 ? reply.code(400).send({ error: 'Not that kind of path.' })
       : reply.code(502).send({ error: "Couldn't read the agent's files." });
@@ -6728,7 +6874,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     let res: ExecResult;
     try { res = await providerFor(t.agent.hostId).execShellOnVolume(t.agent.runtimeRef!, listShell(t.rel), { readOnly: true }); }
     catch { return reply.code(502).send({ error: "Couldn't read the agent's files." }); }
-    if (res.code !== 0) return fsFailure(reply, res.code);
+    if (res.code !== 0) return fsFailure(reply, res);
     return { path: t.rel, entries: parseListing(res.stdout) };
   });
 
@@ -6740,7 +6886,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     let st: ExecResult;
     try { st = await provider.execShellOnVolume(t.agent.runtimeRef!, kind === 'file' ? statShell(t.rel) : duShell(t.rel), { readOnly: true }); }
     catch { return reply.code(502).send({ error: "Couldn't read the agent's files." }); }
-    if (st.code !== 0) return fsFailure(reply, st.code);
+    if (st.code !== 0) return fsFailure(reply, st);
     const [ftype, fsize] = kind === 'file' ? st.stdout.trim().split('\t') : ['directory', st.stdout.trim()];
     if (kind === 'file' && ftype !== 'regular file' && ftype !== 'regular empty file') return reply.code(400).send({ error: 'That is a folder — download it as an archive.' });
     const size = Number(fsize) || 0;
@@ -6796,7 +6942,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     catch { return reply.code(502).send({ error: "Couldn't write into the agent." }); }
     if (res.code === 5) return reply.code(409).send({ error: `${name} is already there — replace it?` });
     if (res.code === 6) return reply.code(400).send({ error: "That folder leads into OpenClaw's own state — uploads go in the workspace or outside .openclaw." });
-    if (res.code !== 0) return fsFailure(reply, res.code);
+    if (res.code !== 0) return fsFailure(reply, res);
     return { ok: true, path: t.rel, name, size: body.length };
   });
   app.get<{ Params: { id: string }; Querystring: { path?: string } }>('/v1/agents/:id/fs/archive', NO_COMPRESS, (req, reply) => fsStream(req, reply, req.params.id, req.query.path, 'archive'));
@@ -7937,8 +8083,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     try {
       await runPendingOnce(agentId, true);
       while (run.again) { run.again = false; await runPendingOnce(agentId, false); }
+    } catch (err) {
+      // The database itself failed (a full disk): recording the failure, or
+      // reading the request, threw. Run from `void`: it must not end the process.
+      app.log.warn({ agentId, err: String(err) }, 'app.pending_run_failed');
     } finally { pendingRuns.delete(agentId); }
   };
+  (app as unknown as { runPendingApp?: typeof runPendingApp }).runPendingApp = runPendingApp;
 
   /** Install an app into this agent (or replace the one it has, from a new source). */
   app.post<{ Params: { id: string }; Body: { source?: string; ref?: string; values?: Record<string, unknown>; allowShared?: boolean } }>('/v1/agents/:id/app', async (req, reply) => {
@@ -8439,10 +8590,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             profile,
             { system, tools: [], messages: [{ role: 'user', content: user }], maxTokens },
           );
-          return (r.content as Array<{ type?: string; text?: string }>)
+          const text = (r.content as Array<{ type?: string; text?: string }>)
             .filter((c) => c?.type === 'text' && typeof c.text === 'string')
             .map((c) => c.text)
             .join('\n');
+          return { text, stopReason: r.stopReason };
         }
       : undefined;
   };
@@ -8464,7 +8616,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (iconRuns.has(ownerId)) return reply.code(429).send({ error: 'Already picking icons — give it a moment.' });
     iconRuns.add(ownerId);
     try {
-      const picks = await pickIcons(targets.map((a) => ({ id: a.id, name: a.name, persona: a.persona })), iconCompleter(ownerId, 4000));
+      const picks = await pickIcons(targets.map((a) => ({ id: a.id, name: a.name, persona: a.persona })), iconCompleter(ownerId, 4000),
+        (why) => req.log.warn(why, 'agent icons: the management AI left some to the keyword table'));
       for (const p of picks) {
         // Re-check at write time: the owner may have chosen one meanwhile.
         const now = store.getAgent(p.id);
@@ -8502,8 +8655,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         want: b.want as string | undefined,
       });
       // Why the AI gave no ideas goes to the log, not the page: its text can name the account.
-      if (r.error) req.log.warn({ agent: agent.id, error: r.error }, 'icon ideas: the management AI gave none');
-      const { error: _error, ...out } = r;
+      // Of a reply with none, the log gets only its shape: the reply's text can hold anything.
+      if (r.error) req.log.warn({ agent: agent.id, error: r.error, ...(r.reply ? { reply: r.reply } : {}) }, 'icon ideas: the management AI gave none');
+      const { error: _error, reply: _reply, ...out } = r;
       return out;
     } finally {
       iconIdeaRuns.delete(ownerId);
@@ -8940,6 +9094,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const classDetached = await ledgered(req, 'model', [agent.id], () => { store.setAgentModel(agent.id, model); return detachClassIfDrifted(agent.id); });
       const applied = effectiveModel(store.getAgent(agent.id)!, profile);
       const how = await applyModelToRuntime(agent.id);
+      // Recorded, but there is nothing to write it to. Said as an error, or the
+      // page reads a change that "applies on its next rebuild" (HB-0373).
+      if (how === 'gone') return reply.code(409).send({ error: `${VOLUME_GONE} The model is recorded, but a Rebuild would make a fresh, empty volume: find out where its files went first.`, model: applied, volumeGone: true, classDetached });
       // failed: the runtime refused it, so the agent still answers on its old
       // model until a retry or a rebuild (the manager said ✅ without it, audit #077).
       return { model: applied, live: how === 'live', staged: how === 'staged', rebuild: how === 'rebuild', failed: how === 'failed', classDetached };
@@ -11111,13 +11268,35 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.accounts)) {
       return reply.code(502).send({ error: "Couldn't read which Google accounts it is signed into just now — try again in a moment. Nothing was changed." });
     }
-    const accounts = (parsed.accounts as Array<{ email?: unknown; client?: unknown; auth?: unknown } | null>)
-      .filter((a): a is { email: string; client?: unknown; auth?: unknown } => !!a && typeof a.email === 'string' && !!a.email)
+    // gog names no services for an imported account: what was granted is on the connection.
+    const attachedServices = new Map(store.listAgentConnections(agent.id).flatMap((at) => {
+      const c = store.getConnection(at.connectionId);
+      return c ? [[c.email.toLowerCase(), c.services] as const] : [];
+    }));
+    const accounts = (parsed.accounts as Array<{ email?: unknown; client?: unknown; auth?: unknown; services?: unknown } | null>)
+      .filter((a): a is { email: string; client?: unknown; auth?: unknown; services?: unknown } => !!a && typeof a.email === 'string' && !!a.email)
       // The listing also reports a per-account token-read warning when run
       // without a TTY — that's about THIS probe's shell, not the account's
       // health, so it is deliberately not surfaced.
-      .map((a) => ({ email: a.email, client: typeof a.client === 'string' && a.client ? a.client : 'default', auth: typeof a.auth === 'string' && a.auth ? a.auth : 'oauth' }));
+      .map((a) => ({
+        email: a.email, client: typeof a.client === 'string' && a.client ? a.client : 'default', auth: typeof a.auth === 'string' && a.auth ? a.auth : 'oauth',
+        ...(attachedServices.has(a.email.toLowerCase())
+          ? { services: attachedServices.get(a.email.toLowerCase()) }
+          : Array.isArray(a.services) ? { services: a.services.filter((s): s is string => typeof s === 'string') } : {}),
+      }));
     return { accounts };
+  });
+
+  // Is this agent's Gmail working? Real calls at Google from inside it; reads no mail, sends nothing.
+  app.post<{ Params: { id: string; email: string } }>('/v1/agents/:id/connections/:email/test', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (movedAway(agent, reply)) return reply;
+    if (!isAccountEmail(req.params.email)) return reply.code(400).send({ error: 'Not a recognizable account email.' });
+    if (agent.state !== 'RUNNING') return reply.code(409).send({ error: 'Start the agent first: this test runs inside it.' });
+    const out = await testGmail({ store, provider: providerFor(agent.hostId) }, { id: agent.id, runtimeRef: agent.runtimeRef }, req.params.email);
+    if (!out.ok) trace(agent.id)('connection.test_failed', { email: req.params.email, why: out.why, detail: out.detail });
+    return out;
   });
 
   app.delete<{ Params: { id: string; email: string } }>(
@@ -12777,7 +12956,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // scrub (the runner asleep) left the id admitted by an agent that no longer
     // knew it, and a second unlink had nothing to find (review 2026-10-23).
     const me = ownerIdOf(req);
-    const failed: string[] = [];
+    const failed: string[] = [], volumeGone: string[] = [];
     let n = 0;
     for (const id of store.agentsWithIdentity(me, 'discord')) {
       const ownId = store.memberIdentities(id, me).discord;
@@ -12786,19 +12965,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const script = allowlistScrubScript([{ channel: 'discord', acct: CHANNEL_ACCOUNT, id: ownId, cred: `/home/node/.openclaw/credentials/discord-${CHANNEL_ACCOUNT.toLowerCase()}-allowFrom.json` }]);
         const res = await providerFor(agent.hostId).execShellOnVolume(agent.runtimeRef, script).catch(() => undefined);
         if (res?.code !== 0) {
-          trace(id)('channel.unlink_scrub_failed', { kind: 'discord' });
-          failed.push(agent.name);
+          trace(id)('channel.unlink_scrub_failed', { kind: 'discord', ...(res?.volumeMissing ? { volumeGone: true } : {}) });
+          // Kept, as a member's removal is: another machine may still hold the
+          // allowlist. But no machine waking up brings it back (HB-0373).
+          (res?.volumeMissing ? volumeGone : failed).push(agent.name);
           continue;
         }
       }
       n += store.unbindMemberIdentity(id, me, 'discord');
     }
-    if (failed.length) {
-      return reply.code(502).send({
-        unlinked: false, agents: n, failed,
-        error: `Your Discord could not be removed from ${failed.join(', ')} — is the machine it runs on awake? ` +
+    if (failed.length || volumeGone.length) {
+      const gone = volumeGone.length
+        ? `${volumeGone.join(', ')}: ${volumeGone.length === 1 ? 'its stored files are' : 'their stored files are'} not on ${volumeGone.length === 1 ? 'its' : 'their'} machine (the volume is gone), so there is nothing to remove it from. Unlink again once the files are back or after a rebuild, or delete ${volumeGone.length === 1 ? 'that agent' : 'those agents'}.`
+        : '';
+      return reply.code(failed.length ? 502 : 409).send({
+        unlinked: false, agents: n, failed: [...failed, ...volumeGone], ...(volumeGone.length ? { volumeGone } : {}),
+        error: !failed.length ? `Your Discord could not be removed from ${gone}${n ? ` ${n === 1 ? 'One other has' : `${n} others have`} forgotten it.` : ''}` :
+          `Your Discord could not be removed from ${failed.join(', ')} — is the machine it runs on awake? ` +
           `${failed.length === 1 ? 'That agent' : 'Those agents'} still ${failed.length === 1 ? 'knows' : 'know'} it` +
-          `${n ? `; ${n === 1 ? 'one other has' : `${n} others have`} forgotten it` : ''}. Unlink again when ${failed.length === 1 ? 'it is' : 'they are'} reachable.`,
+          `${n ? `; ${n === 1 ? 'one other has' : `${n} others have`} forgotten it` : ''}. Unlink again when ${failed.length === 1 ? 'it is' : 'they are'} reachable.${gone ? ` Nor from ${gone}` : ''}`,
       });
     }
     return { unlinked: true, agents: n };
@@ -14767,7 +14952,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: chan.accountId,
           text: `🏷 This bot is now named “${agent.name}”. Same agent, same chat — only the display name changed.`,
         },
-      );
+      ).catch(() => 0);
     };
     // The card's Sync button greys off this cache — a stale entry after a
     // successful rename would keep the button lit (or grey it wrongly).

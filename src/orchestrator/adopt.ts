@@ -5,6 +5,7 @@ import type { Store } from '../store/store.js';
 import { sharePathProblem } from './provision.js';
 import type { ProvisionDeps } from './provision.js';
 import { whileBusy } from './busy.js';
+import { VolumeGoneError } from '../providers/provider.js';
 import { openclawConfigPath } from './openclawImport.js';
 import { openclawConfigAgents, openclawUserPath } from '../openclaw/configWriter.js';
 import { RUNTIME_STATE_FILES } from './agentFiles.js';
@@ -260,6 +261,10 @@ async function applyWorkspaceInner(
     // prefix of the archive. The agent must not come back up believing that
     // half-truth; leave it stopped and say what happened.
     log('adopt.import_failed', { agentId, from: preview.path, error: String(err) });
+    // Nothing was copied, and adopting again cannot work (HB-0373).
+    if (err instanceof VolumeGoneError) {
+      throw new AdoptError(`${err.userMessage} Nothing was copied in. Find out where its files went first; a Rebuild makes a fresh, empty volume to adopt into.`);
+    }
     throw new AdoptError(
       `Copying the workspace in failed partway — the agent is left stopped because its files ` +
         `may be half-replaced. Adopt again (a clean copy fixes a torn one), or restore a snapshot.`,

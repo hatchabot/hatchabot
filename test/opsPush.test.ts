@@ -16,6 +16,13 @@ function stubFetch(calls: Array<{ url: string; body: Record<string, unknown> }>,
 }
 
 describe('pushing "something is waiting" to the owner', () => {
+  it('a store that fails says no and does not reject: its callers fire and forget (HB-0374)', async () => {
+    const logs: unknown[] = [];
+    const push = createOpsPush({ botToken: async () => 'BOTTOKEN', chatId: () => { throw new Error('database is locked'); }, log: (_e: string, d: unknown) => { logs.push(d); } } as any);
+    await expect(push.waiting('o', 'A headline', 'detail')).resolves.toBe(false);
+    expect(logs).toHaveLength(1);
+  });
+
   it('sends through the manager\'s bot, to the owner\'s own chat, with where to confirm', async () => {
     const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
     const push = createOpsPush({

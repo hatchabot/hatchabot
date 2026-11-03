@@ -725,7 +725,7 @@ export const REST_TOOLS: RestTool[] = [
   },
   {
     name: 'delete_base_image', tier: 'mutate',
-    description: 'Delete a base image tag that nothing uses (e.g. a rejected candidate). Refused while any agent is pinned to it.',
+    description: 'Delete a base image tag that nothing uses (e.g. a rejected candidate). Refused while list_base_images gives it any blockers: agents pinned to it (archived or on a runner too), classes, derived images built on it, and containers on it when it is the image\'s last tag; each blocker says how to clear it.',
     input_schema: obj({ tag: str(200, 'image tag from list_base_images') }, ['tag']),
     call: ({ input }) => {
       const tag = need(input.tag, 'tag');

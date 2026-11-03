@@ -144,7 +144,10 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
         log('ops.mcp_error', { error: String((e as Error).message ?? e).slice(0, 300) });
         return send(500, { error: 'Internal error' });
       }
-    })();
+    })().catch((err) => { // an answer that cannot be written (headers sent, then a body that will not serialize): not the process's end (HB-0374)
+      log('ops.mcp_error', { error: String((err as Error)?.message ?? err).slice(0, 300) });
+      res.destroy();
+    });
   });
 
   // The allowlisting proxy. Anything not CONNECT host:443 to a listed host is

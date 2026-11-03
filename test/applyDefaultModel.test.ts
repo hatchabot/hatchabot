@@ -267,6 +267,17 @@ describe('the model picker offers only what the runtime can actually serve', () 
   });
 });
 
+describe('apply-default-model on an agent whose volume is gone (HB-0373)', () => {
+  it('counts it apart: a rebuild would make a fresh, empty volume', async () => {
+    const { store, provider, f } = await world();
+    store.setAgentState('a1', 'STOPPED');
+    provider.goneVolumes.add(store.getAgent('a1')!.runtimeRef!);
+    const res = await apply(f, 'p1', { model: 'claude-opus-5', apply: ['a1'] });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ applied: 1, live: 0, staged: 0, volumeGone: 1 });
+  });
+});
+
 describe('apply-default-model reports what it actually changed', () => {
   it('counts only the caller\'s own agents, not every id passed in', async () => {
     const { store, f } = await world({ shared: true });

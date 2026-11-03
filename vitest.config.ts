@@ -1,4 +1,6 @@
 import { configDefaults, defineConfig } from 'vitest/config';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 export default defineConfig({
   test: {
@@ -14,6 +16,9 @@ export default defineConfig({
       // Any free port: the tests must never collide with a Hatchabot running
       // on the same machine (it holds the real one).
       HATCHABOT_OPS_PORT: '0',
+      // Never this machine's real backups: a move and a restore keep their copy
+      // of a volume in folders beside them. A test of a real set sets its own.
+      HATCHABOT_BACKUP_DIR: join(tmpdir(), `hatchabot-test-backups-${process.pid}`),
     },
   },
 });

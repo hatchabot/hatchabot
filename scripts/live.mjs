@@ -30,6 +30,8 @@ export const RECORD = join(ROOT, 'docs', 'live-test-runs.md');
  * for a big file most releases touch (routes.ts, cli.ts, store.ts): there a
  * change counts only when a changed line, or the route or command it sits in
  * (the `app.get(…)` / `case '…'` line above it), matches `near` (`touches`).
+ * `endsOnRelease`: it installs what is public, not this checkout, so a run counts
+ * only when it says it ended on the release under test (`resultOf`, `endedOn`).
  */
 const ROUTES = 'src/api/routes.ts';
 const CLI = 'src/cli.ts';
@@ -109,19 +111,19 @@ export const LIVE_TESTS = [
     area: ['src/orchestrator/adopt.ts', 'src/orchestrator/cronImport.ts', 'scripts/smoke.sh', 'scripts/smoke-adopt-full.ts'],
   },
   {
-    name: 'clean-install', cmd: ['bash', 'scripts/clean-install-test.sh'], against: 'checkout', minutes: '20–40', aiTurns: 'one', parallel: true,
+    name: 'clean-install', cmd: ['bash', 'scripts/clean-install-test.sh'], against: 'checkout', endsOnRelease: true, minutes: '20–40', aiTurns: 'one', parallel: true,
     needs: 'LXD on this machine; pass -- --ai-source "<an AI source name>"; stop the VM afterwards',
     proves: 'a stranger\'s install on a brand-new Linux machine, and the first things a new owner does',
     area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'package.json', 'package-lock.json'],
   },
   {
-    name: 'clean-install-ubuntu-2204', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'ubuntu:22.04'], against: 'checkout', minutes: '20–40', aiTurns: 'one', parallel: true,
+    name: 'clean-install-ubuntu-2204', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'ubuntu:22.04'], against: 'checkout', endsOnRelease: true, minutes: '20–40', aiTurns: 'one', parallel: true,
     needs: 'as clean-install; the oldest glibc the bundle supports (2.35)',
     proves: 'the clean install on Ubuntu 22.04 (a glibc bug broke stable there once)',
     area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'package.json', 'package-lock.json'],
   },
   {
-    name: 'clean-install-debian-12', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'hb-debian-12'], against: 'checkout', minutes: '5–40', aiTurns: 'one', parallel: true,
+    name: 'clean-install-debian-12', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'hb-debian-12'], against: 'checkout', endsOnRelease: true, minutes: '5–40', aiTurns: 'one', parallel: true,
     // LXD's image server has no arm64 Debian 12 VM image; Debian's own cloud
     // image, prepared once into a local LXD image, runs on either CPU (2026-10-09).
     needs: 'as clean-install, plus the local LXD image hb-debian-12 (scripts/make-debian-test-image.sh, once)',
@@ -248,14 +250,29 @@ export function committedRuns(cwd = ROOT) {
   return r.status === 0 ? readRuns(r.stdout) : [];
 }
 
+const saysSkip = (output) => /(^|\W)SKIP\b/.test(output.replace(/\x1b\[[0-9;]*m/g, ''));
+
+/**
+ * The version a clean install ended on, from its last summary line
+ * (`── N passed, 0 failed · vX · logs: … ──`). Null when it names none.
+ */
+export function endedOn(output) {
+  const lines = [...output.replace(/\x1b\[[0-9;]*m/g, '').matchAll(/^── \d+ passed, \d+ failed · (v\d[^\s·]*|release unknown) ·/gm)];
+  const v = lines.at(-1)?.[1];
+  return v && v !== 'release unknown' ? v : null;
+}
+
 /**
  * A run's result from its exit code and the end of its output. A test that had
  * nothing to test exits 0 and says SKIP: not a pass. Colour codes are
- * stripped first ("\x1b[33mSKIP" hid the word, 2026-10-08).
+ * stripped first ("\x1b[33mSKIP" hid the word, 2026-10-08). With `release`,
+ * the test must also have ended on that version: a clean run of other code
+ * tested nothing about this release, so it is a skip too (HB-0378).
  */
-export function resultOf(code, output) {
+export function resultOf(code, output, release) {
   if (code !== 0) return 'fail';
-  return /(^|\W)SKIP\b/.test(output.replace(/\x1b\[[0-9;]*m/g, '')) ? 'skip' : 'pass';
+  if (saysSkip(output)) return 'skip';
+  return release && endedOn(output) !== release ? 'skip' : 'pass';
 }
 
 // ---- the live install --------------------------------------------------------
@@ -353,7 +370,7 @@ async function main() {
     const serialRun = (async () => { const r = []; for (const n of serial) r.push(await one(n)); return r; })();
     const results = [...(await Promise.all(parallel.map(one))), ...(await serialRun)];
     const bad = results.filter((r) => r.code !== 0);
-    console.log(bad.length ? `✗ ${bad.length} failed: ${bad.map((r) => r.name).join(', ')} — see their logs` : `✓ all ${results.length} passed or were recorded (commit docs/live-test-runs.md)`);
+    console.log(bad.length ? `✗ ${bad.length} did not pass: ${bad.map((r) => r.name).join(', ')} — see their logs` : `✓ all ${results.length} passed or were recorded (commit docs/live-test-runs.md)`);
     process.exit(bad.length ? 1 : 0);
   }
   if (cmd === 'run') {
@@ -381,11 +398,15 @@ async function main() {
     });
     const minutes = Math.max(1, Math.round((Date.now() - t0) / 60_000));
     // A test that had nothing to test (no token, no runner) says SKIP: that is not a pass.
-    const result = resultOf(code, tail);
-    const row = `| ${new Date().toISOString().slice(0, 10)} | ${t.name} | ${result} | ${release.version} | ${minutes} | ${[release.openclaw ? `OpenClaw ${release.openclaw}` : '', note].filter(Boolean).join('; ')} |\n`;
+    const result = resultOf(code, tail, t.endsOnRelease ? release.version : undefined);
+    // It ran clean, on something else: recorded as a skip and said plainly, and
+    // not a ✓ in run-due's list, where the gate cleared on older code (HB-0378).
+    const ended = t.endsOnRelease && result === 'skip' && !saysSkip(tail) ? (endedOn(tail) ?? 'an unknown version') : null;
+    const row = `| ${new Date().toISOString().slice(0, 10)} | ${t.name} | ${result} | ${release.version} | ${minutes} | ${[release.openclaw ? `OpenClaw ${release.openclaw}` : '', note, ended ? `ended on ${ended}, not ${release.version}` : ''].filter(Boolean).join('; ')} |\n`;
     appendFileSync(RECORD, row);
     console.log(`\n${result === 'pass' ? '✓' : result === 'skip' ? '–' : '✗'} ${t.name}: ${result} (${minutes} min). Recorded in docs/live-test-runs.md — commit it.`);
-    process.exit(code === 0 ? 0 : 1);
+    if (ended) console.log(`Not a pass: this run ended on ${ended}, and the release under test is ${release.version}. It installs the public stable and upgrades to the public latest, so it says nothing about ${release.version} until that is published. Publish it and run this again (published but not the latest: pass -- --upgrade-to ${release.version}).`);
+    process.exit(code === 0 && !ended ? 0 : 1);
   }
   console.error('usage: live.mjs list | due [<tag>] | run <name> [--note <text>] [-- args] | run-due [<tag>] [--args <name>="<args>"]… | gate <tag>');
   process.exit(2);

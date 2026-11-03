@@ -1,6 +1,6 @@
 import { stopAndConfirm } from './quiesce.js';
 import type { Agent } from '../domain/types.js';
-import type { RuntimeProvider } from '../providers/provider.js';
+import { isDiskFull, type RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 import { whileBusy } from './busy.js';
 import { beginOperation, handleFor, rethrowIfCrash, stepReached, type OpHandle } from './operations.js';
@@ -16,6 +16,7 @@ import {
   type ProvisionDeps,
 } from './provision.js';
 import { TransferError } from './transfer.js';
+import { dropMoveCopy, newMoveCopy } from './backups.js';
 
 /**
  * Move an agent to another host on THIS control plane (local ⇄ runner, or
@@ -159,10 +160,16 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
   op.step('stopped');
 
   // 2. Snapshot the volume. A failure here leaves the source fully intact.
-  let state: Buffer;
+  //    To a file, private and in the data folder, not in memory: a large agent
+  //    was refused at 1 GB compressed and held all of it in this process
+  //    (HB-0066). The finally below takes it away, and a restart's boot sweep
+  //    (sweepMoveCopies) one this process did not live to.
+  let stateFile: string | undefined;
   try {
-    state = await source.exportState(oldRef);
+    stateFile = newMoveCopy();
+    await source.exportStateToFile(oldRef, stateFile);
   } catch (err) {
+    dropMoveCopy(stateFile);
     rethrowIfCrash(err);
     // Only claim RUNNING if the container actually came back (export's rule).
     if (wasRunning) {
@@ -174,9 +181,11 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
       }
     }
     const e = new TransferError(
-      `Couldn't read the agent's state — the move was cancelled. (${String(
-        err instanceof Error ? err.message : err,
-      ).slice(0, 300)})`,
+      isDiskFull(err)
+        ? "This machine's disk is too full to hold a copy of the agent for the move — the move was cancelled and nothing was changed. Free some space, then try again."
+        : `Couldn't read the agent's state — the move was cancelled. (${String(
+          err instanceof Error ? err.message : err,
+        ).slice(0, 300)})`,
     );
     keepPin(store, agentId, p, log);
     op.rolledBack(e.userMessage);
@@ -199,7 +208,7 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
     const spec = await buildRuntimeSpec(tdeps, agentId, targetHost);
     ({ runtimeRef: progress.newRef } = await target.provision(spec));
     op.step('target-created', { newRef: progress.newRef });
-    await target.importState(progress.newRef!, state);
+    await target.importStateFromFile(progress.newRef!, stateFile);
     op.step('state-copied');
     // Data is on the target now — safe to point the record there.
     store.setAgentHost(agentId, targetHostId);
@@ -230,6 +239,8 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
     );
     op.rolledBack(e.userMessage);
     throw e;
+  } finally {
+    dropMoveCopy(stateFile);
   }
 
   await retireSource(deps, source, op, agentId, p);

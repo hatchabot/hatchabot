@@ -324,6 +324,7 @@ describe('authenticator app enrolment and changes made meanwhile', () => {
     const late = await call('POST', '/v1/second-factor/totp/confirm', { id: start.id, code: totp(base32Decode(start.secret)) });
     expect(late.statusCode).toBe(409);
     expect(late.json().error).toMatch(/setup was cancelled/); // not "that code is not right"
+    expect(late.json().error).not.toMatch(/close it/i); // the box has no close button, and the page closes it itself (HB-0375)
     expect(h.store.listSecondFactors(o.id, { unconfirmed: true })).toHaveLength(0);
     // Starting again after the change works.
     const again = (await call('POST', '/v1/second-factor/totp', { current: o.password })).json();

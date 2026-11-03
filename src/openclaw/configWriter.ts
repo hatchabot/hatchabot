@@ -362,6 +362,15 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // OpenClaw); link it like a channel plugin, then enable as always.
   if (baked.has('duckduckgo')) cmds.push(link(DUCKDUCKGO_PLUGIN_DIR));
   cmds.push(enable('duckduckgo'));
+  // OpenClaw's auto-detection skips a keyless provider, so DuckDuckGo works only
+  // when named (HB-0392). Left alone if set by hand. Not plain `config set`s, so
+  // they keep their skipIf; here they split no batch, since enable above is not one.
+  if (!patch.ops) {
+    const named = 'c.tools && c.tools.web && c.tools.web.search && c.tools.web.search.provider';
+    cmds.push(patch.searchProvider
+      ? { argv: [], rawShell: 'openclaw config set tools.web.search.provider duckduckgo >/dev/null', skipIf: `!!(${named})` }
+      : { argv: ['config', 'unset', 'tools.web.search.provider'], skipIf: `(${named}) !== "duckduckgo"` });
+  }
 
   // Local memory embeddings from the image-baked GGUF provider. `--link` points
   // the agent's registry at the plugin in the IMAGE (no 71MB volume copy); the

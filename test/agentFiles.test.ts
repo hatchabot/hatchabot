@@ -64,6 +64,21 @@ async function world() {
 }
 
 describe('GET /v1/agents/:id/fs', () => {
+  it('says the volume is gone when it is, for a listing, a download and an upload (HB-0373)', async () => {
+    const { f, provider, store } = await world();
+    provider.goneVolumes.add(store.getAgent('a1')!.runtimeRef!);
+    for (const r of [
+      await f.inject({ method: 'GET', url: '/v1/agents/a1/fs', headers: as }),
+      await f.inject({ method: 'GET', url: '/v1/agents/a1/fs/file?path=out/hi.txt', headers: as }),
+      await f.inject({ method: 'PUT', url: '/v1/agents/a1/fs/file?path=out&name=hi.txt', headers: { ...as, 'content-type': 'application/octet-stream' }, payload: Buffer.from('hi') }),
+    ]) {
+      expect(r.statusCode).toBe(404);
+      expect(r.json().error).toMatch(/volume is gone/);
+    }
+    expect(provider.written).toEqual([]);
+    await f.close();
+  });
+
   it('lists a folder from a read-only one-shot, even while the agent is stopped', async () => {
     const { f, provider } = await world();
     provider.execResponses.set('sh-volume', { code: 0, stdout: "d\t4096\t1790000000\tout\0f\t7\t1790000001\thi.txt\0", stderr: '' });

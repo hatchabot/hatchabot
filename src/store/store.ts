@@ -112,7 +112,7 @@ export interface AgentApp {
 }
 
 /** The person-level preferences the app keeps (owner_prefs). */
-export type OwnerPrefKey = 'ownBotsOnly';
+export type OwnerPrefKey = 'ownBotsOnly' | 'webSearch';
 export interface OwnerPrefs {
   /** Telegram: my agents take only bots I parked myself, never a shared house bot. */
   ownBotsOnly: boolean;
@@ -1675,6 +1675,11 @@ export class Store {
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(h.id, h.ownerId, h.kind, h.provider, h.name, JSON.stringify(h.settings), h.createdAt);
+  }
+
+  /** Who set this machine up: the owners of its local hosts. */
+  listAllLocalHostOwners(): string[] {
+    return (this.db.prepare(`SELECT DISTINCT owner_id FROM hosts WHERE kind = 'local' ORDER BY created_at`).all() as Array<{ owner_id: string }>).map((r) => r.owner_id);
   }
 
   listHosts(ownerId: string): Host[] {

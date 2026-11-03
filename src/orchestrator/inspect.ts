@@ -1,4 +1,4 @@
-import type { RuntimeProvider } from '../providers/provider.js';
+import { VOLUME_GONE, type RuntimeProvider } from '../providers/provider.js';
 import { MAX_FILE_BYTES } from './snapshots.js';
 
 /**
@@ -27,7 +27,7 @@ export class InspectReadError extends Error {
 
 /** The script's answer, or an error: a failed read is not an empty one (#151). */
 function ok(res: { code: number; stdout: string; volumeMissing?: boolean }): string {
-  if (res.volumeMissing) throw new InspectReadError("This agent's stored files are not on its machine: its volume is gone.");
+  if (res.volumeMissing) throw new InspectReadError(VOLUME_GONE);
   if (res.code !== 0) throw new InspectReadError();
   return res.stdout;
 }

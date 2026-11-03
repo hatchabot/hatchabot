@@ -5,9 +5,10 @@ import type {
   RuntimeSpec,
   RuntimeStatus,
 } from './provider.js';
-import { ProviderError } from './provider.js';
+import { readFile, writeFile } from 'node:fs/promises';
+import { ProviderError, VOLUME_GONE, VolumeGoneError } from './provider.js';
 import type { CompressedSwap } from '../orchestrator/swap.js';
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 
 interface MockRuntime {
   spec: RuntimeSpec;
@@ -183,8 +184,16 @@ export class MockProvider implements RuntimeProvider {
     return this.execResponses.get('sh') ?? { code: 0, stdout: '', stderr: '' };
   }
 
+  /** Refs whose volume is gone from the machine: every use of it says so (HB-0373). */
+  readonly goneVolumes = new Set<string>();
+  #gone(runtimeRef: string): ExecResult | undefined {
+    return this.goneVolumes.has(runtimeRef) ? { code: 1, stdout: '', stderr: VOLUME_GONE, volumeMissing: true } : undefined;
+  }
+
   async execShellOnVolume(runtimeRef: string, script: string, _opts?: { readOnly?: boolean }): Promise<ExecResult> {
     this.#require(runtimeRef);
+    const gone = this.#gone(runtimeRef);
+    if (gone) return gone;
     const chat = this.#webChatRead(script);
     if (chat) return chat;
     this.execLog.push(['sh-volume', script]);
@@ -196,6 +205,7 @@ export class MockProvider implements RuntimeProvider {
   streamBytes: Buffer | undefined = undefined;
   streamFromVolume(runtimeRef: string, argv: string[]) {
     this.#require(runtimeRef);
+    if (this.goneVolumes.has(runtimeRef)) { const dead = new PassThrough(); queueMicrotask(() => dead.destroy(new VolumeGoneError('volume gone'))); return dead; }
     this.execLog.push(['stream', argv.join(' ')]);
     return Readable.from(this.streamBytes ? [this.streamBytes] : []);
   }
@@ -205,6 +215,8 @@ export class MockProvider implements RuntimeProvider {
   writeFails = 0;
   async writeToVolume(runtimeRef: string, argv: string[], input: Buffer) {
     this.#require(runtimeRef);
+    const gone = this.#gone(runtimeRef);
+    if (gone) return gone;
     this.written.push({ argv, bytes: input });
     return { code: this.writeFails, stdout: '', stderr: this.writeFails ? 'refused' : '' };
   }
@@ -348,7 +360,21 @@ export class MockProvider implements RuntimeProvider {
   async tagImage(from: string, to: string) { this.tagged.push([from, to]); }
   removed: string[] = [];
   async imageHistory() { return [{ step: 'RUN npm i -g openclaw@mock', size: '100MB' }]; }
-  async removeImageTag(ref: string) { this.removed.push(ref); this.tags = this.tags.filter((t) => t.tag !== ref); }
+  /** Containers on images, as `docker ps -a` has them; imagesInUseFails makes that many calls throw. */
+  imageContainers: { name: string; imageId: string; state: string }[] = [];
+  imagesInUseFails = 0;
+  async imagesInUse() {
+    if (this.imagesInUseFails > 0) { this.imagesInUseFails--; throw new ProviderError('docker did not answer', 'Docker did not answer.'); }
+    return { containers: this.imageContainers, tags: this.tags.map((t) => ({ tag: t.tag, imageId: t.imageId })) };
+  }
+  async removeImageTag(ref: string) {
+    // As Docker does: a container holds an image's last tag, not one of several.
+    const id = this.tags.find((t) => t.tag === ref)?.imageId;
+    if (this.imageContainers.some((c) => c.imageId === id) && this.tags.filter((t) => t.imageId === id).length === 1) {
+      throw new ProviderError(`rmi failed: conflict on ${ref}`, 'A container (possibly stopped or archived) still runs on that image.');
+    }
+    this.removed.push(ref); this.tags = this.tags.filter((t) => t.tag !== ref);
+  }
 
   modelCallLines = '';
   async modelCallLog(): Promise<string> { return this.modelCallLines; }
@@ -362,7 +388,13 @@ export class MockProvider implements RuntimeProvider {
 
   async exportState(runtimeRef: string): Promise<Buffer> {
     this.#require(runtimeRef);
+    if (this.goneVolumes.has(runtimeRef)) throw new VolumeGoneError(`volume of ${runtimeRef} does not exist`);
     return this.stateStore.get(runtimeRef) ?? Buffer.from('mock-state');
+  }
+
+  /** Through exportState, so a test that replaces it decides this too. */
+  async exportStateToFile(runtimeRef: string, file: string): Promise<void> {
+    await writeFile(file, await this.exportState(runtimeRef), { mode: 0o600 });
   }
 
   async importState(runtimeRef: string, data: Buffer): Promise<void> {
@@ -370,10 +402,18 @@ export class MockProvider implements RuntimeProvider {
     this.stateStore.set(runtimeRef, data);
   }
 
+  /** Through importState, likewise. What the last call said about its source (tests). */
+  lastImportOwnCopy: boolean | undefined = undefined;
+  async importStateFromFile(runtimeRef: string, file: string, opts?: { ownCopy?: boolean }): Promise<void> {
+    this.lastImportOwnCopy = opts?.ownCopy;
+    await this.importState(runtimeRef, await readFile(file));
+  }
+
   readonly workspaceStore = new Map<string, Buffer>();
 
   async importWorkspace(runtimeRef: string, slug: string, data: Buffer): Promise<void> {
     this.#require(runtimeRef);
+    if (this.goneVolumes.has(runtimeRef)) throw new VolumeGoneError(`volume of ${runtimeRef} does not exist`);
     this.workspaceStore.set(`${runtimeRef}:${slug}`, data);
   }
 

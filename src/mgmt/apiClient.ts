@@ -265,6 +265,7 @@ export interface BaseImages {
     openclawVersion?: string;
     relation: string;
     derived: unknown | null;
-    pinned: Array<{ id: string; name: string }>;
+    pinned: Array<{ id: string; name: string; state?: string }>;
+    blockers?: Array<{ kind: string; name: string; label: string; fix: string }>;
   }>;
 }

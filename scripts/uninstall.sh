@@ -82,8 +82,65 @@ if [ -n "$INSTALLED_DIR" ] && [ -d "$INSTALLED_DIR" ] && [ "$(cd "$INSTALLED_DIR
 fi
 ENV_DIR="$REPO"
 
-# Where the data lives, read the same way the server reads it.
-[ -f "$ENV_DIR/.env" ] && set -a && . "$ENV_DIR/.env" 2>/dev/null; set +a
+# Where the data lives, read as the service and its nightly backup read it.
+# Sourced on Linux, a passphrase key with a $ or a quote read as something else
+# than they read it, so --backups took this install's own sets for another's and
+# kept them (HB-0376), and a $(...) in .env ran. Through Node's parser instead, a
+# # in a value was cut where systemd keeps it, and on a Mac nothing was expanded
+# where launchd's job expands it: --purge then found no database at a $HOME path
+# and deleted the key beside it. So, by what runs the service:
+#  - Linux: systemd's EnvironmentFile, whose rules the reader below follows. No
+#    expansion, nothing runs, and a # inside a value is part of it.
+#  - a Mac: the launchd job sources .env (launchd-plist.sh), so it is sourced
+#    here too. That runs nothing the service does not run at every start.
+# A backup run by hand reads .env with Node's parser (backup-volumes.sh), so a
+# set may carry that reading's key: kept as ENV_ALT_*, and also tried for a path
+# not found the other way. With no node (the service cannot have run on this
+# either) it is sourced, for the folders; the key has no use then.
+ENV_READ=0; ENV_ALT_KEY=""; ENV_ALT_DB=""; ENV_ALT_BACKUP_DIR=""
+ENV_HOW=systemd; [ "$(uname -s)" = "Darwin" ] && ENV_HOW=shell
+if [ -f "$ENV_DIR/.env" ] && command -v node >/dev/null 2>&1; then
+  ENV_KV="$(mktemp)"
+  if ENV_FILE="$ENV_DIR/.env" ENV_HOW="$ENV_HOW" node -e '
+    const { parseEnv } = require("node:util");
+    const text = require("node:fs").readFileSync(process.env.ENV_FILE, "utf8");
+    // EnvironmentFile, state by state as systemd reads it (parse_env_file).
+    const systemd = (t) => {
+      const out = {}; let st = "prekey", k = "", v = "";
+      const done = () => { if (k) out[k] = st === "value" ? v.replace(/[ \t\r]+$/, "") : v; k = ""; v = ""; st = "prekey"; };
+      for (const c of t + "\n") {
+        const nl = c === "\n" || c === "\r", ws = /\s/.test(c);
+        if (st === "prekey") { if (c === "#" || c === ";") st = "comment"; else if (!ws) { k = c; st = "key"; } }
+        else if (st === "comment") { if (c === "\\") st = "commentesc"; else if (nl) st = "prekey"; }
+        else if (st === "commentesc") st = "comment";
+        else if (st === "key") { if (nl) { k = ""; st = "prekey"; } else if (c === "=") { k = k.trimEnd(); st = "prevalue"; } else k += c; }
+        else if (st === "prevalue") { if (nl) done(); else if (c === "\x27") st = "single"; else if (c === "\"") st = "double"; else if (c === "\\") st = "esc"; else if (!ws) { v += c; st = "value"; } }
+        else if (st === "value") { if (nl) done(); else if (c === "\\") st = "esc"; else v += c; }
+        else if (st === "esc") { st = "value"; if (c !== "\n") v += c; }
+        else if (st === "single") { if (c === "\x27") st = "prevalue"; else v += c; }
+        else if (st === "double") { if (c === "\"") st = "prevalue"; else if (c === "\\") st = "doubleesc"; else v += c; }
+        else if (st === "doubleesc") { st = "double"; if (c !== "\n") v += "\"\\`$".includes(c) ? c : "\\" + c; }
+      }
+      return out;
+    };
+    const say = (k, v) => { if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) process.stdout.write(k + "=" + v + "\0"); };
+    if (process.env.ENV_HOW === "systemd") for (const [k, v] of Object.entries(systemd(text))) say(k, v);
+    const parsed = parseEnv(text);
+    for (const n of ["KEY:SECRET_KEY", "DB:DB", "BACKUP_DIR:BACKUP_DIR"]) {
+      const [as, name] = n.split(":");
+      const v = parsed["HATCHABOT_" + name] ?? parsed["AGENTCLAW_" + name];
+      if (v !== undefined) say("ENV_ALT_" + as, v);
+    }' > "$ENV_KV" 2>/dev/null; then
+    while IFS= read -r -d '' kv; do export "$kv"; done < "$ENV_KV"
+    ENV_READ=1
+  fi
+  rm -f "$ENV_KV"
+fi
+# As the launchd job does it. (-u off: a $VAR it never set is empty there too,
+# and here it would end the script.)
+if { [ "$ENV_READ" = 0 ] || [ "$ENV_HOW" = shell ]; } && [ -f "$ENV_DIR/.env" ]; then
+  set +u; set -a; . "$ENV_DIR/.env" 2>/dev/null || true; set +a; set -u
+fi
 # A pre-rename .env says AGENTCLAW_*: the server takes each for its HATCHABOT_*
 # name unless that is set (src/envCompat.ts), and so does this. Without it an
 # AGENTCLAW_DB went unread, and --purge left that database and its agents
@@ -98,6 +155,10 @@ DB_PATH="${HATCHABOT_DB:-$ENV_DIR/data/hatchabot.sqlite}"
 # the invoking clone's, and --backups deleted that clone's sets (audit #028).
 case "$DB_PATH" in /*) ;; *) DB_PATH="$ENV_DIR/$DB_PATH" ;; esac
 case "$BACKUP_DIR" in /*) ;; *) BACKUP_DIR="$ENV_DIR/$BACKUP_DIR" ;; esac
+# Not there as the service reads it: the other reading, before calling it absent.
+in_install() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$ENV_DIR/$1" ;; esac; }
+if [ ! -f "$DB_PATH" ] && [ -n "$ENV_ALT_DB" ] && [ -f "$(in_install "$ENV_ALT_DB")" ]; then DB_PATH="$(in_install "$ENV_ALT_DB")"; fi
+if [ ! -d "$BACKUP_DIR" ] && [ -n "$ENV_ALT_BACKUP_DIR" ] && [ -d "$(in_install "$ENV_ALT_BACKUP_DIR")" ]; then BACKUP_DIR="$(in_install "$ENV_ALT_BACKUP_DIR")"; fi
 DATA_DIR="$(dirname "$DB_PATH")"
 
 PREFIX="${HATCHABOT_PREFIX:-hatchabot}"
@@ -523,30 +584,45 @@ if [ "$PURGE" = 1 ]; then
     exit 1
   fi
   say "Deleting local state…"
+  # What marks this install's files in the backup folder: as backup-volumes.sh's
+  # key_owner fingerprints the key, by either reading of it (above). With an
+  # argument, the key a set saved there.
+  key_owner() {
+    node -e '
+    const fs = require("node:fs");
+    const { parseEnv } = require("node:util");
+    const saved = process.argv[1];
+    const key = saved ? (() => { const f = fs.existsSync(saved) ? parseEnv(fs.readFileSync(saved, "utf8")) : {}; return f.HATCHABOT_SECRET_KEY ?? f.AGENTCLAW_SECRET_KEY; })()
+      : process.env.KEY_READ ?? process.env.HATCHABOT_SECRET_KEY ?? process.env.AGENTCLAW_SECRET_KEY;
+    if (key) process.stdout.write(require("node:crypto").createHash("sha256").update("hatchabot-backup-owner\0" + key).digest("hex").slice(0, 16));' "${1:-}" 2>/dev/null || true
+  }
+  OWNER="$(key_owner)"; ALT_OWNER="$(KEY_READ="$ENV_ALT_KEY" key_owner)"
+  # A move killed part-way leaves its copy of the volume, tokens and all, in the
+  # data folder. No later boot sweeps it now, and it is no backup, so it goes
+  # with or without --backups, even when the data folder itself stays below.
+  if [ -d "$DATA_DIR/move-copies" ]; then
+    rm -rf "$DATA_DIR/move-copies" && echo "  removed the copy a move that was cut off left in $DATA_DIR"
+  fi
   # The backups first, and only Hatchabot's own sets: the folder may be a NAS
   # mount other machines back up into (backup-volumes.sh prunes only its dated
   # sets for that reason), and --backups used to rm -rf all of it (review,
   # 2026-10-09). The folder goes only when that leaves it empty.
   if [ "$BACKUPS" = 1 ] && [ -d "$BACKUP_DIR" ]; then
+    # A restore's safety copy may be the only good state of an agent, so it goes
+    # only when the backups were asked to. It holds tokens, unencrypted.
+    for o in "$OWNER" "$ALT_OWNER"; do
+      [ -n "$o" ] && [ -d "$BACKUP_DIR/restore-safety-$o" ] || continue
+      rm -rf "$BACKUP_DIR/restore-safety-$o" && echo "  removed the safety copies restores left in $BACKUP_DIR"
+    done
     # Nor another install's sets, when two share the folder: a set names the
     # install that made it (.backup-owner), or an older one the key it saved,
     # fingerprinted as backup-volumes.sh's key_owner does (HB-0280).
-    key_owner() {
-      node -e '
-      const fs = require("node:fs");
-      const { parseEnv } = require("node:util");
-      const saved = process.argv[1];
-      const key = saved ? (() => { const f = fs.existsSync(saved) ? parseEnv(fs.readFileSync(saved, "utf8")) : {}; return f.HATCHABOT_SECRET_KEY ?? f.AGENTCLAW_SECRET_KEY; })()
-        : process.env.HATCHABOT_SECRET_KEY ?? process.env.AGENTCLAW_SECRET_KEY;
-      if (key) process.stdout.write(require("node:crypto").createHash("sha256").update("hatchabot-backup-owner\0" + key).digest("hex").slice(0, 16));' "${1:-}" 2>/dev/null || true
-    }
-    OWNER="$(key_owner)"
     SETS=0; THEIRS=0
     for d in "$BACKUP_DIR"/20??-??-??; do
       [ -d "$d" ] && { [ -f "$d/backup-status.json" ] || [ -f "$d/hatchabot.sqlite" ]; } || continue
       so="$(cat "$d/.backup-owner" 2>/dev/null || true)"
       if [ -z "$so" ] && [ -n "$OWNER" ] && [ -f "$d/secret-key.env" ]; then so="$(key_owner "$d/secret-key.env")"; fi
-      if [ -n "$OWNER" ] && [ -n "$so" ] && [ "$so" != "$OWNER" ]; then THEIRS=$((THEIRS + 1)); continue; fi
+      if [ -n "$OWNER" ] && [ -n "$so" ] && [ "$so" != "$OWNER" ] && [ "$so" != "$ALT_OWNER" ]; then THEIRS=$((THEIRS + 1)); continue; fi
       rm -rf "$d" && SETS=$((SETS + 1))
     done
     echo "  removed $SETS backup sets from $BACKUP_DIR"
@@ -554,6 +630,11 @@ if [ "$PURGE" = 1 ]; then
     if rmdir "$BACKUP_DIR" 2>/dev/null; then echo "  removed $BACKUP_DIR (empty now)"
     else echo "  kept $BACKUP_DIR itself: it holds more than Hatchabot's backup sets"; fi
   fi
+  # What stays: without --backups, this install's; otherwise one made before folders
+  # were per install, under an old key, or another install's. Nothing says whose.
+  for d in "$BACKUP_DIR"/restore-safety "$BACKUP_DIR"/restore-safety-*; do
+    [ -d "$d" ] && echo "  kept $d: a restore's safety copies, which may be another install's. They hold agents' tokens, unencrypted: delete the folder if it is yours"
+  done
   # A backup folder inside the data folder is not part of the data: removing
   # the data folder whole took the backups with it, --backups or not.
   DB_ONLY=0; KEEP_TOP=""

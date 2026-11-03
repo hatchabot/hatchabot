@@ -210,7 +210,7 @@ export async function buildDerivedImage(opts: {
     proc.stdout.on('data', onData);
     proc.stderr.on('data', onData);
 
-    const cleanup = () => void rm(contextDir, { recursive: true, force: true });
+    const cleanup = () => void rm(contextDir, { recursive: true, force: true }).catch(() => {}); // force does not cover EACCES or EBUSY (HB-0374)
     const timer = setTimeout(() => {
       proc.kill('SIGKILL');
       void sink('\n[timed out]\n');

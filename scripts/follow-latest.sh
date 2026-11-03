@@ -84,7 +84,26 @@ CUT="$STATE/upgrade-$(cd "$PROD" && printf %s "$PWD" | cksum | cut -d' ' -f1).fr
 [ "$CUR" = "$NEWEST" ] && [ ! -f "$CUT" ] && exit 0
 # Only ever forward: a checkout that is ahead (a hand deploy of a newer tag) stays.
 vernewer() { printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/'; }
-if [ -n "$CUR" ] && [ "$CUR" != "$NEWEST" ] && [ "$(vernewer "$CUR" "$NEWEST")" = "$CUR" ]; then exit 0; fi
+if [ ! -f "$CUT" ] && [ -n "$CUR" ] && [ "$CUR" != "$NEWEST" ] && [ "$(vernewer "$CUR" "$NEWEST")" = "$CUR" ]; then exit 0; fi
+# A killed deploy put back without the newest tag's code: by the deploy script
+# of the release it came from, which was serving here, and which puts that
+# release back first and then installs it again. Two cases (HB-0372): the
+# newest tag cannot be deployed now (verify_release, below; refused, every
+# tick failed with no repair), or the release it came from is at or ahead of
+# the newest tag (a hand deploy between two rcs; going on would take it back).
+CUT_FROM=""; [ ! -f "$CUT" ] || CUT_FROM="$(sed -n 's/^from //p' "$CUT" | sed -n 1p)"
+repair_cut() {
+  local deploy rc=0
+  echo "A deploy of $PROD was cut off part-way; putting ${CUT_FROM:-the previous release} back."
+  deploy="$(mktemp)"
+  if ! git -C "$PROD" show "$CUT_FROM:scripts/deploy-release.sh" > "$deploy" 2>/dev/null; then
+    rm -f "$deploy"; echo "Could not read that release's deploy script. Deploy a release by hand: scripts/deploy-release.sh vX.Y.Z"; return 1
+  fi
+  HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$CUT_FROM" || rc=$?
+  rm -f "$deploy"
+  return "$rc"
+}
+if [ -n "$CUT_FROM" ] && [ "$(vernewer "$CUT_FROM" "$NEWEST")" = "$CUT_FROM" ]; then repair_cut || exit 1; exit 0; fi
 # A tag set aside stays aside, but not with a killed deploy to repair: the
 # deploy repairs that and then tries the tag once more (aside again if it
 # still does not start).
@@ -100,7 +119,7 @@ case "${T_COUNT:-}${T_LAST:-}" in ''|*[!0-9]*) T_COUNT=0; T_LAST=0 ;; esac
 if [ "$T_TARGET" = "$NEWEST" ] && [ "$T_COUNT" -gt 0 ]; then
   WAIT=$(( 10 * (1 << (T_COUNT - 1)) - 5 ))   # minutes, less 5 for the timer's own jitter: 5, 15, 35 …
   [ "$WAIT" -le 1440 ] || WAIT=1440
-  [ $(( $(date +%s) - T_LAST )) -ge $(( WAIT * 60 )) ] || exit 0
+  [ -f "$CUT" ] || [ $(( $(date +%s) - T_LAST )) -ge $(( WAIT * 60 )) ] || exit 0
 else
   T_COUNT=0
 fi
@@ -168,6 +187,7 @@ JS
   case "$rc" in 0) return 0 ;; 2) return 20 ;; *) return 30 ;; esac
 }
 vrc=0; verify_release "$NEWEST" || vrc=$?
+if [ "$vrc" != 0 ] && [ -f "$CUT" ]; then repair_cut || echo "The repair did not finish (above); it will be tried again."; fi
 case "$vrc" in
   0) ;;
   20)

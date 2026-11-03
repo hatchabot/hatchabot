@@ -78,7 +78,9 @@ key that expired), not a bug. Say which it is.
   - a new route that changes something gets an entry in the manager's
     coverage ledger (`src/mgmt/coverage.ts`);
   - a new `HATCHABOT_*` setting goes in `src/config/envCatalog.ts` and
-    `.env.example`.
+    `.env.example`;
+  - a `void` call handles a rejection, or `test/floatingPromises.test.ts` lists
+    why it cannot reject (Node ends the process on an unhandled one).
 - **Tests that run real scripts stay in a sandbox:** a temp HOME, a PATH of
   shims, and git hooks off. A script under test must never reach the real
   machine.

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
@@ -35,7 +35,9 @@ describe('scripts/follow-channel.sh', () => {
     const root = beside?.root ?? mkdtempSync(join(tmpdir(), 'hb-follow-channel-')); if (!beside) dirs.push(root);
     const home = beside?.home ?? join(root, 'home'); mkdirSync(home, { recursive: true });
     const bin = join(root, 'bin'); mkdirSync(bin, { recursive: true });
-    writeFileSync(join(bin, 'systemctl'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    // node and docker too: --install refuses without them, and on GitHub's runners
+    // node is not in /usr/bin (setup-node's is under /opt/hostedtoolcache, HB-0379).
+    for (const s of ['systemctl', 'node', 'docker']) writeFileSync(join(bin, s), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
     const app = join(root, name); mkdirSync(join(app, 'scripts'), { recursive: true });
     writeFileSync(join(app, 'scripts', 'follow-channel.sh'), readFileSync('scripts/follow-channel.sh'), { mode: 0o755 });
     const asked = join(root, `${name}-asked.log`);
@@ -109,6 +111,9 @@ describe('scripts/follow-channel.sh', () => {
     const installed = w.follow('--install', 'stable');
     expect(installed.status, installed.stdout + installed.stderr).toBe(0);
     expect(readFileSync(w.channelFile, 'utf8').trim()).toBe('stable'); // --install remembers it, as `hatchabot upgrade stable` does
+    // Found in the sandbox's own shims, not wherever this machine keeps them (HB-0379).
+    const shims = join(w.root, 'bin');
+    expect(readFileSync(join(w.home, '.config', 'systemd', 'user', 'hatchabot-follow-channel.service'), 'utf8')).toContain(`Environment="PATH=${shims}:${shims}:`);
     // `hatchabot upgrade beta` remembers beta (scripts/upgrade.sh); the timer still says stable.
     writeFileSync(w.channelFile, 'beta\n');
     expect(w.run(0).status).toBe(0);
@@ -119,6 +124,22 @@ describe('scripts/follow-channel.sh', () => {
     expect(w.run(0).status).toBe(0);
     expect(lines(w.asked)).toEqual(['beta']);
     expect(lines(w.log)).toHaveLength(1);
+  });
+
+  it('a pinned install is left alone, but an upgrade killed part-way goes to upgrade.sh for the pinned release at the next tick (HB-0372)', () => {
+    for (const cut of ['record', 'swap'] as const) {
+      const w = world();
+      const app = join(w.root, 'app');
+      mkdirSync(dirname(w.channelFile), { recursive: true }); writeFileSync(w.channelFile, 'v1.0.0\n');
+      expect(w.run(0).status).toBe(0);
+      expect(lines(w.log)).toEqual([]);
+      const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', app], { encoding: 'utf8' }).trim();
+      if (cut === 'record') { mkdirSync(w.state, { recursive: true }); writeFileSync(join(w.state, `upgrade-${key}.from`), 'from v1.1.0\nto v1.0.0\n'); }
+      else writeFileSync(join(app, '.swapping'), 'from v1.1.0\n');
+      expect(w.run(0).status).toBe(0);
+      expect(lines(w.log)).toEqual(['upgrade v1.0.0 timer=1 target=v1.0.0']);
+      expect(lines(w.asked)).toEqual([]); // the pin is the release: no channel asked, no network needed
+    }
   });
 
   it('a release that keeps failing to install is retried less and less often, then set aside', () => {
@@ -219,6 +240,41 @@ describe('scripts/follow-channel.sh with the real upgrade.sh (audit #042)', () =
     expect(third.status, third.stdout + third.stderr).toBe(0);
     expect(lines(restarts)).toEqual(['v1.1.0', 'v1.2.0', 'v1.1.0']); // tried once, rolled back, not tried again
     expect(git('describe', '--tags', '--exact-match')).toBe('v1.1.0');
+  });
+});
+
+describe('scripts/follow-channel.sh, a pinned upgrade killed part-way, with the real upgrade.sh (HB-0372)', () => {
+  it('the next tick puts the earlier release back and finishes the upgrade to the pin; the tick after does nothing', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-follow-pin-')); dirs.push(root);
+    const app = join(root, 'app'), home = join(root, 'home'), bin = join(root, 'bin');
+    for (const d of [join(app, 'scripts'), home, bin]) mkdirSync(d, { recursive: true });
+    const env = scriptEnv(home, `${bin}:/usr/bin:/bin`, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_RESTART_CMD: 'true', HATCHABOT_UPGRADE_IMAGE: '0' });
+    const git = (...args: string[]) => execFileSync(REAL_GIT, args, { cwd: app, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    git('init', '-q', '-b', 'main');
+    for (const f of ['follow-channel.sh', 'upgrade.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    writeFileSync(join(app, 'scripts', 'release-target.sh'), '#!/usr/bin/env bash\necho "asked, though pinned" >&2\nexit 9\n', { mode: 0o755 });
+    writeFileSync(join(app, '.gitignore'), 'node_modules/\nnode_modules.prev/\ndata/\n');
+    for (const v of ['1.0.0', '1.1.0']) { writeFileSync(join(app, 'package.json'), JSON.stringify({ version: v })); git('add', '-A'); git('commit', '-qm', `v${v}`); git('tag', `v${v}`); }
+    git('checkout', '-q', 'v1.0.0');
+    // `hatchabot upgrade v1.1.0` killed in the install: the pin written, on v1.1.0, half its dependencies.
+    mkdirSync(join(app, 'data')); writeFileSync(join(app, 'data', 'channel'), 'v1.1.0\n');
+    git('checkout', '-q', 'v1.1.0');
+    mkdirSync(join(app, 'node_modules')); writeFileSync(join(app, 'node_modules', 'half'), '');
+    mkdirSync(join(app, 'node_modules.prev')); writeFileSync(join(app, 'node_modules.prev', 'marker'), 'old deps');
+    const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', app], { encoding: 'utf8' }).trim();
+    const state = join(home, '.local', 'state', 'hatchabot'); mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, `upgrade-${key}.from`), 'from v1.0.0\nto v1.1.0\n');
+    const tick = () => spawnSync('bash', [join(app, 'scripts', 'follow-channel.sh'), 'stable'], { env, encoding: 'utf8' });
+    const r = tick();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/cut off part-way — putting v1\.0\.0 back first/);
+    expect(r.stdout).toContain('Upgrading v1.0.0 → v1.1.0 (v1.1.0)');
+    expect(git('describe', '--tags', '--exact-match')).toBe('v1.1.0');
+    expect(existsSync(join(state, `upgrade-${key}.from`))).toBe(false);
+    expect(readFileSync(join(app, 'data', 'channel'), 'utf8').trim()).toBe('v1.1.0');
+    const next = tick();
+    expect(next.status).toBe(0);
+    expect(next.stdout).toBe('');
   });
 });
 
@@ -474,6 +530,181 @@ exec ${JSON.stringify(REAL_GIT)} "$@"
     expect(w.at()).toBe('v1.1.0');
   });
 
+  describe('killed in the checkout, leaving .git/index.lock (HB-0372)', () => {
+    /** A deploy killed by SIGKILL while its git holds the index lock, its files rewritten and HEAD not moved yet. */
+    async function killedInCheckout(w: ReturnType<typeof prodWorld>) {
+      const started = join(w.root, 'in-checkout');
+      writeFileSync(join(w.bin, 'git'), `#!/usr/bin/env bash
+if [ "$1 $2 $3" = "checkout --quiet v1.1.0" ]; then
+  ${JSON.stringify(REAL_GIT)} "$@" || exit 1
+  ${JSON.stringify(REAL_GIT)} update-ref --no-deref HEAD "$(${JSON.stringify(REAL_GIT)} rev-parse 'v1.0.0^{commit}')"
+  ${JSON.stringify(REAL_GIT)} read-tree v1.0.0
+  : > .git/index.lock
+  touch ${JSON.stringify(started)}
+  exec sleep 30
+fi
+exec ${JSON.stringify(REAL_GIT)} "$@"
+`, { mode: 0o755 });
+      const p = spawn('bash', [join(w.prod, 'scripts', 'deploy-release.sh'), 'v1.1.0'], { detached: true, stdio: 'ignore', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod } });
+      await new Promise<void>((resolve, reject) => {
+        const t0 = Date.now();
+        const poll = setInterval(() => {
+          if (existsSync(started)) { clearInterval(poll); process.kill(-p.pid!, 'SIGKILL'); }
+          else if (Date.now() - t0 > 15_000) { clearInterval(poll); process.kill(-p.pid!, 'SIGKILL'); reject(new Error('never reached the checkout')); }
+        }, 20);
+        p.on('exit', () => resolve());
+      });
+      rmSync(join(w.bin, 'git'));
+      const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.prod], { encoding: 'utf8' }).trim();
+      const record = join(w.home, '.local', 'state', 'hatchabot', `upgrade-${key}.from`);
+      const indexLock = join(w.prod, '.git', 'index.lock');
+      /** As if killed that long ago: the record first, the lock after it, as they were made. */
+      const age = (recordAge = '10 minutes ago', lockAge = '9 minutes ago') => { execFileSync('touch', ['-d', recordAge, record]); execFileSync('touch', ['-d', lockAge, indexLock]); };
+      return { record, indexLock, age };
+    }
+
+    it('its own stale lock goes: every tracked file is put back, not refused as local changes, and the next deploy works', async () => {
+      const w = prodWorld();
+      const k = await killedInCheckout(w);
+      expect(lines(k.record)[0]).toBe('from v1.0.0');
+      expect(lines(k.record)[1]).toBe('to v1.1.0');
+      expect(lines(k.record)[2]).toMatch(/^git \d+ /);
+      k.age();
+      const r = w.deploy({ FAKE_DEPS_RC: '1' });
+      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.stdout).toContain('Removing the .git/index.lock');
+      expect(existsSync(k.indexLock)).toBe(false);
+      expect(w.at()).toBe('v1.0.0');
+      expect(w.git(w.prod, 'status', '--porcelain')).toBe('');
+      expect(existsSync(join(w.prod, 'scripts', 'ensure-deps.sh'))).toBe(false);
+      expect(readFileSync(join(w.prod, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+      const next = w.deploy();
+      expect(next.status, next.stdout + next.stderr).toBe(0);
+      expect(w.at()).toBe('v1.1.0');
+    });
+
+    it('a lock it cannot prove is its own stays, and says so: too fresh, older than the record, or no git named', async () => {
+      for (const kind of ['fresh', 'older', 'unnamed'] as const) {
+        const w = prodWorld();
+        const k = await killedInCheckout(w);
+        if (kind === 'older') k.age('5 minutes ago', '20 minutes ago');
+        if (kind === 'unnamed') { writeFileSync(k.record, 'from v1.0.0\nto v1.1.0\n'); k.age(); }
+        const r = w.deploy();
+        expect(r.status, kind + r.stdout + r.stderr).toBe(3);
+        expect(r.stdout).toMatch(/index\.lock is in the way, and nothing shows it is that deploy's own/);
+        expect(existsSync(k.indexLock), kind).toBe(true);
+        expect(existsSync(k.record), kind).toBe(true);
+      }
+    });
+
+    it('git killed alone, the deploy living on: the dependencies go back, and a later run takes the lock as its own', () => {
+      const w = prodWorld();
+      writeFileSync(join(w.bin, 'git'), `#!/usr/bin/env bash
+if [ "$1 $2 $3" = "checkout --quiet v1.1.0" ]; then
+  ${JSON.stringify(REAL_GIT)} "$@" || exit 1
+  ${JSON.stringify(REAL_GIT)} update-ref --no-deref HEAD "$(${JSON.stringify(REAL_GIT)} rev-parse 'v1.0.0^{commit}')"
+  ${JSON.stringify(REAL_GIT)} read-tree v1.0.0
+  : > .git/index.lock
+  kill -9 $$
+fi
+exec ${JSON.stringify(REAL_GIT)} "$@"
+`, { mode: 0o755 });
+      const first = w.deploy();
+      expect(first.status, first.stdout + first.stderr).toBe(3);
+      rmSync(join(w.bin, 'git'));
+      expect(readFileSync(join(w.prod, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+      expect(existsSync(join(w.prod, 'node_modules.prev'))).toBe(false);
+      const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.prod], { encoding: 'utf8' }).trim();
+      const record = join(w.home, '.local', 'state', 'hatchabot', `upgrade-${key}.from`);
+      const lock = join(w.prod, '.git', 'index.lock');
+      // The rollback's own checkout, which could not run, did not move the record on.
+      expect(lines(record).filter((l) => l.startsWith('git '))).toHaveLength(1);
+      expect(statSync(record).mtimeMs).toBeLessThanOrEqual(statSync(lock).mtimeMs);
+      execFileSync('touch', ['-d', '10 minutes ago', record]); execFileSync('touch', ['-d', '9 minutes ago', lock]);
+      const next = w.deploy();
+      expect(next.status, next.stdout + next.stderr).toBe(0);
+      expect(next.stdout).toContain('Removing the .git/index.lock');
+      expect(w.at()).toBe('v1.1.0');
+    });
+
+    it('a git someone else is running here keeps its lock, however old it looks', async () => {
+      const w = prodWorld();
+      const k = await killedInCheckout(w);
+      k.age();
+      // A real git: a commit sitting in its editor, as a person leaves one.
+      rmSync(k.indexLock);
+      writeFileSync(join(w.prod, 'package.json'), '{"name":"being-committed"}\n');
+      const editing = join(w.root, 'in-editor');
+      writeFileSync(join(w.bin, 'slow-editor'), `#!/bin/sh\ntouch ${JSON.stringify(editing)}\nexec sleep 30\n`, { mode: 0o755 });
+      const person = spawn(REAL_GIT, ['commit', '-a', '-q'], { cwd: w.prod, stdio: 'ignore', env: { ...w.env, GIT_EDITOR: join(w.bin, 'slow-editor') } });
+      try {
+        await vi.waitFor(() => { if (!existsSync(editing)) throw new Error('not in the editor yet'); }, { timeout: 15_000, interval: 20 });
+        expect(existsSync(k.indexLock)).toBe(true);
+        k.age();
+        const r = w.deploy();
+        expect(r.status, r.stdout + r.stderr).toBe(3);
+        expect(r.stdout).toMatch(/index\.lock is held by a git running there \(pid \d+\)/);
+        expect(r.stdout).not.toContain('Removing the .git/index.lock');
+        expect(existsSync(k.indexLock)).toBe(true);
+      } finally {
+        person.kill('SIGKILL');
+        rmSync(k.indexLock, { force: true });
+      }
+    });
+
+    it('a hand edit made since the kill is kept and named before the release goes back', async () => {
+      const w = prodWorld();
+      const k = await killedInCheckout(w);
+      k.age();
+      rmSync(k.indexLock); // gone by whatever means: the edit is what is under test
+      writeFileSync(join(w.prod, 'package.json'), '{"name":"hand-patched"}\n');
+      const r = w.deploy({ FAKE_DEPS_RC: '1' });
+      expect(r.stdout, r.stdout + r.stderr).toMatch(/match neither v1\.0\.0 nor v1\.1\.0/);
+      expect(r.stdout).toMatch(/^ {4}package\.json$/m);
+      const where = /kept in (\S+):/.exec(r.stdout)![1]!;
+      expect(readFileSync(join(where, 'package.json'), 'utf8')).toBe('{"name":"hand-patched"}\n');
+      expect(statSync(where).mode & 0o777).toBe(0o700);
+      // A file the kill left at the new release's own content is nobody's edit.
+      expect(r.stdout).not.toMatch(/^ {4}scripts\/ensure-deps\.sh$/m);
+      expect(w.at()).toBe('v1.0.0');
+    });
+
+    it('a git the record names that is still running: its lock stays and nothing is touched', async () => {
+      const w = prodWorld();
+      const k = await killedInCheckout(w);
+      const holder = execFileSync('bash', ['-c', `LC_ALL=C ps -o lstart= -p ${process.pid} | tr -s ' ' | sed 's/^ //;s/ $//'`], { encoding: 'utf8' }).trim();
+      writeFileSync(k.record, `from v1.0.0\nto v1.1.0\ngit ${process.pid} ${holder}\n`); k.age();
+      const r = w.deploy();
+      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.stdout).toMatch(/still running \(pid \d+\)/);
+      expect(existsSync(k.indexLock)).toBe(true);
+    });
+
+    it('a lock with no record is another git\'s: refused with nothing moved, not left half way by a failed checkout and rollback', () => {
+      const w = prodWorld();
+      writeFileSync(join(w.prod, '.git', 'index.lock'), '');
+      const r = w.deploy();
+      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.stdout).toContain('index.lock is held, so nothing was changed');
+      expect(existsSync(join(w.prod, '.git', 'index.lock'))).toBe(true);
+      expect(readFileSync(join(w.prod, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+      expect(existsSync(join(w.prod, 'node_modules.prev'))).toBe(false);
+    });
+
+    it('with no network the repair still runs: the fetch comes after it', () => {
+      const w = prodWorld();
+      const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.prod], { encoding: 'utf8' }).trim();
+      const state = join(w.home, '.local', 'state', 'hatchabot'); mkdirSync(state, { recursive: true });
+      w.git(w.prod, 'checkout', '-q', 'v1.1.0');
+      writeFileSync(join(state, `upgrade-${key}.from`), 'from v1.0.0\nto v1.1.0\n');
+      w.git(w.prod, 'remote', 'set-url', 'origin', join(w.root, 'gone.git'));
+      const r = w.deploy();
+      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.stdout).toMatch(/cut off part-way — putting v1\.0\.0 back first/);
+      expect(w.at()).toBe('v1.0.0');
+    });
+  });
+
   describe('cut off while it removes a node_modules.prev (HB-0266)', () => {
     const REAL_RM = spawnSync('sh', ['-c', 'command -v rm'], { encoding: 'utf8' }).stdout.trim();
     /** An rm that, removing a node_modules.prev holding `file`, deletes that one file and signals the deploy. */
@@ -590,6 +821,69 @@ describe('scripts/follow-latest.sh runs only a release the workflow published (#
     const urls = () => lines(join(gh, 'urls.log'));
     return { ...w, gh, ran, commit, release, manifest, follow, urls, state };
   }
+
+  describe('a hand deploy killed part-way, and a tag it must not run or go on to (HB-0372)', () => {
+    /** Prod's real deploy script is the old release's: it is what repairs here. The record of a killed deploy, beside the lock. */
+    function killedHandDeploy(w: ReturnType<typeof world>, from: string, to: string) {
+      const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.prod], { encoding: 'utf8' }).trim();
+      mkdirSync(w.state, { recursive: true });
+      const record = join(w.state, `upgrade-${key}.from`);
+      w.git(w.prod, 'checkout', '-q', to);
+      rmSync(join(w.prod, 'node_modules'), { recursive: true });
+      mkdirSync(join(w.prod, 'node_modules', 'half-installed'), { recursive: true });
+      mkdirSync(join(w.prod, 'node_modules.prev')); writeFileSync(join(w.prod, 'node_modules.prev', 'marker'), 'deps');
+      writeFileSync(record, `from ${from}\nto ${to}\n`);
+      return record;
+    }
+
+    it('a tag verify_release refuses (30), set aside, then deployed by hand and killed: the tick repairs by the old release\'s script, none of the tag\'s code runs', () => {
+      const w = world();
+      w.release({ immutable: false }); w.manifest();
+      const record = killedHandDeploy(w, 'v2.159.1', 'v2.160.0');
+      writeFileSync(join(w.state, 'follow-latest-failed'), 'v2.160.0\n');
+      const realCurl = readFileSync(join(w.bin, 'curl'), 'utf8');
+      // The old release, once back, answers as itself.
+      writeFileSync(join(w.bin, 'curl'), realCurl.replace('#!/usr/bin/env bash\n', `#!/usr/bin/env bash\ncase "$*" in *127.0.0.1*) echo '<script>window.HATCHABOT_VERSION="1.0.0"</script>'; exit 0 ;; esac\n`));
+      const r = w.follow();
+      expect(r.stdout, r.stdout + r.stderr).toContain('Not deploying v2.160.0');
+      expect(r.stdout).toMatch(/cut off part-way — putting v2\.159\.1 back first/);
+      expect(lines(w.ran)).toEqual([]); // the refused tag's deploy script never ran
+      expect(w.at()).toBe('v2.159.1');
+      expect(existsSync(record)).toBe(false);
+      expect(existsSync(join(w.prod, 'node_modules', 'half-installed'))).toBe(false);
+      expect(readFileSync(join(w.state, 'follow-latest-failed'), 'utf8').trim()).toBe('v2.160.0');
+      const next = w.follow();
+      expect(next.status, next.stdout + next.stderr).toBe(0); // set aside, and nothing left to repair: quiet again
+    });
+
+    it('a killed hand deploy of a tag ahead of the newest followed one (an rc) is repaired, not passed over; on to the newest from behind it', () => {
+      const w = world();
+      w.release(); w.manifest();
+      w.git(w.prod, 'commit', '-q', '--allow-empty', '-m', 'rc'); w.git(w.prod, 'tag', 'v2.161.0-rc.1');
+      const record = killedHandDeploy(w, 'v2.159.1', 'v2.161.0-rc.1');
+      const r = w.follow();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(lines(w.ran)).toEqual(['deploy v2.160.0']); // the newest's script: it repairs, then deploys (recorded only, here)
+      expect(existsSync(record)).toBe(true); // that stand-in script repairs nothing
+    });
+
+    it('a killed hand deploy that came from a release ahead of the newest tag goes back there, not backwards to the newest', () => {
+      const w = world();
+      for (const rc of ['v2.161.0-rc.1', 'v2.161.0-rc.2']) { w.git(w.prod, 'commit', '-q', '--allow-empty', '-m', rc); w.git(w.prod, 'tag', rc); }
+      const realCurl = readFileSync(join(w.bin, 'curl'), 'utf8');
+      writeFileSync(join(w.bin, 'curl'), realCurl.replace('#!/usr/bin/env bash\n', `#!/usr/bin/env bash\ncase "$*" in *127.0.0.1*) echo '<script>window.HATCHABOT_VERSION="1.0.0"</script>'; exit 0 ;; esac\n`));
+      const record = killedHandDeploy(w, 'v2.161.0-rc.1', 'v2.161.0-rc.2');
+      const r = w.follow();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/putting v2\.161\.0-rc\.1 back/);
+      expect(lines(w.ran)).toEqual([]); // v2.160.0 is behind it: not deployed
+      expect(w.at()).toBe('v2.161.0-rc.1');
+      expect(existsSync(record)).toBe(false);
+      const next = w.follow();
+      expect(next.status).toBe(0);
+      expect(lines(w.ran)).toEqual([]);
+    });
+  });
 
   it('deploys a published, immutable release whose manifest names the tag and its commit', () => {
     const w = world();

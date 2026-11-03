@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ExecResult, RuntimeProvider } from '../providers/provider.js';
+import { VOLUME_GONE, type ExecResult, type RuntimeProvider } from '../providers/provider.js';
 import type { SnapshotParams, Store, StoredSnapshot } from '../store/store.js';
 import { beginOperation, handleFor, rethrowIfCrash } from './operations.js';
 
@@ -89,6 +89,7 @@ export async function readCoreFile(
   const res = via.onVolume
     ? await provider.execShellOnVolume(runtimeRef, script, { readOnly: true, image: via.image })
     : await provider.execShell(runtimeRef, script);
+  if (res.volumeMissing) throw new SnapshotError(VOLUME_GONE);
   if (res.code !== 0) {
     throw new SnapshotError(
       res.code === 3 ? `${name} is there but could not be read.` : `Couldn't read ${name} — is the agent healthy?`,
@@ -154,6 +155,7 @@ export async function writeCoreFile(
   // base64 through the shell so arbitrary content can't break quoting.
   const b64 = Buffer.from(content, 'utf8').toString('base64');
   const res = await writeFileInAgent(provider, runtimeRef, workspacePath(slug, name), b64, via);
+  if (res.volumeMissing) throw new SnapshotError(VOLUME_GONE);
   if (res.code !== 0) {
     throw new SnapshotError(`Couldn't write ${name}: ${res.stderr.slice(-200)}`);
   }
@@ -174,6 +176,7 @@ export async function removeCoreFile(
   const res = via.onVolume
     ? await provider.execShellOnVolume(runtimeRef, script, { image: via.image })
     : await provider.execShell(runtimeRef, script);
+  if (res.volumeMissing) throw new SnapshotError(VOLUME_GONE);
   if (res.code !== 0) {
     throw new SnapshotError(`Couldn't remove ${name}: ${res.stderr.slice(-200)}`);
   }

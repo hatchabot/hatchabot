@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ChannelKind } from '../domain/types.js';
-import type { RuntimeProvider } from '../providers/provider.js';
+import { VOLUME_GONE, type RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 import { ACCOUNT_SHAPE, ID_SHAPE } from './channelIds.js';
 import { approvePairing, listPairingRequests, PAIRING_DB, PAIRING_DB_JS, pairingStorePath } from './claim.js';
@@ -343,6 +343,7 @@ export async function denyPairing(
     }
     console.log(String(n));'`;
   const res = await provider.execShellOnVolume(opts.runtimeRef, script);
+  if (res.volumeMissing) throw new AdmitError(VOLUME_GONE);
   if (res.code !== 0) {
     throw new AdmitError('Turning that request away failed — try again in a moment.');
   }
@@ -417,6 +418,7 @@ export async function grantChannelAccess(
     }'`;
   forgetDmPolicy(opts.agentId); // the config's allowFrom is being written
   const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
+  if (res.volumeMissing) throw new AdmitError(VOLUME_GONE);
   if (res.code !== 0) {
     throw new AdmitError('Adding them to the bot allowlist failed — try again in a moment.');
   }
@@ -651,6 +653,10 @@ export async function revokeMember(
   const script = allowlistScrubScript(targets);
   forgetDmPolicy(agentId);
   const res = await provider.execShellOnVolume(agent.runtimeRef, script);
+  if (res.volumeMissing) {
+    // No retry helps, and it may only be on another machine: never read as removed.
+    throw new RevokeError(`${VOLUME_GONE} They stay a member until the agent has its files back or is deleted.`);
+  }
   if (res.code !== 0) {
     // The row is still 'active' (we haven't flipped it), so "remove them
     // again" genuinely retries the scrub. A rebuild would NOT help — both

@@ -4,6 +4,10 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
+import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 // Runtime tab (v1.2.0): fleet image inventory, promote, base build, classes
@@ -65,6 +69,155 @@ describe('GET /v1/runtime/images', () => {
   it('is host-owner only', async () => {
     const { f } = await world();
     expect((await f.inject({ method: 'GET', url: '/v1/runtime/images', headers: { 'x-hatchabot-owner': 'user-other' } })).statusCode).toBe(403);
+  });
+});
+
+describe('"Used by" and the delete agree (HB-0380)', () => {
+  const X = 'hatchabot-runtime:2026.9.4'; // img-B, its only tag
+  const row = async (f: any, tag = X) => (await f.inject({ method: 'GET', url: '/v1/runtime/images', headers: as })).json().tags.find((t: any) => t.tag === tag);
+  const del = (f: any, tag = X) => f.inject({ method: 'DELETE', url: '/v1/runtime/images/' + encodeURIComponent(tag), headers: as });
+  const refusedFor = async (f: any, name: string, label: RegExp) => {
+    const r = await row(f);
+    expect(r.blockers.map((b: any) => b.name)).toEqual([name]);
+    expect(r.blockers[0].label).toMatch(label);
+    expect(r.blockers[0].fix).toBeTruthy();
+    const res = await del(f);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toContain(name);
+    expect(res.json().error).toContain(r.blockers[0].fix);
+  };
+
+  it('"nothing" means the delete succeeds', async () => {
+    const { f, provider } = await world();
+    expect((await row(f)).blockers).toEqual([]);
+    expect((await del(f)).statusCode).toBe(200);
+    expect(provider.removed).toEqual([X]);
+  });
+  it('a pinned agent on this machine', async () => {
+    const { f, store } = await world();
+    store.setAgentImage('a1', X);
+    await refusedFor(f, 'Kitchen', /^pinned$/);
+    expect((await row(f)).pinned.map((a: any) => a.name)).toEqual(['Kitchen']);
+  });
+  it('an archived pinned agent, with a way out that does not need the ✕', async () => {
+    const { f, store } = await world();
+    store.setAgentImage('a1', X); store.setAgentState('a1', 'ARCHIVED');
+    await refusedFor(f, 'Kitchen', /archived, pinned/);
+    const r = await row(f);
+    expect(r.pinned[0].state).toBe('ARCHIVED');
+    expect(r.blockers[0].fix).toMatch(/Restore it .* or delete it/);
+  });
+  it('a pinned agent on a runner', async () => {
+    const { f, store } = await world();
+    store.insertHost({ id: 'h2', ownerId: OWNER, kind: 'remote-docker', provider: 'mock', name: 'Spare box', settings: {}, createdAt: 'now' } as any);
+    store.insertAgent({ id: 'a3', ownerId: OWNER, name: 'Porch', slug: 'porch', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h2', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    store.setAgentState('a3', 'RUNNING'); store.setAgentImage('a3', X);
+    await refusedFor(f, 'Porch', /pinned, on Spare box/);
+    expect((await row(f)).pinned[0].runner).toBe('Spare box');
+  });
+  it('a class on the image, this account', async () => {
+    const { f, store } = await world();
+    store.upsertAgentClass({ id: 'c1', ownerId: OWNER, name: 'Helpers', image: X });
+    await refusedFor(f, 'Helpers', /^class$/);
+  });
+  it("another account's class and pinned agent are marked as such", async () => {
+    const { f, store } = await world();
+    store.upsertAgentClass({ id: 'c2', ownerId: 'user-other', name: 'Neighbours', image: X });
+    await refusedFor(f, 'Neighbours', /class, another account/);
+    const r = await row(f);
+    expect(r.classes[0].mine).toBe(false);
+    expect(r.blockers[0].mine).toBe(false);
+  });
+  it('a derived image built on it', async () => {
+    const { f, store } = await world();
+    store.upsertDerivedImage({ name: 'pdf', tag: 'hatchabot-runtime:derived-pdf', base: X, dockerfile: 'RUN true', createdBy: OWNER });
+    await refusedFor(f, 'pdf', /derived image/);
+  });
+  it("an archived agent's container, with no pin (the reported case)", async () => {
+    const { f, store, provider } = await world();
+    provider.imageContainers = [{ name: store.getAgent('a1')!.runtimeRef!, imageId: 'img-B', state: 'exited' }];
+    store.setAgentState('a1', 'ARCHIVED');
+    await refusedFor(f, 'Kitchen', /archived, container/);
+    expect((await row(f)).blockers[0].fix).toMatch(/Restore and rebuild it.* or delete it/);
+  });
+  it('a container with no agent is a leftover, under its own name', async () => {
+    const { f, provider } = await world();
+    provider.imageContainers = [{ name: 'hatchabot-gone-1', imageId: 'img-B', state: 'exited' }];
+    await refusedFor(f, 'hatchabot-gone-1', /leftover container/);
+    expect((await row(f)).blockers[0].fix).toContain('docker rm hatchabot-gone-1');
+  });
+  it('a pinned agent and its container are one blocker', async () => {
+    const { f, store, provider } = await world();
+    store.setAgentImage('a1', X);
+    provider.imageContainers = [{ name: store.getAgent('a1')!.runtimeRef!, imageId: 'img-B', state: 'running' }];
+    await refusedFor(f, 'Kitchen', /^pinned$/);
+  });
+  it('a container is no blocker while another tag shares the image: Docker only removes the name', async () => {
+    const { f, provider } = await world();
+    provider.imageContainers = [{ name: 'hatchabot-on-a', imageId: 'img-A', state: 'running' }];
+    const shared = 'hatchabot-runtime:2026.7.1-2'; // img-A, also :latest
+    expect((await row(f, shared)).blockers).toEqual([]);
+    expect((await del(f, shared)).statusCode).toBe(200);
+  });
+  it('when Docker cannot be asked the list says so, and the delete still gets its answer from Docker', async () => {
+    const { f, store, provider } = await world();
+    provider.imagesInUseFails = 1;
+    const list = (await f.inject({ method: 'GET', url: '/v1/runtime/images', headers: as })).json();
+    expect(list.containersChecked).toBe(false);
+    expect(list.tags.length).toBeGreaterThan(0);
+    provider.imageContainers = [{ name: store.getAgent('a1')!.runtimeRef!, imageId: 'img-B', state: 'exited' }];
+    // The first look fails, Docker refuses, the second look names the holder.
+    provider.imagesInUseFails = 1;
+    const named = await del(f);
+    expect(named.statusCode).toBe(409);
+    expect(named.json().error).toContain('Kitchen');
+    // Neither look works: Docker's own words, not a success.
+    provider.imagesInUseFails = 2;
+    const blind = await del(f);
+    expect(blind.statusCode).toBe(409);
+    expect(blind.json().error).toMatch(/container/);
+    expect(provider.removed).toEqual([]);
+    expect((await f.inject({ method: 'GET', url: '/v1/runtime/images', headers: as })).json().containersChecked).toBe(true);
+  });
+  it('a derived image with its own row is refused the same way by its own delete', async () => {
+    const { f, store } = await world();
+    store.upsertDerivedImage({ name: 'pdf', tag: 'hatchabot-runtime:derived-pdf', base: 'hatchabot-runtime:latest', dockerfile: 'RUN true', createdBy: OWNER });
+    store.setAgentImage('a1', 'hatchabot-runtime:derived-pdf'); store.setAgentState('a1', 'ARCHIVED');
+    const res = await f.inject({ method: 'DELETE', url: '/v1/images/pdf', headers: as });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toContain('Kitchen');
+  });
+});
+
+describe('LocalDockerProvider.imagesInUse (HB-0380)', () => {
+  const stubbed = (inspect: string) => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-images-in-use-'));
+    const stub = join(dir, 'docker');
+    writeFileSync(stub, `#!/bin/sh
+case "$1" in
+  images) printf 'aaaaaaaaaaaa|hatchabot-runtime:old\nbbbbbbbbbbbb|<none>:<none>\n' ;;
+  ps) printf 'id-one\nid-gone\n' ;;
+  inspect) ${inspect} ;;
+esac
+`);
+    chmodSync(stub, 0o755);
+    return { provider: new LocalDockerProvider({ docker: stub }), done: () => rmSync(dir, { recursive: true, force: true }) };
+  };
+  it('matches long container image ids to the short ones of `docker images`, and leaves out untagged images', async () => {
+    const { provider, done } = stubbed(`printf '/hatchabot-one|sha256:aaaaaaaaaaaa0000|exited\\n'`);
+    expect(await provider.imagesInUse()).toEqual({
+      tags: [{ tag: 'hatchabot-runtime:old', imageId: 'aaaaaaaaaaaa' }],
+      containers: [{ name: 'hatchabot-one', imageId: 'aaaaaaaaaaaa', state: 'exited' }],
+    });
+    done();
+  });
+  it('a container removed since `ps` is not a failure; Docker failing is', async () => {
+    const gone = stubbed(`printf '/hatchabot-one|sha256:aaaaaaaaaaaa0000|running\\n'; echo 'Error: No such object: id-gone' >&2; exit 1`);
+    expect((await gone.provider.imagesInUse()).containers.map((c) => c.name)).toEqual(['hatchabot-one']);
+    gone.done();
+    const broken = stubbed(`echo 'daemon error' >&2; exit 1`);
+    await expect(broken.provider.imagesInUse()).rejects.toThrow();
+    broken.done();
   });
 });
 

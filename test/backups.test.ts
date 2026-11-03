@@ -11,6 +11,7 @@ import {
   listBackups,
   pruneBackup,
   restoreAgentFromBackup,
+  restoreSafetyDir,
   RestoreError,
 } from '../src/orchestrator/backups.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
@@ -258,7 +259,7 @@ describe('restoreAgentFromBackup', () => {
     expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('current-memory');
     expect(store.getAgent('a1')!.state).toBe('RUNNING');
     expect((await provider.status(runtimeRef)).phase).toBe('running');
-    expect(existsSync(join(rbase, 'restore-safety'))).toBe(false); // nothing to keep
+    expect(existsSync(restoreSafetyDir())).toBe(false); // nothing to keep
   });
 
   it('import AND rollback fail: stays stopped and failed, names both failures, keeps the copy (issue #12)', async () => {

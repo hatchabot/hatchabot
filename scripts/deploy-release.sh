@@ -48,22 +48,6 @@ trap finish EXIT
 # in node_modules.prev (HB-0266). Ended through exit, finish puts the old one
 # back, as upgrade.sh does (HB-0043).
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
-git fetch --tags --force --quiet origin || { echo "Could not fetch from $PROD's origin (above) — nothing was changed; try again later."; exit 3; }
-git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "Tag $TAG not found on origin."; exit 2; }
-# Refusing is right; refusing without saying WHAT is not. An untracked stray —
-# a note saved into the wrong directory — reads identically to a hand-edit here,
-# and the operator can only act if the message names it.
-if [ -n "$(git status --porcelain)" ]; then
-  echo "$PROD has local changes — production must never be edited by hand. Refusing."
-  echo
-  git status --porcelain | sed 's/^/    /'
-  echo
-  echo "  ?? = an untracked file that does not belong to the release. If it is"
-  echo "       something of yours, move it out:  mv $PROD/<file> ~/"
-  echo "  Any other marker = a tracked file was edited in place. Restore it with"
-  echo "       git -C $PROD checkout -- <file>   (your .env and data/ are untouched)"
-  exit 2
-fi
 # The SAME lock upgrade.sh takes (a directory: mkdir is atomic everywhere,
 # and macOS has no flock). A flock here and a mkdir there did not exclude each
 # other, so `hbt upgrade` and the follow-latest timer could race one checkout's
@@ -106,13 +90,120 @@ fi
 # node_modules.prev. Put the old release back first, then deploy as usual
 # (HB-0266).
 FROM_FILE="${LOCK_PATH%.lock.d}.from"
+# Every checkout under the record writes its holder there first, by the process
+# that becomes git (pid and start time, as the lock's holder): a kill in the
+# checkout leaves .git/index.lock, and every later deploy failed on it.
+# Not with a lock already there: this checkout cannot take it and makes no lock
+# of its own, and a line written now left the record newer than the lock of the
+# git that was killed alone, so that lock never read as this run's (below).
+checkout_recorded() {
+  sh -c '[ -e .git/index.lock ] || printf "git %s %s\n" "$$" "$(LC_ALL=C ps -o lstart= -p $$ 2>/dev/null | tr -s " " | sed "s/^ //;s/ $//")" >> "$1"; shift; exec git checkout "$@"' _ "$FROM_FILE" "$@"
+}
+# A git running in this checkout, whoever started it: its pid, or "unknown" when
+# this machine has no way to tell. A commit waiting in its editor holds the lock
+# for as long as the person takes, however old the lock looks.
+git_running_here() {
+  local here p cwd line pid=""
+  here="$(pwd -P)"
+  if [ -d "/proc/$$" ]; then
+    for p in /proc/[0-9]*; do
+      case "$(cat "$p/comm" 2>/dev/null)" in git|git-*) ;; *) continue ;; esac
+      cwd="$(readlink "$p/cwd" 2>/dev/null)" || continue
+      case "$cwd/" in "$here/"*) echo "${p#/proc/}"; return 0 ;; esac
+    done
+    return 1
+  fi
+  command -v lsof >/dev/null 2>&1 || { echo unknown; return 0; }
+  while IFS= read -r line; do
+    case "$line" in
+      p*) pid="${line#p}" ;;
+      n*) case "${line#n}/" in "$here/"*) echo "$pid"; return 0 ;; esac ;;
+    esac
+  done < <(lsof -a -c git -d cwd -Fpn 2>/dev/null)
+  return 1
+}
+# .git/index.lock goes only when it is shown to be that checkout's own: the
+# record names a git, that git is gone, the lock is no older than the record
+# (the record is written first), it is not fresh, and no other git is running
+# here. Anything else stays and is said.
+# 0 clear to go on; 1 a git of this record's is running, or the lock is not its own.
+clear_own_index_lock() {
+  local word pid start named=0
+  while read -r word pid start; do
+    [ "$word" = git ] || continue
+    named=1
+    if [ -n "$start" ]; then [ "$start" != "$(proc_start "$pid")" ] || { echo "The checkout that deploy started is still running (pid $pid) — try again once it ends."; return 1; }
+    elif kill -0 "$pid" 2>/dev/null; then echo "The checkout that deploy started is still running (pid $pid) — try again once it ends."; return 1; fi
+  done < "$FROM_FILE"
+  [ -e .git/index.lock ] || return 0
+  local live
+  if live="$(git_running_here)"; then
+    if [ "$live" != unknown ]; then echo "$PWD/.git/index.lock is held by a git running there (pid $live), which this deploy did not start — try again once it ends."; return 1; fi
+    named=0
+  fi
+  if [ "$named" = 1 ] && [ ! "$FROM_FILE" -nt .git/index.lock ] && [ -n "$(find .git/index.lock -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+    echo "Removing the .git/index.lock the deploy that was cut off left behind."
+    rm -f .git/index.lock; return 0
+  fi
+  echo "$PWD/.git/index.lock is in the way, and nothing shows it is that deploy's own (one a few minutes old may be: try again then). If no git is running there, remove it: rm $PWD/.git/index.lock"
+  return 1
+}
+# Back to the release the record names. Forced, and through the new one first
+# when the tree is part-way: a checkout cut off leaves HEAD and the index on the
+# old one with files rewritten, which a plain checkout kept (mixed code, then
+# refused as local changes for good). The deploy started from a clean tree, and
+# tracked files are all this touches, so .env and data/ stay. A tracked file
+# that matches neither release may be someone's edit since the kill (or a file
+# the kill cut short, which cannot be told apart): a copy is kept, and named.
+save_other_edits() {
+  local f got kept=""
+  while IFS= read -r -d '' f; do
+    [ -f "$f" ] || [ -L "$f" ] || continue
+    got="$(git hash-object -- "$f" 2>/dev/null)" || got=""
+    [ "$got" != "$(git rev-parse -q --verify "$FROM:$f" 2>/dev/null)" ] || continue
+    [ -z "$TO" ] || [ "$got" != "$(git rev-parse -q --verify "$TO:$f" 2>/dev/null)" ] || continue
+    if [ -z "$kept" ]; then
+      kept="${FROM_FILE%.from}.kept-$(date +%Y%m%d-%H%M%S)"
+      ( umask 077; mkdir -p "$kept" ) || { echo "Could not keep a copy of the edit to $f, so it was not overwritten."; return 1; }
+      echo "These tracked files match neither $FROM nor ${TO:-the new release}, so they may be someone's edits. Putting $FROM back overwrites them; a copy of each is kept in $kept:"
+    fi
+    mkdir -p "$kept/$(dirname "$f")" && cp -pP "$f" "$kept/$f" || { echo "Could not keep a copy of the edit to $f, so it was not overwritten."; return 1; }
+    echo "    $f"
+  done < <(git --no-optional-locks diff --name-only -z HEAD 2>/dev/null)
+  return 0
+}
+repair_tree() {
+  [ -n "$FROM" ] || return 1
+  save_other_edits || return 1
+  if [ -n "$TO" ] && [ "$(git rev-parse HEAD)" != "$(git rev-parse "$TO^{commit}" 2>/dev/null)" ] && [ -n "$(git status --porcelain)" ]; then
+    checkout_recorded --quiet --force "$TO" || return 1
+  fi
+  checkout_recorded --quiet --force "$FROM"
+}
 if [ -f "$FROM_FILE" ]; then
-  FROM="$(sed -n 's/^from //p' "$FROM_FILE" | sed -n 1p)"
+  FROM="$(sed -n 's/^from //p' "$FROM_FILE" | sed -n 1p)"; TO="$(sed -n 's/^to //p' "$FROM_FILE" | sed -n 1p)"
   echo "A deploy of $PROD was cut off part-way — putting ${FROM:-the previous release} back first."
-  { [ -n "$FROM" ] && git checkout --quiet "$FROM"; } || { echo "Could not check out ${FROM:-the previous release} (above): node_modules.prev holds its dependencies."; exit 3; }
+  clear_own_index_lock || exit 3
+  repair_tree || { echo "Could not check out ${FROM:-the previous release} (above): node_modules.prev holds its dependencies."; exit 3; }
   [ ! -d node_modules.prev ] || { rm -rf node_modules; mv node_modules.prev node_modules; }
   if grep -qx restarted "$FROM_FILE"; then systemctl --user restart "$SVC" || true; fi
   rm -f "$FROM_FILE"
+fi
+git fetch --tags --force --quiet origin || { echo "Could not fetch from $PROD's origin (above) — nothing was changed; try again later."; exit 3; }
+git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "Tag $TAG not found on origin."; exit 2; }
+# Refusing is right; refusing without saying WHAT is not. An untracked stray —
+# a note saved into the wrong directory — reads identically to a hand-edit here,
+# and the operator can only act if the message names it.
+if [ -n "$(git --no-optional-locks status --porcelain)" ]; then
+  echo "$PROD has local changes — production must never be edited by hand. Refusing."
+  echo
+  git --no-optional-locks status --porcelain | sed 's/^/    /'
+  echo
+  echo "  ?? = an untracked file that does not belong to the release. If it is"
+  echo "       something of yours, move it out:  mv $PROD/<file> ~/"
+  echo "  Any other marker = a tracked file was edited in place. Restore it with"
+  echo "       git -C $PROD checkout -- <file>   (your .env and data/ are untouched)"
+  exit 2
 fi
 CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
 echo "Deploying $TAG to $PROD (currently $CUR)…"
@@ -138,13 +229,18 @@ restore_deps() {
 # from a clean tree), so .env and data/ stay.
 back_to_cur() {
   if [ "$(git rev-parse HEAD)" != "$(git rev-parse "$TAG^{commit}")" ] && [ -n "$(git status --porcelain)" ]; then
-    git checkout --quiet --force "$TAG" || return 1
+    checkout_recorded --quiet --force "$TAG" || return 1
   fi
-  git checkout --quiet --force "$CUR"
+  checkout_recorded --quiet --force "$CUR"
 }
 rollback() {
   echo "Rolling back to ${CUR}…"
-  back_to_cur && restore_deps || return 1
+  # The dependencies go back whether or not the checkout could: left aside, the
+  # running service had none until someone came. The record stays for the repair.
+  local back=0
+  back_to_cur || back=1
+  restore_deps
+  [ "$back" = 0 ] || return 1
   if [ "$RESTARTED" = 1 ]; then systemctl --user restart "$SVC" || return 1; fi
   rm -f "$FROM_FILE"
 }
@@ -161,10 +257,13 @@ INSTALL="${HATCHABOT_INSTALL_CMD:-install_deps}"   # overridable for tests only
 # A leftover, removed before the record is written: half removed under it,
 # the next run's repair would move it in as the old release's.
 rm -rf node_modules.prev
+# Another git's lock, with nothing moved yet: the checkout would fail on it,
+# and the rollback's too, with the dependencies aside (HB-0372).
+[ ! -e .git/index.lock ] || { echo "$PWD/.git/index.lock is held, so nothing was changed — try again later. If no git is running there, remove it: rm $PWD/.git/index.lock"; exit 3; }
 CHANGING=1
-printf 'from %s\n' "$CUR" > "$FROM_FILE"
+printf 'from %s\nto %s\n' "$CUR" "$TAG" > "$FROM_FILE"
 if [ -d node_modules ]; then mv node_modules node_modules.prev; fi; ASIDE=1
-git checkout --quiet "$TAG"
+checkout_recorded --quiet "$TAG"
 # A failed install must not leave prod checked out at a tag it can't run.
 $INSTALL || { CHANGING=0; rollback || true; exit 3; }
 # node_modules.prev stays until the new release is SERVING: removed here, a

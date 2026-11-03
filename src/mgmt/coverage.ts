@@ -85,6 +85,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/:id/connections/detach': 'app: later — detach a Google account',
   'POST /v1/agents/:id/access/verify': 'app: later — Verify now (Sharing → Access): look inside the agent and record what it can reach; read-only',
   'DELETE /v1/agents/:id/connections/:email': 'app: later — detach a Google account',
+  'POST /v1/agents/:id/connections/:email/test': 'app: later — test an agent\'s Gmail',
   'POST /v1/agents/:id/env': 'app: secret — environment values are credentials',
   'DELETE /v1/agents/:id/env/:envId': 'app: later — remove an environment variable',
 
@@ -176,6 +177,9 @@ export const COVERAGE: Record<string, string> = {
   'DELETE /v1/media-key': 'app: later — remove the Gemini key',
   'PUT /v1/search-key': 'app: secret — the Brave key',
   'DELETE /v1/search-key': 'app: later — remove the Brave key',
+  'POST /v1/web-search/check': 'app: later — test the fleet\'s web search',
+  'PUT /v1/web-search': 'app: later — which search the whole fleet uses',
+  'POST /v1/agents/:id/search-test': 'app: later — test one agent\'s web search',
 
   // ---- Telegram bots ----
   'POST /v1/pool': 'app: secret — adding a bot takes its token',

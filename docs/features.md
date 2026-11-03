@@ -1258,6 +1258,21 @@ sharing caveats as the media key); a per-agent `BRAVE_API_KEY` env var (or
 an env-target template field) overrides it with that agent's own quota.
 Provider auto-detection comes from the key names.
 
+**Testing search, and when Brave runs out.** Settings → AI → Fleet search key has
+**Test search**: it checks the key, its quota and DuckDuckGo from this machine.
+An agent's Advanced tab has **Test web search**: a real search inside that
+agent, naming who answered. When the fleet key runs out, or is about to,
+Hatchabot moves running agents to DuckDuckGo with no rebuild, tells you, and
+moves them back when the quota returns. It checks every 6 hours
+(`HATCHABOT_SEARCH_CHECK_MS`), hourly near the limit, and as soon as the manager's
+search or an agent's test fails; each check spends one query. So an agent can
+meet the empty quota first: until the next check its search fails, or goes to
+Gemini if it holds a Gemini key. An agent with a search key of its own stays on it.
+A key you replace reaches agents at their next Rebuild, since each holds it in
+its environment: until then they use DuckDuckGo, even if the old key still works,
+and Settings says how many.
+**Use** can be set to DuckDuckGo only.
+
 Environment variables travel with a full copy: Download/Restore and
 cross-cluster moves carry each var's name **and** value (the archive already
 holds the bot token — guard it like a password). Shared templates still carry
@@ -2150,6 +2165,11 @@ never include them. Recommend a **purpose-bound Google account** (scoped to
 the agent's job) and minimal services: everyone who can message the agent
 can act as the connected account. Design and phases:
 [connections-design.md](connections-design.md).
+
+**Testing an agent's Gmail:** on the agent's Connections, **Test Gmail** beside
+an account checks its sign-in with Google and asks Gmail for the inbox's counts,
+from inside the agent. It reads no mail and sends nothing, so it says nothing
+about sending. A failure says why and what mends it. The agent has to be running.
 
 **Connecting from the app** (⚙ Settings → Connections): the consent must come
 back to the same browser that pressed Connect, so a link forwarded to someone

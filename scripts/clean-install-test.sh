@@ -27,7 +27,8 @@
 #
 # Needs LXD (sudo snap install lxd && sudo lxd init --auto && sudo usermod -aG lxd $USER).
 # On a machine that also runs Docker, the VM has no internet until Docker's
-# firewall lets LXD's bridge through; the script checks and says how.
+# firewall lets LXD's bridge through; when the VM has none, the script looks for
+# why and says how to fix what it found.
 set -uo pipefail
 CHANNEL=stable; UPGRADE=1; KEEP=0; AI_SOURCE=""; IMAGE=ubuntu:24.04; BUNDLE_BASE=""; UPGRADE_TO=latest
 INSTALLER_URL="https://hatchabot.com/install.sh"
@@ -54,14 +55,89 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 VM="hb-clean-$(date +%m%d%H%M%S)-$$"
 OUT="$HOME/hatchabot-clean-install/$(date +%Y-%m-%d-%H%M%S)-$$"
 mkdir -p "$OUT"; chmod 700 "$OUT"
-PASS=0; FAIL=0; RESULTS=()
+STARTED="$(date '+%Y-%m-%d %H:%M:%S')"
+PASS=0; FAIL=0; RESULTS=(); VM_STARTED=0; VM_LOG_SAVED=0
 ok()  { PASS=$((PASS + 1)); RESULTS+=("✓ $1"); echo "✓ $1"; }
-bad() { FAIL=$((FAIL + 1)); RESULTS+=("✗ $1"); echo "✗ $1"; }
+# Whatever just failed, a VM that has stopped is the failure, not that step (HB-0381).
+bad() {
+  vm_stopped && vm_failed "the VM stopped by itself"
+  FAIL=$((FAIL + 1)); RESULTS+=("✗ $1"); echo "✗ $1"
+}
 
 # lxc, whether or not this shell already has the lxd group.
 L() { if id -nG | grep -qw lxd; then lxc "$@"; else sg lxd -c "lxc $(printf '%q ' "$@")"; fi; }
 vm() { L exec "$VM" -- su - ubuntu -c "$1"; }       # as the new user, a fresh login each time
 vmi() { vm "bash -ic $(printf '%q' "$1") 2>&1" | grep -vE '^bash: (cannot set terminal|no job control)'; }  # …with ~/.bashrc
+# lxc with a time limit and no input: under load a client can sit for minutes.
+Lt() { local t="$1"; shift; timeout "$t" bash -c "$(declare -f L); L $(printf '%q ' "$@")" </dev/null; }
+
+# Has the VM stopped? Only when LXD says so: an LXD too busy to answer is not a stopped VM.
+vm_stopped() {
+  [ "$VM_STARTED" = 1 ] || return 1
+  local s; s="$(Lt 30 info "$VM" 2>/dev/null)" || return 1
+  grep -qiE '^Status: *(STOPPED|ERROR)' <<<"$s"
+}
+machine_load() { echo "this machine's load average now: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo unknown), on $(nproc 2>/dev/null || echo '?') CPUs"; }
+# LXD's record of the VM, while the VM is still there to ask about.
+save_vm_log() {
+  VM_LOG_SAVED=1
+  { Lt 30 info "$VM" --show-log; echo "--- LXD's own log, lines naming $VM"; timeout 30 journalctl -u snap.lxd.daemon --since "$STARTED" --no-pager 2>/dev/null | grep -F "$VM"; } >"$OUT/vm-stopped.log" 2>&1
+}
+# The VM or the machine let this run down, not the install: say so and end it.
+# Why VMs stop by themselves is not known yet (HB-0381), so this gives what there
+# is to go on and names no cause.
+vm_failed() {
+  FAIL=$((FAIL + 1)); RESULTS+=("✗ $1"); echo "✗ $1 — a failure of the VM or this machine, not of the install"
+  echo "  $(machine_load)"
+  save_vm_log
+  echo "  LXD's log: journalctl -u snap.lxd.daemon | grep 'Instance stopped' (what could be read of it for this VM: $OUT/vm-stopped.log)"
+  exit 1
+}
+no_answer() {
+  echo "  LXD did not answer when asked about the VM's network, so nothing was found out about it: the VM or this machine, not the install."
+  echo "  $(machine_load)"
+}
+# Why the VM has no internet, from what can be found. Docker's firewall only when
+# that is what was found: this message used to blame it for any failed ping.
+net_why() {
+  local route gw fw chain asked
+  # Each question to the VM says it got there: an LXD too busy to answer, or a
+  # time limit, gives nothing, and that is no finding about the VM's network.
+  if ! route="$(Lt 20 exec "$VM" -- sh -c 'echo asked; ip route show default 2>/dev/null' 2>/dev/null)" || ! grep -qx asked <<<"$route"; then
+    no_answer; return
+  fi
+  route="$(grep -m1 '^default' <<<"$route" || true)"
+  if [ -z "$route" ]; then
+    echo "  It has no default route: its network did not come up. That is the VM or this machine, not the install."
+    echo "  $(machine_load)"; return
+  fi
+  gw="$(sed -n 's/^default via \([^ ]*\).*/\1/p' <<<"$route")"
+  if [ -n "$gw" ]; then
+    asked="$(Lt 20 exec "$VM" -- sh -c "echo asked; timeout 8 ping -c1 -W5 $gw >/dev/null 2>&1 || echo no-reply" 2>/dev/null)" || asked=""
+    grep -qx asked <<<"$asked" || { no_answer; return; }
+    if grep -qx no-reply <<<"$asked"; then
+      echo "  It cannot reach LXD's bridge ($gw): the VM's network or LXD, not the install."
+      echo "  $(machine_load)"; return
+    fi
+  fi
+  if ! timeout 8 ping -c1 -W5 1.1.1.1 >/dev/null 2>&1; then
+    echo "  This machine cannot reach the internet either: the machine's connection, not the VM's."; return
+  fi
+  # The firewall is root's to read, and sudo -n never asks.
+  if ! fw="$(sudo -n iptables -S FORWARD 2>/dev/null)"; then
+    echo "  It reaches LXD's bridge and this machine is online, so something between them drops it."
+    echo "  This machine's firewall could not be read without a password. On a machine that runs Docker, look with:"
+    echo "    sudo iptables -S DOCKER-USER; sudo iptables -S FORWARD    (Docker's firewall: FORWARD's policy is DROP and neither names lxdbr0)"
+    return
+  fi
+  if chain="$(sudo -n iptables -S DOCKER-USER 2>/dev/null)" && grep -q '^-P FORWARD DROP' <<<"$fw" && ! grep -q lxdbr0 <<<"$fw$chain"; then
+    echo "  Docker's firewall is dropping LXD's bridge (FORWARD's policy is DROP and no rule names lxdbr0). Once per boot:"
+    echo "    sudo iptables -I DOCKER-USER -i lxdbr0 -j ACCEPT"
+    echo "    sudo iptables -I DOCKER-USER -o lxdbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+    return
+  fi
+  echo "  It reaches LXD's bridge and this machine is online, and Docker's firewall is not what drops it (sudo iptables -S shows the rules)."
+}
 
 command -v lxc >/dev/null || { echo "LXD is not installed. sudo snap install lxd && sudo lxd init --auto && sudo usermod -aG lxd \$USER"; exit 2; }
 cleanup() {
@@ -70,8 +146,8 @@ cleanup() {
   if [ "${KEEP_RUNNING:-0}" = 1 ]; then echo "kept RUNNING: $VM   (lxc exec $VM -- su - ubuntu · stop it with: lxc stop $VM)"; return; fi
   if [ "$KEEP" = 1 ]; then L stop "$VM" --force >/dev/null 2>&1; echo "kept, stopped: $VM   (lxc start $VM · lxc delete $VM --force)"; return; fi
   # A VM that stopped by itself (it happened mid-test on Ubuntu 22.04,
-  # 2026-10-08): keep LXD's record of why before it goes.
-  if ! L info "$VM" 2>/dev/null | grep -q 'Status: RUNNING'; then L info "$VM" --show-log >"$OUT/vm-stopped.log" 2>&1 && echo "the VM had stopped by itself: $OUT/vm-stopped.log"; fi
+  # 2026-10-08): keep LXD's record of it before it goes.
+  if [ "$VM_LOG_SAVED" = 0 ] && vm_stopped; then save_vm_log; echo "the VM had stopped by itself: $OUT/vm-stopped.log"; fi
   L delete "$VM" --force >/dev/null 2>&1 && echo "deleted $VM"
 }
 trap cleanup EXIT
@@ -95,21 +171,40 @@ case "$IMAGE" in hb-debian-*)
 esac
 timeout 600 bash -c "$(declare -f L); L launch $IMAGE $VM --vm -c limits.cpu=4 -c limits.memory=8GiB -d root,size=40GiB" </dev/null >"$OUT/launch.log" 2>&1 \
   || { bad "launch a fresh $IMAGE VM ($(tail -1 "$OUT/launch.log"))"; exit 1; }
+VM_STARTED=1
 # Wait for cloud-init where the image has it (Ubuntu's, debian/12/cloud); a
-# plain image has none and is ready once it answers.
+# plain image has none and is ready once it answers. One command asks both: a
+# failed "has it cloud-init?" could mean the VM's agent was not up yet, and the
+# next answer then ended the wait with cloud-init still at work (HB-0381).
+READY=0; ANSWERED=0; WAITING="its agent never answered"
+WAIT_FROM=$SECONDS
+# How long it really took: a busy machine's lxc can take its whole time limit on every try.
+waited() { local s=$((SECONDS - WAIT_FROM)); if [ "$s" -lt 120 ]; then echo "$s seconds"; else echo "$((s / 60)) minutes"; fi; }
 for _ in $(seq 1 60); do
-  if L exec "$VM" -- sh -c 'command -v cloud-init' >/dev/null 2>&1; then L exec "$VM" -- cloud-init status 2>/dev/null | grep -q done && break
-  else L exec "$VM" -- true >/dev/null 2>&1 && break; fi
+  P="$(Lt 30 exec "$VM" -- sh -c 'if command -v cloud-init >/dev/null 2>&1; then echo "cloud-init $(cloud-init status 2>/dev/null)"; else echo "no cloud-init"; fi' 2>/dev/null)"
+  case "$P" in
+    "no cloud-init"|"cloud-init "*done*|"cloud-init "*disabled*) READY=1; break ;;
+    # It has finished and will not change. Whether the VM is usable, the next steps show.
+    "cloud-init "*error*) READY=1; echo "  $P: going on"; break ;;
+    "cloud-init "*) ANSWERED=1; WAITING="$P" ;;
+    *) [ "$ANSWERED" = 0 ] || WAITING="its agent stopped answering"; vm_stopped && vm_failed "the VM stopped by itself" ;;
+  esac
   sleep 5
 done
+[ "$READY" = 1 ] || vm_failed "the VM was not ready after 60 tries, $(waited) ($WAITING)"
 ok "fresh $IMAGE VM ($(L exec "$VM" -- uname -m), $(L exec "$VM" -- getconf GNU_LIBC_VERSION))"
 
-if ! L exec "$VM" -- sh -c 'timeout 8 ping -c1 -W5 1.1.1.1 >/dev/null 2>&1'; then
-  bad "the VM has no internet"
-  echo
-  echo "  On a machine that runs Docker, its firewall drops LXD's bridge. Once per boot:"
-  echo "    sudo iptables -I DOCKER-USER -i lxdbr0 -j ACCEPT"
-  echo "    sudo iptables -I DOCKER-USER -o lxdbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+# A network can come up a little after boot, more so on a busy machine: 24 tries
+# before calling it absent, two minutes at the least and longer when pings are dropped.
+ONLINE=0; WAIT_FROM=$SECONDS
+for _ in $(seq 1 24); do
+  Lt 20 exec "$VM" -- sh -c 'timeout 8 ping -c1 -W5 1.1.1.1 >/dev/null 2>&1' 2>/dev/null && { ONLINE=1; break; }
+  vm_stopped && vm_failed "the VM stopped by itself"
+  sleep 5
+done
+if [ "$ONLINE" = 0 ]; then
+  bad "the VM has no internet (24 pings, $(waited))"
+  net_why
   exit 1
 fi
 # What the image already has (Ubuntu's cloud image ships git), so "gained" means gained.
@@ -164,8 +259,9 @@ QS=$(sed 's/\r//g' "$OUT"/install-*.log | grep -c '\[y/N\] y')
 vmi 'hatchabot doctor' >"$OUT/doctor.log"
 grep -q "^All good" "$OUT/doctor.log" && ok "hatchabot doctor: $(grep '^All good' "$OUT/doctor.log")" || bad "hatchabot doctor — $(grep '^✗' "$OUT/doctor.log" | sed -n 1,2p | tr '\n' ' ')"
 vmi 'hbt help | sed -n 1p' | grep -q 'hbt is the same command' && ok "hatchabot and hbt are on the PATH" || bad "hbt is not on the PATH"
-# doctor says "Release vX", or "Running vX, but vY is available locally".
-ver() { grep -oE '(Release|Running) v[0-9.]+' | sed -n 1p | grep -oE 'v[0-9.]+'; }
+# doctor says "Release vX", or "Running vX, but vY is available locally". The
+# whole tag: cut at the suffix, a run of v2.132.0-test read as a pass on v2.132.0.
+ver() { grep -oE '(Release|Running) v[0-9][0-9A-Za-z.+-]*' | sed -n 1p | cut -d' ' -f2; }
 REL=$(ver <"$OUT/doctor.log")
 
 cat >"$OUT/firstrun.sh" <<'EOF'
@@ -248,6 +344,10 @@ EOF
   fi
 fi
 
+# A step that prints nothing when the VM has gone counts nothing either.
+vm_stopped && vm_failed "the VM stopped by itself"
+
+# live.mjs reads this line: the version here is the one the run ended on (HB-0378).
 echo
 echo "── $PASS passed, $FAIL failed · ${REL:-release unknown} · logs: $OUT ──"
 printf '%s\n' "${RESULTS[@]}" >"$OUT/summary.txt"

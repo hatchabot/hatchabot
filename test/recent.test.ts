@@ -272,6 +272,17 @@ describe('the tracker', () => {
     await t.note({ id: 'a1', slug: 'k' }, s);
     expect(exec).toHaveBeenCalledTimes(1);
   });
+  it('never rejects: a sessions file holding no object, and a store that throws (HB-0374)', async () => {
+    const { t, db } = make(JSON.stringify({ v: 1, s: { 'agent:k:main': { role: 'assistant', text: 'hello' } } }));
+    await t.note({ id: 'a1', slug: 'k' }, { 'agent:k:main': { updatedAt: NOW - MIN } });
+    const saved = db.get('a1');
+    expect(saved).toBeDefined();
+    // `k in 5` throws, and note() is called with `void`.
+    for (const junk of [5, 'text', true]) await expect(t.note({ id: 'a1', slug: 'k' }, junk as unknown as Record<string, unknown>)).resolves.toBeUndefined();
+    expect(db.get('a1')).toBe(saved);
+    const full = new RecentTracker({ get: () => undefined, set: () => { throw new Error('disk full'); }, exec: async () => ({ code: 0, stdout: '' }), now: () => NOW });
+    await expect(full.note({ id: 'a1', slug: 'k' }, {})).resolves.toBeUndefined();
+  });
   it('a failed read marks nothing as read', async () => {
     const { t, exec } = make('');
     await t.note({ id: 'a1', slug: 'k' }, { 'agent:k:main': { updatedAt: NOW - MIN } });

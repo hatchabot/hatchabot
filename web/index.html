@@ -1542,6 +1542,10 @@
   </section>
 
   <section id="paneEditEnv" role="tabpanel" hidden>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+      <button id="agentSearchTestBtn" onclick="testAgentSearch()" title="Runs a real search in this agent, which spends one query if it uses a key">🔎 Test web search</button>
+      <span id="agentSearchTestOut" class="sub" aria-live="polite"></span>
+    </div>
     <details class="sec-drawer" id="envDrawer">
       <summary><b>🔑 Extra credentials</b> <span class="sub">— for the agent's own tools, not its AI. Most agents need none.</span></summary>
     <div id="envList" style="margin-top:8px"></div>
@@ -1694,6 +1698,9 @@
         here and the whole fleet upgrades to Brave on each agent's next
         <b>Rebuild</b> — better results, proper rate limits. A per-agent
         <code>BRAVE_API_KEY</code> env var overrides it (its own quota).
+        When the key runs out, agents move to DuckDuckGo by themselves and back when
+        its quota returns, with no rebuild. Hatchabot checks every few hours, spending one query each time.
+        A new key reaches each agent at its next <b>Rebuild</b>; until then it uses DuckDuckGo, even if the old key still works.
         <b>Shared credential</b> — same caveats as the media key.
       </div>
       <div id="searchKeyStatus" style="margin-top:8px;font-size:14px"></div>
@@ -1701,6 +1708,16 @@
         <input type="password" id="searchKey" placeholder="Brave Search API key" autocomplete="off" style="flex:1;min-width:0">
         <button id="searchKeySaveBtn" onclick="saveSearchKey()">Save</button>
         <button id="searchKeyDelBtn" onclick="removeSearchKey()" style="display:none">Remove</button>
+      </div>
+      <div id="searchHealth" style="margin-top:10px"></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+        <button id="searchTestBtn" onclick="testFleetSearch()" title="Spends one Brave query">🔎 Test search</button>
+        <label class="sub" style="display:flex;gap:6px;align-items:center">Use
+          <select id="searchMode" onchange="setSearchMode(this.value)">
+            <option value="auto">Brave, and DuckDuckGo when it runs out</option>
+            <option value="duckduckgo">DuckDuckGo only</option>
+          </select>
+        </label>
       </div>
     </details>
 
@@ -3079,14 +3096,24 @@ async function sfStartTotp(btn) {
   } catch (e) { sfFail(e); }
   finally { btn.disabled = false; }
 }
+/** The "Add an authenticator app" box, shut, with its secret gone from the page. */
+function sfCloseTotp() {
+  $('sfTotpBox').hidden = true; delete $('sfTotpBox').dataset.id;
+  $('sfTotpQr').innerHTML = ''; $('sfTotpSecret').textContent = ''; $('sfTotpCode').value = '';
+}
 async function sfConfirmTotp() {
   $('sfTotpConfirmBtn').disabled = true;
   try {
     const r = await api('/v1/second-factor/totp/confirm', { method: 'POST', body: { id: $('sfTotpBox').dataset.id, code: $('sfTotpCode').value.trim() } });
-    $('sfTotpBox').hidden = true; $('sfTotpQr').innerHTML = ''; $('sfTotpSecret').textContent = '';
+    sfCloseTotp();
     toast('Authenticator app added');
     await sfAfterChange(r);
-  } catch (e) { sfFail(e); }
+  } catch (e) {
+    // 409: this setup is gone on the server (a factor removed or reset, or
+    // another app started, in another tab). No code can finish it now (HB-0375).
+    if (e.status === 409) sfCloseTotp();
+    sfFail(e);
+  }
   finally { $('sfTotpConfirmBtn').disabled = false; }
 }
 async function sfAddPasskey(btn) {
@@ -3119,8 +3146,15 @@ async function sfNewBackupCodes(btn) {
 async function sfRemove(btn) {
   if (!confirm('Remove this second factor?')) return;
   btn.disabled = true;
-  try { await api('/v1/second-factor/' + encodeURIComponent(btn.dataset.id), { method: 'DELETE', body: sfProof() }); toast('Removed'); await sfAfterChange(); }
-  catch (e) { sfFail(e); btn.disabled = false; }
+  try {
+    await api('/v1/second-factor/' + encodeURIComponent(btn.dataset.id), { method: 'DELETE', body: sfProof() });
+    // Removing a factor cancels an app still being added: its box goes too, and
+    // says so, or a code typed there could only be refused (HB-0375).
+    const adding = !$('sfTotpBox').hidden;
+    if (adding) sfCloseTotp();
+    toast(adding ? 'Removed. That cancelled the authenticator app you were adding: add it again.' : 'Removed', adding ? 8000 : undefined);
+    await sfAfterChange();
+  } catch (e) { sfFail(e); btn.disabled = false; }
 }
 
 /** Settings → You → Reach it from anywhere (the machine's owner, at the private address). */
@@ -4467,16 +4501,58 @@ async function loadSearchKey() {
     const el = $('searchKeyStatus');
     if (r.set) {
       el.style.color = 'var(--ok)';
-      el.innerHTML = '✓ <b>Fleet search key set</b> — agents use Brave on their next Rebuild. <button class="hbtn" onclick="revealFleetKey(\'search\', this)">Show</button> <code id="fleetkey-search" style="display:none;user-select:all;word-break:break-all"></code> <span class="sub">Paste a new one to replace.</span>';
+      el.innerHTML = '✓ <b>Fleet search key set</b> — agents holding it use Brave; others get it at their next Rebuild. <button class="hbtn" onclick="revealFleetKey(\'search\', this)">Show</button> <code id="fleetkey-search" style="display:none;user-select:all;word-break:break-all"></code> <span class="sub">Paste a new one to replace.</span>';
       $('searchKey').placeholder = 'Replace key…';
     } else {
       el.style.color = 'var(--dim)';
-      el.innerHTML = 'No key — agents use the keyless DuckDuckGo baseline.';
+      el.innerHTML = 'No key — agents use DuckDuckGo, which needs none.';
       $('searchKey').placeholder = 'Brave Search API key';
     }
     $('searchKeyDelBtn').style.display = r.set ? '' : 'none';
     if (r.set) $('searchKeyDrawer')?.setAttribute('open', ''); // don't hide a live key
+    loadSearchHealth();
   } catch { /* not the host owner — leave inert */ }
+}
+let searchHealthTimer;
+const SEARCH_NAMES = { brave: 'Brave', duckduckgo: 'DuckDuckGo' };
+function renderSearchHealth(s) {
+  const row = (p) => p ? `<div>${p.status === 'ok' ? '✓' : '⚠'} ${esc(p.detail)}</div>` : '';
+  const when = (t) => t ? new Date(t).toLocaleString() : '';
+  $('searchHealth').innerHTML = `<div style="font-size:14px">In use: <b>${esc(SEARCH_NAMES[s.active] || s.active)}</b>${s.why ? ` — ${esc(s.why)}` : ''}</div>
+    <div class="sub">${row(s.brave)}${row(s.duckduckgo)}
+    ${s.checkedAt ? `<div>Checked ${esc(when(s.checkedAt))}${s.brave?.resetsAt && s.active !== 'brave' ? `; Brave's quota returns about ${esc(when(s.brave.resetsAt))}` : ''}.</div>` : '<div>Not checked yet.</div>'}
+    ${s.moving ? '<div>Agents are moving now.</div>' : ''}
+    ${s.applied?.rebuild ? `<div>⚠ ${s.applied.rebuild} on DuckDuckGo until their next Rebuild, which gives them this key.</div>` : ''}
+    ${s.applied?.failed?.length ? `<div>⚠ Not moved yet, tried again soon: ${esc(s.applied.failed.join(', '))}.</div>` : ''}</div>`;
+  $('searchMode').value = s.mode || 'auto';
+  // Agents move after the check answers: look again until they are done, while this is on screen.
+  clearTimeout(searchHealthTimer);
+  if (s.moving && !window.__noAutoPoll) searchHealthTimer = setTimeout(() => { if ($('searchHealth').offsetParent) loadSearchHealth(); }, 5000);
+}
+async function loadSearchHealth() {
+  try { renderSearchHealth(await api('/v1/web-search')); } catch { /* not the host owner */ }
+}
+async function testFleetSearch() {
+  const btn = $('searchTestBtn');
+  btn.disabled = true;
+  try { renderSearchHealth(await api('/v1/web-search/check', { method: 'POST' })); }
+  catch (e) { toast(e.message, 10000); }
+  finally { btn.disabled = false; }
+}
+async function setSearchMode(mode) {
+  try { renderSearchHealth(await api('/v1/web-search', { method: 'PUT', body: { mode } })); }
+  catch (e) { toast(e.message, 10000); loadSearchHealth(); }
+}
+/** A real search in this agent, through its own settings and keys. */
+async function testAgentSearch() {
+  const btn = $('agentSearchTestBtn'), out = $('agentSearchTestOut');
+  btn.disabled = true;
+  out.textContent = 'Searching…';
+  try {
+    const r = await api(`/v1/agents/${editAgentId}/search-test`, { method: 'POST' });
+    out.textContent = `${r.ok ? '✓' : '⚠'} ${r.detail}`;
+  } catch (e) { out.textContent = `⚠ ${e.message}`; }
+  finally { btn.disabled = false; }
 }
 async function saveSearchKey() {
   const key = $('searchKey').value.trim();
@@ -4484,12 +4560,12 @@ async function saveSearchKey() {
   try {
     await api('/v1/search-key', { method: 'PUT', body: { key } });
     $('searchKey').value = '';
-    toast('Search key saved — agents upgrade to Brave on their next Rebuild.', 10000);
+    toast('Search key saved — agents use it from their next Rebuild, and DuckDuckGo until then.', 10000);
     loadSearchKey();
   } catch (e) { toast(e.message, 10000); }
 }
 async function removeSearchKey() {
-  if (!confirm('Remove the fleet search key? Agents fall back to DuckDuckGo on their next Rebuild.')) return;
+  if (!confirm('Remove the fleet search key? Agents move to DuckDuckGo within a few minutes.')) return;
   try { await api('/v1/search-key', { method: 'DELETE' }); loadSearchKey(); }
   catch (e) { toast(e.message, 10000); }
 }
@@ -4785,7 +4861,8 @@ async function saveMachineDefault(key, input) {
   try {
     const r = await api('/v1/machine-defaults', { method: 'PUT', body: { key, value: input.value } });
     input.value = r.default.value;
-    toast(`Saved${r.applied ? ` — applied to ${r.applied} ${key === 'engineMemory' ? 'service' : `agent${r.applied === 1 ? '' : 's'}`}` : ''}.`);
+    const gone = r.volumeGone?.length ? ` Not on ${r.volumeGone.join(', ')}: its stored files are not on its machine (the volume is gone).` : '';
+    toast(`Saved${r.applied ? ` — applied to ${r.applied} ${key === 'engineMemory' ? 'service' : `agent${r.applied === 1 ? '' : 's'}`}` : ''}.${gone}`, gone ? 8000 : undefined);
   } catch (e) { toast(e.message, 6000); }
 }
 async function loadHosts() {
@@ -6067,8 +6144,10 @@ async function applyModelToSelected() {
     const bits = [];
     if (r.live) bits.push(`${r.live} switched live`);
     if (r.staged) bits.push(`${r.staged} stopped agent${r.staged > 1 ? 's' : ''} updated for next start`);
-    const later = (r.applied || 0) - (r.live || 0) - (r.staged || 0);
+    const later = (r.applied || 0) - (r.live || 0) - (r.staged || 0) - (r.volumeGone || 0);
     if (later > 0) bits.push(`${later} apply on next rebuild`);
+    // Not "next rebuild": a rebuild would make a fresh, empty volume (HB-0373).
+    if (r.volumeGone) bits.push(`${r.volumeGone} not changed: ${r.volumeGone > 1 ? 'their volumes are' : 'its volume is'} gone (see its page before you rebuild)`);
     if (r.held) bits.push(`${r.held} kept on their own model`);
     // Ticked, but its runtime is too old for the model on a Claude plan: kept on its own (HB-0232).
     const notSw = r.notSwitched || [];
@@ -6195,9 +6274,16 @@ function renderRuntimeList() {
       : t.relation === 'newer' ? '<b>candidate</b><div class="sub">newer than the default</div>'
       : t.relation === 'older' ? 'older build<div class="sub">a previous default</div>'
       : t.exists ? 'candidate' : '<b>not built</b><div class="sub">on this machine</div>';
-    const pins = t.pinned.map(a => `<span class="chip" title="${esc(a.state)}">${a.mine ? '' : '👥 '}${a.state === 'REBUILDING' ? '↻ rebuilding · ' : ''}${esc(a.name)}${a.mine && a.state !== 'ARCHIVED' ? ` <a href="#" title="Discard the trial: unpin and rebuild on the fleet default" onclick="event.preventDefault();discardTrial('${a.id}','${jsq(a.name)}')">✕</a>` : ''}</span>`).join(' ');
-    const cls = t.classes.map(c => `<span class="chip">🏷 ${esc(c.name)}</span>`).join(' ');
-    const who = t.isDefault ? `<b>${d.unpinned.length}</b> agent${d.unpinned.length === 1 ? '' : 's'} <span class="sub">with no pin</span>` : (pins || cls) ? `${pins}${pins && cls ? ' ' : ''}${cls}` : '<span class="sub">nothing</span>';
+    const pins = t.pinned.map(a => `<span class="chip" title="${esc(a.state)}">${a.mine ? '' : '👥 '}${a.state === 'REBUILDING' ? '↻ rebuilding · ' : ''}${esc(a.name)}${a.state === 'ARCHIVED' ? ' · archived' : ''}${a.runner ? ` · on ${esc(a.runner)}` : ''}${a.mine && a.state !== 'ARCHIVED' ? ` <a href="#" title="Discard the trial: unpin and rebuild on the fleet default" onclick="event.preventDefault();discardTrial('${a.id}','${jsq(a.name)}')">✕</a>` : ''}</span>`).join(' ');
+    const cls = t.classes.map(c => `<span class="chip">${c.mine === false ? '👥 ' : ''}🏷 ${esc(c.name)}</span>`).join(' ');
+    // Pins and classes have their chips above; these are the rest of what blocks a delete.
+    const blockers = t.blockers ?? [];
+    const held = blockers.filter(b => b.kind !== 'pin' && b.kind !== 'class').map(b => `<span class="chip" title="${esc(b.fix)}">${b.mine ? '' : '👥 '}${esc(b.name)} · ${esc(b.label)}</span>`).join(' ');
+    const fixes = [...new Set(blockers.map(b => b.fix))].map(f => `<div class="sub">${esc(f)}</div>`).join('');
+    // "nothing" promises the delete works, so it needs Docker's answer about containers.
+    const unchecked = d.containersChecked === false && t.exists ? '<div class="sub">Containers could not be checked: Docker did not answer.</div>' : '';
+    const holders = [pins, cls, held].filter(Boolean).join(' ');
+    const who = t.isDefault ? `<b>${d.unpinned.length}</b> agent${d.unpinned.length === 1 ? '' : 's'} <span class="sub">with no pin</span>` : holders ? `${holders}${fixes}${unchecked}` : unchecked || '<span class="sub">nothing</span>';
     const canPromote = t.exists && !t.isDefault && !t.isLatest && !t.derived;
     const canDelete = t.exists && !t.isDefault && !t.derived;
     const key = t.tag.replace(/[^a-z0-9]/gi, '_');
@@ -6206,7 +6292,7 @@ function renderRuntimeList() {
       t.exists && !t.isDefault ? `<button onclick="tryOnAgent('${jsq(t.tag)}')" title="Try it on one agent: pin that agent to this image and rebuild it (memory kept)">🧪</button>` : '',
       canPromote ? `<button class="primary" onclick="promoteImage('${jsq(t.tag)}')" title="Point the fleet default at this image; agents without a pin pick it up on their next rebuild">⬆ Promote</button>` : '',
       t.derived ? `<button onclick="rebuildDerivedImage('${jsq(t.derived.name)}').then(loadRuntimeImages)" title="Build it again from its Dockerfile lines">↻</button><button onclick="showDerivedLog('${jsq(t.derived.name)}')">Log</button><button class="danger" onclick="deleteDerivedImage('${jsq(t.derived.name)}').then(loadRuntimeImages)" title="Delete this derived image">🗑</button>` : '',
-      canDelete ? `<button class="danger" onclick="deleteImageTag('${jsq(t.tag)}')" title="Delete this tag (refused while anything is pinned to it or a container still runs on it)">🗑</button>` : '',
+      canDelete ? `<button class="danger" onclick="deleteImageTag('${jsq(t.tag)}')" title="Delete this tag (refused while Used by lists anything)">🗑</button>` : '',
     ].join('');
     const under = mislabelled
       + (t.exists ? `<pre id="rtHist_${key}" hidden style="margin:6px 0 0;max-height:260px;overflow:auto;font-size:11px;white-space:pre-wrap;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px"></pre>` : '')
@@ -6238,7 +6324,7 @@ async function toggleImageDetails(tag, key) {
   } catch (e) { pre.textContent = e.message; }
 }
 async function deleteImageTag(tag) {
-  if (!confirm(`Remove the tag ${tag} from this machine?\n\nRefused if an agent is pinned to it or a container still runs on it. Layers shared with other images are kept.`)) return;
+  if (!confirm(`Remove the tag ${tag} from this machine?\n\nRefused while anything under Used by holds it. Layers shared with other images are kept.`)) return;
   try { await api(`/v1/runtime/images/${encodeURIComponent(tag)}`, { method: 'DELETE' }); toast(`Removed ${tag}.`); await loadRuntimeImages(); }
   catch (e) { $('rtErr').textContent = e.message; }
 }
@@ -7673,13 +7759,27 @@ async function renderConnections() {
     const { accounts } = await api(`/v1/agents/${forId}/connections`);
     if (editAgentId !== forId) return; // dialog moved on while we fetched
     el.innerHTML = accounts.length
-      ? accounts.map(a => `<div class="pair"><span class="grow"><b class="pii">${esc(a.email)}</b>
-          <span class="sub">${esc(a.auth)}${a.client && a.client !== 'default' ? ` · client: ${esc(a.client)}` : ''}</span></span>
+      ? accounts.map((a, i) => `<div class="pair"><span class="grow"><b class="pii">${esc(a.email)}</b>
+          <span class="sub">${esc(a.auth)}${a.client && a.client !== 'default' ? ` · client: ${esc(a.client)}` : ''}</span>
+          <span id="connGmailOut${i}" class="sub" role="status" style="display:block"></span></span>
+          ${!a.services || a.services.includes('gmail') ? `<button title="Checks the sign-in and asks Gmail for the inbox's counts, from inside the agent. Reads no mail and sends nothing." onclick="testAgentGmail(this, '${jsq(a.email)}', ${i})">Test Gmail</button>` : ''}
           <button class="danger" title="Takes this agent's access away at once; the Google account itself is untouched" onclick="disconnectAccount('${jsq(a.email)}')">Disconnect</button></div>`).join('')
       : 'None yet — attach one above, or ask the agent to connect its own.';
   } catch (e) {
     if (editAgentId === forId) el.innerHTML = esc(e.message);
   }
+}
+
+/** Real calls at Google from inside this agent, for one account. */
+async function testAgentGmail(btn, email, i) {
+  const forId = editAgentId, out = $(`connGmailOut${i}`);
+  btn.disabled = true;
+  out.textContent = 'Testing…';
+  try {
+    const r = await api(`/v1/agents/${forId}/connections/${encodeURIComponent(email)}/test`, { method: 'POST' });
+    out.textContent = `${r.ok ? '✓' : '⚠'} ${r.detail}`;
+  } catch (e) { out.textContent = `⚠ ${e.message}`; }
+  finally { btn.disabled = false; }
 }
 
 async function attachConnection() {
@@ -8251,6 +8351,7 @@ async function removeDataSource(id) {
 }
 
 function renderEnvList(vars) {
+  $('agentSearchTestOut').textContent = ''; // what it said was about the agent shown before
   const list = vars ?? [];
   $('envList').innerHTML = list.length
     ? list.map(v => `<div class="pair"><span class="grow">🔑 <code>${esc(v.name)}</code>
@@ -14262,7 +14363,7 @@ async function v2LoadBrowser(id) {
   } catch { if (el) el.textContent = ''; }
 }
 async function v2SetAgentPolicy(id, body) {
-  try { await api(`/v1/agents/${id}`, { method: 'PATCH', body }); toast('Saved.'); await refresh(false); }
+  try { const r = await api(`/v1/agents/${id}`, { method: 'PATCH', body }); r?.filesCapPending ? toast(r.filesCapPending, 8000) : toast('Saved.'); await refresh(false); }
   catch (e) { toast(e.message, 6000); await refresh(false); }
 }
 /** Slack creates an app from a manifest given in the address: no copy, no paste. */
@@ -14555,7 +14656,9 @@ async function v2IconIdeas(btn) {
       `<button type="button" data-emoji="${esc(i.icon)}" data-color="${esc(i.color)}" style="--tint:${esc(i.color)}" aria-label="${esc(i.icon)}" aria-pressed="false">${esc(i.icon)}</button>`).join(''));
     $('v2IconIdeasBox').hidden = !v2IconIdeasShown.length;
     $('v2IconNote').textContent = r.via === 'keywords'
-      ? (r.why === 'no-ai' ? 'None of your AI sources can make ideas (that takes a Claude source of your own, in ⚙ Settings)' : 'The management AI didn’t answer (busy, or out of its limit)')
+      ? (r.why === 'no-ai' ? 'None of your AI sources can make ideas (that takes a Claude source of your own, in ⚙ Settings)'
+        : r.why === 'ai-no-ideas' ? 'The management AI answered, but no ideas could be read from its answer'
+        : 'The management AI didn’t answer (busy, or out of its limit)')
         + (ideas.length ? `, so these come from ${want ? 'your words and ' : ''}its name. ` : '. ')
         + 'You can also paste any emoji in the box above.'
       : ideas.length ? 'Pick one, then Save. Press ✨ again for different ones.'

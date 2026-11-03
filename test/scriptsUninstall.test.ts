@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -407,6 +408,160 @@ describe('scripts/uninstall.sh and the backups (review, 2026-10-09)', () => {
     expect(existsSync(join(backups, '2026-10-02'))).toBe(true);
     expect(existsSync(join(backups, '2026-10-03'))).toBe(false);
     expect(existsSync(join(backups, '2026-10-04'))).toBe(false);
+  });
+
+  it('--backups reads the key as the backup does, not as shell: a passphrase with a $ or a quote still knows its own sets, and .env runs nothing (HB-0376)', () => {
+    const owner = (key: string) => createHash('sha256').update(`hatchabot-backup-owner\0${key}`).digest('hex').slice(0, 16);
+    for (const [line, key] of [
+      ['made-up$key-phrase', 'made-up$key-phrase'],     // sourced: $key expanded to nothing
+      ['"made-up${HOME}phrase"', 'made-up${HOME}phrase'], // sourced: the temp HOME in it
+      ["it's-made-up", "it's-made-up"],                  // sourced: an unclosed quote, and the whole line unread
+    ] as const) {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = join(dirname(w.repo), 'shared');
+      mkdirSync(join(backups, '2026-10-01'), { recursive: true });
+      writeFileSync(join(backups, '2026-10-01', 'backup-status.json'), '{}');
+      writeFileSync(join(backups, '2026-10-01', '.backup-owner'), `${owner(key)}\n`); // what backup-volumes.sh wrote
+      mkdirSync(join(backups, '2026-10-02'));
+      writeFileSync(join(backups, '2026-10-02', 'backup-status.json'), '{}');
+      writeFileSync(join(backups, '2026-10-02', '.backup-owner'), 'feedfacefeedface\n'); // the other install's
+      writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=${line}\nHATCHABOT_BACKUP_DIR=${backups}\n`);
+      const r = run(w, ['--purge', '--backups', '--yes']);
+      expect(r.stdout, line + r.stdout + r.stderr).toContain('removed 1 backup sets');
+      expect(existsSync(join(backups, '2026-10-01')), line).toBe(false);
+      expect(existsSync(join(backups, '2026-10-02')), line).toBe(true);
+    }
+    const w = purgeWorld();
+    dockerShim(w, VOLS);
+    const ran = join(dirname(w.repo), 'ran');
+    writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x$(touch ${ran})y\n`);
+    expect(run(w, ['--purge', '--yes']).status).toBe(0);
+    expect(existsSync(ran)).toBe(false);
+  });
+
+  const owner = (key: string) => createHash('sha256').update(`hatchabot-backup-owner\0${key}`).digest('hex').slice(0, 16);
+  /** A backup folder beside the install: a dated set per mark, each named by its .backup-owner. */
+  const sets = (w: ReturnType<typeof world>, marks: string[]) => {
+    const backups = join(dirname(w.repo), 'shared');
+    marks.forEach((mark, i) => {
+      const d = join(backups, `2026-10-0${i + 1}`);
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, 'backup-status.json'), '{}');
+      writeFileSync(join(d, '.backup-owner'), `${mark}\n`);
+    });
+    return backups;
+  };
+  const onMac = (w: ReturnType<typeof world>) => writeFileSync(join(w.bin, 'uname'), '#!/usr/bin/env bash\necho Darwin\n', { mode: 0o755 });
+
+  it('--backups on Linux reads a # in the key as systemd does; a set made by hand with the cut reading is its own too', () => {
+    const w = purgeWorld();
+    dockerShim(w, VOLS);
+    const backups = sets(w, [owner('pass#word'), owner('pass'), 'feedfacefeedface']);
+    writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=pass#word\nHATCHABOT_BACKUP_DIR=${backups}\n`);
+    const r = run(w, ['--purge', '--backups', '--yes']);
+    expect(r.stdout, r.stdout + r.stderr).toContain('removed 2 backup sets');
+    expect(existsSync(join(backups, '2026-10-03'))).toBe(true);
+  });
+
+  it('a database in a folder with a # in its name is found on Linux, not left behind with its agents', () => {
+    const w = purgeWorld();
+    dockerShim(w, VOLS);
+    const data = join(dirname(w.repo), 'da#ta'); mkdirSync(data);
+    renameSync(join(w.repo, 'data', 'hatchabot.sqlite'), join(data, 'hb.sqlite'));
+    writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x\nHATCHABOT_DB=${join(data, 'hb.sqlite')}\n`);
+    const r = run(w, ['--purge', '--yes']);
+    expect(readFileSync(w.log, 'utf8')).toContain('docker volume rm hatchabot-leaky-11111111-vol');
+    expect(existsSync(join(data, 'hb.sqlite')), r.stdout + r.stderr).toBe(false);
+  });
+
+  it('a database only Node\'s reading finds (a server started by hand) is still found', () => {
+    const w = purgeWorld();
+    dockerShim(w, VOLS);
+    const data = join(dirname(w.repo), 'elsewhere'); mkdirSync(data);
+    renameSync(join(w.repo, 'data', 'hatchabot.sqlite'), join(data, 'hb.sqlite'));
+    writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x\nHATCHABOT_DB=${join(data, 'hb.sqlite')} # moved here\n`);
+    run(w, ['--purge', '--yes']);
+    expect(readFileSync(w.log, 'utf8')).toContain('docker volume rm hatchabot-leaky-11111111-vol');
+    expect(existsSync(join(data, 'hb.sqlite'))).toBe(false);
+  });
+
+  it('on a Mac it reads .env as the launchd job does: its nightly sets are its own (HB-0376)', () => {
+    const w = purgeWorld();
+    onMac(w);
+    dockerShim(w, VOLS);
+    const backups = sets(w, [owner('made-up-phrase'), owner('made-up$key-phrase'), 'feedfacefeedface']);
+    writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=made-up$key-phrase\nHATCHABOT_BACKUP_DIR=${backups}\n`);
+    const r = run(w, ['--purge', '--backups', '--yes']);
+    expect(r.stdout, r.stdout + r.stderr).toContain('removed 2 backup sets');
+    expect(existsSync(join(backups, '2026-10-01'))).toBe(false);
+    expect(existsSync(join(backups, '2026-10-03'))).toBe(true);
+  });
+
+  it('on a Mac a $HOME database and backup folder are the real ones, so a purge finds the agents and refuses with no Docker (audit #026)', () => {
+    const w = purgeWorld();
+    onMac(w);
+    mkdirSync(join(w.home, 'hbdata'));
+    renameSync(join(w.repo, 'data', 'hatchabot.sqlite'), join(w.home, 'hbdata', 'hb.sqlite'));
+    writeFileSync(join(w.repo, '.env'), 'HATCHABOT_SECRET_KEY=x\nHATCHABOT_DB=$HOME/hbdata/hb.sqlite\nHATCHABOT_BACKUP_DIR=$HOME/hbbackups\n');
+    writeFileSync(join(w.bin, 'docker'), '#!/usr/bin/env bash\nexit 1\n', { mode: 0o755 });
+    const refused = run(w, ['--purge', '--yes']);
+    expect(refused.status, refused.stdout + refused.stderr).toBe(2);
+    expect(refused.stdout).toMatch(/Docker is not answering/);
+    expect(existsSync(join(w.repo, '.env'))).toBe(true);
+    dockerShim(w, VOLS);
+    mkdirSync(join(w.home, 'hbbackups', '2026-10-01'), { recursive: true });
+    writeFileSync(join(w.home, 'hbbackups', '2026-10-01', 'backup-status.json'), '{}');
+    const r = run(w, ['--purge', '--backups', '--yes']);
+    expect(readFileSync(w.log, 'utf8')).toContain('docker volume rm hatchabot-leaky-11111111-vol');
+    expect(existsSync(join(w.home, 'hbdata', 'hb.sqlite')), r.stdout + r.stderr).toBe(false);
+    expect(existsSync(join(w.home, 'hbbackups', '2026-10-01'))).toBe(false);
+  });
+
+  it('--purge takes the copy a killed move left, with or without --backups, even when the data folder stays (HB-0388)', () => {
+    for (const args of [['--purge', '--yes'], ['--purge', '--backups', '--yes']]) {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const shared = join(w.home, 'shared');   // not named as Hatchabot's own, so the folder stays
+      const copies = join(shared, 'move-copies');
+      mkdirSync(copies, { recursive: true }); writeFileSync(join(copies, 'copy.tgz.part'), 'made-up volume');
+      copyFileSync(join(w.repo, 'data', 'hatchabot.sqlite'), join(shared, 'hb.sqlite'));
+      writeFileSync(join(shared, 'other.txt'), 'not hatchabot');
+      writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x\nHATCHABOT_DB=${join(shared, 'hb.sqlite')}\n`);
+      const r = run(w, args);
+      expect(existsSync(copies), r.stdout + r.stderr).toBe(false);
+      expect(existsSync(join(shared, 'other.txt'))).toBe(true);
+      expect(r.stdout).toContain('removed the copy a move that was cut off left');
+    }
+  });
+
+  it('a killed restore\'s copy goes only with --backups, and never another install\'s or an unmarked folder', () => {
+    for (const [args, gone] of [[['--purge', '--yes'], false], [['--purge', '--backups', '--yes'], true]] as const) {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = join(dirname(w.repo), 'shared');
+      const mine = join(backups, `restore-safety-${owner('x')}`), theirs = join(backups, 'restore-safety-feedfacefeedface'), old = join(backups, 'restore-safety');
+      for (const d of [mine, theirs, old]) { mkdirSync(d, { recursive: true }); writeFileSync(join(d, 'copy.tgz'), 'made-up volume'); }
+      writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x\nHATCHABOT_BACKUP_DIR=${backups}\n`);
+      const r = run(w, [...args]);
+      expect(existsSync(mine), r.stdout + r.stderr).toBe(!gone);
+      expect(existsSync(join(theirs, 'copy.tgz'))).toBe(true);
+      expect(existsSync(join(old, 'copy.tgz'))).toBe(true);
+      expect(r.stdout).toContain(`kept ${old}:`);
+      expect(r.stdout).toContain(`kept ${theirs}:`);
+      expect(r.stdout.includes(`kept ${mine}:`)).toBe(!gone);
+    }
+  });
+
+  it('--purge --backups leaves no folder behind for a copy that was the only thing left in it', () => {
+    const w = purgeWorld();
+    dockerShim(w, VOLS);
+    const backups = join(dirname(w.repo), 'mine');
+    const mine = join(backups, `restore-safety-${owner('x')}`);
+    mkdirSync(mine, { recursive: true }); writeFileSync(join(mine, 'copy.tgz'), 'made-up volume');
+    writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x\nHATCHABOT_BACKUP_DIR=${backups}\n`);
+    const r = run(w, ['--purge', '--backups', '--yes']);
+    expect(existsSync(backups), r.stdout + r.stderr).toBe(false);
   });
 
   it('--purge without --backups keeps a backup folder that sits inside the data folder', () => {

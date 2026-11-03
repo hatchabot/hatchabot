@@ -299,7 +299,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     // shown cancels it. Said, not "the code is not right" (HB-0297).
     if (!row) {
       api.throttle.noteFailure(req, bucket, '2fa');
-      return reply.code(409).send({ error: 'This setup was cancelled: your second factors changed since the code was shown. Close it and add the app again.' });
+      return reply.code(409).send({ error: 'This setup was cancelled: your second factors changed since the code was shown. Add the app again.' });
     }
     if (step === undefined) {
       api.throttle.noteFailure(req, bucket, '2fa');

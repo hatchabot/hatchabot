@@ -1,3 +1,4 @@
+import { sweepMoveCopies } from './orchestrator/backups.js';
 import { whileBusy } from './orchestrator/busy.js';
 import { ensureOpsServer } from './ops/opsServer.js';
 import { opsToolsFingerprint } from './ops/opsTools.js';
@@ -161,6 +162,13 @@ for (const p of new Set(providers.values())) {
     .then((n) => { if (n) app.log.warn({ provider: p.key, removed: n }, 'removed leftover volume one-shots'); })
     .catch((err) => app.log.error({ err: String(err) }, 'one-shot sweep failed'));
 }
+
+// Copies of a volume a move held when the process ended: they hold an agent's
+// secrets, and no move runs yet. On disk in the data folder, read by nothing.
+try {
+  const n = sweepMoveCopies();
+  if (n) app.log.warn({ removed: n }, 'removed leftover move copies');
+} catch (err) { app.log.error({ err: String(err) }, 'move copy sweep failed'); }
 
 // Bot-token secrets no table references anymore are dead weight holding a live
 // credential (a failed best-effort pool release on delete leaks them). All
@@ -370,7 +378,7 @@ if (app.publicAccess?.config().on) {
   void syncEnvFile(envPath).then((r) => {
     if (r.error && !/can't read/.test(r.error)) app.log.warn({ error: r.error }, 'env.sync_refused');
     else if (r.changed) app.log.info({ backup: r.backup }, 'env.synced');
-  });
+  }).catch((err) => app.log.warn({ err: String(err) }, 'env.sync_failed')); // a tidy that failed must not end the process (HB-0374)
 }
 // Management agents reach their tools and their AI provider only through the
 // ops server; bring it up with the control plane whenever one exists.

@@ -21,7 +21,9 @@ afterAll(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, fo
 
 /** Local midnight `days` ago as a set date. */
 const day = (days: number, now = Date.now()) => {
-  const d = new Date(now - days * 86_400_000);
+  // By the calendar: on the day the clocks go back, 24 hours ago can still be today.
+  const d = new Date(now);
+  d.setDate(d.getDate() - days);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 

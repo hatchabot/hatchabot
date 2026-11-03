@@ -13,7 +13,9 @@ import type { MgmtChatRequest, MgmtChatResponse } from './mgmtLlm.js';
  * only the model call. Tool use rides a strict text protocol: the model
  * either answers in prose or emits a single JSON object naming a tool — the
  * broker validates everything downstream, so a malformed emission costs one
- * retry turn, never a wrong action.
+ * retry turn, never a wrong action. A call with no tools (the icon pickers)
+ * is a plain completion: no protocol, and its reply is always text, so what it
+ * asked of the model's answer is the only instruction it gets.
  *
  * Credential flavors:
  *  - machine-login: spawn with the host's real HOME (~/.claude).
@@ -167,21 +169,24 @@ export async function completeViaCli(
 ): Promise<MgmtChatResponse> {
   const run = opts.runner ?? defaultRunner;
 
+  const hasTools = req.tools.length > 0;
   const toolCatalog = (req.tools as Array<{ name: string; description: string; input_schema: unknown }>)
     .map((t) => `- ${t.name}: ${t.description}\n  input schema: ${JSON.stringify(t.input_schema)}`)
     .join('\n');
   const prompt = [
     req.system,
     '',
-    'TOOLS AVAILABLE TO YOU:',
-    toolCatalog,
-    '',
-    'PROTOCOL — follow exactly:',
-    '- To call a tool, reply with ONLY one JSON object, nothing else:',
-    '  {"tool": "<name>", "input": { ... }}',
-    '- Otherwise reply in plain prose for the owner.',
-    '- Never mix prose and a tool call in one reply. One tool call at a time.',
-    '',
+    ...(hasTools ? [
+      'TOOLS AVAILABLE TO YOU:',
+      toolCatalog,
+      '',
+      'PROTOCOL — follow exactly:',
+      '- To call a tool, reply with ONLY one JSON object, nothing else:',
+      '  {"tool": "<name>", "input": { ... }}',
+      '- Otherwise reply in plain prose for the owner.',
+      '- Never mix prose and a tool call in one reply. One tool call at a time.',
+      '',
+    ] : []),
     'CONVERSATION SO FAR:',
     renderConversation(req.messages),
     '',
@@ -227,8 +232,10 @@ export async function completeViaCli(
     scratch,
   );
   let text: string;
+  let stopped: unknown;
   try {
     const parsed = JSON.parse(stdout);
+    stopped = parsed.stop_reason;
     if (parsed.is_error) throw new Error(String(parsed.result ?? 'unknown CLI error').slice(0, 400));
     // Never surface the raw JSON envelope as "prose" to the owner.
     text = typeof parsed.result === 'string' ? parsed.result : '(the model returned no text)';
@@ -236,6 +243,10 @@ export async function completeViaCli(
     if (e instanceof SyntaxError) text = stdout.trim(); // older CLI / plain output
     else throw e;
   }
+
+  // Nothing to call: a reply shaped like a tool call is still just its text.
+  // No word from the CLI stays no word: a made-up end_turn would hide a cut-off reply from the icon log.
+  if (!hasTools) return { stopReason: typeof stopped === 'string' ? stopped : '', content: [{ type: 'text', text }] };
 
   const tool = parseToolEmission(text);
   if (tool) {

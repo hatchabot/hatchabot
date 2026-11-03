@@ -399,7 +399,8 @@ repo `cksci/hatchabot-dev` is private, with no branch rules (`land.sh`
 lands every change), and its own CI runners on the main machine: every
 job runs there, `ui` too, with rootless podman for its Chrome container
 (the publish kit's `runner/containers.sh`), so dev CI spends no Actions
-minutes. The public repo's CI runs on GitHub's runners.
+minutes. The public repo's CI runs on GitHub's runners. `scripts/promote.sh` reads
+its result on the release and says so (a ⚠ line, not a gate: `public_ci_note`).
 
 ## The privacy check
 

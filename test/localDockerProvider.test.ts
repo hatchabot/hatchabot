@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { isDiskFull, VolumeGoneError, VolumeUntouchedError } from '../src/providers/provider.js';
 import { LocalDockerProvider, remoteTarget, SEED_STEP_MARK, secretValuesOf, seedFailure, seedStepLabel, tcpReachable } from '../src/providers/localDockerProvider.js';
 import { createServer, type AddressInfo } from 'node:net';
 import { GATEWAY_TOKEN } from './support/fixtures.js';
@@ -378,7 +379,7 @@ exit 0
 
 describe('HB-0333: an archive restores to the same place however its paths are spelled', () => {
   /** A docker stub that runs the import's real script, its /vol and /tmp files moved into a folder of the test's own. */
-  function importer() {
+  function importer(change = '') {
     const dd = mkdtempSync(join(tmpdir(), 'acl-import-layout-'));
     const target = join(dd, 'target');
     const scratch = join(dd, 'scratch');
@@ -389,7 +390,7 @@ const fs = require('node:fs');
 const a = process.argv.slice(2);
 if (a[0] !== 'run') process.exit(0);
 const script = a[a.length - 1].replaceAll('/tmp/s.tgz', ${JSON.stringify(join(scratch, 's.tgz'))}).replaceAll('/tmp/s.list', ${JSON.stringify(join(scratch, 's.list'))})
-  .replaceAll('/vol', ${JSON.stringify(target)}).replace('chown -R 1000:1000', 'true');
+  .replaceAll('/vol', ${JSON.stringify(target)}).replace('chown -R 1000:1000', 'true')${change};
 const r = require('node:child_process').spawnSync('/bin/sh', ['-c', script], { input: fs.readFileSync(0), env: { PATH: '/usr/bin:/bin' } });
 process.stderr.write(r.stderr ?? '');
 process.exit(r.status ?? 1);
@@ -413,6 +414,34 @@ process.exit(r.status ?? 1);
       expect(readFileSync(join(w.target, '.openclaw/agents/main/agent/SOUL.md'), 'utf8')).toBe('# soul');
       expect(existsSync(join(w.target, '.openclaw/.openclaw'))).toBe(false);
     }
+  });
+
+  describe('whether it touched the volume is known', () => {
+    const REF = 'docker://hatchabot-kitchen-helper-df918a55';
+    const keep = (w: ReturnType<typeof importer>) => writeFileSync(join(w.target, 'memory.md'), 'the memory');
+    it('a disk too full to stage the archive: untouched, and named', async () => {
+      const w = importer(`.replace(/cat > \\S+/, '{ echo "cat: write error: No space left on device" >&2; false; }')`);
+      keep(w);
+      const err = await w.p.importState(REF, w.tgz(['-C', w.tree, '.'])).catch((e) => e);
+      expect(err).toBeInstanceOf(VolumeUntouchedError);
+      expect(isDiskFull(err)).toBe(true);
+      expect(err.userMessage).toMatch(/disk of the machine it runs on is full/);
+      expect(readFileSync(join(w.target, 'memory.md'), 'utf8')).toBe('the memory');
+    });
+    it('an archive that fails its check: untouched', async () => {
+      const w = importer();
+      keep(w);
+      await expect(w.p.importState(REF, Buffer.from('not a gzip'))).rejects.toBeInstanceOf(VolumeUntouchedError);
+      expect(readFileSync(join(w.target, 'memory.md'), 'utf8')).toBe('the memory');
+    });
+    it('a failure in the extract, after the volume was emptied, does not claim so', async () => {
+      const w = importer(`.replace('tar xz --no-same-owner', 'false')`);
+      keep(w);
+      const err = await w.p.importState(REF, w.tgz(['-C', w.tree, '.'])).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(VolumeUntouchedError);
+      expect(existsSync(join(w.target, 'memory.md'))).toBe(false);
+    });
   });
 });
 
@@ -680,12 +709,55 @@ describe('exporting a volume that is not there (2026-10-09)', () => {
     await expect(listInspectableFiles(p, 'docker://hatchabot-kitchen-helper-df918a55', 'kitchen-helper')).rejects.toThrow(/volume is gone/);
   });
 
-  it('a read-only run goes on as before when the volume is there; a writable one is not asked', async () => {
+  it('a run goes on as before when the volume is there, asking first whether it reads or writes (HB-0373)', async () => {
     await provider.execShellOnVolume('docker://hatchabot-kitchen-helper-df918a55', 'true', { readOnly: true });
     expect(argv()).toMatch(/^volume inspect .*\n.*run --rm .*hatchabot-kitchen-helper-df918a55-vol:\/home\/node:ro /m);
     writeFileSync(LOG, '');
     await provider.execShellOnVolume('docker://hatchabot-kitchen-helper-df918a55', 'true');
-    expect(argv()).not.toMatch(/^volume inspect /m);
+    expect(argv()).toMatch(/^volume inspect .*\n.*run --rm .*hatchabot-kitchen-helper-df918a55-vol:\/home\/node /m);
+  });
+
+  it('a write, an upload, a download and a workspace copy all say it is gone and never make it (HB-0373)', async () => {
+    const { p, argv: seen } = noVolume();
+    const ref = 'docker://hatchabot-kitchen-helper-df918a55';
+    expect(await p.execShellOnVolume(ref, 'openclaw models set x')).toMatchObject({ code: 1, volumeMissing: true, stderr: expect.stringMatching(/volume is gone/) });
+    expect(await p.writeToVolume(ref, ['sh', '-c', 'cat > /home/node/x'], Buffer.from('x'))).toMatchObject({ code: 1, volumeMissing: true });
+    await expect(p.importWorkspace(ref, 'kitchen-helper', Buffer.from('x'))).rejects.toThrow(/does not exist/);
+    const failed = await new Promise<Error>((resolve, reject) => {
+      const s = p.streamFromVolume(ref, ['tar', 'c', '.']);
+      s.on('error', resolve);
+      s.on('end', () => reject(new Error('a download of a missing volume ended as a good, empty one')));
+      s.resume();
+    });
+    expect(failed).toBeInstanceOf(VolumeGoneError);
+    expect(seen()).not.toMatch(/^run /m);
+  });
+
+  it('a daemon that did not answer the check is not "gone"', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-novol-'));
+    const bin = join(d, 'docker');
+    writeFileSync(bin, '#!/usr/bin/env bash\nif [ "$1" = volume ]; then echo "Cannot connect to the Docker daemon" >&2; exit 1; fi\nexit 0\n', { mode: 0o755 });
+    const res = await new LocalDockerProvider({ docker: bin, image: 'test-image:latest' }).execShellOnVolume('docker://hatchabot-kitchen-helper-df918a55', 'true');
+    expect(res.code).toBe(1);
+    expect(res.volumeMissing).toBeUndefined();
+    expect(res.stderr).toMatch(/Cannot connect/);
+  });
+
+  it('a download still streams when the volume is there, and a reader gone before the check starts nothing', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-stream-'));
+    const log = join(d, 'argv.log');
+    const bin = join(d, 'docker');
+    writeFileSync(bin, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nif [ "$1" = run ]; then printf 'bytes'; fi\nexit 0\n`, { mode: 0o755 });
+    const p = new LocalDockerProvider({ docker: bin, image: 'test-image:latest' });
+    const ref = 'docker://hatchabot-kitchen-helper-df918a55';
+    const chunks: Buffer[] = [];
+    for await (const c of p.streamFromVolume(ref, ['cat', 'x'])) chunks.push(c as Buffer);
+    expect(Buffer.concat(chunks).toString()).toBe('bytes');
+    writeFileSync(log, '');
+    const gone = p.streamFromVolume(ref, ['cat', 'x']);
+    gone.destroy();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(readFileSync(log, 'utf8')).not.toMatch(/^run /m);
   });
 
   it('exports as before when the volume is there', async () => {
@@ -700,7 +772,7 @@ describe('a download stream from a volume (#178)', () => {
   function streaming(code: number) {
     const d = mkdtempSync(join(tmpdir(), 'acl-stream-'));
     const bin = join(d, 'docker');
-    writeFileSync(bin, `#!/usr/bin/env bash\nprintf 'first half'\necho 'cat: read error' >&2\nexit ${code}\n`, { mode: 0o755 });
+    writeFileSync(bin, `#!/usr/bin/env bash\nif [ "$1" = volume ]; then exit 0; fi\nprintf 'first half'\necho 'cat: read error' >&2\nexit ${code}\n`, { mode: 0o755 });
     chmodSync(bin, 0o755);
     return new LocalDockerProvider({ docker: bin, image: 'test-image:latest' });
   }

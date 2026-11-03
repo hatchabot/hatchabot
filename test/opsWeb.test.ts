@@ -27,6 +27,22 @@ describe('isPrivateAddress', () => {
 });
 
 describe('web_search / read_result', () => {
+  it('Brave out of quota: the same search comes from DuckDuckGo, and the fleet is told to check (HB-0391)', async () => {
+    let failed = 0;
+    const answered = new Map<string, number>();
+    const fetchImpl = (async (url: string) => {
+      const u = String(url);
+      answered.set(u.split('?')[0]!, (answered.get(u.split('?')[0]!) ?? 0) + 1);
+      if (u.startsWith(SEARCH)) return new Response('{}', { status: 429 });
+      return new Response('<a class="result__a" href="https://docs.example.com/d">From DuckDuckGo</a>', { status: 200 });
+    }) as unknown as typeof fetch;
+    const w = makeOpsWeb({ braveKey: async () => 'made-up', onBraveFailed: () => { failed++; }, fetchImpl, lookup: async () => ['93.184.216.34'] } as never);
+    const s = await w('o', 'web_search', { query: 'release notes' });
+    expect(s.text).toContain('From DuckDuckGo');
+    expect(answered.get(SEARCH)).toBe(1);
+    expect(failed).toBe(1);
+  });
+
   it('searches, numbers results, and reads one as text', async () => {
     const { opsWeb } = web({ [SEARCH]: results(['https://docs.example.com/a']), 'https://docs.example.com/a': () => page('<html><script>x()</script><p>Hello <b>world</b></p></html>') });
     const s = await opsWeb('o', 'web_search', { query: 'openclaw release notes' });

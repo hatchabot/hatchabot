@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 // @ts-expect-error — a plain .mjs script, no types
-import { LIVE_TESTS, committedRuns, dueFor, planRun, readRuns, resultOf, touches } from '../scripts/live.mjs';
+import { LIVE_TESTS, committedRuns, dueFor, endedOn, planRun, readRuns, resultOf, touches } from '../scripts/live.mjs';
 
 /**
  * The live tests' register (scripts/live.mjs): every test names a script that
@@ -57,7 +57,7 @@ describe('when a live test is due', () => {
   /** A repo with v1 → v2 (changes src/x.ts, the area) → v3 (changes elsewhere only). */
   function repo() {
     const dir = mkdtempSync(join(tmpdir(), 'hb-live-')); dirs.push(dir);
-    const env = { ...process.env, HOME: dir, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
+    const env = { HOME: dir, PATH: process.env.PATH ?? '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
       GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
     const git = (...a: string[]) => { const r = spawnSync('git', a, { cwd: dir, env, encoding: 'utf8' }); if (r.status !== 0) throw new Error(r.stderr); };
     git('init', '-q', '-b', 'main');
@@ -109,7 +109,7 @@ describe('when a live test is due', () => {
   });
   it('a version bump in package.json is not a change; a dependency is', () => {
     const dir = mkdtempSync(join(tmpdir(), 'hb-live-pkg-')); dirs.push(dir);
-    const env = { ...process.env, HOME: dir, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
+    const env = { HOME: dir, PATH: process.env.PATH ?? '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
       GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
     const git = (...a: string[]) => { const r = spawnSync('git', a, { cwd: dir, env, encoding: 'utf8' }); if (r.status !== 0) throw new Error(r.stderr); };
     git('init', '-q', '-b', 'main');
@@ -139,6 +139,96 @@ describe('a run\'s result', () => {
   it('privacy: an incomplete check (exit 3) is a fail, and the test checks the pre-push hook (#41, 2026-10-09)', () => {
     expect(resultOf(3, '✗ privacy: incomplete — not everything GitHub serves could be checked')).toBe('fail');
     expect(LIVE_TESTS.find((t: { name: string }) => t.name === 'privacy')!.cmd).toEqual(['node', 'scripts/privacy-check.mjs', '--public', '--check-hook']);
+  });
+});
+
+/**
+ * A clean install takes what is public, not this checkout: on 2026-10-31 three
+ * ended on v2.170.1 and were recorded as passes on v2.171.0 (HB-0378). `run` is
+ * exercised from a copy of live.mjs in a temp folder, with a stand-in for the
+ * test's script: its record and its script are the copy's, never this checkout's.
+ */
+describe('a clean install must end on the release under test (HB-0378)', () => {
+  const END = (v: string) => `✓ something\n\n── 18 passed, 0 failed · ${v} · logs: /x/y ──\ndeleted hb-clean-1\n`;
+  it('endedOn reads the last summary line, in colour too; no version is null', () => {
+    expect(endedOn(END('v2.170.1'))).toBe('v2.170.1');
+    expect(endedOn(`\x1b[32m${END('v2.170.1')}\x1b[0m`)).toBe('v2.170.1');
+    expect(endedOn(`${END('v1.0.0')}${END('v2.0.0')}`)).toBe('v2.0.0');
+    expect(endedOn(END('release unknown'))).toBeNull();
+    expect(endedOn('no summary at all')).toBeNull();
+    expect(endedOn('── 3 passed, 0 failed, 120s ──')).toBeNull(); // the regression's own line
+  });
+  it('resultOf: another version or none is a skip; the same is a pass; a non-zero exit stays a fail; without a release nothing changes', () => {
+    expect(resultOf(0, END('v2.171.0'), 'v2.171.0')).toBe('pass');
+    expect(resultOf(0, END('v2.170.1'), 'v2.171.0')).toBe('skip');
+    expect(resultOf(0, END('v2.171.0'), 'v2.171.00')).toBe('skip');
+    expect(resultOf(0, END('release unknown'), 'v2.171.0')).toBe('skip');
+    expect(resultOf(0, 'nothing', 'v2.171.0')).toBe('skip');
+    expect(resultOf(1, END('v2.171.0'), 'v2.171.0')).toBe('fail');
+    expect(resultOf(1, END('v2.170.1'), 'v2.171.0')).toBe('fail');
+    expect(resultOf(0, `SKIP: nothing to test\n${END('v2.171.0')}`, 'v2.171.0')).toBe('skip');
+    expect(resultOf(0, END('v2.170.1'))).toBe('pass');
+  });
+  it('all three clean installs are held to it, and nothing else', () => {
+    expect(tests.filter((t) => (t as { endsOnRelease?: boolean }).endsOnRelease).map((t) => t.name))
+      .toEqual(['clean-install', 'clean-install-ubuntu-2204', 'clean-install-debian-12']);
+  });
+
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+  /** `live.mjs run clean-install` from a copy, its script a stand-in saying `body`, the checkout at 2.171.0. */
+  function runIt(body: string) {
+    const root = mkdtempSync(join(tmpdir(), 'hb-live-end-')); dirs.push(root);
+    mkdirSync(join(root, 'scripts')); mkdirSync(join(root, 'docs'));
+    writeFileSync(join(root, 'scripts', 'live.mjs'), readFileSync('scripts/live.mjs'));
+    writeFileSync(join(root, 'scripts', 'clean-install-test.sh'), body);
+    writeFileSync(join(root, 'package.json'), '{"version":"2.171.0"}\n');
+    writeFileSync(join(root, 'docs', 'live-test-runs.md'), '');
+    const r = spawnSync(process.execPath, ['scripts/live.mjs', 'run', 'clean-install'], {
+      cwd: root, encoding: 'utf8',
+      env: { HOME: root, PATH: '/usr/bin:/bin', GIT_CEILING_DIRECTORIES: tmpdir(), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
+    });
+    return { code: r.status, out: r.stdout + r.stderr, rows: readRuns(readFileSync(join(root, 'docs', 'live-test-runs.md'), 'utf8')) };
+  }
+  const say = (v: string) => `echo; echo "── 18 passed, 0 failed · ${v} · logs: /x ──"; echo deleted\n`;
+
+  it('run: ended on the release: a pass', () => {
+    const r = runIt(say('v2.171.0'));
+    expect(r.rows).toEqual([expect.objectContaining({ test: 'clean-install', result: 'pass', release: 'v2.171.0', note: '' })]);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).not.toMatch(/Not a pass/);
+  }, 30_000);
+  it('run: ended on another release: recorded as a skip with why, says so, and does not exit 0', () => {
+    const r = runIt(say('v2.170.1'));
+    expect(r.rows).toEqual([expect.objectContaining({ result: 'skip', release: 'v2.171.0', note: 'ended on v2.170.1, not v2.171.0' })]);
+    expect(r.out).toMatch(/Not a pass: this run ended on v2\.170\.1, and the release under test is v2\.171\.0/);
+    expect(r.code).toBe(1);
+  }, 30_000);
+  it('run: names no version: not a pass either', () => {
+    const r = runIt(say('release unknown'));
+    expect(r.rows).toEqual([expect.objectContaining({ result: 'skip', note: 'ended on an unknown version, not v2.171.0' })]);
+    expect(r.code).toBe(1);
+  }, 30_000);
+  it('run: its own failure and its own SKIP behave as before', () => {
+    const failed = runIt(`${say('v2.170.1')}exit 1\n`);
+    expect(failed.rows).toEqual([expect.objectContaining({ result: 'fail', note: '' })]);
+    expect(failed.code).toBe(1);
+    expect(failed.out).not.toMatch(/Not a pass/);
+    const skipped = runIt('echo "SKIP: nothing to test"\n');
+    expect(skipped.rows).toEqual([expect.objectContaining({ result: 'skip', note: '' })]);
+    expect(skipped.code).toBe(0);
+    expect(skipped.out).not.toMatch(/Not a pass/);
+  }, 30_000);
+  it('a mismatch does not clear the gate: the release is still due', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-live-end-repo-')); dirs.push(dir);
+    const env = { HOME: dir, PATH: process.env.PATH ?? '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
+      GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
+    const git = (...a: string[]) => { const r = spawnSync('git', a, { cwd: dir, env, encoding: 'utf8' }); if (r.status !== 0) throw new Error(r.stderr); };
+    git('init', '-q', '-b', 'main');
+    writeFileSync(join(dir, 'install.sh'), 'x'); git('add', '.'); git('commit', '-q', '-m', 'x'); git('tag', 'v2');
+    const T = [{ name: 'alpha', cmd: ['bash', 'a.sh'], area: ['install.sh'], endsOnRelease: true }];
+    const row = { date: '2026-10-31', test: 'alpha', result: resultOf(0, END('v1'), 'v2'), release: 'v2', minutes: 2, note: '' };
+    expect(dueFor('v2', [row], T, dir)).toEqual([{ test: 'alpha', why: expect.stringMatching(/never passed/) }]);
   });
 });
 

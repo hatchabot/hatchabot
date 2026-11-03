@@ -30,6 +30,7 @@ function world() {
   // "pr-only" (a passing pull-request run on the commit, and no run for the push to main).
   // `gh run watch` answers as it does for a fine-grained token: HTTP 403 (audit #036).
   // HB_DEV_NONE: the dev repo has no run (a release from before it), the public repo answers.
+  // HB_PUBLIC_CI: the public repo's answer when it differs from the dev repo's ("unreadable": gh fails).
   // The tag's GitHub release from HB_RELEASE — "ok" (default; published, with the
   // manifest), "none" (gh fails: no release), "draft", "nomanifest".
   const bin = join(root, 'bin'); mkdirSync(bin);
@@ -41,6 +42,7 @@ case "$1 $2" in
     case "\${HB_RELEASE:-ok}" in ok) echo "false true" ;; draft) echo "true true" ;; nomanifest) echo "false false" ;; *) echo "release not found" >&2; exit 1 ;; esac ;;
   "run list")
     case "$*" in *"--repo cksci/hatchabot-dev "*) [ -z "\${HB_DEV_NONE:-}" ] || exit 0 ;; esac
+    case "$*" in *"--repo hatchabot/hatchabot "*) [ -z "\${HB_PUBLIC_CI:-}" ] || ci="$HB_PUBLIC_CI"; [ "$ci" != unreadable ] || { echo "HTTP 502" >&2; exit 1; } ;; esac
     case "$ci" in none) ;; pr-only) case "$*" in *"--event push"*) ;; *) echo "4243 completed success" ;; esac ;;
       running) echo "4242 in_progress " ;;
       running:*) if [ -f ${JSON.stringify(join(root, 'listed'))} ]; then echo "4242 completed \${ci#running:}"; else touch ${JSON.stringify(join(root, 'listed'))}; echo "4242 in_progress "; fi ;;
@@ -156,7 +158,7 @@ describe('scripts/promote.sh asks CI first (it was red for eight days unseen, 20
     expect(r.status, r.stdout + r.stderr).toBe(0);
     const log = readFileSync(join(w.root, 'gh.log'), 'utf8');
     expect(log).not.toContain('run watch');
-    expect(log.match(/gh run list/g)).toHaveLength(2);
+    expect(log.match(/gh run list --repo cksci\/hatchabot-dev/g)).toHaveLength(2);
     expect(w.channels()).toContain('"stable": "v1.1.0"');
     // One that never finishes: refused at the wait's end, said as still running, nothing changed.
     const slow = world();
@@ -175,6 +177,35 @@ describe('scripts/promote.sh asks CI first (it was red for eight days unseen, 20
     const forced = w.promote({ HB_CI: 'none', HATCHABOT_PROMOTE_IGNORE_CI: '1' }, 'v1.1.0');
     expect(forced.status, forced.stdout + forced.stderr).toBe(0);
     expect(forced.stdout).toContain('CI not checked');
+  });
+
+  it('the public repo\'s CI on the release is read and said, on its own commit; it stops nothing (HB-0379)', () => {
+    const w = world();
+    const bad = w.promote({ HB_PUBLIC_CI: 'failure' }, 'v1.1.0');
+    expect(bad.status, bad.stdout + bad.stderr).toBe(0);
+    expect(bad.stdout).toContain('✓ CI passed on v1.1.0');
+    expect(bad.stdout).toContain('⚠ CI FAILED on hatchabot/hatchabot for v1.1.0 (failure): https://github.com/hatchabot/hatchabot/actions/runs/4242');
+    expect(w.channels()).toContain('"stable": "v1.1.0"');
+    const sha = w.git(w.pub, 'rev-parse', 'v1.1.0^{commit}').trim();
+    expect(readFileSync(join(w.root, 'gh.log'), 'utf8')).toContain(`run list --repo hatchabot/hatchabot --workflow ci.yml --commit ${sha} `);
+    for (const [answer, says] of [['success', '✓ CI passed on hatchabot/hatchabot too'], ['none', '⚠ No CI run on hatchabot/hatchabot'], ['running', '⚠ CI is still running on hatchabot/hatchabot'], ['unreadable', '⚠ Could not read CI on hatchabot/hatchabot']] as const) {
+      const v = world();
+      const r = v.promote({ HB_PUBLIC_CI: answer }, 'v1.1.0');
+      expect(r.status, answer + r.stdout + r.stderr).toBe(0);
+      expect(r.stdout, answer).toContain(says);
+    }
+  });
+
+  it('a public repo it cannot read after CI passed: says so and goes on, never ends silently (HB-0379)', () => {
+    const w = world();
+    // A blip on just this read: the note's own, which asks for the peeled tag.
+    const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+    writeFileSync(join(w.root, 'bin', 'git'), `#!/usr/bin/env bash\ncase "$*" in "ls-remote --tags public "*"^{}") exit 128 ;; esac\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o755 });
+    const r = w.promote({}, 'v1.1.0');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('✓ CI passed on v1.1.0');
+    expect(r.stdout).toContain("⚠ Could not read the public repo's v1.1.0");
+    expect(w.channels()).toContain('"stable": "v1.1.0"');
   });
 
   it('a release from before the dev repo: its CI run is the public repo\'s', () => {

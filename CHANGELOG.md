@@ -2,6 +2,40 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.172.0] — 2026-11-03
+
+You can now test web search and an agent's Gmail with one button each, and agents move off a Brave key that has run out by themselves.
+
+### Upgrading
+- An agent with no search key of its own now uses DuckDuckGo by name. One whose only key is Gemini moves from Gemini to DuckDuckGo, which is what the app always said it used. To keep Gemini, set that key on the agent and rebuild it.
+- With a fleet Brave key set, Hatchabot checks its quota every 6 hours (hourly near the limit), which spends about 120 of its queries a month. `HATCHABOT_SEARCH_CHECK_MS` changes how often.
+
+### Added
+- **Testing web search:** Settings → AI → Fleet search key → **Test search** checks Brave and DuckDuckGo from this machine and shows which is in use, why, and how much quota is left. **Test web search** on an agent's Advanced tab runs a real search inside it and names who answered, or why it failed. A test that reaches Brave spends one query.
+- **Web search switches by itself:** when the fleet's Brave key runs out, running agents move to DuckDuckGo with no rebuild and you get a message; they move back when its quota returns. They move while about 10 queries are left, which keeps some for checking. **Use** can also be set to DuckDuckGo only. The management agent tries DuckDuckGo within the same search when Brave fails. An agent with a search key of its own is not moved. A key you replace reaches agents at their next rebuild, and they use DuckDuckGo until then; Settings says how many.
+- **Testing an agent's Gmail:** **Test Gmail** beside an account on the agent's Connections checks its sign-in with Google, then asks Gmail for the inbox's counts, from inside the agent. It reads no mail and sends nothing, so it says nothing about sending. A failure names the cause and what mends it.
+
+### Security
+- **Uninstall:** a `$(...)` in `.env` no longer runs when uninstall reads the file: it reads it the way the service does. Sets made by this install are also recognised as its own now, so `--backups` no longer keeps them.
+- **Uninstall:** any `--purge` removes the `move-copies` folder, which can hold an agent's whole volume. A purge names any restore safety copies it keeps.
+
+### Fixed
+- **Web search:** an agent with no search key could have no web search at all on OpenClaw 2026.9, which does not fall back to DuckDuckGo by itself.
+- **Large agents:** a restore or a move of an agent over about 1 GB compressed was refused. The copy now goes through a private file on disk, in `move-copies/` in the data folder for a move and in a `restore-safety-<mark>` folder beside the backups for a restore, so it needs that much free space there. A full disk says so and changes nothing. Download copy keeps its limit of about 190 MB.
+- **Restores:** a restore that stopped on a nearly full disk before the volume was emptied left a healthy agent FAILED. It now restarts the agent and says it was left as it was.
+- **Moves:** a move could be cancelled with an `ENOENT` error on its `.tgz.part` file, when the copy's folder was removed while a copy was on its way.
+- **Agent volumes:** with an agent's volume gone, a write could make a new empty one, and the agent looked healthy with no memory. The Files, members and snapshot paths now say the volume is gone and create nothing. A restore refused for a gone volume says how to get it back: Rebuild, or Retry if the agent failed.
+- **Deploys and upgrades:** a deploy or upgrade killed part-way could fail every later try on `.git/index.lock`, leave a pinned install half upgraded although its timer ran, or leave the follow-latest timer failing on "Not deploying". The next run now repairs each, and leaves a lock that another git may still hold.
+- **Service restarts:** a sessions file holding something other than a list, or a full disk during a background job, could restart the whole service. Such jobs now log the failure and try again next time.
+- **Runtime images:** "Used by" said "nothing" for an image whose delete was then refused. It now lists everything holding the image and how to clear it, and a refused delete says the same.
+- **Icon ideas:** ✨ could say "The management AI didn't answer" when the AI had answered. Replies are read entry by entry from any array in them, including ones with a stray bracket, a trailing comma or a cut-off end, and the note now says whether the AI could not be reached or gave no ideas.
+- **Second factors:** removing a factor left an open **Add an authenticator app** box behind, which then said its code was wrong. The box now closes and says the setup was cancelled.
+
+### Changed
+For maintainers:
+- The clean-install live tests count as a pass only when the run ended on the release under test, wait for cloud-init, and name why a VM has no internet or stopped.
+- `scripts/promote.sh` says what CI did on the public repo, and the two follow-channel tests that failed there on every release carry their own `node` and `docker`.
+
 ## [2.171.1] — 2026-10-31
 
 v2.171.0 was tagged but never published: its release build stopped when GitHub switched off the macOS 14 runners for a scheduled test of their retirement. Everything listed under 2.171.0 below ships in this release.

@@ -174,3 +174,11 @@ tests that run on their own.
 | 2026-10-31 | regress-autonomous | pass | v2.171.0 | 6 | OpenClaw 2026.9.8 |
 | 2026-10-31 | restore-drill | pass | v2.171.0 | 3 | OpenClaw 2026.9.8 |
 | 2026-10-31 | smoke-adopt | pass | v2.171.0 | 1 |  |
+| 2026-10-31 | privacy | pass | v2.171.1 | 1 | OpenClaw 2026.9.8 |
+| 2026-10-31 | clean-install-ubuntu-2204 | fail | v2.171.1 | 1 |  |
+| 2026-10-31 | clean-install-debian-12 | pass | v2.171.1 | 3 |  |
+| 2026-10-31 | clean-install | pass | v2.171.1 | 3 |  |
+| 2026-10-31 | clean-install-ubuntu-2204 | fail | v2.171.1 | 1 |  |
+| 2026-10-31 | clean-install-ubuntu-2204 | fail | v2.171.1 | 1 |  |
+| 2026-10-31 | clean-install-ubuntu-2204 | fail | v2.171.1 | 1 |  |
+| 2026-11-01 | clean-install-ubuntu-2204 | pass | v2.171.1 | 2 |  |

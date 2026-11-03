@@ -311,6 +311,61 @@ describe('attach / detach / remove', () => {
     expect(attached[0]!.materializedAt).toBeTruthy(); // materialize stamped the pull
   });
 
+  describe('Test Gmail', () => {
+    const TEST = '/v1/agents/a1/connections/chris%40example.com/test';
+    function answering(w: { provider: { execShell: unknown } }) {
+      const seen: string[] = [];
+      w.provider.execShell = (async (_ref: string, script: string) => {
+        seen.push(script);
+        if (script.includes('auth list')) return { code: 0, stdout: JSON.stringify({ accounts: [{ email: 'chris@example.com', valid: true }] }), stderr: '' };
+        return { code: 0, stdout: JSON.stringify({ label: { messagesTotal: 12, messagesUnread: 1 } }), stderr: '' };
+      });
+      return seen;
+    }
+
+    it('answers for a running agent, and names the no-send it was attached with', async () => {
+      const w = await connectedWorld();
+      await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId, gmailNoSend: true } });
+      const seen = answering(w);
+      const res = await w.f.inject({ method: 'POST', url: TEST, headers: H });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toMatchObject({ ok: true, messages: 12, unread: 1 });
+      expect(res.json().detail).toContain('Sending is switched off here');
+      expect(seen.at(-1)).toContain('--account "chris@example.com"');
+    });
+
+    it('needs the agent running, your own agent, and an email fit for a shell line', async () => {
+      const w = await connectedWorld();
+      const seen = answering(w);
+      expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/a%22%24(reboot)%40example.com/test', headers: H })).statusCode).toBe(400);
+      expect((await w.f.inject({ method: 'POST', url: TEST, headers: { 'x-hatchabot-owner': 'someone-else' } })).statusCode).toBe(404);
+      w.store.setAgentState('a1', 'STOPPED');
+      expect((await w.f.inject({ method: 'POST', url: TEST, headers: H })).statusCode).toBe(409);
+      expect(seen).toEqual([]);
+    });
+
+    it('a failed test is answered, not an error', async () => {
+      const w = await connectedWorld();
+      w.provider.execShell = (async () => ({ code: 0, stdout: JSON.stringify({ accounts: [{ email: 'chris@example.com', valid: false, error: 'oauth2: "invalid_grant" "x"' }] }), stderr: '' })) as never;
+      const res = await w.f.inject({ method: 'POST', url: TEST, headers: H });
+      expect(res.json()).toMatchObject({ ok: false, why: 'signin' });
+    });
+
+    it('the list says which attached accounts have Gmail, since gog names no services for an imported one', async () => {
+      const w = await connectedWorld();
+      await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } });
+      w.provider.execShell = (async () => ({ code: 0, stdout: JSON.stringify({ accounts: [
+        { email: 'CHRIS@example.com', client: 'default', auth: 'oauth' },
+        { email: 'own@example.com', client: 'default', auth: 'oauth', services: ['calendar'] },
+        { email: 'bare@example.com', client: 'default', auth: 'oauth' },
+      ] }), stderr: '' })) as never;
+      const { accounts } = (await w.f.inject({ method: 'GET', url: '/v1/agents/a1/connections', headers: H })).json();
+      expect(accounts[0].services).toEqual(w.store.getConnection(w.connId)!.services);
+      expect(accounts[1].services).toEqual(['calendar']);
+      expect(accounts[2]).not.toHaveProperty('services');
+    });
+  });
+
   it('the per-account Disconnect on a platform account detaches it, so no later sync imports it again (B039)', async () => {
     const w = await connectedWorld();
     await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId } });

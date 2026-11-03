@@ -372,6 +372,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.3`
 - **Code:** `scripts/privacy-check.mjs` — `hookStatus`
 
+### A clean-install live test says "Not a pass: this run ended on vX, and the release under test is vY"
+- **Check:** the last line of its run, `── N passed, 0 failed · vX · logs: … ──`, against `package.json`'s version; `docs/live-test-runs.md` has a `skip` row with "ended on vX" in its note.
+- **Cause:** the clean installs take the public stable and upgrade to the public latest, not this checkout. The release under test is not public yet, or failed to publish, or `latest` has moved past it. These runs used to be recorded as passes on the checkout's version, so the gate cleared on older code.
+- **Fix:** publish the release and run it again. If it is published but not the latest: `node scripts/live.mjs run clean-install -- --upgrade-to vY`.
+- **Fixed in:** `v2.172.0`
+- **Code:** `scripts/live.mjs` — `endedOn`, `resultOf`
+
+### A clean-install live test says "the VM stopped by itself" or "the VM was not ready after 60 tries"
+- **Check:** the run prints the machine's load average and points to `journalctl -u snap.lxd.daemon | grep 'Instance stopped'`; the run's `vm-stopped.log` under `~/hatchabot-clean-install/` holds what could be read for that VM.
+- **Cause:** the failure is the VM's or the machine's, before or apart from anything Hatchabot did. Why VMs stop by themselves is not known: it was seen on Ubuntu 22.04 VMs at a load average of 36–39 and not on a quiet machine, but load is not proved to be the cause.
+- **Fix:** run it again when the machine is quieter. If it keeps happening on a quiet machine, keep the run's `vm-stopped.log`.
+- **Fixed in:** `v2.172.0`
+- **Code:** `scripts/clean-install-test.sh` — `vm_failed`, `vm_stopped`, `save_vm_log`
+
+### A clean-install live test says "the VM has no internet"
+- **Check:** the lines under it say what was found: no default route, no answer from LXD's bridge, this machine offline too, or Docker's firewall. "LXD did not answer" means nothing was found out about the VM's network: the machine was too busy to say. Only that last one prints the two `iptables` commands. If it could not read the firewall without a password, look with `sudo iptables -S DOCKER-USER` and `sudo iptables -S FORWARD`.
+- **Cause:** the VM's 24 pings failed after it was ready (two minutes at the least, longer when pings are dropped; the message says how long it was). The message used to blame Docker's firewall for any failed ping, and the ping could run before cloud-init was done.
+- **Fix:** whichever the lines name. For Docker's firewall, the two commands it prints, once per boot.
+- **Fixed in:** `v2.172.0`
+- **Code:** `scripts/clean-install-test.sh` — `net_why`
+
 ### CI's `privacy` job names a value at `file (commit <sha>)` that the change no longer has, or says "✗ incomplete: … git could not read it"
 - **Check:** the job's log; `git show <sha>` shows the value added in that commit and taken out by a later one.
 - **Cause:** the job read only the change's end result, so a value added in one commit and removed in the next passed while staying public in the history; and a git command that failed read as an empty, clean change (a branch's first commit always did).
@@ -653,6 +674,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade. Remove any factor you did not add; then add the app again: start over from **Add an authenticator app**, and sign in again first if your password was reset.
 - **Fixed in:** `v2.171.0`
 - **Code:** `src/api/secondFactor.ts` — `proveManage`, `forgetCeremonies`
+
+### "This setup was cancelled" with the Add an authenticator app box still open
+- **Check:** Settings → You, with **Add an authenticator app** open: a factor was removed (here or in another tab) or reset by the owner, and the box stayed on the page. A code typed there is refused with "This setup was cancelled", or an older message telling you to close a box that has no close button.
+- **Cause:** removing or resetting a factor cancels an app still being added, on the server, but the page kept its box open and its QR code on show.
+- **Fix:** upgrade; the box closes when a factor is removed and when the server says the setup was cancelled. On an older version press **Add an authenticator app** again: it starts over, and any new QR code replaces the old one in the box. A code from the old QR code will not work: remove that entry from the app and scan the new one.
+- **Fixed in:** `v2.172.0`
+- **Code:** `web/index.html` — `sfCloseTotp`, `sfRemove`, `sfConfirmTotp`; `src/api/secondFactor.ts` — `'/v1/second-factor/totp/confirm'`
 
 ### Public access is on, but the owner has no second factor left
 - **Check:** Settings → You lists no passkey or authenticator app for an owner, public access is on, and the security record shows two `second_factor.removed` entries for them seconds apart.
@@ -2046,6 +2074,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0` (#174)
 - **Code:** `src/orchestrator/googleConnections.ts` — `grantedServices`, `exchangeGoogleCode`, `isGoogleService`
 
+### An agent says it cannot read Gmail, and you need to know why
+- **Check:** the agent's Connections → **Test Gmail** beside the account, with the agent running. It checks the sign-in, then asks Gmail for the inbox's counts, and says which failed: the sign-in expired or was revoked, the OAuth client, an administrator's block, the Gmail API off in your Google Cloud project, Gmail unticked at consent, no mailbox, Google limiting or down, or no way out to Google.
+- **Cause:** one of those; the test names it. Before it there was no way to tell them apart short of asking the agent. `gog` also keeps using an access token for up to an hour after the sign-in behind it was revoked, so a call that works does not prove the sign-in is good, which is why the test checks that first.
+- **Fix:** the one the test gives. Most often: press Connect for the account under ⚙ Settings → Connections, then attach it to the agent again. A pass does not cover sending, which the test does not try.
+- **Fixed in:** `v2.172.0`
+- **Code:** `src/orchestrator/googleConnections.ts` — `testGmail`, `gmailFailure`; `web/index.html` — `testAgentGmail`
+
 ### After connecting a Google account again, an agent still fails with the old sign-in, while Connections says every agent is up to date
 - **Check:** Settings → Connections shows the account with no agent needing a re-attach, yet the agent's Google calls fail as before the reconnect (an expired or revoked sign-in); its Setup log has `connection.materialized` for that account a little before the reconnect finished.
 - **Cause:** the agent was importing the account's old sign-in (a rebuild, a wake or an attach) when it was connected again. The import was recorded as done when it ended, after the new consent, so it counted as current although it carried the old token.
@@ -2330,7 +2365,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### Looking inside an archived agent whose volume is gone shows an agent with no files, and an empty volume appears
 - **Check:** `docker volume inspect <agent's volume>` said "no such volume" before you looked, and an empty volume of that name exists after.
 - **Cause:** the read-only look mounted the volume by name, and Docker makes a volume that is not there, empty. The view then showed no files instead of saying they were gone.
-- **Fix:** upgrade; a read-only look asks for the volume first and says "This agent's stored files are not on its machine: its volume is gone." Restore the agent from a backup set if you need its files. Remove an empty volume made this way with `docker volume rm`.
+- **Fix:** upgrade; a read-only look asks for the volume first and says "This agent's stored files are not on its machine: its volume is gone." If you need its files, restore it from the archive, which makes a new, empty volume, then restore it from a backup set. Remove an empty volume made this way with `docker volume rm`.
 - **Fixed in:** `v2.171.0`
 - **Code:** `src/providers/localDockerProvider.ts` — `execShellOnVolume`; `src/orchestrator/inspect.ts` — `InspectReadError`
 ### Looking inside an archived agent: Chat history says "No conversation found on the volume", or shows a background task instead of the chat
@@ -2411,11 +2446,11 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `src/orchestrator/hibernate.ts` — `hibernateAgent`, `settledBlocker`
 
 ### ✨ Ideas in the icon dialog never offers the icon you have in mind
-- **Check:** the ideas are only 🤖, or nothing like what you want; the note under them says the management AI didn't answer or none of your sources can make ideas. On the machine, `journalctl --user -u hatchabot | grep "icon ideas"` gives the AI's error.
-- **Cause:** the ideas came from the AI's reading of the name alone, with no way to say what you wanted; when the AI didn't answer, the keyword table stood in, and it knew no seasonal or everyday words ("Holiday list" matched nothing).
-- **Fix:** upgrade, then type what it should show ("a birthday cake") in **What should it show?** and press ✨ (or Enter). Any emoji can also be pasted straight into the Emoji box.
-- **Fixed in:** `v2.170.0`
-- **Code:** `src/orchestrator/agentIcons.ts` — `suggestIcons`, `keywordIcon`; `web/index.html` — `v2IconIdeas`
+- **Check:** the ideas are only 🤖, or nothing like what you want, or there are none on any agent, every time, even though the AI works elsewhere. The note under them says which: none of your sources can make ideas; the management AI didn't answer (the call failed: it was busy, out of its limit, or could not be reached); or the management AI answered but no ideas could be read from its answer. Before the fix, that last one also read "didn't answer". On the machine, `journalctl --user -u hatchabot --since "-1 day" | grep "icon ideas"` gives the AI's error, or for a reply with no ideas `"error":"its answer held no emoji"` and the reply's shape, never its text: `length`, `bracket` (it held a `[`), `entries` (how many could be read), `toolShaped`, `cutOff`, and `stopReason` where the source gives one. `grep "agent icons"` gives the same for the home screen's automatic picks, which fall back to the keyword table per agent.
+- **Cause:** the ideas came from the AI's reading of the name alone, with no way to say what you wanted; when the AI didn't answer, the keyword table stood in, and it knew no seasonal or everyday words ("Holiday list" matched nothing). A reply that held usable ideas could also be lost: the parser read from the first `[` to the last `]` as one piece of JSON, so a stray bracket, a trailing comma or a cut-off reply gave nothing, and on a Claude plan's source (a setup token or the machine's login) the prompt also told the model about calling tools and replying in plain prose, which goes against "JSON only", and a reply shaped like a tool call came back empty.
+- **Fix:** upgrade, then type what it should show ("a birthday cake") in **What should it show?** and press ✨ (or Enter); that box came in `v2.170.0`. Any emoji can also be pasted straight into the Emoji box. Since the fix the parser reads a reply's entries one by one, from any array in it, and a source with no tools gets no tool protocol. If the note still says no ideas could be read, the log line's shape says what came back: `cutOff` means the reply was too long for its limit (the source's own stop reason says so; with no stop reason, an array ran out at the end of the text); a short `length` with no `bracket` means something other than the ideas came back, so try another model for the source under ⚙ Settings → AI sources.
+- **Fixed in:** `v2.172.0`
+- **Code:** `src/orchestrator/agentIcons.ts` — `suggestIcons`, `pickIcons`, `parseIdeas`, `replyArrays`, `replyShape`, `keywordIcon`; `src/api/cliChatModel.ts` — `completeViaCli`; `src/api/routes.ts` — `iconCompleter`; `web/index.html` — `v2IconIdeas`
 
 ### Two of your agents have the same name, and the command line says the name "matches more than one"
 - **Check:** the app lists two agents of yours with one name (case aside); one was renamed to it, with a memory change in the same save, at about the time the other was renamed to it or made.
@@ -2478,6 +2513,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: items are trimmed and blanks dropped, so a list of only blanks is asked for again; Update the app with the values.
 - **Fixed in:** `v2.171.0`
 - **Code:** `src/orchestrator/apps.ts` — `mergeConfig`, `coerce`
+
+### Runtime images: "Used by" says "nothing" but deleting the image is refused
+- **Check:** `docker ps -a --filter ancestor=<tag> --format '{{.Names}}\t{{.State}}\t{{.Image}}'` lists a container, often an archived agent's stopped one. Or the image is held by an archived agent's pin, an agent's pin on a runner, another account's class, or a derived image built on it.
+- **Cause:** the list and the delete checked different things. The list read only this account's classes and the pins of live agents on this machine, and no containers; the delete also counted the rest, and Docker's refusal named nobody.
+- **Fix:** upgrade: "Used by" then lists everything that holds the image and how to clear it, and a refused delete says the same. Until then, clear what the Check finds: restore an archived agent and rebuild it on another image, or delete it. A container with no agent goes with `docker rm <name>`. Docker removes a tag freely when another tag shares its image, so a container only holds the image's last tag.
+- **Fixed in:** `v2.172.0`
+- **Code:** `src/api/routes.ts` — `imageBlockers`; `src/providers/localDockerProvider.ts` — `imagesInUse`; `web/index.html` — `renderRuntimeList`
 
 ## Memory and conversations
 
@@ -3121,16 +3163,16 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `scripts/backup-volumes.sh` — `registry`
 
 ### "Restore failed … and putting it back as it was failed too": agent marked failed after a backup restore
-- **Check:** the agent shows failed with "A restore from the YYYY-MM-DD backup failed and could not be undone…"; the log shows `restore.left_failed`; a file `restore-safety/<container>-vol-before-restore-<time>.tgz` exists in the backups folder.
+- **Check:** the agent shows failed with "A restore from the YYYY-MM-DD backup failed and could not be undone…"; the log shows `restore.left_failed`; a file `restore-safety-<mark>/<container>-vol-before-restore-<time>.tgz` (`restore-safety/` before this) exists in the backups folder.
 - **Cause:** a restore overwrote the agent's volume, then failed, and putting back the copy taken just before also failed (usually a full disk). Before v2.153.0 the agent was restarted on the half-written volume and the message said "left as it was".
-- **Fix:** free disk space (`df -h`, `docker system df`). Then restore a backup again from Settings → Backups (allowed on a failed agent), or put the kept copy back by hand while the agent is stopped: `docker run --rm -i -v <container>-vol:/vol alpine sh -c 'find /vol -mindepth 1 -delete && tar xz -C /vol && chown -R 1000:1000 /vol' < <kept file>`. Then tap Retry. Keep the `restore-safety` file until the agent works; Hatchabot never deletes it.
+- **Fix:** free disk space (`df -h`, `docker system df`). Then restore a backup again from Settings → Backups (allowed on a failed agent), or put the kept copy back by hand while the agent is stopped: `docker run --rm -i -v <container>-vol:/vol alpine sh -c 'find /vol -mindepth 1 -delete && tar xz -C /vol && chown -R 1000:1000 /vol' < <kept file>`. Then tap Retry. Keep the `restore-safety` file until the agent works; Hatchabot does not delete it unless you run `uninstall.sh --purge --backups`.
 - **Fixed in:** `v2.153.0`
 - **Code:** `src/orchestrator/backups.ts` — `restoreAgentFromBackup`, `restoreSafetyDir`
 
 ### A backup set says incomplete: a runner agent's volume failed or is missing
 - **Check:** the set's `backup-status.json` lists the volume in `failedVolumes` (and in `missing` if the runner has no volume by that name); the run's log says "on <runner> failed (exit N)" or "that runner has no volume by that name".
 - **Cause:** the runner answered but its archive failed (tar error, torn gzip, no `alpine` image), or the agent's volume is not on that runner. Before v2.153.0 the first was recorded as skipped and the set said complete; the second made an empty archive and an empty volume on the runner.
-- **Fix:** check the runner (`docker -H <host> volume ls`, `docker -H <host> pull alpine`), then run `scripts/backup-volumes.sh` again. If the volume is gone, restore the agent from its newest set (nothing is pruned while it is missing).
+- **Fix:** check the runner (`docker -H <host> volume ls`, `docker -H <host> pull alpine`), then run `scripts/backup-volumes.sh` again. If the volume is gone, rebuild the agent, which makes a new, empty volume, then restore it from its newest set (nothing is pruned while it is missing).
 - **Fixed in:** `v2.153.0`
 - **Code:** `scripts/backup-volumes.sh` — `failed_list`, `missing_list`
 
@@ -3179,7 +3221,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### Agent stopped after a restart: "The restore from the … backup was interrupted by a restart"
 - **Check:** the agent's page or Alerts shows a held "Restore from a backup"; `GET /v1/operations?agentId=…` returns status `held`, kind `restore-backup`.
 - **Cause:** Hatchabot restarted (an upgrade, a crash, a reboot) after the copy of how the agent was had been saved but before the restore finished, so its memory may be half-restored.
-- **Fix:** choose **Finish the restore** (that night's copy, with today's members and bot) or **Put back the copy from before**. The copy stays in `restore-safety/` beside the backups until you choose.
+- **Fix:** choose **Finish the restore** (that night's copy, with today's members and bot) or **Put back the copy from before**. The copy stays in `restore-safety-<mark>/` beside the backups until you choose.
 - **Fixed in:** `v2.155.0`
 - **Code:** `src/orchestrator/backups.ts` — `resumeBackupRestore`, `recoverBackupRestore`
 
@@ -4106,6 +4148,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.171.0`
 - **Code:** `src/providers/localDockerProvider.ts` — `info`
 
+### The service restarts when an agent's sessions file holds something other than a list ("Cannot use 'in' operator" in its log)
+- **Check:** the service log ends in an unhandled `TypeError: Cannot use 'in' operator to search for … in …`, it happens each time the home screen polls, and that agent's `sessions.json` (an agent with no SQLite session store) holds a bare number, string or `true`, not `{…}`.
+- **Cause:** the Recent list's capture is started in the background, and it looked a conversation up in whatever the file held. Its failure had no handler, and Node ends the process on that. A few other background chains had the same gap: tidying `.env`, the check after an agent starts, re-checking a manager's doorman, telling members about a rename and clearing a derived image's build folder.
+- **Fix:** upgrade; such a file is ignored, the agent's saved previews stay, and the others log the failure or try again next time. Then rebuild or restore that agent if its sessions file is damaged.
+- **Fixed in:** `v2.172.0`
+- **Code:** `src/orchestrator/recent.ts` — `RecentTracker`; `src/index.ts` — `syncEnvFile`
+
+### The service restarts on a full disk, with "SQLITE_FULL" or "database or disk is full" at the end of its log
+- **Check:** `df` shows the disk holding the database full, and the service log ends in an unhandled error from a database call, around an app install that failed or a timer (the paused-agent replies, the cron or manager checks).
+- **Cause:** those background jobs read or wrote the database outside their `try`, or in the `catch` that recorded a failure. A database error then had no handler, and Node ends the process on that.
+- **Fix:** upgrade, and free some space. Those jobs now log the failure (`app.pending_run_failed`, `cron.sweep_failed`, `ops.drift_check_failed`) and try again next time.
+- **Fixed in:** `v2.172.0`
+- **Code:** `src/api/routes.ts` — `runPendingApp`, `runPausedReplies`, `retargetCronSweep`, `quickCronRetarget`; `src/ops/opsDrift.ts` — `checkOpsDrift`
+
 ### Archive says "Couldn't confirm its runtime stopped" while its machine answers
 - **Check:** `docker inspect -f '{{.State.Status}}' <container>` says `paused`.
 - **Cause:** a paused container (paused by hand or by another tool) is frozen, not stopped: `docker stop` refuses it, and once unpaused it polls its bot again. Before v2.168.0 it counted as stopped, so an archive gave its bot to the pool while it could still answer.
@@ -4496,6 +4552,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade. Until then, click once. `pkill -f 'docker save'` (or restarting the service) clears a stuck copy.
 - **Fixed in:** `v2.164.2`
 - **Code:** `src/api/routes.ts` — `/v1/hosts/:id/install-image`; `src/orchestrator/runnerSetup.ts` — `installRuntimeImage`
+
+### An agent says Brave's quota is used up, or web search does not work
+- **Check:** Settings → AI → Fleet search key → **Test search** says what Brave and DuckDuckGo answer from this machine, and which is in use. An agent's **Test web search** (Advanced tab) runs a real search in it and names who answered.
+- **Cause:** OpenClaw falls back only to providers that hold a key, so never to DuckDuckGo, and it auto-detects only those too, so an agent with no key had no search unless one was named. An empty Brave key failed every agent's search until someone changed it.
+- **Fix:** upgrade. Agents now move to DuckDuckGo with no rebuild when the fleet key runs out, and back when its quota returns; Hatchabot messages you. It checks every 6 hours, hourly near the limit, so **Test search** moves them at once if you see this first. An agent with a search key of its own (such as `BRAVE_API_KEY` in its Environment) is not moved: replace that key or remove it and rebuild. A fleet key you replace reaches agents at their next rebuild, and they use DuckDuckGo until then, even if the old key still works; Settings says how many. An agent with no key gets DuckDuckGo at its next rebuild, or within minutes while it runs. A provider other than DuckDuckGo set by hand in `tools.web.search.provider` is left alone. If both fail from this machine, DuckDuckGo may be turning its address away for now.
+- **Fixed in:** `v2.172.0`
+- **Code:** `src/orchestrator/webSearch.ts` — `createSearchWatch`, `probeBrave`, `applySearchScript`; `src/openclaw/configWriter.ts` — `buildConfigCommands`; `src/ops/opsWeb.ts` — `makeOpsWeb`
 
 ### The manager's web search shows titles and links but no descriptions
 - **Check:** no Brave key is set, so `web_search` uses DuckDuckGo, and every result's third line is empty.
@@ -4953,3 +5016,80 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade. The agent stays on the cheaper model until every cheaper-model budget that covers it is under its limit, or until the 1st. To have it back on its own model now, raise the machine's budget too.
 - **Fixed in:** `v2.164.2`
 - **Code:** `src/orchestrator/budgets.ts` — `runBudgets`
+
+### An agent's volume went missing and it looked healthy with no memory, or a change "worked" on nothing
+- **Check:** `docker volume inspect <container>-vol` says "no such volume", or was recreated recently with almost nothing in it. Since the fix, changing a stopped agent's model (or its class's), its file limit, adopting a workspace into it, admitting or removing someone, unlinking your Discord, or opening Files says "This agent's stored files are not on its machine: its volume is gone." (or the same in other words). Those changes used to say "try again, or Rebuild it", "Adopt again" or "is the machine it runs on awake?", none of which can work.
+- **Cause:** `docker run -v` creates a volume that is not there. Writing to a stopped agent's volume, uploading, or downloading made an empty one, so the loss looked like an agent that had forgotten everything. Only read-only looks and copies asked first.
+- **Fix:** upgrade, then find out why it went (a `docker volume prune`, a Docker reinstall, the agent recorded on the wrong machine). A rebuild makes a fresh, empty volume and seeds it. Removing a member, and unlinking your Discord from that agent, stays refused until the agent has its files back or is deleted, since another machine may still hold the allowlist. A restore from a backup is also refused while the volume is gone, because it has no way to go back; rebuild first, then restore.
+- **Fixed in:** `v2.172.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `execShellOnVolume`, `writeToVolume`, `streamFromVolume`, `importWorkspace`; `src/orchestrator/members.ts` — `revokeMember`, `denyPairing`, `grantChannelAccess`; `src/orchestrator/adopt.ts` — `applyWorkspace`; `src/api/routes.ts` — `applyModelNow`, `applyFilesCap`, `'/v1/account/discord'`
+
+### A restore or a move of a large agent was refused at about 1 GB compressed
+- **Check:** the restore said "Its current state could not be copied first", or the move "Couldn't read the agent's state", and the log shows `maxBuffer` for that agent.
+- **Cause:** the copy of its volume was held in one Buffer in the Hatchabot process, capped at 1 GB.
+- **Fix:** upgrade. The copy now goes to a private file (`restore-safety-<install's mark>/` beside the backups for a restore, `move-copies/` in the data folder for a move, so a backup folder on a NAS plays no part in a move) and needs that much free disk there; a full disk says so and nothing is changed, whether it is the copy or the backup being staged that does not fit. Download copy still has its own limit of about 190 MB. A copy past `HATCHABOT_DOCKER_IO_TIMEOUT_MS` (15 minutes) still fails, with nothing changed; raise it for a very large agent. A move also stays under `HATCHABOT_IMPORT_MAX_GB` on the machine it goes to.
+- **Fixed in:** `v2.172.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `exportStateToFile`, `importStateFromFile`; `src/orchestrator/backups.ts` — `restoreAgentFromBackup`, `newMoveCopy`, `sweepMoveCopies`; `src/orchestrator/moveHost.ts` — `moveAgentToHost`
+
+### A restore on a nearly full disk left a healthy agent FAILED, "its memory may be half-restored"
+- **Check:** the agent's failure names a safety copy under `restore-safety-<install's mark>/` (`restore-safety/` before this), both failures in the message say `No space left on device`, and `df` shows the disk nearly full. Its volume is as it was before the restore.
+- **Cause:** the backup failed to stage on the disk before the volume was emptied, and the rollback then staged the safety copy the same way, which failed too. The rollback did not ask whether the volume had been touched.
+- **Fix:** upgrade: a restore that stops before the volume is emptied now restarts the agent and says "the agent was left as it was". Already in this state: free some space, then restore that backup again (or tap Retry once you have checked the volume with Files); the safety copy can go once it is back.
+- **Fixed in:** `v2.172.0`
+- **Code:** `src/orchestrator/backups.ts` — `restoreSteps`, `rollBack`; `src/providers/localDockerProvider.ts` — `importStateFromFile`; `src/providers/provider.ts` — `VolumeUntouchedError`
+
+### A move was cancelled with "Couldn't read the agent's state ... ENOENT ... .tgz.part"
+- **Check:** the message or the log names a `.tgz.part` under `move-copies` or `restore-safety`, and another move or restore ended around that time, or, for `restore-safety`, another Hatchabot install shares this backup folder and started then. The source agent is untouched; a retry works.
+- **Cause:** the private folder was removed when one operation's copy left it empty, while another had made it and not yet opened its file. Two installs sharing a backup folder also shared one such folder, and one owned by another user refused the operation altogether.
+- **Fix:** upgrade: the folder stays while a copy is on its way. A move's copy goes in this install's data folder (`move-copies/`), and each install has its own `restore-safety-<mark>` folder, with the mark its backup sets carry in `.backup-owner`.
+- **Fixed in:** `v2.172.0`
+- **Code:** `src/orchestrator/backups.ts` — `newMoveCopy`, `dropMoveCopy`, `dropSafetyCopy`, `sweepMoveCopies`
+
+### A deploy or upgrade fails every time on ".git/index.lock: File exists" after it was killed
+- **Check:** `ls <install>/.git/index.lock` finds it, and `~/.local/state/hatchabot/upgrade-*.from` is there beside the lock: a deploy or upgrade was killed (SIGKILL, a power cut) in its `git checkout`. The output says "index.lock is in the way" or "index.lock is held, so nothing was changed".
+- **Cause:** a killed git leaves its lock, every later checkout fails on it, and a plain checkout back kept the files it had rewritten, so later runs refused them as local changes.
+- **Fix:** upgrade, then run it again. A deploy or upgrade now writes in its record which git it started, and removes the lock only when that git is gone, no other git is running in the checkout (a `git commit` waiting in its editor holds it for as long as the person takes), the lock is no older than the record and a couple of minutes old; it then puts every tracked file back (`.env` and `data/` are not touched). A tracked file that matches neither release, such as a hand edit made since the kill, is copied first and named: the copy is in `~/.local/state/hatchabot/upgrade-*.kept-<time>/`. A lock it cannot show is its own stays and is named: check no git is running there (`pgrep -a git`), then `rm <install>/.git/index.lock`. One left by a kill under an older release is that case. When only git was killed, the run puts the dependencies back at once and a later run clears the lock.
+- **Fixed in:** `v2.172.0`
+- **Code:** `scripts/deploy-release.sh` — `checkout_recorded`, `git_running_here`, `clear_own_index_lock`, `save_other_edits`, `repair_tree`; `scripts/upgrade.sh` — `checkout_recorded`, `git_running_here`, `clear_own_index_lock`, `save_other_edits`, `repair_tree`
+
+### An install pinned to a version stays half upgraded although its channel timer runs
+- **Check:** `data/channel` holds a version (`v2.31.3`), a `hatchabot upgrade vX.Y.Z` was killed part-way, and `.swapping` in the install or `~/.local/state/hatchabot/upgrade-*.from` is there; `journalctl --user -u hatchabot-follow-channel` shows the timer doing nothing.
+- **Cause:** the timer left a pinned install alone before it looked for an upgrade to repair, so only the next `hatchabot upgrade` by hand repaired it.
+- **Fix:** upgrade, or run `hatchabot upgrade` once by hand. The next tick now puts the earlier release back and finishes the upgrade to the release pinned; after that the timer leaves the pin alone again.
+- **Fixed in:** `v2.172.0`
+- **Code:** `scripts/follow-channel.sh` — `PINNED`
+
+### The follow-latest timer fails every tick with "Not deploying" after a hand deploy was killed
+- **Check:** `~/.local/state/hatchabot/upgrade-*.from` is there, and either `journalctl --user -u hatchabot-follow-latest` repeats "Not deploying vX.Y.Z", or the deploy killed was of a tag newer than the newest followed one (an rc) and the timer says nothing at all.
+- **Cause:** the timer asked whether the newest tag may be deployed before it repaired anything, and passed over a checkout ahead of the newest tag, so the repair in `deploy-release.sh` never ran.
+- **Fix:** upgrade, or `scripts/deploy-release.sh <the release it was on>` by hand. The timer now puts the release the killed deploy came from back with that release's own deploy script, running none of the refused tag's code, and does not take a checkout backwards to reach the newest tag. That reinstalls and restarts the release once.
+- **Fixed in:** `v2.172.0`
+- **Code:** `scripts/follow-latest.sh` — `repair_cut`, `CUT_FROM`
+
+### An upgrade stops with "Could not move <install>/<folder> aside." on a bundle install
+- **Check:** `findmnt <install>/<folder>` (on a Mac, `mount | grep <install>`) shows that folder is a mount point, one the release replaces, such as `node_modules` on its own disk. `mv` says "Device or resource busy".
+- **Cause:** a bundle upgrade moves each of its folders aside, and a mount point cannot be moved. The upgrade stops, the earlier release goes back and nothing on the mount is touched, but every later try stops the same way.
+- **Fix:** nothing to repair: unmount that folder, or point the mount somewhere the release does not own (`data/` and `.env` are never replaced), then `hatchabot upgrade`. A mounted folder inside the install cannot be upgraded in place, so this stays a refusal.
+- **Fixed in:** —
+- **Code:** `scripts/upgrade.sh` — `restore_prev`, `not_ours`
+
+### Uninstall --backups keeps this install's own backup sets and says another install made them
+- **Check:** `HATCHABOT_SECRET_KEY` in `.env` is a passphrase with a `$`, a quote or a `#` in it; `hatchabot uninstall --purge --backups` says "kept N sets another Hatchabot install made there", and those sets (and their `secret-key.env`) are still on disk.
+- **Cause:** uninstall read `.env` one way, and the nightly backup got it another, so such a key gave two different owner fingerprints. On Linux the backup gets `.env` from systemd (no expansion; a `#` inside a value is kept), on a Mac from the launchd job, which sources it (a `$` expands), and by hand from Node's dotenv parser (a `#` starts a comment). Generated keys are not affected. The same difference could hide a `HATCHABOT_DB` or `HATCHABOT_BACKUP_DIR`: a hand-edited Mac `.env` with `$HOME/...` read as no database, and `--purge` removed `.env` and said the agents were gone while they ran on.
+- **Fix:** upgrade, then run it again; `.env` is now read the way the service reads it on that machine, and a set made under Node's reading by a backup run by hand also counts as this install's. Without upgrading, delete those dated sets by hand if you are sure they are this install's.
+- **Fixed in:** `v2.172.0`
+- **Code:** `scripts/uninstall.sh` — `key_owner`, `ENV_READ`, `ENV_ALT_KEY`; `scripts/backup-volumes.sh` — `key_owner`; `scripts/launchd-plist.sh`
+
+### After `uninstall.sh --purge`, a `restore-safety` folder is left in the backup folder, with an agent's whole volume in it
+- **Check:** `ls <backup folder>` shows `restore-safety` or `restore-safety-<16 hex>` holding a `.tgz`, and the purge printed `kept <that folder>: a restore's safety copies`.
+- **Cause:** a restore held, or one that could not be undone, keeps a copy that may be an agent's only good state. It is unencrypted and holds the agent's tokens. A purge without `--backups` keeps it. Even with `--backups`, a purge can only recognise this install's folder by its key: not a folder from before folders were per install, one made under an old key, or a second purge after the first removed `.env`.
+- **Fix:** if you may still need the agent, restore from that copy first. Otherwise delete the folder, after checking it is not another install's, and rotate the tokens that agent held if the disk may have been read.
+- **Fixed in:** —
+- **Code:** `scripts/uninstall.sh` — `key_owner`; `src/orchestrator/backups.ts` — `restoreSafetyDir`
+
+### After `uninstall.sh --purge`, a `move-copies` folder is left behind, with an agent's whole volume in it
+- **Check:** `ls <data folder>` shows a `move-copies` folder holding a `.tgz` or `.tgz.part`, and the data folder stayed because it is not Hatchabot's own or is also the backup folder. The service was killed during a move (uninstall stopping it is one way).
+- **Cause:** that copy is unencrypted and holds the agent's tokens. The only cleanups were in the running process and at its next boot, and after a purge there is no next boot. A purge that kept the data folder removed only the database.
+- **Fix:** upgrade: any `--purge` removes that folder, with or without `--backups`. Otherwise delete it by hand, after checking no move is running, and rotate the tokens that agent held if the disk may have been read.
+- **Fixed in:** `v2.172.0`
+- **Code:** `scripts/uninstall.sh`; `src/orchestrator/backups.ts` — `newMoveCopy`, `sweepMoveCopies`

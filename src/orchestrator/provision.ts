@@ -75,6 +75,7 @@ if (!hit) { console.error('Unknown peer "' + peer + '". Available: ' + peers.map
 export const SEARCH_KEY_REF = 'media/brave-api-key';
 import { buildGitRemovalScript, buildGitSyncScript, buildPublicGitSyncScript, gitSyncReason, isPublicGitUrl } from './gitSource.js';
 import type { Agent, Channel, Host } from '../domain/types.js';
+import { ownSearchKeys, readWebSearch, searchProviderFor } from './webSearch.js';
 import { briefCause } from '../domain/redact.js';
 import { opsToolsFingerprint } from '../ops/opsTools.js';
 import { opsSection, OPS_MANAGED_HEADINGS, OPS_RENAMED_HEADINGS } from '../ops/opsAgent.js';
@@ -820,6 +821,11 @@ export async function buildRuntimeSpec(
         openclawVersion,
         bakedPlugins,
         pluginInstall,
+        searchProvider: searchProviderFor({
+          hasFleetKey: !!searchKey,
+          hasOwnKey: ownSearchKeys(store.listAgentEnv(agent.id)).length > 0,
+          state: readWebSearch(store),
+        }),
         // Model refs are provider-prefixed; a Google profile configured as
         // `anthropic/gemini-…` provisions healthy and fails on first use.
         provider: local

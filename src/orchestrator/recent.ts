@@ -482,7 +482,14 @@ export class RecentTracker {
 
   /** A fresh sessions read for a running agent. Resolves when any capture it started is stored. */
   async note(agent: { id: string; slug: string }, sessions: Record<string, unknown> | undefined): Promise<void> {
-    if (!sessions || this.#inFlight.has(agent.id)) return;
+    // Called with `void` from the home screen's poll, so it must never reject:
+    // Node ends the process on that. The list is the agent's own file, and may
+    // hold anything (HB-0374).
+    try { await this.#note(agent, sessions); } catch { /* the next poll tries again */ }
+  }
+
+  async #note(agent: { id: string; slug: string }, sessions: Record<string, unknown> | undefined): Promise<void> {
+    if (!sessions || typeof sessions !== 'object' || this.#inFlight.has(agent.id)) return;
     const now = this.deps.now?.() ?? Date.now();
     const s = sessions as Record<string, SessionEntry>;
     const prev = this.record(agent.id);

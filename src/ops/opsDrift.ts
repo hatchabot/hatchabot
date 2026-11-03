@@ -48,7 +48,11 @@ export const LOCKDOWN_READ = `node -e '
 export async function checkOpsDrift(
   deps: { store: Store; providerFor: (hostId: string) => RuntimeProvider; log?: (event: string, detail: Record<string, unknown>) => void },
 ): Promise<void> {
-  for (const agent of deps.store.listOpsAgents()) {
+  // Off a timer: a database that fails here must not end the process.
+  let agents: ReturnType<Store['listOpsAgents']>;
+  try { agents = deps.store.listOpsAgents(); }
+  catch (err) { deps.log?.('ops.drift_check_failed', { error: String(err) }); return; }
+  for (const agent of agents) {
     if (agent.state !== 'RUNNING' || !agent.runtimeRef) continue;
     try {
       const provider = deps.providerFor(agent.hostId);

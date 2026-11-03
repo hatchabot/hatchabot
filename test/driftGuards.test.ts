@@ -175,7 +175,7 @@ describe('operator scripts name what blocks them', () => {
   // deploy guard refused over a stray note saved into the prod directory.
   it('the deploy guard and the installer both print the offending paths', () => {
     const deploy = read('scripts/deploy-release.sh');
-    expect(deploy).toContain('git status --porcelain | sed');
+    expect(deploy).toContain('status --porcelain | sed');
     expect(deploy).toMatch(/untracked file/i);
     expect(read('install.sh')).toContain('These files differ from the release');
   });

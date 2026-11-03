@@ -59,7 +59,8 @@ export function pushText(headline: string, detail: string | undefined, tail: str
 
 export interface OpsPush {
   /** Fire-and-forget; resolves false when there was nowhere to send. */
-  waiting(ownerId: string, headline: string, detail?: string): Promise<boolean>;
+  /** `note`: something to know, with nothing to confirm. */
+  waiting(ownerId: string, headline: string, detail?: string, opts?: { note?: boolean }): Promise<boolean>;
 }
 
 /**
@@ -98,8 +99,11 @@ export class PushBudget {
 export function createOpsPush(deps: OpsPushDeps): OpsPush {
   const budget = new PushBudget(deps.perHour ?? 6);
   return {
-    async waiting(ownerId, headline, detail) {
-      const chatId = deps.chatId(ownerId);
+    async waiting(ownerId, headline, detail, opts) {
+      // Its callers fire and forget: a store that fails here must not end the process.
+      let chatId: ReturnType<OpsPushDeps['chatId']>;
+      try { chatId = deps.chatId(ownerId); }
+      catch (err) { deps.log?.('ops.push', { ok: false, error: String((err as Error)?.message ?? err).slice(0, 160) }); return false; }
       const token = chatId ? await deps.botToken(ownerId).catch(() => undefined) : undefined;
       // Nowhere to push to: not counted, so an owner with no manager bot does
       // not have their hour spent on pushes that could never be sent.
@@ -109,7 +113,7 @@ export function createOpsPush(deps: OpsPushDeps): OpsPush {
       const where = deps.appUrl?.();
       const text = pushText(headline, detail, [
         slot === 'last' ? 'That is the last of these for this hour — anything more waits in the app.' : '',
-        where ? `Confirm it in Hatchabot: ${where}` : 'Confirm it in the Hatchabot app.',
+        opts?.note ? (where ? `Hatchabot: ${where}` : '') : where ? `Confirm it in Hatchabot: ${where}` : 'Confirm it in the Hatchabot app.',
       ]);
       if (!token) {
         // No Telegram to carry it: the manager's Discord bot, when the owner is linked there.

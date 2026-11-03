@@ -35,6 +35,8 @@ export const OPS_WEB_TOOLS = [
 export interface OpsWebDeps {
   /** The machine's Brave key, if one is set; else DuckDuckGo is used. */
   braveKey: () => Promise<string | undefined>;
+  /** Brave failed a search just now, so the fleet's search is worth checking. */
+  onBraveFailed?: () => void;
   fetchImpl?: typeof fetch;
   lookup?: (host: string) => Promise<string[]>;
   now?: () => number;
@@ -198,13 +200,16 @@ export function makeOpsWeb(deps: OpsWebDeps) {
   async function search(ownerId: string, query: string): Promise<Result[]> {
     const key = await deps.braveKey().catch(() => undefined);
     if (key) {
-      const r = await f(`https://api.search.brave.com/res/v1/web/search?count=8&q=${encodeURIComponent(query)}`, {
-        headers: { accept: 'application/json', 'x-subscription-token': key }, signal: AbortSignal.timeout(15_000),
-      });
-      if (!r.ok) throw new Error(`The search provider answered ${r.status}.`);
-      const j = (await r.json()) as { web?: { results?: Array<{ title?: string; url?: string; description?: string }> } };
-      return (j.web?.results ?? []).filter((x) => x.url).slice(0, 8)
-        .map((x) => ({ title: strip(x.title ?? ''), url: x.url!, snippet: strip(x.description ?? '').slice(0, 300) }));
+      // On to DuckDuckGo if it fails: a key out of quota must not end the manager's search (HB-0391).
+      try {
+        const r = await f(`https://api.search.brave.com/res/v1/web/search?count=8&q=${encodeURIComponent(query)}`, {
+          headers: { accept: 'application/json', 'x-subscription-token': key }, signal: AbortSignal.timeout(15_000),
+        });
+        if (!r.ok) throw new Error(`The search provider answered ${r.status}.`);
+        const j = (await r.json()) as { web?: { results?: Array<{ title?: string; url?: string; description?: string }> } };
+        return (j.web?.results ?? []).filter((x) => x.url).slice(0, 8)
+          .map((x) => ({ title: strip(x.title ?? ''), url: x.url!, snippet: strip(x.description ?? '').slice(0, 300) }));
+      } catch { deps.onBraveFailed?.(); }
     }
     const r = await f(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
       headers: { 'user-agent': 'Mozilla/5.0 (Hatchabot)' }, signal: AbortSignal.timeout(15_000),

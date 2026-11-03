@@ -7,11 +7,12 @@
  * trigger a run or prune an old one.
  */
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { defaultBackupsDir } from '../envCompat.js';
+import { defaultBackupsDir, defaultDbPath } from '../envCompat.js';
 import { fileURLToPath } from 'node:url';
-import type { RuntimeProvider } from '../providers/provider.js';
+import { isDiskFull, VOLUME_GONE, VolumeGoneError, VolumeUntouchedError, type RuntimeProvider } from '../providers/provider.js';
 import { DEFAULT_PREFIX, dockerNames } from '../providers/dockerNames.js';
 import type { Store } from '../store/store.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
@@ -354,7 +355,18 @@ export function agentArchiveName(runtimeRef: string, prefix = process.env.HATCHA
  * not one of them, so listBackups and the nightly prune never touch it.
  */
 export function restoreSafetyDir(): string {
-  return join(backupsDir(), 'restore-safety');
+  return installFolder('restore-safety');
+}
+
+/**
+ * A folder of this install's own beside the sets, named by the mark its backup
+ * sets carry (key_owner in backup-volumes.sh, which uninstall.sh reads too):
+ * two installs may share this base, and one's boot sweep took the copy the
+ * other was using, and one user's private folder refused another's.
+ */
+function installFolder(name: string): string {
+  const key = process.env.HATCHABOT_SECRET_KEY;
+  return join(backupsDir(), key ? `${name}-${createHash('sha256').update(`hatchabot-backup-owner\0${key}`).digest('hex').slice(0, 16)}` : name);
 }
 
 /** Where this restore's copy of the volume goes (decided before it is written, so a restart knows). */
@@ -363,19 +375,78 @@ function safetyCopyPath(runtimeRef: string): string {
   return join(restoreSafetyDir(), `${agentArchiveName(runtimeRef).replace(/\.tgz$/, '')}-before-restore-${stamp}.tgz`);
 }
 
-/** Write the pre-restore copy to disk, owner-only (it holds the agent's secrets). */
-function keepSafetyCopy(file: string, safety: Buffer): void {
-  const dir = restoreSafetyDir();
+/** A folder only its owner can enter: what goes in holds an agent's secrets, whatever the umask. */
+function privateDir(dir: string): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
-  writeFileSync(file, safety, { mode: 0o600 });
 }
 
-/** A restore that ended either way no longer needs its copy (it holds secrets); the folder goes when empty. */
+/**
+ * Copies this process has a folder for and has not finished writing. An empty
+ * folder may be one another operation just made and is about to write into:
+ * removed under it, that operation failed with ENOENT, cancelled for no reason
+ * of its own.
+ */
+const copiesUnderWay = new Set<string>();
+/** The folder a copy lived in, when it is empty and nothing is about to write there. */
+function dropCopyFolder(dir: string): void {
+  for (const f of copiesUnderWay) if (dirname(f) === dir) return;
+  try { rmdirSync(dir); } catch { /* not empty, or gone */ }
+}
+
+/** A restore that ended either way no longer needs its copy (it holds secrets), or a copy a restart cut off half-way; the folder goes when empty. */
 function dropSafetyCopy(file: string | undefined): void {
-  if (!file || !file.startsWith(restoreSafetyDir())) return;
-  try { rmSync(file, { force: true }); } catch { /* best effort */ }
-  try { rmdirSync(restoreSafetyDir()); } catch { /* not empty, or gone */ }
+  // Under the name before folders were per install too: a restore held across the upgrade.
+  if (!file || !dirname(file).startsWith(join(backupsDir(), 'restore-safety'))) return;
+  copiesUnderWay.delete(file);
+  for (const f of [file, `${file}.part`]) {
+    try { rmSync(f, { force: true }); } catch { /* best effort */ }
+  }
+  dropCopyFolder(dirname(file));
+}
+
+/**
+ * Where a move keeps its copy of the volume between the two machines: this
+ * install's data folder, not the backup folder. A move has no other need of
+ * that folder, and on a NAS an unmounted or full share cancelled every move and
+ * the copy crossed the network twice (HB-0388).
+ */
+function moveCopyDir(): string {
+  return join(dirname(resolve(process.env.HATCHABOT_DB ?? defaultDbPath())), 'move-copies');
+}
+
+/** A new path for one move's copy (made by exportStateToFile), in a private folder. */
+export function newMoveCopy(): string {
+  const file = join(moveCopyDir(), `${randomUUID()}.tgz`);
+  copiesUnderWay.add(file);
+  try { privateDir(moveCopyDir()); }
+  catch (err) { copiesUnderWay.delete(file); throw err; }
+  return file;
+}
+
+/** A move that ended either way no longer needs its copy; the folder goes when empty. */
+export function dropMoveCopy(file: string | undefined): void {
+  if (!file) return;
+  copiesUnderWay.delete(file);
+  for (const f of [file, `${file}.part`]) {
+    try { rmSync(f, { force: true }); } catch { /* best effort */ }
+  }
+  dropCopyFolder(dirname(file));
+}
+
+/**
+ * Boot: copies a move held when the process ended (it holds an agent's
+ * secrets, and a resumed move never reads it: the source's volume is still
+ * there). No move of this install runs yet, and the folder is this install's
+ * alone. Returns how many.
+ */
+export function sweepMoveCopies(): number {
+  const dir = moveCopyDir();
+  if (!existsSync(dir)) return 0;
+  const names = readdirSync(dir);
+  for (const n of names) rmSync(join(dir, n), { force: true, recursive: true });
+  try { rmdirSync(dir); } catch { /* best effort */ }
+  return names.length;
 }
 
 function short(err: unknown): string {
@@ -439,7 +510,10 @@ export async function restoreAgentFromBackup(
   if (!existsSync(file)) {
     throw new RestoreError(`The ${date} backup doesn't contain this agent.`);
   }
-  const data = readFileSync(file);
+  // Read as it goes into the volume, not into memory (HB-0066): asked here, so
+  // one it cannot read is refused before the agent is stopped.
+  try { accessSync(file, constants.R_OK); }
+  catch (err) { throw new RestoreError(`The ${date} backup of this agent could not be read (${short(err)}).`); }
 
   const wasRunning = agent.state === 'RUNNING';
   const runtimeRef = agent.runtimeRef;
@@ -450,7 +524,7 @@ export async function restoreAgentFromBackup(
   const op = beginOperation(store, 'restore-backup', agentId, { date, wasRunning, safetyFile }, { requestedBy: deps.requestedBy });
   deps.onOperation?.(op.id);
   try {
-    return await restoreSteps(deps, op, agentId, runtimeRef, date, data, wasRunning, safetyFile);
+    return await restoreSteps(deps, op, agentId, runtimeRef, date, file, wasRunning, safetyFile);
   } catch (err) {
     rethrowIfCrash(err);
     // Whatever was not recorded below (an unexpected error) ends the record too.
@@ -461,7 +535,7 @@ export async function restoreAgentFromBackup(
 }
 
 async function restoreSteps(
-  deps: RestoreDeps, op: OpHandle, agentId: string, runtimeRef: string, date: string, data: Buffer, wasRunning: boolean, safetyFile: string,
+  deps: RestoreDeps, op: OpHandle, agentId: string, runtimeRef: string, date: string, archive: string, wasRunning: boolean, safetyFile: string,
 ): Promise<RestoreResult> {
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
@@ -491,29 +565,44 @@ async function restoreSteps(
   // Safety net: capture the current volume so a failed extract can be undone.
   // No copy, no restore: the extract empties the volume first, so a failure
   // part-way left nothing to go back to (night review, 2026-09-27).
-  let safety: Buffer;
-  try {
-    safety = await provider.exportState(runtimeRef);
-  } catch (err) {
-    rethrowIfCrash(err);
-    log('restore.safety_capture_failed', { agentId, error: String(err) });
-    // No pointer at Download copy: it tars the same volume the same way, so it
-    // fails for the same reason (review, 2026-09-29).
-    return nothingChanged(
-      "Its current state could not be copied first, so the restore would not be undoable — nothing was changed. " +
-        "Try again in a moment; if it keeps failing, check this machine's free disk space.",
-    );
-  }
   // On disk BEFORE the volume is replaced: in memory only, a restart in the
-  // middle lost the one copy of how it was (design, "After a restart").
+  // middle lost the one copy of how it was (design, "After a restart"). Streamed
+  // there, not held here, so its size no longer refuses a restore (HB-0066).
+  copiesUnderWay.add(safetyFile);
   try {
-    keepSafetyCopy(safetyFile, safety);
+    privateDir(restoreSafetyDir());
   } catch (err) {
+    copiesUnderWay.delete(safetyFile);
     rethrowIfCrash(err);
     log('restore.safety_keep_failed', { agentId, error: String(err) });
     return nothingChanged(
       `Its current state could not be saved to disk first (${short(err)}), so the restore would not be undoable — nothing was changed. ` +
         "Check this machine's free disk space, then try again.",
+    );
+  }
+  try {
+    await provider.exportStateToFile(runtimeRef, safetyFile);
+    copiesUnderWay.delete(safetyFile); // the file itself holds the folder now
+  } catch (err) {
+    copiesUnderWay.delete(safetyFile);
+    rethrowIfCrash(err);
+    log('restore.safety_capture_failed', { agentId, error: String(err) });
+    if (err instanceof VolumeGoneError) {
+      // Both make a new, empty volume; Rebuild refuses a FAILED agent, which has Retry.
+      const wayIn = store.getAgent(agentId)?.state === 'FAILED' ? 'Tap Retry on the agent' : 'Rebuild the agent';
+      return nothingChanged(`${VOLUME_GONE} There is nothing to copy first, so the restore did not begin — nothing was changed. ${wayIn}, which makes a new, empty volume, then restore this backup.`);
+    }
+    if (isDiskFull(err)) {
+      return nothingChanged(
+        "This machine's disk is too full to hold a copy of its current state, so the restore would not be undoable — nothing was changed. " +
+          'Free some space, then try again.',
+      );
+    }
+    // No pointer at Download copy: it tars the same volume the same way, so it
+    // fails for the same reason (review, 2026-09-29).
+    return nothingChanged(
+      "Its current state could not be copied first, so the restore would not be undoable — nothing was changed. " +
+        "Try again in a moment; if it keeps failing, check this machine's free disk space.",
     );
   }
   op.step('safety-taken');
@@ -533,7 +622,7 @@ async function restoreSteps(
       // The import replaces the volume: never under a running agent (issue #21).
       const notDown = await confirmStopped(deps, agentId, runtimeRef);
       if (notDown) throw new Error(`its runtime could not be confirmed stopped (${notDown})`);
-      await provider.importState(runtimeRef, safety);
+      await provider.importStateFromFile(runtimeRef, safetyFile, { ownCopy: true });
     } catch (e) {
       rethrowIfCrash(e);
       rollbackErr = e;
@@ -565,13 +654,30 @@ async function restoreSteps(
 
   forgetDmPolicy(agentId); // the restored config is whatever the archive held
   try {
-    await provider.importState(runtimeRef, data);
+    await provider.importStateFromFile(runtimeRef, archive);
   } catch (err) {
     rethrowIfCrash(err);
+    log('restore.import_failed', { agentId, error: String(err) });
+    // It stopped before the volume was emptied: nothing to put back. Putting it
+    // back anyway staged the safety copy the same way, and on a disk too full
+    // for the backup (the copy is usually the larger) that failed too and marked
+    // an untouched agent FAILED and half-restored.
+    if (err instanceof VolumeUntouchedError) {
+      return nothingChanged(
+        isDiskFull(err)
+          ? 'Restore failed because the disk is full — the agent was left as it was. Free some space, then try again.'
+          : 'Restore failed — the agent was left as it was.',
+      );
+    }
     // The volume may be half-overwritten. Put the pre-restore state back, so a
     // broken archive never corrupts a working agent.
-    log('restore.import_failed', { agentId, error: String(err) });
-    await rollBack('Restore failed', err, 'Restore failed — the agent was left as it was.');
+    await rollBack(
+      'Restore failed',
+      err,
+      isDiskFull(err)
+        ? "Restore failed because the disk is full — the agent was left as it was. Free some space, then try again."
+        : 'Restore failed — the agent was left as it was.',
+    );
   }
   op.step('replaced');
 
@@ -787,7 +893,7 @@ export async function recoverBackupRestore(deps: RestoreDeps, opId: string, acti
     if (!p.safetyFile || !existsSync(p.safetyFile)) {
       throw new RestoreError('The copy from before the restore is no longer on disk, so it cannot be put back. Finish the restore, or restore another backup.');
     }
-    await deps.provider.importState(ref, readFileSync(p.safetyFile)).catch((err: unknown) => {
+    await deps.provider.importStateFromFile(ref, p.safetyFile, { ownCopy: true }).catch((err: unknown) => {
       throw new RestoreError(`The copy from before could not be put back: ${short(err)}. It stays stopped; try again.`);
     });
     forgetDmPolicy(agent.id);
@@ -810,7 +916,7 @@ export async function recoverBackupRestore(deps: RestoreDeps, opId: string, acti
     throw new RestoreError(`The ${date} backup is no longer on disk, so the restore cannot be finished. Put back the copy from before instead.`);
   }
   forgetDmPolicy(agent.id);
-  await deps.provider.importState(ref, readFileSync(file)).catch((err: unknown) => {
+  await deps.provider.importStateFromFile(ref, file).catch((err: unknown) => {
     throw new RestoreError(`The restore could not be finished: ${short(err)}. It stays stopped; put back the copy from before, or try again.`);
   });
   op.step('replaced');

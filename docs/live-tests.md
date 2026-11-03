@@ -27,6 +27,16 @@ way, and a run that tested nothing fails. The gate
 counts only runs that are committed: `due` says when some are not yet.
 `node scripts/live.mjs list` shows each test's last result.
 
+The clean installs (`endsOnRelease` in the register) install the public stable
+and upgrade to the public latest, not this checkout, so run them once the
+release is published. A run that ends clean on any other version, or names no
+version, is recorded as a skip with the version in its note, says so, and
+exits 1 (`run-due` lists it with a ✗): it says nothing about the release under
+test. A run that stops before its last line is a fail, as any non-zero exit is.
+When a VM stops by itself or never gets ready, the run says it is the VM's or
+the machine's failure, not the install's, with the load average and LXD's log;
+it still fails, so run it again on a quieter machine.
+
 A big file most releases touch (`src/api/routes.ts`, `src/cli.ts`,
 `src/store/store.ts`) is in an area as `{ path, near }`: a change there makes
 the test due only when a changed line, or the route or command it sits in,

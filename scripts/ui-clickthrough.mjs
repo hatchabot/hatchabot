@@ -874,6 +874,23 @@ const SCENARIOS = String.raw`(() => {
         { tag: 'hatchabot-runtime:2026.9.9', exists: true, relation: 'newer', openclawVersion: '2026.9.9', pinned: [], classes: [] } ] };
       window.__answer = { 'POST /v1/runtime/images/promote': [{ status: 200, body: { promoted: 'hatchabot-runtime:2026.9.9', followers: [] } }] };
       await openAiDlg('images');
+      await until(() => [...document.querySelectorAll('#rtList button')].find((b) => b.textContent.includes('Promote')));
+      // "Used by" lists what blocks a delete; "nothing" is said only when Docker answered (HB-0380).
+      rtData = { ...rtData, tags: [
+        { tag: 'hatchabot-runtime:2026.7.1', exists: true, relation: 'older', pinned: [{ id: 'x1', name: 'Pantry', state: 'ARCHIVED', mine: true, runner: null }], classes: [],
+          blockers: [{ kind: 'pin', name: 'Pantry', label: 'archived, pinned', fix: 'Restore it and discard its trial, or delete it.', mine: true }] },
+        { tag: 'hatchabot-runtime:2026.7.2', exists: true, relation: 'older', pinned: [], classes: [],
+          blockers: [{ kind: 'container', name: 'Cellar', label: 'archived, container on it', fix: 'Restore and rebuild it, which moves it off this image, or delete it.', mine: true }] },
+        { tag: 'hatchabot-runtime:2026.7.3', exists: true, relation: 'older', pinned: [], classes: [], blockers: [] } ] };
+      renderRuntimeList();
+      const used = [...document.querySelectorAll('#rtList tbody tr:not(.rt-under)')].map((r) => r.cells[3].textContent);
+      ok('an archived pin is named, with no ✕ and a way out', used[0].includes('Pantry · archived') && used[0].includes('Restore it and discard its trial') && !document.querySelector('#rtList tbody tr:not(.rt-under)').cells[3].querySelector('a'));
+      ok("an archived agent's container is named, with a way out", used[1].includes('Cellar · archived, container on it') && used[1].includes('Restore and rebuild it'));
+      ok('nothing holding it says nothing', used[2].trim() === 'nothing');
+      rtData = { ...rtData, containersChecked: false }; renderRuntimeList();
+      const unchecked = [...document.querySelectorAll('#rtList tbody tr:not(.rt-under)')].map((r) => r.cells[3].textContent);
+      ok('Docker not answering is not "nothing"', unchecked[2].includes('Containers could not be checked') && !unchecked[2].includes('nothing'));
+      await loadRuntimeImages();
       const promote = await until(() => [...document.querySelectorAll('#rtList button')].find((b) => b.textContent.includes('Promote')));
       promote.click();
       const pr = await until(() => calls('POST', /\/v1\/runtime\/images\/promote$/)[0]);
@@ -2701,6 +2718,18 @@ const SCENARIOS = String.raw`(() => {
         document.getElementById('sfTotpConfirmBtn').click();
         await until(() => document.getElementById('sfBoxErr').textContent.includes('not right'));
         ok('a wrong code leaves the QR up', !document.getElementById('sfTotpBox').hidden);
+        // A setup the server cancelled (a factor removed in another tab): no code can finish it, so the box goes and the reason stays (HB-0375).
+        window.__answer['POST /v1/second-factor/totp/confirm'].unshift({ status: 409, body: { error: 'This setup was cancelled: your second factors changed since the code was shown. Add the app again.' } });
+        document.getElementById('sfTotpCode').value = '111111';
+        document.getElementById('sfTotpConfirmBtn').click();
+        await until(() => document.getElementById('sfBoxErr').textContent.includes('setup was cancelled'));
+        ok('a cancelled setup closes its box', document.getElementById('sfTotpBox').hidden);
+        ok('and takes its secret off the page', document.getElementById('sfTotpSecret').textContent === '' && document.getElementById('sfTotpQr').innerHTML === '');
+        window.__answer['POST /v1/second-factor/totp'] = [{ body: { id: 'sf-1', secret: madeUpKey, uri: 'otpauth://totp/x', qr: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0h10v10H0z"/></svg>' } }];
+        document.getElementById('sfCurPw').value = 'the-right-password';
+        document.getElementById('sfAddTotpBtn').click();
+        await until(() => !document.getElementById('sfTotpBox').hidden);
+        ok('starting again clears the reason', document.getElementById('sfBoxErr').textContent === '');
         window.__override['/v1/second-factor'] = { ...none, need: 'yes', methods: ['totp', 'backup'], backupCodes: 2, factors: [{ id: 'sf-1', kind: 'totp', createdAt: new Date().toISOString() }] };
         document.getElementById('sfTotpCode').value = '123456';
         document.getElementById('sfTotpConfirmBtn').click();
@@ -2725,6 +2754,21 @@ const SCENARIOS = String.raw`(() => {
         document.querySelector('#sfList .sfRemove').click();
         const del = await until(() => calls('DELETE', /\/v1\/second-factor\/sf-1$/)[0]);
         eq('the removal carries the password', del.body, { current: 'the-right-password' });
+        await until(() => document.getElementById('toast').textContent === 'Removed');
+        // An app still being added when a factor is removed: the server cancelled it, so its box closes and says so (HB-0375).
+        window.__override['/v1/second-factor'] = { ...none, need: 'yes', methods: ['totp', 'backup'], backupCodes: 2, factors: [{ id: 'sf-1', kind: 'totp', createdAt: new Date().toISOString() }, { id: 'sf-2', kind: 'passkey', label: 'A key', createdAt: new Date().toISOString() }] };
+        await loadSecondFactor();
+        window.__answer['POST /v1/second-factor/totp'] = [{ body: { id: 'sf-3', secret: madeUpKey, uri: 'otpauth://totp/x', qr: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0h10v10H0z"/></svg>' } }];
+        document.getElementById('sfCurPw').value = 'the-right-password';
+        document.getElementById('sfAddTotpBtn').click();
+        await until(() => !document.getElementById('sfTotpBox').hidden);
+        document.getElementById('sfTotpCode').value = '222';
+        document.getElementById('sfCurPw').value = 'the-right-password';
+        document.querySelector('#sfList .sfRemove[data-id="sf-2"]').click();
+        await until(() => calls('DELETE', /\/v1\/second-factor\/sf-2$/)[0]);
+        await until(() => document.getElementById('sfTotpBox').hidden);
+        ok('removing a factor closes the box of an app being added', document.getElementById('sfTotpSecret').textContent === '' && document.getElementById('sfTotpQr').innerHTML === '' && document.getElementById('sfTotpCode').value === '');
+        ok('and says the setup was cancelled: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('cancelled the authenticator app'));
       } finally {
         delete window.__override['/v1/second-factor']; delete window.__override['/v1/public-access'];
         window.__answer = {}; window.__confirmAnswer = true;
@@ -3108,7 +3152,16 @@ const SCENARIOS = String.raw`(() => {
         const put = await until(() => calls('PUT', /\/v1\/machine-defaults$/).find((c) => c.body && c.body.key === 'agentSwap'));
         eq('the machine setting', put.body, { key: 'agentSwap', value: '2g' });
         await until(() => document.getElementById('toast').textContent.includes('applied to 3 agents'));
+        // An agent whose volume is gone took neither: said by name, not left out (HB-0373).
+        window.__answer = { 'PUT /v1/machine-defaults': [{ status: 200, body: { default: { key: 'agentSwap', value: '3g' }, applied: 1, volumeGone: ['Kitchen'] } }] };
+        input.value = '3g';
+        input.parentElement.querySelector('button').click();
+        await until(() => document.getElementById('toast').textContent.includes('Not on Kitchen'));
+        ok('a gone volume is named: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('the volume is gone'));
         aiDlg.close();
+        window.__answer = { 'PATCH /v1/agents/a1': [{ status: 200, body: { id: 'a1', filesCapPending: 'The limit is saved, but it could not be written to the agent. Its volume is gone.' } }] };
+        await v2SetAgentPolicy('a1', { filesMaxMb: 5 });
+        ok('the file limit says so too', document.getElementById('toast').textContent.includes('could not be written'));
       } finally {
         try { v2Close(); } catch {}
         window.__answer = {};
@@ -3140,6 +3193,13 @@ const SCENARIOS = String.raw`(() => {
         openApplyModel('p1', 'claude-haiku-4-5', [], onProfile, 'Claude token');
         await until(() => applyModelDlg.open);
         eq('one ticked by default (the follower, not the pinned one)', document.getElementById('applyModelBtn').textContent, 'Save, and switch 1');
+        // Its volume is gone: not "next rebuild", which would make a fresh, empty one (HB-0373).
+        window.__answer = { 'POST /v1/ai-profiles/p1/apply-default-model': [{ body: { applied: 1, held: 1, live: 0, staged: 0, volumeGone: 1 } }] };
+        document.getElementById('applyModelBtn').click();
+        await until(() => document.getElementById('toast').textContent.includes('its volume is gone'));
+        ok('a gone volume is not told to rebuild', !document.getElementById('toast').textContent.includes('next rebuild'));
+        openApplyModel('p1', 'claude-haiku-4-5', [], onProfile, 'Claude token');
+        await until(() => applyModelDlg.open);
         // The server held it back: its runtime is too old for the model on a plan (HB-0232).
         window.__answer = { 'POST /v1/ai-profiles/p1/apply-default-model': [{ body: { applied: 0, held: 2, live: 0, staged: 0, notSwitched: [{ id: 'a1', name: 'Homework Helper', reason: 'too old' }] } }] };
         document.getElementById('applyModelBtn').click();
@@ -3807,7 +3867,12 @@ const SCENARIOS = String.raw`(() => {
         { body: { via: 'ai', ideas: [{ icon: '🪙', color: '#e0a13a' }, { icon: '🔭', color: '#5a7fd6' }, { icon: '🐝', color: '#c9b03a' }] } },
         { body: { via: 'ai', ideas: [{ icon: '🧩', color: '#8a6fd0' }] } },
         { body: { via: 'keywords', why: 'ai-failed', ideas: [] } },
+        // HB-0382: a reply with no ideas in it is not a silent AI, and each has its own note.
+        { body: { via: 'keywords', why: 'ai-no-ideas', ideas: [{ icon: '🐚', color: '#3a8fd0' }] } },
+        { body: { via: 'keywords', why: 'ai-no-ideas', ideas: [] } },
+        { body: { via: 'keywords', why: 'no-ai', ideas: [] } },
       ];
+      const note = () => document.getElementById('v2IconNote').textContent;
       const mark = window.__calls.length;
       const patches = () => window.__calls.slice(mark).filter((c) => c.method === 'PATCH');
       try {
@@ -3838,6 +3903,20 @@ const SCENARIOS = String.raw`(() => {
         ok('without the AI it says so, and keeps what it had', ideaBtns().length === 4);
         ok('and says an emoji can be pasted', document.getElementById('v2IconNote').textContent.includes('paste any emoji'));
         ok('still nothing saved', !patches().length);
+        await until(ready);
+        document.getElementById('v2IconAutoBtn').click();
+        await until(() => note().includes('no ideas could be read'));
+        ok('an answer with no ideas says it answered, not that it did not: ' + note(), !note().includes('didn’t answer'));
+        ok('with stand-ins, it says where they came from', note().includes('your words and its name') && note().includes('paste any emoji') && ideaBtns().length === 5);
+        await until(ready);
+        document.getElementById('v2IconWant').value = '';
+        document.getElementById('v2IconAutoBtn').click();
+        await until(() => asks().length === 5);
+        await until(ready);
+        ok('with none, it still says it could not read them: ' + note(), note().includes('no ideas could be read') && !note().includes('these come from') && note().includes('paste any emoji'));
+        document.getElementById('v2IconAutoBtn').click();
+        await until(() => note().includes('None of your AI sources'));
+        ok('no source says so: ' + note(), note().includes('paste any emoji') && !note().includes('management AI'));
         await until(ready);
         document.getElementById('v2IconSaveBtn').click();
         const patch = await until(() => patches().find((c) => c.path === '/v1/agents/a1'));
@@ -5948,6 +6027,70 @@ const SCENARIOS = String.raw`(() => {
       } finally {
         try { v2Close(); } catch {}
         delete window.__override['/v1/agents/a1/fs']; delete window.__override['/v1/agents/a1/fs/file']; v2FilesPath.delete('a1');
+      }
+    },
+    searchHealthAndSwitch: async () => {
+      // The fleet: what is in use, why, and a test that shows the answer (HB-0390, HB-0391).
+      const out = { mode: 'auto', active: 'duckduckgo', keySet: true, why: 'The Brave key has run out of quota.', checkedAt: '2026-11-03T10:00:00Z',
+        brave: { status: 'exhausted', detail: 'The Brave key has run out of quota.', resetsAt: '2026-11-20T00:00:00Z' }, duckduckgo: { status: 'ok', detail: 'DuckDuckGo works.' }, applied: { at: '2026-11-03T10:00:05Z', changed: 3, failed: ['Kitchen'], rebuild: 2 } };
+      window.__answer = { 'POST /v1/web-search/check': [{ body: out }], 'PUT /v1/web-search': [{ body: { ...out, mode: 'duckduckgo', why: 'You chose DuckDuckGo.' } }] };
+      await testFleetSearch();
+      ok('the POST was made', calls('POST', /\/v1\/web-search\/check$/).length === 1);
+      const health = document.getElementById('searchHealth').textContent;
+      ok('names what is in use: ' + health, health.includes('In use: DuckDuckGo'));
+      ok('says why', health.includes('run out of quota'));
+      ok('says when it returns', health.includes("quota returns"));
+      ok('names an agent not moved', health.includes('Kitchen'));
+      ok('says how many wait for a rebuild', health.includes('2 on DuckDuckGo until their next Rebuild'));
+      const mode = document.getElementById('searchMode');
+      mode.value = 'duckduckgo'; mode.dispatchEvent(new Event('change', { bubbles: true }));
+      const put = await until(() => calls('PUT', /\/v1\/web-search$/)[0]);
+      eq('the mode chosen', put.body, { mode: 'duckduckgo' });
+      await until(() => document.getElementById('searchHealth').textContent.includes('You chose DuckDuckGo'));
+      // One agent: the test says who answered, and a failure says why.
+      openV2Agent('a1', 'advanced');
+      const btn = await until(() => document.getElementById('agentSearchTestBtn'));
+      window.__answer = { 'POST /v1/agents/a1/search-test': [{ body: { ok: true, provider: 'duckduckgo', results: 1, detail: 'Search works: DuckDuckGo answered.' } }, { body: { ok: false, why: 'quota', provider: 'brave', detail: 'Brave refused: its quota or rate limit is used up.' } }, { status: 409, body: { error: 'Start the agent first: this runs a real search inside it.' } }] };
+      btn.click();
+      await until(() => document.getElementById('agentSearchTestOut').textContent.includes('DuckDuckGo answered'));
+      btn.click();
+      await until(() => document.getElementById('agentSearchTestOut').textContent.includes('⚠ Brave refused'));
+      btn.click();
+      await until(() => document.getElementById('agentSearchTestOut').textContent.includes('Start the agent first'));
+      ok('the button is usable again', !btn.disabled);
+      v2Close();
+      window.__answer = {};
+    },
+    agentGmailTest: async () => {
+      // The owner's request (2026-11-03): a button per account that has Gmail; it says what the test said.
+      window.__override['/v1/agents/a1/connections'] = { accounts: [
+        { email: 'mara@example.org', client: 'default', auth: 'oauth', services: ['gmail', 'calendar'] },
+        { email: 'jo@example.org', client: 'default', auth: 'oauth', services: ['calendar'] },
+      ] };
+      try {
+        openV2Agent('a1', 'knowledge');
+        const list = await until(() => { const el = document.getElementById('connList'); return el?.querySelectorAll('.pair').length === 2 && el; });
+        const rows = [...list.querySelectorAll('.pair')];
+        const btn = () => rows[0].querySelector('button:not(.danger)');
+        ok('the account with Gmail has the button', btn()?.textContent === 'Test Gmail');
+        ok('the account without Gmail has none', !rows[1].querySelector('button:not(.danger)'));
+        window.__answer = { 'POST /v1/agents/a1/connections/mara%40example.org/test': [
+          { body: { ok: true, detail: 'Gmail works: the sign-in is good, and the inbox answered (12 messages).' } },
+          { body: { ok: false, why: 'signin', detail: 'Google no longer accepts this sign-in: it expired or was revoked.' } },
+          { status: 409, body: { error: 'Start the agent first: this test runs inside it.' } },
+        ] };
+        const out = document.getElementById('connGmailOut0');
+        btn().click();
+        await until(() => out.textContent.includes('✓ Gmail works'));
+        btn().click();
+        await until(() => out.textContent.includes('⚠ Google no longer accepts'));
+        btn().click();
+        await until(() => out.textContent.includes('Start the agent first'));
+        ok('the button is usable again', !btn().disabled);
+        v2Close();
+      } finally {
+        delete window.__override['/v1/agents/a1/connections'];
+        window.__answer = {};
       }
     },
     phoneAccessAndSpendingFit: async () => {

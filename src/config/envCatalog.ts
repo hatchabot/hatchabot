@@ -191,6 +191,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('timings', 'HATCHABOT_IDLE_RENAME_MS', '900000', 'Rename a bot only after it has been idle this long.'),
   s('timings', 'HATCHABOT_KNOCK_CACHE_MS', '30000', 'How long a "someone is knocking" answer is reused.'),
   s('timings', 'HATCHABOT_POSTURE_SWEEP_MS', '86400000', 'How often the security check runs.'),
+  s('timings', 'HATCHABOT_SEARCH_CHECK_MS', '21600000', "How often Brave's quota is checked; each check spends one query."),
 
   // Never in production
   s('never', 'HATCHABOT_ALLOW_OWNER_HEADER', null, '1 lets a request header choose the owner. For tests only; the security check flags it as critical.'),

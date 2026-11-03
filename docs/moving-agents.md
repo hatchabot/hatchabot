@@ -236,7 +236,7 @@ purpose:
 | An import (a file, or a move arriving from another Hatchabot) | Undoes it completely — a half-imported agent never starts. Import the file again |
 | A move to another Hatchabot, after the agent was packed up | Asks the other server whether it arrived: yes — this copy stays stopped, marked as moved; no — it is started here again |
 | A restore from a backup, before the copy of how it was had been saved | Undoes it: nothing was changed, and the agent is started again if it was running |
-| A restore from a backup, after that copy was saved (to `restore-safety/` beside the backups) | Its memory may be half-restored, so it stays **stopped** and waits for you: **Finish the restore** or **Put back the copy from before**. (If only the restart itself was left, it finishes by itself.) |
+| A restore from a backup, after that copy was saved (to `restore-safety-<install's mark>/` beside the backups) | Its memory may be half-restored, so it stays **stopped** and waits for you: **Finish the restore** or **Put back the copy from before**. (If only the restart itself was left, it finishes by itself.) |
 | A restore of a snapshot, part-way through its files | Waits for you: **Finish** or **Revert to the copy taken before** (the snapshot taken just before the restore). If none of its files had changed yet, or all had, it settles by itself |
 | An archive, before its bot was given back | Undoes it: started again if it was running |
 | An archive, after its bot was given back | Finishes it: archived, its container left stopped. Going back would need a new bot |

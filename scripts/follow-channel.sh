@@ -90,8 +90,23 @@ valid "$CHANNEL" || { echo "Usage: $0 stable|beta|latest   (or --install <channe
 REMEMBERED=""
 if [ -f "$CHANNEL_FILE" ]; then REMEMBERED="$(tr -d '[:space:]' < "$CHANNEL_FILE")"
 elif [ -f "$USER_CHANNEL_FILE" ]; then REMEMBERED="$(tr -d '[:space:]' < "$USER_CHANNEL_FILE")"; fi
-# Pinned by hand to a version (hatchabot upgrade vX.Y.Z): leave it there.
-case "$REMEMBERED" in v[0-9]*) exit 0 ;; esac
+# This install's own records, keyed on its path as the upgrade lock is: one
+# file for every install of the user's let a release that failed on one set
+# it aside on another, which then stayed behind (audit #034). The records
+# from before (unkeyed) are taken over by the first install that looks.
+KEY="$(printf %s "$DIR" | cksum | cut -d' ' -f1)"
+# Pinned by hand to a version (hatchabot upgrade vX.Y.Z): leave it there. But
+# not half-way: that upgrade killed (a swap cut off, or its record beside the
+# lock) goes to upgrade.sh, for the release pinned, which it puts the earlier
+# one back for and then finishes. Left for the next hand upgrade, the install
+# stayed half changed under a running timer (HB-0372).
+PINNED=""
+case "$REMEMBERED" in v[0-9]*)
+  [ -f .swapping ] || [ -f "$STATE/upgrade-$KEY.from" ] || exit 0
+  PINNED="$REMEMBERED" ;;
+esac
+if [ -n "$PINNED" ]; then CHANNEL="$PINNED"; TARGET="$PINNED"
+else
 if valid "$REMEMBERED"; then CHANNEL="$REMEMBERED"; fi
 
 # What the channel names now — the same resolution as upgrade.sh, needed here
@@ -99,13 +114,9 @@ if valid "$REMEMBERED"; then CHANNEL="$REMEMBERED"; fi
 # (A bundle install has no clone: release-target.sh asks GitHub instead.)
 TARGET="$("$DIR/scripts/release-target.sh" "$CHANNEL" 2>/dev/null)" || exit 0
 [ -n "$TARGET" ] || exit 0
+fi
 if [ -f BUNDLE.json ] && [ ! -d .git ]; then CUR="$(sed -nE 's/.*"tag":"([^"]+)".*/\1/p' BUNDLE.json)"
 else CUR="$(git describe --tags --exact-match 2>/dev/null || true)"; fi
-# This install's own records, keyed on its path as the upgrade lock is: one
-# file for every install of the user's let a release that failed on one set
-# it aside on another, which then stayed behind (audit #034). The records
-# from before (unkeyed) are taken over by the first install that looks.
-KEY="$(printf %s "$DIR" | cksum | cut -d' ' -f1)"
 # A bundle swap that was cut off (.swapping) may have the new BUNDLE.json in
 # already, and a git install's upgrade killed part-way (its record beside the
 # lock) the new release checked out with half its dependencies: upgrade.sh
@@ -132,7 +143,7 @@ case "${T_COUNT:-}${T_LAST:-}" in ''|*[!0-9]*) T_COUNT=0; T_LAST=0 ;; esac
 if [ "$T_TARGET" = "$TARGET" ] && [ "$T_COUNT" -gt 0 ]; then
   WAIT=$(( 10 * (1 << (T_COUNT - 1)) - 5 ))   # minutes, less 5 for the timer's own jitter: 5, 15, 35 …
   [ "$WAIT" -le 1440 ] || WAIT=1440
-  [ $(( $(date +%s) - T_LAST )) -ge $(( WAIT * 60 )) ] || exit 0
+  [ -f .swapping ] || [ -f "$STATE/upgrade-$KEY.from" ] || [ $(( $(date +%s) - T_LAST )) -ge $(( WAIT * 60 )) ] || exit 0
 else
   T_COUNT=0
 fi

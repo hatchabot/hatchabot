@@ -268,6 +268,133 @@ exec ${JSON.stringify(REAL_GIT)} "$@"
   });
 });
 
+describe('scripts/upgrade.sh killed in the checkout, leaving .git/index.lock (HB-0372)', () => {
+  /** An upgrade killed by SIGKILL while its git holds the index lock, its files rewritten and HEAD not moved yet. */
+  async function killedInCheckout(w: World) {
+    const started = join(w.root, 'in-checkout');
+    writeFileSync(join(w.src, 'added.txt'), 'only in v1.2.0\n');
+    w.git(w.src, 'add', '-A'); w.git(w.src, 'commit', '-q', '-m', 'v3'); w.git(w.src, 'tag', 'v1.2.0');
+    w.git(w.src, 'push', '-q', w.origin, 'main', 'v1.2.0');
+    w.git(w.install, 'fetch', '-q', '--tags', 'origin');
+    writeFileSync(join(w.bin, 'git'), `#!/usr/bin/env bash
+if [ "$1 $2 $3" = "checkout --quiet v1.2.0" ]; then
+  ${JSON.stringify(REAL_GIT)} "$@" || exit 1
+  ${JSON.stringify(REAL_GIT)} update-ref --no-deref HEAD "$(${JSON.stringify(REAL_GIT)} rev-parse 'v1.0.0^{commit}')"
+  ${JSON.stringify(REAL_GIT)} read-tree v1.0.0
+  : > .git/index.lock
+  touch ${JSON.stringify(started)}
+  exec sleep 30
+fi
+exec ${JSON.stringify(REAL_GIT)} "$@"
+`, { mode: 0o755 });
+    const p = spawn('bash', [join(w.install, 'scripts', 'upgrade.sh'), 'v1.2.0'], { detached: true, stdio: 'ignore', env: { ...w.env, HATCHABOT_RESTART_CMD: join(w.bin, 'fake-restart'), HATCHABOT_UPGRADE_IMAGE: '0', HATCHABOT_INSTALL_CMD: 'true' } });
+    await new Promise<void>((resolve, reject) => {
+      const t0 = Date.now();
+      const poll = setInterval(() => {
+        if (existsSync(started)) { clearInterval(poll); process.kill(-p.pid!, 'SIGKILL'); }
+        else if (Date.now() - t0 > 15_000) { clearInterval(poll); process.kill(-p.pid!, 'SIGKILL'); reject(new Error('never reached the checkout')); }
+      }, 20);
+      p.on('exit', () => resolve());
+    });
+    rmSync(join(w.bin, 'git'));
+    const record = lockOf(w).replace(/\.lock\.d$/, '.from');
+    const indexLock = join(w.install, '.git', 'index.lock');
+    return { record, indexLock };
+  }
+
+  it('its own stale lock goes, every tracked file is put back, and the upgrade it asked for finishes', async () => {
+    const w = world();
+    const k = await killedInCheckout(w);
+    expect(readFileSync(k.record, 'utf8')).toMatch(/^from v1\.0\.0\nto v1\.2\.0\ngit \d+ /);
+    execFileSync('touch', ['-d', '10 minutes ago', k.record]); execFileSync('touch', ['-d', '9 minutes ago', k.indexLock]);
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'false' }, ['v1.2.0']);
+    expect(r.status, r.stdout + r.stderr).toBe(3); // the repair, then this run's install fails: the old release, whole
+    expect(r.stdout).toContain('Removing the .git/index.lock');
+    expect(existsSync(k.indexLock)).toBe(false);
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
+    expect(w.git(w.install, 'status', '--porcelain')).toBe('');
+    expect(existsSync(join(w.install, 'added.txt'))).toBe(false);
+    expect(readFileSync(join(w.install, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+    const next = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['v1.2.0']);
+    expect(next.status, next.stdout + next.stderr).toBe(0);
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.2.0');
+  });
+
+  it('git killed alone, the upgrade living on: the dependencies go back, and a later run takes the lock as its own', () => {
+    const w = world();
+    writeFileSync(join(w.src, 'added.txt'), 'only in v1.2.0\n');
+    w.git(w.src, 'add', '-A'); w.git(w.src, 'commit', '-q', '-m', 'v3'); w.git(w.src, 'tag', 'v1.2.0');
+    w.git(w.src, 'push', '-q', w.origin, 'main', 'v1.2.0');
+    w.git(w.install, 'fetch', '-q', '--tags', 'origin');
+    writeFileSync(join(w.bin, 'git'), `#!/usr/bin/env bash
+if [ "$1 $2 $3" = "checkout --quiet v1.2.0" ]; then
+  ${JSON.stringify(REAL_GIT)} "$@" || exit 1
+  ${JSON.stringify(REAL_GIT)} update-ref --no-deref HEAD "$(${JSON.stringify(REAL_GIT)} rev-parse 'v1.0.0^{commit}')"
+  ${JSON.stringify(REAL_GIT)} read-tree v1.0.0
+  : > .git/index.lock
+  kill -9 $$
+fi
+exec ${JSON.stringify(REAL_GIT)} "$@"
+`, { mode: 0o755 });
+    const first = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['v1.2.0']);
+    expect(first.status, first.stdout + first.stderr).not.toBe(0);
+    rmSync(join(w.bin, 'git'));
+    expect(readFileSync(join(w.install, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+    const record = lockOf(w).replace(/\.lock\.d$/, '.from');
+    const lock = join(w.install, '.git', 'index.lock');
+    expect(readFileSync(record, 'utf8').match(/^git /gm)).toHaveLength(1);
+    execFileSync('touch', ['-d', '10 minutes ago', record]); execFileSync('touch', ['-d', '9 minutes ago', lock]);
+    const next = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['v1.2.0']);
+    expect(next.status, next.stdout + next.stderr).toBe(0);
+    expect(next.stdout).toContain('Removing the .git/index.lock');
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.2.0');
+  });
+
+  it('a git someone else is running here keeps its lock; a hand edit made since the kill is kept and named', async () => {
+    const w = world();
+    const k = await killedInCheckout(w);
+    execFileSync('touch', ['-d', '10 minutes ago', k.record]); execFileSync('touch', ['-d', '9 minutes ago', k.indexLock]);
+    const fakeGit = join(w.root, 'other', 'git');
+    mkdirSync(dirname(fakeGit));
+    writeFileSync(fakeGit, '#!/bin/sh\nsleep 30\n', { mode: 0o755 });
+    const person = spawn(fakeGit, [], { cwd: w.install, stdio: 'ignore', env: w.env });
+    try {
+      await new Promise((r) => setTimeout(r, 200));
+      const held = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['v1.2.0']);
+      expect(held.status, held.stdout + held.stderr).toBe(3);
+      expect(held.stdout).toMatch(/index\.lock is held by a git running there \(pid \d+\)/);
+      expect(existsSync(k.indexLock)).toBe(true);
+    } finally { person.kill('SIGKILL'); }
+    await new Promise((r) => setTimeout(r, 100));
+    writeFileSync(join(w.install, 'package.json'), '{"name":"hand-patched"}\n');
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'false' }, ['v1.2.0']);
+    expect(r.stdout, r.stdout + r.stderr).toMatch(/match neither v1\.0\.0 nor v1\.2\.0/);
+    const where = /kept in (\S+):/.exec(r.stdout)![1]!;
+    expect(readFileSync(join(where, 'package.json'), 'utf8')).toBe('{"name":"hand-patched"}\n');
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
+  });
+
+  it('a lock it cannot prove is its own stays, and says so', async () => {
+    const w = world();
+    const k = await killedInCheckout(w); // just now: too fresh to be sure no one else's git holds it
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['v1.2.0']);
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(r.stdout).toMatch(/index\.lock is in the way, and nothing shows it is that upgrade's own/);
+    expect(existsSync(k.indexLock)).toBe(true);
+    expect(existsSync(k.record)).toBe(true);
+  });
+
+  it('a lock with no record is another git\'s: refused with nothing moved', () => {
+    const w = world();
+    writeFileSync(join(w.install, '.git', 'index.lock'), '');
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(r.stdout).toContain('index.lock is held, so nothing was changed');
+    expect(readFileSync(join(w.install, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+    expect(existsSync(join(w.install, 'node_modules.prev'))).toBe(false);
+  });
+});
+
 describe('the upgrade lock knows its holder (#226)', () => {
   /** The holder line upgrade.sh writes: pid and its start time, as ps tells it. */
   const holder = (pid: number) => `${pid} ${execFileSync('bash', ['-c', `LC_ALL=C ps -o lstart= -p ${pid} | tr -s ' ' | sed 's/^ //;s/ $//'`], { encoding: 'utf8' }).trim()}`;
