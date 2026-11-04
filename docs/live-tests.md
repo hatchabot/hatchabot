@@ -52,6 +52,7 @@ on a machine that can; it does not hold the gate here.
 | `apps` | An app installs into an agent (its tests run there), its scheduled command runs by itself, an update keeps its config, a release with failing tests is refused, rollback and stop work | Room for 1 agent | 10–15 min | none |
 | `console` | A real browser opens an agent's console at the public HTTPS address: a secure context and its app starts; with a sign-in key, also that its live connection opens and carries messages | `HATCHABOT_PUBLIC_URL`; room for 1 agent; a sign-in key for the live connection (it admits a signed-in browser only): `-- --signin-key <file>.key`, or `~/.config/hatchabot/signin-live-test.key` with its `.pub` as `HATCHABOT_SIGNIN_KEY_FILE` (docs/signin-links.md); without one the run is a SKIP | 2–5 min | none |
 | `browser` | An agent's own browser: off by default; switched on it opens and reads a real page; none of the agent's files in it; it follows an agent restart; switched off it is gone | Room for 1 agent | 8–12 min | none |
+| `google-plain-request` | Under Code Mode, an agent told of an attached account runs `gog` for a plain request that names no command, and answers from the result. A stand-in `gog` over a made-up mailbox: it does not show that a real mailbox answers | Room for 1 agent; no Google account | 3–5 min | one |
 | `candidate-gate` | An agent on an image builds, answers, and keeps its memory search and tools | The image (default: this machine's default) | 5–10 min | one |
 | `regress-autonomous` | An agent made from the CLI answers, remembers, runs a task on demand and on its schedule, pauses, and keeps both across a restart | The live install | 10–15 min | about eight |
 | `restore-drill` | The newest complete nightly backup restores, every agent's archive into its own throwaway volume (no network, no secrets mounted), without touching the live system; writes its record under `<backups>/drills` | A backup set | 10–60 min | none |
@@ -79,7 +80,9 @@ end to end (only a person can message a bot), including a pool bot handed
 to a new agent (send a message to a free pool bot, make a test agent that
 takes it, and see that the agent never gets that message; the
 `pool.updates_dropped` log line says the lease cleared it), Google connections
-(`node scripts/connection-health.mjs` reads yours), a runner going to sleep
+(`node scripts/connection-health.mjs` reads yours; Test Gmail on the agent's
+Connections, then a plain request for mail in a fresh chat on an agent with an
+account attached), a runner going to sleep
 mid-move, an install on a Mac.
 
 Each test's area (the files that make it due) is in `scripts/live.mjs`

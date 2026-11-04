@@ -7,6 +7,8 @@ import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ExecResult, RuntimeProvider } from '../src/providers/provider.js';
 import { OAuthStateJar, gogAccounts, googleAuthUrl, materializeConnection, parseOAuthClient, syncConnections } from '../src/orchestrator/googleConnections.js';
+import { stripManagedSections } from '../src/orchestrator/template.js';
+import { syncDataSourceDocs } from '../src/orchestrator/provision.js';
 
 /** The browser-binding cookie the start route set (night review, 2026-09-28). */
 const nonceOf = (res: { cookies: Array<{ name: string; value: string }> }) => res.cookies.find((c) => c.name === 'hb_oauth')?.value ?? '';
@@ -309,6 +311,68 @@ describe('attach / detach / remove', () => {
     expect(attached[0]).toMatchObject({ connectionId: connId, gmailNoSend: true });
     expect(attached[0]!.attachedAt).toBeTruthy();
     expect(attached[0]!.materializedAt).toBeTruthy(); // materialize stamped the pull
+  });
+
+  describe("the agent's AGENTS.md names its accounts (HB-0394)", () => {
+    function withAgentsMd(w: { provider: { execShell: unknown } }, start = '# AGENTS.md\n\nmine\n') {
+      const file = { text: start };
+      const inner = (w.provider.execShell as (...a: unknown[]) => Promise<unknown>).bind(w.provider);
+      w.provider.execShell = (async (ref: string, script: string, ...rest: unknown[]) => {
+        if (script.includes('AGENTS.md') && script.startsWith('cat ')) return { code: 0, stdout: file.text, stderr: '' };
+        if (script.includes('AGENTS.md') && script.includes('base64 -d')) {
+          file.text = Buffer.from(/echo "([A-Za-z0-9+/=]+)"/.exec(script)![1]!, 'base64').toString('utf8');
+          return { code: 0, stdout: '', stderr: '' };
+        }
+        return inner(ref, script, ...rest);
+      });
+      return file;
+    }
+    const attach = (w: Awaited<ReturnType<typeof connectedWorld>>, gmailNoSend = false) =>
+      w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: w.connId, gmailNoSend } });
+
+    it('attach writes the section, and detach takes it out again', async () => {
+      const w = await connectedWorld();
+      const file = withAgentsMd(w);
+      expect((await attach(w, true)).json()).toMatchObject({ attached: true, live: true });
+      expect(file.text).toContain('## Google accounts');
+      expect(file.text).toMatch(/- chris@example\.com[^\n]*\(sending mail is blocked\)/);
+      expect(file.text).toContain('mine');
+
+      await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/detach', headers: H, payload: { connectionId: w.connId } });
+      expect(file.text).not.toContain('## Google accounts');
+      expect(file.text).toContain('mine');
+    });
+
+    it('an import that failed names no account: the agent does not hold it', async () => {
+      const w = await connectedWorld();
+      const file = withAgentsMd(w);
+      const ok = w.provider.execShell.bind(w.provider);
+      w.provider.execShell = async (ref, script, opts) =>
+        script.includes('gog auth import') ? { code: 1, stdout: '', stderr: 'no' } : ok(ref, script, opts);
+      expect((await attach(w)).json()).toMatchObject({ attached: true, live: false });
+      expect(file.text).not.toContain('## Google accounts');
+    });
+
+    it('never reaches a template: the addresses are this machine\'s', () => {
+      const out = stripManagedSections('# A\n\nmine\n\n## Google accounts\n- chris@example.com\n\n## Mine too\nkeep\n');
+      expect(out).not.toContain('chris@example.com');
+      expect(out).toContain('## Mine too');
+    });
+
+    it('the sync a start or rebuild runs writes it, once', async () => {
+      const w = await connectedWorld();
+      const file = withAgentsMd(w);
+      await attach(w);
+      file.text = '# AGENTS.md\n\nmine\n'; // as a restored or older agent's file would be
+      await syncDataSourceDocs({ store: w.store, provider: w.provider } as never, 'a1', 'docker://a1', () => {});
+      expect(file.text).toContain('- chris@example.com');
+      // One section, however often it syncs; and it settles, so nothing is rewritten for ever.
+      await syncDataSourceDocs({ store: w.store, provider: w.provider } as never, 'a1', 'docker://a1', () => {});
+      const settled = file.text;
+      await syncDataSourceDocs({ store: w.store, provider: w.provider } as never, 'a1', 'docker://a1', () => {});
+      expect(file.text).toBe(settled);
+      expect(settled.match(/## Google accounts/g)).toHaveLength(1);
+    });
   });
 
   describe('Test Gmail', () => {

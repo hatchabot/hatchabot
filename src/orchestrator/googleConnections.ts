@@ -294,6 +294,20 @@ export async function materializeConnection(
 export const isAccountEmail = (email: string): boolean =>
   /^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+$/.test(email) && email.length <= 254;
 
+/**
+ * The accounts an agent holds through Hatchabot, for its AGENTS.md: attached
+ * and imported at least once. Sorted, so an unchanged list never rewrites the
+ * agent's file. Only plain addresses and service names reach a file the model
+ * reads as instructions.
+ */
+export function attachedGoogleAccounts(store: Store, agentId: string): Array<{ email: string; services: string[]; gmailNoSend: boolean }> {
+  return store.listAgentConnections(agentId).flatMap((at) => {
+    const conn = at.materializedAt ? store.getConnection(at.connectionId) : undefined;
+    if (!conn || !isAccountEmail(conn.email)) return [];
+    return [{ email: conn.email, services: conn.services.filter((s) => /^[a-z]+$/.test(s)).sort(), gmailNoSend: at.gmailNoSend }];
+  }).sort((a, b) => a.email.localeCompare(b.email));
+}
+
 export type GmailTestWhy =
   | 'signin' | 'client' | 'blocked' | 'not-held' | 'api-off' | 'permission' | 'no-mailbox'
   | 'busy' | 'google-down' | 'network' | 'keyring' | 'unknown';

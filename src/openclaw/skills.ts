@@ -20,8 +20,16 @@ metadata: {"clawdbot":{"emoji":"🎮","requires":{"bins":["gog"]}}}
 
 Use \`gog\` for Gmail/Calendar/Drive/Contacts/Sheets/Docs. Your credentials
 live in \$GOG_HOME on your own volume — they survive rebuilds and move with
-you between machines. Until an account is connected, Google commands fail:
-offer the owner the connect flow below instead of guessing.
+you between machines. \`gog auth list --json\` shows which accounts you hold,
+and your AGENTS.md may list them under "Google accounts". Only when it lists
+none do Google commands fail: then offer the owner the connect flow below
+instead of guessing.
+
+\`gog\` is a shell command, not a tool in your catalog. If your \`exec\` tool takes
+JavaScript (Code Mode), run it through the \`exec\` function inside:
+\`const r = await exec({ command: "gog auth list --json" }); return r;\`. The
+output is in \`r.aggregated\`; a result saying \`running\` has a \`sessionId\` to read
+later with \`await process({ action: "poll", sessionId })\`.
 
 ## Connecting an account (chat-based, no browser on this machine)
 

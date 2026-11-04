@@ -175,6 +175,7 @@ and compares it with what it intends; mismatches become an Alerts line.
 
 - `src/orchestrator/googleConnections.ts` — `materializeConnection`, `dematerializeConnection`, `gogAccounts`, `recordGoogleSeen`, `syncConnections`, `withConnectionLock`, `offAgainIfDetached`: import, removal, the per-agent turn, and the checks they record.
 - `src/orchestrator/googleConnections.ts` — `testGmail`, `gmailFailure`; `src/api/routes.ts` — `'/v1/agents/:id/connections/:email/test'`; `web/index.html` — `testAgentGmail`: Test Gmail on an agent's Connections.
+- What an agent is told about its accounts: `src/openclaw/workspace.ts` — `googleAccountsSection`; `src/orchestrator/googleConnections.ts` — `attachedGoogleAccounts`; `src/orchestrator/provision.ts` — `syncDataSourceDocs`; `src/api/routes.ts` — `syncGoogleDocs`
 - `src/orchestrator/accessOverview.ts` — `verifyAgentAccess`, `accessProbeScript`, `accessOverview`, `accessAlertOf`, `agentsWithAccessFindings`: Verify now (read-only), the overview, and its Alerts line.
 - `src/store/store.ts` — `access_checks`, `recordAccessCheck`, `connectionRemovalsSince`, `countConnectionsFromOtherClient`: the records, and which OAuth client issued each connection (`client_id`).
 - `src/api/routes.ts` — `'/v1/google-oauth/client'`, `'/v1/agents/:id/connections/:email'`: the installation's OAuth client (a different client ID is confirmed first), and an agent's Disconnect (detaches an attached account).

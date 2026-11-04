@@ -6,12 +6,13 @@ import type { Agent, TemplateParam } from '../domain/types.js';
 import type { Store } from '../store/store.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import { CORE_FILES, CoreFileTooBigError, MAX_FILE_BYTES, readCoreFile, SnapshotError, workspacePath } from './snapshots.js';
-import { DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, PEERS_HEADING, removeSection, SCHEDULED_RESULTS_HEADING } from '../openclaw/workspace.js';
+import { DATA_SOURCES_HEADING, GOOGLE_ACCOUNTS_HEADING, INSTALL_HEADING, OPERATOR_HEADING, PEERS_HEADING, removeSection, SCHEDULED_RESULTS_HEADING } from '../openclaw/workspace.js';
 import { scanPersonalData, type PersonalScan } from '../domain/personalData.js';
 
 /**
  * The sections Hatchabot writes into AGENTS.md for THIS machine and owner:
- * who the operator is, their folders and repos, their other agents, the
+ * who the operator is, their folders and repos, their Google accounts, their
+ * other agents, the
  * memory rules and budget, the install notes. None of it may travel in a
  * template — it reached another owner's agent and was written back by its
  * setup values (night review, 2026-09-28). The importer's own build adds
@@ -19,7 +20,7 @@ import { scanPersonalData, type PersonalScan } from '../domain/personalData.js';
  */
 // The install notes' pre-rename heading too: agents built before v1.0.0
 // still carry it (2026-09-30).
-const MANAGED_HEADINGS = [OPERATOR_HEADING, DATA_SOURCES_HEADING, PEERS_HEADING, INSTALL_HEADING, '## Installing tools (managed by AgentClaw)', '## Memory policy', '## Memory budget'];
+const MANAGED_HEADINGS = [OPERATOR_HEADING, DATA_SOURCES_HEADING, GOOGLE_ACCOUNTS_HEADING, PEERS_HEADING, INSTALL_HEADING, '## Installing tools (managed by AgentClaw)', '## Memory policy', '## Memory budget'];
 export function stripManagedSections(agentsMd: string): string {
   return MANAGED_HEADINGS.reduce((s, h) => removeSection(s, h), agentsMd);
 }

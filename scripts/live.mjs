@@ -81,6 +81,12 @@ export const LIVE_TESTS = [
       { path: ROUTES, near: /browser/i }, { path: 'src/orchestrator/provision.ts', near: /browser/i }, { path: CLI, near: /case '(start|stop)'/ }],
   },
   {
+    name: 'google-plain-request', cmd: ['node_modules/.bin/tsx', 'scripts/google-scenarios.mjs'], against: 'install', minutes: '3–5', aiTurns: 'one',
+    needs: 'room for 1 agent; no Google account (a stand-in gog over a made-up mailbox)',
+    proves: 'under Code Mode, an agent told of an attached account runs gog for a plain request that names no command, and answers from the result',
+    area: ['docker', 'src/openclaw/workspace.ts', 'src/openclaw/skills.ts', 'scripts/google-scenarios.mjs', LIB, { path: 'src/orchestrator/provision.ts', near: /google/i }],
+  },
+  {
     name: 'candidate-gate', cmd: ['bash', 'scripts/candidate-gate.sh'], defaultArgs: ['hatchabot-runtime:latest'], against: 'install', minutes: '5–10', aiTurns: 'one',
     needs: 'the image to check (default: this machine\'s default image)',
     proves: 'an agent on that image builds, answers, and keeps its memory search and tools',

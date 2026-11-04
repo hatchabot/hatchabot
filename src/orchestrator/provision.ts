@@ -27,10 +27,10 @@ import { syncModelReviewCron } from './modelReview.js';
 import { channelTimeoutEnv } from './channelTimeout.js';
 import { syncContextCap } from './compaction.js';
 import { clearStaleRuntimePins } from './runtimePins.js';
-import { syncConnections } from './googleConnections.js';
+import { attachedGoogleAccounts, syncConnections } from './googleConnections.js';
 import { verifyAgentAccess } from './accessOverview.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
-import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, removeInstallSections, operatorSection, peerOneLine, peerToolsSection, removeSection, replaceSection, scheduledResultsSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, SCHEDULED_RESULTS_HEADING } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, GOOGLE_ACCOUNTS_HEADING, googleAccountsSection, installConventionsSection, memoryPolicySection, removeInstallSections, operatorSection, peerOneLine, peerToolsSection, removeSection, replaceSection, scheduledResultsSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, SCHEDULED_RESULTS_HEADING } from '../openclaw/workspace.js';
 import { effectiveMemoryCap, memoryBudgetSection } from './memoryCap.js';
 import { agentMemoryLimits } from './swap.js';
 
@@ -1720,6 +1720,9 @@ export async function syncDataSourceDocs(
     next = replaceSection(next, '## Memory budget', memoryBudgetSection(memoryCapFor(store, agent)));
     // The operator identity: injected so every agent already knows who it serves.
     next = replaceSection(next, OPERATOR_HEADING, operatorSection(store.getOperatorProfile(agent.ownerId)));
+    // The Google accounts it holds: it could not otherwise know (HB-0394).
+    const google = attachedGoogleAccounts(store, agentId);
+    next = google.length ? replaceSection(next, GOOGLE_ACCOUNTS_HEADING, googleAccountsSection(google)) : removeSection(next, GOOGLE_ACCOUNTS_HEADING);
     // Where scheduled results go, for an agent in no chat app only: one asked
     // in its web chat told its owner it needed Telegram (2026-10-12). Adding or
     // removing a chat app rebuilds the agent, which brings this back here.

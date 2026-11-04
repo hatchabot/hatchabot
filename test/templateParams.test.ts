@@ -710,6 +710,33 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     return { ...w, child: w.store.getAgent(child.id)! };
   }
 
+  it("a pushed definition keeps each child's own Google accounts, and never carries the master's (HB-0394)", async () => {
+    const master = 'Playbook.\n\n## Google accounts\n- master-account@example.org\n\n## After\nkeep\n';
+    const run = async (childFile: string) => {
+      const { f, provider, child } = await withChild();
+      const written: string[] = [];
+      const inner = provider.execShell.bind(provider);
+      provider.execShell = async (ref, script, opts) => {
+        if (script.includes('base64 -d') && script.includes(`${child.slug}/agent/AGENTS.md`)) {
+          written.push(Buffer.from(/echo "([A-Za-z0-9+/=]+)"/.exec(script)![1]!, 'base64').toString('utf8'));
+          return { code: 0, stdout: '', stderr: '' };
+        }
+        if (script.includes('AGENTS.md')) return { code: 0, stdout: script.includes(`${child.slug}/agent/`) ? childFile : master, stderr: '' };
+        return inner(ref, script, opts);
+      };
+      const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+      expect(res.json().pushed).toBe(1);
+      return written[0]!; // the pushed file itself: the section sync after it is a second write
+    };
+    const own = await run('Old.\n\n## Google accounts\n- child-account@example.org\n');
+    expect(own).toContain('child-account@example.org');
+    expect(own).not.toContain('master-account@example.org');
+    expect(own).toContain('## After');
+    const none = await run('Old.\n');
+    expect(none).not.toContain('## Google accounts');
+    expect(none).not.toContain('master-account@example.org');
+  });
+
   it("a child refused for a description too long reads the whole reason (HB-0309)", async () => {
     const { store, f, child } = await withChild();
     // "growth " 1,200 times: 8,400 characters rendered.

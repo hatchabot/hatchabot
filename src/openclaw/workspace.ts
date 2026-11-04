@@ -264,6 +264,53 @@ verbatim.`;
 
 export const INSTALL_HEADING = '## Installing tools (managed by Hatchabot)';
 
+export const GOOGLE_ACCOUNTS_HEADING = '## Google accounts';
+
+/**
+ * The AGENTS.md section naming the Google accounts on this agent, rewritten on
+ * every build and on attach and detach. Without it an agent had no way to know:
+ * the accounts are not in OpenClaw's config, so its `openclaw` tool reported
+ * none, and it saved that to its memory (HB-0394). Hence the last lines: they
+ * correct a saved claim without Hatchabot editing the agent's memory.
+ *
+ * It also says how to run a shell command when the model's `exec` takes
+ * JavaScript (OpenClaw's Code Mode, on by default for its preferred models).
+ * Nothing OpenClaw tells the model says this: its prompt calls `exec`
+ * JavaScript, "never shell". The shell tool is the guest's `exec` global; past
+ * the cell's 10 seconds it answers `running` with a session to poll (run on
+ * 2026.9.8). AGENTS.md, not TOOLS.md: 2026.9.8 does not put TOOLS.md in the
+ * prompt (HB-0397).
+ */
+export function googleAccountsSection(accounts: Array<{ email: string; services: string[]; gmailNoSend: boolean }>): string {
+  const lines = accounts.map((a) => {
+    const reach = a.services.length ? `: ${a.services.join(', ')}` : '';
+    return `- ${a.email}${reach}${a.gmailNoSend ? ' (sending mail is blocked)' : ''}`;
+  });
+  return `${GOOGLE_ACCOUNTS_HEADING}
+
+<!-- Hatchabot rewrites this section - keep your own notes outside it. -->
+
+These Google accounts are connected to you and ready to use:
+
+${lines.join('\n')}
+
+For mail, calendar, Drive and the like, use the \`gog\` command (your gog skill
+has the details), with \`--account\` set to one of the addresses above. There is
+nothing to set up: no OAuth, and no plugin to install. \`gog\` is a shell command,
+so searching your tool catalog for it finds nothing, and the \`openclaw\` tool
+does not know about these accounts because they are not in its config.
+
+If your \`exec\` tool takes JavaScript (Code Mode), run it through the \`exec\`
+function inside:
+\`const r = await exec({ command: "gog auth list --json" }); return r;\`. The
+output is in \`r.aggregated\`; a result saying \`running\` has a \`sessionId\` to read
+later with \`await process({ action: "poll", sessionId })\`.
+
+\`gog auth list --json\` shows what you hold right now. If your notes or memory
+say you have no Google account or no shell, they are out of date: run that, then
+correct them.`;
+}
+
 /**
  * AGENTS.md without the install sections earlier versions wrote there. The
  * section moved to TOOLS.md, but the old copies stayed, under both names:

@@ -166,7 +166,7 @@ import { agentHealth, aiSourceHealth, doctorLint } from '../orchestrator/health.
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { forgetDmPolicy } from '../orchestrator/dmPolicyMemo.js';
 import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError, scrubChannelAllowlist, allowlistScrubScript, setDmPolicy } from '../orchestrator/members.js';
-import { replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
+import { replaceSection, removeSection, extractSection, DATA_SOURCES_HEADING, GOOGLE_ACCOUNTS_HEADING } from '../openclaw/workspace.js';
 import {
   DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar, grantedServices, isGoogleService,
   exchangeGoogleCode, googleAuthUrl, materializeConnection, offAgainIfDetached, removeQueuedNow, syncConnections, withConnectionLock,
@@ -3343,6 +3343,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const verifyLater = () => verifyAgentAccess(connSyncDeps(a.hostId), a.id, ref).then(() => undefined, () => undefined);
     if (store.listConnections(a.ownerId).length || store.connectionRemovals(a.id).length) {
       void syncConnections(connSyncDeps(a.hostId), a.id, ref).catch((err: unknown) => trace(a.id)('connection.sync_failed', { error: String(err).slice(0, 200) }))
+        .then(() => syncDocsHeld({ ...a, runtimeRef: ref }, providerFor(a.hostId))) // names the accounts it now holds (HB-0394)
         .then(verifyLater)
         .catch(() => {}); // verifyLater throws when the host was removed during the sync (HB-0374)
     } else void verifyLater();
@@ -11332,6 +11333,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           return all;
         });
         trace(agent.id)('connection.detached', { email, removed });
+        await syncGoogleDocs(agent.id);
         return { removed, detached: true };
       }
       if (!agent.runtimeRef || agent.state !== 'RUNNING') {
@@ -11374,6 +11376,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     store, secrets, provider: providerFor(hostId),
     log: (e: string, d: Record<string, unknown>) => trace()(e, d), // trace reads agentId from detail
   });
+  /** After an attach or detach: AGENTS.md names the accounts the agent holds (HB-0394). A stopped agent gets it at its next start. */
+  const syncGoogleDocs = async (agentId: string): Promise<void> => {
+    const now = store.getAgent(agentId);
+    if (now?.state === 'RUNNING' && now.runtimeRef) await syncDocsHeld(now, providerFor(now.hostId));
+  };
 
   /**
    * Bot inventory — every Telegram bot this installation holds a token for,
@@ -11672,6 +11679,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           return !!now && removeQueuedNow(connSyncDeps(now.hostId), now, conn.email);
         });
         if (!off) pendingOn++;
+        await syncGoogleDocs(a.id);
       }
       // Not revoked while another account holds the same Google account: both
       // share one grant for this install's client, and revoking ends it for
@@ -11724,6 +11732,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       });
       if (!out) return reply.code(404).send({ error: 'No such connection.' });
       trace(agent.id)('connection.attached', { email: conn.email, live: out.live, attached: out.attached });
+      await syncGoogleDocs(agent.id);
       return out;
     },
   );
@@ -11749,6 +11758,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return removeQueuedNow(connSyncDeps(now.hostId), now, conn.email);
       });
       trace(agent.id)('connection.detached', { email: conn.email, removed });
+      await syncGoogleDocs(agent.id);
       return { detached: true, removed };
     },
   );
@@ -13422,6 +13432,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             })
             : undefined;
           const childDataSection = extractSection(childAgentsMd ?? '', DATA_SOURCES_HEADING);
+          // Its Google accounts too: another agent's addresses must not reach it, nor its own go missing (HB-0394).
+          const childGoogleSection = extractSection(childAgentsMd ?? '', GOOGLE_ACCOUNTS_HEADING);
           // Both files or neither: a SOUL.md written and an AGENTS.md that
           // failed left the child half on the new definition, with the
           // bookkeeping below skipped (review, 2026-10-22). What was written
@@ -13438,6 +13450,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
               let rendered = applyParamValues(text, values);
               if (nameF === 'AGENTS.md' && childDataSection) {
                 rendered = replaceSection(rendered, DATA_SOURCES_HEADING, childDataSection);
+              }
+              if (nameF === 'AGENTS.md') {
+                rendered = childGoogleSection ? replaceSection(rendered, GOOGLE_ACCOUNTS_HEADING, childGoogleSection) : removeSection(rendered, GOOGLE_ACCOUNTS_HEADING);
               }
               if (Buffer.byteLength(rendered, 'utf8') > MAX_FILE_BYTES) throw renderedTooBig(nameF); // review R16
               let beforeRead = nameF === 'AGENTS.md' ? childAgentsRead : true;

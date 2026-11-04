@@ -2166,6 +2166,11 @@ the agent's job) and minimal services: everyone who can message the agent
 can act as the connected account. Design and phases:
 [connections-design.md](connections-design.md).
 
+**What the agent is told:** its `AGENTS.md` has a **Google accounts** section
+naming each attached account, what it reaches, and how to run `gog`. It is
+rewritten when you attach or detach an account and at every start and rebuild, and
+it stays out of templates you share.
+
 **Testing an agent's Gmail:** on the agent's Connections, **Test Gmail** beside
 an account checks its sign-in with Google and asks Gmail for the inbox's counts,
 from inside the agent. It reads no mail and sends nothing, so it says nothing

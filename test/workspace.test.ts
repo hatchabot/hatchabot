@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildWorkspaceSeed, dataSourcePath, dataSourcesSection, memoryPolicySection, replaceMemoryPolicy, replaceSection, DATA_SOURCES_HEADING, installConventionsSection, INSTALL_HEADING, removeSection, peerToolsSection, peerOneLine, PEERS_HEADING } from '../src/openclaw/workspace.js';
+import { GOOGLE_ACCOUNTS_HEADING, googleAccountsSection, buildWorkspaceSeed, dataSourcePath, dataSourcesSection, memoryPolicySection, replaceMemoryPolicy, replaceSection, DATA_SOURCES_HEADING, installConventionsSection, INSTALL_HEADING, removeSection, peerToolsSection, peerOneLine, PEERS_HEADING } from '../src/openclaw/workspace.js';
+import { GOG_SKILL_MD } from '../src/openclaw/skills.js';
 
 describe('replaceMemoryPolicy', () => {
   it('swaps the seeded policy for the other mode, round-trip', () => {
@@ -147,6 +148,40 @@ describe('installConventionsSection: the rules of the house, told to the agent',
     // Idempotent: a second sync with unchanged content is a no-op, which is
     // what lets provisioning skip the write entirely.
     expect(replaceSection(once, INSTALL_HEADING, installConventionsSection())).toBe(once);
+  });
+
+  it('the gog skill says how a command runs when exec takes JavaScript (HB-0394)', () => {
+    expect(GOG_SKILL_MD).toContain('await exec({ command:');
+    expect(GOG_SKILL_MD).not.toContain('Until an account is connected');
+  });
+});
+
+describe('googleAccountsSection: what an agent is told about its accounts (HB-0394)', () => {
+  const section = googleAccountsSection([
+    { email: 'pat@example.org', services: ['drive', 'gmail'], gmailNoSend: false },
+    { email: 'robin@example.org', services: ['gmail'], gmailNoSend: true },
+  ]);
+
+  it('names each account, what it reaches and whether sending is blocked', () => {
+    expect(section.startsWith(GOOGLE_ACCOUNTS_HEADING)).toBe(true);
+    expect(section).toContain('- pat@example.org: drive, gmail\n');
+    expect(section).toContain('- robin@example.org: gmail (sending mail is blocked)');
+  });
+
+  it('says how to run gog, that nothing needs setting up, and that a saved claim is out of date', () => {
+    expect(section).toContain('await exec({ command:');
+    expect(section).toContain('gog auth list --json');
+    expect(section).toMatch(/no OAuth, and no plugin/);
+    expect(section).toMatch(/memory\s+say you have no Google account/);
+  });
+
+  it('survives its own sync: no stray heading or fence, and a second write changes nothing', () => {
+    const file = '# AGENTS.md\n\nmine\n\n## After\nkeep\n';
+    const once = replaceSection(file, GOOGLE_ACCOUNTS_HEADING, section);
+    expect(once).toContain('## After\nkeep');
+    expect(replaceSection(once, GOOGLE_ACCOUNTS_HEADING, section)).toBe(once);
+    expect(section.split('\n').filter((l) => /^#{1,6}\s/.test(l))).toEqual([GOOGLE_ACCOUNTS_HEADING]);
+    expect(section).not.toContain('```');
   });
 });
 

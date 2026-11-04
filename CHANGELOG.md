@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.172.1] — 2026-11-03
+
+An agent with a Google account attached should no longer say it has none when OpenClaw's Code Mode is on.
+
+### Upgrading
+- An agent picks this up when it is rebuilt, or stopped and started. Its `AGENTS.md` then has a **Google accounts** section. If the agent saved "no Google account" to its memory, the section tells it that note is out of date, so start a fresh chat with `/new`.
+
+### Fixed
+- **Google accounts:** an agent on a model OpenClaw prefers for Code Mode could say it had no Google account, no Gmail or Drive tool and no shell, and offer to set up OAuth or install a Google plugin, neither of which is needed. Each agent with an attached account is now told which accounts it has, what each reaches, and how to run `gog` in Code Mode. The account list stays out of templates and pushed definitions. The `gog` skill says the same on new agents.
+
 ## [2.172.0] — 2026-11-03
 
 You can now test web search and an agent's Gmail with one button each, and agents move off a Brave key that has run out by themselves.
