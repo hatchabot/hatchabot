@@ -6,6 +6,7 @@ import { internalPrincipal } from './principal.js';
 import { isPublic, publicClientAddress } from './trust.js';
 import { verifyPassword } from './accountsAuth.js';
 import type { PublicAccessApi } from './publicAccess.js';
+import { PASSWORD_NEEDS_FACTOR } from './publicRoutes.js';
 import { backupCodeHash, base32Encode, newBackupCode, newTotpSecret, normalizeBackupCode, otpauthUri, totpVerify } from './totp.js';
 import { b64u, clientDataChallenge, verifyAssertion, verifyRegistration, WebAuthnError, type StoredPublicKey } from './webauthn.js';
 
@@ -160,7 +161,9 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
   /**
    * The new set replaces the old in one transaction: a failure part-way used
    * to leave the saved codes deleted and only some of the new ones stored,
-   * none of which the person was ever shown (B094).
+   * none of which the person was ever shown (B094). Each reply that carries
+   * them says whose they are (ownerId): a page whose session ends while they
+   * are open keeps them for that person alone (HB-0500).
    */
   const newBackupCodes = (ownerId: string): string[] => {
     const codes = Array.from({ length: BACKUP_CODES }, () => newBackupCode());
@@ -185,6 +188,9 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     // read by whoever holds the password: they learn which KINDS to offer on
     // the prompt, not the factors' ids, names or when each was last used.
     const shown = api.secondFactorGiven(req);
+    const need = api.secondFactorNeed(ownerId);
+    const ownerRights = api.hasOwnerRights(ownerId);
+    const localAccount = !!store.localAccount(ownerId);
     return {
       factors: !shown ? [] : factors.map((f) => ({
         id: f.id, kind: f.kind, label: f.label, createdAt: f.createdAt, lastUsedAt: f.lastUsedAt,
@@ -193,11 +199,13 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
       })),
       backupCodes: shown ? backupLeft(ownerId) : null,
       ...(shown ? {} : { hidden: true }),
-      need: api.secondFactorNeed(ownerId),
-      ownerRights: api.hasOwnerRights(ownerId),
+      need,
+      ownerRights,
       methods: [...new Set(factors.map((f) => f.kind)), ...(backupLeft(ownerId) && factors.length ? ['backup'] : [])],
       publicAddress: isPublic(req),
-      localAccount: !!store.localAccount(ownerId),
+      localAccount,
+      // The gate refuses this person a password change here (HB-0453): the page shows these words in place of the form.
+      ...(isPublic(req) && localAccount && !ownerRights && (need === 'missing' || need === 'guest') ? { passwordRefused: PASSWORD_NEEDS_FACTOR } : {}),
       passkeyAddress: rpId ? `https://${rpId}` : null,
       passkeyHere: !!rpId && requestHost(req) === rpId,
     };
@@ -317,7 +325,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     recordChange(req, 'second_factor.added', ownerId, 'totp');
     api.secondFactorPassed(req, reply);
     void api.evaluate().catch(() => {});
-    return { ok: true, ...(first || backupLeft(ownerId) === 0 ? { backupCodes: newBackupCodes(ownerId) } : {}) };
+    return { ok: true, ...(first || backupLeft(ownerId) === 0 ? { backupCodes: newBackupCodes(ownerId), ownerId } : {}) };
   });
 
   /** Options for navigator.credentials.create(). */
@@ -362,7 +370,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
       recordChange(req, 'second_factor.added', ownerId, 'passkey');
       api.secondFactorPassed(req, reply);
       void api.evaluate().catch(() => {});
-      return { ok: true, label, ...(first || backupLeft(ownerId) === 0 ? { backupCodes: newBackupCodes(ownerId) } : {}) };
+      return { ok: true, label, ...(first || backupLeft(ownerId) === 0 ? { backupCodes: newBackupCodes(ownerId), ownerId } : {}) };
     } catch (err) {
       if (err instanceof WebAuthnError) return reply.code(400).send({ error: `That passkey could not be added: ${err.message}.` });
       throw err;
@@ -375,7 +383,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     if (!ownerId) return reply;
     if (!real(ownerId).length) return reply.code(409).send({ error: 'Add a passkey or an authenticator app first; backup codes stand in for one.' });
     if (!(await proveManage(req, reply, ownerId, req.body?.current))) return reply;
-    return reply.header('cache-control', 'no-store').send({ backupCodes: newBackupCodes(ownerId) });
+    return reply.header('cache-control', 'no-store').send({ backupCodes: newBackupCodes(ownerId), ownerId });
   });
 
   app.delete<{ Params: { id: string }; Body: { current?: string } }>('/v1/second-factor/:id', async (req, reply) => {

@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -9,7 +9,10 @@ import Database from 'better-sqlite3';
  * scripts/privacy-check.mjs against a made-up household: a database with its
  * own agents and people, an env file with a made-up secret, and a throwaway
  * git repo (hooks off) with a bare "origin". It never reads this machine's
- * install or its host, tailnet or IP values (--no-machine, its own HOME).
+ * install or its tailnet (--no-machine, its own HOME, a tailscale shim). One
+ * test of the record of machines seen before runs without --no-machine: it
+ * reads this machine's host and IP names in memory only, and its text names
+ * none of them.
  */
 const SCRIPT = join(__dirname, '..', 'scripts', 'privacy-check.mjs');
 let dir: string, repo: string, db: string, env: string;
@@ -199,13 +202,172 @@ describe('incomplete is never clean (audit issue #41)', () => {
   it('a missing tailscale command is said, not passed over (an optional tool)', async () => {
     // @ts-expect-error — a plain .mjs script
     const { tailnetValues } = await import('../scripts/privacy-check.mjs');
+    const seen = join(dir, 'home', '.config', 'hatchabot', 'privacy-machines.json');
     const notes: string[] = [];
-    tailnetValues(() => {}, notes, join(dir, 'no-such-tailscale'));
-    expect(notes).toEqual(['tailnet names (no tailscale command here)']);
+    tailnetValues(() => {}, notes, join(dir, 'no-such-tailscale'), seen);
+    expect(notes).toEqual([expect.stringContaining('no record yet'), 'tailnet names (no tailscale command here)']);
     const shim = join(dir, 'tailscale-fails'); writeFileSync(shim, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
     const failed: string[] = [];
-    tailnetValues(() => {}, failed, shim);
-    expect(failed).toEqual(['tailnet names (tailscale status failed)']);
+    tailnetValues(() => {}, failed, shim, seen);
+    expect(failed).toEqual([expect.stringContaining('no record yet'), 'tailnet names (tailscale status failed)']);
+  });
+});
+
+describe('machine names seen before (HB-0504)', () => {
+  // The publisher gates with the names of its last values sync; a peer gone from
+  // the tailnet since was still one of them, and only the local check had lost it.
+  // Invented names; a shim for tailscale; the record in the test's own folder.
+  const shim = (peers: string[]) => {
+    const f = join(dir, 'tailscale');
+    const status = {
+      MagicDNSSuffix: 'tail0example.ts.net',
+      Self: { HostName: 'walnut-pantry', DNSName: 'walnut-pantry.tail0example.ts.net.', TailscaleIPs: ['100.64.0.1'] },
+      Peer: Object.fromEntries(peers.map((p, i) => [`node${i}`, { HostName: p, DNSName: `${p}.tail0example.ts.net.`, TailscaleIPs: [`100.64.0.${i + 2}`] }])),
+    };
+    writeFileSync(f, `#!/bin/sh\ncat <<'EOF'\n${JSON.stringify(status)}\nEOF\n`, { mode: 0o755 });
+    return f;
+  };
+  const seenFile = () => join(dir, 'home', '.config', 'hatchabot', 'privacy-machines.json');
+  const values = async (cmd: string, file = seenFile(), remember = true) => {
+    // @ts-expect-error — a plain .mjs script
+    const { tailnetValues } = await import('../scripts/privacy-check.mjs');
+    const got = new Map<string, string>(); const notes: string[] = []; const gaps: string[] = [];
+    tailnetValues((v: string, cat: string) => { if (v) got.set(v, cat); }, notes, cmd, file, { gaps, remember });
+    return { got, notes, gaps };
+  };
+  const seed = (machine: string[]) => { mkdirSync(dirname(seenFile()), { recursive: true }); writeFileSync(seenFile(), JSON.stringify({ machine, tailnet: [] }), { mode: 0o600 }); };
+  const home = () => join(dir, 'home');
+  const binWith = (peers: string[]) => { const bin = join(dir, 'bin'); mkdirSync(bin, { recursive: true }); copyFileSync(shim(peers), join(bin, 'tailscale')); return bin; };
+  /** The script itself, with this test's HOME and tailscale shim (no --no-machine: it reads the record). */
+  const script = (args: string[], bin: string) => spawnSync('node', [SCRIPT, ...args, '--db', db, '--env', env], {
+    cwd: repo, encoding: 'utf8', env: { PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: home() },
+  });
+
+  it('a peer tailscale no longer lists is still checked, from the record kept the run before', async () => {
+    const first = await values(shim(['copper-kettle']));
+    expect(first.got.get('copper-kettle')).toBe('machine');
+    expect(first.got.get('copper-kettle.tail0example.ts.net')).toBe('machine');
+    expect(first.notes).toEqual([expect.stringContaining('no record yet')]);
+    expect(statSync(seenFile()).mode & 0o777).toBe(0o600);
+    expect(statSync(dirname(seenFile())).mode & 0o077).toBe(0);
+    // The peer has left the tailnet: tailscale lists only the machine itself.
+    const later = await values(shim([]));
+    expect(later.got.get('copper-kettle')).toBe('machine');
+    expect(later.got.get('copper-kettle.tail0example.ts.net')).toBe('machine');
+    expect(later.got.get('tail0example.ts.net')).toBe('tailnet');
+    expect(later.notes).toEqual([]);
+    // And with no tailscale at all, the names seen before still are.
+    const none = await values(join(dir, 'no-such-tailscale'));
+    expect(none.got.get('copper-kettle')).toBe('machine');
+    expect(none.notes).toEqual(['tailnet names (no tailscale command here)']);
+  });
+
+  it('a new peer is added to the record, and nothing is dropped from it', async () => {
+    await values(shim(['copper-kettle']));
+    await values(shim(['linden-attic']));
+    const record = JSON.parse(readFileSync(seenFile(), 'utf8'));
+    expect(record.machine).toEqual(expect.arrayContaining(['walnut-pantry', 'copper-kettle', 'linden-attic', 'linden-attic.tail0example.ts.net']));
+    expect(record.tailnet).toEqual(['tail0example.ts.net']);
+  });
+
+  it('a record that cannot be read makes the check incomplete, says how to fix it, and is left as it is', async () => {
+    seed([]); writeFileSync(seenFile(), 'not json', { mode: 0o600 });
+    const r = await values(shim(['copper-kettle']));
+    expect(r.gaps).toEqual([expect.stringMatching(/privacy-machines\.json, is not the JSON this check writes: move it aside \(mv /)]);
+    expect(r.got.get('copper-kettle')).toBe('machine'); // what tailscale lists now is still checked
+    expect(readFileSync(seenFile(), 'utf8')).toBe('not json');
+    expect([...r.gaps, ...r.notes].join(' ')).not.toContain(dir); // named from ~, no private path
+    // The script: incomplete (3), never clean, until it is moved aside.
+    const text = join(dir, 'ok.md'); writeFileSync(text, 'nothing here\n');
+    const bin = binWith([]);
+    const bad = script(['--text', text], bin);
+    expect(bad.status, bad.stdout + bad.stderr).toBe(3);
+    expect(bad.stdout).toContain('move it aside');
+    renameSync(seenFile(), `${seenFile()}.bad`);
+    expect(script(['--text', text], bin).status).toBe(0);
+  });
+
+  it.skipIf(process.getuid?.() === 0)('a record it may not read (EACCES) is a gap too', async () => {
+    seed(['copper-kettle']); chmodSync(seenFile(), 0o000);
+    try {
+      const r = await values(shim([]));
+      expect(r.gaps).toEqual([expect.stringMatching(/could not be read \(EACCES\): move it aside/)]);
+    } finally { chmodSync(seenFile(), 0o600); }
+    expect(JSON.parse(readFileSync(seenFile(), 'utf8')).machine).toEqual(['copper-kettle']);
+  });
+
+  it('--export-values (the publish kit\'s provider) carries the remembered names and never writes the record', () => {
+    seed(['copper-kettle']);
+    const before = readFileSync(seenFile(), 'utf8'); const mtime = statSync(seenFile()).mtimeMs;
+    // tailscale lists a peer the record does not have: any other run would add it.
+    const r = script(['--export-values'], binWith(['linden-attic']));
+    expect(r.status).toBe(0);
+    // Its output is the values themselves (this machine's among them): asked of, never shown.
+    const given = r.stdout.split('\n').filter(Boolean).map((l) => JSON.parse(l).value as string);
+    expect(given.includes('copper-kettle')).toBe(true);
+    expect(given.includes('linden-attic')).toBe(true);
+    expect(readFileSync(seenFile(), 'utf8')).toBe(before);
+    expect(statSync(seenFile()).mtimeMs).toBe(mtime);
+    // With no record there, it makes none.
+    rmSync(seenFile());
+    expect(script(['--export-values'], binWith(['linden-attic'])).status).toBe(0);
+    expect(existsSync(seenFile())).toBe(false);
+  });
+
+  it('read-only for the provider in the function too: remember false adds nothing', async () => {
+    seed(['copper-kettle']);
+    const r = await values(shim(['linden-attic']), seenFile(), false);
+    expect(r.got.get('copper-kettle')).toBe('machine');
+    expect(JSON.parse(readFileSync(seenFile(), 'utf8')).machine).toEqual(['copper-kettle']);
+  });
+
+  it('the folder is made the owner\'s alone, and a link planted at the temp file\'s name is not written through', async () => {
+    mkdirSync(dirname(seenFile()), { recursive: true, mode: 0o775 });
+    chmodSync(dirname(seenFile()), 0o775);
+    const target = join(dir, 'elsewhere.txt'); writeFileSync(target, 'untouched\n');
+    const tmp = `${seenFile()}.${process.pid}.tmp`;
+    symlinkSync(target, tmp);
+    const r = await values(shim(['copper-kettle']));
+    expect(r.notes).toEqual([expect.stringContaining('no record yet')]);
+    expect(statSync(dirname(seenFile())).mode & 0o777).toBe(0o700);
+    expect(readFileSync(target, 'utf8')).toBe('untouched\n');
+    expect(existsSync(tmp)).toBe(false);
+    expect(lstatSync(seenFile()).isFile()).toBe(true);
+    expect(JSON.parse(readFileSync(seenFile(), 'utf8')).machine).toContain('copper-kettle');
+  });
+
+  it('a write that fails leaves no temp file and says so', async () => {
+    // @ts-expect-error — a plain .mjs script
+    const { writeSeen } = await import('../scripts/privacy-check.mjs');
+    // The rename fails: where the record goes is a folder with something in it.
+    mkdirSync(join(seenFile(), 'x'), { recursive: true });
+    const notes: string[] = [];
+    writeSeen(seenFile(), { machine: ['copper-kettle'], tailnet: [] }, notes);
+    expect(notes).toEqual([expect.stringMatching(/not saved: (EISDIR|ENOTEMPTY|EEXIST); this run checked them all/)]);
+    expect(readdirSync(dirname(seenFile()))).toEqual(['privacy-machines.json']); // no temp file left
+  });
+
+  it('a large record is said, with how to forget machines', async () => {
+    seed(Array.from({ length: 201 }, (_, i) => `made-up-node-${i}`));
+    const r = await values(shim([]));
+    expect(r.notes).toEqual([expect.stringMatching(/holds 204 names, each a fingerprint.*forget the machines that are gone/)]);
+  });
+
+  it('--text names a remembered peer that tailscale no longer lists (the HB-0503 lines)', () => {
+    const home = join(dir, 'home');
+    const bin = join(dir, 'bin'); mkdirSync(bin, { recursive: true });
+    const text = join(dir, 'notes.md'); writeFileSync(text, 'An example host: copper-kettle.local\n');
+    const check = () => spawnSync('node', [SCRIPT, '--text', text, '--db', db, '--env', env], {
+      cwd: repo, encoding: 'utf8', env: { PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: home },
+    });
+    copyFileSync(shim(['copper-kettle']), join(bin, 'tailscale'));
+    const before = check();
+    expect(before.status, before.stdout + before.stderr).toBe(1);
+    copyFileSync(shim([]), join(bin, 'tailscale'));
+    const after = check();
+    expect(after.status, after.stdout + after.stderr).toBe(1);
+    expect(after.stdout).toContain("[machine] 'co…(13)'");
+    expect(after.stdout + after.stderr).not.toContain('copper-kettle');
   });
 });
 

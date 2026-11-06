@@ -12,7 +12,7 @@ import {
 } from '../src/orchestrator/provision.js';
 import { AgentBusyError, whileBusy } from '../src/orchestrator/busy.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { dataSourcesSection, memoryPolicySection, operatorSection, replaceSection, DATA_SOURCES_HEADING, OPERATOR_HEADING } from '../src/openclaw/workspace.js';
+import { dataSourcesSection, memoryPolicySection, operatorSection, replaceSection, withInstallSection, DATA_SOURCES_HEADING, OPERATOR_HEADING } from '../src/openclaw/workspace.js';
 import { Store } from '../src/store/store.js';
 import { ChannelSetupRequired } from '../src/channels/channel.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
@@ -820,7 +820,8 @@ describe('AGENTS.md "## Data sources" stays in step with reality', () => {
       let n = replaceSection(doc, DATA_SOURCES_HEADING, dataSourcesSection([]));
       n = replaceSection(n, '## Memory policy', memoryPolicySection(shared));
       n = replaceSection(n, '## Memory budget', memoryBudgetSection('3g'));
-      return replaceSection(n, OPERATOR_HEADING, operatorSection(w.store.getOperatorProfile(agent.ownerId)));
+      n = replaceSection(n, OPERATOR_HEADING, operatorSection(w.store.getOperatorProfile(agent.ownerId)));
+      return withInstallSection(n);
     };
     const current = applyBoth(applyBoth('# K\n'));
     (w.provider as MockProvider).execResponses.set('sh', { code: 0, stdout: current, stderr: '' });
@@ -902,57 +903,127 @@ describe('a git source that will not clone is visible, not just logged', () => {
   });
 });
 
-describe('TOOLS.md carries the install conventions', () => {
-  const written = (p: MockProvider, file: string) => {
-    const w = p.execLog
-      .filter((a) => a[0] === 'sh')
-      .map((a) => a[1]!)
-      .filter((x) => x.includes('base64 -d') && x.includes(file))
-      .at(-1);
-    const m = w && /echo "([A-Za-z0-9+/=]+)"/.exec(w);
-    return m ? Buffer.from(m[1]!, 'base64').toString('utf8') : undefined;
-  };
-
-  it('creates TOOLS.md with the managed section when OpenClaw has not seeded it yet', async () => {
-    const w = await world();
-    const { agent } = await provisionAgent(w.deps, INPUT);
-    void agent;
-    const out = written(w.provider as MockProvider, 'TOOLS.md')!;
-    expect(out).toBeDefined();
-    expect(out).toContain('## Installing tools (managed by Hatchabot)');
-    expect(out).toContain('pip install --target ~/.openclaw/pylibs');
-    expect(out).toContain('on-rebuild.sh');
-  });
-
-  it('adds the section to an existing TOOLS.md without touching the agent\'s notes', async () => {
-    const w = await world();
-    const { agent } = await provisionAgent(w.deps, INPUT);
-    const doc = '# TOOLS.md - Local Notes\n\n### SSH\n\n- home-server -> 192.168.1.100\n';
-    (w.provider as MockProvider).execResponses.set('sh', { code: 0, stdout: doc, stderr: '' });
-    await rebuildAgent(w.deps, agent.id);
-    const out = written(w.provider as MockProvider, 'TOOLS.md')!;
-    expect(out).toContain('home-server -> 192.168.1.100'); // the agent's own notes
-    expect(out).toContain('~/.local/bin');
-  });
-
-  it('drops the old copies from AGENTS.md, under either name, and keeps the rest (review, 2026-09-29)', async () => {
-    const w = await world();
-    const { agent } = await provisionAgent(w.deps, INPUT);
-    const p = w.provider as MockProvider;
-    const section = (by: string) => `## Installing tools (managed by ${by})\n\n<!-- ${by} rewrites this section on rebuild - keep your own notes outside it. -->\n\n- **No root, no apt.**\n`;
-    const agentsMd = `# AGENTS.md - Your Workspace\n\n## Memory\n\nWrite it down.\n\n${section('AgentClaw')}\n${section('Hatchabot')}\n## Heartbeats\n\nCheck the list.\n\n${section('Hatchabot')}`;
+describe('AGENTS.md carries the install conventions, not TOOLS.md (HB-0397)', () => {
+  const HEADING = '## Installing tools (managed by Hatchabot)';
+  const section = (by = 'Hatchabot', body = '- **No root, no apt.**') => `## Installing tools (managed by ${by})\n\n<!-- ${by} rewrites this section on rebuild - keep your own notes outside it. -->\n\n${body}\n`;
+  /** The agent's two files, as the container holds them: read with cat, written with base64, removed with rm. */
+  const files = (p: MockProvider, init: { agents?: string; tools?: string; agentsUnreadable?: boolean; agentsWriteFails?: boolean }) => {
+    const fs = new Map<string, string>();
+    if (init.agents !== undefined) fs.set('AGENTS.md', init.agents);
+    if (init.tools !== undefined) fs.set('TOOLS.md', init.tools);
+    const writes: string[] = [];
     const real = p.execShell.bind(p);
-    p.execShell = (async (ref: string, script: string) => {
-      if (script.startsWith('cat ') && script.includes('/AGENTS.md')) return { code: 0, stdout: agentsMd, stderr: '' };
-      return real(ref, script);
+    p.execShell = (async (ref: string, script: string, opts?: never) => {
+      const name = /\/agent\/(AGENTS|TOOLS)\.md"/.exec(script)?.[1];
+      if (!name) return real(ref, script, opts);
+      const file = `${name}.md`;
+      if (script.startsWith('cat ')) {
+        if (file === 'AGENTS.md' && init.agentsUnreadable) return { code: 1, stdout: '', stderr: 'timed out' };
+        return { code: 0, stdout: fs.get(file) ?? '', stderr: '' };
+      }
+      const b64 = /echo "([A-Za-z0-9+/=]+)" \| base64 -d/.exec(script)?.[1];
+      if (b64 && file === 'AGENTS.md' && init.agentsWriteFails) return { code: 1, stdout: '', stderr: 'No space left on device' };
+      if (b64) { fs.set(file, Buffer.from(b64, 'base64').toString('utf8')); writes.push(file); return { code: 0, stdout: '', stderr: '' }; }
+      if (script.startsWith('rm -f ')) { fs.delete(file); writes.push(`rm ${file}`); return { code: 0, stdout: '', stderr: '' }; }
+      return real(ref, script, opts);
     }) as typeof p.execShell;
-    const before = p.execLog.length;
+    return { fs, writes };
+  };
+  const copies = (s = '') => s.split('\n').filter((l) => l === HEADING).length;
+  const AGENTS = '# AGENTS.md - Your Workspace\n\n## Memory\n\nWrite it down.\n';
+
+  it('a rebuild puts the section in AGENTS.md, which OpenClaw 2026.9 reads, and takes it out of TOOLS.md, keeping the agent\'s notes', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const { fs } = files(w.provider as MockProvider, { agents: AGENTS, tools: `# TOOLS.md - Local Notes\n\n### SSH\n\n- home-server -> 192.0.2.10\n\n${section()}` });
     await rebuildAgent(w.deps, agent.id);
-    const out = written(p, 'AGENTS.md')!;
-    expect(out.match(/Installing tools \(managed/g)).toBeNull();
+    const agentsMd = fs.get('AGENTS.md')!;
+    expect(copies(agentsMd)).toBe(1);
+    expect(agentsMd).toContain('pip install --target ~/.openclaw/pylibs');
+    expect(agentsMd).toContain('on-rebuild.sh');
+    expect(agentsMd).toContain('Write it down.');
+    expect(fs.get('TOOLS.md')).toBe('# TOOLS.md - Local Notes\n\n### SSH\n\n- home-server -> 192.0.2.10\n');
+  });
+
+  it('a TOOLS.md Hatchabot made, holding nothing else, is removed; none is made where there was none', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const made = files(w.provider as MockProvider, { agents: AGENTS, tools: `# TOOLS.md - Local Notes\n\n${section()}` });
+    await rebuildAgent(w.deps, agent.id);
+    expect(made.fs.has('TOOLS.md')).toBe(false);
+    expect(copies(made.fs.get('AGENTS.md'))).toBe(1);
+    const w2 = await world();
+    const { agent: other } = await provisionAgent(w2.deps, INPUT);
+    const none = files(w2.provider as MockProvider, { agents: AGENTS });
+    await rebuildAgent(w2.deps, other.id);
+    expect(none.fs.has('TOOLS.md')).toBe(false);
+    expect(none.writes).not.toContain('TOOLS.md');
+  });
+
+  it('what OpenClaw\'s doctor merged into AGENTS.md: one copy, current, in place, without TOOLS.md\'s title', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    // Two OpenClaw versions' merges: each put TOOLS.md, title and all, under its heading.
+    const merged = `# TOOLS.md - Local Notes\n\n${section('Hatchabot', 'old rules')}`;
+    const doc = `${AGENTS}\n## Tools\n\n### Local notes (migrated from TOOLS.md)\n\n${merged}\n${merged}\n### SSH\n\n- home-server -> 192.0.2.10\n\n## Heartbeats\n\nCheck the list.\n`;
+    const { fs } = files(w.provider as MockProvider, { agents: doc });
+    await rebuildAgent(w.deps, agent.id);
+    const out = fs.get('AGENTS.md')!;
+    expect(copies(out)).toBe(1);
+    expect(out).not.toContain('old rules');
+    expect(out).not.toContain('# TOOLS.md - Local Notes');
+    expect(out).toContain('### Local notes (migrated from TOOLS.md)');
+    expect(out).toContain('### SSH\n\n- home-server -> 192.0.2.10');
+    expect(out).toContain('## Heartbeats\n\nCheck the list.');
+    expect(out.indexOf(HEADING)).toBeLessThan(out.indexOf('## Heartbeats'));
+  });
+
+  it('old copies under either name become one (review, 2026-09-29), and the rest of AGENTS.md stays', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const doc = `${AGENTS}\n${section('AgentClaw')}\n${section()}\n## Heartbeats\n\nCheck the list.\n\n${section()}`;
+    const { fs } = files(w.provider as MockProvider, { agents: doc });
+    await rebuildAgent(w.deps, agent.id);
+    const out = fs.get('AGENTS.md')!;
+    expect(copies(out)).toBe(1);
+    expect(out).not.toContain('managed by AgentClaw');
     expect(out).toContain('Write it down.');
     expect(out).toContain('## Heartbeats\n\nCheck the list.');
-    expect(p.execLog.slice(before).some((a) => a[1]?.includes('TOOLS.md') && a[1].includes('base64 -d'))).toBe(true);
+  });
+
+  it('once current, a rebuild writes neither file, and the section stays one', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const { writes, fs } = files(w.provider as MockProvider, { agents: AGENTS, tools: '# TOOLS.md - Local Notes\n\n### SSH\n\n- home-server -> 192.0.2.10\n' });
+    await rebuildAgent(w.deps, agent.id);
+    // The second pass settles the blank lines between sections appended on the first (replaceSection, as before).
+    await rebuildAgent(w.deps, agent.id);
+    const after = writes.length;
+    await rebuildAgent(w.deps, agent.id);
+    expect(writes.slice(after)).toEqual([]);
+    expect(copies(fs.get('AGENTS.md'))).toBe(1);
+  });
+
+  it('an AGENTS.md that could not be read: TOOLS.md keeps the section, so the notes are never in neither', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const tools = `# TOOLS.md - Local Notes\n\n${section()}`;
+    const { fs, writes } = files(w.provider as MockProvider, { agents: AGENTS, tools, agentsUnreadable: true });
+    await rebuildAgent(w.deps, agent.id);
+    expect(fs.get('TOOLS.md')).toBe(tools);
+    expect(writes).toEqual([]);
+  });
+
+  it('AGENTS.md not written, with the heading only quoted in a fenced example: TOOLS.md keeps the section (HB-0397 review)', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const tools = `# TOOLS.md - Local Notes\n\n${section()}`;
+    const quoted = `${AGENTS}\n\`\`\`\n${HEADING}\n\`\`\`\n`;
+    const { fs, writes } = files(w.provider as MockProvider, { agents: quoted, tools, agentsWriteFails: true });
+    await rebuildAgent(w.deps, agent.id);
+    expect(fs.get('AGENTS.md')).toBe(quoted);
+    expect(fs.get('TOOLS.md')).toBe(tools);
+    expect(writes).toEqual([]);
   });
 
   it('leaves an AGENTS.md without old copies untouched', async () => {

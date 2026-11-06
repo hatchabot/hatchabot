@@ -46,9 +46,19 @@ export interface PublicRule {
   enrols?: boolean;
   /** With enrols: what to say when that proof is missing, if not the words about adding a factor. */
   refusal?: string;
+  /**
+   * step-up, without firstFactorOk: refused to anyone with no second factor at
+   * all (a member, or a chat-only guest), and this says what to do instead,
+   * rather than the words about adding a factor. Someone with owner rights and
+   * no factor is told to add one at the private address, as everywhere.
+   */
+  noFactor?: string;
 }
 
 const READ = ['GET', 'HEAD'] as const;
+
+/** The refusal of a password change at the public address to someone with no second factor (the page shows the same words). */
+export const PASSWORD_NEEDS_FACTOR = 'Your account has no second factor, so its password cannot be changed at this address: whoever had only your password could otherwise lock you out. Change it at the private address (at home), or ask whoever runs this Hatchabot for a reset link.';
 const r = (methods: PublicRule['methods'], pattern: RegExp, cls: PublicClass, group: string, extra: Partial<PublicRule> = {}): PublicRule =>
   ({ methods, pattern, cls, group, ...extra });
 
@@ -87,11 +97,13 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r('*', /^\/v1\/second-factor\/(totp|totp\/confirm|passkey\/options|passkey|backup-codes)$/, 'step-up', 'Adding or replacing a second factor', { firstFactorOk: true, enrols: true }),
   r(['DELETE'], /^\/v1\/second-factor\/:id$/, 'step-up', 'Removing a second factor'),
   r(['POST'], /^\/v1\/local-accounts$/, 'step-up', 'Managing accounts (add, remove, reset links)'),
-  // Your own password: the route asks for the current one itself, so someone
-  // with no second factor is let through to that check (a member without one
-  // could otherwise never change a password here). The owner resetting SOMEONE
-  // ELSE's password always has a factor.
-  r(['POST'], /^\/v1\/local-accounts\/:id\/password$/, 'step-up', 'Changing a password (your own needs your current password as well)', { firstFactorOk: true }),
+  // Your own password: the route asks for the current one itself. With no
+  // second factor it is refused here (HB-0453): whoever held only the password
+  // could change it and lock the real person out until the owner sent a reset
+  // link. At the private address it works, and so does a reset link (the
+  // claim route, above). The owner resetting SOMEONE ELSE's password always
+  // has a factor.
+  r(['POST'], /^\/v1\/local-accounts\/:id\/password$/, 'step-up', 'Changing a password (your own needs your current password as well; with no second factor, only at the private address or by a reset link)', { noFactor: PASSWORD_NEEDS_FACTOR }),
   // A recovery code is itself proof enough to add a first factor, so making one
   // needs the same proof as adding one: a password alone would mint its own (HB-0399).
   r(['POST'], /^\/v1\/local-accounts\/me\/recovery-code$/, 'step-up', 'Making a recovery code (needs your current password as well; with no second factor yet, also a sign-in from a link or code sent to you)', { firstFactorOk: true, enrols: true, refusal: 'Your password alone cannot make a recovery code at this address. Make it at the private address, or ask whoever runs this Hatchabot for a reset link and make it right after using the link.' }),

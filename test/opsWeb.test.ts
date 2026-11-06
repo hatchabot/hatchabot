@@ -43,6 +43,50 @@ describe('web_search / read_result', () => {
     expect(failed).toBe(1);
   });
 
+  it('DuckDuckGo turning this machine away is said plainly, not reported as no results (HB-0455)', async () => {
+    const challenge = '<html><body><div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div><p>Please complete the following challenge.</p></body></html>';
+    const agents: string[] = [];
+    const opsWeb = makeOpsWeb({
+      braveKey: async () => undefined,
+      lookup: async () => ['93.184.216.34'],
+      fetchImpl: (async (url: string, init?: RequestInit) => {
+        if (!String(url).startsWith('https://html.duckduckgo.com/html/')) throw new Error('unrouted ' + url);
+        agents.push(String((init?.headers as Record<string, string>)['user-agent']));
+        return page(challenge, 'text/html', 202);
+      }) as any,
+    });
+    const err = await opsWeb('o', 'web_search', { query: 'weather forecast' }).then((r) => r.text, (e: Error) => e.message);
+    expect(err).not.toBe('No results.');
+    expect(err).toMatch(/turns this machine away/);
+    expect(err).toMatch(/no free search/);
+    expect(err).toMatch(/A Brave key is needed: add one/);
+    // Its own user agent, as before: no browser disguise.
+    expect(agents).toEqual(['Mozilla/5.0 (Hatchabot)']);
+  });
+
+  it('a Brave key set that failed, then DuckDuckGo turning this machine away: says what Brave answered, not "add a key" (review of HB-0455)', async () => {
+    const challenge = '<html><body><p>Please complete the following challenge.</p></body></html>';
+    const ask = async (brave: number | 'down') => {
+      const opsWeb = makeOpsWeb({
+        braveKey: async () => 'made-up',
+        lookup: async () => ['93.184.216.34'],
+        fetchImpl: (async (url: string) => {
+          if (String(url).startsWith(SEARCH)) { if (brave === 'down') throw new TypeError('fetch failed'); return page('{}', 'application/json', brave); }
+          return page(challenge, 'text/html', 202);
+        }) as any,
+      });
+      return opsWeb('o', 'web_search', { query: 'weather forecast' }).then((r) => r.text, (e: Error) => e.message);
+    };
+    const out = await ask(429);
+    expect(out).toMatch(/turns this machine away/);
+    expect(out).toMatch(/the key has run out/);
+    expect(out).toMatch(/Replace it under Settings/);
+    expect(await ask(401)).toMatch(/Brave refused the key \(401\)/);
+    expect(await ask(503)).toMatch(/Brave answered 503.*once Brave answers/);
+    expect(await ask('down')).toMatch(/Brave could not be reached/);
+    for (const b of [429, 401, 503, 'down'] as const) expect(await ask(b), String(b)).not.toMatch(/add one|key is needed/);
+  });
+
   it('searches, numbers results, and reads one as text', async () => {
     const { opsWeb } = web({ [SEARCH]: results(['https://docs.example.com/a']), 'https://docs.example.com/a': () => page('<html><script>x()</script><p>Hello <b>world</b></p></html>') });
     const s = await opsWeb('o', 'web_search', { query: 'openclaw release notes' });

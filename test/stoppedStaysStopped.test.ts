@@ -360,6 +360,33 @@ describe('pinning a stopped agent to an image (HB-0441)', () => {
     await startApplies(w, id);
   });
 
+  // HB-0469: the page's Discard trial and Pin & rebuild send no rebuild for a
+  // stopped agent; the PATCH alone keeps the change for its next start.
+  it('a trial discarded while it is stopped: it stays stopped, and Start moves it back onto the fleet default', async () => {
+    const w = await makeWorld();
+    images(w);
+    vi.spyOn(w.provider, 'info').mockImplementation(async () => ({ imageId: 'sha:hatchabot/runtime:trial', onAgentNetwork: true, containerGen: 99 }) as never);
+    const id = await w.agent('kitchen', 'STOPPED');
+    w.store.setAgentImage(id, 'hatchabot/runtime:trial');
+    const r = await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: H, payload: { image: null } });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().sameImage).toBe(false);
+    expect(w.store.getAgent(id)!.rebuildOnStart).toBeTruthy();
+    await stillDown(w, id);
+    await startApplies(w, id);
+  });
+
+  it('Pin & rebuild\'s rebuild, sent for an agent that stopped since the page looked: stays stopped, checkpoint and all', async () => {
+    const w = await makeWorld();
+    images(w);
+    const id = await w.agent('kitchen', 'STOPPED');
+    await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: H, payload: { image: 'hatchabot/runtime:trial' } });
+    const r = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/rebuild`, headers: H, payload: { checkpoint: true, stoppedWaits: true } });
+    expect(r.json()).toMatchObject({ rebuilding: false, atNextStart: true });
+    await stillDown(w, id);
+    await startApplies(w, id);
+  });
+
   it('the image it already runs: a plain start', async () => {
     const w = await makeWorld();
     images(w);

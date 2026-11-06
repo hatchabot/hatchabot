@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path';
 import { applyLegacyEnv, defaultBackupsDir, defaultDbPath } from './envCompat.js';
 import { activeValues, envValue } from './config/envFile.js';
 import { readSetStatus } from './orchestrator/backups.js';
+import { setAgeDays } from './orchestrator/recoveryReadiness.js';
 import { funnelOff, funnelStatus, tailnetInfo, targetsPort } from './ops/tailnet.js';
 import { envFilePath, publicIntentIsStale, readPublicIntent } from './ops/publicIntent.js';
 import { adminAccounts, evaluateSafeguards, hostOf, publicConfig, type SafeguardCheck } from './api/safeguards.js';
@@ -444,6 +445,26 @@ export async function probeControlPlane(url: string, certFile?: string): Promise
 }
 const versionMarker = (html: string) => /HATCHABOT_VERSION="([^"]+)"/.exec(html)?.[1];
 
+/**
+ * The newest backup set in `bdir` and how old it is. Its age is counted by the
+ * calendar, as the app's machine line counts it (setAgeDays): a set's date is
+ * the local day it was made, and reading it as UTC midnight made it a day older
+ * in an evening west of UTC, so doctor warned a day early (HB-0386).
+ */
+export function backupFacts(bdir: string, now: number): DoctorFacts['backups'] {
+  try {
+    const sets = readdirSync(bdir).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && readdirSync(join(bdir, d)).some((f) => f.endsWith('.sqlite'))).sort();
+    const last = sets.pop();
+    if (!last) return { dir: bdir };
+    const st = readSetStatus(join(bdir, last));
+    return {
+      dir: bdir, lastSet: last, ageDays: setAgeDays(last, now),
+      ...(st.complete !== undefined ? { complete: st.complete } : {}),
+      ...(st.failedVolumes?.length ? { failed: st.failedVolumes.length } : {}),
+    };
+  } catch { return { dir: bdir }; /* no dir */ }
+}
+
 /** Probe this machine. `url` is where the control plane should answer. */
 export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
   let url = urlIn;
@@ -478,19 +499,7 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
   const df = sh('df', ['-Pk', '.']); // -P: one line per filesystem on macOS too
   const diskFreeGb = df ? Number(df.split('\n').pop()!.split(/\s+/)[3]) / 1e6 : undefined;
   const bdir = process.env.HATCHABOT_BACKUP_DIR ?? env.HATCHABOT_BACKUP_DIR ?? defaultBackupsDir();
-  let backups: DoctorFacts['backups'] = { dir: bdir };
-  try {
-    const sets = readdirSync(bdir).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && readdirSync(join(bdir, d)).some((f) => f.endsWith('.sqlite'))).sort();
-    const last = sets.pop();
-    if (last) {
-      const st = readSetStatus(join(bdir, last));
-      backups = {
-        dir: bdir, lastSet: last, ageDays: Math.floor((Date.now() - new Date(last).getTime()) / 86_400_000),
-        ...(st.complete !== undefined ? { complete: st.complete } : {}),
-        ...(st.failedVolumes?.length ? { failed: st.failedVolumes.length } : {}),
-      };
-    }
-  } catch { /* no dir */ }
+  const backups = backupFacts(bdir, Date.now());
   // The same lookup the app's HTTPS step uses: it knows the Mac app bundle,
   // Homebrew's path and `serve`. A plain `tailscale` on PATH missed the Mac
   // app entirely and told a working install it had no Tailscale (2026-09-22).

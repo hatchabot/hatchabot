@@ -79,6 +79,8 @@ describe('HB-0073: an imported archive is bounded by what it expands to, before 
     // A docker that runs the one-shot's script here, with /vol and /tmp pointed into the sandbox.
     const stub = join(d, 'docker');
     writeFileSync(stub, `#!/usr/bin/env bash
+[ "$1" = run ] || exit 0 # rm -f of the one-shot, and the like: done
+prev=; for a in "$@"; do [ "$prev" = --cidfile ] && printf f00dfeed > "$a"; prev=$a; done # docker writes the id once it has made the one-shot
 script="\${@: -1}"
 script="\${script//\\/vol/${vol}}"
 script="\${script//\\/tmp\\/s./${d}/s.}"

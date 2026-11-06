@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { isDiskFull, VolumeGoneError, VolumeUntouchedError } from '../src/providers/provider.js';
 import { LocalDockerProvider, remoteTarget, SEED_STEP_MARK, secretValuesOf, seedFailure, seedStepLabel, tcpReachable } from '../src/providers/localDockerProvider.js';
-import { createServer, type AddressInfo } from 'node:net';
+import { createServer } from 'node:net';
+import { firstThen, heldPort, listenOnFreePort } from './helpers/ports.js';
 import { GATEWAY_TOKEN } from './support/fixtures.js';
 
 /**
@@ -389,6 +390,8 @@ describe('HB-0333: an archive restores to the same place however its paths are s
 const fs = require('node:fs');
 const a = process.argv.slice(2);
 if (a[0] !== 'run') process.exit(0);
+// As docker does once it has made the one-shot, before it starts it.
+if (a.includes('--cidfile')) fs.writeFileSync(a[a.indexOf('--cidfile') + 1], 'f00dfeed');
 const script = a[a.length - 1].replaceAll('/tmp/s.tgz', ${JSON.stringify(join(scratch, 's.tgz'))}).replaceAll('/tmp/s.list', ${JSON.stringify(join(scratch, 's.list'))})
   .replaceAll('/vol', ${JSON.stringify(target)}).replace('chown -R 1000:1000', 'true')${change};
 const r = require('node:child_process').spawnSync('/bin/sh', ['-c', script], { input: fs.readFileSync(0), env: { PATH: '/usr/bin:/bin' } });
@@ -670,8 +673,11 @@ describe('a remote machine that is asleep or offline answers at once (2026-10-05
 
   it('the connect test: a listening port answers, a closed one does not', async () => {
     const srv = createServer((c) => c.destroy());
-    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
-    const port = (srv.address() as AddressInfo).port;
+    // Outside the kernel's ephemeral range: once closed, no other test's listen(0) can be handed it (HB-0505).
+    // The first port it is given is held, so choosing again is shown every run.
+    const held = await heldPort();
+    const port = await listenOnFreePort(srv, { choose: firstThen(held.port) }).finally(() => held.release());
+    expect(port).not.toBe(held.port);
     expect(await tcpReachable('127.0.0.1', port, 2000)).toBe(true);
     await new Promise<void>((r) => srv.close(() => r()));
     expect(await tcpReachable('127.0.0.1', port, 2000)).toBe(false);

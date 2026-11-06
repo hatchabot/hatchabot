@@ -1689,7 +1689,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // nothing would bring it back, so say so instead.
       const supervised = !!(process.env.INVOCATION_ID || process.env.XPC_SERVICE_NAME);
       if (supervised && !process.env.VITEST) setTimeout(() => process.exit(0), 1200).unref();
-      return { ok: true, username, adopted, restarting: supervised, recoveryCode };
+      // ownerId: whose the code is, the new account's (HB-0500).
+      return { ok: true, username, adopted, restarting: supervised, recoveryCode, ownerId: id };
     } finally { familySwitchRunning = false; }
   });
 

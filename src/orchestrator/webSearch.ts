@@ -30,7 +30,8 @@ export const DEFAULT_CHECK_MS = 6 * HOUR;
 const NUDGE_GAP_MS = 15 * 60_000;
 
 export type SearchProviderId = 'brave' | 'duckduckgo';
-export type ProbeStatus = 'ok' | 'low' | 'exhausted' | 'rejected' | 'busy' | 'unreachable' | 'blocked';
+/** `turned-away`: DuckDuckGo answered this machine with a challenge page, so it has no free search (HB-0455). */
+export type ProbeStatus = 'ok' | 'low' | 'exhausted' | 'rejected' | 'busy' | 'unreachable' | 'blocked' | 'turned-away';
 export interface Probe {
   status: ProbeStatus;
   /** Plain words for the owner; never the key or a raw response. */
@@ -55,6 +56,12 @@ export interface WebSearchState {
   applied?: { at: string; changed: number; failed: string[]; rebuild?: number };
   /** Which key the last check was about, so a key the owner changed is not announced as a quota returning. */
   keyMark?: string;
+  /**
+   * DuckDuckGo turning this machine away has been said (when). Cleared only
+   * once DuckDuckGo answers with results at two checks running, so a
+   * DuckDuckGo that comes and goes is not announced at every turn (HB-0455).
+   */
+  awaySaid?: string;
 }
 
 /**
@@ -140,14 +147,68 @@ export async function probeBrave(key: string, deps: { fetchImpl?: typeof fetch; 
   return { status: 'ok', detail: remaining !== undefined ? `Brave works, with ${remaining}${limit !== undefined ? ` of ${limit}` : ''} queries left.` : 'Brave works.', ...quota };
 }
 
+/** What the owner is told when DuckDuckGo turns this machine away (HB-0455). */
+export const DDG_TURNED_AWAY = 'DuckDuckGo turns this machine away: it answered with a challenge page, not results. So this machine gets no free search from DuckDuckGo, and agents can search only with a working Brave key.';
+
+const KEY_PLACE = 'Settings → AI → Fleet search key';
+
+/**
+ * What a Brave failure seen outside a probe says about the key (the manager's
+ * own search): the same words probeBrave uses. `status` undefined: no answer.
+ */
+export function braveFailure(status?: number): Probe {
+  if (status === undefined) return { status: 'unreachable', detail: 'Brave could not be reached from this machine.' };
+  if (status >= 200 && status < 300) return { status: 'busy', detail: 'Brave answered, but not with results that could be read.' };
+  if (status === 429 || status === 402) return { status: 'exhausted', detail: `Brave refused for its quota (${status}): the key has run out, or is limiting requests for now.` };
+  if (status === 401 || status === 403 || status === 422) return { status: 'rejected', detail: `Brave refused the key (${status}). It may be wrong, or its plan ended.` };
+  return { status: 'busy', detail: `Brave answered ${status}. That is usually its own trouble and passes.` };
+}
+
+/**
+ * With DuckDuckGo turning this machine away, what to do about Brave, in the
+ * owner's words: add a key only when none is set; else what its probe said
+ * (run out, refused, works but "DuckDuckGo only" was chosen). The page's
+ * renderSearchHealth says the same (HB-0455).
+ */
+export function braveAdvice(o: { keySet: boolean; brave?: Pick<Probe, 'status' | 'detail' | 'resetsAt'>; mode?: WebSearchState['mode'] }): string {
+  if (!o.keySet) return `A Brave key is needed: add one under ${KEY_PLACE}.`;
+  const b = o.brave;
+  if (!b) return 'The Brave key set has not been checked yet.';
+  switch (b.status) {
+    case 'ok':
+      return o.mode === 'duckduckgo'
+        ? `The Brave key works: under ${KEY_PLACE}, choose "Brave, and DuckDuckGo when it runs out" instead of "DuckDuckGo only".`
+        : 'The Brave key works.';
+    case 'low':
+    case 'exhausted':
+      return `${b.detail} Replace it under ${KEY_PLACE}${b.resetsAt ? `, or wait for its quota to return (about ${b.resetsAt.slice(0, 10)})` : ', or wait for its quota to return'}.`;
+    case 'rejected':
+      return `${b.detail} Replace it under ${KEY_PLACE}.`;
+    default:
+      return `${b.detail} Agents can search again once Brave answers.`;
+  }
+}
+
+/**
+ * Whether a DuckDuckGo answer is it turning this machine away: a challenge
+ * page (seen as a 202, "Please complete the following challenge") with no
+ * result in it. We say so rather than dress up as a browser to get past it:
+ * the block is DuckDuckGo's to make (HB-0455).
+ */
+export function duckDuckGoTurnedAway(status: number, html: string): boolean {
+  if (html.includes('result__a')) return false;
+  return status === 202 || /complete the following challenge|anomaly-modal|bots use DuckDuckGo too|captcha/i.test(html);
+}
+
 /** Asks DuckDuckGo once. It has no key or quota, but it can turn a machine's address away. */
 export async function probeDuckDuckGo(deps: { fetchImpl?: typeof fetch } = {}): Promise<Probe> {
   const f = deps.fetchImpl ?? fetch;
   try {
     const r = await f(DDG_URL, { headers: { 'user-agent': 'Mozilla/5.0 (Hatchabot)' }, signal: AbortSignal.timeout(15_000) });
-    if (!r.ok) return { status: 'blocked', detail: `DuckDuckGo answered ${r.status}.` };
-    // A challenge page answers 200 or 202 with no results in it.
-    if (!(await r.text()).includes('result__a')) return { status: 'blocked', detail: 'DuckDuckGo answered with no results: it may be turning this address away for now.' };
+    const html = await r.text().catch(() => '');
+    if (duckDuckGoTurnedAway(r.status, html)) return { status: 'turned-away', detail: DDG_TURNED_AWAY };
+    if (!r.ok) return { status: 'blocked', detail: `DuckDuckGo answered ${r.status}, so search may not work from this machine for now.` };
+    if (!html.includes('result__a')) return { status: 'blocked', detail: 'DuckDuckGo answered with a page that had no results in it, so search may not work from this machine for now.' };
     return { status: 'ok', detail: 'DuckDuckGo works.' };
   } catch {
     return { status: 'unreachable', detail: 'DuckDuckGo could not be reached from this machine.' };
@@ -316,9 +377,19 @@ export function createSearchWatch(deps: SearchWatchDeps): SearchWatch {
       s.brave = brave;
       if (s.mode === 'duckduckgo') s = moved(s, 'duckduckgo', 'You chose DuckDuckGo.');
       else if (brave.status === 'ok') s = moved(s, 'brave', 'Brave has quota.');
+      // Nearly out, but DuckDuckGo turns this machine away: the last queries are the only search there is (HB-0455).
+      else if (brave.status === 'low' && duckduckgo.status === 'turned-away') s = moved(s, 'brave', `${brave.detail} DuckDuckGo turns this machine away, so agents stay on Brave until it runs out.`);
+      // Nearly out, and DuckDuckGo did not answer with results just now (a timeout, an empty page): a key that
+      // still works is not left for one that may not, and the next check for "low" can be a day away.
+      else if (brave.status === 'low' && duckduckgo.status !== 'ok' && s.active === 'brave') s = moved(s, 'brave', `${brave.detail} DuckDuckGo did not answer with results just now, so agents stay on Brave.`);
       else if (brave.status === 'exhausted' || brave.status === 'low' || brave.status === 'rejected') s = moved(s, 'duckduckgo', brave.detail);
       // busy, unreachable: says nothing about the key, so nothing moves.
     }
+    // DuckDuckGo turning this machine away: said once, until it has worked again for two checks running.
+    const away = duckduckgo.status === 'turned-away';
+    const newlyAway = away && !before.awaySaid;
+    if (away) s.awaySaid = before.awaySaid ?? iso(now());
+    else if (duckduckgo.status === 'ok' && before.duckduckgo?.status === 'ok') delete s.awaySaid;
     saveWebSearch(deps.store, s);
     // What an agent was settled for may have been true before: on the way back it is not.
     if (s.active !== before.active || s.keyMark !== before.keyMark) settled.clear();
@@ -328,13 +399,24 @@ export function createSearchWatch(deps: SearchWatchDeps): SearchWatch {
       const sameKey = before.keyMark === keyMark;
       if (s.active === 'duckduckgo' && key && s.mode === 'auto') {
         deps.notify?.('Web search moved to DuckDuckGo', `${s.why} Agents are moving now, with no rebuild${s.brave?.resetsAt ? `, and go back to Brave when its quota returns (${s.brave.resetsAt.slice(0, 10)}).` : ', and go back when Brave answers again.'}`);
-      } else if (s.active === 'brave' && sameKey && before.mode === 'auto' && before.brave && ['exhausted', 'low', 'rejected'].includes(before.brave.status)) {
+      } else if (s.active === 'brave' && s.brave?.status === 'ok' && sameKey && before.mode === 'auto' && before.brave && ['exhausted', 'low', 'rejected'].includes(before.brave.status)) {
         deps.notify?.('Web search is back on Brave', 'Its quota returned, so agents are moving back, with no rebuild.');
       }
     }
-    // Nothing left to move to: worth saying once, when it starts.
+    // Nothing left to move to: worth saying once, when it starts. DuckDuckGo
+    // newly turning this machine away is said once too, also to a fleet already
+    // stuck on it (an install upgraded with a stored `blocked`), and to one on
+    // Brave, which then has nothing to fall back on (HB-0455).
     const stuck = (x: WebSearchState) => x.active === 'duckduckgo' && !!x.duckduckgo && x.duckduckgo.status !== 'ok';
-    if (stuck(s) && !stuck(before)) deps.notify?.('Web search may not be working', `Agents are on DuckDuckGo, and from this machine: ${duckduckgo.detail}`);
+    // A DuckDuckGo that turned away, worked once and turns away again is not news; the fleet moving onto it is.
+    const startsStuck = stuck(s) && !stuck(before) && (!away || s.active !== before.active);
+    if (stuck(s) && (newlyAway || startsStuck)) {
+      deps.notify?.('Web search may not be working', away
+        ? `Agents are on DuckDuckGo. ${duckduckgo.detail} ${braveAdvice({ keySet: !!key, brave: s.brave, mode: s.mode })}`
+        : `Agents are on DuckDuckGo, and from this machine: ${duckduckgo.detail}`);
+    } else if (newlyAway && s.active === 'brave') {
+      deps.notify?.('Web search has nothing to fall back on', `${duckduckgo.detail} Agents search with Brave; once its key runs out, they have no search. ${braveAdvice({ keySet: !!key, brave: s.brave, mode: s.mode })}`);
+    }
     // A move takes minutes across a fleet; nobody waits for it, and a check can run beside it.
     void pass().catch((err) => log('search.check_failed', { error: String(err) }));
     return s;

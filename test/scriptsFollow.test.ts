@@ -3,7 +3,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { scriptEnv } from './helpers/scriptEnv.js';
+import { hangingStep, scriptEnv } from './helpers/scriptEnv.js';
 
 // Every test here runs real shell scripts (git, bash, a fake gh) in a sandbox. On the
 // self-hosted runner CI shares the machine with other work, and vitest's 5 s was not
@@ -484,7 +484,7 @@ describe('scripts/deploy-release.sh (review, 2026-10-09)', () => {
      */
     function cutOff(w: ReturnType<typeof prodWorld>, signal: NodeJS.Signals) {
       const started = join(w.root, 'started');
-      writeFileSync(join(w.bin, 'hanging-step'), `#!/usr/bin/env bash\nmkdir -p node_modules/half-installed; touch ${JSON.stringify(started)}; exec sleep 30\n`, { mode: 0o755 });
+      writeFileSync(join(w.bin, 'hanging-step'), hangingStep(started), { mode: 0o755 });
       const p = spawn('bash', [join(w.prod, 'scripts', 'deploy-release.sh'), 'v1.1.0'], {
         detached: true, stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...w.env, HATCHABOT_PROD_DIR: w.prod, HATCHABOT_INSTALL_CMD: join(w.bin, 'hanging-step') },

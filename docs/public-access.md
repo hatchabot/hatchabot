@@ -194,6 +194,12 @@ has no second factor yet, so the owner can send each a reset link.
   right after using it. The page says so, once, where it cannot be missed.
   Making a recovery code needs the same proof, since a code made with the
   password alone would vouch for itself.
+- **Changing your password at the public address needs a second factor.**
+  Without one it is refused: whoever held only the password could otherwise
+  change it, and the real person would be locked out until the owner sent a
+  reset link. Change it at the private address, or ask the owner for a reset
+  link (a reset link works at both addresses). Settings → You says so in
+  place of the form.
 - **A lost phone.** Backup codes get you in. Without them: sign in at the
   private address, where no second factor is asked; the owner can also clear
   anyone's factors (`hatchabot second-factor reset <user>`). Clearing the
@@ -313,7 +319,7 @@ reads inside the agent (docs/access-overview-design.md).
 | step-up | Adding or replacing a second factor |
 | step-up | Removing a second factor |
 | step-up | Managing accounts (add, remove, reset links) |
-| step-up | Changing a password (your own needs your current password as well) |
+| step-up | Changing a password (your own needs your current password as well; with no second factor, only at the private address or by a reset link) |
 | step-up | Making a recovery code (needs your current password as well; with no second factor yet, also a sign-in from a link or code sent to you) |
 | step-up | Signing someone else out everywhere |
 | step-up | Public access: status, its address, and turning it off |

@@ -412,6 +412,39 @@ emails, bot usernames, machine, tailnet and IP names, and the secret values in
 `scripts/privacy-ignore.txt` hold nothing private) and prints a hit masked.
 A pattern scanner cannot do this: a real agent's name is just words.
 
+Machine and tailnet names come from `tailscale status`, which lists only the
+peers on the tailnet now. The publisher gates with the values of its last
+`kit values sync`, which can still hold a machine that has left since. v2.173.0
+was stopped that way an hour after its tag, by a name the local check no longer
+had (HB-0504). So the check also keeps every machine name, tailnet DNS name and
+tailnet suffix it has seen in `~/.config/hatchabot/privacy-machines.json`
+(mode 600, in a folder it makes the owner's alone, outside every repo, never
+printed), and checks those on every later run.
+
+- **Who writes it:** every run that reads this machine's values (the pre-push
+  hook, `--text`, `--public`, `--sync-ci`) adds what tailscale lists now.
+  `--export-values` reads it and never writes it: the publish kit's provider
+  writes nothing to disk (publish-kit SPEC.md section 6). The names it holds
+  still go into that output, so `kit values sync` and `kit preflight` check
+  them too.
+- **When it is missing:** the record starts the first time the check runs on
+  a machine, and until then the `not covered` line says so. A machine that
+  left before that first run is not in it; add its name to the `machine` list
+  by hand if the publisher's set still has it.
+- **When it cannot be read** (not the JSON the check writes, or no
+  permission): the result is incomplete (exit 3) until you move it aside
+  (`mv ~/.config/hatchabot/privacy-machines.json{,.bad}`). The check never
+  replaces it by itself, so its names are not lost in silence.
+- **Forgetting a machine:** the record only grows, and each name is a
+  fingerprint in the 48 KB secrets (`--sync-ci` refuses a set over GitHub's
+  limit, and so does `kit values sync`). The `not covered` line says when it
+  holds over 200 names. To forget a machine that is gone for good, remove its
+  `machine` entries (its name and its `….ts.net` name) from the file, keeping
+  it valid JSON. To forget them all, delete the file. Either can shrink the
+  publisher's machine category by more than 20%: `kit values sync` then warns,
+  and the publisher stops the project until `kit values accept-shrink
+  hatchabot`.
+
 - **Every push** from a clone with the hook (`node scripts/privacy-check.mjs
   --install-hook`, once per clone; `--check-hook` says whether this clone's
   pre-push runs it, including through a machine-wide `core.hooksPath` that
@@ -443,11 +476,12 @@ Each run ends in one of three results, and says which:
 |---|---|---|
 | 0 | clean | nothing it checked names a private value |
 | 1 | found | a private value (printed masked), or a refused tag |
-| 3 | incomplete | something it needed could not be read: the database, an env file, a note file, or GitHub's release notes and issues (`gh` missing, signed out, refused). Never a pass: the live test records it as a fail and `--text … &&` stops the release |
+| 3 | incomplete | something it needed could not be read: the database, an env file, a note file, the record of machines seen before, or GitHub's release notes and issues (`gh` missing, signed out, refused). Never a pass: the live test records it as a fail and `--text … &&` stops the release |
 
 Every result also says what is **not covered**: pictures and compressed data
 inside binary files (no OCR, no unpacking), and, with `--no-machine` or no `tailscale` command, this machine's
-names. The text inside a file git treats as binary (a name in a PDF's or a
+names (with no `tailscale` command, the names seen before are still checked), and the machines seen
+before while there is no record of them yet. The text inside a file git treats as binary (a name in a PDF's or a
 photo's metadata, a SQLite file) is read, as UTF-8 and UTF-16, since
 2026-10-10, and by the GitHub-side `privacy` job too since v2.162.0: each
 run of text is split into words like a line and looked up the same way.

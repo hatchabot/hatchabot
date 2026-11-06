@@ -25,12 +25,27 @@ Open your account menu (top right), then **Report a problem**:
      same label or, when it is cut off, to the end of its base64, in a journal's or a
      quote's lines too. Only real PEM headers (`Proc-Type:`, `DEK-Info:`, `Comment:`)
      and lines that look like base64 by their mix of characters or their length count,
-     so a line of words ends it. Also any long run of letters and digits or of base64
-     (`***`);
-   - settings named like a password, token or key, however short the value, quoted, escaped inside a string (`\"password\":\"…\"`) or written as a hash (`'password' => '…'`):
-     `PASSWORD=…`, `DB_PASS=…`, `PASS: …`, `GARDEN_KEY=…`, `"apiKey": "…"`, the
-     options `--password …` and `--token …`, curl's `-u` with a password, and
-     `Cookie:` lines. A bare lowercase `pass` can be a test run's count, so
+     so a line of words ends it. A PuTTY key file (`.ppk`) goes the same way, from its
+     first line or from `Private-Lines: N` to `Private-MAC:`, with the lines each
+     `-Lines:` header counts (and more lines of base64 when the key was wrapped again),
+     whatever the first line had before it on every line (an indent, a quote's `>`, a
+     journal's or `docker logs --timestamps`' prefix, `cat -n`'s or `grep -n`'s numbers). A header named in a
+     sentence, or headers with no key lines, stay. Also any long run of letters
+     and digits or of base64 (`***`), and GitLab, Hugging Face and GitHub tokens by their
+     start (`glpat-…`, `hf_…`, `ghp_…`) however short;
+   - settings named like a password, token or key, however short the value, quoted, escaped inside a string (`\"password\":\"…\"`) or written as a hash (`'password' => '…'`, `:password => …`), in curly, guillemet, CJK or fullwidth quotes (`“password”: “…”`, `password: «…»`, an apostrophe inside them too) or with a fullwidth colon:
+     `PASSWORD=…`, `TOKEN2=…`, `SECRET_KEY_BASE=…`, `DB_PASS=…`, `PASS: …`, `GARDEN_KEY=…`, `Garden_Key=…`, `dbPass=…`, `DbPass=…`, `adminPASS=…`, `pw=…`, `routerPw=…`, `sshKey=…`, `"apiKey": "…"`, `"credentials": "…"`, Docker's `"auth": "<base64 of user:password>"`, the
+     options `--password …` and `--token …`, curl's `-u` with a password, `mysql -p'…'` (the whole
+     shell word), a value after `Bearer` or `Basic` that reads as a token (8 characters or more of
+     a token's characters, counting `=`, with a letter and a digit, digits alone, `=` at its end,
+     a capital inside, or both cases and a `-` or `_`; not `read-only`, `Step-By-Step` or
+     `v2.1.0`), and
+     `Cookie:` lines. A quote inside a quoted value (`"a\"b"`) does not end it, nor does a
+     backslash at its end; in a setting's single or double quotes a backslash before the
+     closing quote is kept in the value when a space or a separator follows (`'C:\'`), the quotes may be mixed (`\"pass":"…"`), and a value cut off
+     before its closing quote goes to the end of its line. Code stays: an arrow function's
+     body after `token =>` when it reads as code (`token => token.trim()`, `token => token && ok`),
+     and a ternary's `? 'api-key' : cfg.mode`. A bare lowercase `pass` can be a test run's count, so
      `pass=12`, `pass=true`, `pass: ok` and `pass: word` stay; `pass=word`,
      `pass=1234` and `pass: x9` go;
    - a password after the bare word: `password hunter2` or `password 123456`, when

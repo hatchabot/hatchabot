@@ -2,6 +2,38 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.174.0] — 2026-11-06
+
+Sign-in on a shared browser, the public address, search that tells you when it cannot work, install notes agents actually read, restores that leave an agent as it was when Docker refuses them, and Report a problem masking more credential shapes.
+
+### Upgrading
+- **At the public address, a password can be changed only by an account with a second factor.** Without one, the page says so and asks you to add a factor first, or change it at home. Before, whoever held only a password could change it from the internet and lock the real person out.
+- **Web search:** when DuckDuckGo turns this machine away, Settings and the manager now say plainly that this machine has no free search and a Brave key is needed, and the owner is told once. A Brave key that is nearly out stays in use while DuckDuckGo gives no results.
+- **Install notes** move from TOOLS.md into AGENTS.md, which OpenClaw 2026.9 puts in the prompt. Each agent's next rebuild or start moves them; its own notes in either file are kept.
+- **Pin & rebuild, and discarding a trial,** under Runtime images now leave a stopped agent stopped: it takes the image when it next starts, and the confirm says so.
+
+### Fixed: sign-in on a shared browser
+- When another account signs in on the same page, the API key field, the plan box and every other typed field are cleared, and the page reloads once nothing is waiting on a second-factor step.
+- One-time codes (backup codes, a recovery code) are kept for the person they belong to across a sign-in, and are not shown to the next person. Esc or a click beside them no longer closes them unsaved, and turning on family accounts shows the owner's new recovery code.
+- A second-factor prompt stays until it is answered or cancelled, and a request it held is sent only for the person it was raised for: when the session changed in another tab, it is answered "not given" instead.
+
+### Fixed: agents and images
+- Bulk actions → Image no longer reports an agent that has no container yet as not rebuilt: it takes the pin when it is made.
+- A pin whose rebuild was refused says "pinned, but not rebuilt yet", with the reason.
+
+### Fixed: backups and restores
+- A restore that Docker refused to make or start (a full disk, exit 125) or whose runner dropped before anything ran leaves the agent as it was, not FAILED and half-restored. A rollback waits until the failed one-shot is gone, and stops anything else still writing to the volume first.
+- A restore, Put back or Finish is refused while a nightly backup of this install is being made.
+- Hatchabot clears its leftover one-shot containers at start and every 10 minutes.
+- `hatchabot doctor` counts a backup set's age by the calendar, as the app does.
+
+### Fixed: Report a problem
+- Masks more credential shapes: passwords in JSON and Ruby hashes, names with a number (`TOKEN2=`), `mysql -p'…'`, `sshpass -p`, `bearer` in prose, Docker auth blocks, curly-quoted values, and PuTTY key files. Read every line before you send: free text can never be fully safe.
+
+### Tests and releasing
+- Tests that choose a port take it from a band no listener uses, and choose again when it is taken; several tests no longer time out on a busy machine.
+- The privacy check remembers machine names it has seen, so a tailnet machine no longer listed is still caught before tagging (`~/.config/hatchabot/privacy-machines.json`).
+
 ## [2.173.1] — 2026-11-05
 
 v2.173.0 and v2.172.2 were never published: v2.173.0 was stopped by the publisher's privacy gate, and v2.172.2 was never tagged. Everything listed under 2.173.0 and 2.172.2 below ships in this release, including the fix that stops a stolen password from adding a second factor at the public address, and Brave's metered plans no longer reading as "0 queries left".

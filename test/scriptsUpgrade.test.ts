@@ -3,7 +3,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { scriptEnv } from './helpers/scriptEnv.js';
+import { hangingStep, scriptEnv } from './helpers/scriptEnv.js';
 
 // Every test here runs real shell scripts (git, bash, a fake gh) in a sandbox. On the
 // self-hosted runner CI shares the machine with other work, and vitest's 5 s was not
@@ -129,7 +129,7 @@ describe('scripts/upgrade.sh cut off part-way through the install (HB-0043)', ()
    */
   function cutOff(w: World, signal: NodeJS.Signals, where: 'install' | 'restart' = 'install') {
     const started = join(w.root, 'started');
-    const hang = `#!/usr/bin/env bash\nmkdir -p node_modules/half-installed; touch ${JSON.stringify(started)}; exec sleep 30\n`;
+    const hang = hangingStep(started);
     writeFileSync(join(w.bin, 'hanging-step'), hang, { mode: 0o755 });
     const p = spawn('bash', [join(w.install, 'scripts', 'upgrade.sh'), 'stable'], {
       detached: true, stdio: ['ignore', 'pipe', 'pipe'],

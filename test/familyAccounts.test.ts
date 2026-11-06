@@ -62,6 +62,7 @@ describe('turning on family accounts', () => {
       // A recovery code, shown once: nobody can send the host owner a reset link.
       expect(typeof r.json().recoveryCode).toBe('string');
       expect(acct.recoveryHash).toBeTruthy();
+      expect(r.json().ownerId).toBe(acct.id); // whose the code is: the new account's (HB-0500)
       expect(w.store.getAgent('a1')!.ownerId).toBe(acct.id);   // adopted
       expect(w.env()).toContain('HATCHABOT_AUTH=accounts');
       expect(w.env()).toContain('HATCHABOT_SECRET_KEY=x');       // the rest untouched

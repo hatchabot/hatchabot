@@ -75,13 +75,14 @@ describe('Try on agents (HB-0350)', () => {
   it('rebuilds with the Chat → Memory checkpoint its question promises', async () => {
     const { c, calls } = page(['runTryOnAgents'], {
       tryState: { tag: 'hatchabot-runtime:candidate', picked: new Set(['a1', 'a2']) }, tryDlg: element(), updateTryBtn() {}, loadRuntimeImages: async () => {},
+      agents: [{ id: 'a1', name: 'Homework Helper', state: 'RUNNING' }, { id: 'a2', name: 'Soccer Schedule', state: 'RUNNING' }],
     });
     let asked = '';
     c.confirm = (s: string) => { asked = s; return true; };
     await c.runTryOnAgents();
     expect(asked).toContain('Chat → Memory runs first');
     expect(calls.filter((x) => x.url.endsWith('/rebuild')).map((x) => [x.url, x.body])).toEqual([
-      ['/v1/agents/a1/rebuild', { checkpoint: true }], ['/v1/agents/a2/rebuild', { checkpoint: true }]]);
+      ['/v1/agents/a1/rebuild', { checkpoint: true, stoppedWaits: true }], ['/v1/agents/a2/rebuild', { checkpoint: true, stoppedWaits: true }]]);
   });
 });
 

@@ -305,9 +305,10 @@ export interface RuntimeProvider {
   streamFromVolume?(runtimeRef: string, argv: string[]): import('node:stream').Readable;
   /** The write-side twin: a one-shot on the VOLUME (writable) fed `input` on stdin — an upload. */
   writeToVolume?(runtimeRef: string, argv: string[], input: Buffer): Promise<ExecResult>;
-  /** Boot: remove volume one-shots a killed client left behind (never started, or
-   *  finished but not removed). Returns how many. Optional. */
-  sweepOneShots?(): Promise<number>;
+  /** Remove volume one-shots left behind: finished but not removed, and with
+   *  `created` (the default, for boot) those that never started. Returns how
+   *  many. Optional. */
+  sweepOneShots?(opts?: { created?: boolean; createdBefore?: number }): Promise<number>;
 
   /** What this runtime is actually running (image identity, OpenClaw version). */
   info(runtimeRef: string): Promise<RuntimeInfo>;
@@ -485,6 +486,15 @@ export interface RuntimeProvider {
   importStateFromFile(runtimeRef: string, file: string, opts?: { ownCopy?: boolean }): Promise<void>;
 
   /**
+   * Stop whatever of this install's may still be writing the runtime's volume
+   * besides the runtime itself: a copy into it that a failed restore could not
+   * remove (HB-0385). Undefined once nothing is; otherwise why not, naming it.
+   * Asked before a restore copies or replaces the volume. Optional: a provider
+   * with no such one-shots has nothing to stop.
+   */
+  stopVolumeWriters?(runtimeRef: string): Promise<string | undefined>;
+
+  /**
    * Restore a tarball into ONE agent's workspace directory, leaving the rest
    * of the runtime's state alone. Used to adopt an existing OpenClaw agent's
    * files (SOUL/MEMORY/AGENTS and everything else it has accumulated).
@@ -643,6 +653,19 @@ export class VolumeUntouchedError extends ProviderError {
   constructor(message: string, userMessage: string) {
     super(message, userMessage);
     this.name = 'VolumeUntouchedError';
+  }
+}
+
+/**
+ * A one-shot that writes an agent's volume failed, and it could not then be
+ * confirmed gone: removing it failed and Docker never said it was not there
+ * (HB-0385). It may still be writing, so nothing else may write that volume:
+ * a rollback that extracted alongside it could leave a mix of the two.
+ */
+export class OneShotNotGoneError extends ProviderError {
+  constructor(message: string, userMessage: string, readonly oneShot: string, options?: { cause?: unknown }) {
+    super(message, userMessage, options);
+    this.name = 'OneShotNotGoneError';
   }
 }
 

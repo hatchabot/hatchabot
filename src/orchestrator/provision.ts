@@ -30,7 +30,7 @@ import { clearStaleRuntimePins } from './runtimePins.js';
 import { attachedGoogleAccounts, syncConnections } from './googleConnections.js';
 import { verifyAgentAccess } from './accessOverview.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
-import { buildWorkspaceSeed, dataSourcesSection, GOOGLE_ACCOUNTS_HEADING, googleAccountsSection, installConventionsSection, memoryPolicySection, removeInstallSections, operatorSection, peerOneLine, peerToolsSection, removeSection, replaceSection, scheduledResultsSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, SCHEDULED_RESULTS_HEADING } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, GOOGLE_ACCOUNTS_HEADING, googleAccountsSection, memoryPolicySection, operatorSection, peerOneLine, peerToolsSection, extractSection, removeSection, replaceSection, scheduledResultsSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, SCHEDULED_RESULTS_HEADING, toolsMdWithoutInstallSection, withInstallSection } from '../openclaw/workspace.js';
 import { effectiveMemoryCap, memoryBudgetSection } from './memoryCap.js';
 import { agentMemoryLimits } from './swap.js';
 
@@ -1735,6 +1735,8 @@ export async function syncDataSourceDocs(
     next = replaceSection(next, '## Memory budget', memoryBudgetSection(memoryCapFor(store, agent)));
     // The operator identity: injected so every agent already knows who it serves.
     next = replaceSection(next, OPERATOR_HEADING, operatorSection(store.getOperatorProfile(agent.ownerId)));
+    // Where to install tools: here, not TOOLS.md, which OpenClaw 2026.9 does not read (HB-0397).
+    next = withInstallSection(next);
     // The Google accounts it holds: it could not otherwise know (HB-0394).
     const google = attachedGoogleAccounts(store, agentId);
     next = google.length ? replaceSection(next, GOOGLE_ACCOUNTS_HEADING, googleAccountsSection(google)) : removeSection(next, GOOGLE_ACCOUNTS_HEADING);
@@ -1797,13 +1799,13 @@ export async function syncDataSourceDocs(
 }
 
 /**
- * Write the install conventions into the agent's TOOLS.md (managed section).
- *
- * Unlike syncDataSourceDocs this CREATES the file when it is missing: OpenClaw
- * seeds TOOLS.md lazily on first boot, and a brand-new agent reaches this step
- * before that has happened. replaceSection appends when the heading is absent
- * and rewrites in place when present, so an agent's own notes around the
- * section survive every rebuild.
+ * Take Hatchabot's install section out of the agent's TOOLS.md, once
+ * syncDataSourceDocs has put it in AGENTS.md (HB-0397): OpenClaw 2026.9 does
+ * not read TOOLS.md, and on an image that still does, two copies would go out
+ * with every call. The agent's own notes in TOOLS.md stay; a file left with
+ * nothing of the agent's (the title Hatchabot gave one it created) is removed.
+ * Nothing is done while AGENTS.md lacks the section (no AGENTS.md yet, a read
+ * that failed): the notes are never in neither file.
  */
 async function syncInstallDocs(
   deps: ProvisionDeps,
@@ -1814,34 +1816,26 @@ async function syncInstallDocs(
   const { store, provider } = deps;
   const agent = store.getAgent(agentId);
   if (!agent) return;
-  const path = `/home/node/.openclaw/agents/${agent.slug}/agent/TOOLS.md`;
+  const dir = `/home/node/.openclaw/agents/${agent.slug}/agent`;
+  const path = `${dir}/TOOLS.md`;
   const q = JSON.stringify(path);
   try {
-    const read = await provider.execShell(runtimeRef, `cat ${q} 2>/dev/null || true`);
-    // A read that failed (a timeout, a restarting container) is not an empty
-    // file: writing then replaced the agent's notes with the section alone.
-    if (read.code !== 0) { log('installdocs.failed', { agentId, stderr: read.stderr.slice(0, 300) }); return; }
-    const current = read.stdout;
-    const base = current.trim() ? current : '# TOOLS.md - Local Notes\n';
-    const next = replaceSection(base, INSTALL_HEADING, installConventionsSection());
-    if (next !== current) { // already current: never churn the agent's file
-      const b64 = Buffer.from(next, 'utf8').toString('base64');
-      // Through the helper: above ~96 KB it goes on stdin (one shell argument
-      // caps at 128 KiB; a big AGENTS.md never synced again — night review).
-      const res = await writeFileInAgent(provider, runtimeRef, path, b64);
-      if (res.code !== 0) { log('installdocs.failed', { agentId, stderr: res.stderr.slice(0, 300) }); return; }
-      log('installdocs.synced', { agentId });
-    }
-    // With TOOLS.md holding the section, drop the copies earlier versions left
-    // in AGENTS.md: each went out with every call (review, 2026-09-29).
-    const agentsPath = `/home/node/.openclaw/agents/${agent.slug}/agent/AGENTS.md`;
-    const agentsRead = await provider.execShell(runtimeRef, `cat ${JSON.stringify(agentsPath)} 2>/dev/null || true`);
+    const agentsRead = await provider.execShell(runtimeRef, `cat ${JSON.stringify(`${dir}/AGENTS.md`)} 2>/dev/null || true`);
     if (agentsRead.code !== 0) { log('installdocs.failed', { agentId, stderr: agentsRead.stderr.slice(0, 300) }); return; }
-    const cleaned = removeInstallSections(agentsRead.stdout);
-    if (cleaned === agentsRead.stdout) return;
-    const res = await writeFileInAgent(provider, runtimeRef, agentsPath, Buffer.from(cleaned, 'utf8').toString('base64'));
-    if (res.code !== 0) log('installdocs.failed', { agentId, stderr: res.stderr.slice(0, 300) });
-    else log('installdocs.agentsmd_cleaned', { agentId });
+    // Fence-aware: a heading quoted in an example is not the section.
+    if (!extractSection(agentsRead.stdout, INSTALL_HEADING)) return;
+    // A read that failed (a timeout, a restarting container) is not an empty file.
+    const read = await provider.execShell(runtimeRef, `cat ${q} 2>/dev/null || true`);
+    if (read.code !== 0) { log('installdocs.failed', { agentId, stderr: read.stderr.slice(0, 300) }); return; }
+    if (!read.stdout) return; // no TOOLS.md: nothing to take out
+    const next = toolsMdWithoutInstallSection(read.stdout);
+    if (next === read.stdout) return; // none of Hatchabot's in it: never churn the agent's file
+    const res = next === null
+      ? await provider.execShell(runtimeRef, `rm -f ${q}`)
+      // Through the helper: above ~96 KB it goes on stdin (one shell argument caps at 128 KiB).
+      : await writeFileInAgent(provider, runtimeRef, path, Buffer.from(next, 'utf8').toString('base64'));
+    if (res.code !== 0) { log('installdocs.failed', { agentId, stderr: res.stderr.slice(0, 300) }); return; }
+    log('installdocs.toolsmd_cleaned', { agentId, removed: next === null });
   } catch (e) {
     log('installdocs.error', { agentId, error: String((e as Error).message ?? e) });
   }

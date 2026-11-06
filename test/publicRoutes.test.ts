@@ -146,7 +146,6 @@ describe('public route classification', () => {
   it('only routes that ask for the current password themselves let someone with no second factor past step-up', () => {
     const lax = all().filter((line) => { const [m, u] = line.split(' '); return publicRuleFor(m!, u!)?.firstFactorOk; });
     expect(lax).toEqual([
-      'POST /v1/local-accounts/:id/password',
       'POST /v1/local-accounts/me/recovery-code',
       'POST /v1/second-factor/backup-codes',
       'POST /v1/second-factor/passkey',
@@ -157,6 +156,9 @@ describe('public route classification', () => {
     expect(publicRuleFor('DELETE', '/v1/second-factor/:id')?.firstFactorOk).toBeUndefined();
     expect(publicRuleFor('POST', '/v1/local-accounts/:id/reset-link')?.firstFactorOk).toBeUndefined();
     expect(publicRuleFor('DELETE', '/v1/local-accounts/:id')?.firstFactorOk).toBeUndefined();
+    // Changing your own password is refused without a factor, and says what to do instead (HB-0453).
+    expect(publicRuleFor('POST', '/v1/local-accounts/:id/password')?.firstFactorOk).toBeUndefined();
+    expect(publicRuleFor('POST', '/v1/local-accounts/:id/password')?.noFactor).toMatch(/private address.*reset link/);
   });
 
   it('every rule names at least one real route (no rule left over from a route that is gone)', () => {

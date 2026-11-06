@@ -1935,8 +1935,10 @@ when the newest version needs the service.
 what it is (fleet default, candidate, older build, derived), what it carries
 ("with Slack and Discord · plus traceroute"), what uses it, and its actions.
 **🧪 Try** opens a picker: filter by name or group, tick as many agents as you
-like, and **Pin & rebuild _n_** pins each and queues the rebuilds (memory kept,
-six at a time). An agent's own pin lives in its ⚙ Advanced → Runtime image as a
+like, and **Pin & rebuild _n_** pins each and queues the rebuilds of the running
+ones (memory kept, six at a time). A stopped or sleeping one stays so and moves
+onto the image when it next starts; so does one whose trial you discard with ✕
+while it is stopped. An agent's own pin lives in its ⚙ Advanced → Runtime image as a
 dropdown of every image with a line saying what each one is, and **Fleet
 default** at the top to put it back. **Pin & rebuild** does both at once — the agent moves onto the image right away, memory kept (a stopped one moves when it starts).
 
@@ -2395,8 +2397,9 @@ from a downloaded .hatchabot file".
 
 The runtime image is deliberately minimal and shared; tools belong to the agent
 that needs them, on its own volume, installed **through chat with the agent**.
-Every agent's `TOOLS.md` carries a managed "Installing tools" section (synced on
-every rebuild) that teaches it the rules of the house: no root and no apt;
+Every agent's `AGENTS.md` carries a managed "Installing tools" section (synced on
+every rebuild; it was in `TOOLS.md` until v2.174.0, which OpenClaw 2026.9 no
+longer puts in the prompt) that teaches it the rules of the house: no root and no apt;
 static binaries into `~/.local/bin`; `npm install -g` (lands in
 `~/.npm-global`); `pip install --target ~/.openclaw/pylibs`; OpenClaw skills via
 `openclaw skills install`; and `~/.openclaw/on-rebuild.sh` for anything that

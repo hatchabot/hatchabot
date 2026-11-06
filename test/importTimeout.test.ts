@@ -16,6 +16,9 @@ import { join } from 'node:path';
 const REF = 'docker://hatchabot-kitchen-helper-df918a55';
 let dir: string;
 let LocalDockerProvider: typeof import('../src/providers/localDockerProvider.js').LocalDockerProvider;
+// From the same fresh load as the provider, or instanceof sees another class.
+let ProviderError: typeof import('../src/providers/provider.js').ProviderError;
+let VolumeUntouchedError: typeof import('../src/providers/provider.js').VolumeUntouchedError;
 
 beforeAll(async () => {
   // Read when the module loads: a short deadline for this file only. A second,
@@ -23,6 +26,7 @@ beforeAll(async () => {
   vi.stubEnv('HATCHABOT_DOCKER_IO_TIMEOUT_MS', '1000');
   vi.resetModules();
   ({ LocalDockerProvider } = await import('../src/providers/localDockerProvider.js'));
+  ({ ProviderError, VolumeUntouchedError } = await import('../src/providers/provider.js'));
 });
 afterAll(() => { vi.unstubAllEnvs(); vi.resetModules(); });
 
@@ -36,7 +40,8 @@ const provider = (run: string) => {
   writeFileSync(stub, `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> ${JSON.stringify(join(dir, 'argv.log'))}
 case "$1" in
-  run) ${run} ;;
+  run) prev=; for a in "$@"; do [ "$prev" = --cidfile ] && printf f00dfeed > "$a"; prev=$a; done # docker writes the id once it has made the one-shot
+    ${run} ;;
   rm) sleep 0.5; touch ${JSON.stringify(join(dir, 'removed'))} ;;
 esac
 exit 0
@@ -73,7 +78,7 @@ describe('an import that does not finish is heard only once its one-shot is gone
     expect((r as unknown as { err: { userMessage: string } }).err.userMessage).toMatch(/would expand to more than/);
   });
 
-  it('a clean import removes nothing and is not held', async () => {
+  it('a clean import is not held by the removal of its finished one-shot', async () => {
     const r = await removedWhenSettled(provider('cat > /dev/null').importState(REF, Buffer.from('fixture archive')));
     expect(r).toMatchObject({ ok: true, removed: false });
   });
@@ -81,6 +86,46 @@ describe('an import that does not finish is heard only once its one-shot is gone
   it('writeToVolume (stdin to a one-shot): a timeout waits for the removal too', async () => {
     const r = await removedWhenSettled(provider('exec sleep 10').writeToVolume(REF, ['sh', '-c', 'cat > /home/node/x'], Buffer.from('fixture')));
     expect(r).toMatchObject({ ok: false, removed: true });
+  });
+});
+
+describe('a timed-out import says whether its one-shot ever ran (HB-0384)', () => {
+  /** As `provider`, with docker's --cidfile and `container inspect`: `made` writes the id, as docker does once it has made the one-shot. */
+  const withIds = (run: string, inspect: string) => {
+    const stub = join(dir, 'docker');
+    writeFileSync(stub, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(join(dir, 'argv.log'))}
+cid=; prev=; for a in "$@"; do [ "$prev" = --cidfile ] && cid=$a; prev=$a; done
+made() { [ -z "$cid" ] || printf 'f00dfeed%056d' 0 > "$cid"; }
+case "$1" in
+  run) ${run} ;;
+  container) ${inspect} ;;
+  rm) sleep 0.5; touch ${JSON.stringify(join(dir, 'removed'))} ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    return new LocalDockerProvider({ docker: stub, image: 'test-image:latest', reapRetryMs: 10 });
+  };
+  const noSuch = 'echo "Error: No such container: ${@: -1}" >&2; exit 1';
+
+  it('docker never made it (no id, no container): untouched', async () => {
+    const err = await withIds('exec sleep 10', noSuch).importState(REF, Buffer.from('fixture archive')).catch((e) => e);
+    expect(err).toBeInstanceOf(VolumeUntouchedError);
+    expect(String(err)).toMatch(/timed out/);
+  });
+
+  it('made and never started: untouched, and removed before the caller hears', async () => {
+    const r = await removedWhenSettled(withIds('made; exec sleep 10', 'echo "created|0001-01-01T00:00:00Z"').importState(REF, Buffer.from('fixture archive')));
+    expect(r).toMatchObject({ ok: false, removed: true });
+    expect((r as { err: Error }).err).toBeInstanceOf(VolumeUntouchedError);
+  });
+
+  it('made and running: it may have begun, so not untouched; removed before the caller hears', async () => {
+    const r = await removedWhenSettled(withIds('made; exec sleep 10', 'echo "running|2026-11-06T08:00:00Z"').importState(REF, Buffer.from('fixture archive')));
+    expect(r).toMatchObject({ ok: false, removed: true });
+    expect((r as { err: Error }).err).toBeInstanceOf(ProviderError);
+    expect((r as { err: Error }).err).not.toBeInstanceOf(VolumeUntouchedError);
+    expect(String((r as { err: Error }).err)).toMatch(/timed out/);
   });
 });
 

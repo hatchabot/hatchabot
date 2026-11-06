@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach } from 'vitest';
 import { publicApp, type PublicApp, type PublicAppOptions } from './publicApp.js';
 import { SHIM_DNS, tailscaleShim, type Shim } from './tailscaleShim.js';
+import { freePort, portTaken } from './ports.js';
 import { activeValues } from '../../src/config/envFile.js';
 
 /**
@@ -72,7 +73,12 @@ export async function world(env: Record<string, string> = {}, opts: { on?: boole
   const cookie = await privCookie(h, 'owner', owner.password);
   const call: World['call'] = (method, url, payload, c = cookie) => h.app.inject({ method: method as 'GET', url, headers: { cookie: c }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   if (opts.on) {
-    const r = await call('POST', '/v1/public-access/on', { confirm: true });
+    let r = await call('POST', '/v1/public-access/on', { confirm: true });
+    // The port was chosen before the listener opens it (ports.ts). If something took it in between, the switch took itself back: choose again.
+    for (let i = 0; i < 4 && r.statusCode !== 200 && portTaken(r.body) && !env.HATCHABOT_PUBLIC_PORT; i++) {
+      h.port = await freePort();
+      r = await call('POST', '/v1/public-access/on', { confirm: true });
+    }
     if (r.statusCode !== 200) throw new Error(`could not turn public access on: ${r.body}`);
   }
   return { h, owner, call, shim, envFile, dir, sent };

@@ -1,6 +1,5 @@
 import Database from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { createServer } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { Store } from '../../src/store/store.js';
 import { registerAuth, _resetLoginThrottle } from '../../src/api/auth.js';
@@ -9,6 +8,9 @@ import { registerRoutes } from '../../src/api/routes.js';
 import { MockProvider } from '../../src/providers/mockProvider.js';
 import { totp, base32Decode } from '../../src/api/totp.js';
 import type { PublicProbes } from '../../src/api/publicAccess.js';
+import { freePort, portTaken } from './ports.js';
+
+export { freePort };
 
 /**
  * A Hatchabot with its PUBLIC listener really open on a loopback port, for
@@ -19,14 +21,6 @@ import type { PublicProbes } from '../../src/api/publicAccess.js';
  */
 export const PUBLIC_HOST = 'box.example.com';
 export const PUBLIC_URL = `https://${PUBLIC_HOST}:8443`;
-
-export async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once('error', reject);
-    s.listen(0, '127.0.0.1', () => { const { port } = s.address() as { port: number }; s.close(() => resolve(port)); });
-  });
-}
 
 const ENV_KEYS = ['HATCHABOT_PUBLIC_ACCESS', 'HATCHABOT_PUBLIC_PORT', 'HATCHABOT_PUBLIC_INVITED_ONLY', 'HATCHABOT_PUBLIC_ACCESS_URL', 'HATCHABOT_PUBLIC_URL',
   'HATCHABOT_PUBLIC_IDLE_MINUTES', 'HATCHABOT_PUBLIC_STEPUP_MINUTES', 'HATCHABOT_PUBLIC_REQS_PER_MIN', 'HATCHABOT_PUBLIC_REQS_PER_MIN_PER_ADDRESS',
@@ -65,6 +59,7 @@ export interface PublicAppOptions {
 export interface PublicApp {
   app: FastifyInstance;
   store: Store;
+  /** The public listener's port. Setting it (a test that found it taken) also sets HATCHABOT_PUBLIC_PORT. */
   port: number;
   secret: Buffer;
   /** A request to the public listener. `from` is the visitor's address as tailscaled reports it. */
@@ -78,7 +73,7 @@ export interface PublicApp {
 
 export async function publicApp(opts: PublicAppOptions = {}): Promise<PublicApp> {
   const saved = new Map(ENV_KEYS.map((k) => [k, process.env[k]]));
-  const port = await freePort();
+  let port = await freePort();
   for (const k of ENV_KEYS) delete process.env[k];
   Object.assign(process.env, {
     HATCHABOT_PUBLIC_PORT: String(port),
@@ -144,7 +139,15 @@ export async function publicApp(opts: PublicAppOptions = {}): Promise<PublicApp>
     return { id, totpSecret, password };
   };
 
-  if (!opts.off) await app.publicAccess!.syncListener();
+  if (!opts.off) {
+    // The port was chosen before the listener opens it (ports.ts): if something took it in between, choose again.
+    for (let i = 0; i < 5; i++) {
+      const r = await app.publicAccess!.syncListener();
+      if (r.listening || !portTaken(r.error) || opts.env?.HATCHABOT_PUBLIC_PORT) break;
+      port = await freePort();
+      process.env.HATCHABOT_PUBLIC_PORT = String(port);
+    }
+  }
 
   const pub: PublicApp['pub'] = async (path, init = {}) => {
     const headers: Record<string, string> = {
@@ -180,7 +183,9 @@ export async function publicApp(opts: PublicAppOptions = {}): Promise<PublicApp>
   };
 
   return {
-    app, store, port, secret, pub, addAccount, signIn,
+    app, store, secret, pub, addAccount, signIn,
+    get port() { return port; },
+    set port(p: number) { port = p; process.env.HATCHABOT_PUBLIC_PORT = String(p); },
     close: async () => {
       await app.close();
       for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }

@@ -103,11 +103,14 @@ checkout_recorded() {
 # this machine has no way to tell. A commit waiting in its editor holds the lock
 # for as long as the person takes, however old the lock looks.
 git_running_here() {
-  local here p cwd line pid=""
+  local here p comm cwd line pid=""
   here="$(pwd -P)"
   if [ -d "/proc/$$" ]; then
+    # Read with the builtin, not $(cat): one cat per process on the machine
+    # took 1.7 s with 900 running, and longer the busier it was (HB-0505).
     for p in /proc/[0-9]*; do
-      case "$(cat "$p/comm" 2>/dev/null)" in git|git-*) ;; *) continue ;; esac
+      { read -r comm < "$p/comm"; } 2>/dev/null || continue
+      case "$comm" in git|git-*) ;; *) continue ;; esac
       cwd="$(readlink "$p/cwd" 2>/dev/null)" || continue
       case "$cwd/" in "$here/"*) echo "${p#/proc/}"; return 0 ;; esac
     done

@@ -3,7 +3,7 @@ import { isIPv6 } from 'node:net';
 import { hostname, homedir, userInfo } from 'node:os';
 import { isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { Worker } from 'node:worker_threads';
-import { maskKeyMaterial, maskKnownValues, redactSecrets } from '../domain/redact.js';
+import { looksLikeCode, maskKeyMaterial, OTHER_QUOTED, maskKnownValues, quotedFieldMasker, redactSecrets } from '../domain/redact.js';
 
 /**
  * "Report a problem" (docs/field-reports.md): the manager agent — or the
@@ -730,11 +730,42 @@ function maskPeople(text: string, people: Iterable<string> | undefined, ids: Ite
 }
 
 // A bare value: stops where redactCredentialFields' does. Keeps a reference to a setting, which is not a value.
-const FIELD_VALUE = String.raw`"[^"\n]*"|'[^'\n]*'|[^\s,;&"'}\])]+`;
+// Curly, guillemet, CJK and fullwidth quotes as quotes: DB_PASS: “a b c” left "b c”".
+const FIELD_VALUE = String.raw`"[^"\n]*"|'[^'\n]*'|${OTHER_QUOTED}|(?![\u201C\u2018\u00AB\u201E\u300C\uFF02])[^\s,;&"'}\])]+`;
 const isSettingRef = (v: string) => /^\$(?:[A-Z_][A-Z0-9_]*|\{[A-Za-z_]\w*\})$/.test(v);
 const hasLetterAndDigit = (v: string) => /\p{L}/u.test(v) && /\d/.test(v);
 const manyDigits = (v: string) => /^\d{4,}$/.test(v);
-const isMask = (v: string) => v.includes('*') || v.includes('{');
+// Already masked: the whole value, quotes and a closing mark aside. A mask inside one is not the value masked:
+// DB_PASS=hunter2?token=*** kept its hunter2 when any * or { in it counted (HB-0501 review).
+// A template's reference is code too, as when any { counted: --token ${t.json.token}, data-key="${esc(key)}".
+// Not one with a shell default in it (${PASS:-x}), and not one holding a quote.
+const isMask = (v: string) => /^["'\u201C\u2018]?(?:\*+|\{[a-z-]+\})["'\u201D\u2019]?[.,;:!?)\]}>]*$/.test(v)
+  || (/^["']?\$\{[\w.?$()[\], ]*(?:\}|$)/.test(v) && !/:[-=?+]/.test(v));
+const PLAIN_VALUE = /^(?:\d{1,3}|true|false|yes|no|ok|null|none|on|off)$/i;
+const TEST_PASS = /^(?:tests?|num|total|n)[_.-]?pass$/i;
+// camelCase, which needs no separator: dbPass, mqttPass, sshKey, appKey. Never bypass or monkey: the end has its capital.
+const CAMEL = String.raw`[a-z][a-z0-9]*(?:[A-Z][a-z0-9]*)*`;
+// A pass name may be PascalCase or end in capitals or Pw too: DbPass, WifiPass, adminPASS, routerPw. A key name may not
+// (SortKey, PrimaryKey are code).
+const CAMEL_PASS = String.raw`[A-Za-z][a-z0-9]*(?:[A-Z][a-z0-9]*)*(?:Pass|PASS|Pw)`;
+// A pass or key name in any case after a separator (Db_Pass, garden_KEY, Garden_Key, db_pw), all capitals, or camelCase.
+const PASS_OR_KEY = String.raw`(?:[\w.-]*[_.-])?(?:pass|PASS|Pass|pw|PW|Pw)|${CAMEL_PASS}|(?:[A-Z0-9_]*_)?KEY|[A-Za-z0-9_-]*[A-Za-z0-9][_-](?:key|Key|KEY)|${CAMEL}Key`;
+/**
+ * "DB_PASS": "x", {"pass":"x"}, \\"GARDEN_KEY\\":\\"x\\", {"pass":123456}, {"dbPass":"x"}: a quoted name and its value, as JSON or a
+ * hash writes them, read the way quotedFieldMasker reads them (HB-0501: a quote inside the value cut it). Not "test_pass":"12" or "pass":"true".
+ */
+// A ternary's `? 'session-key' : rt?.source` is kept by quotedFieldMasker itself; any other unquoted value goes.
+const maskQuotedPassAndKey = quotedFieldMasker(PASS_OR_KEY, 'g',
+  (v, key) => isSettingRef(v) || /^\*+$|^\{[a-z-]+\}$/.test(v) || TEST_PASS.test(key) || PLAIN_VALUE.test(v));
+/**
+ * Docker's config.json: "auth":"<base64 of user:password>", too short for the long-key rule. Only a value that
+ * decodes to a name and a colon: "auth": "oauth" or "auth": true stays.
+ */
+const maskDockerAuth = quotedFieldMasker('auths?', 'g', (v, _key, quoted) => !quoted || !/^[A-Za-z0-9+/]{4,}={0,2}$/.test(v)
+  || !/^[^:\s]{1,256}:/.test(Buffer.from(v, 'base64').toString('latin1')));
+// "credentials": "bob:x", "db_creds": "…". Not fetch's credentials: 'include', 'same-origin' or 'omit'.
+const maskCredentialsField = quotedFieldMasker(String.raw`(?:[\w.-]*[_.-])?(?:credentials?|Credentials?|CREDENTIALS?|creds|Creds|CREDS)|${CAMEL}Credentials?`, 'g',
+  (v, _key, quoted) => !quoted || /^\*+$|^\{[a-z-]+\}$/.test(v) || isSettingRef(v) || PLAIN_VALUE.test(v) || /^(?:include|same-origin|omit)$/.test(v));
 /**
  * Credentials written the ways redactSecrets leaves alone, for a public report
  * only (redact.ts is shared with logs and errors, where "pass=12" and a word
@@ -744,7 +775,7 @@ const isMask = (v: string) => v.includes('*') || v.includes('{');
  * digit in it, or is 4 digits or more. After a bare "token" digits alone stay (max token 4096).
  */
 function maskCredentialForms(text: string): string {
-  return text
+  const first = text
     // --password hunter2xyz, --token abc123def. Not --password-stdin, or the next option.
     .replace(/(^|[\s'"(])(--?[A-Za-z0-9_-]*(?:password|passwd|passphrase|pass|pwd|token|secret|api-?key))[ \t]+(?!-)("[^"\n]*"|'[^'\n]*'|[^\s'"]+)/gim,
       (m, at: string, flag: string, v: string) => (isSettingRef(v) || isMask(v) ? m : `${at}${flag} ***`))
@@ -757,7 +788,8 @@ function maskCredentialForms(text: string): string {
         return secret && !isMask(v) ? `${word}${gap}***${v.slice(end)}` : m;
       })
     // pass=hunter2, pass=123456, db_pass: x, PASS: x. Not a test run's pass=12, pass: ok or test_pass=12, nor pass: x in a sentence.
-    .replace(new RegExp(String.raw`(?<![\w.-])((?:[\w.-]*[_.-])?pass)(=(?![=>])|:[ \t]*)(${FIELD_VALUE})`, 'gi'), (m, key: string, sep: string, v: string) => {
+    // db_pw=x and pw=x the same way; a fullwidth colon is a colon.
+    .replace(new RegExp(String.raw`(?<![\w.-])((?:[\w.-]*[_.-])?(?:pass|pw))(=(?![=>])|[:\uFF1A][ \t]*)(${FIELD_VALUE})`, 'gi'), (m, key: string, sep: string, v: string) => {
       if (isSettingRef(v) || isMask(v)) return m;
       const plain = /^(?:\d{1,3}|true|false|yes|no|ok|null|none|on|off)$/i.test(v);
       const named = key.length > 4 && !/^(?:tests?|num|total|n)[_.-]pass$/i.test(key);
@@ -765,15 +797,29 @@ function maskCredentialForms(text: string): string {
       if (plain) return m;
       return sep === '=' || key === 'PASS' || hasLetterAndDigit(v) || manyDigits(v) ? `${key}${sep}***` : m;
     })
-    // "DB_PASS": "x", {"pass":"x"}, \\"GARDEN_KEY\\":\\"x\\": a quoted name and a quoted value, as JSON or a hash writes them. Not "test_pass":"12" or "pass":"true".
-    .replace(new RegExp(String.raw`(?<!\\)(\\*["'])((?:[\w.-]*[_.-])?(?:pass|PASS|Pass)|(?:[A-Z0-9_]*_)?KEY|[a-z0-9_-]*[a-z0-9][_-]key)\1(\s*(?:=>|[:=])\s*)(\\*["'])([^\n]{0,4000}?)\4`, 'g'),
-      (m, q: string, key: string, sep: string, q2: string, v: string) => {
-        if (isSettingRef(v) || /^\*+$|^\{[a-z-]+\}$/.test(v) || /^(?:tests?|num|total|n)[_.-]pass$/i.test(key)) return m;
-        return /^(?:\d{1,3}|true|false|yes|no|ok|null|none|on|off)$/i.test(v) ? m : `${q}${key}${q}${sep}${q2}***${q2}`;
-      })
-    // GARDEN_KEY=x, ssh_key=x. Not monkey=x, or a key: in code, which is most often a word.
-    .replace(new RegExp(String.raw`(?<![\w.-])((?:[A-Z0-9_]*_)?KEY|[a-z0-9_-]*[a-z0-9][_-]key)(=(?![=>])|:[ \t]+(?=[^\s]*\d))(${FIELD_VALUE})`, 'g'),
+    // got bearer abc123def, basic dXNlcjpw: a value after the word, as a header writes it (HB-0499). Only a token's
+    // characters (RFC 6750's), 8 or more, with a letter and a digit, base64's padding or a capital inside, or 20 not all
+    // letters. Not "a bearer token", "basic read-only access", "basic v2.173.1", "Basic Information</i>" or "bearer (x)".
+    .replace(/(?<![\w-])(bearer|basic)([ \t]+)([^\s'"`,;)\]}]+)/gi, (m, word: string, gap: string, v: string) => {
+      const end = trailingAt(v, '.:!?');
+      const value = v.slice(0, end);
+      // The 8 count base64's padding (basic Ym9iOmE=); a phrase is lowercase words (P-aZpirnuXNeavY is no phrase); digits alone are a token.
+      const tokenLike = /^(?=.{8,}$)[A-Za-z0-9._~+/-]+=*$/.test(value) && !/^[a-z]+(?:-[a-z]+)+$/.test(value) && !/^v?\d+(?:\.\d+)+(?:-[\w.]+)?$/.test(value);
+      // Both cases and a - or _ (base64url: CDQh-rmc), unless it is words: Step-By-Step.
+      const mixedUrl = /[A-Z]/.test(value) && /[a-z]/.test(value) && /[-_]/.test(value) && !/^[A-Z]?[a-z]+(?:[-_][A-Z]?[a-z]+)+$/.test(value);
+      const secret = tokenLike && (/^\d+$/.test(value) || (/\d/.test(value) && /[A-Za-z]/.test(value)) || /=$/.test(value) || /[a-z][A-Z]/.test(value) || mixedUrl
+        || (value.length >= 20 && !/^[A-Za-z]+$/.test(value)));
+      return secret && !isMask(value) && !isSettingRef(value) ? `${word}${gap}***${v.slice(end)}` : m;
+    });
+  return maskCredentialsField(maskDockerAuth(maskQuotedPassAndKey(first)))
+    // GARDEN_KEY=x, ssh_key=x, Garden_Key=x. Not monkey=x, or a key: in code, which is most often a word.
+    .replace(new RegExp(String.raw`(?<![\w.-])((?:[A-Z0-9_]*_)?KEY|[A-Za-z0-9_-]*[A-Za-z0-9][_-](?:key|Key|KEY))(=(?![=>])|[:\uFF1A][ \t]+(?=[^\s]*\d))(${FIELD_VALUE})`, 'g'),
       (m, key: string, sep: string, v: string) => (isSettingRef(v) || isMask(v) ? m : `${key}${sep}***`))
+    // dbPass=x, mqttPass: x, DbPass=x, routerPw=x, sshKey=x. A camelCase key: in code only with a digit in the value, as above; code itself stays.
+    .replace(new RegExp(String.raw`(?<![\w.-])(${CAMEL_PASS}|${CAMEL}Key)(=(?![=>])|[:\uFF1A][ \t]*)(${FIELD_VALUE})`, 'g'), (m, key: string, sep: string, v: string) => {
+      if (isSettingRef(v) || isMask(v) || PLAIN_VALUE.test(v) || TEST_PASS.test(key) || looksLikeCode(v)) return m;
+      return key.endsWith('Key') && sep !== '=' && !/\d/.test(v) ? m : `${key}${sep}***`;
+    })
     // curl's -u with a password. Not docker's user and group: -u 1000:1000, or the same name twice.
     .replace(/(^|\s)(-u[ \t]*|--user[ =])(["']?)([^\s:'"]+):([^\s'"]+)/gm, (m, at: string, flag: string, q: string, a: string, b: string) => {
       if ((/^\d+$/.test(a) && /^\d+$/.test(b)) || a === b || isMask(b)) return m;
@@ -782,8 +828,10 @@ function maskCredentialForms(text: string): string {
     .replace(/\b((?:Set-)?Cookie:)[ \t]*[^\n'"]+/gi, '$1 ***')
     .replace(/(?<![\w-])([\w-]*_session=)(?!\*)[^\s;,&'"]+/gi, '$1***')
     // A password stuck to -p. Not a port mapped in a docker line that happens to follow the word: -p3306:3306.
-    .replace(/\b((?:mysql|mysqldump|mariadb|mariadb-dump)(?:\s[^\n]{0,200}?)?\s-p)(?![\s*])(?!(?:\d{1,3}(?:\.\d{1,3}){3}:)?\d+:\d+(?:\/\w+)?(?:\s|$))\S+/gm, '$1***')
-    .replace(/\b(sshpass\s+-p\s*)(?![\s*])\S+/g, '$1***')
+    // The whole shell word, its quoted and escaped pieces too: -p'made up' left "up'", -p'it'\''s-x' left "\''s-x'" (HB-0499).
+    // A quote with no end goes to the end of the line.
+    .replace(/\b((?:mysql|mysqldump|mariadb|mariadb-dump)(?:\s[^\n]{0,200}?)?\s-p)(?![\s*])(?!(?:\d{1,3}(?:\.\d{1,3}){3}:)?\d+:\d+(?:\/\w+)?(?:\s|$))(?:\\.|'[^'\n]*'?|"(?:\\.|[^"\\\n])*"?|[^\s'"\\]+)+/gm, '$1***')
+    .replace(/\b(sshpass\s+-p\s*)(?![\s*])(?:\\.|'[^'\n]*'?|"(?:\\.|[^"\\\n])*"?|[^\s'"\\]+)+/g, '$1***')
     // The codes in a link, which sign someone in or take an account: /?claim=…, /join/…, /v1/invites/….
     .replace(/([?&#](?:claim|code|invite|reset|recovery|key|sig|signature)=)(?!\{)[^\s&#"'<>)]+/gi, '$1{code}')
     .replace(/(\/signin\/link\?t=)(?!\{)[^\s&#"'<>)]+/g, '$1{code}')

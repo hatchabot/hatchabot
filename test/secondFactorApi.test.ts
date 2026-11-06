@@ -30,6 +30,8 @@ describe('second factors: enrolment', () => {
     const secret = base32Decode(start.secret);
     const done = (await call('POST', '/v1/second-factor/totp/confirm', { id: start.id, code: totp(secret) })).json();
     expect(done.backupCodes).toHaveLength(10);
+    // Whose they are (the account's id, as /v1/account names the person): the page keeps them for that person alone across a sign-in (HB-0500).
+    expect(done.ownerId).toBe(o.id);
     expect(h.app.publicAccess!.secondFactorNeed(o.id)).toBe('yes');
     const st = (await call('GET', '/v1/second-factor')).json();
     expect(st.factors.map((f: any) => f.kind)).toEqual(['totp']);
@@ -63,6 +65,7 @@ describe('second factors: enrolment', () => {
     const added = await call('POST', '/v1/second-factor/passkey', { label: 'Laptop', ...key.create({ challenge: opts2.challenge, origin: at.origin, rpId: PUBLIC_HOST }) }, at);
     expect(added.statusCode).toBe(200);
     expect(added.json().backupCodes).toHaveLength(10);
+    expect(added.json().ownerId).toBe(o.id);
     // The same passkey twice: refused.
     const opts3 = (await call('POST', '/v1/second-factor/passkey/options', { current: o.password }, at)).json();
     expect(opts3.excludeCredentials).toHaveLength(1);
@@ -257,6 +260,10 @@ describe('new backup codes', () => {
     expect(h.store.listSecondFactors(o.id, { kind: 'backup' }).map((f) => f.data).sort()).toEqual(before);
     // And a saved code still works.
     expect(h.store.spendBackupCode(o.id, backupCodeHash(h.secret, o.id, backupCodes[0]))).toBe(true);
+    // A new set that works says whose it is (HB-0500).
+    const remade = (await call('POST', '/v1/second-factor/backup-codes', { current: o.password })).json();
+    expect(remade.backupCodes).toHaveLength(10);
+    expect(remade.ownerId).toBe(o.id);
   });
 });
 

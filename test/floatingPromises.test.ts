@@ -20,7 +20,7 @@ const CANNOT_REJECT: Record<string, string> = {
   // Lock tails: each is the `run.catch(...)` or `run.then(f, f)` of the line above it.
   tail: 'a queue tail, already caught', turn: 'a queue tail, already caught', settled: 'a queue tail, already caught', next: 'ops/notify.ts: the chain ends in .catch',
   // Their own bodies catch what can fail.
-  'this.#reapOneShot': 'catches the docker call',
+  'this.#reapOneShot': 'catches the docker call', 'this.#settleOneShot': 'catches every docker call, and its callback only resolves',
   browsersNow: 'ends in .catch', syncDocsHeld: 'ends in .catch', runUsageSample: 'ends in .catch',
   // The first of these is proved below, with a store that throws.
   runPausedReplies: 'try/catch', refreshDetectedUrl: 'catches the only await',
@@ -93,16 +93,28 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
+/**
+ * Every unhandled `void` call in src/, read once for the tests below. Parsing
+ * and walking all of src/ (over 4 MB) took about 0.9 s here, and each of two
+ * tests did it, so the file ran past vitest's 5 s on a busy machine (HB-0505).
+ * A file without the word `void` cannot hold one, and is not parsed.
+ */
+let srcFloating: Array<{ at: string; root: string }> | undefined;
+const floatingInSrc = () => (srcFloating ??= sourceFiles('src').flatMap((p) => {
+  const text = readFileSync(p, 'utf8');
+  return /\bvoid\b/.test(text) ? floating(p, text) : [];
+}));
+
 describe('void calls cannot end the process (HB-0374)', () => {
   it('every one in src/ handles a rejection, or is listed with why it cannot reject', () => {
-    const bad = sourceFiles('src').flatMap((p) => floating(p, readFileSync(p, 'utf8')))
+    const bad = floatingInSrc()
       .filter((f) => !Object.hasOwn(CANNOT_REJECT, f.root))
       .map((f) => `${f.at} void ${f.root}(...)`);
     expect(bad).toEqual([]);
   });
 
   it('every name on the list is still used, so a stale reason does not linger', () => {
-    const roots = new Set(sourceFiles('src').flatMap((p) => floating(p, readFileSync(p, 'utf8'))).map((f) => f.root));
+    const roots = new Set(floatingInSrc().map((f) => f.root));
     expect(Object.keys(CANNOT_REJECT).filter((k) => !roots.has(k))).toEqual([]);
   });
 

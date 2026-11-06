@@ -65,20 +65,40 @@ user's.
  * duplicate section on every rebuild (audit 2026-09-08).
  */
 function fenceMask(lines: string[]): boolean[] {
+  // As CommonMark and OpenClaw's own section finder (findToolsSection) read
+  // them: a fence closes only on a run of the SAME character at least as long
+  // as the one that opened it, with nothing else on the line. A ```` block
+  // quoting ``` is one block (review of HB-0397).
   const inFence: boolean[] = [];
-  let open: string | null = null;
+  let open: { ch: string; len: number } | null = null;
   for (const l of lines) {
-    const m = /^\s*(```|~~~)/.exec(l);
-    if (m) {
-      const ch = m[1]![0]!; // '`' or '~'
-      if (open === null) { inFence.push(false); open = ch; }
-      else if (ch === open) { inFence.push(true); open = null; }
-      else inFence.push(true); // a non-matching fence line inside a block is content
+    // Without a CRLF file's \r, which `.` does not match.
+    const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(l.replace(/\r$/, ''));
+    if (open === null) {
+      inFence.push(false);
+      if (m) open = { ch: m[1]![0]!, len: m[1]!.length };
     } else {
-      inFence.push(open !== null);
+      inFence.push(true);
+      if (m && m[1]![0] === open.ch && m[1]!.length >= open.len && m[2]!.trim() === '') open = null;
     }
   }
   return inFence;
+}
+
+/**
+ * The fence a file ends inside, or undefined. A section appended after it
+ * would sit in the agent's code block, never be found again, and be appended
+ * once more on every rebuild: the fence is closed first.
+ */
+function unclosedFence(lines: string[]): string | undefined {
+  let open: string | undefined;
+  for (const l of lines) {
+    const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(l.replace(/\r$/, ''));
+    if (!m) continue;
+    if (open === undefined) open = m[1]!;
+    else if (m[1]![0] === open[0] && m[1]!.length >= open.length && m[2]!.trim() === '') open = undefined;
+  }
+  return open;
 }
 
 /** Drop a managed section (heading through the line before the next heading). No-op if absent. */
@@ -104,7 +124,10 @@ export function replaceSection(content: string, heading: string, section: string
   const inFence = fenceMask(lines);
   const isHeading = (i: number) => !inFence[i] && /^#{1,6} /.test(lines[i]!);
   const start = lines.findIndex((l, i) => !inFence[i] && l.trimEnd() === heading);
-  if (start === -1) return `${content.trimEnd()}\n\n${section}\n`;
+  if (start === -1) {
+    const fence = unclosedFence(lines);
+    return `${content.trimEnd()}${fence ? `\n${fence}` : ''}\n\n${section}\n`;
+  }
   // Our section runs to the next heading of ANY level, so a following `###`
   // (or `#`) ends it rather than being swallowed.
   let end = lines.length;
@@ -312,10 +335,9 @@ correct them.`;
 }
 
 /**
- * AGENTS.md without the install sections earlier versions wrote there. The
- * section moved to TOOLS.md, but the old copies stayed, under both names:
- * 34 agents carried 2 or 3 copies, re-sent with every call (review,
- * 2026-09-29). Every copy of either heading goes.
+ * A file without any of the install sections Hatchabot (or AgentClaw before
+ * it) wrote: every copy of either heading goes. 34 agents once carried 2 or 3
+ * copies in AGENTS.md, re-sent with every call (review, 2026-09-29).
  */
 export function removeInstallSections(content: string): string {
   let out = content;
@@ -325,8 +347,191 @@ export function removeInstallSections(content: string): string {
   return out;
 }
 
+/** The title Hatchabot gave a TOOLS.md it created (OpenClaw's template starts with it too). */
+export const TOOLS_MD_TITLE = '# TOOLS.md - Local Notes';
+/** Where OpenClaw's doctor (2026.9) puts a TOOLS.md it merges into AGENTS.md. */
+const MIGRATED_TOOLS_HEADING = '### Local notes (migrated from TOOLS.md)';
+const AGENTCLAW_INSTALL_HEADING = '## Installing tools (managed by AgentClaw)';
 /**
- * The install conventions, written INTO each agent's TOOLS.md.
+ * OpenClaw's own TOOLS.md template after its title (LEGACY_TOOLS_MD_TEMPLATE
+ * in 2026.9.8's doctor). An agent whose TOOLS.md was that template plus
+ * Hatchabot's section had both merged into AGENTS.md by the doctor; the
+ * template is nobody's notes, so it goes, but only when it is word for word.
+ */
+const OPENCLAW_TOOLS_TEMPLATE_BODY = [
+  "Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup: camera names and locations, SSH hosts and aliases, preferred TTS voices, speaker/room names, device nicknames, anything environment-specific.",
+  '', '## Examples', '', '```markdown', '### Cameras', '', '- living-room → Main area, 180° wide angle', '- front-door → Entrance, motion-triggered', '',
+  '### SSH', '', '- home-server → 192.168.1.100, user: admin', '', '### TTS', '', '- Preferred voice: "Nova" (warm, slightly British)', '- Default speaker: Kitchen HomePod', '```', '',
+  '## Why Separate?', '', 'Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.', '',
+  '---', '', 'Add whatever helps you do your job. This is your cheat sheet.', '', '## Related', '', '- [Agent workspace](/concepts/agent-workspace)',
+];
+
+const isHeadingLine = (l: string) => /^#{1,6} /.test(l);
+const isBlank = (l: string) => l.trim() === '';
+
+/**
+ * Each install section's lines, [start, end). A copy of today's text ends
+ * where that text ends, so notes written right after it with no heading of
+ * their own are never taken for part of it (a doctor merge can leave them
+ * there); any other copy, an older wording, runs to the next heading, as every
+ * managed section does.
+ */
+function installBlocks(lines: string[], inFence: boolean[]): Array<[number, number]> {
+  const known = installConventionsSection().split('\n');
+  const blocks: Array<[number, number]> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]!.trimEnd();
+    if (inFence[i] || (l !== INSTALL_HEADING && l !== AGENTCLAW_INSTALL_HEADING)) continue;
+    let end = lines.length;
+    for (let j = i + 1; j < lines.length; j++) if (!inFence[j] && isHeadingLine(lines[j]!)) { end = j; break; }
+    if (l === INSTALL_HEADING && known.every((k, n) => lines[i + n]?.trimEnd() === k)) end = Math.min(end, i + known.length);
+    else {
+      // An edited or older copy (AgentClaw's) ends where its own last lines do,
+      // not at the next heading, so notes after it stay: the latest line of
+      // today's text still in it, plus the lines that followed that one (an edit
+      // to the very last line). With none of them left, the next heading.
+      outer: for (let k = known.length - 1; k > 0; k--) {
+        const want = known[k]!.trimEnd();
+        if (!want.trim()) continue;
+        for (let j = end - 1; j > i; j--) {
+          if (!inFence[j] && lines[j]!.trimEnd() === want) { end = Math.min(end, j + 1 + (known.length - 1 - k)); break outer; }
+        }
+      }
+    }
+    blocks.push([i, end]);
+    i = end - 1;
+  }
+  return blocks;
+}
+
+/** Lines without these blocks; the blank lines a cut leaves back to back become one. */
+function cutBlocks(lines: string[], blocks: Array<[number, number]>, mark?: string): string[] {
+  const out: string[] = [];
+  let b = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const block = blocks[b];
+    if (block && i === block[0]) {
+      if (mark !== undefined && b === 0) out.push(mark);
+      i = block[1] - 1;
+      b++;
+      // The blank lines after it: none when a blank line (or the top of the file) comes before, else one.
+      const before = out.length === 0 || isBlank(out[out.length - 1]!);
+      let kept = before ? 0 : 1;
+      while (i + 1 < lines.length && isBlank(lines[i + 1]!)) { i++; if (kept) { out.push(lines[i]!); kept--; } }
+      continue;
+    }
+    out.push(lines[i]!);
+  }
+  return out;
+}
+
+/**
+ * AGENTS.md with exactly one current install section (HB-0397).
+ *
+ * The section lived in TOOLS.md from 2026-09-29, but OpenClaw 2026.9 puts
+ * only AGENTS.md, SOUL.md, IDENTITY.md, USER.md, BOOTSTRAP.md and MEMORY.md in
+ * the prompt (`WORKSPACE_BOOTSTRAP_FILENAMES`, read in the 2026.9.7 and
+ * 2026.9.8 packages), so agents never saw it. 2026.6.11 still read TOOLS.md;
+ * every version reads AGENTS.md, so this one place works on old and new
+ * images alike, and is sent once either way.
+ *
+ * The doctor's TOOLS.md migration, which Hatchabot's seed runs once per
+ * OpenClaw version (`doctor --fix`), copies TOOLS.md, title and all, under its
+ * `### Local notes (migrated from TOOLS.md)`; each later run puts the new text
+ * right under that heading, AHEAD of what an earlier run brought. So:
+ * 1. every install copy is cut while the titles still end them (a title is a
+ *    heading), the first one's place kept;
+ * 2. a title the doctor brought goes only when nothing but a heading (or the
+ *    end) follows it: before the agent's own notes it stays, as their heading;
+ * 3. the one current section goes back in the first copy's place (at the end
+ *    when there was none), with a heading after it if text follows, so
+ *    nothing of the agent's runs on inside it.
+ * OpenClaw's untouched TOOLS.md template, merged the same way, goes too.
+ */
+export function withInstallSection(content: string): string {
+  const eol = content.includes('\r\n') ? '\r' : '';
+  let lines = content.split('\n');
+  let inFence = fenceMask(lines);
+  const migrated = lines.findIndex((l, i) => !inFence[i] && l.trimEnd() === MIGRATED_TOOLS_HEADING);
+  if (migrated !== -1) {
+    // OpenClaw's template, word for word, after the migrated heading.
+    const t = OPENCLAW_TOOLS_TEMPLATE_BODY;
+    for (let i = migrated + 1; i + t.length <= lines.length; i++) {
+      if (!inFence[i] && t.every((k, n) => lines[i + n]!.trimEnd() === k)) {
+        lines = cutBlocks(lines, [[i, i + t.length]]);
+        inFence = fenceMask(lines);
+        i--;
+      }
+    }
+  }
+  const mark = `${INSTALL_HEADING}\u0000`;
+  lines = cutBlocks(lines, installBlocks(lines, inFence), mark);
+  inFence = fenceMask(lines);
+  if (migrated !== -1) {
+    // A title follows the migrated heading, the section, or another such title.
+    const at = lines.findIndex((l, i) => !inFence[i] && l.trimEnd() === MIGRATED_TOOLS_HEADING);
+    const out: string[] = [];
+    let chain = false;
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i]!;
+      if (i <= at || inFence[i]) { out.push(l); if (i === at) chain = true; else if (!isBlank(l)) chain = false; continue; }
+      if (isBlank(l)) { out.push(l); continue; }
+      if (l.trimEnd() === TOOLS_MD_TITLE && chain) {
+        let j = i + 1;
+        while (j < lines.length && isBlank(lines[j]!)) j++;
+        if (j === lines.length || (!inFence[j] && isHeadingLine(lines[j]!))) { i = j - 1; continue; } // nothing of its own under it
+        out.push(l);
+        continue;
+      }
+      chain = l === mark;
+      out.push(l);
+    }
+    lines = out;
+  }
+  const section = installConventionsSection().split('\n').map((l) => l + eol);
+  let pos = lines.indexOf(mark);
+  if (pos === -1) {
+    while (lines.length && isBlank(lines[lines.length - 1]!)) lines.pop();
+    // A CRLF file with no newline at its end: its last line gets its \r first.
+    if (eol && lines.length && !lines[lines.length - 1]!.endsWith(eol)) lines[lines.length - 1] += eol;
+    const fence = unclosedFence(lines);
+    if (fence) lines.push(fence + eol);
+    lines.push(eol, mark, '');
+    pos = lines.length - 2;
+  }
+  inFence = fenceMask(lines);
+  let rest = lines.slice(pos + 1);
+  let k = 0;
+  while (k < rest.length && isBlank(rest[k]!)) k++;
+  let tail: string[] = [];
+  if (k < rest.length && (inFence[pos + 1 + k] || !isHeadingLine(rest[k]!))) {
+    // Text of the agent's right after it: under a heading of its own, so no section reading runs on into it.
+    tail = [eol, `### Local notes${eol}`, eol];
+    rest = rest.slice(k);
+  } else if (k === 0 && rest.length) tail = [eol]; // a blank line before the next heading
+  lines = [...lines.slice(0, pos), ...section, ...tail, ...rest];
+  return lines.join('\n');
+}
+
+/**
+ * TOOLS.md once the install section is in AGENTS.md: the agent's own notes,
+ * without Hatchabot's section. `null` when nothing of the agent's is left (the
+ * title Hatchabot gave a file it created, or nothing), so the file can go:
+ * left behind, the doctor would merge that husk into AGENTS.md at the next
+ * OpenClaw version.
+ */
+export function toolsMdWithoutInstallSection(content: string): string | null {
+  const lines = content.split('\n');
+  const blocks = installBlocks(lines, fenceMask(lines));
+  if (!blocks.length) return content;
+  const out = cutBlocks(lines, blocks).join('\n');
+  const rest = out.trim();
+  return !rest || rest === TOOLS_MD_TITLE ? null : `${out.trimEnd()}${content.includes('\r\n') ? '\r\n' : '\n'}`;
+}
+
+/**
+ * The install conventions, written into each agent's AGENTS.md (they were in
+ * TOOLS.md, which OpenClaw 2026.9 no longer reads: withInstallSection).
  *
  * Every mechanism here has existed for a while ($HOME survives rebuilds,
  * ~/.local/bin is on PATH, pylibs on PYTHONPATH, on-rebuild.sh runs after every

@@ -75,6 +75,49 @@ describe('a second factor is required of every password account at the public ad
     expect(next.json.recoveryCode).toBeTruthy();
   }, 30_000);
 
+  it('a password alone cannot change the password at the public address; at home it can, and a reset link still works (HB-0453)', async () => {
+    h = ctx.h = await publicApp({ env: { HATCHABOT_PUBLIC_GUESTS_WITHOUT_SECOND_FACTOR: '1' } });
+    const owner = await h.addAccount('owner', { owner: true });
+    const m = await h.addAccount('member');
+    await h.app.publicAccess!.evaluate();
+    const thief = await h.signIn('member', m.password);
+    const changed = await h.pub('/v1/local-accounts/me/password', { jar: thief, body: { current: m.password, password: 'a-password-the-thief-chose' } });
+    expect(changed.status).toBe(403);
+    expect(changed.json.secondFactor).toBe('missing');
+    expect(changed.json.error).toMatch(/private address/);
+    expect(changed.json.error).toMatch(/reset link/);
+    // The page is told the same words, to show in place of the form.
+    expect((await h.pub('/v1/second-factor', { jar: thief })).json.passwordRefused).toBe(changed.json.error);
+    // Their own password still works, and the thief's does not.
+    expect(await h.signIn('member', m.password)).toBeTruthy();
+    expect((await h.pub('/v1/login', { body: { username: 'member', password: 'a-password-the-thief-chose' } })).status).toBe(401);
+    // Arriving by a reset link: the link itself sets the password, and the session it gives cannot change it again.
+    h.store.setLocalAccountClaim(m.id, 'reset-link-from-the-owner', new Date(Date.now() + 600_000).toISOString());
+    const linked = new Jar();
+    expect((await h.pub('/v1/local-accounts/claim', { jar: linked, body: { code: 'reset-link-from-the-owner', password: 'a-new-password-they-chose' } })).status).toBe(200);
+    expect((await h.pub('/v1/local-accounts/me/password', { jar: linked, body: { current: 'a-new-password-they-chose', password: 'yet-another-of-theirs' } })).json.secondFactor).toBe('missing');
+    // A chat-only guest let in without a factor: refused the same way.
+    const guest = await h.addAccount('guest');
+    h.store.insertAgent(agentRow('a1', owner.id));
+    giveWebChat(h, 'a1', guest.id);
+    expect(h.app.publicAccess!.secondFactorNeed(guest.id)).toBe('guest');
+    const gj = await h.signIn('guest', guest.password);
+    const g = await h.pub('/v1/local-accounts/me/password', { jar: gj, body: { current: guest.password, password: 'a-password-the-thief-chose' } });
+    expect(g.status).toBe(403);
+    expect(g.json.error).toBe(changed.json.error);
+    // At the private address it works.
+    const cookie = await privCookie(h, 'member', 'a-new-password-they-chose');
+    const home = await h.app.inject({ method: 'POST', url: '/v1/local-accounts/me/password', headers: { cookie }, payload: { current: 'a-new-password-they-chose', password: 'changed-at-home-by-them' } });
+    expect(home.statusCode, home.body).toBe(200);
+    expect((await h.app.inject({ method: 'GET', url: '/v1/second-factor', headers: { cookie: await privCookie(h, 'member', 'changed-at-home-by-them') } })).json().passwordRefused).toBeUndefined();
+    // With a second factor, at the public address too.
+    const f = await h.addAccount('with-factor', { totp: true });
+    const fj = await h.signIn('with-factor', f.password, { totpSecret: f.totpSecret });
+    const ok = await h.pub('/v1/local-accounts/me/password', { jar: fj, body: { current: f.password, password: 'changed-with-a-factor' } });
+    expect(ok.status, JSON.stringify(ok.json)).toBe(200);
+    expect((await h.pub('/v1/second-factor', { jar: fj })).json.passwordRefused).toBeUndefined();
+  }, 30_000);
+
   it('the old setting cannot switch it off: =0 is ignored (and reported), =1 changes nothing', async () => {
     h = ctx.h = await publicApp({ env: { HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL: '0' } });
     await h.addAccount('owner', { owner: true });

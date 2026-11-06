@@ -26,8 +26,9 @@ beforeEach(() => {
   writeFileSync(stub, `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> ${JSON.stringify(LOG)}
 case "$1" in
-  ps) cat ${JSON.stringify(join(dir, 'ps'))} ;;
+  ps) case "$*" in *status=created*) if [ -f ${JSON.stringify(join(dir, 'ps-created'))} ]; then cat ${JSON.stringify(join(dir, 'ps-created'))}; else cat ${JSON.stringify(join(dir, 'ps'))}; fi ;; *) cat ${JSON.stringify(join(dir, 'ps'))} ;; esac ;;
   inspect) cat ${JSON.stringify(join(dir, 'inspect'))} ;;
+  container) cat ${JSON.stringify(join(dir, 'created'))} ;;
   run) if [ -f ${JSON.stringify(join(dir, 'hang'))} ]; then exec sleep 5; fi ;;
 esac
 exit 0
@@ -72,6 +73,23 @@ describe('volume one-shots are named, labelled and cleaned up', () => {
     writeFileSync(LOG, ''); writeFileSync(join(dir, 'ps'), '');
     expect(await provider.sweepOneShots()).toBe(0);
     expect(calls().some((c) => c.startsWith('rm '))).toBe(false);
+  });
+
+  it('after boot the sweep leaves a created one-shot (a call may be making it) and takes dead ones too', async () => {
+    writeFileSync(join(dir, 'ps'), 'ccc333\n');
+    expect(await provider.sweepOneShots({ created: false })).toBe(1);
+    const ps = calls().find((c) => c.startsWith('ps '))!;
+    expect(ps).not.toContain('status=created');
+    expect(ps).toContain('status=exited');
+    expect(ps).toContain('status=dead');
+  });
+
+  it('at boot a created one-shot goes only if it was made before this process started', async () => {
+    writeFileSync(join(dir, 'ps'), '');
+    writeFileSync(join(dir, 'ps-created'), 'aaa111aaa111\nbbb222bbb222\n');
+    writeFileSync(join(dir, 'created'), `aaa111aaa111${'0'.repeat(52)}|2026-11-06T08:00:00.123456789Z\nbbb222bbb222${'0'.repeat(52)}|2026-11-06T09:30:00Z\n`);
+    expect(await provider.sweepOneShots({ created: true, createdBefore: Date.parse('2026-11-06T09:00:00Z') })).toBe(1);
+    expect(calls()).toContain('rm -f aaa111aaa111');
   });
 
   it('a purge removes the one-shots holding the volume first — never the agent\'s own or another container', async () => {

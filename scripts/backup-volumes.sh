@@ -540,8 +540,9 @@ if [ -n "$remote" ]; then
       continue
     fi
     rc=0
-    # Named and labelled as the app's one-shots are (its boot sweep removes
-    # one that is left exited), so a failed run can remove it by name.
+    # Named and labelled as the app's one-shots are (the app's sweep, at boot
+    # and every 10 minutes, removes one left exited, on runners too), so a
+    # failed run can remove it by name. Read-only: a restore leaves it running.
     oneshot="$rhost|${PREFIX}-bk-$$-$RANDOM$RANDOM"
     # </dev/null: over ssh, docker would read the rest of this loop's list.
     # shellcheck disable=SC2046,SC2086  # the TLS flag and the excludes are separate words

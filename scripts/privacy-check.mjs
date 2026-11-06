@@ -34,6 +34,10 @@
  * of each, with the key, as the PRIVACY_FINGERPRINTS secret, and
  * scripts/privacy-ci.mjs looks up the words of every pull request and push.
  * The key is made once and kept in ~/.config/hatchabot/privacy-ci.key (0600).
+ * Beside it, ~/.config/hatchabot/privacy-machines.json (0600) keeps the
+ * machine and tailnet names `tailscale status` has listed before, so a peer
+ * that has left the tailnet is still checked, as the publisher's values still
+ * hold it (HB-0504; tailnetValues).
  *
  * Exit 0: clean (of what it says it checked); 1: found something; 2: usage;
  * 3: incomplete — something it needed could not be read (the database, an
@@ -48,7 +52,7 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from 'node:fs';
 import { homedir, hostname, networkInterfaces, tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -87,22 +91,113 @@ function defaultDb(envFiles) {
 const REQUIRED_TABLES = ['agents', 'accounts'];
 
 /**
- * This machine's tailnet names and addresses. No tailscale command, or one
- * that fails, is said in `notes` (not covered), not passed over in silence.
+ * The machine and tailnet names this check has seen in `tailscale status`
+ * before, kept beside the CI key (0600, never in a repo, never printed). The
+ * publisher gates with the names of its last `kit values sync`, and a peer
+ * gone from the tailnet since was still one of them: the local check passed
+ * four lines naming it that the publisher's gate stopped, an hour after the
+ * tag (HB-0504). Named in notes by this short form only.
  */
-export function tailnetValues(add, notes, cmd = 'tailscale') {
-  const ts = spawnSync(cmd, ['status', '--json'], { encoding: 'utf8', timeout: 10_000 });
-  if (ts.error) { notes.push('tailnet names (no tailscale command here)'); return; }
-  if (ts.status !== 0) { notes.push('tailnet names (tailscale status failed)'); return; }
-  try {
-    const j = JSON.parse(ts.stdout);
-    if (j.MagicDNSSuffix) add(j.MagicDNSSuffix, 'tailnet', { min: 6 });
-    for (const p of [j.Self || {}, ...Object.values(j.Peer || {})]) {
-      add(p.HostName, 'machine', { min: 5 });
-      add((p.DNSName || '').replace(/\.$/, ''), 'machine', { min: 8 });
-      for (const ip of p.TailscaleIPs || []) if (ip.includes('.')) add(ip, 'ip', { min: 7 });
+export const seenMachinesFile = () => join(homedir(), '.config', 'hatchabot', 'privacy-machines.json');
+const SEEN_SHOWN = '~/.config/hatchabot/privacy-machines.json';
+/** What each kind of remembered name is added as. */
+const SEEN_KINDS = { machine: { min: 5 }, tailnet: { min: 6 } };
+
+/** Past this many names the record is said to be large: each is a fingerprint in the 48 KB GitHub and publisher secrets. */
+export const SEEN_WARN = 200;
+const MOVE_ASIDE = `move it aside (mv ${SEEN_SHOWN} ${SEEN_SHOWN}.bad) and run the check again: it starts a new record from the peers tailscale lists`;
+
+/**
+ * The names seen before: { machine: [...], tailnet: [...] }. No record yet is
+ * said in `notes` (a first run). One that is there and cannot be read is a gap:
+ * the check is incomplete (exit 3) until it is moved aside, and it is never
+ * replaced here, so the names in it are not lost in silence. null then.
+ */
+function readSeen(file, notes, gaps) {
+  let text;
+  try { text = readFileSync(file, 'utf8'); } catch (e) {
+    if (e?.code === 'ENOENT') {
+      notes.push(`machine names seen before (no record yet in ${SEEN_SHOWN}: only the peers tailscale lists now)`);
+      return { machine: [], tailnet: [] };
     }
-  } catch { notes.push('tailnet names (tailscale status unreadable)'); }
+    gaps.push(`the record of machine names seen before, ${SEEN_SHOWN}, could not be read (${e?.code ?? 'error'}): ${MOVE_ASIDE}`);
+    return null;
+  }
+  try {
+    const j = JSON.parse(text);
+    if (!j || typeof j !== 'object' || Array.isArray(j)) throw new Error('not an object');
+    const list = (k) => (Array.isArray(j[k]) ? j[k].filter((s) => typeof s === 'string') : []);
+    return { machine: list('machine'), tailnet: list('tailnet') };
+  } catch {
+    gaps.push(`the record of machine names seen before, ${SEEN_SHOWN}, is not the JSON this check writes: ${MOVE_ASIDE}`);
+    return null;
+  }
+}
+
+/**
+ * The record, written whole: its folder made the owner's alone first (a
+ * folder others may write to could swap the file under it; not written then),
+ * a fresh temp file opened with O_EXCL so a link planted at its name is
+ * refused, renamed over the record, and removed again if anything fails.
+ */
+export function writeSeen(file, seen, notes) {
+  const unsaved = (why) => notes.push(`machine names seen before (${SEEN_SHOWN} not saved: ${why}; this run checked them all)`);
+  const folder = dirname(file);
+  try {
+    mkdirSync(folder, { recursive: true, mode: 0o700 });
+    try { chmodSync(folder, 0o700); } catch { /* checked below */ }
+    if (statSync(folder).mode & 0o022) { unsaved(`its folder ${dirname(SEEN_SHOWN)} is writable by others and could not be made the owner's alone`); return; }
+  } catch (e) { unsaved(e?.code ?? 'error'); return; }
+  const tmp = `${file}.${process.pid}.tmp`;
+  let made = false;
+  try {
+    rmSync(tmp, { force: true });
+    writeFileSync(tmp, JSON.stringify(seen, null, 1) + '\n', { mode: 0o600, flag: 'wx' });
+    made = true;
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, file);
+    made = false;
+  } catch (e) {
+    unsaved(e?.code ?? 'error');
+  } finally {
+    if (made) try { rmSync(tmp, { force: true }); } catch { /* gone */ }
+  }
+}
+
+/**
+ * This machine's tailnet names and addresses: the peers `tailscale status`
+ * lists now, and every machine and tailnet name it listed before (`seenFile`).
+ * With `remember`, what it lists now is added to the record; --export-values
+ * reads the record and never writes it (the publish kit's provider writes
+ * nothing to disk, publish-kit SPEC.md section 6). No tailscale command, or one
+ * that fails, is said in `notes` (not covered); a record that cannot be read
+ * goes in `gaps` (incomplete), and is left as it is.
+ */
+export function tailnetValues(add, notes, cmd = 'tailscale', seenFile = seenMachinesFile(), { gaps = [], remember = true } = {}) {
+  const seen = readSeen(seenFile, notes, gaps);
+  if (seen) for (const [kind, names] of Object.entries(seen)) for (const s of names) add(s, kind, SEEN_KINDS[kind]);
+  const now = { machine: [], tailnet: [] };
+  const ts = spawnSync(cmd, ['status', '--json'], { encoding: 'utf8', timeout: 10_000 });
+  if (ts.error) notes.push('tailnet names (no tailscale command here)');
+  else if (ts.status !== 0) notes.push('tailnet names (tailscale status failed)');
+  else {
+    try {
+      const j = JSON.parse(ts.stdout);
+      if (j.MagicDNSSuffix) { add(j.MagicDNSSuffix, 'tailnet', SEEN_KINDS.tailnet); now.tailnet.push(String(j.MagicDNSSuffix).trim()); }
+      for (const p of [j.Self || {}, ...Object.values(j.Peer || {})]) {
+        const dns = (p.DNSName || '').replace(/\.$/, '');
+        add(p.HostName, 'machine', { min: 5 });
+        add(dns, 'machine', { min: 8 });
+        for (const s of [p.HostName, dns]) if (typeof s === 'string' && s.trim()) now.machine.push(s.trim());
+        for (const ip of p.TailscaleIPs || []) if (ip.includes('.')) add(ip, 'ip', { min: 7 });
+      }
+    } catch { notes.push('tailnet names (tailscale status unreadable)'); }
+  }
+  if (!seen) return;
+  const merged = { machine: [...new Set([...seen.machine, ...now.machine])], tailnet: [...new Set([...seen.tailnet, ...now.tailnet])] };
+  const size = merged.machine.length + merged.tailnet.length;
+  if (size > SEEN_WARN) notes.push(`machine names seen before: ${SEEN_SHOWN} holds ${size} names, each a fingerprint in the 48 KB secrets; forget the machines that are gone for good (docs/releasing.md, "The privacy check")`);
+  if (remember && size !== seen.machine.length + seen.tailnet.length) writeSeen(seenFile, merged, notes);
 }
 
 /**
@@ -111,7 +206,7 @@ export function tailnetValues(add, notes, cmd = 'tailscale') {
  * match in any case. What it needed and could not read goes in `gaps` (the
  * result is then incomplete); what it chose not to read, in `notes`.
  */
-export function privateValues({ db, envFiles, machine = true, gaps = [], notes = [] }) {
+export function privateValues({ db, envFiles, machine = true, remember = true, gaps = [], notes = [] }) {
   const v = new Map();
   const add = (value, cat, { secret = false, min = 4 } = {}) => {
     if (value === null || value === undefined) return;
@@ -169,7 +264,7 @@ export function privateValues({ db, envFiles, machine = true, gaps = [], notes =
       if (/^(lo|docker|br-|veth|lxdbr|virbr|tailscale|utun)/.test(name)) continue;
       for (const a of list || []) if (a.family === 'IPv4' && !a.internal) add(a.address, 'ip', { min: 7 });
     }
-    tailnetValues(add, notes);
+    tailnetValues(add, notes, 'tailscale', seenMachinesFile(), { gaps, remember });
   } else notes.push("this machine's host, tailnet and IP names (--no-machine)");
   const ignore = new Set(readFileSync(join(ROOT, 'scripts', 'privacy-ignore.txt'), 'utf8').split('\n')
     .map((l) => l.replace(/#.*/, '').trim().toLowerCase()).filter(Boolean));
@@ -353,7 +448,7 @@ const hookLine = (s) => (s.ok ? `✓ pre-push hook: ${s.how}` : `✗ pre-push ho
  * no env file). A database missing beside an env file that is there used to
  * read as "no install", and the hook let the push through (#41).
  */
-export function load() {
+export function load({ remember = true } = {}) {
   const asked = opts('--env');
   const envFiles = asked.length ? asked : DEFAULT_ENVS.filter(existsSync);
   const present = envFiles.filter(existsSync);
@@ -363,7 +458,7 @@ export function load() {
   const gaps = [], notes = [];
   for (const f of envFiles) if (!existsSync(f)) gaps.push(`the env file ${f} is not there`);
   if (!haveDb) gaps.push(`the database ${db || '(none named in the env file, none in the usual places)'} is not there — only the env file's values could be read`);
-  const values = privateValues({ db: haveDb ? db : undefined, envFiles: present, machine: !has('--no-machine'), gaps, notes });
+  const values = privateValues({ db: haveDb ? db : undefined, envFiles: present, machine: !has('--no-machine'), remember, gaps, notes });
   return { ms: matchers(values), gaps, notes };
 }
 
@@ -674,7 +769,8 @@ function secretsTokenEnv() {
  */
 function exportValues() {
   if (process.stdout.isTTY) { console.error('usage: privacy-check.mjs --export-values | <reader> (the output is the private values themselves)'); return USAGE; }
-  const loaded = load();
+  // The provider writes nothing to disk (publish-kit SPEC.md section 6): the record of machines is read, not added to.
+  const loaded = load({ remember: false });
   if (!loaded) { console.error('✗ privacy values: not given — no Hatchabot install here to read private values from'); return INCOMPLETE; }
   if (loaded.gaps.length) { console.error('✗ privacy values: not given — this install could not be fully read'); coverage(console.error, loaded); return INCOMPLETE; }
   process.stdout.write(loaded.ms.map((m) => JSON.stringify({ cat: m.cat, match: m.re.flags.includes('i') ? 'lower' : 'exact', value: m.value }) + '\n').join(''));

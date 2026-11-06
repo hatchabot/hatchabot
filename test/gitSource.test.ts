@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { firstThen, heldPort, onFreePort, TAKEN } from './helpers/ports.js';
 import { buildGitRemovalScript, buildGitSyncScript, normalizeGitUrl, gitSyncReason, buildPublicGitSyncScript, isPublicGitUrl } from '../src/orchestrator/gitSource.js';
 
 describe('normalizeGitUrl', () => {
@@ -84,12 +84,11 @@ describe('a stale <key>.pub on the volume no longer makes the host refuse the ke
   // It judges the authentication (ssh's own "Authenticated to" line), not the
   // remote command: a CI runner's account let the key in, then exited 1.
   const sshd = '/usr/sbin/sshd';
-  const freePort = () => new Promise<number>((done) => { const srv = createServer().listen(0, '127.0.0.1', () => { const { port } = srv.address() as { port: number }; srv.close(() => done(port)); }); });
+  // (onFreePort: a port outside the kernel's ephemeral range, chosen again if it was taken first; HB-0505.)
   const keygen = (file: string, comment: string) => execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', comment, '-f', file]);
 
   it.skipIf(!existsSync(sshd))('the stored key gets in although an old .pub and -cert.pub were beside it', async () => {
     const base = mkdtempSync(join(tmpdir(), 'hb-stalepub-'));
-    const port = await freePort();
     try {
       const sshDir = join(base, '.ssh');
       mkdirSync(sshDir);
@@ -97,12 +96,24 @@ describe('a stale <key>.pub on the volume no longer makes the host refuse the ke
       keygen(join(base, 'stored'), 'stored');
       keygen(join(base, 'stale'), 'stale');
       writeFileSync(join(base, 'authorized_keys'), readFileSync(join(base, 'stored.pub')));
-      writeFileSync(join(base, 'sshd_config'), [
-        `Port ${port}`, 'ListenAddress 127.0.0.1', `HostKey ${join(base, 'hostkey')}`,
-        `AuthorizedKeysFile ${join(base, 'authorized_keys')}`, `PidFile ${join(base, 'sshd.pid')}`,
-        'StrictModes no', 'UsePAM no', 'PasswordAuthentication no', 'KbdInteractiveAuthentication no', '',
-      ].join('\n'));
-      const live = spawn(sshd, ['-D', '-e', '-f', join(base, 'sshd_config')], { stdio: 'ignore' });
+      // sshd on a chosen port: it says when it listens, and a port taken first ends it, so another is
+      // chosen. The first one it is given is held here, so that is shown every run.
+      const held = await heldPort();
+      const { port, opened: live } = await onFreePort((p) => {
+        writeFileSync(join(base, 'sshd_config'), [
+          `Port ${p}`, 'ListenAddress 127.0.0.1', `HostKey ${join(base, 'hostkey')}`,
+          `AuthorizedKeysFile ${join(base, 'authorized_keys')}`, `PidFile ${join(base, 'sshd.pid')}`,
+          'StrictModes no', 'UsePAM no', 'PasswordAuthentication no', 'KbdInteractiveAuthentication no', 'LogLevel INFO', '',
+        ].join('\n'));
+        const child = spawn(sshd, ['-D', '-e', '-f', join(base, 'sshd_config')], { stdio: ['ignore', 'ignore', 'pipe'] });
+        let err = '';
+        return new Promise<ChildProcess | typeof TAKEN>((resolve, reject) => {
+          const wait = setTimeout(() => resolve(child), 10_000); // never said: the login loop below waits for it
+          child.stderr!.on('data', (d) => { err += d; if (/Server listening on/.test(err)) { clearTimeout(wait); resolve(child); } });
+          child.once('exit', () => { clearTimeout(wait); if (/Address already in use/i.test(err)) resolve(TAKEN); else reject(new Error(`sshd ended: ${err}`)); });
+        });
+      }, { choose: firstThen(held.port) }).finally(() => held.release());
+      expect(port).not.toBe(held.port);
       try {
         const key = join(sshDir, 'defs_deploy');
         const login = () => spawnSync('ssh', ['-F', '/dev/null', '-i', key, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',

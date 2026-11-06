@@ -506,7 +506,8 @@ export function registerAccountRoutes(
     const recoveryCode = await issueRecoveryCode(me.id, me.pwHash);
     if (!recoveryCode) return reply.code(409).send({ error: PASSWORD_CHANGED_MEANWHILE });
     app.log.warn({ account: me.id }, 'account.recovery_code_created');
-    return { recoveryCode };
+    // Whose it is: a page whose session ends while it is open keeps it for that person alone (HB-0500).
+    return { recoveryCode, ownerId: me.id };
   });
 
   /**
@@ -565,7 +566,7 @@ export function registerAccountRoutes(
     // The new hash signs out every other session; this browser gets a fresh one.
     setSessionCookie(reply, req, mintSession(secret, account.id, pw.hash, Date.now() + TTL_MS, store.sessionEpoch(account.id)));
     deps.onAuthenticated?.({ ownerId: account.id, via: 'password', email: account.username.includes('@') ? account.username : undefined });
-    return { ok: true, username: account.username, recoveryCode };
+    return { ok: true, username: account.username, recoveryCode, ownerId: account.id };
   });
 
   /** The roster. Host owner only: who else can reach this installation is not

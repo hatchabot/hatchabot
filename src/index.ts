@@ -157,11 +157,36 @@ await Promise.race([
 // Volume one-shots whose client died with the last process (a restart mid-
 // sweep) stay 'created' and pin their agent's volume (review, 2026-09-29).
 // Only this install's labelled ones; in the background, never blocking boot.
-for (const p of new Set(providers.values())) {
-  void p.sweepOneShots?.()
-    .then((n) => { if (n) app.log.warn({ provider: p.key, removed: n }, 'removed leftover volume one-shots'); })
-    .catch((err) => app.log.error({ err: String(err) }, 'one-shot sweep failed'));
-}
+// Runners too, and again every 10 minutes (HB-0385): an import's one-shot is
+// not --rm, and one whose client was killed goes on to the end and stays
+// 'exited' with its files; a runner asleep at boot is swept soon after it
+// answers. After boot a 'created' one is left: a call may be making it.
+// At boot only 'created' ones made before this process started: resumed
+// operations and reconcile may be making their own on a runner meanwhile.
+const processStarted = Date.now() - process.uptime() * 1000;
+let oneShotSweepWarned = false;
+const sweepOneShots = (created: boolean) => {
+  try {
+    const all = new Set<RuntimeProvider>(providers.values());
+    for (const id of store.listRunnerHostIds()) {
+      const host = store.getHost(id);
+      const p = host ? providerForHost(host) : undefined;
+      if (p) all.add(p);
+    }
+    for (const p of all) {
+      void p.sweepOneShots?.({ created, ...(created ? { createdBefore: processStarted } : {}) })
+        .then((n) => { if (n) app.log.warn({ provider: p.key, removed: n }, 'removed leftover volume one-shots'); })
+        .catch((err) => app.log.error({ err: String(err) }, 'one-shot sweep failed'));
+    }
+  } catch (err) {
+    // A timer's throw would end the process; said once, not every 10 minutes.
+    if (!oneShotSweepWarned) app.log.warn({ err: String(err) }, 'one-shot sweep failed');
+    oneShotSweepWarned = true;
+  }
+};
+sweepOneShots(true);
+const oneShotSweep = setInterval(() => sweepOneShots(false), 10 * 60_000);
+oneShotSweep.unref();
 
 // Copies of a volume a move held when the process ended: they hold an agent's
 // secrets, and no move runs yet. On disk in the data folder, read by nothing.

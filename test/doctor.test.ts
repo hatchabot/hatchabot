@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { checkoutFacts, doctorReport, probeControlPlane, releaseBehind, type DoctorFacts } from '../src/doctor.js';
+import { backupFacts, checkoutFacts, doctorReport, probeControlPlane, releaseBehind, type DoctorFacts } from '../src/doctor.js';
 import { scriptEnv } from './helpers/scriptEnv.js';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -186,5 +186,26 @@ describe.skipIf(!haveOpenssl)('hatchabot doctor probes a TLS install without tur
     expect(await probeControlPlane(url, other.certPath)).toMatchObject({ url, ok: false, error: expect.stringMatching(/self.signed|certificate|unable to verify/i) });
     expect(await probeControlPlane(url, undefined)).toMatchObject({ url, ok: false });
     expect(await probeControlPlane(url, join(dir, 'missing.crt'))).toMatchObject({ url, ok: false });
+  });
+});
+
+describe('doctor reads a backup set\'s age as the app does (HB-0386)', () => {
+  it('an evening west of UTC is not a day older', () => {
+    const prev = process.env.TZ;
+    process.env.TZ = 'America/Los_Angeles';
+    const dir = mkdtempSync(join(tmpdir(), 'hb-doctor-age-'));
+    try {
+      mkdirSync(join(dir, '2026-09-13'));
+      writeFileSync(join(dir, '2026-09-13', 'hatchabot.sqlite'), '');
+      // 20:00 on the 15th, local: two days by the calendar, three since UTC midnight on the 13th.
+      const now = new Date(2026, 8, 15, 20, 0).getTime();
+      const facts = backupFacts(dir, now);
+      expect(facts).toMatchObject({ lastSet: '2026-09-13', ageDays: 2 });
+      expect(doctorReport({ ...healthy, backups: facts }).some((l) => /days old/.test(l.text))).toBe(false);
+      expect(backupFacts(dir, new Date(2026, 8, 16, 0, 30).getTime()).ageDays).toBe(3);
+    } finally {
+      if (prev === undefined) delete process.env.TZ; else process.env.TZ = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

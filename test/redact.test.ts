@@ -15,6 +15,76 @@ describe('redacting a failure', () => {
     expect(redactSecrets(`"password"=>"made-up-1"`)).toBe(`"password"=>"***"`);
     expect(redactSecrets(String.raw`\"max_tokens\":\"400\"`)).toBe(String.raw`\"max_tokens\":\"400\"`);
   });
+  it('a quoted name and its value in every quoting, cut off, unquoted, or as a Ruby hash (HB-0501)', () => {
+    const cases: Array<[string, string]> = [
+      // An escaped quote inside the value no longer cuts it.
+      [String.raw`{"x":"{\"token\":\"a\\\"b-made-up\"}"}`, String.raw`{"x":"{\"token\":\"***\"}"}`],
+      // Cut off: to the end of the line.
+      [String.raw`\"password\":\"made-up`, String.raw`\"password\":\"***`],
+      ['"password": "made-up\nnext line', '"password": "***\nnext line'],
+      ['"password": "made-up\\\nnext "line"', '"password": "***\nnext "line"'],
+      // No quotes round the value.
+      [String.raw`\"token\":123456`, String.raw`\"token\":***`],
+      [String.raw`\"token\":123456,\"user\":\"quincy\"`, String.raw`\"token\":***,\"user\":\"quincy\"`],
+      // Quoting that JSON.stringify never makes.
+      [String.raw`\\"password\":\"made-up\"`, String.raw`\\"password\":\"***\"`],
+      [String.raw`"password\":\"made-up\"`, String.raw`"password\":\"***\"`],
+      // Ruby.
+      [':password => "made-up"', ':password => "***"'],
+      [':password => made-up', ':password => ***'],
+      ['password => made-up', 'password => ***'],
+      [':token=>made-up', ':token=>***'],
+    ];
+    for (const [text, want] of cases) expect(redactSecrets(text), text).toBe(want);
+    for (const text of ['token => token.trim()', 'secret => secret.value', 'password => { return check(password) }', String.raw`\"token\":\"$GARDEN_TOKEN\"`, String.raw`\"max_tokens\":400`]) {
+      expect(redactSecrets(text), text).toBe(text);
+    }
+  });
+  it('a value ending in a backslash, or with escaped quotes, ends at its own quote at every level, so the next field still goes (HB-0501 review)', () => {
+    for (const obj of [{ password: 'Made-up\\', token: 'made-up-2' }, { password: 'a"b\\', token: 'q\\"z', api_key: 'made-up-3' }]) {
+      let text = JSON.stringify(obj);
+      for (let level = 0; level < 3; level++) {
+        const out = redactSecrets(`log: ${text}`);
+        for (const value of Object.values(obj)) expect(out, `level ${level}: ${text}`).not.toContain(value.replace(/[\\"]/g, '').slice(0, 6));
+        for (const name of Object.keys(obj)) expect(out, `level ${level}`).toContain(name);
+        text = JSON.stringify(text);
+      }
+    }
+    // Hand-made: a run of backslashes no encoder writes, before the next name's quote.
+    expect(redactSecrets(String.raw`{\\\"password\\\":\\\"abc\\\\\\\\\\\\\\\",\\\"token\\\":\\\"made-up-2\\\"}`)).not.toContain('made-up-2');
+    const cases: Array<[string, string]> = [
+      [String.raw`{'password': 'it\'s-made-up'}`, `{'password': '***'}`],
+      [String.raw`\"password\":\"Made` + '\r' + String.raw`9x\"`, String.raw`\"password\":\"***\"`],
+      ['“password”: “made-up-1”', '“password”: “***”'], ['‘token’: ‘made-up-1’', '‘token’: ‘***’'], ['password：made-up-1', 'password：***'], ['"password"：“made-up-1”', '"password"：“***”'],
+      ['password => !Made2up', 'password => ***'], ['password => (made-up)', 'password => ***)'],
+      ["x ? 'password': 'made-up'", "x ? 'password': '***'"],
+    ];
+    for (const [text, want] of cases) expect(redactSecrets(text), text).toBe(want);
+    for (const text of ['tokens.filter(token => token && ok)', 'list.some(token => token === x)', '+  const ids = secrets.map(secret => secret.id);', 'const f = (password) => password.length > 8',
+      "const mode = flag ? 'api-key' : cfg.mode;"]) expect(redactSecrets(text), text).toBe(text);
+  });
+  it("a shell's single-quoted value ending in a backslash, curly quotes after a bare name, and code that is really code (second review of HB-0501)", () => {
+    const cases: Array<[string, string]> = [
+      [String.raw`docker run -e DB_PASSWORD='p@ss\' -e API_TOKEN='Xy9madeupvalue' img`, `docker run -e DB_PASSWORD='***' -e API_TOKEN='***' img`],
+      [String.raw`token='C:\' password='made-up'`, `token='***' password='***'`],
+      [String.raw`export PASSWORD='abc\' TOKEN='made-up-2'`, `export PASSWORD='***' TOKEN='***'`],
+      [String.raw`password="a\" token="made-up-2"`, `password="***" token="***"`],
+      ['password: “correct horse battery”', 'password: “***”'], ['password：“made up”', 'password：“***”'], ['token: «made up»', 'token: «***»'],
+      ['password => Secret.Value', 'password => ***'], ['password => made2up.x', 'password => ***'], ['{ password => q(made2up) }', '{ password => ***) }'], ['password => Made2up && x', 'password => *** && x'],
+      [String.raw`password='it\'s' ok`, `password='***' ok`],
+      ["x ? 'password' : Correct.Horse", "x ? 'password' : ***"], ["mode ? 'password' : s3cr3t.k3y", "mode ? 'password' : ***"],
+    ];
+    for (const [text, want] of cases) expect(redactSecrets(text), text).toBe(want);
+    for (const text of ['token => my.secret', "x ? 'password' : getPass()", "const mode = flag ? 'api-key' : cfg.mode;"]) expect(redactSecrets(text), text).not.toMatch(/\*\*\*/);
+  });
+  it('a number or _BASE after the name, and known token prefixes cut short (HB-0499)', () => {
+    const cases: Array<[string, string]> = [
+      ['TOKEN2=made-up', 'TOKEN2=***'], ['PASSWORD1=made-up', 'PASSWORD1=***'], ['API_KEY_2=made-up', 'API_KEY_2=***'], ['SECRET_KEY_BASE=made-up', 'SECRET_KEY_BASE=***'],
+      ['clone failed: glpat-made-up-12', 'clone failed: ***'], ['hub said no to hf_MadeUp1234', 'hub said no to ***'], ['push with gho_MadeUp12', 'push with ***'],
+    ];
+    for (const [text, want] of cases) expect(redactSecrets(text), text).toBe(want);
+    for (const text of ['token_count=5', 'pip install hf_transfer', 'hf_hub_download failed', 'the password1 field']) expect(redactSecrets(text), text).toBe(text);
+  });
   it("the shell's PWD holds a folder, not a password: only a value that starts like a path, and only by that exact name", () => {
     expect(redactSecrets('PWD=/srv/Smith Family/x ; USER=root')).toBe('PWD=/srv/Smith Family/x ; USER=root');
     expect(redactSecrets('OLDPWD=~/x')).toBe('OLDPWD=~/x');
@@ -94,6 +164,18 @@ describe('redacting a failure', () => {
     expect(briefCause(new Error('x'.repeat(400)))).toBe('***');
     expect(briefCause('plain string')).toBe('plain string');
     expect(briefCause(undefined)).toBe('');
+  });
+});
+
+describe('quoted values in logs, after the final review of HB-0501', () => {
+  it("a curly closer ends a value only before a separator, and a logfmt \\\" stays in its value", () => {
+    expect(redactSecrets('DB_PASSWORD=‘O’Brien2024’ next=1')).toBe('DB_PASSWORD=‘***’ next=1');
+    expect(redactSecrets('password: ‘Bob’s-fake-dog’')).toBe('password: ‘***’');
+    expect(redactSecrets('"password": ‘Bob’s-fake-dog’')).toBe('"password": ‘***’');
+    expect(redactSecrets('token=“abc”def123')).toBe('token=***');
+    expect(redactSecrets('level=info user=bob token="abc\\" def" next=1')).toBe('level=info user=bob token="***" next=1');
+    expect(redactSecrets('password="p@ss\\" token="x"')).toBe('password="***" token="***"');
+    expect(redactSecrets('error: invalid token: ‘expired’ (code 401)')).toBe('error: invalid token: ‘***’ (code 401)');
   });
 });
 

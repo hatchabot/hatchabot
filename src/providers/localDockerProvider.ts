@@ -2,8 +2,8 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { PassThrough, pipeline, type Readable } from 'node:stream';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, connect } from 'node:net';
-import { type FileHandle, mkdtemp, open, rename, rm, writeFile, mkdir } from 'node:fs/promises';
-import { createReadStream, createWriteStream, readdirSync, readFileSync, statSync } from 'node:fs';
+import { type FileHandle, mkdtemp, open, readFile, rename, rm, writeFile, mkdir } from 'node:fs/promises';
+import { createReadStream, createWriteStream, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir, cpus } from 'node:os';
 import { join, dirname } from 'node:path';
 import { promisify } from 'node:util';
@@ -15,7 +15,7 @@ import type {
   RuntimeSpec,
   RuntimeStatus,
 } from './provider.js';
-import { type ImagesInUse, isDiskFull, ProviderError, VOLUME_GONE, VolumeGoneError, VolumeUntouchedError, parseByteSize, parseCgroupMemory, parseChannelsLabel, parseEmbedEngineLabel, parsePluginInstallLabel, parsePluginsLabel, type ContainerStats, type EmbedEngine } from './provider.js';
+import { type ImagesInUse, isDiskFull, OneShotNotGoneError, ProviderError, VOLUME_GONE, VolumeGoneError, VolumeUntouchedError, parseByteSize, parseCgroupMemory, parseChannelsLabel, parseEmbedEngineLabel, parsePluginInstallLabel, parsePluginsLabel, type ContainerStats, type EmbedEngine } from './provider.js';
 import { CONTAINER_GEN } from '../orchestrator/rebuildPolicy.js';
 import { LOOP_LINE } from '../orchestrator/loopLines.js';
 import { dockerMemorySwap, parseCgroupLimit, parseSwapProbe, procCgroupPath, SWAP_PROBE_SCRIPT, type CompressedSwap } from '../orchestrator/swap.js';
@@ -55,7 +55,15 @@ export interface LocalDockerOptions {
   hostRoot?: string;
   /** The published runtime image of an OpenClaw version this release vouches for (tests); default from the release manifest. */
   publishedImage?: (openclawVersion: string) => Promise<PublishedImage>;
+  /** The wait between tries at removing a failed one-shot (tests); default REAP_RETRY_MS. */
+  reapRetryMs?: number;
 }
+
+/** How often, and how far apart, a failed one-shot's removal is tried before it is called not gone (HB-0385). */
+const REAP_TRIES = 3;
+const REAP_RETRY_MS = 3_000;
+/** Docker's words for a container that is not there, from `rm -f` or `container inspect`. */
+const NO_SUCH_CONTAINER = /no such (container|object)/i;
 
 /**
  * §5.2 made concrete on a single always-on box: one container per agent, one
@@ -112,6 +120,61 @@ const DISK_FULL_COPY = "This machine's disk is full, so the agent's state could 
 function exportArgs(volume: string, flags: string[]): string[] {
   return ['run', '--rm', ...flags, '--network', 'none', '-v', `${volume}:/vol:ro`, 'alpine', 'tar', 'cz', ...STATE_CACHE_EXCLUDES, '-C', '/vol', '.'];
 }
+/** What Docker said of a one-shot (see #inspectOneShot); `found` undefined when it did not answer. */
+interface OneShotSeen { found?: boolean; status?: string; neverRan?: boolean }
+/** How a volume one-shot's client ended (#oneShotExit). `error`: it timed out, or could not be run. */
+interface OneShotEnd {
+  code: number; stderr: string; signalled: boolean; error?: unknown;
+  /** After a failure: whether it is known not to be writing, and what Docker last said of it before it was removed. */
+  settled?: { notWriting: boolean; last: OneShotSeen };
+}
+/** Statuses in which a container writes nothing more. */
+const NOT_WRITING = new Set(['created', 'exited', 'dead']);
+
+/** A failure whose one-shot could not be shown to have stopped writing (HB-0385). */
+function notGoneError(err: unknown, name: string): OneShotNotGoneError {
+  const e = err as { message?: string; userMessage?: string };
+  return new OneShotNotGoneError(
+    `${String(e.message ?? err)}; and its one-shot ${name} could not be confirmed gone`,
+    e.userMessage ?? "Couldn't restore the agent's state.", name, { cause: err },
+  );
+}
+
+/**
+ * Where `docker run --cidfile` writes a one-shot's id (HB-0384), in a new
+ * private folder with a mark beside it. A missing id is taken to mean docker
+ * made nothing only while the mark is still there: something that cleared the
+ * folder (logind empties /dev/shm at a user's last logout) took the id too.
+ */
+interface IdFile {
+  dir: string; id: string;
+  /** 'none': no id and the mark still there; 'empty': begun, never filled; 'present'; 'unknown': the folder was cleared. */
+  read(): Promise<'none' | 'empty' | 'present' | 'unknown'>;
+}
+
+/**
+ * An IdFile, or undefined when none can be made. Memory-backed where there is
+ * one, so a full disk is not what decides it.
+ */
+async function idFileFor(): Promise<IdFile | undefined> {
+  try {
+    const dir = await mkdtemp(join(existsSync('/dev/shm') ? '/dev/shm' : tmpdir(), 'hatchabot-cid-'));
+    const mark = join(dir, 'mark');
+    const id = join(dir, 'id');
+    try { await writeFile(mark, '', { mode: 0o600 }); } catch { await rm(dir, { recursive: true, force: true }).catch(() => {}); return undefined; }
+    return {
+      dir, id,
+      async read() {
+        if (!existsSync(mark)) return 'unknown';
+        const got = await readFile(id, 'utf8').catch((err: NodeJS.ErrnoException) => (err.code === 'ENOENT' ? null : undefined));
+        if (got === undefined) return 'unknown';
+        if (got === null) return 'none';
+        return got.trim() === '' ? 'empty' : 'present';
+      },
+    };
+  } catch { return undefined; }
+}
+
 /** The label on every volume one-shot; its value is the install's prefix. */
 export const ONESHOT_LABEL = 'hatchabot.oneshot';
 
@@ -142,9 +205,11 @@ export class LocalDockerProvider implements RuntimeProvider {
   readonly #swapProbe?: () => Promise<string | undefined>;
   readonly #hostRoot: string;
   readonly #publishedImage: (openclawVersion: string) => Promise<PublishedImage>;
+  readonly #reapRetryMs: number;
 
   constructor(opts: LocalDockerOptions = {}) {
     this.#fetch = opts.fetchImpl ?? fetch;
+    this.#reapRetryMs = opts.reapRetryMs ?? REAP_RETRY_MS;
     this.#publishedImage = opts.publishedImage ?? ((v) => publishedRuntimeImage(v));
     this.#swapProbe = opts.swapProbe;
     this.#hostRoot = opts.hostRoot ?? '';
@@ -211,19 +276,138 @@ export class LocalDockerProvider implements RuntimeProvider {
     return { name, flags: ['--name', name, '--label', `${ONESHOT_LABEL}=${this.prefix}`] };
   }
 
-  /** A one-shot whose client gave up: remove the container itself, so it stops writing and pins nothing. */
-  async #reapOneShot(name: string): Promise<void> {
-    await this.#docker(['rm', '-f', name], 120_000).catch(() => {});
+  /** What `container inspect` says of a one-shot: there or not (undefined: Docker did not say), its status, and whether it never started. */
+  async #inspectOneShot(name: string): Promise<OneShotSeen> {
+    const res = await this.#docker(['container', 'inspect', '--format', '{{.State.Status}}|{{.State.StartedAt}}', name], 30_000);
+    if (res.code === 0) {
+      const [status = '', started = ''] = res.stdout.trim().split('|');
+      // Docker sets StartedAt only once the process is running: a zero time is
+      // a container that was made and never ran (HB-0384).
+      return { found: true, status, neverRan: /^0001-01-01/.test(started) };
+    }
+    return NO_SUCH_CONTAINER.test(res.stderr) ? { found: false } : {};
   }
 
   /**
-   * Boot: remove this install's one-shots that never ran or never got
-   * removed ('created' / 'exited'). A running one is left alone — it may
+   * A one-shot that failed or was given up: remove it, and know it is no
+   * longer writing (HB-0385). Not writing once removed, once Docker says it is
+   * not there, or once it is seen finished (exited, dead: a removal that
+   * fails then only leaves it for the sweep). A try that
+   * cannot show that is repeated a little later, each time with a fresh look
+   * at whether a runner answers: the "down" it remembers for 30 seconds would
+   * otherwise make every try the same one. `last` is what Docker last said of
+   * it before it was removed (one seen "created" may have started since an
+   * earlier look). Never rejects. At most about 2 minutes on a hung daemon.
+   */
+  async #settleOneShot(name: string): Promise<{ notWriting: boolean; last: OneShotSeen }> {
+    let last: OneShotSeen = {};
+    for (let i = 0; i < REAP_TRIES; i++) {
+      if (i) {
+        await new Promise((r) => setTimeout(r, this.#reapRetryMs));
+        this.#reach = undefined;
+      }
+      try {
+        const seen = await this.#inspectOneShot(name);
+        if (seen.found !== undefined) last = seen;
+        // What this try saw, and only that: an answer from an earlier try may
+        // be older than a start that came since.
+        if (seen.found === false) return { notWriting: true, last: seen };
+        const rm = await this.#docker(['rm', '-f', name], 30_000);
+        if (rm.code === 0 || NO_SUCH_CONTAINER.test(rm.stderr)) return { notWriting: true, last: seen };
+        // Not removed, but finished: it writes nothing more. One still 'created'
+        // may yet be started by a start already on its way: looked at again.
+        if (seen.found && (seen.status === 'exited' || seen.status === 'dead')) return { notWriting: true, last: seen };
+      } catch { /* docker not there at all: not known */ }
+    }
+    return { notWriting: false, last };
+  }
+
+  /** A one-shot whose client gave up: removed, so it stops writing and pins nothing. True once it is known not to be writing. */
+  async #reapOneShot(name: string): Promise<boolean> {
+    return (await this.#settleOneShot(name)).notWriting;
+  }
+
+  /**
+   * This install's one-shots on a volume that are, or may be, still writing
+   * it: each is removed and confirmed gone, all at once. One a failed copy
+   * left (its removal failed while a runner slept, then the runner woke and
+   * its tar went on) must not unpack alongside the next one, or under the
+   * safety copy a restore takes first. Readers are left alone: a one-shot
+   * whose mount of this volume is read-only (the nightly backup's, a
+   * Download's, a copy's) writes nothing, and removing it failed that night's
+   * set. Finished and never-started ones are removed too, without waiting:
+   * they pin the volume, and an import's may hold the archive. Undefined when
+   * none is left writing; otherwise why not, naming it (HB-0385).
+   */
+  async #clearVolumeWriters(volume: string): Promise<string | undefined> {
+    // Asked again a little later, with a fresh look at whether a runner
+    // answers, as #settleOneShot does: one dropped answer must not refuse a
+    // rollback that could go ahead.
+    let res: { code: number; stdout: string; stderr: string } = { code: 1, stdout: '', stderr: '' };
+    for (let i = 0; i < REAP_TRIES; i++) {
+      if (i) {
+        await new Promise((r) => setTimeout(r, this.#reapRetryMs));
+        this.#reach = undefined;
+      }
+      res = await this.#docker(['ps', '-a', '--filter', `volume=${volume}`, '--filter', `label=${ONESHOT_LABEL}=${this.prefix}`, '--format', '{{.Names}}|{{.State}}'], 15_000)
+        .catch((err: unknown) => ({ code: 1, stdout: '', stderr: String(err) }));
+      if (res.code === 0) break;
+    }
+    if (res.code !== 0) return `its containers could not be listed (${res.stderr.trim().slice(0, 160) || 'no answer'})`;
+    const listed = res.stdout.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
+      const [name = '', state = ''] = l.split('|');
+      return { name, state };
+    }).filter((c) => c.name);
+    const done = listed.filter((c) => NOT_WRITING.has(c.state)).map((c) => c.name);
+    if (done.length) void this.#docker(['rm', '-f', ...done], 30_000).catch(() => {});
+    const live = listed.filter((c) => !NOT_WRITING.has(c.state));
+    if (!live.length) return undefined;
+    // How each mounts this volume: "false" is read-only. One not answered for is taken as a writer.
+    const rw = new Map<string, string>();
+    const mounts = await this.#docker(['container', 'inspect', '--format', `{{.Name}}|{{range .Mounts}}{{if eq .Name ${JSON.stringify(volume)}}}{{.RW}}{{end}}{{end}}`, ...live.map((c) => c.name)], 15_000)
+      .catch(() => ({ code: 1, stdout: '', stderr: '' }));
+    for (const l of mounts.stdout.split('\n')) {
+      const [n = '', mode = ''] = l.trim().split('|');
+      if (n) rw.set(n.replace(/^\//, ''), mode);
+    }
+    const writers = live.filter((c) => rw.get(c.name) !== 'false');
+    const stuck = (await Promise.all(writers.map(async (c) => ((await this.#reapOneShot(c.name)) ? undefined : c)))).filter((c) => c !== undefined);
+    return stuck.length ? stuck.map((c) => `${c!.name} is still ${c!.state || 'there'} and could not be removed`).join('; ') : undefined;
+  }
+
+  /** See #clearVolumeWriters: for a restore, before it copies or replaces the volume. */
+  async stopVolumeWriters(runtimeRef: string): Promise<string | undefined> {
+    if (!(await this.reachable())) return "its machine isn't answering";
+    return this.#clearVolumeWriters(this.#names(runtimeRef).volume);
+  }
+
+  /**
+   * Remove this install's one-shots that finished and were never removed
+   * ('exited' / 'dead': an import's is not --rm, and a killed client's goes
+   * on to the end), and at boot also those that never ran ('created'). A
+   * running one is left alone, and a created one after boot: either may
    * belong to a call still in flight. Returns how many went.
    */
-  async sweepOneShots(): Promise<number> {
-    const res = await this.#docker(['ps', '-aq', '--filter', `label=${ONESHOT_LABEL}=${this.prefix}`, '--filter', 'status=created', '--filter', 'status=exited']);
+  async sweepOneShots(opts: { created?: boolean; createdBefore?: number } = {}): Promise<number> {
+    const label = `label=${ONESHOT_LABEL}=${this.prefix}`;
+    // With createdBefore (the process's start): only 'created' ones made
+    // before it, never one a call of this process is making right now.
+    const byAge = opts.created !== false && opts.createdBefore !== undefined;
+    const res = await this.#docker(['ps', '-aq', '--filter', label, ...(opts.created === false || byAge ? [] : ['--filter', 'status=created']), '--filter', 'status=exited', '--filter', 'status=dead']);
     const ids = res.code === 0 ? res.stdout.split(/\s+/).filter(Boolean) : [];
+    if (byAge) {
+      const made = await this.#docker(['ps', '-aq', '--filter', label, '--filter', 'status=created']);
+      const created = made.code === 0 ? made.stdout.split(/\s+/).filter(Boolean) : [];
+      if (created.length) {
+        const ages = await this.#docker(['container', 'inspect', '--format', '{{.Id}}|{{.Created}}', ...created]);
+        for (const l of ages.stdout.split('\n')) {
+          const [id = '', at = ''] = l.trim().split('|');
+          const t = Date.parse(at);
+          const short = created.find((c) => id.startsWith(c));
+          if (short && Number.isFinite(t) && t < opts.createdBefore!) ids.push(short);
+        }
+      }
+    }
     if (ids.length) await this.#docker(['rm', '-f', ...ids]);
     return ids.length;
   }
@@ -1367,107 +1551,171 @@ export class LocalDockerProvider implements RuntimeProvider {
     // Opened before anything starts: no file, or an empty one, must never
     // reach the script as an empty stdin.
     const handle = await open(file, 'r');
-    let handed = false;
     try {
       if ((await handle.stat()).size === 0) throw new ProviderError(`archive ${file} is empty`, "That copy of the agent's state is empty, so it was not used. The agent's state was left as it was.");
-      handed = true;
-      await this.#importVolume(runtimeRef, handle, opts?.ownCopy === true);
     } finally {
-      // The read stream closes a handle it was given; one never given is ours.
-      if (!handed) await handle.close().catch(() => {});
+      await handle.close().catch(() => {});
+    }
+    // By its path: a try docker refused before it made anything is made again
+    // from the start of the file (idFileFor).
+    await this.#importVolume(runtimeRef, file, opts?.ownCopy === true);
+  }
+
+  async #importVolume(runtimeRef: string, source: Buffer | string, ownCopy = false): Promise<void> {
+    const { volume } = this.#names(runtimeRef);
+    if (!(await this.reachable())) {
+      // Nothing was started: the volume is as it was (HB-0384).
+      const down = this.#unreachableError();
+      throw new VolumeUntouchedError(down.message, down.userMessage);
+    }
+    // Never alongside an earlier copy that may still be unpacking (HB-0385).
+    const busy = await this.#clearVolumeWriters(volume);
+    if (busy) {
+      throw new VolumeUntouchedError(
+        `another one-shot may still be writing ${volume}: ${busy}`,
+        `An earlier copy into this agent's memory may still be running (${busy}), so nothing was changed. Try again once its machine answers.`,
+      );
+    }
+    // Where docker writes the one-shot's id once it has made it, before it
+    // starts it: no id after a failure means it never made one (HB-0384). Not
+    // for an agent's own copy going back (a rollback, Put back): what fails
+    // there is told the same either way, and on a full disk this file must not
+    // be what stops it. Without the file, `container inspect` alone decides.
+    const ids = ownCopy ? undefined : await idFileFor();
+    try {
+      await this.#importInto(volume, source, ownCopy, ids);
+    } finally {
+      if (ids) await rm(ids.dir, { recursive: true, force: true }).catch(() => {});
     }
   }
 
-  async #importVolume(runtimeRef: string, data: Buffer | FileHandle, ownCopy = false): Promise<void> {
-    const { volume } = this.#names(runtimeRef);
-    // The handle is this call's to close, whichever way it ends.
-    if (!(await this.reachable())) {
-      if (!Buffer.isBuffer(data)) await data.close().catch(() => {});
-      throw this.#unreachableError();
+  async #importInto(volume: string, source: Buffer | string, ownCopy: boolean, ids: IdFile | undefined): Promise<void> {
+    // Opened again here, maybe minutes after it was first read (an earlier
+    // copy was being stopped): a set deleted meanwhile changed nothing yet.
+    const handle = typeof source === 'string'
+      ? await open(source, 'r').catch((err: unknown) => {
+        throw new VolumeUntouchedError(
+          `opening ${source} failed: ${String(err).slice(0, 200)}`,
+          "The copy to restore from is no longer on disk (it was removed while the restore waited), so nothing was changed.",
+        );
+      })
+      : undefined;
+    // An archive is untrusted input, so it must not dictate ownership or
+    // carry setuid bits — but the runtime runs as uid 1000 and has to be
+    // able to read what we extract. --no-same-owner alone left everything
+    // root-owned and every import failed with EACCES on openclaw.json.
+    // So: refuse the archive's ownership, then set the correct one, and
+    // strip setuid/setgid while KEEPING modes (credentials rely on 0600).
+    // Clear the volume FIRST so this is a true replace, not an overlay — a
+    // restore/rollback must not leave behind files created since the snapshot
+    // (and on import it discards the provisioned seed skeleton). But VALIDATE
+    // the archive (gzip -t on a staged copy) BEFORE deleting: a truncated or
+    // corrupt snapshot must not empty the agent's volume and then fail,
+    // leaving no state and nothing to roll back to.
+    // Named, so a timeout removes the one-shot itself: killing the docker
+    // client alone left it extracting while the rollback extracted into the
+    // same volume (night review, 2026-09-28). Not --rm: after a failure its
+    // container says whether it ever ran (.State.StartedAt) until this call
+    // removes it, as it does on every path (HB-0384); the sweep (at boot,
+    // then every 10 minutes) takes one a dead process left.
+    const { name: ioName, flags: ioFlags } = this.#oneShot('io');
+    const child = spawn(this.docker, this.#argv([
+      'run', '-i', ...ioFlags, ...(ids ? ['--cidfile', ids.id] : []), '-v', `${volume}:/vol`, 'alpine',
+      'sh', '-c',
+      // Archives made before the home-as-volume change hold ~/.openclaw's
+      // CONTENTS at their root; newer ones hold the whole home (with
+      // .openclaw/ inside it). Detect which, and extract to the matching
+      // place, so old backups and .hatchabot files still restore.
+      // Exits 3, 4 and 5 all come before `find -delete`: the volume is untouched.
+      // Its copy of the archive (an agent's credentials) goes with it however
+      // it ends: a container left exited keeps its files until it is removed.
+      "trap 'rm -f /tmp/s.tgz /tmp/s.list' EXIT; " +
+      '{ cat > /tmp/s.tgz && gzip -t /tmp/s.tgz; } || exit 5; ' +
+        // What it EXPANDS to is bounded too: a ~190 MB gzip of zeros is
+        // ~190 GB on disk, filling the host for every agent (26th audit).
+        // Counted by decompressing once more (CPU), never by trusting the
+        // gzip trailer (mod 2^32). Not for a copy this install took of the
+        // agent's own volume: that size was already on the disk, and a limit
+        // here would refuse to put a large agent back after its volume was
+        // emptied (HB-0066).
+        (ownCopy ? '' : `if [ "$(gzip -dc /tmp/s.tgz | head -c ${IMPORT_MAX_BYTES + 1} | wc -c)" -gt ${IMPORT_MAX_BYTES} ]; then echo "archive expands past the size limit" >&2; exit 3; fi && `) +
+        // The whole tar is read before anything is deleted: gzip -t checks
+        // only the compression, and a failed listing used to pick the old
+        // layout and empty the volume before extraction found the junk (#213).
+        'if ! tar tzf /tmp/s.tgz > /tmp/s.list; then echo "not a tar archive" >&2; exit 4; fi && ' +
+        // `./.openclaw/…` and `.openclaw/…` are the same home layout: an
+        // archive made with `tar czf x .openclaw` went one level too deep (HB-0333).
+        'if grep -qE "^(\\./)?\\.openclaw/" /tmp/s.list; then DEST=/vol; else DEST=/vol/.openclaw; fi && ' +
+        'find /vol -mindepth 1 -delete && mkdir -p "$DEST" && ' +
+        'tar xz --no-same-owner -C "$DEST" -f /tmp/s.tgz && ' +
+        // An old-layout archive is already in the home layout once here:
+        // without the marker the next provision "moved" the agent's own
+        // ~/.config and ~/.local into ~/.openclaw (night review).
+        'if [ "$DEST" = /vol/.openclaw ]; then touch /vol/.openclaw/.agentclaw-home-v2; fi && ' +
+        'chown -R 1000:1000 /vol && chmod -R a-s /vol',
+    ]));
+    // Unreadable half-way: killed, and what reached the container fails its
+    // `gzip -t` before anything is deleted.
+    let readErr: unknown;
+    const input = handle?.createReadStream();
+    input?.on('error', (err) => { readErr = err; child.kill('SIGKILL'); });
+    // Putting an agent's own copy back must not be what gives up: a volume
+    // that took the whole limit to copy out takes longer to extract, and by
+    // then it has been emptied (HB-0066).
+    const ending = this.#oneShotExit(child, ioName, ownCopy ? OWN_COPY_IMPORT_TIMEOUT_MS : IO_TIMEOUT_MS);
+    // Same EPIPE race as #runStdin: if the child exits before draining stdin
+    // (a corrupt archive fails `gzip -t` early, docker refuses to start), the
+    // write emits an unhandled stream error and takes the PROCESS down. The
+    // real failure is already reported by the close handler above.
+    child.stdin.on('error', () => {});
+    if (input) input.pipe(child.stdin);
+    else child.stdin.end(source as Buffer);
+    // The read stream closes the handle it was made from.
+    const end = await ending.finally(() => input?.destroy());
+    const { code, stderr } = end;
+    if (end.error === undefined && code === 0 && !readErr) {
+      // It has exited, so it writes nothing: removed without holding the caller.
+      void this.#docker(['rm', '-f', ioName], 60_000).catch(() => {});
+      return;
     }
-    await new Promise<void>((resolve, reject) => {
-      // An archive is untrusted input, so it must not dictate ownership or
-      // carry setuid bits — but the runtime runs as uid 1000 and has to be
-      // able to read what we extract. --no-same-owner alone left everything
-      // root-owned and every import failed with EACCES on openclaw.json.
-      // So: refuse the archive's ownership, then set the correct one, and
-      // strip setuid/setgid while KEEPING modes (credentials rely on 0600).
-      // Clear the volume FIRST so this is a true replace, not an overlay — a
-      // restore/rollback must not leave behind files created since the snapshot
-      // (and on import it discards the provisioned seed skeleton). But VALIDATE
-      // the archive (gzip -t on a staged copy) BEFORE deleting: a truncated or
-      // corrupt snapshot must not empty the agent's volume and then fail,
-      // leaving no state and nothing to roll back to.
-      // Named, so a timeout removes the one-shot itself: killing the docker
-      // client alone left it extracting while the rollback extracted into the
-      // same volume (night review, 2026-09-28).
-      const { name: ioName, flags: ioFlags } = this.#oneShot('io');
-      const child = spawn(this.docker, this.#argv([
-        'run', '--rm', '-i', ...ioFlags, '-v', `${volume}:/vol`, 'alpine',
-        'sh', '-c',
-        // Archives made before the home-as-volume change hold ~/.openclaw's
-        // CONTENTS at their root; newer ones hold the whole home (with
-        // .openclaw/ inside it). Detect which, and extract to the matching
-        // place, so old backups and .hatchabot files still restore.
-        // Exits 3, 4 and 5 all come before `find -delete`: the volume is untouched.
-        '{ cat > /tmp/s.tgz && gzip -t /tmp/s.tgz; } || exit 5; ' +
-          // What it EXPANDS to is bounded too: a ~190 MB gzip of zeros is
-          // ~190 GB on disk, filling the host for every agent (26th audit).
-          // Counted by decompressing once more (CPU), never by trusting the
-          // gzip trailer (mod 2^32). Not for a copy this install took of the
-          // agent's own volume: that size was already on the disk, and a limit
-          // here would refuse to put a large agent back after its volume was
-          // emptied (HB-0066).
-          (ownCopy ? '' : `if [ "$(gzip -dc /tmp/s.tgz | head -c ${IMPORT_MAX_BYTES + 1} | wc -c)" -gt ${IMPORT_MAX_BYTES} ]; then echo "archive expands past the size limit" >&2; exit 3; fi && `) +
-          // The whole tar is read before anything is deleted: gzip -t checks
-          // only the compression, and a failed listing used to pick the old
-          // layout and empty the volume before extraction found the junk (#213).
-          'if ! tar tzf /tmp/s.tgz > /tmp/s.list; then echo "not a tar archive" >&2; exit 4; fi && ' +
-          // `./.openclaw/…` and `.openclaw/…` are the same home layout: an
-          // archive made with `tar czf x .openclaw` went one level too deep (HB-0333).
-          'if grep -qE "^(\\./)?\\.openclaw/" /tmp/s.list; then DEST=/vol; else DEST=/vol/.openclaw; fi && ' +
-          'find /vol -mindepth 1 -delete && mkdir -p "$DEST" && ' +
-          'tar xz --no-same-owner -C "$DEST" -f /tmp/s.tgz && ' +
-          // An old-layout archive is already in the home layout once here:
-          // without the marker the next provision "moved" the agent's own
-          // ~/.config and ~/.local into ~/.openclaw (night review).
-          'if [ "$DEST" = /vol/.openclaw ]; then touch /vol/.openclaw/.agentclaw-home-v2; fi && ' +
-          'chown -R 1000:1000 /vol && chmod -R a-s /vol',
-      ]));
-      // Unreadable half-way: killed, and what reached the container fails its
-      // `gzip -t` before anything is deleted.
-      let readErr: unknown;
-      const input = Buffer.isBuffer(data) ? undefined : data.createReadStream();
-      input?.on('error', (err) => { readErr = err; child.kill('SIGKILL'); });
-      // Putting an agent's own copy back must not be what gives up: a volume
-      // that took the whole limit to copy out takes longer to extract, and by
-      // then it has been emptied (HB-0066).
-      this.#oneShotExit(child, ioName, ownCopy ? OWN_COPY_IMPORT_TIMEOUT_MS : IO_TIMEOUT_MS).then(({ code, stderr }) => {
-        if (code === 0 && !readErr) { resolve(); return; }
-        const detail = readErr
-          ? `reading the archive failed: ${String(readErr).slice(0, 300)}`
-          : `volume import failed (${code}): ${stderr.slice(-500)}`;
-        const said = code === 3
-          ? `This archive would expand to more than ${Math.round(IMPORT_MAX_BYTES / 2 ** 30)} GB, which this machine does not allow (HATCHABOT_IMPORT_MAX_GB).`
-          : isDiskFull(stderr)
-            ? 'The disk of the machine it runs on is full, so the copy could not be unpacked. Free some space, then try again.'
-            : code === 4
-              ? "That file is not a valid agent archive (it is not a tar archive). The agent's state was left as it was."
-              : "Couldn't restore the agent's state.";
-        // Only the script's own exits, all before it empties the volume. Not 125:
-        // docker also says that when it loses a one-shot that is already extracting
-        // (the daemon restarts, the link to a runner drops). A killed reader proves
-        // nothing about how far the one-shot had got either.
-        reject(!readErr && (code === 3 || code === 4 || code === 5) ? new VolumeUntouchedError(detail, said) : new ProviderError(detail, said));
-      }, reject).finally(() => input?.destroy());
-      // Same EPIPE race as #runStdin: if the child exits before draining stdin
-      // (a corrupt archive fails `gzip -t` early, docker refuses to start), the
-      // write emits an unhandled stream error and takes the PROCESS down. The
-      // real failure is already reported by the close handler above.
-      child.stdin.on('error', () => {});
-      if (input) input.pipe(child.stdin);
-      else child.stdin.end(data as Buffer);
-    });
+    // A docker that could not make the id file (a confined CLI) refused before
+    // it made anything: once more without it, as before (HB-0384). It exits
+    // 126 or 127 for that, not 125.
+    if (ids && end.error === undefined && code !== 0 && /container ID file/i.test(stderr) && end.settled?.last.found === false) {
+      return this.#importInto(volume, source, ownCopy, undefined);
+    }
+    const detail = end.error !== undefined
+      ? String((end.error as { message?: string }).message ?? end.error)
+      : readErr
+        ? `reading the archive failed: ${String(readErr).slice(0, 300)}`
+        : `volume import failed (${code}): ${stderr.slice(-500)}`;
+    const said = end.error !== undefined
+      ? ((end.error as { userMessage?: string }).userMessage ?? "Couldn't restore the agent's state.")
+      : code === 3
+        ? `This archive would expand to more than ${Math.round(IMPORT_MAX_BYTES / 2 ** 30)} GB, which this machine does not allow (HATCHABOT_IMPORT_MAX_GB).`
+        : isDiskFull(stderr)
+          ? 'The disk of the machine it runs on is full, so the copy could not be unpacked. Free some space, then try again.'
+          : code === 4
+            ? "That file is not a valid agent archive (it is not a tar archive). The agent's state was left as it was."
+            : "Couldn't restore the agent's state.";
+    const seen = end.settled?.last ?? {};
+    const notWriting = end.settled?.notWriting ?? true;
+    const id = ids ? await ids.read() : undefined;
+    // Untouched: the script's own exits, all before it empties the volume; no
+    // id, so docker made nothing, whatever it exited with (it writes the id
+    // once it has made the one-shot, before it starts it; an unreachable
+    // daemon or runner exits 1); an id file it began and never filled, and no
+    // one-shot; or one made, never started and now removed. Not a 125 with an
+    // id: docker also says that when it loses a one-shot that is already
+    // extracting (the daemon restarts, the link to a runner drops). A killed
+    // reader proves nothing about how far it had got either.
+    const untouched = (end.error === undefined && !readErr && (code === 3 || code === 4 || code === 5))
+      || id === 'none'
+      || (id === 'empty' && seen.found === false)
+      || (seen.neverRan === true && notWriting);
+    if (untouched) throw new VolumeUntouchedError(detail, said);
+    if (end.settled && !end.settled.notWriting) throw notGoneError(new ProviderError(detail, said, { cause: end.error }), ioName);
+    throw end.error ?? new ProviderError(detail, said);
   }
 
   /**
@@ -1480,24 +1728,27 @@ export class LocalDockerProvider implements RuntimeProvider {
    * error exit, a client killed by a signal) is reported only once the one-shot
    * has been removed.
    */
-  #oneShotExit(child: ChildProcess, name: string, timeoutMs = IO_TIMEOUT_MS): Promise<{ code: number; stderr: string }> {
-    return new Promise((resolve, reject) => {
+  #oneShotExit(child: ChildProcess, name: string, timeoutMs = IO_TIMEOUT_MS): Promise<OneShotEnd> {
+    return new Promise((resolve) => {
       let stderr = '';
       let over = false;
-      const finish = (settle: () => void, reap: boolean) => {
+      // Every failure waits for the one-shot to be settled (removed, and known
+      // not writing: HB-0385); a clean exit does not.
+      const finish = (end: Omit<OneShotEnd, 'stderr' | 'settled'>, settle: boolean) => {
         if (over) return;
         over = true;
         clearTimeout(timer);
-        if (reap) void this.#reapOneShot(name).finally(settle); else settle();
+        if (settle) void this.#settleOneShot(name).then((settled) => resolve({ ...end, stderr, settled }));
+        else resolve({ ...end, stderr });
       };
       const timer = setTimeout(() => {
         child.kill('SIGKILL');
-        finish(() => reject(new ProviderError('docker import timed out', 'Docker did not respond in time.')), true);
+        finish({ code: -1, signalled: true, error: new ProviderError('docker import timed out', 'Docker did not respond in time.') }, true);
       }, timeoutMs);
       timer.unref();
       child.stderr?.on('data', (c) => (stderr += c));
-      child.on('error', (err) => finish(() => reject(err), true));
-      child.on('close', (code) => finish(() => resolve({ code: code ?? 1, stderr }), code !== 0));
+      child.on('error', (err) => finish({ code: -1, signalled: false, error: err }, true));
+      child.on('close', (code, signal) => finish({ code: code ?? 1, signalled: code === null && signal !== null }, code !== 0));
     });
   }
 
@@ -1517,15 +1768,11 @@ export class LocalDockerProvider implements RuntimeProvider {
         `mkdir -p ${dir} && tar xz --no-same-owner -C ${dir} && ` +
           `chown -R 1000:1000 /vol/.openclaw && chmod -R a-s /vol/.openclaw`,
       ]));
-      this.#oneShotExit(child, ioName).then(({ code, stderr }) =>
-        code === 0
-          ? resolve()
-          : reject(
-              new ProviderError(
-                `workspace import failed (${code}): ${stderr.slice(-500)}`,
-                "Couldn't copy the agent's files into its new home.",
-              ),
-            ), reject);
+      this.#oneShotExit(child, ioName).then((end) => {
+        if (end.error === undefined && end.code === 0) { resolve(); return; }
+        const err = end.error ?? new ProviderError(`workspace import failed (${end.code}): ${end.stderr.slice(-500)}`, "Couldn't copy the agent's files into its new home.");
+        reject(end.settled?.notWriting === false ? notGoneError(err, ioName) : err);
+      }, reject);
       // Same EPIPE race as #runStdin: if the child exits before draining stdin
       // (a corrupt archive fails `gzip -t` early, docker refuses to start), the
       // write emits an unhandled stream error and takes the PROCESS down. The

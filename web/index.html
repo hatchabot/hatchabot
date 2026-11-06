@@ -1205,7 +1205,7 @@
       <button type="button" onclick="downloadRecoveryCode()">Download</button>
     </span>
     <label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="recoverySaved" onchange="$('recoveryDone').disabled = !this.checked"> I've saved it</label>
-    <button class="primary" id="recoveryDone" disabled onclick="recoveryDlg.close()">Done</button>
+    <button class="primary" id="recoveryDone" disabled onclick="closeRecoveryCode()">Done</button>
   </div>
 </dialog>
 
@@ -1988,12 +1988,15 @@
     </div>
     <div id="acctSelf" hidden>
       <h4 style="margin:0 0 4px">Your password</h4>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-        <div><label>Current</label><input type="password" id="acctCurPw" style="width:170px" autocomplete="current-password"></div>
-        <div><label>New</label><input type="password" id="acctNewSelfPw" style="width:170px" autocomplete="new-password"></div>
-        <button onclick="changeMyPassword(this)">Change</button>
+      <div id="acctPwForm">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+          <div><label>Current</label><input type="password" id="acctCurPw" style="width:170px" autocomplete="current-password"></div>
+          <div><label>New</label><input type="password" id="acctNewSelfPw" style="width:170px" autocomplete="new-password"></div>
+          <button onclick="changeMyPassword(this)">Change</button>
+        </div>
+        <div class="sub" style="margin:6px 0 18px">Changing it signs this account out everywhere else.</div>
       </div>
-      <div class="sub" style="margin:6px 0 18px">Changing it signs this account out everywhere else.</div>
+      <div id="acctPwRefused" class="sub" hidden style="margin:0 0 18px"></div>
       <h4 style="margin:0 0 4px">Recovery code</h4>
       <div class="sub" id="recoveryStatus" style="margin-bottom:6px">Loading…</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
@@ -2614,7 +2617,7 @@
 
 <dialog id="tryDlg" style="width:min(640px,96vw)">
   <h3 style="margin:0 0 4px">Try <span id="tryTag"></span> on…</h3>
-  <div class="sub" style="margin-bottom:10px"><code id="tryTagFull"></code> — pick the agents to pin to this image. Each one rebuilds (memory kept) and stays on it until you discard the trial; every other agent keeps the fleet default.</div>
+  <div class="sub" style="margin-bottom:10px"><code id="tryTagFull"></code> — pick the agents to pin to this image. Running ones rebuild now (memory kept); stopped and sleeping ones stay that way and move onto it when they next start. Each stays on it until you discard the trial; every other agent keeps the fleet default.</div>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
     <input type="search" id="tryFilter" placeholder="Filter by name or group" oninput="renderTryList()" style="flex:1;min-width:0">
     <button onclick="tryPickAll(true)">All</button>
@@ -2864,7 +2867,8 @@ const api = async (path, opts = {}) => {
   if (res.status === 401 && (data.secondFactor === 'required' || data.secondFactor === 'step-up')
       && !_afterSecondFactor && !path.startsWith('/v1/second-factor/verify') && !path.startsWith('/v1/second-factor/challenge')) {
     await askSecondFactor(data.secondFactor);
-    return api(path, { ...opts, _afterSecondFactor: true });
+    // What it was asked for is under way until it answers: new codes, a new recovery code (HB-0491).
+    return pageHold(() => api(path, { ...opts, _afterSecondFactor: true }));
   }
   // Everyone is asked for a second factor here and this person has none yet:
   // take them to where one is added (once; the calls behind it just fail).
@@ -2919,14 +2923,19 @@ function sfShowBlock(text) {
   el.innerHTML = `<div>🔐 ${esc(text)}</div><div style="margin-top:8px"><button onclick="signOut()">Sign out</button></div>`;
 }
 
-/** One prompt at a time: every request that needs the second factor waits on the same one. */
+/**
+ * One prompt at a time: every request that needs the second factor waits on the same one. It belongs to the
+ * session and the person it was raised for: when the session ends, or the page reads someone else, it is answered
+ * "not given", so no request of one person's is sent again under the next one's session.
+ */
 let sfPending = null;
 function askSecondFactor(kind) {
-  if (sfPending) return sfPending.promise;
+  // Still waiting for an answer: the same prompt, shown again if something took it off the screen.
+  if (sfPending) { if (!sfDlg.open) sfDlg.showModal(); return sfPending.promise; }
   let resolve, reject;
   const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
-  sfPending = { promise, resolve, reject, kind };
-  promise.then(() => { sfPending = null; }, () => { sfPending = null; });
+  sfPending = { promise, resolve, reject, kind, for: pagePersonAway ? '' : (pagePerson || '') };
+  promise.then(() => { if (sfPending?.promise === promise) sfPending = null; }, () => { if (sfPending?.promise === promise) sfPending = null; });
   $('sfDlgTitle').textContent = kind === 'step-up' ? 'Confirm it is you' : 'One more step';
   $('sfDlgLede').textContent = kind === 'step-up'
     ? 'This changes something sensitive, and you are at the public address: give your second factor again.'
@@ -2945,7 +2954,39 @@ function askSecondFactor(kind) {
   }).catch(() => {});
   return promise;
 }
-function sfDone() { if (sfDlg.open) sfDlg.close(); sfPending?.resolve(); }
+/** The prompt answered "not given" without signing anyone out: its session is over, or the page is someone else's now. */
+function sfDrop() {
+  const was = sfPending;
+  if (!was) return;
+  sfPending = null;
+  if (sfDlg.open) sfDlg.close();
+  was.reject(Object.assign(new Error('The second factor was not given.'), { status: 401 }));
+}
+async function sfDone() {
+  const was = sfPending;
+  if (!was) { if (sfDlg.open) sfDlg.close(); return; }
+  // Raised for someone this page knew: the request goes again only under their session. Another tab or window may
+  // have signed in as someone else meanwhile, and the factor just given was theirs. Read who the session is first;
+  // anyone else, or no answer, and the request is answered "not given", not sent (review of HB-0491).
+  if (was.for) {
+    $('sfCodeBtn').disabled = true;
+    let who = '';
+    try { who = (await api('/v1/account', { _afterSecondFactor: true }))?.ownerId || ''; } catch { /* not known: not sent */ }
+    finally { $('sfCodeBtn').disabled = false; }
+    if (sfPending !== was) return; // answered meanwhile (the session ended)
+    if (who !== was.for) {
+      sfDrop();
+      if (who) pagePersonIs(who);
+      if (who && was.kind === 'required' && !pageSignIns) void pageSigningIn(() => pageSignedIn()); // a sign-in, finished here
+      return;
+    }
+  }
+  if (sfDlg.open) sfDlg.close();
+  was.resolve();
+  // Signed in through a prompt that no sign-in form raised (another tab signed in, and this page's poll was asked):
+  // the sign-in finishes here, so who it is is read and the page is cleared for them, as a sign-in form does.
+  if (was.kind === 'required' && pagePersonAway && !pageSignIns) void pageSigningIn(() => pageSignedIn());
+}
 /**
  * fetch() for what api() cannot carry (a file up or down), with api()'s
  * second-factor prompt: a 401 asking for it is asked, then the request made
@@ -2960,7 +3001,7 @@ async function sfFetch(url, init) {
   const data = await res.clone().json().catch(() => ({}));
   if (data.secondFactor !== 'required' && data.secondFactor !== 'step-up') return res;
   await askSecondFactor(data.secondFactor);
-  return fetch(url, init);
+  return pageHold(() => fetch(url, init));
 }
 /** A step-up download link (a folder's .tar.gz): at the public address it is fetched through sfFetch, so the second factor is asked instead of a page of raw JSON; elsewhere the link streams as before. */
 function sfLink(ev, el, fallbackName) {
@@ -2989,6 +3030,7 @@ async function sfCancel() {
   const kind = sfPending?.kind;
   if (sfDlg.open) sfDlg.close();
   sfPending?.reject(Object.assign(new Error('The second factor was not given.'), { status: 401 })); // refused, as a 401 is: the request never went on
+  pageReloadWhenQuiet();
   // At sign-in there is nothing to use without it: back to the sign-in screen, signed out.
   if (kind === 'required') {
     try { await fetch('/v1/logout', { method: 'POST' }); } catch { /* the screen is shown either way */ }
@@ -2999,7 +3041,7 @@ async function sfSubmitCode() {
   const code = $('sfCode').value.trim();
   if (!code) return;
   $('sfCodeBtn').disabled = true; $('sfErr').textContent = '';
-  try { await api('/v1/second-factor/verify', { method: 'POST', body: { code } }); sfDone(); }
+  try { await api('/v1/second-factor/verify', { method: 'POST', body: { code } }); await sfDone(); }
   catch (e) { $('sfErr').textContent = e.message; $('sfCode').select(); }
   finally { $('sfCodeBtn').disabled = false; }
 }
@@ -3015,17 +3057,23 @@ async function sfUsePasskey() {
       id: bufToB64u(cred.rawId), clientDataJSON: bufToB64u(cred.response.clientDataJSON),
       authenticatorData: bufToB64u(cred.response.authenticatorData), signature: bufToB64u(cred.response.signature),
     } } });
-    sfDone();
+    await sfDone();
   } catch (e) { $('sfErr').textContent = e.name === 'NotAllowedError' ? 'The passkey was not used. Try again, or type a code.' : e.message; }
   finally { $('sfPasskeyBtn').disabled = false; }
 }
 
-/** Shows the codes once; resolves when the person has pressed Done. (Not the dialog's close event: it can arrive much later.) */
+/**
+ * Shows the codes once; resolves when the person has pressed Done. (Not the dialog's close event: it can arrive much later.)
+ * `ownerId`: whose they are, as the server said; a session that ends meanwhile keeps them for that person (pageSecretShown).
+ */
 let backupResolve = null;
-function showBackupCodes(codes) {
+function showBackupCodes(codes, ownerId) {
+  if (pageSignedOut) return pageSecretLater(ownerId, () => showBackupCodes(codes, ownerId));
+  if (pageSecretNotHere(ownerId)) return Promise.resolve();
   $('backupCodes').textContent = codes.join('\n');
   $('backupSaved').checked = false; $('backupDone').disabled = true;
   backupDlg.showModal();
+  pageSecretShown(backupDlg, ownerId);
   return new Promise((res) => { backupResolve = res; });
 }
 function closeBackupCodes() {
@@ -3034,6 +3082,7 @@ function closeBackupCodes() {
   if (backupDlg.open) backupDlg.close();
   const done = backupResolve; backupResolve = null;
   done?.();
+  pageReloadWhenQuiet(); // one waiting for these (HB-0491); not on the close event, which can come much later
 }
 function downloadBackupCodes() {
   const a = document.createElement('a');
@@ -3053,6 +3102,10 @@ async function loadSecondFactor() {
   try { st = await api('/v1/second-factor'); } catch { box.hidden = true; return; }
   sfState = st;
   box.hidden = false;
+  // At the public address with no second factor, a password change is refused (HB-0453): say so instead of offering the form.
+  $('acctPwForm').hidden = !!st.passwordRefused;
+  $('acctPwRefused').hidden = !st.passwordRefused;
+  $('acctPwRefused').textContent = st.passwordRefused || '';
   $('sfPwRow').hidden = !st.localAccount || (st.publicAddress && st.factors.length > 0);
   $('sfBackupBtn').hidden = st.factors.length === 0;
   $('sfStatus').innerHTML = st.hidden
@@ -3081,7 +3134,7 @@ function sfFail(e) { $('sfBoxErr').textContent = e.message === 'The second facto
 async function sfAfterChange(r) {
   $('sfCurPw').value = ''; $('sfBoxErr').textContent = '';
   if (r && r.backupCodes) {
-    await showBackupCodes(r.backupCodes);
+    await showBackupCodes(r.backupCodes, r.ownerId);
   }
   await loadSecondFactor();
   if (!$('reachBox').hidden) void loadReach();
@@ -3089,7 +3142,7 @@ async function sfAfterChange(r) {
 async function sfStartTotp(btn) {
   btn.disabled = true; $('sfBoxErr').textContent = '';
   try {
-    const r = await api('/v1/second-factor/totp', { method: 'POST', body: sfProof() });
+    const r = await pageHold(() => api('/v1/second-factor/totp', { method: 'POST', body: sfProof() }));
     $('sfTotpBox').hidden = false;
     $('sfTotpBox').dataset.id = r.id;
     // The server's own SVG (the qrcode library's output): an image, never markup from a person.
@@ -3103,11 +3156,12 @@ async function sfStartTotp(btn) {
 function sfCloseTotp() {
   $('sfTotpBox').hidden = true; delete $('sfTotpBox').dataset.id;
   $('sfTotpQr').innerHTML = ''; $('sfTotpSecret').textContent = ''; $('sfTotpCode').value = '';
+  pageReloadWhenQuiet(); // one waiting for this setup (HB-0491)
 }
 async function sfConfirmTotp() {
   $('sfTotpConfirmBtn').disabled = true;
   try {
-    const r = await api('/v1/second-factor/totp/confirm', { method: 'POST', body: { id: $('sfTotpBox').dataset.id, code: $('sfTotpCode').value.trim() } });
+    const r = await pageHold(() => api('/v1/second-factor/totp/confirm', { method: 'POST', body: { id: $('sfTotpBox').dataset.id, code: $('sfTotpCode').value.trim() } }));
     sfCloseTotp();
     toast('Authenticator app added');
     await sfAfterChange(r);
@@ -3122,18 +3176,21 @@ async function sfConfirmTotp() {
 async function sfAddPasskey(btn) {
   btn.disabled = true; $('sfBoxErr').textContent = '';
   try {
-    const o = await api('/v1/second-factor/passkey/options', { method: 'POST', body: sfProof() });
-    const cred = await navigator.credentials.create({ publicKey: {
-      challenge: b64uToBuf(o.challenge), rp: o.rp,
-      user: { id: b64uToBuf(o.user.id), name: o.user.name, displayName: o.user.displayName },
-      pubKeyCredParams: o.pubKeyCredParams, timeout: o.timeout, attestation: o.attestation,
-      authenticatorSelection: o.authenticatorSelection,
-      excludeCredentials: o.excludeCredentials.map((c) => ({ type: 'public-key', id: b64uToBuf(c.id) })),
-    } });
-    const label = (navigator.userAgentData?.platform || navigator.platform || 'Passkey').slice(0, 40);
-    const r = await api('/v1/second-factor/passkey', { method: 'POST', body: {
-      label, clientDataJSON: bufToB64u(cred.response.clientDataJSON), attestationObject: bufToB64u(cred.response.attestationObject),
-    } });
+    // Held while the passkey is being made, not while its codes are read: the open codes hold it then (HB-0491).
+    const r = await pageHold(async () => {
+      const o = await api('/v1/second-factor/passkey/options', { method: 'POST', body: sfProof() });
+      const cred = await navigator.credentials.create({ publicKey: {
+        challenge: b64uToBuf(o.challenge), rp: o.rp,
+        user: { id: b64uToBuf(o.user.id), name: o.user.name, displayName: o.user.displayName },
+        pubKeyCredParams: o.pubKeyCredParams, timeout: o.timeout, attestation: o.attestation,
+        authenticatorSelection: o.authenticatorSelection,
+        excludeCredentials: o.excludeCredentials.map((c) => ({ type: 'public-key', id: b64uToBuf(c.id) })),
+      } });
+      const label = (navigator.userAgentData?.platform || navigator.platform || 'Passkey').slice(0, 40);
+      return api('/v1/second-factor/passkey', { method: 'POST', body: {
+        label, clientDataJSON: bufToB64u(cred.response.clientDataJSON), attestationObject: bufToB64u(cred.response.attestationObject),
+      } });
+    });
     toast('Passkey added');
     await sfAfterChange(r);
   } catch (e) { sfFail(e.name === 'NotAllowedError' ? new Error('The passkey was not made (cancelled, or it timed out).') : e.name === 'InvalidStateError' ? new Error('This device already has a passkey for this Hatchabot.') : e); }
@@ -3142,7 +3199,7 @@ async function sfAddPasskey(btn) {
 async function sfNewBackupCodes(btn) {
   if (!confirm('Make new backup codes? The old ones stop working.')) return;
   btn.disabled = true;
-  try { await sfAfterChange(await api('/v1/second-factor/backup-codes', { method: 'POST', body: sfProof() })); }
+  try { await sfAfterChange(await pageHold(() => api('/v1/second-factor/backup-codes', { method: 'POST', body: sfProof() }))); }
   catch (e) { sfFail(e); }
   finally { btn.disabled = false; }
 }
@@ -3405,6 +3462,8 @@ function friendlyIdpError(code) {
 
 /** Trade a verified Identity Platform token for a Hatchabot session. */
 async function startSession(idToken) {
+  pageSignIns++; // through to the end of pageSignedIn, a reload for another account waits (HB-0491)
+  try {
   const out = await api('/v1/session', { method: 'POST', body: { idToken } });
   // The cookie only carries the subject — remember the email locally so the
   // header can say WHO this browser is signed in as (all tabs share it).
@@ -3412,6 +3471,7 @@ async function startSession(idToken) {
   loginDlg.close();
   $('loginIdPw').value = '';
   await pageSignedIn();
+  } finally { pageSignInEnded(); }
 }
 
 async function signOut() {
@@ -3576,15 +3636,15 @@ async function loadClaim(code) {
 async function acctClaim() {
   const code = new URLSearchParams(location.search).get('claim');
   $('claimBtn').disabled = true;
+  pageSignIns++; // through to the end of pageSignedIn, a reload for another account waits (HB-0491)
   try {
     const r = await api('/v1/local-accounts/claim', { method: 'POST', body: { code, password: $('claimPw').value } });
     await rememberPassword(r.username, $('claimPw').value);
     history.replaceState(null, '', location.pathname);   // the code is spent
     loginDlg.close(); $('claimPw').value = '';
-    await loadConfig(); await pageSignedIn();
-    if (r.recoveryCode) showRecoveryCode(r.recoveryCode); // the owner, arriving from a command-line setup
+    await loadConfig(); await pageSignedIn(r.recoveryCode ? () => showRecoveryCode(r.recoveryCode, '', r.id, { here: true }) : undefined); // the owner, arriving from a command-line setup
   } catch (e) { $('loginErr').textContent = e.message; }
-  finally { $('claimBtn').disabled = false; }
+  finally { $('claimBtn').disabled = false; pageSignInEnded(); }
 }
 
 /** Offer the browser's password manager the credential explicitly: a dialog
@@ -3600,28 +3660,29 @@ async function rememberPassword(id, password) {
 /** Accounts mode: username + password against this installation's own list. */
 async function acctSignIn() {
   $('acctLoginBtn').disabled = true;
+  pageSignIns++; // through to the end of pageSignedIn, a reload for another account waits (HB-0491)
   try {
     await api('/v1/login', { method: 'POST', body: { username: $('loginUser').value.trim(), password: $('loginAcctPw').value } });
     await rememberPassword($('loginUser').value.trim(), $('loginAcctPw').value);
     loginDlg.close(); $('loginAcctPw').value = '';
     await loadConfig(); await pageSignedIn();
   } catch (e) { $('loginErr').textContent = e.message === 'auth required' ? 'Wrong username or password' : e.message; }
-  finally { $('acctLoginBtn').disabled = false; }
+  finally { $('acctLoginBtn').disabled = false; pageSignInEnded(); }
 }
 
 /** First run: create account #1, which adopts anything a password-mode
  *  installation already owned. */
 async function acctBootstrap() {
   $('setupBtn').disabled = true;
+  pageSignIns++; // through to the end of pageSignedIn, a reload for another account waits (HB-0491)
   try {
     const r = await api('/v1/local-accounts/bootstrap', { method: 'POST', body: { username: $('setupUser').value.trim(), password: $('setupPw').value, setupCode: $('setupCode').value.trim() || undefined } });
     await rememberPassword($('setupUser').value.trim(), $('setupPw').value);
     loginDlg.close(); $('setupPw').value = '';
     if (r.adopted) toast(`Account created — it adopted ${r.adopted} existing record${r.adopted === 1 ? '' : 's'}.`);
-    await loadConfig(); await pageSignedIn();
-    if (r.recoveryCode) showRecoveryCode(r.recoveryCode);
+    await loadConfig(); await pageSignedIn(r.recoveryCode ? () => showRecoveryCode(r.recoveryCode, '', r.id, { here: true }) : undefined);
   } catch (e) { $('loginErr').textContent = e.message; }
-  finally { $('setupBtn').disabled = false; }
+  finally { $('setupBtn').disabled = false; pageSignInEnded(); }
 }
 
 /** Accounts mode only: the roster (host owner) and your own password. */
@@ -3669,7 +3730,7 @@ async function turnOnFamilyAccounts(btn) {
     const r = await api('/v1/auth/family-accounts', { method: 'POST', body: { username, password } });
     // The recovery code first, shown once — the restart below reloads the page.
     if (r.recoveryCode) {
-      await new Promise(res => { recoveryDlg.addEventListener('close', res, { once: true }); showRecoveryCode(r.recoveryCode, 'Your recovery code. You own this machine, so nobody can send you a reset link: this code is how you get back in if you forget your password. Save it somewhere safe — it is shown only now.'); });
+      await showRecoveryCode(r.recoveryCode, 'Your recovery code. You own this machine, so nobody can send you a reset link: this code is how you get back in if you forget your password. Save it somewhere safe — it is shown only now.', r.ownerId, { here: true });
     }
     if (!r.restarting) {
       $('famErr').innerHTML = 'Done — now restart Hatchabot (<code>./scripts/restart.sh</code>) and sign in as <b>' + esc(username) + '</b>.';
@@ -3767,18 +3828,48 @@ document.addEventListener('DOMContentLoaded', () => {
   // Status, Bulk actions, Settings and New live in the header (Chris, 2026-09-26).
   const acts = $('v2HubActions'), acct = document.querySelector('#v2Header .v2acct');
   if (acts && acct) acct.parentNode.insertBefore(acts, acct);
-  $('recoveryDlg')?.addEventListener('cancel', (e) => { if (!$('recoverySaved').checked) e.preventDefault(); });
-  // Esc is stopped at the key as well: a browser lets a second Esc past a refused 'cancel'.
-  $('recoveryDlg')?.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('recoverySaved').checked) e.preventDefault(); });
-});
-function showRecoveryCode(code, lede) {
+  $('recoveryDlg')?.addEventListener('cancel', (e) => { e.preventDefault(); if ($('recoverySaved').checked) closeRecoveryCode(); });
+  // Esc is stopped at the key as well: a browser lets a second Esc past a refused 'cancel'. On the document, first,
+  // so an Esc whose target is outside the dialog (the page behind, the body) is stopped too.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (sfDlg.open || (recoveryDlg.open && !$('recoverySaved').checked) || (backupDlg.open && !$('backupSaved').checked)) e.preventDefault();
+  }, true);
   // Gone from the page when the dialog closes: a one-time code must not sit in the DOM for the next person at the keyboard.
-  recoveryDlg.addEventListener('close', () => { $('recoveryCode').textContent = ''; }, { once: true });
+  // (Not when it is open again by then: the event comes a task after the close, and a code put away can be back.)
+  $('recoveryDlg')?.addEventListener('close', recoveryCodeClosed);
+  // Backup codes, the same way: not before "I've saved them". After it, a click outside or Esc is Done, so they
+  // leave the page and what waits on them goes on (a bare close left both, and a passkey's setup waiting for ever).
+  $('backupDlg')?.addEventListener('cancel', (e) => { e.preventDefault(); if ($('backupSaved').checked) closeBackupCodes(); });
+  // The second-factor prompt goes only by its own buttons: closed any other way, its request waited for ever, and so did every later prompt.
+  $('sfDlg')?.addEventListener('cancel', (e) => e.preventDefault());
+  // Closed anyway (a browser that lets a second Esc through) while its request still waits: shown again.
+  $('sfDlg')?.addEventListener('close', () => { if (sfPending && !sfDlg.open) sfDlg.showModal(); });
+});
+function closeRecoveryCode() { recoveryDlg.close(); recoveryCodeClosed(); }
+function recoveryCodeClosed() {
+  if (recoveryDlg.open) return;
+  $('recoveryCode').textContent = '';
+  const done = recoveryResolve; recoveryResolve = null;
+  done?.();
+  pageReloadWhenQuiet(); // one waiting for it (HB-0491)
+}
+/**
+ * Shows the code once; resolves when it is closed. `ownerId`: whose it is, when the server said (pageSecretShown).
+ * `here`: for whoever is at this page now, whatever the page last read or could not read: what their own sign-in brought,
+ * or the shared password's owner becoming an account.
+ */
+let recoveryResolve = null;
+function showRecoveryCode(code, lede, ownerId, { here = false } = {}) {
+  if (!here && pageSignedOut) return pageSecretLater(ownerId, () => showRecoveryCode(code, lede, ownerId));
+  if (!here && pageSecretNotHere(ownerId)) return Promise.resolve();
   $('recoveryCode').textContent = code;
   if (lede) $('recoveryLede').innerHTML = lede;
   $('recoverySaved').checked = false;
   $('recoveryDone').disabled = true;
   recoveryDlg.showModal();
+  pageSecretShown(recoveryDlg, ownerId);
+  return new Promise((res) => { recoveryResolve = res; });
 }
 function downloadRecoveryCode() {
   const who = ($('recUser').value || $('setupUser').value || '').trim();
@@ -3793,9 +3884,9 @@ function downloadRecoveryCode() {
 async function newRecoveryCode(btn) {
   btn.disabled = true;
   try {
-    const r = await api('/v1/local-accounts/me/recovery-code', { method: 'POST', body: { current: $('recCurPw').value } });
+    const r = await pageHold(() => api('/v1/local-accounts/me/recovery-code', { method: 'POST', body: { current: $('recCurPw').value } }));
     $('recCurPw').value = '';
-    showRecoveryCode(r.recoveryCode);
+    showRecoveryCode(r.recoveryCode, '', r.ownerId);
     renderRecoveryStatus(new Date().toISOString());
   } catch (e) { toast(e.message); }
   finally { btn.disabled = false; }
@@ -3821,14 +3912,15 @@ function hideRecoverForm() {
 }
 async function acctRecover() {
   $('recBtn').disabled = true;
+  pageSignIns++; // through to the end of pageSignedIn, a reload for another account waits (HB-0491)
   try {
     const r = await api('/v1/local-accounts/recover-with-code', { method: 'POST', body: { username: $('recUser').value.trim(), code: $('recCode').value, password: $('recPw').value } });
     await rememberPassword(r.username, $('recPw').value);
     loginDlg.close(); $('recPw').value = ''; $('recCode').value = ''; hideRecoverForm();
-    await loadConfig(); await pageSignedIn();
-    showRecoveryCode(r.recoveryCode, '<b>You are back in.</b> Your old code is used up — this is your new one. Save it somewhere safe, away from this computer.');
+    await loadConfig();
+    await pageSignedIn(() => showRecoveryCode(r.recoveryCode, '<b>You are back in.</b> Your old code is used up — this is your new one. Save it somewhere safe, away from this computer.', r.ownerId, { here: true }));
   } catch (e) { $('loginErr').textContent = e.message; }
-  finally { $('recBtn').disabled = false; }
+  finally { $('recBtn').disabled = false; pageSignInEnded(); }
 }
 
 async function changeMyPassword(btn) {
@@ -3843,12 +3935,13 @@ async function changeMyPassword(btn) {
 
 async function doLogin() {
   $('loginBtn').disabled = true;
+  pageSignIns++; // through to the end of pageSignedIn, a reload for another account waits (HB-0491)
   try {
     await api('/v1/login', { method: 'POST', body: { password: $('loginPw').value } });
     loginDlg.close(); $('loginPw').value = '';
     await pageSignedIn();
   } catch (e) { $('loginErr').textContent = e.message === 'auth required' ? 'Wrong password' : e.message; }
-  finally { $('loginBtn').disabled = false; }
+  finally { $('loginBtn').disabled = false; pageSignInEnded(); }
 }
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' || !loginDlg.open) return;
@@ -4553,7 +4646,15 @@ const SEARCH_NAMES = { brave: 'Brave', duckduckgo: 'DuckDuckGo' };
 function renderSearchHealth(s) {
   const row = (p) => p ? `<div>${p.status === 'ok' ? '✓' : '⚠'} ${esc(p.detail)}</div>` : '';
   const when = (t) => t ? new Date(t).toLocaleString() : '';
-  $('searchHealth').innerHTML = `<div style="font-size:14px">In use: <b>${esc(SEARCH_NAMES[s.active] || s.active)}</b>${s.why ? ` — ${esc(s.why)}` : ''}</div>
+  // DuckDuckGo turning this machine away (HB-0455): there is no free search here, so say what that means for the fleet.
+  const away = s.duckduckgo?.status === 'turned-away';
+  const awayLine = !away ? ''
+    : s.active === 'duckduckgo'
+      ? `<div id="searchTurnedAway" style="font-size:14px;color:var(--warn);margin-top:4px">⚠ <b>Agents have no working web search.</b> This machine gets no free search from DuckDuckGo, so a Brave key is needed${s.brave?.status === 'ok' ? ': yours works, so choose "Brave, and DuckDuckGo when it runs out" below.' : ', with quota left. Paste one above.'}</div>`
+      : s.brave?.status === 'low'
+        ? '<div id="searchTurnedAway" style="font-size:14px;color:var(--warn);margin-top:4px">⚠ <b>The Brave key is nearly out</b>, and this machine gets no free search from DuckDuckGo: agents stay on Brave until it runs out, and then have no search. Replace the key above, or wait for its quota to return.</div>'
+        : '<div id="searchTurnedAway" style="margin-top:4px">⚠ This machine gets no free search from DuckDuckGo, so agents stay on Brave even when it runs low, and have no search once its key runs out.</div>';
+  $('searchHealth').innerHTML = `<div style="font-size:14px">In use: <b>${esc(SEARCH_NAMES[s.active] || s.active)}</b>${s.why ? ` — ${esc(s.why)}` : ''}</div>${awayLine}
     <div class="sub">${row(s.brave)}${row(s.duckduckgo)}
     ${s.checkedAt ? `<div>Checked ${esc(when(s.checkedAt))}${s.brave?.resetsAt && s.active !== 'brave' ? `; Brave's quota returns about ${esc(when(s.brave.resetsAt))}` : ''}.</div>` : '<div>Not checked yet.</div>'}
     ${s.moving ? '<div>Agents are moving now.</div>' : ''}
@@ -6376,7 +6477,7 @@ function renderRuntimeList() {
       : t.relation === 'newer' ? '<b>candidate</b><div class="sub">newer than the default</div>'
       : t.relation === 'older' ? 'older build<div class="sub">a previous default</div>'
       : t.exists ? 'candidate' : '<b>not built</b><div class="sub">on this machine</div>';
-    const pins = t.pinned.map(a => `<span class="chip" title="${esc(a.state)}">${a.mine ? '' : '👥 '}${a.state === 'REBUILDING' ? '↻ rebuilding · ' : ''}${esc(a.name)}${a.state === 'ARCHIVED' ? ' · archived' : ''}${a.runner ? ` · on ${esc(a.runner)}` : ''}${a.mine && a.state !== 'ARCHIVED' ? ` <a href="#" title="Discard the trial: unpin and rebuild on the fleet default" onclick="event.preventDefault();discardTrial('${a.id}','${jsq(a.name)}')">✕</a>` : ''}</span>`).join(' ');
+    const pins = t.pinned.map(a => `<span class="chip" title="${esc(a.state)}">${a.mine ? '' : '👥 '}${a.state === 'REBUILDING' ? '↻ rebuilding · ' : ''}${esc(a.name)}${a.state === 'ARCHIVED' ? ' · archived' : ''}${a.runner ? ` · on ${esc(a.runner)}` : ''}${a.mine && a.state !== 'ARCHIVED' ? ` <a href="#" title="Discard the trial: unpin it and put it back on the fleet default (rebuilt now if running; a stopped one moves when it next starts)" onclick="event.preventDefault();discardTrial('${a.id}','${jsq(a.name)}')">✕</a>` : ''}</span>`).join(' ');
     const cls = t.classes.map(c => `<span class="chip">${c.mine === false ? '👥 ' : ''}🏷 ${esc(c.name)}</span>`).join(' ');
     // Pins and classes have their chips above; these are the rest of what blocks a delete.
     const blockers = t.blockers ?? [];
@@ -6490,36 +6591,75 @@ async function runTryOnAgents() {
   const ids = [...tryState.picked];
   const names = ids.map(id => agents.find(a => a.id === id)?.name).filter(Boolean);
   const shown = names.slice(0, 12).join(', ') + (names.length > 12 ? `, and ${names.length - 12} more` : '');
-  if (!confirm(`Pin ${ids.length} agent${ids.length === 1 ? '' : 's'} to ${tag} and rebuild ${ids.length === 1 ? 'it' : 'them'} now?\n\n${shown}\n\nChat → Memory runs first; memory is kept. Discard a trial later with ✕ next to the agent's name.`)) return;
+  // As the manager's try does (HB-0469): a rebuild ends RUNNING, so only a running
+  // agent rebuilds now. A stopped or sleeping one stays so; the pin is kept for
+  // its next start, which is the rebuild (the PATCH marks it, HB-0441).
+  const up = ids.filter(id => agents.find(a => a.id === id)?.state === 'RUNNING').length, down = ids.length - up;
+  const what = [
+    up ? `${up === ids.length ? (up === 1 ? 'It rebuilds' : 'They rebuild') : `The ${up} running rebuild`} now: Chat → Memory runs first, and memory is kept.` : '',
+    down ? `${down === ids.length ? (down === 1 ? 'It is' : 'They are') : `The ${down} other${down === 1 ? ' is' : 's are'}`} not running, so ${down === 1 ? 'it stays' : 'they stay'} that way and ${down === 1 ? 'moves' : 'move'} onto it when ${down === 1 ? 'it next starts' : 'each next starts'}.` : '',
+  ].filter(Boolean).join(' ');
+  if (!confirm(`Pin ${ids.length} agent${ids.length === 1 ? '' : 's'} to ${tag}?\n\n${shown}\n\n${what} Discard a trial later with ✕ next to the agent's name.`)) return;
   $('tryBtn').disabled = true;
   const failed = [];
-  let ok = 0;
+  let rebuilding = 0, waiting = 0, same = 0, held = 0;
   for (const id of ids) {
-    const name = agents.find(a => a.id === id)?.name ?? id;
+    const a = agents.find(x => x.id === id);
+    const name = a?.name ?? id;
+    let r;
+    try { r = await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image: tag } }); }
+    catch (e) { failed.push(`${name}: not pinned: ${e.message}`); continue; }
+    if (r?.sameImage) { same++; continue; }
     try {
-      await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image: tag } });
-      // The confirm promises Chat → Memory first: the rebuild asks for it (a stopped agent has no chat to save; the server skips it).
-      await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: { checkpoint: true } });
-      ok++;
-    } catch (e) { failed.push(`${name}: ${e.message}`); }
+      // Always asked, whatever the page last saw: the server rebuilds a running
+      // agent and keeps it for a stopped one's next start (stoppedWaits). The
+      // page's view is old: one it lists as asleep may have been woken since,
+      // and skipping it left it on the old image (review of HB-0469). The
+      // confirm promises Chat → Memory first: the rebuild asks for it.
+      const r2 = await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: { checkpoint: true, stoppedWaits: true } });
+      if (r2?.atNextStart) waiting++; else rebuilding++;
+    } catch (e) {
+      // The pin is saved: say so, not "failed" (a stopped one still moves at its next start).
+      held++;
+      failed.push(`${name}: pinned, but not rebuilt yet: ${e.message}${a?.state === 'RUNNING' ? '' : ' It moves onto it when it next starts.'}`);
+    }
   }
   if (failed.length) $('tryErr').innerHTML = failed.map(esc).join('<br>');
   else tryDlg.close();
   updateTryBtn();
-  if (ok) {
-    toast(`${ok} agent${ok === 1 ? '' : 's'} rebuilding on ${tag}${ok > 1 ? ' (a few at a time)' : ''}. The spinning ring on the home screen clears when each is back.`, 9000);
-  }
+  const said = [
+    rebuilding ? `${rebuilding} agent${rebuilding === 1 ? '' : 's'} rebuilding on ${tag}${rebuilding > 1 ? ' (a few at a time)' : ''}. The spinning ring on the home screen clears when each is back.` : '',
+    waiting ? `${waiting} not running: ${waiting === 1 ? 'it stays' : 'they stay'} that way and ${waiting === 1 ? 'moves' : 'move'} onto ${tag} when ${waiting === 1 ? 'it next starts' : 'each next starts'}.` : '',
+    same ? `${same} already ${same === 1 ? 'runs' : 'run'} that image, so no rebuild.` : '',
+    held ? `${held} pinned, but not rebuilt yet (the reason is in the list).` : '',
+  ].filter(Boolean).join(' ');
+  if (said) toast(said, 9000);
   await refresh(false); await loadRuntimeImages();
 }
 
 async function discardTrial(id, name) {
-  if (!confirm(`Discard the trial: return "${name}" to the fleet default image and rebuild it now?`)) return;
+  // As the manager's end of a trial does (HB-0469): only a running agent rebuilds now.
+  // The page's view words the question; the server's answer says what happened.
+  const running = (agents.find(a => a.id === id) ?? rtData?.tags.flatMap(t => t.pinned).find(p => p.id === id))?.state === 'RUNNING';
+  if (!confirm(running
+    ? `Discard the trial: return "${name}" to the fleet default image and rebuild it now?`
+    : `Discard the trial: return "${name}" to the fleet default image?\n\nIt is not running, so it stays that way and moves onto the fleet default when it next starts.`)) return;
+  let r;
+  try { r = await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image: null } }); }
+  catch (e) { $('rtErr').textContent = e.message; return; }
   try {
-    const r = await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image: null } });
     if (r.sameImage) toast(`"${name}" is unpinned — it already runs the fleet default, so no rebuild.`, 6000);
-    else { await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} }); toast(`"${name}" is rebuilding on the fleet default.`, 6000); }
-    await refresh(false); await loadRuntimeImages();
-  } catch (e) { $('rtErr').textContent = e.message; }
+    else {
+      // The server decides, not the page's old view (as in runTryOnAgents): with
+      // the pin gone, nothing else would ever move a woken agent back.
+      const r2 = await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
+      toast(r2?.atNextStart ? `"${name}" is unpinned — it stays stopped and moves onto the fleet default when it next starts.` : `"${name}" is rebuilding on the fleet default.`, 6000);
+    }
+  } catch (e) {
+    // Unpinned all the same: say so, and show it unpinned (review of HB-0469).
+    const said = `"${name}" is unpinned, but was not rebuilt: ${e.message}${running ? '' : ' It moves onto the fleet default when it next starts.'}`;
+    $('rtErr').textContent = said; toast(said, 9000);
+  } finally { await refresh(false); await loadRuntimeImages(); }
 }
 async function promoteImage(tag) {
   if (!confirm(`Make ${tag} the fleet default?\n\nNothing restarts by itself: every agent without a pin shows "newer image available" and moves over when you rebuild it (Bulk actions → Needs rebuild).`)) return;
@@ -6811,7 +6951,7 @@ async function faApply() {
   if (action === 'checkpoint' && !confirm(`Save the conversation to memory for ${ids.length} agent${ids.length > 1 ? 's' : ''}? Runs a ~20s turn per running agent, one at a time (uses tokens).`)) return;
   $('faApplyBtn').disabled = true;
   $('faResults').innerHTML = `Working on ${ids.length}…`;
-  let ok = 0, skipped = 0, failed = 0, notSaved = 0, nothingNew = 0; const reasons = [];
+  let ok = 0, skipped = 0, failed = 0, notSaved = 0, nothingNew = 0, nextStart = 0, notRebuilt = 0; const reasons = [];
   for (const id of ids) {
     const a = agents.find(x => x.id === id);
     try {
@@ -6835,7 +6975,18 @@ async function faApply() {
       } else if (action === 'image') {
         if ((a?.image ?? null) === image) { skipped++; continue; } // already there
         const r = await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image } });
-        if (!r.sameImage && a?.state === 'RUNNING' && a.runtimeRef) await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
+        // The server decides, not the last poll (review of HB-0469): one shown asleep may be up since.
+        // One with no container yet (failed or still being made) takes the pin when it is made.
+        if (!r.sameImage && a?.runtimeRef) {
+          try {
+            const r2 = await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
+            if (r2?.atNextStart) { nextStart++; continue; }
+          } catch (e) {
+            // The pin is saved: not a failure of the pin.
+            notRebuilt++; if (reasons.length < 3) reasons.push(`${a?.name || id}: pinned, but not rebuilt yet: ${e.message}`);
+            continue;
+          }
+        }
       } else if (action === 'stop') {
         if (a?.state !== 'RUNNING') { skipped++; continue; }
         await api(`/v1/agents/${id}/stop`, { method: 'POST', body: {} });
@@ -6856,7 +7007,7 @@ async function faApply() {
   }
   $('faErr').textContent = reasons.join(' · ');
   $('faApplyBtn').disabled = false;
-  $('faResults').innerHTML = `✓ ${ok} done${skipped ? ` · ${skipped} skipped (not applicable)` : ''}${nothingNew ? ` · ${nothingNew} found nothing new to save` : ''}${notSaved ? ` · <span style="color:var(--warn)">${notSaved} not saved (AI source didn't respond)</span>` : ''}${failed ? ` · <span style="color:var(--bad)">${failed} failed</span>` : ''}.`;
+  $('faResults').innerHTML = `✓ ${ok} done${skipped ? ` · ${skipped} skipped (not applicable)` : ''}${nothingNew ? ` · ${nothingNew} found nothing new to save` : ''}${nextStart ? ` · ${nextStart} not running, so ${nextStart === 1 ? 'it moves' : 'they move'} when ${nextStart === 1 ? 'it next starts' : 'each next starts'}` : ''}${notRebuilt ? ` · <span style="color:var(--warn)">${notRebuilt} pinned, but not rebuilt yet</span>` : ''}${notSaved ? ` · <span style="color:var(--warn)">${notSaved} not saved (AI source didn't respond)</span>` : ''}${failed ? ` · <span style="color:var(--bad)">${failed} failed</span>` : ''}.`;
   await refresh(false);
   if ($('classList').childElementCount) renderClassList(); // Settings may still be open: keep its counts honest
 }
@@ -7207,7 +7358,7 @@ async function addAiProfile() {
   $('aiAddBtn').disabled = true;
   try {
     await api('/v1/ai-profiles', { method: 'POST', body });
-    $('aiName').value = ''; $('aiModel').value = ''; $('aiModelsAdd').value = ''; $('aiKey').value = '';
+    $('aiName').value = ''; $('aiModel').value = ''; $('aiModelsAdd').value = ''; $('aiKey').value = ''; $('aiToken').value = '';
     toast('AI source added');
     await refresh(true); renderAiList();
   } catch (e) { $('aiErr').textContent = e.message; }
@@ -11365,44 +11516,150 @@ function paintMachineOwnerOnly() {
  * last one's, here or in what the page held for them. Read again on each meta refresh,
  * which also catches another tab having signed in as someone else.
  */
-let pagePerson = null, pagePersonAway = false, pagePersonRead = 0, pageCleared = false;
+let pagePerson = null, pagePersonAway = false, pagePersonRead = 0, pageCleared = false, pageSignedOut = false;
 function pageSessionEnded() {
+  sfDrop(); // a request waiting on a prompt for this session is not sent under the next one
+  pageSignedOut = true;
   pagePersonAway = true; pageCleared = false;
   window.__sfEnrolShown = false; // whoever comes next is taken to add a factor if they need one
   pagePersonRead++; // a read begun in that session does not say who comes next
+  pageSecretsPutAway();
   webChatPutAway();
 }
 function pagePersonIs(ownerId) {
   if (!ownerId) return;
   const another = pagePerson ? pagePerson !== ownerId : pagePersonAway;
-  pagePerson = ownerId; pagePersonAway = false;
+  const changed = !!pagePerson && pagePerson !== ownerId; // this page showed someone else (not: it never knew who)
+  pagePerson = ownerId; pagePersonAway = false; pageSignedOut = false; // a read that works: signed in (here, or in another tab)
+  if (sfPending?.for && sfPending.for !== ownerId) sfDrop(); // raised for someone else
   const cleared = pageCleared; pageCleared = false;
-  if (!another) return;
-  webChatForget();
-  if (!cleared) pageClearLast();
+  if (another) {
+    webChatForget();
+    if (!cleared) pageClearLast(ownerId);
+  }
+  pageSecretsBack(ownerId);
+  if (changed) { pageReloadWanted = true; pageReloadWhenQuiet(); }
 }
-function pageClearLast() {
+/**
+ * Another account than the one this page showed: the page loads again, so nothing of the last person's is left in
+ * it, in a field or in what the page held for them (HB-0491). pageClearLast has already taken off what it knows of,
+ * which covers the wait. Not while a second-factor step is under way, which a reload would lose: a sign-in still
+ * finishing (and the recovery code it shows), the second-factor prompt (a passkey's included) and the request it was
+ * asked for, an authenticator app being added, a passkey being made, a request for new codes, backup codes or a
+ * recovery code on the screen or waiting for their person. Each of those asks again when it ends.
+ */
+let pageReloadWanted = false, pageReloadTimer = 0, pageSignIns = 0, pageHolds = 0;
+/** location.reload(), on its own: the click-through check cannot follow a reload, so it puts a counter here. */
+function pageReload() { location.reload(); }
+/** A sign-in form at work, from its first request to the end of pageSignedIn (with what it shows); the sign-in screen itself is loginDlg.open. */
+function pageSignInEnded() { pageSignIns--; pageReloadWhenQuiet(); }
+async function pageSigningIn(fn) { pageSignIns++; try { return await fn(); } finally { pageSignInEnded(); } }
+/** A request whose answer must be seen (new codes, a setup, a passkey being made, what a prompt was for): held until it settles. */
+async function pageHold(fn) { pageHolds++; try { return await fn(); } finally { pageHolds--; pageReloadWhenQuiet(); } }
+function pageSecondFactorBusy() {
+  return pageSignIns > 0 || pageHolds > 0 || loginDlg.open || sfDlg.open || (aiDlg.open && !$('sfTotpBox').hidden)
+    || backupDlg.open || recoveryDlg.open || pageSecretsAway.length > 0;
+}
+function pageReloadWhenQuiet() {
+  if (!pageReloadWanted || pageReloadTimer) return;
+  // A task later: what the same task goes on to open (backup codes, once an app is confirmed) is under way by then.
+  pageReloadTimer = setTimeout(() => {
+    pageReloadTimer = 0;
+    if (!pageReloadWanted || pageSecondFactorBusy()) return;
+    pageReloadWanted = false;
+    pageReload();
+  }, 0);
+}
+// Settings closed (an app's setup left open there is let go), or a dialog shut by Escape.
+document.addEventListener('DOMContentLoaded', () => {
+  for (const id of ['sfDlg', 'aiDlg']) $(id)?.addEventListener('close', () => pageReloadWhenQuiet());
+});
+/**
+ * A one-time secret on the screen, backup codes or a recovery code, is its person's to read until they say they have
+ * saved it (HB-0500). When the session ends it leaves the page, so it is not left under the sign-in for whoever is at the
+ * keyboard, and waits with whose it is. A read that names that person shows it again; a read that names anyone else, and
+ * it is gone, and what waited on it goes on. Whose: what the server said, and only that. One shown without an owner is
+ * nobody's: it is not given back to anyone (a read never claims it for whoever happens to be signed in by then).
+ */
+const pageSecretOwner = new Map();
+let pageSecretsAway = [];
+/**
+ * A secret that answered after this page was read to be someone else's (a request in flight while another tab signed in
+ * as another account): not shown to them. The page is about to load again for them anyway (HB-0491).
+ */
+function pageSecretNotHere(ownerId) {
+  if (!ownerId || !pagePerson || pagePersonAway || ownerId === pagePerson) return false;
+  toast('New codes were made for the account signed in before, and are not shown to this one. Sign in as it and make new ones in Settings → You.', 10000);
+  return true;
+}
+/** Answered after the session ended, before a read names who is here now: not shown, but waiting for its person, as one open then does. */
+function pageSecretLater(whose, show) {
+  const waiting = new Promise((res) => { pageSecretsAway.push({ whose: whose || '', back: () => show().then(res), drop: () => res() }); });
+  // Signed in, but not read yet (a first factor added at the public address): read now, so they come back at once.
+  if (!loginDlg.open && !pageSignIns) loadMyAccount().catch(() => {});
+  return waiting;
+}
+function pageSecretShown(dlg, ownerId) {
+  pageSecretOwner.set(dlg, ownerId || '');
+}
+function pageSecretsPutAway() {
+  if (backupDlg.open) {
+    const codes = $('backupCodes').textContent.split('\n'), whose = pageSecretOwner.get(backupDlg), done = backupResolve;
+    backupResolve = null;
+    $('backupCodes').textContent = ''; backupDlg.close();
+    pageSecretsAway.push({ whose, back: () => showBackupCodes(codes, whose).then(done), drop: () => done?.() });
+  }
+  if (recoveryDlg.open) {
+    const code = $('recoveryCode').textContent, lede = $('recoveryLede').innerHTML, whose = pageSecretOwner.get(recoveryDlg), done = recoveryResolve;
+    recoveryResolve = null;
+    $('recoveryCode').textContent = ''; recoveryDlg.close();
+    pageSecretsAway.push({ whose, back: () => showRecoveryCode(code, lede, whose).then(done), drop: () => done?.() });
+  }
+}
+function pageSecretsBack(ownerId) {
+  const away = pageSecretsAway;
+  pageSecretsAway = [];
+  for (const s of away) (s.whose && s.whose === ownerId ? s.back : s.drop)();
+}
+/** `next`: who has just been read, whose own one-time secret on the screen stays. */
+function pageClearLast(next = '') {
   v2Close();
   if ($('consoleDlg').open) closeConsole();
   consoleTabs = [];
-  if (backupDlg.open) closeBackupCodes(); // off the page too, and what waits on them goes on
+  const theirs = (dlg) => !!next && dlg.open && pageSecretOwner.get(dlg) === next;
+  if (backupDlg.open && !theirs(backupDlg)) closeBackupCodes(); // off the page too, and what waits on them goes on
   sfCloseTotp(); $('sfCurPw').value = ''; // Access is drawn again for whoever comes next: not a setup or a password of the last person's
-  document.querySelectorAll('dialog[open]:not(#loginDlg):not(#sfDlg)').forEach((d) => d.close());
+  const keep = [backupDlg, recoveryDlg].filter(theirs).map((d) => `:not(#${d.id})`).join('');
+  document.querySelectorAll(`dialog[open]:not(#loginDlg):not(#sfDlg)${keep}`).forEach((d) => d.close());
+  recoveryCodeClosed(); // its code off the page, and what waits on it goes on, now (unless it is theirs, and open)
   aiRowsDrawn = {}; moveSourceState = null; applyModelState = null; migrateState = null;
   reportCur = null; reportGen++; // a draft still loading does not paint
   for (const id of ['reportTitle', 'reportWhat', 'reportRTitle', 'reportBody']) $(id).value = '';
-}
-/** A sign-in landed. Who it is comes first, so nothing of another account's is drawn for them, and what the path shows next (a recovery code) is not closed. */
-async function pageSignedIn() {
-  await loadMyAccount();
-  // Not told who: no second factor yet (Access is open for them to add one), or the read failed. What was open for the last person goes now,
-  // because the read that later succeeds must not close what this one has opened by then: their backup codes, a recovery code. Drafts wait for that read.
-  if (pagePersonAway && !pageCleared) {
-    pageClearLast();
-    pageCleared = true;
-    if (window.__sfEnrolShown && !aiDlg.open) void openAiDlg('access'); // drawn for them, not what the last person left
+  // What the last person typed and did not save: every password box (keys, tokens, client secrets, current passwords),
+  // every free-text box and form, back to what the page drew. Not the sign-in or the prompt, which are this person's (HB-0498, HB-0491).
+  for (const el of document.querySelectorAll('input, textarea')) {
+    if (el.closest('#loginDlg, #sfDlg') || /^(checkbox|radio|hidden|button|submit|reset|file|range|color)$/i.test(el.type)) continue;
+    el.value = el.type === 'password' ? '' : el.defaultValue;
   }
-  await refresh(true);
+}
+/**
+ * A sign-in landed. Who it is comes first, so nothing of another account's is drawn for them, and what the path shows next is not closed.
+ * `show`: what this sign-in brought to be read once (a recovery code), shown here so a reload for another account waits for it (HB-0491).
+ */
+async function pageSignedIn(show) {
+  try {
+    await loadMyAccount();
+    // Not told who: no second factor yet (Access is open for them to add one), or the read failed. What was open for the last person goes now,
+    // because the read that later succeeds must not close what this one has opened by then: their backup codes, a recovery code. Drafts wait for that read.
+    if (pagePersonAway && !pageCleared) {
+      pageClearLast();
+      pageCleared = true;
+      if (window.__sfEnrolShown && !aiDlg.open) void openAiDlg('access'); // drawn for them, not what the last person left
+    }
+    await refresh(true);
+  } finally {
+    show?.(); // before the sign-in ends (pageSignInEnded): a reload waits for it
+  }
 }
 async function loadMyAccount() {
   const read = ++pagePersonRead;
@@ -12607,6 +12864,8 @@ async function refreshNow(withMeta, seq) {
 }
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && pollPaused) { pollPaused = false; void refresh(false); }
+  // Another tab may have signed in as someone else meanwhile: read who it is now, not at the next meta refresh (HB-0491).
+  if (!document.hidden && !loginDlg.open) void loadMyAccount().catch(() => {});
 });
 
 /**

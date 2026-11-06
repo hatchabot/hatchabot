@@ -11,7 +11,7 @@ import { buildConfigCommands } from '../src/openclaw/configWriter.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import {
-  applySearchScript, createSearchWatch, ownSearchKeys, probeBrave, probeDuckDuckGo, readAgentSearchTest, readWebSearch, searchProviderFor,
+  applySearchScript, createSearchWatch, DDG_TURNED_AWAY, duckDuckGoTurnedAway, ownSearchKeys, probeBrave, probeDuckDuckGo, readAgentSearchTest, readWebSearch, searchProviderFor,
 } from '../src/orchestrator/webSearch.js';
 
 const T0 = Date.parse('2026-11-03T12:00:00Z');
@@ -112,13 +112,188 @@ describe('asking Brave', () => {
   });
 });
 
+/** An invented challenge page, shaped like the one seen (HB-0455): no result links in it. */
+const DDG_CHALLENGE = '<html><body><form id="challenge-form"><div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>'
+  + '<p class="anomaly-modal__description">Please complete the following challenge to confirm this search was made by a human.</p></form></body></html>';
+
 describe('asking DuckDuckGo', () => {
   it('a page with no results is being turned away, even at 200', async () => {
     const ask = (ddg: Parameters<typeof net>[1]) => probeDuckDuckGo({ fetchImpl: net([], ddg).fetchImpl });
     expect((await ask({ body: DDG_OK })).status).toBe('ok');
-    expect((await ask({ body: 'Unfortunately, bots use DuckDuckGo too.' })).status).toBe('blocked');
-    expect((await ask({ status: 202 })).status).toBe('blocked');
+    expect((await ask({ body: 'Unfortunately, bots use DuckDuckGo too.' })).status).toBe('turned-away');
+    expect((await ask({ status: 202 })).status).toBe('turned-away');
     expect((await ask('down')).status).toBe('unreachable');
+  });
+
+  it('a challenge page (202, or its words) says plainly that this machine has no free search and needs a Brave key (HB-0455)', async () => {
+    const ask = (ddg: Parameters<typeof net>[1]) => probeDuckDuckGo({ fetchImpl: net([], ddg).fetchImpl });
+    for (const answer of [{ status: 202, body: DDG_CHALLENGE }, { status: 200, body: DDG_CHALLENGE }, { status: 403, body: DDG_CHALLENGE }, { status: 202, body: '' }]) {
+      const p = await ask(answer);
+      expect(p.status, JSON.stringify(answer)).toBe('turned-away');
+      expect(p.detail).toMatch(/no free search/);
+      expect(p.detail).toMatch(/only with a working Brave key/);
+      expect(p.detail).not.toMatch(/answered with no results/);
+    }
+    // Not a challenge: an empty page, or an error, is not called one.
+    for (const answer of [{ status: 200, body: '<html><body>nothing here</body></html>' }, { status: 503, body: 'down for a moment' }]) {
+      const p = await ask(answer);
+      expect(p.status, JSON.stringify(answer)).toBe('blocked');
+      expect(p.detail).not.toMatch(/turns this machine away/);
+    }
+    // Results in it, whatever the status: it works.
+    expect((await ask({ status: 200, body: DDG_OK + '<p>captcha</p>' })).status).toBe('ok');
+    expect(duckDuckGoTurnedAway(202, DDG_OK)).toBe(false);
+  });
+
+  it('it keeps its own user agent: it does not dress up as a browser to get past a challenge (HB-0455)', async () => {
+    const agents: string[] = [];
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      agents.push(String((init?.headers as Record<string, string>)['user-agent']));
+      return new Response(DDG_CHALLENGE, { status: 202 });
+    }) as unknown as typeof fetch;
+    await probeDuckDuckGo({ fetchImpl });
+    expect(agents).toEqual(['Mozilla/5.0 (Hatchabot)']);
+  });
+
+  it('a fleet with no Brave key, turned away by DuckDuckGo: the state and the message say a Brave key is needed', async () => {
+    const w = world({});
+    const bodies: string[] = [];
+    const watch = createSearchWatch({ ...w.base, notify: (h: string, b: string) => { w.notes.push(h); bodies.push(b); }, fetchImpl: net([], { status: 202, body: DDG_CHALLENGE }).fetchImpl });
+    const s = await watch.check();
+    expect(s).toMatchObject({ active: 'duckduckgo', duckduckgo: { status: 'turned-away', detail: DDG_TURNED_AWAY } });
+    expect(w.notes).toEqual(['Web search may not be working']);
+    expect(bodies[0]).toContain('no free search');
+    expect(bodies[0]).toContain('A Brave key is needed: add one under Settings → AI → Fleet search key');
+  });
+
+  /** A watch whose messages are kept whole. */
+  const watchOf = (w: ReturnType<typeof world>, fetchImpl: typeof fetch) => {
+    const said: Array<[string, string]> = [];
+    const watch = createSearchWatch({ ...w.base, notify: (h: string, b: string) => { said.push([h, b]); }, fetchImpl });
+    return { watch, said };
+  };
+  const challenge = { status: 202, body: DDG_CHALLENGE } as const;
+
+  it('turned away with a Brave key set: the message says what its check found, and "add one" only when none is set (review of HB-0455)', async () => {
+    // Out of quota, in auto: moved to DuckDuckGo, and told the key has run out.
+    const out = watchOf(world({ key: 'made-up' }), net([{ status: 429, headers: QUOTA(0) }], challenge).fetchImpl);
+    await out.watch.check();
+    expect(out.said.map(([h]) => h)).toEqual(['Web search moved to DuckDuckGo', 'Web search may not be working']);
+    expect(out.said[1]![1]).toContain('run out of quota');
+    expect(out.said[1]![1]).toContain('Replace it under Settings → AI → Fleet search key');
+    expect(out.said[1]![1]).not.toMatch(/add one|key is needed/);
+    // Refused: told so.
+    const bad = watchOf(world({ key: 'made-up' }), net([{ status: 401 }], challenge).fetchImpl);
+    await bad.watch.check();
+    expect(bad.said.at(-1)![1]).toContain('Brave refused the key (401)');
+    expect(bad.said.at(-1)![1]).not.toMatch(/add one|key is needed/);
+    // A key that works, with "DuckDuckGo only" chosen: told to choose Brave.
+    const chose = watchOf(world({ key: 'made-up' }), net([{ status: 200, headers: QUOTA(1500) }], challenge).fetchImpl);
+    await chose.watch.setMode('duckduckgo');
+    expect(chose.said.map(([h]) => h)).toEqual(['Web search may not be working']);
+    expect(chose.said[0]![1]).toContain('The Brave key works');
+    expect(chose.said[0]![1]).toContain('instead of "DuckDuckGo only"');
+    expect(chose.said[0]![1]).not.toMatch(/add one|key is needed/);
+  });
+
+  it('an install already stuck on DuckDuckGo with an older "blocked" is told once when it turns out to be turned away (review of HB-0455)', async () => {
+    const w = world({});
+    w.prefs.set('webSearch', JSON.stringify({ mode: 'auto', active: 'duckduckgo', why: 'No Brave key is set.',
+      duckduckgo: { status: 'blocked', detail: 'DuckDuckGo answered with no results: it may be turning this address away for now.' } }));
+    const { watch, said } = watchOf(w, net([], challenge).fetchImpl);
+    await watch.check();
+    expect(said.map(([h]) => h)).toEqual(['Web search may not be working']);
+    expect(said[0]![1]).toContain('turns this machine away');
+    await watch.check();
+    expect(said).toHaveLength(1);
+  });
+
+  it('a fleet on Brave is told once when DuckDuckGo starts turning this machine away: nothing to fall back on', async () => {
+    const w = world({ key: 'made-up' });
+    const { watch, said } = watchOf(w, net([{ status: 200, headers: QUOTA(1500) }], challenge).fetchImpl);
+    expect((await watch.check()).active).toBe('brave');
+    await watch.check();
+    expect(said.map(([h]) => h)).toEqual(['Web search has nothing to fall back on']);
+    expect(said[0]![1]).toContain('The Brave key works.');
+  });
+
+  /** DuckDuckGo answers check by check from `ddg`; Brave from `brave()` (none: no key). */
+  const flapping = (ddg: Array<'away' | 'ok' | 'down' | 'empty'>, brave?: () => { status: number; headers?: Record<string, string> }) => {
+    let i = 0;
+    const fetchImpl = (async (url: string) => {
+      if (String(url).includes('brave.com')) { const b = brave!(); return new Response('{}', { status: b.status, headers: b.headers ?? {} }); }
+      const d = ddg[Math.min(i, ddg.length - 1)];
+      if (d === 'down') throw new TypeError('fetch failed');
+      return d === 'away' ? new Response(DDG_CHALLENGE, { status: 202 }) : new Response(d === 'ok' ? DDG_OK : '<html></html>', { status: 200 });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, next: () => { i++; } };
+  };
+  const runChecks = async (w: ReturnType<typeof world>, f: ReturnType<typeof flapping>, n: number) => {
+    const { watch, said } = watchOf(w, f.fetchImpl);
+    const active: string[] = [];
+    for (let k = 0; k < n; k++) { active.push((await watch.check()).active); f.next(); }
+    return { said: said.map(([h]) => h), active };
+  };
+
+  it('a DuckDuckGo that comes and goes is announced once, not at every turn (final review of HB-0455)', async () => {
+    // No key, turned away and timing out by turns: one message.
+    expect((await runChecks(world({}), flapping(['away', 'down', 'away', 'down', 'away']), 5)).said).toEqual(['Web search may not be working']);
+    // No key, turned away and working by turns: still one.
+    expect((await runChecks(world({}), flapping(['away', 'ok', 'away', 'ok', 'away']), 5)).said).toEqual(['Web search may not be working']);
+    // Brave works, DuckDuckGo away and working by turns: one "nothing to fall back on".
+    expect((await runChecks(world({ key: 'made-up' }), flapping(['away', 'ok', 'away', 'ok', 'away'], () => ({ status: 200, headers: QUOTA(1500) })), 5)).said)
+      .toEqual(['Web search has nothing to fall back on']);
+    // Brave nearly out, DuckDuckGo away and timing out by turns: one message, and the fleet never leaves Brave.
+    const low = await runChecks(world({ key: 'made-up' }), flapping(['away', 'down', 'away', 'down'], () => ({ status: 200, headers: QUOTA(5) })), 4);
+    expect(low.said).toEqual(['Web search has nothing to fall back on']);
+    expect(low.active).toEqual(['brave', 'brave', 'brave', 'brave']);
+    // Working again for two checks running: the next time it turns away is news again.
+    expect((await runChecks(world({}), flapping(['away', 'ok', 'ok', 'away']), 4)).said).toEqual(['Web search may not be working', 'Web search may not be working']);
+  });
+
+  it('the fleet moving onto a DuckDuckGo already said to turn this machine away is still told it has no search', async () => {
+    let brave = { status: 200, headers: QUOTA(1500) } as { status: number; headers?: Record<string, string> };
+    const r = await (async () => {
+      const w = world({ key: 'made-up' });
+      const f = flapping(['away'], () => brave);
+      const { watch, said } = watchOf(w, f.fetchImpl);
+      await watch.check();
+      brave = { status: 429, headers: QUOTA(0) };
+      await watch.check();
+      return said.map(([h]) => h);
+    })();
+    expect(r).toEqual(['Web search has nothing to fall back on', 'Web search moved to DuckDuckGo', 'Web search may not be working']);
+  });
+
+  it('Brave nearly out and DuckDuckGo not answering with results (a timeout, an empty page): the fleet stays on Brave (final review of HB-0455)', async () => {
+    for (const ddg of ['down', 'empty'] as const) {
+      const r = await runChecks(world({ key: 'made-up' }), flapping([ddg], () => ({ status: 200, headers: QUOTA(5) })), 2);
+      expect(r.active, ddg).toEqual(['brave', 'brave']);
+      expect(r.said, ddg).not.toContain('Web search moved to DuckDuckGo');
+    }
+  });
+
+  it('Brave nearly out and DuckDuckGo turning this machine away: the fleet stays on Brave, and moves only once it runs out (review of HB-0455)', async () => {
+    const w = world({ key: 'made-up' });
+    let brave: { status: number; headers?: Record<string, string> } = { status: 200, headers: QUOTA(5) };
+    const fetchImpl = (async (url: string) => String(url).includes('brave.com')
+      ? new Response('{}', { status: brave.status, headers: brave.headers ?? {} })
+      : new Response(DDG_CHALLENGE, { status: 202 })) as unknown as typeof fetch;
+    const { watch, said } = watchOf(w, fetchImpl);
+    const low = await watch.check();
+    expect(low).toMatchObject({ active: 'brave', brave: { status: 'low' } });
+    expect(low.why).toContain('agents stay on Brave until it runs out');
+    expect(said.map(([h]) => h)).not.toContain('Web search moved to DuckDuckGo');
+    // Out: now it moves.
+    brave = { status: 429, headers: QUOTA(0) };
+    expect((await watch.check()).active).toBe('duckduckgo');
+    // Low again (quota partly back): back to Brave, and not announced as its quota returning.
+    brave = { status: 200, headers: QUOTA(5) };
+    expect((await watch.check()).active).toBe('brave');
+    expect(said.map(([h]) => h)).not.toContain('Web search is back on Brave');
+    // With DuckDuckGo working, low still moves the fleet, as before.
+    const w2 = world({ key: 'made-up' });
+    expect((await watchOf(w2, net([{ status: 200, headers: QUOTA(5) }]).fetchImpl).watch.check()).active).toBe('duckduckgo');
   });
 });
 

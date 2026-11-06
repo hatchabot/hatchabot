@@ -661,9 +661,11 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
         }
         // A chat-only guest the owner chose to let in with a password alone: the chat, and nothing else.
         if (need === 'guest' && guestMay(req.method, req.routeOptions?.url)) return;
-        // Adding the first factor (and changing one's own password): let
-        // through to the route, which asks for the current password; adding
-        // one also needs a sign-in that came by a link or code sent out of band.
+        // A route refused to anyone without a factor, with its own words on what to do instead (HB-0453).
+        if (rule.noFactor) return reply.code(403).send({ error: rule.noFactor, secondFactor: 'missing' });
+        // Adding the first factor: let through to the route, which asks for
+        // the current password; adding one also needs a sign-in that came by
+        // a link or code sent out of band.
         if (rule.cls === 'step-up' && rule.firstFactorOk) {
           if (rule.enrols && !(pass.en > now)) return reply.code(403).send({ error: rule.refusal ?? FIRST_FACTOR_NEEDS_LINK, secondFactor: 'enrol-link' });
           return;

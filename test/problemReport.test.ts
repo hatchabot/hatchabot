@@ -931,6 +931,295 @@ describe('how long masking takes with many names (HB-0405)', () => {
   });
 });
 
+// What the last check before v2.173.0 found still going public (HB-0501), and the credential shapes of HB-0497 and HB-0499.
+describe('credential shapes in JSON, hashes and key files (HB-0501, HB-0499, HB-0497)', () => {
+  const table = (rows: ReadonlyArray<readonly [string, string]>) => { for (const [a, b] of rows) expect(redactForPublic(a, {}), a).toBe(b); };
+  const stays = (rows: readonly string[]) => { for (const a of rows) expect(redactForPublic(a, {}), a).toBe(a); };
+  it('a quote inside a quoted value does not cut it', () => {
+    table([
+      [String.raw`{"pass":"a\"b-made-up"}`, '{"pass":"***"}'],
+      [String.raw`\"pass\":\"a\\\"b-made-up\"`, String.raw`\"pass\":\"***\"`],
+      [String.raw`'pass': 'it\'s-made-up'`, `'pass': '***'`],
+      [String.raw`"GARDEN_KEY":"a\"b-made-up"`, '"GARDEN_KEY":"***"'],
+      [String.raw`{"x":"{\"token\":\"a\\\"b-made-up\"}"}`, String.raw`{"x":"{\"token\":\"***\"}"}`],
+    ]);
+  });
+  it('a cut-off value, an unquoted one, and Ruby hashes', () => {
+    table([
+      [String.raw`\"password\":\"made-up`, String.raw`\"password\":\"***`],
+      [String.raw`\"token\":123456`, String.raw`\"token\":***`],
+      ['{"pass":123456}', '{"pass":***}'],
+      [':password => "made-up"', ':password => "***"'],
+      ['password => made-up', 'password => ***'],
+    ]);
+  });
+  it('mixed quoting that proper escaping does not make', () => {
+    table([
+      [String.raw`\\"password\":\"made-up\"`, String.raw`\\"password\":\"***\"`],
+      [String.raw`\"pass":"made-up"`, String.raw`\"pass":"***"`],
+      [String.raw`"pass\":\"made-up\"`, String.raw`"pass\":\"***\"`],
+    ]);
+    stays(['{"test_pass":12}', '{"pass":true}', String.raw`\"pass\":\"ok\"`, '"monkey":"banana"', 'token => token.trim()']);
+  });
+  it('a number after the name, a bearer value, known prefixes, and a quoted -p (HB-0499)', () => {
+    table([
+      ['TOKEN2=abc', 'TOKEN2=***'], ['PASSWORD1=abc', 'PASSWORD1=***'], ['API_KEY_2=abc', 'API_KEY_2=***'], ['SECRET_KEY_BASE=abc', 'SECRET_KEY_BASE=***'],
+      ['got bearer abc123def', 'got bearer ***'], ['sent Basic bWFkZTp1cA==.', 'sent Basic ***.'],
+      ['glpat-made-up-12', '***'], ['hf_MadeUp1234', '***'],
+      [`mysql -p'hunter 22'`, 'mysql -p***'], ['mysql -p"made up" db', 'mysql -p*** db'], ["mysql -p'made up", 'mysql -p***'], ["sshpass -p 'made up' ssh x", 'sshpass -p *** ssh x'],
+    ]);
+    stays(['send a bearer token in the header', 'use basic auth', 'basic v2 API', 'Bearer Token missing', 'Bearer $GARDEN_TOKEN', 'pip install hf_transfer', 'mysql is down, try docker run -p3306:3306']);
+  });
+  it('a PuTTY key file goes whole, with no BEGIN line (HB-0497)', () => {
+    const ppk = ['PuTTY-User-Key-File-3: ssh-ed25519', 'Encryption: none', 'Comment: made-up-key', 'Public-Lines: 2', 'AAAAC3MadeUpMadeUpMadeUpMadeUpMadeUp+MadeUp/MadeUp', 'MadeUpMadeUp',
+      'Private-Lines: 1', 'AAAAIMadeUpPrivateMadeUpMadeUpMadeUp+Xyz=', 'Private-MAC: 0123456789abcdef0123456789abcdef'];
+    table([
+      [`key:\n${ppk.join('\n')}\nDone`, 'key:\n{key}\nDone'],
+      [`"${ppk.join('\\n')}"`, '"{key}"'],
+      // Cut off: to the last line of base64.
+      [`${ppk.slice(0, 8).join('\n')}\nError: x`, '{key}\nError: x'],
+      // Pasted from the private half.
+      [`${ppk.slice(6).join('\n')}\nDone`, '{key}\nDone'],
+    ]);
+  });
+});
+
+// The review of the first fix (HB-0501): two of its changes let a credential through, and some masks went too far.
+describe('the review of the HB-0501 fix: a leak is worse than a lost word', () => {
+  const table = (rows: ReadonlyArray<readonly [string, string]>) => { for (const [a, b] of rows) expect(redactForPublic(a, {}), a).toBe(b); };
+  const stays = (rows: readonly string[]) => { for (const a of rows) expect(redactForPublic(a, {}), a).toBe(a); };
+  it('a pass or key value ending in a backslash does not take the next field with it', () => {
+    let text = JSON.stringify({ db_pass: 'Made-up\\', GARDEN_KEY: 'made-up-2', other_pass: 'made-up-3' });
+    for (let level = 0; level < 3; level++) {
+      const out = redactForPublic(`log: ${text}`, {});
+      for (const v of ['Made-up', 'made-up-2', 'made-up-3']) expect(out, `level ${level}: ${text}`).not.toContain(v);
+      text = JSON.stringify(text);
+    }
+    table([[String.raw`{'pass': 'a\\', 'other_pass': 'Made-up9'}`, `{'pass': '***', 'other_pass': '***'}`]]);
+  });
+  it('a password stuck to -p is the whole shell word', () => {
+    table([[String.raw`mysql -u root -p'it'\''s-Made9' mydb`, 'mysql -u root -p*** mydb'], ["mysqldump -u root -p'ab'cd123 db", 'mysqldump -u root -p*** db'], ['mysql -p"$X"Made9 db', 'mysql -p*** db'],
+      [String.raw`sshpass -p 'it'\''s-Made9' ssh x`, 'sshpass -p *** ssh x'], ["sshpass -p'ab'Made9 ssh x", 'sshpass -p*** ssh x']]);
+  });
+  it('camelCase and mixed-case pass and key names', () => {
+    table([['{"dbPass":"made-up"}', '{"dbPass":"***"}'], ['{"mqttPass":"made9"}', '{"mqttPass":"***"}'], ['{"sshKey":"made-up"}', '{"sshKey":"***"}'], ['{"authKey":"made9"}', '{"authKey":"***"}'],
+      ['{"appKey":"made9"}', '{"appKey":"***"}'], ['dbPass=made9', 'dbPass=***'], ['"Garden_Key":"abc1"', '"Garden_Key":"***"'], ['"garden_KEY":"abc1"', '"garden_KEY":"***"'], ['Garden_Key=abc', 'Garden_Key=***']]);
+    stays(['bypass=on', 'compass=north', 'monkey=x', 'sortKey: name', 'testPass=12', "const p = ok ? 'dbPass' : cfg.pass;", "typeof rt === 'string' ? 'session-key' : rt?.source;"]);
+  });
+  it('bearer and basic: a token, not a word', () => {
+    table([['basic YWJjZGVm here', 'basic *** here'], ['bearer Made.Up9.Token', 'bearer ***'], ['got bearer abc123def', 'got bearer ***']]);
+    stays(['a basic step-by-step guide', 'basic read-only access', 'Use basic v2.173.1 or later', '<i>Basic Information</i>', 'bearer (ownerForCliToken rejects it)', "'Bearer hatchabot_'"]);
+  });
+  describe('a PuTTY key file with a prefix on every line', () => {
+    const line = (n: number) => `AAAA${`MadeUp${n}+Key/`.repeat(8)}`.slice(0, 64);
+    const ppk = ['PuTTY-User-Key-File-2: ssh-rsa', 'Encryption: none', 'Comment: made-up-key', 'Public-Lines: 2', line(1), line(2), 'Private-Lines: 3', line(3), line(4), 'TailMadeUp5=', 'Private-MAC: 0123456789abcdef'];
+    const forms: Array<[string, (l: string, i: number) => string]> = [
+      ['an indent', (l) => `    ${l}`], ["a quote's >", (l) => `> ${l}`], ['spaces at the end', (l) => `${l}  `],
+      ["a journal's prefix, its time changing", (l, i) => `Nov 06 10:00:${String(i).padStart(2, '0')} box app[12]: ${l}`], ["cat -n's numbers", (l, i) => `${String(i + 1).padStart(6)}\t${l}`],
+    ];
+    for (const [what, wrap] of forms) {
+      it(what, () => {
+        const out = redactForPublic(`${ppk.map(wrap).join('\n')}\nDone`, {});
+        expect(out).toContain('{key}');
+        expect(out).not.toContain('MadeUp');
+        expect(out.endsWith('Done')).toBe(true);
+      });
+    }
+    it('a cut-off key keeps the word after it; a header named in a sentence, or headers with no key, stay', () => {
+      table([[`Key contents:\nPrivate-Lines: 1\n${line(1)}\nok\nnext`, 'Key contents:\n{key}\nok\nnext']]);
+      stays(['the header Private-Lines: says how many lines follow, then the MAC', 'PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nok']);
+    });
+  });
+});
+
+// The second review of the HB-0501 fix: what still went through, or newly did.
+describe('the second review of the HB-0501 fix', () => {
+  const table = (rows: ReadonlyArray<readonly [string, string]>) => { for (const [a, b] of rows) expect(redactForPublic(a, {}), a).toBe(b); };
+  const stays = (rows: readonly string[]) => { for (const a of rows) expect(redactForPublic(a, {}), a).toBe(a); };
+  it('an unquoted value after a quoted pass or key name goes, whatever it looks like', () => {
+    table([['"DB_PASS": Correct.Horse.Battery', '"DB_PASS": ***'], ['- "SMTP_PASS": Spring.Time', '- "SMTP_PASS": ***'], ["'db_pass' => Hunter.Two", "'db_pass' => ***"], ['"DB_PASS": (made2up)', '"DB_PASS": ***)']]);
+    stays(["const p = ok ? 'dbPass' : cfg.pass;"]);
+  });
+  it('curly and fullwidth forms after a bare pass name, and a mask inside a value', () => {
+    table([['DB_PASS: “a b c”', 'DB_PASS: ***'], ['DB_PASS：made2up', 'DB_PASS：***'], ['DB_PASS=made2up?token=abc', 'DB_PASS=***'], ['DB_PASS:made2up=token：x', 'DB_PASS:***']]);
+    stays(['--token ${t.json.token} --url x', 'data-key="${esc(key)}"']);
+  });
+  it('bearer and basic: mixed-case tokens with dashes, padding in the length, digits alone', () => {
+    table([['got bearer P-aZpirnuXNeavY', 'got bearer ***'], ['bearer AbCd-EfGh-IjKl', 'bearer ***'], ['basic Ym9iOmE=', 'basic ***'], ['basic YWI6Y2Q=', 'basic ***'], ['bearer 40805404', 'bearer ***'], ['bearer CDQh-rmc', 'bearer ***']]);
+    stays(['a basic step-by-step guide', 'a basic Step-By-Step guide', 'basic read-only access', 'Use basic v2.173.1 or later', 'bearer Abc-Def']);
+  });
+  it("docker's auth, PascalCase and pw names, and credentials", () => {
+    const auth = Buffer.from('sam:made-up').toString('base64');
+    table([[`{"auths":{"registry.example":{"auth":"${auth}"}}}`, '{"auths":{"registry.example":{"auth":"***"}}}'], ['DbPass=made2up', 'DbPass=***'], ['WifiPass: madeup', 'WifiPass: ***'],
+      ['adminPASS=x9', 'adminPASS=***'], ['routerPw=made2up', 'routerPw=***'], ['pw=made2up', 'pw=***'], ['"pw": "made2up"', '"pw": "***"'], ['"credentials": "sam:made-up"', '"credentials": "***"']]);
+    stays(['"auth": "oauth"', '"auth": true', "fetch(u, { credentials: 'include' })", 'bypass=on', 'SortKey: name']);
+  });
+  describe('a PuTTY key file wrapped again, or behind a timestamp or grep -n', () => {
+    const b64 = Array.from({ length: 14 }, (_, i) => `AAAA${`MadeUp${i}+Key/`.repeat(8)}`.slice(0, 64)).join('');
+    const ppk = (width: number) => ['PuTTY-User-Key-File-2: ssh-rsa', 'Encryption: none', 'Comment: made-up-key', 'Public-Lines: 1', 'AAAAB3NzaC1yc2EAAAAMadeUp', 'Private-Lines: 14',
+      ...(b64.match(new RegExp(`.{1,${width}}`, 'g')) ?? []), 'Private-MAC: 0123456789abcdef'];
+    for (const width of [32, 30]) {
+      it(`wrapped at ${width}`, () => {
+        const out = redactForPublic(`${ppk(width).join('\n')}\nDone`, {});
+        expect(out).toBe('{key}\nDone');
+      });
+    }
+    it('docker logs --timestamps and grep -n', () => {
+      const lines = ppk(64);
+      for (const wrap of [(l: string, i: number) => `2026-11-06T10:00:${String(i).padStart(2, '0')}.123456789Z ${l}`, (l: string, i: number) => `${i + 1}:${l}`, (l: string, i: number) => `key.ppk:${i + 1}:${l}`]) {
+        const out = redactForPublic(`${lines.map(wrap).join('\n')}\nDone`, {});
+        expect(out).not.toContain('MadeUp');
+        expect(out.endsWith('Done')).toBe(true);
+      }
+    });
+  });
+});
+
+describe('the final review of the HB-0501 fix', () => {
+  it("a curly closer ends a value only before a separator, so an apostrophe inside it does not leave the rest", () => {
+    const cases: Array<[string, string]> = [
+      ['DB_PASSWORD=‘O’Brien2024’ next=1', 'Brien2024'], ['password: ‘Bob’s-fake-dog’', 's-fake-dog'], ['api_key: ‘k’3yValue’', '3yValue'],
+      ['token=“abc”def123', 'def123'], ['password: «abc»def', 'abc'], ['"password": ‘Bob’s-fake-dog’', 's-fake-dog'], ['“password”: ‘Bob’s-fake-dog’', 's-fake-dog'],
+      ['"dbPass": ‘Bob’s-fake-dog’', 's-fake-dog'], ["password='it's-Secret9'", 'Secret9'], ['password="abc"def123', 'def123'],
+    ];
+    for (const [text, rest] of cases) expect(redactForPublic(text, {}), text).not.toContain(rest);
+    expect(redactForPublic('DB_PASSWORD=‘O’Brien2024’ next=1', {})).toBe('DB_PASSWORD=‘***’ next=1');
+    expect(redactForPublic('‘token’: ‘O’Brien2024’, ‘next’: 1', {})).toBe('‘token’: ‘***’, ‘next’: 1');
+  });
+
+  it('a quoted value that does end at its quote keeps what follows it', () => {
+    expect(redactForPublic('error: invalid token: ‘expired’ (code 401)', {})).toBe('error: invalid token: ‘***’ (code 401)');
+    expect(redactForPublic('token=«abc» other=1', {})).toBe('token=«***» other=1');
+    expect(redactForPublic('The password “must” be 8 chars', {})).toBe('The password “must” be 8 chars');
+    expect(redactForPublic('Its "apiKey": "seed1".', {})).toBe('Its "apiKey": "***".');
+    expect(redactForPublic("set `HATCHABOT_PASSWORD='p@ss'`. Then", {})).toBe("set `HATCHABOT_PASSWORD='***'`. Then");
+  });
+
+  it('a backslash-escaped double quote in logfmt stays in the value, unless the next setting follows the quote', () => {
+    expect(redactForPublic('level=info user=bob token="abc\\" def" next=1', {})).toBe('level=info user=bob token="***" next=1');
+    expect(redactForPublic('password="a\\" b"', {})).toBe('password="***"');
+    expect(redactForPublic('password="p@ss\\" token="x"', {})).toBe('password="***" token="***"');
+    expect(redactForPublic('docker run -e DB_PASSWORD="a b" -e USER=x img', {})).toBe('docker run -e DB_PASSWORD="***" -e USER=x img');
+    expect(redactForPublic("password='it\\'s' user=bob", {})).toBe("password='***' user=bob");
+  });
+
+  it('an arrow function that builds an object, calls a constant or fills a template is code, and a value after => still goes', () => {
+    for (const code of ['tokens.map(token => ({ id: token.id }))', 'token => JSON.parse(token)', 'password => PASSWORD_RE.test(password)', 'token => [token]', 'token => `Bearer ${token}`']) {
+      expect(redactForPublic(code, {}), code).toBe(code);
+    }
+    expect(redactForPublic('token => `s3cret`', {})).toBe('token => ***');
+    expect(redactForPublic('password => [hunter22]', {})).not.toContain('hunter22');
+  });
+});
+
+describe('how long masking takes on what the final review of HB-0501 added', () => {
+  // A prefix of numbers read each space as [ \t]*, so a line of digits could be split every way: 8 numbers took 1.7 s,
+  // 10 took 19 s. Journal lines of digits were quadratic.
+  for (const k of [8, 10, 20, 90, 100]) {
+    it(`a PuTTY key line after ${k} numbers, then a line of digits, is fast`, () => {
+      const text = `${Array(k).fill('1').join(' ')} x PuTTY-User-Key-File-3: ssh-ed25519\n${'1'.repeat(40)}y\n`;
+      const t0 = performance.now();
+      redactForPublic(text, {});
+      expect(performance.now() - t0).toBeLessThan(250);
+    });
+  }
+  it('journal-prefixed PuTTY key lines, each then a line of digits after the date, are fast', () => {
+    // Each line is read up to 8,192 characters, so the old cost was about 80 ms a line: 50 of them took 4 s.
+    const text = `Nov 06 10:22:33 box app[12]: PuTTY-User-Key-File-3: ssh-ed25519\n${`Nov 06${'1'.repeat(8000)}\n`}`.repeat(50);
+    const t0 = performance.now();
+    redactForPublic(text, {});
+    expect(performance.now() - t0).toBeLessThan(250);
+  });
+  const units = ['password="', 'password="a"b', "password='a'b", 'password=‘a’b', '"password": ‘', '"password": ‘a’b', 'token=«a»b', '’', 'password="x" ', 'pw="a"x ', 'KEY="a"b',
+    'token => `', 'token => `${', 'token => ({', 'token => JSON.parse('];
+  for (const u of units) {
+    const text = u.repeat(Math.ceil(60_000 / u.length)).slice(0, 60_000);
+    it(`60,000 characters of ${JSON.stringify(u)} take well under a second`, () => {
+      const t0 = performance.now();
+      redactForPublic(text, {});
+      expect(performance.now() - t0).toBeLessThan(3000);
+    });
+  }
+  it('lines of an opening quote then 4,100 characters with no end are fast', () => {
+    const text = `password=“${'x'.repeat(4100)}\n"password": ‘${'x'.repeat(4100)}\n`.repeat(30);
+    const t0 = performance.now();
+    redactForPublic(text, {});
+    expect(performance.now() - t0).toBeLessThan(3000);
+  });
+});
+
+describe('how long masking takes on what the second review of HB-0501 added', () => {
+  const units = ["a='b\\' ", "token='a\\' ", "'\\'", '"a\\" ', 'password="a\\" ', '“', '«', '„', '「', '＂', 'password: “', 'DB_PASS: “', 'DB_PASS：', 'a_pass=“', 'Abc', 'AbcPASS=', 'aBcPw=', 'DbPass=', '"auth":"',
+    '"auth":"QUJD', '"credentials":"', 'pw=', 'x ? ', "x ? 'password' : a.b", 'password => q(', 'bearer Ab-', 'basic Ym9=', 'bearer 1234', '${a}', '${', 'DB_PASS=${', 'DB_PASS=a?token=***',
+    '1:Private-Lines: 1\n', '2026-11-06T10:00:01Z Private-Lines: 1\n', 'Private-Lines: 1\nAAAA\nAAAA\n', 'Private-Lines: 1\nAAAAAAAAAAAAAAAAAAAAAAAA1\n', 'AAAA\n'];
+  const singles: Array<[string, string]> = [
+    ['Private-Lines: 1 then base64 lines with no MAC', `Private-Lines: 1\n${'AAAA\n'.repeat(12_000)}`],
+    ['Private-Lines: 1 then 30-wide base64 lines', `Private-Lines: 1\n${`${'Ab1+'.repeat(7)}Ab\n`.repeat(2_000)}`],
+    ['a 200-character numbered prefix', `${'1 '.repeat(100)}Private-Lines: 1\n${`${'2 '.repeat(100)}AAAA\n`.repeat(250)}`],
+    ['a quote then 60,000 capitals', `"${'A'.repeat(60_000)}`],
+    ['a name then 60,000 capitals and PASS', `a${'A'.repeat(60_000)}PAS=`],
+  ];
+  for (const [what, text] of [...units.map((u) => [JSON.stringify(u), u.repeat(Math.ceil(60_000 / u.length)).slice(0, 60_000)] as [string, string]), ...singles]) {
+    it(`60,000 characters of ${what} take well under a second`, () => {
+      const t0 = performance.now();
+      redactForPublic(text, {});
+      expect(performance.now() - t0).toBeLessThan(3000);
+    });
+  }
+});
+
+describe('how long masking takes on what the review of HB-0501 added', () => {
+  const units = ['“', '“password”: “', '‘token’：', '：', 'password：', '"password"：“a', '? ', "? 'api-key' : ", "? 'pass' : a.b ", '?\t', 'aB', '"aB', 'dbPass=', '"dbPass":', 'a_Key=', '"a_KEY":', 'Garden_Key=',
+    'token => ', 'token => token && ', 'password => !', 'password => (', 'x => x.y ', "mysql -p'a'\\''", 'mysql -p"\\', 'mysql -p\\', "sshpass -p 'a'", 'bearer a1', 'basic a-b-', 'Bearer v1.2.', '> ',
+    '> PuTTY-User-Key-File-3: x\n', '> Private-Lines: 1\n> AAAA\n', 'Nov 06 box app[12]: Private-Lines: 1\n', '     1\tPrivate-Lines: 1\n', 'Private-Lines: 0\n', 'Private-Lines: 9999\nAAAA\n', 'Private-Lines: 1\n\n',
+    'Private-Lines: 1\nok\n', 'PuTTY-User-Key-File-3: x\nComment: x\n', 'Private-Lines: 1\\nAAAA\\n', '\\\\\\\\\\\\\\"', '\\\\\\"pass\\\\\\":\\\\\\"a\\\\\\\\\\\\\\"', "'it\\'", "password='a\\"];
+  const singles: Array<[string, string]> = [
+    ['a quote then aB… with no end', `"${'aB'.repeat(30_000)}`],
+    ['aB… then =', `${'aB'.repeat(30_000)}=`],
+    ['? then 60,000 spaces and a name', `?${' '.repeat(60_000)}'api-key' : a.b`],
+    ['token => token then 60,000 spaces', `token => token${' '.repeat(60_000)}&&`],
+    ['Private-Lines: 1 then one 60,000-character line', `Private-Lines: 1\n${'A'.repeat(60_000)}`],
+    ['a PuTTY line then 9,000-character lines', `PuTTY-User-Key-File-3: x\n${`${'A'.repeat(9000)}\n`.repeat(7)}`],
+    ['a 200-character prefix then header lines', `${'x '.repeat(100)}Private-Lines: 1\n${`${'x '.repeat(100)}Comment: y\n`.repeat(250)}`],
+    ['\\"token\\":\\" then runs of 15 backslashes', `\\"token\\":\\"${'abc\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"'.repeat(3000)}`],
+    ['mysql -p then 60,000 characters of shell pieces', `mysql -p${"'a'\\x\"b\"".repeat(6000)}`],
+  ];
+  for (const [what, text] of [...units.map((u) => [JSON.stringify(u), u.repeat(Math.ceil(60_000 / u.length)).slice(0, 60_000)] as [string, string]), ...singles]) {
+    it(`60,000 characters of ${what} take well under a second`, () => {
+      const t0 = performance.now();
+      redactForPublic(text, {});
+      // Generous: a busy machine. Each takes under 0.1 s here.
+      expect(performance.now() - t0).toBeLessThan(3000);
+    });
+  }
+});
+
+describe('how long masking takes on what HB-0501 added', () => {
+  const units = ['\\', '\\"', '\\\\"', '"\\', '\\"token\\":', '\\"token\\":\\"', '\\\\\\"token\\\\\\":\\\\\\"', '"pass":"', '"pass":"\\', '"pass":"a\\"', '\\"pass\\":\\"a\\\\\\"', '\\\\"pass\\":"', "'token' => ", 'password => ', 'password =>', ':token=>', '=>', '= ', ' ', '"', "'", '\\\\\\"',
+    'bearer ', 'bearer a1 ', 'Basic ', 'basic a', "mysql -p'", 'mysql -p"a ', "sshpass -p '", 'PuTTY-User-Key-File-1:', 'PuTTY-User-Key-File-1:\n', 'PuTTY-User-Key-File-1:\nAAAA\n', 'Private-Lines: 1\n', 'Private-Lines: 1\\n', 'Comment: x\n', 'Private-Lines:',
+    'glpat-', 'glpat-aaaaaaaa', 'hf_', 'hf_a', 'ghp_', 'github_pat_', 'TOKEN2=', 'API_KEY_2=', 'a_', 'token_', 'secret_key_base', '"a_', '"KEY":', '"x_key":"'];
+  const singles: Array<[string, string]> = [
+    ['"token": then 60,000 backslashes', `"token":${'\\'.repeat(60_000)}`],
+    ['"token": " then 60,000 backslashes', `"token": "${'\\'.repeat(60_000)}`],
+    ['\\"token\\":\\" then 60,000 backslashes', `\\"token\\":\\"${'\\'.repeat(60_000)}`],
+    ['\\"token\\":\\" then escaped quotes', `\\"token\\":\\"${'\\\\\\"'.repeat(15_000)}`],
+    ['password then 60,000 spaces and =>', `password${' '.repeat(60_000)}=>`],
+    ['"pass" then 60,000 spaces', `"pass"${' '.repeat(60_000)}`],
+    ['hf_ then 60,000 letters', `hf_${'a'.repeat(60_000)}`],
+    ['a quote then 60,000 name characters', `"${'a_'.repeat(30_000)}"`],
+    ['a PuTTY line then 60,000 letters', `PuTTY-User-Key-File-1:\n${'A'.repeat(60_000)}`],
+    ['a PuTTY line then lines too long for base64', `PuTTY-User-Key-File-1:\n${`${'A'.repeat(129)}\n`.repeat(460)}`],
+  ];
+  for (const [what, text] of [...units.map((u) => [JSON.stringify(u), u.repeat(Math.ceil(60_000 / u.length)).slice(0, 60_000)] as [string, string]), ...singles]) {
+    it(`60,000 characters of ${what} take well under a second`, () => {
+      const t0 = performance.now();
+      redactForPublic(text, {});
+      // Generous: a busy machine. Each takes under 0.1 s here.
+      expect(performance.now() - t0).toBeLessThan(3000);
+    });
+  }
+});
+
 describe('the masks and GitHub markdown (HB-0405)', () => {
   it('a mask outside a code fence is not shaped like an HTML tag, which GitHub would drop', () => {
     const r = buildReport({ title: 'Fails on kitchen-box', whatHappened: 'open /srv/a/b failed for sam@example.org at 203.0.113.7 on old-nas.local', by: 'person' },

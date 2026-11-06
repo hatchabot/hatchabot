@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { firstThen, heldPort, onFreePort, TAKEN } from './helpers/ports.js';
 import { DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, doormanScript, HOST_ALIAS } from '../src/ops/doorman.js';
 
 /**
@@ -38,29 +39,44 @@ describe('the forwarder', () => {
     const far = net.createServer((c) => c.end('FAR-END'));
     await new Promise<void>((r) => far.listen(0, '127.0.0.1', () => r()));
     const farPort = (far.address() as { port: number }).port;
-    // A free port for the forwarder to listen on.
-    const probe = net.createServer();
-    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()));
-    const listen = (probe.address() as { port: number }).port;
-    await new Promise<void>((r) => probe.close(() => r()));
-
-    // The real script, run the way the doorman container runs it.
-    const child = spawn(process.execPath, ['-e', doormanScript()], {
-      env: { ...process.env, DOORMAN_ROUTES: JSON.stringify([{ listen, host: '127.0.0.1', port: farPort }]), DOORMAN_MAX: '4' },
-      stdio: 'ignore',
+    // The real script, run the way the doorman container runs it, on a port outside the kernel's
+    // ephemeral range. A port taken before the script opens it ends the script (EADDRINUSE), and
+    // another is chosen (HB-0505). It is up when the far end answers through it.
+    const ask = (port: number) => new Promise<string>((resolve) => {
+      const c = net.connect(port, '127.0.0.1');
+      c.on('data', (d) => { resolve(d.toString()); c.destroy(); });
+      c.on('error', (e) => resolve(`error ${(e as NodeJS.ErrnoException).code}`));
+      setTimeout(() => { resolve('timeout'); c.destroy(); }, 3000);
     });
+    const children: Array<import('node:child_process').ChildProcess> = [];
+    // The first port it is given is held here, so the choosing again is shown every run.
+    const held = await heldPort('0.0.0.0');
     try {
-      await new Promise((r) => setTimeout(r, 400));
-      const got = await new Promise<string>((resolve) => {
-        const c = net.connect(listen, '127.0.0.1');
-        c.on('data', (d) => { resolve(d.toString()); c.destroy(); });
-        c.on('error', (e) => resolve(`error ${(e as NodeJS.ErrnoException).code}`));
-        setTimeout(() => resolve('timeout'), 3000);
-      });
+      const { port, opened: got } = await onFreePort(async (listen) => {
+        const child = spawn(process.execPath, ['-e', doormanScript()], {
+          env: { ...process.env, DOORMAN_ROUTES: JSON.stringify([{ listen, host: '127.0.0.1', port: farPort }]), DOORMAN_MAX: '4' },
+          stdio: ['ignore', 'ignore', 'pipe'],
+        });
+        children.push(child);
+        let err = ''; let ended = false;
+        child.stderr!.on('data', (d) => { err += d; });
+        child.once('exit', () => { ended = true; });
+        let answer = '';
+        for (const t0 = Date.now(); Date.now() - t0 < 10_000;) {
+          if (ended) return /EADDRINUSE/.test(err) ? TAKEN : `ended: ${err}`;
+          answer = await ask(listen);
+          if (answer === 'FAR-END') return answer;
+          await new Promise((r) => setTimeout(r, 50)); // not up yet (refused), or someone else's listener until the script ends
+        }
+        return answer;
+      }, { choose: firstThen(held.port) });
       expect(got).toBe('FAR-END');
+      expect(port).not.toBe(held.port);
+      expect(children).toHaveLength(2);
     } finally {
-      child.kill();
+      for (const c of children) c.kill();
       far.close();
+      await held.release();
     }
   }, 15_000);
 });

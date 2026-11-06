@@ -3,6 +3,7 @@ import { lookup as dnsLookupCb, type LookupAddress } from 'node:dns';
 import { isIP } from 'node:net';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
+import { braveAdvice, braveFailure, DDG_TURNED_AWAY, duckDuckGoTurnedAway } from '../orchestrator/webSearch.js';
 
 /**
  * Web search for the management agent, done BY Hatchabot so the agent's jail
@@ -199,12 +200,14 @@ export function makeOpsWeb(deps: OpsWebDeps) {
 
   async function search(ownerId: string, query: string): Promise<Result[]> {
     const key = await deps.braveKey().catch(() => undefined);
+    let braveAnswered: number | undefined;
     if (key) {
       // On to DuckDuckGo if it fails: a key out of quota must not end the manager's search (HB-0391).
       try {
         const r = await f(`https://api.search.brave.com/res/v1/web/search?count=8&q=${encodeURIComponent(query)}`, {
           headers: { accept: 'application/json', 'x-subscription-token': key }, signal: AbortSignal.timeout(15_000),
         });
+        braveAnswered = r.status;
         if (!r.ok) throw new Error(`The search provider answered ${r.status}.`);
         const j = (await r.json()) as { web?: { results?: Array<{ title?: string; url?: string; description?: string }> } };
         return (j.web?.results ?? []).filter((x) => x.url).slice(0, 8)
@@ -214,8 +217,11 @@ export function makeOpsWeb(deps: OpsWebDeps) {
     const r = await f(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
       headers: { 'user-agent': 'Mozilla/5.0 (Hatchabot)' }, signal: AbortSignal.timeout(15_000),
     });
-    if (!r.ok) throw new Error(`The search provider answered ${r.status}.`);
     const html = await r.text();
+    // A challenge page is DuckDuckGo turning this machine away, not "No results" (HB-0455).
+    // What to do about Brave depends on whether a key is set and what it answered just now.
+    if (duckDuckGoTurnedAway(r.status, html)) throw new Error(`${DDG_TURNED_AWAY} ${braveAdvice({ keySet: !!key, ...(key ? { brave: braveFailure(braveAnswered) } : {}) })}`);
+    if (!r.ok) throw new Error(`The search provider answered ${r.status}.`);
     const out: Result[] = [];
     // One result per title link; its snippet is looked for only up to the next
     // result. (A lazy match with an optional snippet group ended right after

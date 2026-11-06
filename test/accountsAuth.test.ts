@@ -668,6 +668,7 @@ describe('recovery codes (beta blocker #3: the host owner with no Telegram)', ()
     // Typed sloppily: lower case, spaces instead of dashes.
     const ok = await recover(f, { username: 'CHRIS', code: code.toLowerCase().replace(/-/g, ' '), password: 'a-brand-new-one' });
     expect(ok.statusCode).toBe(200);
+    expect(ok.json().ownerId).toBe(made.json().id); // whose the new code is (HB-0500)
     const fresh: string = ok.json().recoveryCode;
     expect(fresh).toBeTruthy();
     expect(fresh).not.toBe(code);
@@ -750,6 +751,8 @@ describe('recovery codes (beta blocker #3: the host owner with no Telegram)', ()
     expect(again.statusCode).toBe(200);
     const second: string = again.json().recoveryCode;
     expect(second).not.toBe(first);
+    // Whose it is (HB-0500), as /v1/account names the person.
+    expect(again.json().ownerId).toBe(made.json().id);
     _resetLoginThrottle();
     expect((await recover(f, { username: 'chris', code: first, password: 'long-enough-fake' })).statusCode).toBe(401);
     expect((await recover(f, { username: 'chris', code: second, password: 'long-enough-fake' })).statusCode).toBe(200);

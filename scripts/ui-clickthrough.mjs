@@ -72,6 +72,8 @@ const SCENARIOS = String.raw`(() => {
   const results = [];
   // Checks refresh by hand; a timed poll mid-check made the suite flaky under load.
   window.__noAutoPoll = true; clearTimeout(pollTimer);
+  // A reload would end the check: another account signing in reloads the page (HB-0491), so the page's own is counted instead.
+  window.__reloads = 0; pageReload = () => { window.__reloads++; };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // 8 s: a condition that holds returns at once; a slow run of headless Chrome
   // (it happens) used to fail checks that were only late.
@@ -1160,6 +1162,105 @@ const SCENARIOS = String.raw`(() => {
         eq('refused: nothing sent', calls('POST', new RegExp('/v1/agents/' + tax.id + '/rebuild$')).length, rebuilds);
       } finally { window.__confirmAnswer = true; window.__answer = {}; editAgentId = null; if (chanDlg.open) chanDlg.close(); if (fleetActionsDlg.open) fleetActionsDlg.close(); }
     },
+    trialsWaitForStoppedAgents: async () => {
+      // HB-0469: Pin & rebuild and Discard trial rebuild only running agents, as the manager's try and end of a trial do.
+      // The server decides (stoppedWaits), not the page's old view: one it shows stopped may have woken since.
+      const toastText = () => document.getElementById('toast').textContent;
+      const tax = agents.find((a) => a.name === 'Tax Filing'), run = agents.find((a) => a.id === 'a1');
+      ok('a stopped and a running agent in the stub', tax?.state === 'STOPPED' && run?.state === 'RUNNING');
+      const tag = 'hatchabot-runtime:2026.9.9';
+      const rebuilds = (id) => calls('POST', new RegExp('/v1/agents/' + id + '/rebuild$'));
+      const patches = (id) => calls('PATCH', new RegExp('/v1/agents/' + id + '$'));
+      const pick = (...ids) => { tryOnAgent(tag); for (const id of ids) tryPick(id, true); };
+      try {
+        pick(run.id, tax.id);
+        window.__confirmAnswer = false;
+        const pinned = patches(tax.id).length;
+        await runTryOnAgents();
+        const asked = window.__confirms.at(-1);
+        ok('the question says the stopped one waits: ' + asked, /The 1 running rebuild now/.test(asked) && /The 1 other is not running, so it stays that way and moves onto it when it next starts/.test(asked));
+        ok('and does not promise to rebuild both', !/rebuild them now/.test(asked));
+        eq('refused: nothing sent', patches(tax.id).length, pinned);
+        window.__confirmAnswer = true;
+        const before = rebuilds(tax.id).length;
+        const waits = { status: 202, body: { rebuilding: false, atNextStart: true } };
+        window.__answer = { ['POST /v1/agents/' + run.id + '/rebuild']: [{ status: 202, body: { rebuilding: true } }], ['POST /v1/agents/' + tax.id + '/rebuild']: [waits] };
+        await runTryOnAgents();
+        eq('both pinned', [patches(run.id).at(-1)?.body, patches(tax.id).at(-1)?.body], [{ image: tag }, { image: tag }]);
+        eq('the stopped one is only asked to wait', [rebuilds(tax.id).length - before, rebuilds(tax.id).at(-1)?.body], [1, { checkpoint: true, stoppedWaits: true }]);
+        eq('the running one rebuilds, memory saved first, and waits if it stopped meanwhile', rebuilds(run.id).at(-1)?.body, { checkpoint: true, stoppedWaits: true });
+        ok('the result says both: ' + toastText(), /1 agent rebuilding/.test(toastText()) && /1 not running: it stays that way and moves onto/.test(toastText()));
+        // Stopped since the page last looked: the server keeps it for its next start, and the page says so.
+        pick(run.id);
+        window.__answer = { ['POST /v1/agents/' + run.id + '/rebuild']: [{ status: 202, body: { rebuilding: false, atNextStart: true } }] };
+        await runTryOnAgents();
+        ok('not "rebuilding": ' + toastText(), /1 not running/.test(toastText()) && !/rebuilding/.test(toastText()));
+        // Shown stopped, but woken since (a message on its bot): the server rebuilds it, and the page says so.
+        pick(tax.id);
+        window.__answer = { ['POST /v1/agents/' + tax.id + '/rebuild']: [{ status: 202, body: { rebuilding: true } }] };
+        const woken = rebuilds(tax.id).length;
+        await runTryOnAgents();
+        eq('asked, not skipped', rebuilds(tax.id).length, woken + 1);
+        ok('rebuilding: ' + toastText(), /1 agent rebuilding/.test(toastText()) && !/not running/.test(toastText()));
+        // Discard the trial on the stopped one: asked as such, and no rebuild.
+        window.__confirmAnswer = false;
+        await discardTrial(tax.id, tax.name);
+        ok('the question says it stays stopped: ' + window.__confirms.at(-1), /It is not running, so it stays that way/.test(window.__confirms.at(-1)) && !/rebuild it now/.test(window.__confirms.at(-1)));
+        window.__confirmAnswer = true;
+        window.__answer = { ['PATCH /v1/agents/' + tax.id]: [{ status: 200, body: { id: tax.id, image: null, sameImage: false } }], ['POST /v1/agents/' + tax.id + '/rebuild']: [waits] };
+        const asks = rebuilds(tax.id).length;
+        await discardTrial(tax.id, tax.name);
+        eq('unpinned', patches(tax.id).at(-1)?.body, { image: null });
+        eq('the stopped one is only asked to wait', [rebuilds(tax.id).length - asks, rebuilds(tax.id).at(-1)?.body], [1, { stoppedWaits: true }]);
+        ok('the result says it: ' + toastText(), /stays stopped and moves onto the fleet default when it next starts/.test(toastText()));
+        // Shown stopped, woken since: rebuilt onto the fleet default, or nothing would ever move it back.
+        window.__answer = { ['PATCH /v1/agents/' + tax.id]: [{ status: 200, body: { id: tax.id, image: null, sameImage: false } }], ['POST /v1/agents/' + tax.id + '/rebuild']: [{ status: 202, body: { rebuilding: true } }] };
+        await discardTrial(tax.id, tax.name);
+        eq('asked again', rebuilds(tax.id).length, asks + 2);
+        ok('rebuilding: ' + toastText(), /is rebuilding on the fleet default/.test(toastText()));
+        // The running one: rebuilt now, as before.
+        window.__answer = { ['PATCH /v1/agents/' + run.id]: [{ status: 200, body: { id: run.id, image: null, sameImage: false } }], ['POST /v1/agents/' + run.id + '/rebuild']: [{ status: 202, body: { rebuilding: true } }] };
+        await discardTrial(run.id, run.name);
+        ok('a running one is asked about a rebuild now', /rebuild it now/.test(window.__confirms.at(-1)));
+        eq('and rebuilt', rebuilds(run.id).at(-1)?.body, { stoppedWaits: true });
+        ok('rebuilding: ' + toastText(), /is rebuilding on the fleet default/.test(toastText()));
+        // Unpinned, but the rebuild refused (another operation): said as such, and the list redrawn unpinned.
+        const busy = { status: 409, body: { error: 'Another operation is already running on this agent.' } };
+        window.__answer = { ['PATCH /v1/agents/' + tax.id]: [{ status: 200, body: { id: tax.id, image: null, sameImage: false } }], ['POST /v1/agents/' + tax.id + '/rebuild']: [busy] };
+        let reads = calls('GET', /^\/v1\/runtime\/images$/).length;
+        await discardTrial(tax.id, tax.name);
+        ok('unpinned, not rebuilt: ' + toastText(), /"Tax Filing" is unpinned, but was not rebuilt: Another operation/.test(toastText()) && /moves onto the fleet default when it next starts/.test(toastText()));
+        ok('and the images redrawn', calls('GET', /^\/v1\/runtime\/images$/).length > reads);
+        // A pin saved whose rebuild was refused is not "failed"; a PATCH refused is "not pinned".
+        pick(run.id, tax.id);
+        window.__answer = { ['POST /v1/agents/' + run.id + '/rebuild']: [busy], ['PATCH /v1/agents/' + tax.id]: [{ status: 400, body: { error: 'That image cannot read its data.' } }] };
+        await runTryOnAgents();
+        const listed = document.getElementById('tryErr').textContent;
+        ok('pinned, not rebuilt: ' + listed, /Homework Helper: pinned, but not rebuilt yet: Another operation/.test(listed));
+        ok('not pinned: ' + listed, /Tax Filing: not pinned: That image cannot read its data/.test(listed));
+        ok('and a toast for it: ' + toastText(), /1 pinned, but not rebuilt yet/.test(toastText()));
+        tryDlg.close();
+        // Bulk actions → Image: the server decides too, shown stopped or not.
+        await openFleetActions();
+        await until(() => document.querySelectorAll('.faCb').length);
+        document.querySelectorAll('.faCb').forEach((cb) => { cb.checked = cb.dataset.id === tax.id || cb.dataset.id === run.id; });
+        document.getElementById('faAction').value = 'image'; faRenderAction();
+        const o = document.createElement('option'); o.value = tag; document.getElementById('faImage').replaceChildren(o); document.getElementById('faImage').value = tag;
+        const bulk = rebuilds(tax.id).length;
+        window.__answer = { ['POST /v1/agents/' + tax.id + '/rebuild']: [{ status: 202, body: { rebuilding: true } }], ['POST /v1/agents/' + run.id + '/rebuild']: [waits] };
+        await faApply();
+        await until(() => !document.getElementById('faApplyBtn').disabled);
+        eq('the one shown stopped is asked too', rebuilds(tax.id).length, bulk + 1);
+        ok('the waiting one is said: ' + document.getElementById('faResults').textContent, /1 not running, so it moves when it next starts/.test(document.getElementById('faResults').textContent));
+        // Another image: the one above now reads as where they already are.
+        const o2 = document.createElement('option'); o2.value = 'hatchabot-runtime:2026.9.10'; document.getElementById('faImage').replaceChildren(o2); document.getElementById('faImage').value = o2.value;
+        window.__answer = { ['POST /v1/agents/' + tax.id + '/rebuild']: [busy], ['POST /v1/agents/' + run.id + '/rebuild']: [{ status: 202, body: { rebuilding: true } }] };
+        await faApply();
+        await until(() => !document.getElementById('faApplyBtn').disabled);
+        ok('pinned, not rebuilt: ' + document.getElementById('faResults').textContent, /1 pinned, but not rebuilt yet/.test(document.getElementById('faResults').textContent) && !/failed/.test(document.getElementById('faResults').textContent));
+        ok('with its reason: ' + document.getElementById('faErr').textContent, /pinned, but not rebuilt yet: Another operation/.test(document.getElementById('faErr').textContent));
+      } finally { window.__confirmAnswer = true; window.__answer = {}; tryState = null; if (tryDlg.open) tryDlg.close(); if (fleetActionsDlg.open) fleetActionsDlg.close(); }
+    },
     oneTokenForm: async () => {
       // An agent waiting for a bot shows ONE token box: two with the same id sent the empty one.
       const list = await (await fetch('/v1/agents')).json();
@@ -1682,15 +1783,47 @@ const SCENARIOS = String.raw`(() => {
     modalOnlyDialogs: async () => {
       // A stray click outside must not close the recovery code before "I've saved it", nor the sign-in (night review #19).
       const outside = (dlg) => dlg.dispatchEvent(new MouseEvent('click', { clientX: 3, clientY: 3, bubbles: true, cancelable: true }));
+      // Esc as a browser takes it: the key (here aimed at the page behind, outside the dialog), then, if not stopped,
+      // the dialog's cancel algorithm: a 'cancel' event, and a close unless it is refused. Both must hold it.
+      const escape = (dlg) => {
+        const key = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+        document.body.dispatchEvent(key);
+        if (dlg.dispatchEvent(new Event('cancel', { cancelable: true }))) dlg.close();
+        return { keyStopped: key.defaultPrevented, stillOpen: dlg.open };
+      };
       showRecoveryCode('WXYZ-1234-TEST');
       outside(recoveryDlg);
       ok('the recovery code stays open', recoveryDlg.open && document.getElementById('recoveryCode').textContent === 'WXYZ-1234-TEST');
-      const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
-      recoveryDlg.dispatchEvent(esc);
-      ok('Esc is refused too', esc.defaultPrevented);
+      eq('Esc is refused too', escape(recoveryDlg), { keyStopped: true, stillOpen: true });
       document.getElementById('recoverySaved').checked = true;
       outside(recoveryDlg);
       ok('once saved, it may go', !recoveryDlg.open);
+      // Backup codes the same way; once saved, the click is Done: off the page, and what waits on them goes on (review of HB-0500).
+      let codesSettled = false;
+      showBackupCodes(['WXYZ-1234-TEST'], 'o1').then(() => { codesSettled = true; });
+      outside(backupDlg);
+      ok('backup codes stay open', backupDlg.open && $('backupCodes').textContent === 'WXYZ-1234-TEST');
+      eq('Esc is refused there too', escape(backupDlg), { keyStopped: true, stillOpen: true });
+      $('backupSaved').checked = true;
+      outside(backupDlg);
+      await sleep(0);
+      ok('once saved, they go, and are settled', !backupDlg.open && $('backupCodes').textContent === '' && codesSettled);
+      // The second-factor prompt goes only by its buttons: a stray click left its request waiting, and every later prompt with it.
+      let asked = 'waiting';
+      askSecondFactor('step-up').then(() => { asked = 'given'; }, () => { asked = 'refused'; });
+      await until(() => sfDlg.open);
+      outside(sfDlg);
+      ok('the prompt stays open', sfDlg.open);
+      eq('Esc is refused', escape(sfDlg), { keyStopped: true, stillOpen: true });
+      // Taken off the screen some other way (a browser letting a second Esc through). The check's Chrome does not
+      // always deliver a dialog's close event, so it is sent here as a browser would.
+      sfDlg.close(); sfDlg.dispatchEvent(new Event('close'));
+      ok('while its request waits, it comes back', sfDlg.open);
+      sfDlg.close();
+      const again = askSecondFactor('step-up');
+      ok('the next ask shows it again', sfDlg.open);
+      await sfCancel(); await again.catch(() => {});
+      ok('and Cancel answers it', asked === 'refused');
       loginDlg.showModal();
       outside(loginDlg);
       ok('the sign-in stays open', loginDlg.open);
@@ -2980,6 +3113,34 @@ const SCENARIOS = String.raw`(() => {
       } finally {
         window.__answer = {};
         block.hidden = true; block.innerHTML = '';
+      }
+    },
+    passwordChangeNeedsFactor: async () => {
+      // HB-0453: at the public address with no second factor, Settings → You explains instead of offering a form the gate refuses.
+      const was = { authMode: appConfig.authMode };
+      const words = 'Your account has no second factor, so its password cannot be changed at this address: whoever had only your password could otherwise lock you out. Change it at the private address (at home), or ask whoever runs this Hatchabot for a reset link.';
+      const base = { factors: [], backupCodes: 0, need: 'missing', ownerRights: false, methods: [], localAccount: true, passkeyAddress: 'https://box.example.com', passkeyHere: false };
+      window.__override['/v1/local-accounts/me'] = { id: 'la-2', username: 'sam', hostOwner: false };
+      window.__override['/v1/public-access'] = { on: true, serving: true, safeguards: [], failing: [], invitedOnly: false };
+      try {
+        appConfig.authMode = 'accounts';
+        window.__override['/v1/second-factor'] = { ...base, publicAddress: true, passwordRefused: words };
+        await openAiDlg('access');
+        await until(() => !document.getElementById('acctSelf').hidden && !document.getElementById('acctPwRefused').hidden);
+        ok('the form is not offered', document.getElementById('acctPwForm').hidden);
+        eq('the page says what to do instead', document.getElementById('acctPwRefused').textContent, words);
+        ok('the recovery-code form is still there', !!byText('#acctSelf button', 'Make a new code'));
+        aiDlg.close();
+        // At home (no refusal in the answer): the form, and no explanation.
+        window.__override['/v1/second-factor'] = { ...base, publicAddress: false };
+        await openAiDlg('access');
+        await until(() => !document.getElementById('sfBox').hidden && !document.getElementById('acctPwForm').hidden);
+        ok('at home the form is back', document.getElementById('acctPwRefused').hidden && !!byText('#acctPwForm button', 'Change'));
+      } finally {
+        appConfig.authMode = was.authMode;
+        for (const k of ['/v1/second-factor', '/v1/public-access', '/v1/local-accounts/me']) delete window.__override[k];
+        document.getElementById('acctPwForm').hidden = false; document.getElementById('acctPwRefused').hidden = true;
+        if (aiDlg.open) aiDlg.close();
       }
     },
     secondFactorPrompt: async () => {
@@ -5965,7 +6126,7 @@ const SCENARIOS = String.raw`(() => {
         await runTryOnAgents();
         ok('the question promises it: ' + window.__confirms.at(-1), window.__confirms.at(-1).includes('Chat → Memory runs first'));
         const sent = window.__calls.slice(mark).filter((c) => c.method !== 'GET').map((c) => [c.method, c.path, c.body]);
-        eq('pinned, then rebuilt with the checkpoint', sent, [['PATCH', '/v1/agents/a1', { image: 'hatchabot-runtime:candidate' }], ['POST', '/v1/agents/a1/rebuild', { checkpoint: true }]]);
+        eq('pinned, then rebuilt with the checkpoint', sent, [['PATCH', '/v1/agents/a1', { image: 'hatchabot-runtime:candidate' }], ['POST', '/v1/agents/a1/rebuild', { checkpoint: true, stoppedWaits: true }]]);
       } finally { tryState = null; window.__confirms = []; if (tryDlg.open) tryDlg.close(); }
     },
     // HB-0351: a read of a repo that answers after the dialog was opened again lands nowhere.
@@ -6692,7 +6853,8 @@ const SCENARIOS = String.raw`(() => {
         await until(() => aiDlg.open);
         ok('they are taken to add a factor', aiDlg.open && !loginDlg.open);
         window.__answer = {};
-        const codes = showBackupCodes(['AAAA-BBBB-CCCC', 'DDDD-EEEE-FFFF']);
+        // Whose they are, as the server says: shown once a read names them (at once: the page reads when they are held).
+        const codes = showBackupCodes(['AAAA-BBBB-CCCC', 'DDDD-EEEE-FFFF'], 'new-person');
         await loadMyAccount();
         ok('the first read that works leaves the codes open', backupDlg.open && /AAAA-BBBB-CCCC/.test($('backupCodes').textContent));
         ok('and Access', aiDlg.open);
@@ -6727,7 +6889,7 @@ const SCENARIOS = String.raw`(() => {
         $('loginUser').value = 'another-person'; $('loginAcctPw').value = 'made-up';
         await acctSignIn();
         window.__answer = {};
-        showRecoveryCode('MADE-UP-CODE');
+        showRecoveryCode('MADE-UP-CODE', '', 'another-person', { here: true }); // what that sign-in brought
         await loadMyAccount();
         ok('a recovery code stays open', recoveryDlg.open && $('recoveryCode').textContent === 'MADE-UP-CODE');
         recoveryDlg.close();
@@ -6903,6 +7065,663 @@ const SCENARIOS = String.raw`(() => {
         if (moveSourceDlg.open) moveSourceDlg.close();
         if (loginDlg.open) loginDlg.close();
         await refresh(true);
+      }
+    },
+    signInEmptiesTypedFields: async () => {
+      // HB-0498: an AI key typed and not saved, and the plan box, are not left for the next account to see or send.
+      const account = await (await fetch('/v1/account')).json();
+      const view = v2View;
+      window.__override['/v1/agent-todos'] = { todos: [{ id: 't1', name: 'Recipe Box' }] };
+      try {
+        v2SetView('group'); await loadTodos();
+        (await until(() => $('v2TodoNew'))).value = 'Planned by the first person';
+        $('aiKey').value = 'made-up-unsaved-key'; $('aiToken').value = 'made-up-unsaved-token'; $('aiName').value = 'First person source';
+        const secrets = ['mediaKey', 'searchKey', 'poolToken', 'dpoolToken', 'spoolBot', 'spoolApp', 'connClientSecret', 'envValue', 'wizBotToken', 'peerToken', 'adoptToken', 'acctCurPw', 'recCurPw'].filter((id) => $(id)); // adoptToken is drawn only for a channel being adopted
+        const texts = ['cronMsg', 'agentPersona', 'editDesc'];
+        for (const id of [...secrets, ...texts]) $(id).value = 'made-up-' + id;
+        window.__answer = { 'GET /v1/agents': [{ status: 401, body: { error: 'auth required' } }] };
+        await refresh(false);
+        await until(() => loginDlg.open);
+        window.__answer = {};
+        window.__override['/v1/account'] = { ...account, ownerId: 'someone-else' };
+        $('loginUser').value = 'someone-else'; $('loginAcctPw').value = 'made-up';
+        await acctSignIn();
+        ok('signed in', !loginDlg.open);
+        eq('the key form is empty', ['aiKey', 'aiToken', 'aiName'].map((id) => $(id).value), ['', '', '']);
+        eq('every other key, token and current password', secrets.filter((id) => $(id).value), []);
+        eq('and the free-text forms', texts.filter((id) => $(id).value !== $(id).defaultValue), []);
+        eq('and so is the plan box, drawn again', (await until(() => $('v2TodoNew'))).value, '');
+      } finally {
+        window.__answer = {};
+        window.__override['/v1/account'] = account;
+        delete window.__override['/v1/agent-todos'];
+        for (const id of ['aiKey', 'aiToken', 'aiName']) $(id).value = '';
+        for (const el of document.querySelectorAll('input[type=password]')) if (!el.closest('#loginDlg')) el.value = '';
+        for (const id of ['cronMsg', 'agentPersona', 'editDesc']) $(id).value = $(id).defaultValue;
+        if (loginDlg.open) loginDlg.close();
+        await loadMyAccount();
+        v2SetView(view); await loadTodos();
+        await refresh(true);
+      }
+    },
+    ownCodesWaitForTheirPerson: async () => {
+      // HB-0500: one-time codes open when the session ends leave the page, and come back to their own person alone,
+      // even when this page never read who that was, or the read fails at the sign-in.
+      const account = await (await fetch('/v1/account')).json();
+      const lede = $('recoveryLede').innerHTML;
+      const expire = async () => {
+        window.__answer = { 'GET /v1/agents': [{ status: 401, body: { error: 'auth required' } }] };
+        await refresh(false);
+        await until(() => loginDlg.open);
+        window.__answer = {};
+      };
+      const signIn = async (ownerId, readFails = false) => {
+        window.__override['/v1/account'] = { ...account, ownerId };
+        if (readFails) window.__answer = { 'GET /v1/account': Array.from({ length: 4 }, () => ({ status: 500, body: { error: 'made up' } })) };
+        $('loginUser').value = 'made-up-user'; $('loginAcctPw').value = 'made-up';
+        await acctSignIn();
+        window.__answer = {};
+        ok('signed in', !loginDlg.open);
+      };
+      const codesShown = () => backupDlg.open && /AAAA-BBBB-CCCC/.test($('backupCodes').textContent);
+      const offThePage = () => !backupDlg.open && $('backupCodes').textContent === '';
+      try {
+        // Made in Settings by someone this page has never read: the server says whose they are.
+        pagePerson = null;
+        window.__answer = { 'POST /v1/second-factor/backup-codes': [{ body: { backupCodes: ['AAAA-BBBB-CCCC', 'DDDD-EEEE-FFFF'], ownerId: 'o-codes' } }] };
+        const making = sfNewBackupCodes($('sfBackupBtn'));
+        await until(codesShown);
+        await expire();
+        ok('off the page, not under the sign-in', offThePage());
+        await signIn('o-codes');
+        ok('back for their own person', codesShown());
+        ok('Done still waits for "I have saved them"', $('backupDone').disabled);
+        $('backupSaved').click(); $('backupDone').click();
+        await making;
+        ok('closed by Done', offThePage());
+        // The read fails at the sign-in: they wait for one that works.
+        const again = showBackupCodes(['AAAA-BBBB-CCCC'], 'o-codes');
+        await expire();
+        await signIn('o-codes', true);
+        ok('not shown while who it is cannot be read', offThePage());
+        await loadMyAccount();
+        ok('back once it is read', codesShown());
+        closeBackupCodes(); await again;
+        // Another account: gone, and what waited on them goes on.
+        let let_go = false;
+        showBackupCodes(['AAAA-BBBB-CCCC'], 'o-codes').then(() => { let_go = true; });
+        await expire();
+        await signIn('someone-else');
+        ok('not for another account', offThePage());
+        await sleep(0);
+        ok('what waited on them went on', let_go);
+        await expire();
+        await signIn('o-codes');
+        ok('and not kept for later', offThePage());
+        // A recovery code, the same way.
+        const rc = showRecoveryCode('MADE-UP-RECOVERY', '<b>Made-up lede.</b>', 'o-codes');
+        await expire();
+        ok('the recovery code is off the page', !recoveryDlg.open && $('recoveryCode').textContent === '');
+        await signIn('o-codes', true);
+        ok('and stays off while who it is cannot be read', !recoveryDlg.open);
+        await loadMyAccount();
+        ok('back once it is read, with its words', recoveryDlg.open && $('recoveryCode').textContent === 'MADE-UP-RECOVERY' && $('recoveryLede').textContent === 'Made-up lede.');
+        ok('still waiting for "I have saved it"', $('recoveryDone').disabled);
+        recoveryDlg.close(); await rc;
+        await sleep(0);
+        eq('closed, it leaves the page', $('recoveryCode').textContent, '');
+      } finally {
+        window.__answer = {};
+        window.__override['/v1/account'] = account;
+        $('recoveryLede').innerHTML = lede;
+        if (backupDlg.open) closeBackupCodes();
+        if (recoveryDlg.open) recoveryDlg.close();
+        if (loginDlg.open) loginDlg.close();
+        await loadMyAccount();
+        await refresh(true);
+      }
+    },
+    anotherAccountReloadsThePage: async () => {
+      // HB-0491: another account than the one this page showed loads the page again; the same account does not;
+      // and not while a second-factor step is under way: backup codes, a recovery code, an authenticator app being added.
+      const account = await (await fetch('/v1/account')).json();
+      const lede = $('recoveryLede').innerHTML;
+      const expire = async () => {
+        window.__answer = { 'GET /v1/agents': [{ status: 401, body: { error: 'auth required' } }] };
+        await refresh(false);
+        await until(() => loginDlg.open);
+        window.__answer = {};
+      };
+      const signIn = async (ownerId, readFails = false) => {
+        window.__override['/v1/account'] = { ...account, ownerId };
+        if (readFails) window.__answer = { 'GET /v1/account': Array.from({ length: 4 }, () => ({ status: 500, body: { error: 'made up' } })) };
+        $('loginUser').value = 'made-up-user'; $('loginAcctPw').value = 'made-up';
+        await acctSignIn();
+        window.__answer = {};
+        ok('signed in', !loginDlg.open);
+      };
+      const reloads = () => window.__reloads;
+      let n = 0;
+      const reloaded = async (what) => { try { await until(() => reloads() === n + 1, 3000); } catch { throw new Error(what + ': no reload (' + reloads() + ', was ' + n + ')'); } n = reloads(); };
+      const none = { factors: [], backupCodes: 0, need: 'missing', ownerRights: false, methods: [], publicAddress: false, localAccount: true, passkeyAddress: 'https://box.example.com', passkeyHere: false };
+      try {
+        await loadMyAccount();
+        n = reloads();
+        // The same account back: no reload.
+        await expire();
+        await signIn(account.ownerId);
+        await sleep(50);
+        eq('the same account: the page stays', reloads(), n);
+        // Another account: loaded again.
+        await expire();
+        await signIn('next-person');
+        await reloaded('another account reloads the page');
+        // Another tab signed in as someone else, seen at the next read: loaded again too.
+        window.__override['/v1/account'] = { ...account, ownerId: 'tab-person' };
+        await loadMyAccount();
+        await reloaded('the account of another tab, at the next read');
+        // The read fails at the sign-in, they add an authenticator app, and the read that works comes meanwhile:
+        // the reload waits for the app's setup, then for the backup codes it brings, then goes.
+        await expire();
+        await signIn('code-person', true);
+        const readFails = () => Array.from({ length: 20 }, () => ({ status: 500, body: { error: 'made up' } }));
+        window.__override['/v1/second-factor'] = none;
+        window.__answer = { 'GET /v1/account': readFails() };
+        await openAiDlg('access');
+        await until(() => !$('sfBox').hidden);
+        eq('nothing yet: who it is is not known', reloads(), n);
+        const madeUpKey = ['GEZDGNBV', 'GY3TQOJQ'].join('').repeat(2); // RFC 6238's seed in base32, split for secret scanners
+        window.__answer = {
+          'GET /v1/account': readFails(),
+          'POST /v1/second-factor/totp': [{ body: { id: 'sf-9', secret: madeUpKey, uri: 'otpauth://totp/x', qr: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0h10v10H0z"/></svg>' } }],
+          'POST /v1/second-factor/totp/confirm': [{ body: { ok: true, backupCodes: ['AAAA-BBBB-CCCC', 'DDDD-EEEE-FFFF'], ownerId: 'code-person' } }],
+        };
+        $('sfCurPw').value = 'made-up';
+        $('sfAddTotpBtn').click();
+        await until(() => !$('sfTotpBox').hidden);
+        delete window.__answer['GET /v1/account'];
+        await loadMyAccount();
+        ok('read: another person than the page showed', pagePerson === 'code-person');
+        await sleep(50);
+        eq('not while an app is being added', reloads(), n);
+        $('sfTotpCode').value = '123456';
+        $('sfTotpConfirmBtn').click();
+        await until(() => backupDlg.open);
+        await sleep(50);
+        eq('nor while its backup codes are open', reloads(), n);
+        ok('which stay theirs', /AAAA-BBBB-CCCC/.test($('backupCodes').textContent));
+        $('backupSaved').click(); $('backupDone').click();
+        await reloaded('once the codes are closed, it goes');
+        ok('the codes were closed by Done first', !backupDlg.open && $('backupCodes').textContent === '');
+        aiDlg.close();
+        // A recovery code that a sign-in as another account brings: the reload waits until it is closed.
+        await expire();
+        window.__override['/v1/account'] = { ...account, ownerId: 'recovering-person' };
+        window.__answer = { 'POST /v1/local-accounts/recover-with-code': [{ body: { ok: true, username: 'recovering-person', recoveryCode: 'MADE-UP-RECOVERY', ownerId: 'recovering-person' } }] };
+        $('recUser').value = 'recovering-person'; $('recCode').value = 'MADE-UP-OLD'; $('recPw').value = 'made-up-new';
+        await acctRecover();
+        window.__answer = {};
+        ok('the new recovery code is shown', recoveryDlg.open && $('recoveryCode').textContent === 'MADE-UP-RECOVERY');
+        await sleep(50);
+        eq('not while it is open', reloads(), n);
+        $('recoverySaved').click(); $('recoveryDone').click();
+        await reloaded('once the recovery code is closed, it goes');
+      } finally {
+        window.__answer = {};
+        window.__override['/v1/account'] = account;
+        delete window.__override['/v1/second-factor'];
+        $('recoveryLede').innerHTML = lede;
+        if (backupDlg.open) closeBackupCodes();
+        if (recoveryDlg.open) recoveryDlg.close();
+        if (aiDlg.open) aiDlg.close();
+        if (loginDlg.open) loginDlg.close();
+        sfCloseTotp();
+        await loadMyAccount();
+        pageReloadWanted = false;
+        await refresh(true);
+      }
+    },
+    reloadWaitsForWhatMustBeSeen: async () => {
+      // Review of HB-0491: the reload for another account is never held for ever, and never lands between a request and the codes it brings.
+      const account = await (await fetch('/v1/account')).json();
+      const outside = (dlg) => dlg.dispatchEvent(new MouseEvent('click', { clientX: 3, clientY: 3, bubbles: true, cancelable: true }));
+      const realFetch = window.fetch, realCreate = navigator.credentials.create;
+      let n = 0;
+      const reloaded = async (what) => { try { await until(() => window.__reloads === n + 1, 3000); } catch { throw new Error(what + ': no reload (' + window.__reloads + ', was ' + n + ')'); } n = window.__reloads; };
+      const held = async (what) => { await sleep(50); eq(what, window.__reloads, n); };
+      const factors = { factors: [{ id: 'f1', kind: 'totp', createdAt: new Date().toISOString() }], backupCodes: 3, need: 'yes', ownerRights: false, methods: ['totp'], publicAddress: false, localAccount: true, passkeyAddress: 'https://box.example.com', passkeyHere: true };
+      const slow = (match, reply, ms = 300) => { window.fetch = async (input, init = {}) => {
+        const url = String(typeof input === 'string' ? input : input.url);
+        if (!match(url, init)) return realFetch(input, init);
+        await sleep(ms);
+        return new Response(JSON.stringify(reply()), { status: 200, headers: { 'content-type': 'application/json' } });
+      }; };
+      const readAs = async (ownerId) => { window.__override['/v1/account'] = { ...account, ownerId }; await loadMyAccount(); };
+      try {
+        await readAs(account.ownerId);
+        n = window.__reloads; pageReloadWanted = false;
+        // A passkey's codes closed by a click outside once saved: its setup finishes, and a reload for another account goes.
+        window.__override['/v1/second-factor'] = factors;
+        await openAiDlg('access');
+        await until(() => !$('sfBox').hidden);
+        navigator.credentials.create = async () => ({ response: { clientDataJSON: new Uint8Array([1]).buffer, attestationObject: new Uint8Array([2]).buffer } });
+        window.__answer = {
+          'POST /v1/second-factor/passkey/options': [{ body: { challenge: 'AAAA', rp: { id: 'x', name: 'x' }, user: { id: 'AAAA', name: 'u', displayName: 'u' }, pubKeyCredParams: [], timeout: 1000, attestation: 'none', authenticatorSelection: {}, excludeCredentials: [] } }],
+          'POST /v1/second-factor/passkey': [{ body: { ok: true, label: 'L', backupCodes: ['AAAA-BBBB-CCCC'], ownerId: account.ownerId } }],
+        };
+        let added = false;
+        sfAddPasskey($('sfAddPasskeyBtn')).then(() => { added = true; });
+        await until(() => backupDlg.open);
+        window.__answer = {};
+        outside(backupDlg);
+        ok('the codes stay before they are saved', backupDlg.open);
+        $('backupSaved').checked = true;
+        outside(backupDlg);
+        await until(() => added);
+        ok('the passkey\'s setup finished', !backupDlg.open);
+        aiDlg.close();
+        await readAs('later-person');
+        await reloaded('a later read of another account');
+        // New codes behind a step-up prompt, while another tab's account is read: the reload waits for the codes and their Done.
+        await readAs(account.ownerId); n = window.__reloads; pageReloadWanted = false;
+        await openAiDlg('access');
+        await until(() => !$('sfBox').hidden);
+        let asks = 0, codesArrived = -1;
+        window.fetch = async (input, init = {}) => {
+          const url = String(typeof input === 'string' ? input : input.url);
+          if (!url.startsWith('/v1/second-factor/backup-codes')) return realFetch(input, init);
+          if (++asks === 1) return new Response(JSON.stringify({ error: 'again', secondFactor: 'step-up' }), { status: 401, headers: { 'content-type': 'application/json' } });
+          await sleep(300);
+          codesArrived = window.__reloads - n;
+          return new Response(JSON.stringify({ backupCodes: ['AAAA-BBBB-CCCC'], ownerId: account.ownerId }), { status: 200, headers: { 'content-type': 'application/json' } });
+        };
+        window.__answer = { 'POST /v1/second-factor/verify': [{ body: { ok: true } }] };
+        const making = sfNewBackupCodes($('sfBackupBtn'));
+        await until(() => sfDlg.open);
+        // A reload already wanted (another account was read here before; a read now would answer the prompt "not given").
+        pageReloadWanted = true; pageReloadWhenQuiet();
+        await held('not during the prompt');
+        $('sfCode').value = '123456';
+        await sfSubmitCode();
+        await sleep(20);
+        pageReloadWhenQuiet(); // anything that asks meanwhile (a step ending, a dialog closing)
+        await held('not while the request it was asked for is in flight');
+        await until(() => backupDlg.open);
+        eq('not before the codes came', codesArrived, 0);
+        await held('nor while they are open');
+        closeBackupCodes(); await making;
+        await reloaded('once they are closed');
+        // Any request a prompt was for is held until it answers, not only the ones that bring codes.
+        await readAs(account.ownerId); n = window.__reloads; pageReloadWanted = false;
+        asks = 0;
+        window.fetch = async (input, init = {}) => {
+          const url = String(typeof input === 'string' ? input : input.url);
+          if (!url.startsWith('/v1/made-up-sensitive')) return realFetch(input, init);
+          if (++asks === 1) return new Response(JSON.stringify({ error: 'again', secondFactor: 'step-up' }), { status: 401, headers: { 'content-type': 'application/json' } });
+          await sleep(300);
+          return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+        };
+        window.__answer = { 'POST /v1/second-factor/verify': [{ body: { ok: true } }] };
+        const sensitive = api('/v1/made-up-sensitive', { method: 'POST', body: {} });
+        await until(() => sfDlg.open);
+        pageReloadWanted = true;
+        $('sfCode').value = '123456';
+        await sfSubmitCode();
+        await sleep(20);
+        pageReloadWhenQuiet();
+        await held('not while what the prompt was for is in flight');
+        await sensitive;
+        await reloaded('once it answered');
+        window.fetch = realFetch;
+        // An authenticator app's confirm in flight when Settings closes for another account: held until it answers.
+        // Its codes are the last person's: not shown to the new one.
+        await readAs(account.ownerId); n = window.__reloads; pageReloadWanted = false;
+        await openAiDlg('access');
+        await until(() => !$('sfBox').hidden);
+        const madeUpKey = ['GEZDGNBV', 'GY3TQOJQ'].join('').repeat(2); // RFC 6238's seed in base32, split for secret scanners
+        window.__answer = { 'POST /v1/second-factor/totp': [{ body: { id: 'sf-7', secret: madeUpKey, uri: 'otpauth://totp/x', qr: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0h10v10H0z"/></svg>' } }] };
+        $('sfAddTotpBtn').click();
+        await until(() => !$('sfTotpBox').hidden);
+        slow((url) => url.startsWith('/v1/second-factor/totp/confirm'), () => ({ ok: true, backupCodes: ['QQQQ-RRRR-SSSS'], ownerId: account.ownerId }));
+        $('sfTotpCode').value = '123456';
+        const confirming = sfConfirmTotp();
+        await sleep(20);
+        await readAs('switched-person');
+        ok('Settings closed for them', !aiDlg.open);
+        await held('not while the confirm is in flight');
+        await Promise.race([confirming, sleep(1000)]);
+        ok('the last person\'s codes are not shown: ' + $('toast').textContent, !backupDlg.open && !/QQQQ/.test($('backupCodes').textContent) && /not shown to this one/.test($('toast').textContent));
+        await reloaded('once it answered');
+      } finally {
+        window.fetch = realFetch; navigator.credentials.create = realCreate;
+        window.__answer = {};
+        window.__override['/v1/account'] = account;
+        delete window.__override['/v1/second-factor'];
+        if (backupDlg.open) closeBackupCodes();
+        if (sfDlg.open) await sfCancel().catch(() => {});
+        if (aiDlg.open) aiDlg.close();
+        sfCloseTotp();
+        await loadMyAccount();
+        pageReloadWanted = false;
+        await refresh(true);
+      }
+    },
+    promptSignInReadsWho: async () => {
+      // Review of HB-0491: another tab signed in and this page's poll was asked for the second factor. Passing it is a sign-in:
+      // who it is is read, the page cleared for them, and the reload is not held for ever.
+      const account = await (await fetch('/v1/account')).json();
+      try {
+        await loadMyAccount();
+        const n = window.__reloads; pageReloadWanted = false;
+        window.__answer = { 'GET /v1/agents': [{ status: 401, body: { error: 'auth required' } }] };
+        await refresh(false);
+        await until(() => loginDlg.open);
+        window.__answer = { 'GET /v1/agents': [{ status: 401, body: { error: 'second factor', secondFactor: 'required' } }], 'POST /v1/second-factor/verify': [{ body: { ok: true } }] };
+        window.__override['/v1/account'] = { ...account, ownerId: 'other-tab-person' };
+        $('cronMsg').value = 'typed by the last person';
+        const poll = refresh(false);
+        await until(() => sfDlg.open);
+        ok('the prompt took the sign-in screen\'s place', !loginDlg.open);
+        $('sfCode').value = '123456';
+        await sfSubmitCode();
+        await poll;
+        window.__answer = {};
+        await until(() => pagePerson === 'other-tab-person', 3000).catch(() => {});
+        eq('who it is was read', pagePerson, 'other-tab-person');
+        eq('and the page was cleared for them', $('cronMsg').value, '');
+        await until(() => window.__reloads === n + 1, 3000).catch(() => {});
+        eq('and the page loads again for them', window.__reloads, n + 1);
+        eq('no sign-in left counted', pageSignIns, 0);
+      } finally {
+        window.__answer = {};
+        window.__override['/v1/account'] = account;
+        if (loginDlg.open) loginDlg.close();
+        if (sfDlg.open) await sfCancel().catch(() => {});
+        await loadMyAccount();
+        pageReloadWanted = false;
+        await refresh(true);
+      }
+    },
+    familyAccountsShowsTheCode: async () => {
+      // Review of HB-0500: the shared password's owner becomes an account. Its recovery code is theirs, though the page
+      // still knows them by the password's owner: shown, and kept until "I've saved it".
+      const account = await (await fetch('/v1/account')).json();
+      const outside = (dlg) => dlg.dispatchEvent(new MouseEvent('click', { clientX: 3, clientY: 3, bubbles: true, cancelable: true }));
+      const lede = $('recoveryLede').innerHTML;
+      try {
+        window.__override['/v1/account'] = { ...account, ownerId: 'dev-owner' };
+        await loadMyAccount();
+        $('famUser').value = 'made-up-owner'; $('famPw').value = 'made-up-password-1';
+        window.__answer = { 'POST /v1/auth/family-accounts': [{ body: { ok: true, username: 'made-up-owner', adopted: 0, restarting: false, recoveryCode: 'RCVR-CODE-MADE-UP1', ownerId: 'acct-made-up' } }] };
+        let done = false;
+        turnOnFamilyAccounts(document.createElement('button')).then(() => { done = true; });
+        await until(() => recoveryDlg.open, 3000).catch(() => {});
+        ok('the recovery code is shown: ' + $('toast').textContent, recoveryDlg.open && $('recoveryCode').textContent === 'RCVR-CODE-MADE-UP1');
+        outside(recoveryDlg);
+        await sleep(100);
+        ok('and stays until it is saved', recoveryDlg.open && !done && $('recoveryDone').disabled);
+        $('recoverySaved').click(); $('recoveryDone').click();
+        await until(() => done);
+        ok('then the switch goes on: ' + $('famErr').textContent, !recoveryDlg.open && /now restart/.test($('famErr').textContent));
+      } finally {
+        window.__answer = {};
+        window.__override['/v1/account'] = account;
+        $('recoveryLede').innerHTML = lede; $('famErr').textContent = ''; $('famPw').value = '';
+        if (recoveryDlg.open) closeRecoveryCode();
+        await loadMyAccount();
+        pageReloadWanted = false;
+      }
+    },
+    stepUpEndsWithItsSession: async () => {
+      // Review of HB-0491: a request waiting on a second-factor prompt belongs to the session and person it was asked for.
+      // Neither another sign-in on the page nor another account read here sends it again.
+      const account = await (await fetch('/v1/account')).json();
+      const realFetch = window.fetch;
+      let sent = [], asks = 0;
+      const stepUp = () => { window.fetch = async (input, init = {}) => {
+        const url = String(typeof input === 'string' ? input : input.url);
+        if (!(url.startsWith('/v1/ai-profiles') && (init.method || 'GET') === 'POST')) return realFetch(input, init);
+        if (++asks === 1) return new Response(JSON.stringify({ error: 'again', secondFactor: 'step-up' }), { status: 401, headers: { 'content-type': 'application/json' } });
+        sent.push({ as: window.__override['/v1/account'].ownerId, body: init.body });
+        return new Response(JSON.stringify({ ok: true, id: 'p9' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }; };
+      const save = () => api('/v1/ai-profiles', { method: 'POST', body: { kind: 'apikey', key: 'made-up-key-of-a' } }).then(() => 'saved', (e) => e.message);
+      try {
+        // The session ends with the prompt open; the next person signs in through their own prompt.
+        window.__override['/v1/account'] = { ...account, ownerId: 'person-a' };
+        await loadMyAccount();
+        stepUp();
+        const saving = save();
+        await until(() => sfDlg.open);
+        window.__answer = { 'GET /v1/agents': [{ status: 401, body: { error: 'auth required' } }] };
+        await refresh(false);
+        await until(() => loginDlg.open);
+        eq('the request is answered at once', await Promise.race([saving, sleep(1000).then(() => 'still waiting')]), 'The second factor was not given.');
+        ok('and its prompt is not left under the sign-in', !sfDlg.open);
+        window.__answer = { 'GET /v1/account': [{ status: 401, body: { error: 'second factor', secondFactor: 'required' } }], 'POST /v1/second-factor/verify': [{ body: { ok: true } }] };
+        window.__override['/v1/account'] = { ...account, ownerId: 'person-b' };
+        $('loginUser').value = 'made-up-b'; $('loginAcctPw').value = 'made-up';
+        const signing = acctSignIn();
+        await until(() => sfDlg.open && !loginDlg.open);
+        eq('the next person is asked at their own sign-in', $('sfDlgTitle').textContent, 'One more step');
+        $('sfCode').value = '123456';
+        await sfSubmitCode();
+        await signing;
+        await sleep(100);
+        eq('nothing of the first person is sent under their session', sent, []);
+        window.__answer = {};
+        // Another account read here while the prompt waits (another tab signed in): answered, not sent.
+        await loadMyAccount();
+        asks = 0; sent = [];
+        const saving2 = save();
+        await until(() => sfDlg.open);
+        window.__override['/v1/account'] = { ...account, ownerId: 'person-c' };
+        await loadMyAccount();
+        eq('the request is answered', await Promise.race([saving2, sleep(1000).then(() => 'still waiting')]), 'The second factor was not given.');
+        ok('and the prompt closed', !sfDlg.open);
+        eq('and nothing sent', sent, []);
+      } finally {
+        window.fetch = realFetch;
+        window.__answer = {};
+        window.__override['/v1/account'] = account;
+        if (sfDlg.open) await sfCancel().catch(() => {});
+        if (loginDlg.open) loginDlg.close();
+        await loadMyAccount();
+        pageReloadWanted = false;
+        await refresh(true);
+      }
+    },
+    lateCodesWaitBehindTheSignIn: async () => {
+      // Review of HB-0500: codes that answer after the session ended do not open over the sign-in; they wait for their person.
+      const account = await (await fetch('/v1/account')).json();
+      const realFetch = window.fetch;
+      try {
+        window.__override['/v1/account'] = { ...account, ownerId: 'person-a' };
+        await loadMyAccount();
+        window.fetch = async (input, init = {}) => {
+          const url = String(typeof input === 'string' ? input : input.url);
+          if (!url.startsWith('/v1/second-factor/backup-codes')) return realFetch(input, init);
+          await sleep(400);
+          return new Response(JSON.stringify({ backupCodes: ['LATE-CODE-ZZZZ'], ownerId: 'person-a' }), { status: 200, headers: { 'content-type': 'application/json' } });
+        };
+        const making = sfNewBackupCodes(document.createElement('button'));
+        await sleep(20);
+        window.__answer = { 'GET /v1/agents': [{ status: 401, body: { error: 'auth required' } }] };
+        await refresh(false);
+        await until(() => loginDlg.open);
+        window.__answer = {};
+        await sleep(600);
+        ok('not over the sign-in', loginDlg.open && !backupDlg.open && $('backupCodes').textContent === '');
+        $('loginUser').value = 'made-up-a'; $('loginAcctPw').value = 'made-up';
+        await acctSignIn();
+        ok('shown to their own person once signed in', backupDlg.open && /LATE-CODE-ZZZZ/.test($('backupCodes').textContent));
+        closeBackupCodes(); await making;
+      } finally {
+        window.fetch = realFetch;
+        window.__answer = {};
+        window.__override['/v1/account'] = account;
+        if (backupDlg.open) closeBackupCodes();
+        if (loginDlg.open) loginDlg.close();
+        await loadMyAccount();
+        pageReloadWanted = false;
+        await refresh(true);
+      }
+    },
+    answeredPromptIsForItsPerson: async () => {
+      // Final review of HB-0491: another tab or window signed in as someone else, and this page's request was asked for a
+      // second factor. The factor given is the other session's: the request is answered "not given", never sent as them.
+      const account = await (await fetch('/v1/account')).json();
+      const realFetch = window.fetch;
+      let sent = [], asks = 0;
+      const ask = (kind) => { asks = 0; sent = []; window.fetch = async (input, init = {}) => {
+        const url = String(typeof input === 'string' ? input : input.url);
+        if (!(url.startsWith('/v1/ai-profiles') && (init.method || 'GET') === 'POST')) return realFetch(input, init);
+        if (++asks === 1) return new Response(JSON.stringify({ error: 'second factor', secondFactor: kind }), { status: 401, headers: { 'content-type': 'application/json' } });
+        sent.push({ as: window.__override['/v1/account'].ownerId, body: init.body });
+        return new Response(JSON.stringify({ ok: true, id: 'p9' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }; };
+      const save = () => api('/v1/ai-profiles', { method: 'POST', body: { kind: 'apikey', key: 'made-up-key-of-a' } }).then(() => 'saved', (e) => e.message);
+      try {
+        for (const kind of ['required', 'step-up']) {
+          window.__override['/v1/account'] = { ...account, ownerId: 'person-a' };
+          await loadMyAccount();
+          pageReloadWanted = false;
+          const n = window.__reloads;
+          ask(kind);
+          const saving = save();
+          await until(() => sfDlg.open);
+          window.__override['/v1/account'] = { ...account, ownerId: 'person-b' }; // signed in elsewhere meanwhile
+          window.__answer = { 'POST /v1/second-factor/verify': [{ body: { ok: true } }] };
+          $('sfCode').value = '123456';
+          await sfSubmitCode();
+          window.__answer = {};
+          eq(kind + ': the request is answered', await Promise.race([saving, sleep(1000).then(() => 'still waiting')]), 'The second factor was not given.');
+          eq(kind + ': and not sent as the other account', sent, []);
+          ok(kind + ': the prompt closed', !sfDlg.open);
+          eq(kind + ': the page knows who is signed in now', pagePerson, 'person-b');
+          await until(() => window.__reloads === n + 1, 3000).catch(() => {});
+          eq(kind + ': and loads again for them', window.__reloads, n + 1);
+          await until(() => !pageSignIns, 3000).catch(() => {});
+        }
+        // The same person: the request goes on.
+        window.__override['/v1/account'] = { ...account, ownerId: 'person-a' };
+        await loadMyAccount();
+        ask('step-up');
+        const saving = save();
+        await until(() => sfDlg.open);
+        window.__answer = { 'POST /v1/second-factor/verify': [{ body: { ok: true } }] };
+        $('sfCode').value = '123456';
+        await sfSubmitCode();
+        window.__answer = {};
+        eq('the same person: saved', await saving, 'saved');
+        eq('as them', sent.map((x) => x.as), ['person-a']);
+      } finally {
+        window.fetch = realFetch;
+        window.__answer = {};
+        window.__override['/v1/account'] = account;
+        if (sfDlg.open) await sfCancel().catch(() => {});
+        await loadMyAccount();
+        pageReloadWanted = false;
+        await refresh(true);
+      }
+    },
+    lateCodesWaitThroughAFailedRead: async () => {
+      // Final review of HB-0500: the last person's codes answer after the next person signed in, and that person's read
+      // failed. Not shown to them; their own sign-in's recovery code still is.
+      const account = await (await fetch('/v1/account')).json();
+      const realFetch = window.fetch;
+      const lede = $('recoveryLede').innerHTML;
+      let release = false, failRead = false;
+      try {
+        window.__override['/v1/account'] = { ...account, ownerId: 'person-a' };
+        await loadMyAccount();
+        window.fetch = async (input, init = {}) => {
+          const url = String(typeof input === 'string' ? input : input.url);
+          if (failRead && url.split('?')[0] === '/v1/account') return new Response('{"error":"made up"}', { status: 500, headers: { 'content-type': 'application/json' } });
+          if (!url.startsWith('/v1/second-factor/backup-codes')) return realFetch(input, init);
+          await until(() => release, 20000);
+          return new Response(JSON.stringify({ backupCodes: ['AAAA-LATE-ZZZZ'], ownerId: 'person-a' }), { status: 200, headers: { 'content-type': 'application/json' } });
+        };
+        let let_go = false;
+        sfNewBackupCodes(document.createElement('button')).then(() => { let_go = true; });
+        await sleep(20);
+        window.__answer = { 'GET /v1/agents': [{ status: 401, body: { error: 'auth required' } }] };
+        await refresh(false);
+        await until(() => loginDlg.open);
+        window.__answer = {};
+        window.__override['/v1/account'] = { ...account, ownerId: 'person-b' }; failRead = true;
+        $('loginUser').value = 'made-up-b'; $('loginAcctPw').value = 'made-up';
+        await acctSignIn();
+        release = true;
+        await sleep(300);
+        ok('the last person\'s codes are not shown to the next', !backupDlg.open && $('backupCodes').textContent === '');
+        failRead = false;
+        await loadMyAccount();
+        await until(() => let_go, 3000).catch(() => {});
+        ok('and once the read names them, they are gone: ' + JSON.stringify({ open: backupDlg.open, let_go, away: pageSecretsAway.length }), !backupDlg.open && let_go && !pageSecretsAway.length);
+        // A sign-in whose read fails still shows what it brought.
+        window.__answer = { 'GET /v1/agents': [{ status: 401, body: { error: 'auth required' } }] };
+        await refresh(false);
+        await until(() => loginDlg.open);
+        window.__answer = { 'POST /v1/local-accounts/recover-with-code': [{ body: { ok: true, username: 'made-up-b', recoveryCode: 'MADE-UP-NEW-CODE', ownerId: 'person-b' } }] };
+        failRead = true;
+        $('recUser').value = 'made-up-b'; $('recCode').value = 'MADE-UP-OLD'; $('recPw').value = 'made-up-new';
+        await acctRecover();
+        window.__answer = {};
+        ok('the recovery code it brought is shown', recoveryDlg.open && $('recoveryCode').textContent === 'MADE-UP-NEW-CODE');
+        failRead = false;
+      } finally {
+        window.fetch = realFetch;
+        window.__answer = {};
+        window.__override['/v1/account'] = account;
+        $('recoveryLede').innerHTML = lede;
+        if (backupDlg.open) closeBackupCodes();
+        if (recoveryDlg.open) closeRecoveryCode();
+        if (loginDlg.open) loginDlg.close();
+        await loadMyAccount();
+        pageReloadWanted = false;
+        await refresh(true);
+      }
+    },
+    ownerlessCodesAreNobodys: async () => {
+      // Review of HB-0500: codes with no owner said are nobody's: a read never hands them to whoever is signed in by then.
+      const account = await (await fetch('/v1/account')).json();
+      try {
+        await loadMyAccount();
+        let let_go = false;
+        showBackupCodes(['NOBO-DYSC-ODES']).then(() => { let_go = true; });
+        window.__answer = { 'GET /v1/agents': [{ status: 401, body: { error: 'auth required' } }] };
+        await refresh(false);
+        await until(() => loginDlg.open);
+        window.__answer = {};
+        $('loginUser').value = 'made-up-user'; $('loginAcctPw').value = 'made-up';
+        await acctSignIn();
+        ok('not shown again, even to the same account', !backupDlg.open && $('backupCodes').textContent === '');
+        await sleep(0);
+        ok('and what waited on them went on', let_go);
+      } finally {
+        window.__answer = {};
+        window.__override['/v1/account'] = account;
+        if (backupDlg.open) closeBackupCodes();
+        if (loginDlg.open) loginDlg.close();
+        await loadMyAccount();
+        await refresh(true);
+      }
+    },
+    shownTabReadsWhoIsSignedIn: async () => {
+      // Review of HB-0491: a tab shown again reads who is signed in, so another tab's switch does not wait for the next meta refresh.
+      const account = await (await fetch('/v1/account')).json();
+      try {
+        await loadMyAccount();
+        const n = window.__reloads; pageReloadWanted = false;
+        window.__override['/v1/account'] = { ...account, ownerId: 'switched-elsewhere' };
+        document.dispatchEvent(new Event('visibilitychange'));
+        await until(() => window.__reloads === n + 1, 3000).catch(() => {});
+        eq('shown again, it reads, and loads again for them', window.__reloads, n + 1);
+      } finally {
+        window.__override['/v1/account'] = account;
+        await loadMyAccount();
+        pageReloadWanted = false;
       }
     },
     webChatMaybeDeliveredComesBack: async () => {
@@ -7692,6 +8511,33 @@ const SCENARIOS = String.raw`(() => {
       ok('the button is usable again', !btn.disabled);
       v2Close();
       window.__answer = {};
+    },
+    searchTurnedAway: async () => {
+      // HB-0455: DuckDuckGo answers this machine with a challenge page. The page says there is no free search here and a Brave key is needed.
+      const away = { status: 'turned-away', detail: 'DuckDuckGo turns this machine away: it answered with a challenge page, not results. So this machine gets no free search from DuckDuckGo, and agents can search only with a working Brave key.' };
+      const noKey = { mode: 'auto', active: 'duckduckgo', keySet: false, why: 'No Brave key is set.', checkedAt: '2026-11-05T10:00:00Z', duckduckgo: away };
+      try {
+        window.__answer = { 'POST /v1/web-search/check': [{ body: noKey }] };
+        await testFleetSearch();
+        const health = () => document.getElementById('searchHealth').textContent;
+        ok('it says agents have no search: ' + health(), health().includes('Agents have no working web search'));
+        ok('and why, and what is needed', health().includes('no free search from DuckDuckGo') && health().includes('Brave key is needed') && health().includes('Paste one above'));
+        ok('not "answered with no results"', !health().includes('answered with no results'));
+        // A key that works, with DuckDuckGo chosen by hand: it says to choose Brave.
+        renderSearchHealth({ ...noKey, mode: 'duckduckgo', keySet: true, why: 'You chose DuckDuckGo.', brave: { status: 'ok', detail: 'Brave works.' } });
+        ok('a working key: choose Brave', health().includes('yours works') && !health().includes('Paste one above'));
+        // On Brave: there is nothing to fall back on.
+        renderSearchHealth({ ...noKey, active: 'brave', keySet: true, why: 'Brave has quota.', brave: { status: 'ok', detail: 'Brave works.' } });
+        ok('on Brave: no fallback, said quietly', health().includes('agents stay on Brave even when it runs low') && !health().includes('Agents have no working web search'));
+        // On Brave and nearly out: it stays there, and says so (review of HB-0455).
+        renderSearchHealth({ ...noKey, active: 'brave', keySet: true, why: 'The Brave key has 5 queries left. DuckDuckGo turns this machine away, so agents stay on Brave until it runs out.', brave: { status: 'low', detail: 'The Brave key has 5 queries left.' } });
+        ok('nearly out: stays on Brave until it runs out', health().includes('The Brave key is nearly out') && health().includes('stay on Brave until it runs out') && !health().includes('if the Brave key runs out'));
+        // DuckDuckGo working: no such line.
+        renderSearchHealth({ ...noKey, duckduckgo: { status: 'ok', detail: 'DuckDuckGo works.' } });
+        ok('DuckDuckGo works: nothing said', !document.getElementById('searchTurnedAway'));
+      } finally {
+        window.__answer = {};
+      }
     },
     agentGmailTest: async () => {
       // The owner's request (2026-11-03): a button per account that has Gmail; it says what the test said.

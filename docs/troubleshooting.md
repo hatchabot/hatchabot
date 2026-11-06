@@ -43,6 +43,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.173.0`
 - **Code:** `src/domain/redact.ts` — `maskKeyMaterial`; `src/orchestrator/problemReport.ts` — `judgePath`, `maskPaths`, `maskPeople`, `maskWords`, `maskCredentialForms`
 
+### Report a problem left part of a password in JSON, a Ruby hash or a PuTTY key file in the issue
+- **Check:** the review panel or the filed issue shows the rest of a value after `***` in a quoted field (`{"pass":"***"b…"}`, from a value with a `\"` in it), or a value kept whole after an escaped name (`\"password\":\"…` cut off, `\"token\":123456`), after mixed quoting (`\"pass":"…"`), after `:password =>` or `password =>`, after `TOKEN2=`, `API_KEY_2=` or `SECRET_KEY_BASE=`, after a camelCase, PascalCase or mixed-case name (`dbPass`, `DbPass`, `sshKey`, `Garden_Key`, `pw`), after a shell's `'…\'` before another setting, in curly quotes (also after an apostrophe inside them: `‘O’Brien…’`) or after a fullwidth colon, after a logfmt `\"` (`token="…\" …"`), in Docker's `"auth"`, after a lowercase `bearer`, the rest of `mysql -p'… …'`, a short `glpat-…` or `hf_…`, or the lines of a `.ppk` key file (`PuTTY-User-Key-File-…`, `Private-Lines:`), also with a prefix on each line.
+- **Cause:** the quoted-field rule ended a value at the first quote it met, even an escaped one, needed a closing quote and quotes of the same kind, took a curly `’` that is also an apostrophe as the end, and did not know Ruby's `=>` after a bare name. A setting name had to end in the credential word, and a pass or key name needed a separator. A PuTTY key file has no `BEGIN` line, so the key rules never saw it whole.
+- **Fix:** upgrade, then read the draft through. Open reports are masked again as they leave. An issue already filed stays as it was: edit it on GitHub, or ask for it to be deleted. A password or key that was in a filed issue is no longer secret: change it. `docs/field-reports.md` lists what is masked and what is not.
+- **Fixed in:** `v2.174.0`
+- **Code:** `src/domain/redact.ts` — `quotedFieldMasker`, `redactCredentialFields`, `isArrowCode`, `maskKeyMaterial`, `maskPuttyKeys`; `src/orchestrator/problemReport.ts` — `maskCredentialForms`, `maskQuotedPassAndKey`, `maskDockerAuth`
+
 ### Report a problem turned a log line into {path}, or masked everyday words as names
 - **Check:** a title or log line with a path in it reads `{path}` alone with no second path or file named later on the line, or the sentence after a path is gone. Or ordinary words show as masks: `it {user} fail` for a user named will, `the {name} bot` for a member named Telegram User, `{name}-10-05` for a member named Alex 2026, `github.{name}` for a member whose name is an email address. Or `tcp` shows as `{host}` after a runner was added at `tcp://:2375`; or `openssl-1.1.1-8.el8.noarch` or `config.local` as `{host}`, a list of numbers as `{phone}`, or `-p3306:3306` as `-p***`.
 - **Cause:** after a space, a path took capitalized words with no limit, and plain words up to one that looked like a file. Usernames and the parts of a member's free-text name were masked in any case, whatever the word. `endpointIdentity` read a scheme as the host when an address had none.
@@ -659,6 +666,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.164.3`
 - **Code:** `scripts/privacy-check.mjs` — `scan`; `scripts/privacy-ci.mjs` — `scanAcross`, `scanText`, `scanRange`
 
+### Releasing: the publisher blocked a release for a `[fingerprint] M` (machine) hit that the local check passed
+- **Check:** the publisher's issue names `[fingerprint] M` lines, and `node scripts/privacy-check.mjs --text <file>` on those files says they name nothing private. Its `not covered:` line says `machine names seen before (no record yet …)`, or the result is `✗ incomplete: the record of machine names seen before … could not be read` (exit 3).
+- **Cause:** the local check read machine names only from the peers `tailscale status` listed at that moment. The publisher gates with the names from its last `kit values sync`, so a machine that has left the tailnet since was still in its set, and the hit showed up only an hour after the tag.
+- **Fix:** reword each line it names, using a made-up host such as `Sams-Notebook`, and release the next patch version. The check now keeps every machine and tailnet name it has seen in `~/.config/hatchabot/privacy-machines.json` (mode 600, never in a repo) and checks those too. The record starts the first time it runs on a machine, so a machine that left before then is not in it: add its name to the file's `machine` list by hand. An unreadable record stops the check (exit 3) until it is moved aside; docs/releasing.md, "The privacy check", says how to forget a machine.
+- **Fixed in:** the release after `v2.173.1`
+- **Code:** `scripts/privacy-check.mjs` — `tailnetValues`, `seenMachinesFile`
+
 ### `scripts/promote.sh`: "vX.Y.Z is not published yet (the public repo has no such tag)"
 - **Check:** `git ls-remote --tags public refs/tags/vX.Y.Z` prints nothing.
 - **Cause:** only a published release can be moved to a channel, and the publisher has not pushed it yet (above). The publisher's fast lane would refuse a `channels.json` naming it.
@@ -877,6 +891,34 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** `chmod 600 ~/.config/hatchabot/env`, and make a new token (⚙ Settings → Security) if others share the machine. From v2.160.0 every write leaves the file 0600.
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/cli.ts` — `writeConfigValue`
+
+### After a sign-in on a shared browser, Settings → AI shows an API key the last person typed, or the plan box their text
+- **Check:** one person's session ended on that page (the sign-in screen appeared by itself) and another account signed in without the page being reloaded. **Add another AI source** still held a key, token or name the first person typed and did not add, or **Plan an agent…** on the home screen held their text.
+- **Cause:** the sign-in cleared dialogs, report text and unsaved source edits, but not these boxes. An unsaved key is a credential: pressing **Add source** would have saved it as the new person's source.
+- **Fix:** upgrade: when another account signs in, the add-a-source form (key, token, name and models) and the plan box are emptied, and the page loads again (see "Another account signed in on a shared browser…" below). A setup token that was added is now cleared from its box too, as an API key already was. On an older release, reload the page before handing it over.
+- **Fixed in:** `v2.174.0`
+- **Code:** `web/index.html` — `pageClearLast`, `addAiProfile`
+
+### Backup codes or a recovery code closed before you saved them, after the sign-in screen appeared by itself
+- **Check:** the codes (or the recovery code) were on the screen when the session ended, you signed back in as yourself on the same page without reloading it, and they were gone. Settings → You shows the codes were made (fewer left than you saved, or a recovery code dated today you never saw).
+- **Cause:** a sign-in closes what the last person had open. When the page had never read who you were, or could not read it at that sign-in, it could not tell you were the same person, and closed your codes with the rest. Until then they also stayed on the screen, dimmed, under the sign-in.
+- **Fix:** upgrade: codes open when the session ends leave the screen, and wait with whose they are (the server now says so with them). Sign in again as yourself and they are back, until you tick that you have saved them; if who you are cannot be read yet, they come back at the first read that works. Another account never sees them, and codes shown with no owner are given back to nobody. A click outside the codes, or Esc, no longer closes them before you tick that you have saved them. Codes that answer after the session ended wait behind the sign-in for their person too, and the recovery code made by **Turn on family accounts** is shown to the owner making the switch. On any release, codes you did not save can be replaced: **Make new backup codes**, or make a new recovery code, in Settings → You.
+- **Fixed in:** `v2.174.0`
+- **Code:** `web/index.html` — `pageSecretShown`, `pageSecretNotHere`, `pageSecretLater`, `pageSecretsPutAway`, `pageSecretsBack`, `pageClearLast`, `showBackupCodes`, `showRecoveryCode`; `src/api/secondFactor.ts`; `src/api/accountsAuth.ts`; `src/api/routes.ts`
+
+### Another account signed in on a shared browser, and a form still held the last person's text
+- **Check:** one person's session ended on that page, or another tab signed in as someone else, and the page was not reloaded. A form such as the new-agent or task form still held what the first person typed, or a list was theirs until the next refresh.
+- **Cause:** a sign-in cleared what the page knew to clear (dialogs, chat drafts, report text, the add-a-source form), but the page keeps more for a person than that, and none of the rest was reset.
+- **Fix:** upgrade: when the page reads that another account than the one it showed is signed in, it loads again. It waits while a second-factor step is under way, so nothing that must be seen is lost: a sign-in finishing and the recovery code it shows, the second-factor prompt and the request it was for, an authenticator app or a passkey being added, a request for new codes, and backup codes or a recovery code on the screen. It reloads once that step ends. New codes that answer after the switch belong to the last account and are not shown to the new one (it says so; make new ones in Settings → You). The same account signing back in, or a first sign-in on a fresh page, does not reload. Another tab's switch is noticed when this tab is shown again, or at its next refresh. Until the reload, every password box and free-text form is emptied. On an older release, reload the page before handing it over.
+- **Fixed in:** `v2.174.0`
+- **Code:** `web/index.html` — `pagePersonIs`, `pageReloadWhenQuiet`, `pageSecondFactorBusy`, `pageHold`, `pageSigningIn`, `pageSignedIn`, `pageClearLast`, `sfDone`
+
+### The second-factor prompt went away after a click beside it, and nothing asks for it again
+- **Check:** at the public address, the "Confirm it is you" or "One more step" box closed on a click outside it or Esc, and since then a sensitive change (or the whole page) waits with no prompt.
+- **Cause:** a click outside closed the prompt without answering it, and every later request waited on that same unanswered prompt without showing it.
+- **Fix:** upgrade: the prompt closes only by **Continue**, a passkey or **Cancel**, and it comes back if it is ever off the screen while a request waits on it. A prompt belongs to the session and the person it was raised for: when that session ends, when the page reads that someone else is signed in, or when the factor given turns out to be another account's (signed in in another tab or window meanwhile), the request waiting on it is answered "The second factor was not given." and is not sent, so nothing one person asked for is sent again under the next person's sign-in. On an older release, reload the page.
+- **Fixed in:** `v2.174.0`
+- **Code:** `web/index.html` — `askSecondFactor`, `sfDone`, `sfCancel`, `sfDrop`, `pageSessionEnded`, `pagePersonIs`
 
 ### A member's Settings shows forms that only answer "Only the account that set up this machine can do that"
 - **Check:** you are signed in with an account that does not own the machine (Settings → You has no host owner chip), and the refusal came from Voice & media key, Fleet search key, Add a runner, the "Every bot this server has a token for" drawer or the Default box on a source.
@@ -1744,6 +1786,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: Start or a wake now rebuilds an agent onto its pin when the container runs another image. On an older version, press Rebuild.
 - **Fixed in:** `v2.173.0`
 - **Code:** `src/api/routes.ts` — `pinNotRunYet`, `startStopped`
+
+### A stopped agent came up running after Try on… → Pin & rebuild, or after ✕ (discard the trial) under Runtime images
+- **Check:** the agent was stopped, asleep (💤) or paused by its budget before you pinned it or discarded its trial in Settings → Advanced → Runtime images, and its Setup log shows `rebuild` steps right after. The Hatchabot agent's try and end of a trial left such an agent stopped.
+- **Cause:** the page rebuilt every agent it pinned or unpinned, and a rebuild ends with the agent running: answering on its chat apps and able to spend on its source. The question said "rebuild them now" for all of them.
+- **Fix:** upgrade, and press Stop if it came up. Only running agents rebuild now. A stopped or sleeping one stays so, its card says "A change is waiting", and its next Start or wake moves it onto the image. The question and the result say which agents are which. On an older version, press Stop after the trial change if it came up.
+- **Fixed in:** `v2.174.0`
+- **Code:** `web/index.html` — `runTryOnAgents`, `discardTrial`; `src/api/routes.ts` — `oweRebuild`
+
+### Asked to install a tool, an agent tries `sudo` or `apt-get`, or says it cannot install anything
+- **Check:** the agent runs OpenClaw 2026.9 (its Runtime tab), and its `TOOLS.md` (the agent's files) holds "Installing tools (managed by Hatchabot)" while its `AGENTS.md` does not. Typing `/context` in its console lists the files put in every turn: on 2026.9 `TOOLS.md` is not among them.
+- **Cause:** Hatchabot wrote the rules for installing tools (into HOME: `~/.local/bin`, `npm install -g`, `pip install --target ~/.openclaw/pylibs`, `on-rebuild.sh`) into `TOOLS.md`. OpenClaw 2026.9 no longer puts `TOOLS.md` in the prompt (its doctor merges the file into `AGENTS.md` instead), so the agent only knew them if it thought to open the file.
+- **Fix:** upgrade, then rebuild the agent (or wait for its next rebuild). The section is now kept in `AGENTS.md`, which every OpenClaw version reads, once; Hatchabot's copy leaves `TOOLS.md`, and a `TOOLS.md` with nothing else in it is removed. Your own notes in either file stay, including ones the doctor already moved into `AGENTS.md`; OpenClaw's unedited `TOOLS.md` template, if the doctor moved that too, is taken out. On an older version, tell the agent in chat to read its `TOOLS.md` before installing anything.
+- **Fixed in:** `v2.174.0`
+- **Code:** `src/openclaw/workspace.ts` — `withInstallSection`, `toolsMdWithoutInstallSection`, `installConventionsSection`; `src/orchestrator/provision.ts` — `syncDataSourceDocs`, `syncInstallDocs`
 
 ### A rebuild stops with "A shared folder is no longer safe to mount", for a folder brought in from OpenClaw
 - **Check:** the agent's Data lists a folder shared at its own path (brought in with "Bring in from OpenClaw"); the message names it, and says it is a symlink, is or holds a folder that may not be shared, or "would cover" a path such as `/usr`, `/opt` or `/home/node`.
@@ -3527,6 +3583,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/doctor.ts` — `readSetStatus`; `deploy/hatchabot-backup.service` — `EnvironmentFile`
 
+### `hatchabot doctor` says "Last backup set is 3 days old" in the evening, while the app calls the same set 2 days old
+- **Check:** the machine's time zone is west of UTC (the Americas), it is evening, and the set doctor names is the one the app shows as the newest; the next morning doctor and the app agree.
+- **Cause:** doctor counted the set's date as midnight UTC and rounded down, so from late afternoon or evening local time it read a day older than the app, which counts by the calendar. It warns past 2 days, so it warned a day early.
+- **Fix:** upgrade: doctor now counts the days the way the app does. Before that, the app's figure is the right one.
+- **Fixed in:** `v2.174.0`
+- **Code:** `src/doctor.ts` — `backupFacts`; `src/orchestrator/recoveryReadiness.ts` — `setAgeDays`
+
 ### A backup run by hand says complete, but the set holds an old registry and says the agents' volumes are used by no agent
 - **Check:** `.env` sets `HATCHABOT_DB` (or `HATCHABOT_BACKUP_DIR`, `HATCHABOT_PREFIX`); the set `./scripts/backup-volumes.sh` made lists your agents' volumes under `orphans` in its `backup-status.json`, or the run stops with "No database at data/hatchabot.sqlite".
 - **Cause:** before v2.168.0 a run started from a shell did not read `.env` (only the nightly timer had it, through its unit's `EnvironmentFile`), so it backed up the default database and namespace, not the ones the service uses.
@@ -4396,6 +4459,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `web/index.html` — `sfFetch`, `sfLink`
 
+### At the public address, "Your account has no second factor, so its password cannot be changed at this address"
+- **Check:** the page is opened at the public address, the account signs in with a password and has no second factor (Settings → You → Second factor says "You have none"), and Settings → You shows these words where the password form was.
+- **Cause:** deliberate since `v2.174.0`. Before it, whoever held only a member's password could change it from the internet, and the real person was locked out until the owner sent a reset link. The new password gave no more access, but the lockout was real.
+- **Fix:** change the password at the private address (at home), or ask whoever runs this Hatchabot for a reset link, which works at either address. Adding a second factor at the private address lets you change it at the public one too.
+- **Fixed in:** `v2.174.0`
+- **Code:** `src/api/publicRoutes.ts` — `PASSWORD_NEEDS_FACTOR`; `src/api/publicAccess.ts` — `noFactor`; `src/api/secondFactor.ts` — `passwordRefused`; `web/index.html` — `loadSecondFactor`
+
 ### `hatchabot reach on --invited-only` fails with "unknown option --invited-only"
 - **Check:** the command stops before asking anything, with that error.
 - **Cause:** the help text documented the flag, but the CLI's list of known flags left it out.
@@ -5037,6 +5107,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.164.2`
 - **Code:** `src/api/routes.ts` — `/v1/hosts/:id/install-image`; `src/orchestrator/runnerSetup.ts` — `installRuntimeImage`
 
+### "DuckDuckGo turns this machine away" or "Agents have no working web search" (was: DuckDuckGo "answered with no results")
+- **Check:** Settings → AI → Fleet search key → **Test search** shows the line. From the machine, `curl -s -o /dev/null -w '%{http_code}\n' -A 'Mozilla/5.0 (Hatchabot)' 'https://html.duckduckgo.com/html/?q=weather%20forecast'` prints `202`, and the page it sends asks you to "complete the following challenge". The manager's web search says the same instead of "No results."
+- **Cause:** DuckDuckGo answers some machines' addresses with a challenge page meant for a person, not search results. Hatchabot does not pose as a browser to get past it, because that would be working around DuckDuckGo's own block. So this machine has no free search, and agents with no working Brave key cannot search. Before `v2.174.0` the page said only that DuckDuckGo "answered with no results", and the manager said "No results."
+- **Fix:** paste a Brave Search API key under Settings → AI → Fleet search key, with quota left. If one is set and has run out or been refused, the message says so: replace it, or wait for its quota. If it works but **Use** says "DuckDuckGo only", choose "Brave, and DuckDuckGo when it runs out". While DuckDuckGo turns the machine away (or does not answer with results), agents stay on a Brave key that is nearly out, and move off it only once it has run out or is refused; the page warns that there is then nothing to fall back on. Being turned away is said once, and again only after DuckDuckGo has worked at two checks running. The block can lift later: **Test search** checks again.
+- **Fixed in:** `v2.174.0` (the plain message; the block is DuckDuckGo's)
+- **Code:** `src/orchestrator/webSearch.ts` — `probeDuckDuckGo`, `duckDuckGoTurnedAway`, `DDG_TURNED_AWAY`, `braveAdvice`, `createSearchWatch`; `src/ops/opsWeb.ts` — `makeOpsWeb`; `web/index.html` — `renderSearchHealth`
+
 ### "The Brave key has 0 queries left", though the key works and Brave's dashboard shows nothing wrong
 - **Check:** Settings → AI → Fleet search key says this and the fleet is on DuckDuckGo, and the Brave key is on a metered (credit) plan, so its monthly limit is reported as 0.
 - **Cause:** before v2.172.2, Brave's "0 = no monthly cap" was read as an empty key. Hatchabot moved agents to DuckDuckGo and kept them there, since every check got the same answer. If DuckDuckGo turns this machine's address away too, agents have no working search.
@@ -5528,6 +5605,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: a restore that stops before the volume is emptied now restarts the agent and says "the agent was left as it was". Already in this state: free some space, then restore that backup again (or tap Retry once you have checked the volume with Files); the safety copy can go once it is back.
 - **Fixed in:** `v2.172.0`
 - **Code:** `src/orchestrator/backups.ts` — `restoreSteps`, `rollBack`; `src/providers/localDockerProvider.ts` — `importStateFromFile`; `src/providers/provider.ts` — `VolumeUntouchedError`
+
+### A restore that Docker refused to make or start ("no space left on device", exit 125), or whose runner dropped first, left the agent FAILED and "half-restored"
+- **Check:** the failure's two messages both say `volume import failed (125)` with `Error response from daemon` and `no space left on device` (at `mkdir /var/lib/docker/...` or `failed to create task`), or the runner "isn't answering", and the agent's volume, looked at with Files once there is room, is as it was before the restore. The safety copy named in the failure is there.
+- **Cause:** Docker refused to make the one-shot that unpacks the backup, or made it and could not start it (it had no room, or could not reach the runner), so nothing touched the volume. Docker gives the same exit, 125, when it loses a one-shot that is already unpacking, so the restore could not tell them apart, went to put the safety copy back, failed the same way, and marked the agent FAILED. The 2.172 fix for a full disk covered only failures inside the one-shot.
+- **Fix:** upgrade. The one-shot is no longer removed by Docker on exit (`--rm`): after a failure Hatchabot asks Docker whether it ever ran (its start time), then removes it itself. Docker also writes its id to a private file when it makes it, so a failure with no id is known to have made nothing, whatever it exited with (a daemon or runner it could not reach exits 1). Either way the restore starts the agent again if it was running and its record says "the agent was left as it was", with the reason. A runner that does not answer before the import is the same; if the agent then cannot be started, the record says it is stopped and to start it once its machine answers. A docker CLI that cannot write that file (a confined install: exit 126 or 127, "failed to create the container ID file") imports as before, without it. The one-shot deletes its staged copy of the archive when its script ends, and one left behind is swept at boot and every 10 minutes, on runners too. Not when Docker itself stops it (`docker stop`, the daemon shutting down, the runner powering off): its shell is killed after the grace period, and the staged archive, with the agent's credentials, stays in the exited container until the next sweep; removing a runner does not remove it, so remove `docker ps -a --filter label=hatchabot.oneshot` containers on a runner you retire. Already in this state: free some space (or wake the runner), then restore the backup again, or put the safety copy back; the copy can go once the agent is back.
+- **Fixed in:** `v2.174.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `importStateFromFile`, `idFileFor`, `#settleOneShot`, `#inspectOneShot`; `src/orchestrator/backups.ts` — `restoreSteps`, `restartAfterRestore`; `src/providers/provider.ts` — `VolumeUntouchedError`
+
+### A restore failed while its runner's link dropped, and the agent came back "left as it was" with odd or missing memory
+- **Check:** the restore's failure says `volume import failed (125)` (often `error waiting for container`) or `timed out`, the runner's link dropped or it slept around then, and `docker ps -a --filter label=hatchabot.oneshot` on that machine showed a one-shot still running after the restore ended. Since the fix, the agent is instead left FAILED with "the container that was unpacking it (…) could not be confirmed gone, so putting it back did not begin", and the safety copy is kept; a later restore says "an earlier copy into its memory may still be running" until that container is gone.
+- **Cause:** when the unpacking failed, its one-shot was removed with `docker rm -f`, but a failed removal was ignored. If the link came back just after (or a sleeping runner woke and its `tar` went on), the rollback or the next restore unpacked alongside the first one-shot, so the volume could hold a mix of the two, and the safety copy was then deleted.
+- **Fix:** upgrade: a failed one-shot is now removed and confirmed gone, or seen finished, before anything else writes the volume; Docker is asked three times a few seconds apart, each time checking afresh that a runner answers. If it cannot be shown gone, the restore does not put the copy back: the agent stays stopped and FAILED and the copy is kept. Every later restore, Put back, Finish and import first looks for this install's one-shots still writing that volume and removes them, or does not begin and names the one left; read-only ones (the nightly backup, a Download) are left running. A restore, Put back or Finish also waits while a backup is being made: "A backup is being made right now … Try again once it finishes." Only a live run's lock on today's or yesterday's set of this install counts, and not one over 12 hours old. By hand: remove that container (`docker rm -f <name>`, as the failure says) before putting the copy back yourself.
+- **Fixed in:** `v2.174.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `importStateFromFile`, `stopVolumeWriters`, `#clearVolumeWriters`, `#settleOneShot`, `sweepOneShots`; `src/orchestrator/backups.ts` — `rollBack`, `confirmStopped`, `backupRunning`; `src/providers/provider.ts` — `OneShotNotGoneError`; `src/index.ts` — `sweepOneShots`
 
 ### A move was cancelled with "Couldn't read the agent's state ... ENOENT ... .tgz.part"
 - **Check:** the message or the log names a `.tgz.part` under `move-copies` or `restore-safety`, and another move or restore ended around that time, or, for `restore-safety`, another Hatchabot install shares this backup folder and started then. The source agent is untouched; a retry works.
